@@ -168,6 +168,16 @@ impl PipelineExecutor {
             // model size — too tight for long prompts on slow hardware.
             // forward_through_segments already does this for the standard
             // path; mirror here.
+            let budget = super::local::SegmentBudget::for_forward(
+                &self.shared_state,
+                &segment.node_id,
+                &segment.shard_id.model_id,
+                crate::daemon::state::WorkKind::Prefill,
+                num_layers,
+                prompt_byte_len,
+                // The prompt itself, not hidden states.
+                super::local::ActivationUnits::PromptBytes,
+            );
             let prefill_result = Self::wait_for_result(
                 rx,
                 request_id,
@@ -175,6 +185,7 @@ impl PipelineExecutor {
                 &segment.node_id,
                 num_layers,
                 prompt_byte_len,
+                budget,
             )
             .await?;
             // Result delivered (the dispatcher already removed the entry when
@@ -595,6 +606,16 @@ pub(super) async fn send_verify_batch(
         return Err(SwarmError::Network("verify send dropped".into()));
     }
     let num_layers = segment.layer_range.1 - segment.layer_range.0;
+    let budget = super::local::SegmentBudget::for_forward(
+        shared_state,
+        &segment.node_id,
+        &segment.shard_id.model_id,
+        // A verify batch is a handful of tokens, not a prompt pass.
+        crate::daemon::state::WorkKind::Decode,
+        num_layers,
+        verify_tokens.len() * 4,
+        super::local::ActivationUnits::PromptBytes,
+    );
     let result: LayerResult = PipelineExecutor::wait_for_result(
         rx,
         request_id,
@@ -602,6 +623,7 @@ pub(super) async fn send_verify_batch(
         &segment.node_id,
         num_layers,
         verify_tokens.len() * 4,
+        budget,
     )
     .await?;
     // Result delivered (the dispatcher already removed the entry); disarm

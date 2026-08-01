@@ -11,6 +11,12 @@ fn make_shared_state() -> Arc<SharedState> {
     make_shared_state_with(|_| {})
 }
 
+/// Model id for peer-speed tests. The speed map is keyed by node; the model
+/// only marks the (peer, model) pair warm, which these tests don't assert on.
+fn speed_test_model() -> ModelId {
+    ModelId("peer-speed-test-model".into())
+}
+
 /// `make_shared_state` with a hook to tweak the config before the state is
 /// built. Needed for tensor parallelism, which is opt-in (`inference.
 /// tensor_parallel`, default false) since R146.
@@ -857,20 +863,48 @@ fn peer_segment_latency_ema_math() {
     let state = make_shared_state();
     let node = NodeId([7u8; 32]);
     // First sample: 20 ms over 4 layers → 5 ms/layer. No prior → EMA = 5.
-    state.record_peer_segment_latency(&node, 20, 4);
+    state.record_peer_segment_latency(
+        &node,
+        &speed_test_model(),
+        crate::daemon::state::WorkKind::Decode,
+        20,
+        4,
+        0,
+    );
     let v1 = state.observed_latency_ms_per_layer(&node).unwrap();
     assert!((v1 - 5.0).abs() < 1e-5, "first sample EMA = {v1}");
     // Second sample: 40 ms over 4 layers → 10 ms/layer. EMA = 0.3*10 + 0.7*5 = 6.5.
-    state.record_peer_segment_latency(&node, 40, 4);
+    state.record_peer_segment_latency(
+        &node,
+        &speed_test_model(),
+        crate::daemon::state::WorkKind::Decode,
+        40,
+        4,
+        0,
+    );
     let v2 = state.observed_latency_ms_per_layer(&node).unwrap();
     assert!((v2 - 6.5).abs() < 1e-5, "second sample EMA = {v2}");
     // Width-normalised: a 2-layer segment at 20 ms → 10 ms/layer.
-    state.record_peer_segment_latency(&node, 20, 2);
+    state.record_peer_segment_latency(
+        &node,
+        &speed_test_model(),
+        crate::daemon::state::WorkKind::Decode,
+        20,
+        2,
+        0,
+    );
     let v3 = state.observed_latency_ms_per_layer(&node).unwrap();
     // EMA = 0.3*10 + 0.7*6.5 = 7.55.
     assert!((v3 - 7.55).abs() < 1e-5, "third sample EMA = {v3}");
     // Zero-layer guard: no panic, no update.
-    state.record_peer_segment_latency(&node, 100, 0);
+    state.record_peer_segment_latency(
+        &node,
+        &speed_test_model(),
+        crate::daemon::state::WorkKind::Decode,
+        100,
+        0,
+        0,
+    );
     let v4 = state.observed_latency_ms_per_layer(&node).unwrap();
     assert!((v4 - 7.55).abs() < 1e-5, "zero-layer update = {v4}");
     // Unknown peer: None.
@@ -890,7 +924,14 @@ fn merge_peer_segment_latency_zero_trust_is_noop() {
     assert!(state.observed_latency_ms_per_layer(&node).is_none());
 
     // Seed a direct observation, then try to poison it with weight 0.
-    state.record_peer_segment_latency(&node, 20, 4);
+    state.record_peer_segment_latency(
+        &node,
+        &speed_test_model(),
+        crate::daemon::state::WorkKind::Decode,
+        20,
+        4,
+        0,
+    );
     let before = state.observed_latency_ms_per_layer(&node).unwrap();
     state.merge_peer_segment_latency(&node, 9999.0, 0.0);
     let after = state.observed_latency_ms_per_layer(&node).unwrap();
@@ -930,7 +971,14 @@ fn merge_peer_segment_latency_trust_weighted_ema() {
     let node = NodeId([13u8; 32]);
 
     // Start with a direct sample of 10 ms/layer (20 ms over 2 layers).
-    state.record_peer_segment_latency(&node, 20, 2);
+    state.record_peer_segment_latency(
+        &node,
+        &speed_test_model(),
+        crate::daemon::state::WorkKind::Decode,
+        20,
+        2,
+        0,
+    );
     let v0 = state.observed_latency_ms_per_layer(&node).unwrap();
     assert!((v0 - 10.0).abs() < 1e-5);
 
@@ -946,7 +994,14 @@ fn merge_peer_segment_latency_trust_weighted_ema() {
     // Reset and try with weight 0.5 →
     // effective_α = 0.15, EMA = 0.15*100 + 0.85*10 = 23.5.
     let state2 = make_shared_state();
-    state2.record_peer_segment_latency(&node, 20, 2);
+    state2.record_peer_segment_latency(
+        &node,
+        &speed_test_model(),
+        crate::daemon::state::WorkKind::Decode,
+        20,
+        2,
+        0,
+    );
     state2.merge_peer_segment_latency(&node, 100.0, 0.5);
     let v2 = state2.observed_latency_ms_per_layer(&node).unwrap();
     assert!(
@@ -970,7 +1025,14 @@ fn merge_peer_segment_latency_preserves_direct_observations() {
     let node = NodeId([15u8; 32]);
     // Three direct samples at identical per-layer rate converge exactly.
     for _ in 0..3 {
-        state.record_peer_segment_latency(&node, 50, 5);
+        state.record_peer_segment_latency(
+            &node,
+            &speed_test_model(),
+            crate::daemon::state::WorkKind::Decode,
+            50,
+            5,
+            0,
+        );
     }
     let before = state.observed_latency_ms_per_layer(&node).unwrap();
     assert!((before - 10.0).abs() < 1e-5);

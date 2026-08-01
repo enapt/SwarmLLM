@@ -113,6 +113,23 @@ impl<'a> Drop for PendingLayerResultGuard<'a> {
 pub(crate) const LLAMA_FALLBACK_EOS_TOKEN: u32 = 2;
 pub(crate) const PREFILL_ACTIVATION_THRESHOLD_BYTES: usize = 100_000;
 
+/// Which half of inference a forward represents, from its sequence number.
+///
+/// `sequence_num == 0` is the prompt pass; every later one is a single-token
+/// decode step (`speculative.rs` spells this out at its own construction site
+/// with `sequence_num: 1, // not prefill`). This is authoritative, unlike the
+/// `PREFILL_ACTIVATION_THRESHOLD_BYTES` size heuristic, which misclassifies a
+/// short prompt on a narrow model. Prefill and decode cost ~2 orders of
+/// magnitude apart, so anything sizing a budget from them must not confuse the
+/// two — see `daemon::state::peer_speed`.
+pub(super) fn work_kind_for(sequence_num: u32) -> crate::daemon::state::WorkKind {
+    if sequence_num == 0 {
+        crate::daemon::state::WorkKind::Prefill
+    } else {
+        crate::daemon::state::WorkKind::Decode
+    }
+}
+
 /// Does this remote error mean the holder does not have the shard data it
 /// advertised?
 ///
@@ -263,6 +280,21 @@ pub(super) async fn forward_verify_through_segments(
             }
 
             let num_layers = segment.layer_range.1 - segment.layer_range.0;
+            let budget = local::SegmentBudget::for_forward(
+                shared_state,
+                &segment.node_id,
+                &segment.shard_id.model_id,
+                // Verify batches carry a few packed tokens, not a prompt pass.
+                crate::daemon::state::WorkKind::Decode,
+                num_layers,
+                activation_bytes.len(),
+                // Segment 0 gets packed token ids; later hops get hidden states.
+                if idx == 0 {
+                    local::ActivationUnits::PromptBytes
+                } else {
+                    local::ActivationUnits::HiddenStates
+                },
+            );
             let result = PipelineExecutor::wait_for_result(
                 rx,
                 request_id,
@@ -270,6 +302,7 @@ pub(super) async fn forward_verify_through_segments(
                 &segment.node_id,
                 num_layers,
                 activation_bytes.len(),
+                budget,
             )
             .await?;
             pending_guard.disarm();

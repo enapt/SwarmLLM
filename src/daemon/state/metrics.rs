@@ -95,14 +95,31 @@ pub struct MetricsProviders {
     /// return the stale value. Rebuilder clears the flag after writing the
     /// new cache entry.
     pub stats_building: std::sync::atomic::AtomicBool,
-    /// Observed per-layer latency EMA (ms per layer) per remote peer. Updated
-    /// after every successful remote segment in `forward_through_segments`.
-    /// Consumed by the Parallax routing DP to replace the static
-    /// `est_tokens_per_sec` capability estimate when a live signal is
-    /// available. Per-layer normalisation makes the signal comparable across
-    /// segment widths (e.g. a 4-layer segment vs a 16-layer segment on the
-    /// same peer).
-    pub peer_segment_latency_ms_per_layer: DashMap<crate::types::NodeId, f32>,
+    /// Measured compute speed per remote peer — see `state::peer_speed`.
+    /// Updated after every successful remote segment in
+    /// `forward_through_segments`, and merged (trust-weighted) from gossip.
+    ///
+    /// Prefill and decode are held as SEPARATE, differently-normalised EMAs
+    /// because they differ by ~2 orders of magnitude on the same peer. This
+    /// replaced a single blended `ms_per_layer` figure that could predict
+    /// neither and was consequently useless for sizing a timeout.
+    ///
+    /// Consumers: segment-timeout sizing (`pipeline::local`), remote-candidate
+    /// ranking (`inference::scheduler`), the Parallax routing DP, and
+    /// `GET /api/admin/performance`. Swept by the HealthMonitor tick via
+    /// `evict_stale_peer_speed` so departed peers do not linger.
+    pub peer_speed: DashMap<crate::types::NodeId, super::PeerSpeed>,
+    /// Last time a segment forward for `(peer, model)` completed successfully.
+    ///
+    /// Its only job is to answer "might this peer have to LOAD the model
+    /// before it can answer?". A cold peer legitimately takes minutes: the
+    /// 2026-08-01 failure was a peer needing ~120s to load an 8B model, cut
+    /// off by a flat 120s deadline. A first forward therefore gets a much
+    /// larger budget than a warm one. Unreachability is NOT covered by that
+    /// generosity — `RR_ACK_TIMEOUT_SECS` still fails a silently-dropped send
+    /// in 10s.
+    pub peer_model_warm_at:
+        DashMap<(crate::types::NodeId, crate::types::ModelId), std::time::Instant>,
     /// Cached snapshot of swarm-wide capacity (online nodes, total VRAM,
     /// serveable models, ...). Refreshed on gossip ticks via
     /// `capacity::refresh_swarm_capacity`. ArcSwap so dashboard / WS / REST

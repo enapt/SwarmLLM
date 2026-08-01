@@ -22,6 +22,7 @@ mod events;
 mod hf;
 mod metrics;
 mod models;
+mod peer_speed;
 mod perf_history;
 mod relay;
 mod tp_allreduce;
@@ -36,6 +37,7 @@ pub use events::EventBus;
 pub use hf::{HfProbeInfo, HfSource};
 pub use metrics::{ChannelCounters, ChannelMetricsSet, MetricsProviders};
 pub use models::{ModelMgmt, FOREIGN_WISHLIST_MAX_AGE_MS, MAX_FOREIGN_WISHLIST_ENTRIES};
+pub use peer_speed::{PeerSpeed, WorkKind};
 pub use relay::{RelayForwardCounter, RelayProvenFeatures, RelayRoute};
 pub use tp_allreduce::TpAllReduceCollector;
 
@@ -74,8 +76,17 @@ pub struct PeerPerformanceRow {
     /// Health-ping round trip.
     pub rtt_ms: Option<u32>,
     /// Observed per-layer forward cost — comparable across peers serving
-    /// differently-sized segments, unlike raw segment time.
+    /// differently-sized segments, unlike raw segment time. This is the
+    /// *ranking* figure (decode-scale); see `prefill_ms_per_layer_kb` for the
+    /// prompt-processing side, which is ~2 orders of magnitude larger.
     pub ms_per_layer: Option<f32>,
+    /// Prefill cost in ms per layer per KB of activations. Multiply by layers
+    /// and by activation KB to predict a prompt pass. Held separately because
+    /// a single blended figure predicted neither half.
+    pub prefill_ms_per_layer_kb: Option<f32>,
+    /// Direct measurements behind each coefficient.
+    pub prefill_samples: u32,
+    pub decode_samples: u32,
     /// Sample-weighted EWMA of segment latency across all (model, segment)
     /// pairs this peer served for us.
     pub ewma_ms: Option<f32>,
@@ -603,7 +614,8 @@ impl SharedState {
                 provider_models_cache: RwLock::new((Vec::new(), std::time::Instant::now())),
                 stats_cache: parking_lot::Mutex::new(None),
                 stats_building: std::sync::atomic::AtomicBool::new(false),
-                peer_segment_latency_ms_per_layer: DashMap::new(),
+                peer_speed: DashMap::new(),
+                peer_model_warm_at: DashMap::new(),
                 swarm_capacity: arc_swap::ArcSwap::from_pointee(SwarmCapacity::default()),
                 hedge_tracker: Arc::new(crate::inference::hedging::HedgeTracker::new()),
                 prefetch_orchestrator: Arc::new(
@@ -1109,21 +1121,88 @@ impl SharedState {
     pub fn record_peer_segment_latency(
         &self,
         node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+        kind: peer_speed::WorkKind,
         segment_ms: u64,
         layers: u32,
+        activation_bytes: usize,
     ) {
-        if layers == 0 {
-            return;
-        }
-        let sample = segment_ms as f32 / layers as f32;
-        let mut entry = self
-            .metrics
-            .peer_segment_latency_ms_per_layer
+        self.metrics
+            .peer_speed
             .entry(node_id.clone())
-            .or_insert(sample);
-        // EMA: new = α·sample + (1−α)·old. Use get/set via deref to avoid entry API lock-in.
-        const ALPHA: f32 = 0.3;
-        *entry = ALPHA * sample + (1.0 - ALPHA) * (*entry);
+            .or_default()
+            .observe(kind, segment_ms, layers, activation_bytes);
+        // This peer has now demonstrably got the model resident, so the next
+        // forward does not need the cold-load allowance.
+        self.metrics.peer_model_warm_at.insert(
+            (node_id.clone(), model_id.clone()),
+            std::time::Instant::now(),
+        );
+    }
+
+    /// Predicted wall-clock ms for a segment of this shape on this peer, or
+    /// `None` when we have not measured the relevant kind of work from it.
+    pub fn predict_segment_ms(
+        &self,
+        node_id: &crate::types::NodeId,
+        kind: peer_speed::WorkKind,
+        layers: u32,
+        activation_bytes: usize,
+    ) -> Option<f32> {
+        self.metrics
+            .peer_speed
+            .get(node_id)
+            .and_then(|s| s.predict_ms(kind, layers, activation_bytes))
+    }
+
+    /// Has this peer served this model recently enough that it is probably
+    /// still loaded? `false` means a forward may have to wait for a model load
+    /// and must be given a correspondingly larger budget.
+    pub fn peer_model_is_warm(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+        ttl: std::time::Duration,
+    ) -> bool {
+        self.metrics
+            .peer_model_warm_at
+            .get(&(node_id.clone(), model_id.clone()))
+            .is_some_and(|t| t.elapsed() <= ttl)
+    }
+
+    /// Drop speed estimates and warm-marks for peers that have gone quiet.
+    ///
+    /// Keeping them is what produced two separate faults: departed peers
+    /// accumulating in the map (three were live on 2026-08-01), and the
+    /// "routing ratchet" where a node that was once slow keeps its stale
+    /// figure for ever because the estimate is only updated when we route to
+    /// it — which we stop doing precisely because the figure is bad. Returns
+    /// how many entries were removed.
+    pub fn evict_stale_peer_speed(&self, ttl: std::time::Duration) -> usize {
+        let now = std::time::Instant::now();
+        let stale: Vec<_> = self
+            .metrics
+            .peer_speed
+            .iter()
+            .filter(|e| e.value().is_stale(now, ttl))
+            .map(|e| e.key().clone())
+            .collect();
+        let mut removed = stale.len();
+        for key in stale {
+            self.metrics.peer_speed.remove(&key);
+        }
+        let stale_warm: Vec<_> = self
+            .metrics
+            .peer_model_warm_at
+            .iter()
+            .filter(|e| e.value().elapsed() > ttl)
+            .map(|e| e.key().clone())
+            .collect();
+        removed += stale_warm.len();
+        for key in stale_warm {
+            self.metrics.peer_model_warm_at.remove(&key);
+        }
+        removed
     }
 
     /// R136 Layer 1 / Layer 3 follow-on: get or lazy-load a standalone
@@ -1307,9 +1386,9 @@ impl SharedState {
     /// capability estimate).
     pub fn observed_latency_ms_per_layer(&self, node_id: &crate::types::NodeId) -> Option<f32> {
         self.metrics
-            .peer_segment_latency_ms_per_layer
+            .peer_speed
             .get(node_id)
-            .map(|r| *r.value())
+            .and_then(|s| s.ranking_ms_per_layer())
     }
 
     /// Item 8 Phase 2: longest-prefix cross-node cache lookup. Walks the
@@ -1509,28 +1588,20 @@ impl SharedState {
         sample_ms_per_layer: f32,
         weight: f32,
     ) {
+        const SEED_THRESHOLD: f32 = 0.3;
         if weight <= 0.0 || !sample_ms_per_layer.is_finite() || sample_ms_per_layer <= 0.0 {
             return;
         }
-        let weight = weight.clamp(0.0, 1.0);
-        const BASE_ALPHA: f32 = 0.3;
-        const SEED_THRESHOLD: f32 = 0.3;
-        let effective_alpha = BASE_ALPHA * weight;
-        use dashmap::mapref::entry::Entry;
-        match self
-            .metrics
-            .peer_segment_latency_ms_per_layer
-            .entry(node_id.clone())
-        {
-            Entry::Occupied(mut e) => {
-                let old = *e.get();
-                e.insert(effective_alpha * sample_ms_per_layer + (1.0 - effective_alpha) * old);
-            }
-            Entry::Vacant(v) => {
-                if weight >= SEED_THRESHOLD {
-                    v.insert(sample_ms_per_layer);
-                }
-            }
+        // Merge into an existing entry, or create one only if the reporter is
+        // trusted enough to seed. `or_default` would create an empty entry for
+        // an untrusted reporter, which `merge_ranking_sample` would then treat
+        // as "occupied" on the next call and let it seed by the back door.
+        if self.metrics.peer_speed.contains_key(node_id) || weight >= SEED_THRESHOLD {
+            self.metrics
+                .peer_speed
+                .entry(node_id.clone())
+                .or_default()
+                .merge_ranking_sample(sample_ms_per_layer, weight, SEED_THRESHOLD);
         }
     }
 

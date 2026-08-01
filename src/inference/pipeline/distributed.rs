@@ -810,8 +810,11 @@ impl PipelineExecutor {
                 // — even a peer that was genuinely faster.
                 self.shared_state.record_peer_segment_latency(
                     &segment.node_id,
+                    &segment.shard_id.model_id,
+                    super::work_kind_for(sequence_num),
                     segment_ms,
                     segment.layer_range.1 - segment.layer_range.0,
+                    result.activations.len(),
                 );
                 if is_last {
                     tracing::info!(
@@ -1026,6 +1029,21 @@ impl PipelineExecutor {
                 }
 
                 let num_layers = segment.layer_range.1 - segment.layer_range.0;
+                let budget = super::local::SegmentBudget::for_forward(
+                    &self.shared_state,
+                    &segment.node_id,
+                    &segment.shard_id.model_id,
+                    super::work_kind_for(sequence_num),
+                    num_layers,
+                    activations.len(),
+                    // Segment 0 of a non-pre-embedded pipeline is handed the
+                    // prompt itself; every later hop carries hidden states.
+                    if idx == 0 && !pre_embedded {
+                        super::local::ActivationUnits::PromptBytes
+                    } else {
+                        super::local::ActivationUnits::HiddenStates
+                    },
+                );
                 let result = Self::wait_for_result(
                     rx,
                     request_id,
@@ -1033,6 +1051,7 @@ impl PipelineExecutor {
                     &segment.node_id,
                     num_layers,
                     activations.len(),
+                    budget,
                 )
                 .await;
 
@@ -1086,8 +1105,11 @@ impl PipelineExecutor {
                             let seg_layers = segment.layer_range.1 - segment.layer_range.0;
                             self.shared_state.record_peer_segment_latency(
                                 &segment.node_id,
+                                &segment.shard_id.model_id,
+                                super::work_kind_for(sequence_num),
                                 seg_elapsed_ms,
                                 seg_layers,
+                                result.activations.len(),
                             );
                             // SWARM-SPEC Layer 2: also record against the
                             // hedge tracker. Keyed on (model, segment_idx,
@@ -1320,6 +1342,19 @@ impl PipelineExecutor {
                 // Wait for standby response via the oneshot channel
                 let failed_segment = &self.assignment.segments[failed_idx];
                 let num_layers = failed_segment.layer_range.1 - failed_segment.layer_range.0;
+                let budget = super::local::SegmentBudget::for_forward(
+                    &self.shared_state,
+                    &backup.node_id,
+                    &backup.shard_id.model_id,
+                    super::work_kind_for(sequence_num),
+                    num_layers,
+                    activations.len(),
+                    if failed_idx == 0 {
+                        super::local::ActivationUnits::PromptBytes
+                    } else {
+                        super::local::ActivationUnits::HiddenStates
+                    },
+                );
                 let result = Self::wait_for_result(
                     rx,
                     request_id,
@@ -1327,6 +1362,7 @@ impl PipelineExecutor {
                     &backup.node_id,
                     num_layers,
                     activations.len(),
+                    budget,
                 )
                 .await?;
                 // dispatcher already removed the entry on deliver

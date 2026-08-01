@@ -355,12 +355,7 @@ impl super::SharedState {
 
         let mut ids: std::collections::HashSet<crate::types::NodeId> =
             hedge.keys().cloned().collect();
-        ids.extend(
-            self.metrics
-                .peer_segment_latency_ms_per_layer
-                .iter()
-                .map(|e| e.key().clone()),
-        );
+        ids.extend(self.metrics.peer_speed.iter().map(|e| e.key().clone()));
 
         let mut rows: Vec<super::PeerPerformanceRow> = ids
             .into_iter()
@@ -370,14 +365,18 @@ impl super::SharedState {
                     .get(&node)
                     .map(|(e, s)| (Some(*e), *s))
                     .unwrap_or((None, 0));
+                let speed = self.metrics.peer_speed.get(&node);
                 super::PeerPerformanceRow {
                     node_id: node.to_string(),
                     rtt_ms: peer.as_ref().and_then(|p| p.latency_ms),
-                    ms_per_layer: self
-                        .metrics
-                        .peer_segment_latency_ms_per_layer
-                        .get(&node)
-                        .map(|v| *v),
+                    ms_per_layer: speed.as_ref().and_then(|s| s.ranking_ms_per_layer()),
+                    // Reported per KB rather than per byte so the number is
+                    // legible in a table instead of being all leading zeros.
+                    prefill_ms_per_layer_kb: speed
+                        .as_ref()
+                        .and_then(|s| s.predict_ms(super::WorkKind::Prefill, 1, 1024)),
+                    prefill_samples: speed.as_ref().map(|s| s.prefill_samples()).unwrap_or(0),
+                    decode_samples: speed.as_ref().map(|s| s.decode_samples()).unwrap_or(0),
                     ewma_ms,
                     samples,
                     region: peer

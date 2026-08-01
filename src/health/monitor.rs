@@ -51,6 +51,14 @@ const MAX_MISSED_PINGS: u32 = 3;
 /// scheduler — short reconnects don't lose useful latency history.
 const HEDGE_STATS_MAX_AGE_MS: u64 = 3_600_000;
 
+/// Drop a peer's measured speed after this long without a fresh observation.
+///
+/// Serves two purposes: departed peers stop accumulating (three dead entries
+/// were live on 2026-08-01), and a peer whose estimate made it un-routable
+/// gets a clean slate rather than being permanently de-ranked by a figure that
+/// can only be refreshed by routing to it. Matches the hedge-tracker horizon.
+const PEER_SPEED_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3_600);
+
 /// Drop `PrefetchOrchestrator.histories` entries whose last activity is
 /// older than this. Matches the KV-cache session expiry (10 min): a
 /// session that has been idle longer than the KV-cache TTL has no usable
@@ -183,6 +191,22 @@ impl HealthMonitor {
                             evicted = hedge_evicted,
                             max_age_ms = HEDGE_STATS_MAX_AGE_MS,
                             "Evicted stale hedge-tracker entries"
+                        );
+                    }
+                    // Peer speed estimates go stale the same way, with an extra
+                    // twist: the estimate is only refreshed when we route to a
+                    // peer, and we stop routing to peers that look slow — so a
+                    // bad figure can never be corrected ("the routing
+                    // ratchet"). Dropping it lets the peer be tried afresh.
+                    let speed_evicted = self
+                        .shared_state
+                        .evict_stale_peer_speed(PEER_SPEED_MAX_AGE);
+                    if speed_evicted > 0 {
+                        tracing::debug!(
+                            target: "swarmllm::health::monitor",
+                            evicted = speed_evicted,
+                            max_age_secs = PEER_SPEED_MAX_AGE.as_secs(),
+                            "Evicted stale peer-speed entries"
                         );
                     }
                     let prefetch_evicted = self
@@ -329,17 +353,23 @@ impl HealthMonitor {
             let mut entries: Vec<(crate::types::NodeId, f32, f32)> = self
                 .shared_state
                 .metrics
-                .peer_segment_latency_ms_per_layer
+                .peer_speed
                 .iter()
-                .map(|r| {
-                    let peer_id = r.key().clone();
+                // Gossip carries the ranking-scale per-layer figure; a peer we
+                // have only ever prefilled through still has one.
+                .filter_map(|r| {
+                    r.value()
+                        .ranking_ms_per_layer()
+                        .map(|ms| (r.key().clone(), ms))
+                })
+                .map(|(peer_id, ms)| {
                     let trust = self
                         .shared_state
                         .peer_registry
                         .get(&peer_id)
                         .map(|p| p.trust_score)
                         .unwrap_or(0.5);
-                    (peer_id, *r.value(), trust)
+                    (peer_id, ms, trust)
                 })
                 .collect();
             // Higher trust first. Stable ordering (partial_cmp handles NaN by
