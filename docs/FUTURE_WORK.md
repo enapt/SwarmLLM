@@ -4463,7 +4463,38 @@ inbound tensor payload. It fires **immediately after the local worker finishes
 loading its segment**, so the failure is on the first activation forward
 crossing a segment boundary, not during generation.
 
-**What is NOT yet known**, and should be established before changing anything:
+**Narrowed 2026-08-01 (investigation, not a fix):**
+
+- The check that fires is `bytes.len() < 4` — so the payload is **essentially
+  empty**, not a subtly wrong size. This is not an arithmetic bug in an expected
+  length; something handed the decoder nothing.
+- `LayerResult::error(request_id, reason)` produces exactly that shape:
+  `activations: Vec::new()` **plus** `finish_reason: Some(Error(reason))`
+  carrying the real cause. So when a segment fails, the true reason is present
+  on the wire and is being dropped in favour of a decode error downstream.
+- The coordinator (`pipeline/distributed.rs`, ~line 1138) checks the returned
+  activation *length* against what it sent and fails over on mismatch — but it
+  never inspects `finish_reason` for `Error`. An empty result therefore looks
+  like a shape mismatch rather than a reported failure, which is why the log
+  says failover was attempted and the surfaced message is about tensor bytes.
+- That length check is deliberately skipped for `idx == 0 && !pre_embedded`
+  (embedding expansion legitimately changes shape), so an empty result from the
+  first segment passes straight through.
+- The failing decode is `model_worker.rs:1201` / `:1243` — the worker decoding
+  an inbound hidden-state payload. Our local segment was `[10..32)`, i.e. not
+  the first, so it expected hidden states and received an empty buffer.
+
+**Two candidate fixes, and they are not the same bug:**
+
+1. *Reporting*: check `finish_reason` for `Error` before decoding activations,
+   at every site that consumes a `LayerResult`, and propagate that reason. This
+   is almost certainly correct regardless and would have made this failure
+   self-describing instead of a misleading `Internal` error.
+2. *Root cause*: whatever made the upstream segment fail in the first place.
+   Fix (1) is what reveals it. Doing (2) blind risks changing the wire format
+   on a guess.
+
+**What is still NOT known**, and should be established before changing anything:
 
 - Which direction the short payload travels (into the local segment from the
   peer, or out of it), and which of the three segments is on which node.
