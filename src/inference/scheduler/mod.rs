@@ -24,6 +24,9 @@ struct NodeCandidate {
     shard_id: ShardId,
     /// All contiguous layer ranges this node can serve for the model.
     available_ranges: Vec<(u32, u32)>,
+    /// How this node is reachable. Ranked before latency so the
+    /// direct-beats-relayed guarantee holds for any latency values.
+    reach: ReachTier,
     latency_ms: u32,
     load: f32,
     trust_score: f32,
@@ -55,12 +58,61 @@ const MAX_TP_GROUP_SIZE: usize = 4;
 /// relay (NETWORKING_PLAN §4 "reachable-via-relay" tier).
 ///
 /// A relayed forward is us → relay → target instead of us → target, so it costs
-/// roughly one extra RTT each way. 150ms is deliberately pessimistic: it must
-/// exceed a plausible direct-peer latency so a directly-connected holder always
-/// outranks a relayed one, while staying far below the point where a relayed
-/// holder looks worse than no holder — the tier exists so a NAT'd holder is
-/// *usable*, not merely visible.
+/// roughly one extra RTT each way. This is a *cost* adjustment used for ranking
+/// within a reachability tier; it is NOT what keeps direct ahead of relayed —
+/// see [`ReachTier`] for that. An additive penalty cannot enforce an ordering,
+/// which is exactly how the old arrangement failed.
 const RELAY_HOP_LATENCY_PENALTY_MS: u32 = 150;
+
+/// Latency assumed for a peer we have never successfully timed.
+///
+/// Deliberately pessimistic. The previous default was 100 ms, which is *better
+/// than most real peers* — so a peer we knew nothing about outranked one we had
+/// measured and found merely mediocre. Unknown is not the same as good.
+/// [`ReachTier`] already sorts unmeasured peers behind measured ones in the
+/// same tier; this value only affects cost arithmetic.
+const UNMEASURED_PEER_LATENCY_MS: u32 = 300;
+
+/// Latency assumed for a peer that is not in the registry at all.
+const UNKNOWN_PEER_LATENCY_MS: u32 = 400;
+
+/// Per-layer compute cost assumed for a peer with neither a measurement nor an
+/// advertised throughput. Chosen to sit in the middle of the range real peers
+/// occupy, so an unrated peer is neither favoured nor disqualified — the cost
+/// is then decided by the terms we *do* know, principally network latency.
+const DEFAULT_COMPUTE_MS_PER_LAYER: f32 = 20.0;
+
+/// How a candidate is reachable, and whether its latency is a measurement or a
+/// guess. **Ordered best-first, and compared before any cost.**
+///
+/// This exists because the documented guarantee — "a directly-connected holder
+/// always outranks a relayed one" — was implemented as an additive 150 ms
+/// penalty, and an additive penalty cannot guarantee an ordering. A relay-only
+/// peer that had never been timed scored `100 (default) + 150 = 250` and so
+/// beat a *measured* direct peer at 570 ms. Both halves of that were wrong: the
+/// unknown peer was flattered by the optimistic default, and the penalty was
+/// too small to dominate a real-world latency spread. Observed live on
+/// 2026-08-01, where the relay-only peer was also the one whose forward timed
+/// out with no standby.
+///
+/// Making the tier a separate, higher-priority sort key means the guarantee
+/// holds for any latency values whatsoever. Relayed holders remain *usable* —
+/// they simply rank behind direct ones, which is what the tier was always
+/// meant to express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReachTier {
+    /// This node. No network at all.
+    Local,
+    /// Directly connected, and we have a real latency sample.
+    DirectMeasured,
+    /// Directly connected, never successfully timed.
+    DirectUnmeasured,
+    /// Reachable only through a relay, with a latency sample.
+    RelayedMeasured,
+    /// Reachable only through a relay, never timed. The weakest evidence there
+    /// is: we know neither that we can reach it directly nor how far it is.
+    RelayedUnmeasured,
+}
 
 /// Static adjacency table for adjacent regions (0.5 score).
 /// These pairs represent geographically close countries where cross-region
@@ -480,7 +532,7 @@ impl PipelineScheduler {
                 model_id: manifest.id.clone(),
                 index: shard_indices[0],
             };
-            let (latency_ms, trust_score) = self.get_peer_metrics(&node_id, local_node_id);
+            let (reach, latency_ms, trust_score) = self.get_peer_metrics(&node_id, local_node_id);
 
             // Determine if this node can serve as first/last segment
             let can_be_first = shard_indices.contains(&0);
@@ -552,6 +604,7 @@ impl PipelineScheduler {
                 node_id,
                 shard_id: first_shard_id,
                 available_ranges: ranges,
+                reach,
                 latency_ms,
                 load: active_load,
                 trust_score,
@@ -576,14 +629,17 @@ impl PipelineScheduler {
             );
         }
 
-        // Sort: latency ASC, region_score DESC (tiebreaker), load ASC, trust DESC.
-        // Latency is the primary sort — we never sacrifice speed for region affinity.
-        // Region breaks ties between nodes with similar latency, preventing
-        // cross-continent routing when same-region alternatives exist.
-        // Sort: pool members first (free + trusted), then by latency, region, load, trust, speed
+        // Sort: pool members first (free + trusted), then reachability tier,
+        // then latency ASC, region DESC, load ASC, trust DESC, speed DESC.
+        //
+        // The reachability tier sits above latency so a directly-connected
+        // holder always outranks a relayed one, and a measured peer always
+        // outranks one we have merely assumed a latency for. Latency alone
+        // could not express either guarantee.
         candidates.sort_by(|a, b| {
             b.is_pool_member
                 .cmp(&a.is_pool_member) // true (1) > false (0) → pool members first
+                .then_with(|| a.reach.cmp(&b.reach))
                 .then_with(|| a.latency_ms.cmp(&b.latency_ms))
                 .then_with(|| {
                     b.region_score
@@ -648,29 +704,84 @@ impl PipelineScheduler {
         }
     }
 
-    /// Get latency and trust for a peer. Local node gets zero latency and max trust.
-    fn get_peer_metrics(&self, node_id: &NodeId, local_node_id: &NodeId) -> (u32, f32) {
+    /// Get reachability tier, latency and trust for a peer.
+    ///
+    /// The tier is the primary ranking key and encodes both how we reach the
+    /// peer and whether its latency is measured — see [`ReachTier`]. The
+    /// latency is a cost input only; it never has to carry the direct-beats-
+    /// relayed guarantee on its own, which is what used to break.
+    fn get_peer_metrics(&self, node_id: &NodeId, local_node_id: &NodeId) -> (ReachTier, u32, f32) {
         if node_id == local_node_id {
-            return (0, 1.0);
+            return (ReachTier::Local, 0, 1.0);
         }
 
-        let (latency, trust) = self
-            .shared_state
-            .peer_registry
-            .get(node_id)
-            .map(|peer| (peer.latency_ms.unwrap_or(100), peer.trust_score))
-            .unwrap_or((200, 0.3));
+        let entry = self.shared_state.peer_registry.get(node_id);
+        let measured = entry.as_ref().and_then(|p| p.latency_ms);
+        let trust = entry.as_ref().map(|p| p.trust_score).unwrap_or(0.3);
+        let direct = self.shared_state.connected_node_ids.contains(node_id);
 
-        // NETWORKING_PLAN §4: prefer direct, then relayed. A peer we can only
-        // reach through a relay pays an extra hop each way, so charge it the
-        // penalty rather than letting it outrank a directly-connected holder on
-        // a stale latency sample. This keeps "direct → relayed → fail" ordering
-        // without a separate sort key: relayed candidates still win over having
-        // no candidate at all, which is the whole point of the tier.
-        if !self.shared_state.connected_node_ids.contains(node_id) {
-            return (latency.saturating_add(RELAY_HOP_LATENCY_PENALTY_MS), trust);
-        }
-        (latency, trust)
+        let tier = match (direct, measured.is_some()) {
+            (true, true) => ReachTier::DirectMeasured,
+            (true, false) => ReachTier::DirectUnmeasured,
+            (false, true) => ReachTier::RelayedMeasured,
+            (false, false) => ReachTier::RelayedUnmeasured,
+        };
+
+        let base = match (measured, entry.is_some()) {
+            (Some(ms), _) => ms,
+            (None, true) => UNMEASURED_PEER_LATENCY_MS,
+            (None, false) => UNKNOWN_PEER_LATENCY_MS,
+        };
+        // A relayed forward is us → relay → target, so it really does cost an
+        // extra hop. Charging it keeps the cost arithmetic honest within the
+        // relayed tier; the tier itself is what orders relayed against direct.
+        let latency = if direct {
+            base
+        } else {
+            base.saturating_add(RELAY_HOP_LATENCY_PENALTY_MS)
+        };
+        (tier, latency, trust)
+    }
+
+    /// Estimated milliseconds *per layer covered* of handing `range` to
+    /// `candidate`, starting at `current_layer`. Lower is better.
+    ///
+    /// Three quantities have to be traded off, and ranking them one after
+    /// another gets it wrong:
+    ///
+    /// - **Network.** One round trip is paid per segment per token, no matter
+    ///   how many layers the segment covers. Dividing it by the coverage is
+    ///   what lets a wide segment amortise a distant peer — and stops a narrow
+    ///   one from pretending it is cheap.
+    /// - **Compute.** The peer's measured per-layer cost where we have one,
+    ///   otherwise its advertised throughput, otherwise a neutral default.
+    /// - **Load.** Scales the compute term rather than being a separate,
+    ///   higher-priority key. `load` counts requests in flight, so a peer
+    ///   already serving one is treated as roughly twice as expensive — a real
+    ///   penalty, but one a 100x latency difference can still outweigh.
+    fn estimated_cost_per_layer(
+        candidate: &NodeCandidate,
+        range: (u32, u32),
+        current_layer: u32,
+    ) -> f32 {
+        let covered = range.1.saturating_sub(current_layer).max(1) as f32;
+
+        let compute_per_layer = candidate
+            .observed_latency_ms_per_layer
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or_else(|| {
+                // No measurement. Fall back to the advertised capability, which
+                // is quoted for a ~32-layer 7B model, then to a neutral figure
+                // so an unrated peer is neither favoured nor disqualified.
+                if candidate.est_tokens_per_sec > 0.0 {
+                    1000.0 / (candidate.est_tokens_per_sec * 32.0)
+                } else {
+                    DEFAULT_COMPUTE_MS_PER_LAYER
+                }
+            });
+
+        let load_multiplier = 1.0 + candidate.load.max(0.0);
+        candidate.latency_ms as f32 / covered + compute_per_layer * load_multiplier
     }
 
     /// Greedy layer assignment: cover all layers 0..num_layers using sorted candidates.
@@ -845,36 +956,40 @@ impl PipelineScheduler {
                 }
             }
 
-            // Pick the best candidate. Prefer the LOCAL node first to minimize
-            // network round-trips and maximize use of locally-hosted shards.
-            // Among remote candidates, prefer the one covering the most layers,
-            // then lower-load nodes for better distribution.
-            let best = options.into_iter().max_by(|(ca, ra), (cb, rb)| {
-                let cov_a = ra.1 - current_layer;
-                let cov_b = rb.1 - current_layer;
-                let local_a = if ca.node_id == *local_node_id {
-                    1u32
-                } else {
-                    0u32
-                };
-                let local_b = if cb.node_id == *local_node_id {
-                    1u32
-                } else {
-                    0u32
-                };
-                // Local node always preferred — distributed inference should use
-                // locally-hosted shards first, forwarding only the remainder.
-                local_a
-                    .cmp(&local_b)
-                    .then_with(|| cov_a.cmp(&cov_b))
-                    // Lower load is better → reverse comparison
-                    .then_with(|| {
-                        cb.load
-                            .partial_cmp(&ca.load)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .then_with(|| ca.latency_ms.cmp(&cb.latency_ms).reverse())
-            });
+            // Pick the best candidate: local first, then reachability tier,
+            // then lowest estimated cost per layer covered.
+            //
+            // This replaced a lexicographic chain of local → coverage → load →
+            // latency. Because `load` is a whole-request integer, it changed
+            // more often than it tied, so latency was effectively never
+            // reached: ONE in-flight request on a 4 ms LAN peer was enough to
+            // hand the segment to a peer 100x further away. Coverage and
+            // latency are not comparable quantities and cannot be ranked one
+            // after the other — they have to be priced against each other,
+            // which is what `estimated_cost_per_layer` does.
+            let best = options
+                .into_iter()
+                .map(|(c, r)| {
+                    let key = (
+                        // Local always wins: its shards are already here and
+                        // there is no network hop to price.
+                        c.node_id != *local_node_id,
+                        c.reach,
+                        Self::estimated_cost_per_layer(c, r, current_layer),
+                        // Only reached on a genuine tie (e.g. two local ranges,
+                        // which have identical zero-network cost). Wider is
+                        // better, so negate for a min-comparison.
+                        -((r.1 - current_layer) as i64),
+                    );
+                    (key, c, r)
+                })
+                .min_by(|(ka, _, _), (kb, _, _)| {
+                    ka.0.cmp(&kb.0)
+                        .then_with(|| ka.1.cmp(&kb.1))
+                        .then_with(|| ka.2.partial_cmp(&kb.2).unwrap_or(std::cmp::Ordering::Equal))
+                        .then_with(|| ka.3.cmp(&kb.3))
+                })
+                .map(|(_, c, r)| (c, r));
 
             match best {
                 Some((candidate, range)) => {

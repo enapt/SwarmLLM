@@ -247,6 +247,7 @@ fn greedy_assign_multi_range_candidate() {
                 index: 0,
             },
             available_ranges: vec![(0, 2), (10, 14)],
+            reach: super::ReachTier::Local,
             latency_ms: 0,
             load: 0.0,
             trust_score: 1.0,
@@ -264,6 +265,7 @@ fn greedy_assign_multi_range_candidate() {
                 index: 1,
             },
             available_ranges: vec![(2, 10)],
+            reach: super::ReachTier::DirectMeasured,
             latency_ms: 10,
             load: 0.0,
             trust_score: 0.8,
@@ -1057,4 +1059,208 @@ fn merge_peer_segment_latency_ignores_bad_samples() {
     state.merge_peer_segment_latency(&node, 0.0, 1.0);
     state.merge_peer_segment_latency(&node, -5.0, 1.0);
     assert!(state.observed_latency_ms_per_layer(&node).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Reachability tier + cost-based segment selection.
+//
+// Both pin behaviour that was found wrong on 2026-08-01 against a live swarm.
+// ---------------------------------------------------------------------------
+
+fn cost_cand(
+    byte: u8,
+    ranges: Vec<(u32, u32)>,
+    reach: super::ReachTier,
+    latency_ms: u32,
+    load: f32,
+    ms_per_layer: Option<f32>,
+) -> NodeCandidate {
+    NodeCandidate {
+        node_id: NodeId([byte; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        available_ranges: ranges,
+        reach,
+        latency_ms,
+        load,
+        trust_score: 1.0,
+        can_be_first: true,
+        can_be_last: true,
+        region_score: 1.0,
+        est_tokens_per_sec: 0.0,
+        observed_latency_ms_per_layer: ms_per_layer,
+        is_pool_member: false,
+    }
+}
+
+/// The documented guarantee — "a directly-connected holder always outranks a
+/// relayed one" — used to be an additive 150ms penalty, which a 570ms direct
+/// peer defeated. As an ordering key it holds for any latency at all.
+#[test]
+fn a_direct_holder_outranks_a_relayed_one_at_any_latency() {
+    assert!(super::ReachTier::DirectMeasured < super::ReachTier::RelayedMeasured);
+    assert!(super::ReachTier::DirectUnmeasured < super::ReachTier::RelayedMeasured);
+    assert!(super::ReachTier::Local < super::ReachTier::DirectMeasured);
+
+    // The live shape: a relay-only peer we never timed vs a measured direct
+    // peer at 570 ms. Under the old additive penalty the relayed peer scored
+    // 100 + 150 = 250 and won.
+    let mut v = [
+        cost_cand(
+            1,
+            vec![(0, 8)],
+            super::ReachTier::RelayedUnmeasured,
+            450,
+            0.0,
+            None,
+        ),
+        cost_cand(
+            2,
+            vec![(0, 8)],
+            super::ReachTier::DirectMeasured,
+            570,
+            0.0,
+            None,
+        ),
+    ];
+    v.sort_by(|a, b| {
+        a.reach
+            .cmp(&b.reach)
+            .then_with(|| a.latency_ms.cmp(&b.latency_ms))
+    });
+    assert_eq!(
+        v[0].node_id,
+        NodeId([2u8; 32]),
+        "the measured direct peer must rank first despite being slower"
+    );
+}
+
+/// An unmeasured peer must not be treated as better than a measured mediocre
+/// one. The old `unwrap_or(100)` made "we know nothing" score better than most
+/// real peers.
+#[test]
+fn an_unmeasured_peer_ranks_behind_a_measured_one_in_its_tier() {
+    assert!(super::ReachTier::DirectMeasured < super::ReachTier::DirectUnmeasured);
+    assert!(super::ReachTier::RelayedMeasured < super::ReachTier::RelayedUnmeasured);
+    // The old default was a flat 100ms, which flattered an unknown peer over
+    // most measured ones. Compare against a mid-range real peer rather than
+    // the literal, so this reads as the property it is defending.
+    let typical_measured_peer_ms: u32 = 100;
+    assert!(
+        super::UNMEASURED_PEER_LATENCY_MS > typical_measured_peer_ms,
+        "an unknown peer must not be assumed faster than a typical real one"
+    );
+}
+
+/// The reported defect: `load` is a whole-request integer compared BEFORE
+/// latency, so one in-flight request on a 4ms LAN peer diverted the segment to
+/// a peer 100x further away.
+#[test]
+fn one_busy_request_does_not_divert_a_segment_to_a_far_peer() {
+    let lan_busy = cost_cand(
+        1,
+        vec![(0, 8)],
+        super::ReachTier::DirectMeasured,
+        4,
+        1.0, // one request in flight
+        Some(20.0),
+    );
+    let far_idle = cost_cand(
+        2,
+        vec![(0, 8)],
+        super::ReachTier::DirectMeasured,
+        411,
+        0.0,
+        Some(20.0),
+    );
+
+    let lan = PipelineScheduler::estimated_cost_per_layer(&lan_busy, (0, 8), 0);
+    let far = PipelineScheduler::estimated_cost_per_layer(&far_idle, (0, 8), 0);
+    assert!(
+        lan < far,
+        "a busy 4ms peer should still beat an idle 411ms one (lan={lan}, far={far})"
+    );
+}
+
+/// Load must still matter — it is a real penalty, just not one that outranks
+/// everything. A heavily loaded peer loses to an equally-distant idle one.
+#[test]
+fn load_still_penalises_a_peer_when_distance_is_equal() {
+    let busy = cost_cand(
+        1,
+        vec![(0, 8)],
+        super::ReachTier::DirectMeasured,
+        10,
+        4.0,
+        Some(20.0),
+    );
+    let idle = cost_cand(
+        2,
+        vec![(0, 8)],
+        super::ReachTier::DirectMeasured,
+        10,
+        0.0,
+        Some(20.0),
+    );
+    assert!(
+        PipelineScheduler::estimated_cost_per_layer(&idle, (0, 8), 0)
+            < PipelineScheduler::estimated_cost_per_layer(&busy, (0, 8), 0),
+        "at equal distance the idle peer must win"
+    );
+}
+
+/// A wide segment amortises its round trip; a narrow one cannot. This is what
+/// lets coverage and latency be priced against each other instead of ranked.
+#[test]
+fn wider_coverage_amortises_a_distant_peers_round_trip() {
+    let far_wide = cost_cand(
+        1,
+        vec![(0, 32)],
+        super::ReachTier::DirectMeasured,
+        400,
+        0.0,
+        Some(5.0),
+    );
+    let far_narrow = cost_cand(
+        2,
+        vec![(0, 2)],
+        super::ReachTier::DirectMeasured,
+        400,
+        0.0,
+        Some(5.0),
+    );
+    let wide = PipelineScheduler::estimated_cost_per_layer(&far_wide, (0, 32), 0);
+    let narrow = PipelineScheduler::estimated_cost_per_layer(&far_narrow, (0, 2), 0);
+    assert!(
+        wide < narrow,
+        "32 layers should amortise the RTT better than 2 (wide={wide}, narrow={narrow})"
+    );
+}
+
+/// A genuinely faster peer wins when everything else is equal — the measured
+/// per-layer cost has to actually count for something.
+#[test]
+fn a_faster_peer_wins_at_equal_distance_and_load() {
+    let fast = cost_cand(
+        1,
+        vec![(0, 8)],
+        super::ReachTier::DirectMeasured,
+        10,
+        0.0,
+        Some(2.0),
+    );
+    let slow = cost_cand(
+        2,
+        vec![(0, 8)],
+        super::ReachTier::DirectMeasured,
+        10,
+        0.0,
+        Some(200.0),
+    );
+    assert!(
+        PipelineScheduler::estimated_cost_per_layer(&fast, (0, 8), 0)
+            < PipelineScheduler::estimated_cost_per_layer(&slow, (0, 8), 0)
+    );
 }

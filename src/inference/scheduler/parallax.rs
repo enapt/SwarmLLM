@@ -464,6 +464,7 @@ mod tests {
                 index: 0,
             },
             available_ranges: ranges,
+            reach: crate::inference::scheduler::ReachTier::DirectMeasured,
             latency_ms,
             load,
             trust_score: 1.0,
