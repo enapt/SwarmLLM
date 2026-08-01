@@ -208,6 +208,16 @@ impl Daemon {
             gpu_info,
         );
 
+        // Publish the key to `<data_dir>/api_key` so the CLI can read it while
+        // the daemon holds the database lock. This is the ONLY caller: writing
+        // it from `resolve_api_key` meant anything that merely constructed a
+        // SharedState — including every test built on `Config::default()`,
+        // which inherits the real data_dir — overwrote a running node's key.
+        crate::daemon::helpers::publish_api_key_file(
+            &self.config.node.data_dir,
+            &shared_state.api_key,
+        );
+
         // Anchor mode: a pure bootstrap/relay/AutoNAT node. The inference and
         // model-management subsystems below are skipped so no models load, no
         // HuggingFace polling / shard acquisition runs, and no inference

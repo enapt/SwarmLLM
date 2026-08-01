@@ -22,13 +22,15 @@ pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
 /// useless as an admission decision: a gate fed those numbers admits models
 /// that cannot fit and the worker dies with `CUDA_ERROR_OUT_OF_MEMORY` anyway.
 ///
-/// The dominant missing term is the **embedding table, dequantized to f32**.
-/// The loader does `tok_embd.dequantize(&device)` because `Embedding::new` takes
-/// a dense tensor, so a 128k-vocabulary model carries
-/// `128256 * 2048 * 4 = 1002 MB` that no file-size multiple can see — larger
-/// than the entire quantized checkpoint for a 1B model. The KV cache is the
-/// second, and is the one `inference.max_seq_len_override` and the 4096 default
-/// bound (see `inference::split::kv_budget`).
+/// The dominant missing term is the **dequantized embedding table**. The loader
+/// must hand `Embedding::new` a dense tensor, so a 128k-vocabulary model carries
+/// `128256 * 2048 * 2 = 501 MB` that no file-size multiple can see — a large
+/// fraction of the entire quantized checkpoint for a 1B model, and on Gemma 2's
+/// 256k vocabulary larger than the checkpoint outright. It is resident at
+/// `inference::split::loader::EMBEDDING_DTYPE`; the two MUST agree, and
+/// `EMBEDDING_TABLE_BYTES_PER_ELEMENT` below is the copy of that fact used here.
+/// The KV cache is the second, and is the one `inference.max_seq_len_override`
+/// and the 4096 default bound (see `inference::split::kv_budget`).
 #[derive(Debug, Clone, Copy)]
 pub struct VramFootprintInputs {
     /// Sum of the shard bytes this worker will map. Quantized, on-disk size.
@@ -87,6 +89,23 @@ pub const CPU_PROCESS_OVERHEAD_BYTES: u64 = 256 * 1024 * 1024;
 /// make the CPU budget the stricter of the two, refusing loads that fit.
 const _: () = assert!(CPU_PROCESS_OVERHEAD_BYTES < CUDA_PROCESS_OVERHEAD_BYTES);
 
+/// Bytes per element of the resident token-embedding table.
+///
+/// **This must match what the loader actually allocates.** The loader
+/// dequantizes `token_embd.weight` via
+/// `SplitModel::EMBEDDING_DTYPE` — the two are checked against each
+/// other by `embedding_dtype_matches_the_vram_estimate` in
+/// `inference::split::loader`, because a disagreement here is invisible until
+/// a node either refuses a model that fits or OOMs on one that does not.
+///
+/// f16 rather than f32 because the values come from a quantized tensor whose
+/// own block scales are f16 — the wider type stores no additional information,
+/// and on a large-vocabulary model it was costing more memory than the entire
+/// rest of the model. Reported 2026-08-01: a 6 GB card refused Gemma 2 2B
+/// (1629 MB of weights) at an estimated 5447 MB, of which 2250 MB was this
+/// table at f32.
+pub const EMBEDDING_TABLE_BYTES_PER_ELEMENT: u64 = 2;
+
 /// The part of a worker's footprint that does not depend on where it runs:
 /// weights, the dequantized embedding table, the KV cache and the RoPE tables.
 /// A model's shape costs the same in system RAM as it does in VRAM; only the
@@ -96,12 +115,19 @@ fn estimate_model_resident_bytes(i: &VramFootprintInputs) -> u64 {
     const F32: u64 = 4;
     let mut bytes = i.quantized_weight_bytes;
 
-    // Embedding table, dequantized to f32 by the loader. First segment only.
+    // Embedding table, dequantized by the loader at
+    // `EMBEDDING_TABLE_BYTES_PER_ELEMENT`. First segment only.
+    //
+    // On a modern large-vocabulary model this is the single largest term —
+    // larger than the quantized weights themselves. Gemma 2 2B carries a
+    // 256,000-token vocabulary at hidden size 2304: 1125 MB at f16, against
+    // 1629 MB for the entire rest of the model. Llama 3.1's 128,256-token
+    // vocabulary at hidden size 4096 is the same order.
     if i.is_first {
         bytes = bytes.saturating_add(
             i.vocab_size
                 .saturating_mul(i.embedding_length)
-                .saturating_mul(F32),
+                .saturating_mul(EMBEDDING_TABLE_BYTES_PER_ELEMENT),
         );
     }
 
@@ -655,13 +681,23 @@ mod footprint_tests {
     /// useless for admission.
     #[test]
     fn matches_measured_steady_state_on_phi35() {
-        const MEASURED: u64 = 6037;
+        // 6037 MiB was measured while the embedding table was resident at f32.
+        // The table is now f16, so the REAL steady state falls by exactly the
+        // same amount the estimate does — the calibration still holds, but it
+        // has to be compared against the adjusted figure or it would be
+        // validating the estimate against a measurement of different code.
+        const MEASURED_WITH_F32_EMBEDDING: u64 = 6037;
+        let embedding_elems = phi35().vocab_size * phi35().embedding_length;
+        let saved_mb = embedding_elems * (4 - EMBEDDING_TABLE_BYTES_PER_ELEMENT) / (1024 * 1024);
+        let measured = MEASURED_WITH_F32_EMBEDDING - saved_mb;
+
         let new = estimate_worker_vram_mb(&phi35());
-        let err_pct = 100.0 * (new as f64 - MEASURED as f64) / MEASURED as f64;
+        let err_pct = 100.0 * (new as f64 - measured as f64) / measured as f64;
         assert!(
             err_pct.abs() < 5.0,
-            "estimate {new} vs measured {MEASURED} is {err_pct:+.1}% — outside 5%"
+            "estimate {new} vs adjusted measurement {measured} is {err_pct:+.1}% — outside 5%"
         );
+        const MEASURED: u64 = 6037;
         let old = estimate_model_vram_mb(phi35().quantized_weight_bytes);
         assert!(
             old < MEASURED * 2 / 3,
@@ -677,9 +713,11 @@ mod footprint_tests {
         let old = estimate_model_vram_mb(llama32_1b().quantized_weight_bytes);
         let new = estimate_worker_vram_mb(&llama32_1b());
         assert!(new > old, "new {new} must exceed old {old}");
-        // The f32 embedding alone (1002 MB) exceeds the 821 MB checkpoint.
+        // The f16 embedding alone (128256 * 2048 * 2 = 501 MB) is still a large
+        // fraction of the 821 MB checkpoint, and entirely invisible to a
+        // file-size multiple.
         assert!(
-            new - old > 1_000,
+            new - old > 500,
             "the embedding term alone should dominate: {old} -> {new}"
         );
     }
@@ -692,10 +730,10 @@ mod footprint_tests {
         let mut middle = llama32_1b();
         middle.is_first = false;
         let mid = estimate_worker_vram_mb(&middle);
-        // 128256 * 2048 * 4 = 1002 MB
+        // 128256 * 2048 * 2 = 501 MB
         assert!(
-            (first - mid) > 900 && (first - mid) < 1100,
-            "first {first} minus middle {mid} should be ~1002 MB"
+            (first - mid) > 450 && (first - mid) < 550,
+            "first {first} minus middle {mid} should be ~501 MB"
         );
     }
 
@@ -726,6 +764,57 @@ mod footprint_tests {
         assert!(
             est < MEASURED * 2,
             "must not be more than 2x over ({est} vs {MEASURED})"
+        );
+    }
+
+    /// gemma-2-2b-it-q4_k_m: 1629 MB of shards but a **256,000**-token
+    /// vocabulary at hidden size 2304 — the case reported on 2026-08-01.
+    fn gemma2_2b(effective_context: u64) -> VramFootprintInputs {
+        VramFootprintInputs {
+            quantized_weight_bytes: 1629 * 1024 * 1024,
+            vocab_size: 256_000,
+            embedding_length: 2304,
+            segment_layers: 26,
+            head_count_kv: 4,
+            head_dim: 256,
+            rope_dim: 256,
+            effective_context,
+            is_first: true,
+        }
+    }
+
+    /// The reported failure: a 6 GB card (4600 MB budget) refused Gemma 2 2B
+    /// with `estimated_mb=5447` and `committed_mb=0` — nothing else was using
+    /// the GPU at all.
+    ///
+    /// The estimate was not wrong; the allocation genuinely was that large,
+    /// and 2250 MB of it was one f32 embedding table — more than the 1629 MB
+    /// the rest of the model weighs. At f16 the same model fits, which is the
+    /// whole point: a modest laptop GPU can serve it again.
+    #[test]
+    fn gemma2_2b_fits_a_6gb_card_now_that_the_embedding_is_f16() {
+        const BUDGET_MB: u64 = 4600;
+        for ctx in [2048, 6144] {
+            let est = estimate_worker_vram_mb(&gemma2_2b(ctx));
+            assert!(
+                est <= BUDGET_MB,
+                "gemma-2-2b at ctx {ctx} estimates {est} MB, over the {BUDGET_MB} MB budget \
+                 that made it fall back to the CPU"
+            );
+        }
+    }
+
+    /// Guards the arithmetic itself against a silent regression: the f32
+    /// table was 2250 MB, which alone exceeded half the card.
+    #[test]
+    fn the_gemma2_embedding_table_is_no_longer_the_largest_single_term() {
+        let i = gemma2_2b(6144);
+        let embedding_mb =
+            i.vocab_size * i.embedding_length * EMBEDDING_TABLE_BYTES_PER_ELEMENT / (1024 * 1024);
+        assert_eq!(embedding_mb, 1125, "256000 x 2304 x 2 bytes");
+        assert!(
+            embedding_mb < i.quantized_weight_bytes / (1024 * 1024),
+            "the embedding table must no longer outweigh the model's own weights"
         );
     }
 

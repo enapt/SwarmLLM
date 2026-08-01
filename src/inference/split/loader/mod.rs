@@ -39,13 +39,34 @@ pub(super) struct SplitLoadOptions<'a> {
     pub parallel_data: Option<&'a [u8]>,
 }
 
+/// Element type the token-embedding table is dequantized to, and therefore the
+/// type it is resident in for the whole life of the worker.
+///
+/// **The single source of truth for that dtype.** Three places have to agree:
+/// this loader (which allocates it), [`segment_weight_bytes`] (which subtracts
+/// it from the KV-cache budget), and
+/// `model::auto_manage::vram::EMBEDDING_TABLE_BYTES_PER_ELEMENT` (which decides
+/// whether the model is admitted to the GPU at all). A disagreement is
+/// invisible until a node either refuses a model that would have fitted or
+/// OOMs on one it thought would. `embedding_dtype_matches_the_vram_estimate`
+/// pins the last of those three.
+///
+/// f16 rather than f32: `Embedding::new` needs a dense tensor, but the values
+/// come from a quantized tensor whose own block scales are f16, so the wider
+/// type stores nothing extra. On a large-vocabulary model the difference is
+/// decisive — Gemma 2 2B's 256,000-token table costs 2250 MB at f32 against
+/// 1629 MB for the entire rest of the model, which by itself pushed a 6 GB
+/// card to a CPU fallback (reported 2026-08-01).
+pub const EMBEDDING_DTYPE: candle_core::DType = candle_core::DType::F16;
+
 /// Sum the on-device byte cost of the tensors this segment will load.
 ///
 /// Only the segment's own layers count — a node holding layers 8..16 never
-/// allocates the others. `token_embd.weight` is charged at its **dequantized
-/// f32** size because the loader dequantizes it (`Embedding::new` takes a
-/// dense tensor), which on a 128K-vocab model is several times its quantized
-/// size and is exactly the term a file-size-based estimate misses.
+/// allocates the others. `token_embd.weight` is charged at its **dequantized**
+/// size ([`EMBEDDING_DTYPE`]) because the loader dequantizes it
+/// (`Embedding::new` takes a dense tensor), which on a 128K-vocab model is
+/// several times its quantized size and is exactly the term a file-size-based
+/// estimate misses.
 ///
 /// Used only to decide how much VRAM is left for the KV cache, so an
 /// over-estimate is the safe direction: it shortens context rather than
@@ -89,8 +110,9 @@ fn segment_weight_bytes(
 
     if is_first {
         if let Some(info) = ct.tensor_infos.get("token_embd.weight") {
-            const F32: u64 = std::mem::size_of::<f32>() as u64;
-            total = total.saturating_add(info.shape.elem_count() as u64 * F32);
+            total = total.saturating_add(
+                info.shape.elem_count() as u64 * EMBEDDING_DTYPE.size_in_bytes() as u64,
+            );
         }
     }
     // A weight-tied model reuses token_embd as its LM head; on the last
@@ -447,7 +469,16 @@ impl SplitModel {
             let tok_embd = ct
                 .tensor(&mut file, "token_embd.weight", &device)
                 .map_err(|e| SwarmError::Internal(format!("Failed to load embeddings: {e}")))?;
-            let tok_embd = tok_embd.dequantize(&device).map_err(SwarmError::internal)?;
+            // Resident for the worker's whole life at EMBEDDING_DTYPE — on a
+            // large-vocabulary model this is the biggest single allocation the
+            // worker makes, so the narrower type is what decides whether a
+            // modest GPU can serve the model at all. On CUDA candle has a
+            // specialised f16 dequantize kernel, so there is no transient f32
+            // copy of the full table.
+            let tok_embd = tok_embd
+                .dequantize_f16(&device)
+                .map_err(SwarmError::internal)?;
+            debug_assert_eq!(tok_embd.dtype(), EMBEDDING_DTYPE);
             Some(Embedding::new(tok_embd, embedding_length))
         } else {
             None
@@ -1879,5 +1910,31 @@ impl SplitModel {
             kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
             final_logit_softcap,
         })
+    }
+}
+
+#[cfg(test)]
+mod embedding_dtype_tests {
+    use super::EMBEDDING_DTYPE;
+    use crate::model::auto_manage::vram::EMBEDDING_TABLE_BYTES_PER_ELEMENT;
+
+    /// The loader allocates the embedding table; the VRAM estimator decides
+    /// whether that allocation is allowed to happen. They hold the same fact in
+    /// two places, and nothing at runtime would notice them disagreeing — the
+    /// node would simply refuse models that fit, or admit ones that OOM.
+    ///
+    /// Changing `EMBEDDING_DTYPE` without updating the estimator is exactly the
+    /// mistake this catches.
+    #[test]
+    fn embedding_dtype_matches_the_vram_estimate() {
+        assert_eq!(
+            EMBEDDING_DTYPE.size_in_bytes() as u64,
+            EMBEDDING_TABLE_BYTES_PER_ELEMENT,
+            "the loader dequantizes token_embd to {:?} ({} bytes/element) but the VRAM \
+             estimator charges {} bytes/element",
+            EMBEDDING_DTYPE,
+            EMBEDDING_DTYPE.size_in_bytes(),
+            EMBEDDING_TABLE_BYTES_PER_ELEMENT
+        );
     }
 }

@@ -25,15 +25,11 @@ pub enum SubsystemCriticality {
 }
 
 pub(super) fn resolve_api_key(config: &Config, db: &Database) -> String {
-    let key;
-
     // 1. Explicit key in config takes priority
     if let Some(ref k) = config.api.api_key {
         if !k.is_empty() {
             tracing::info!(source = "config", "Using API key from configuration");
-            key = k.clone();
-            write_api_key_file(&config.node.data_dir, &key);
-            return key;
+            return k.clone();
         }
     }
 
@@ -41,7 +37,6 @@ pub(super) fn resolve_api_key(config: &Config, db: &Database) -> String {
     if let Ok(Some(k)) = db.get_json::<String>("config", "api_key") {
         if !k.is_empty() {
             tracing::info!(source = "database", "Using persisted API key from database");
-            write_api_key_file(&config.node.data_dir, &k);
             return k;
         }
     }
@@ -50,15 +45,17 @@ pub(super) fn resolve_api_key(config: &Config, db: &Database) -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    key = hex::encode(bytes);
+    let key = hex::encode(bytes);
 
     // Persist to DB
     if let Err(e) = db.put_json("config", "api_key", &key) {
         tracing::warn!(error = %e, "Failed to persist API key to database");
     }
 
-    // Write to file so CLI `status` can read it without opening the database
-    write_api_key_file(&config.node.data_dir, &key);
+    // The file is written by `publish_api_key_file` from the daemon's own
+    // startup, NOT here — resolving a key must not write to the user's data
+    // directory, or every test that builds a SharedState overwrites the key of
+    // a node that happens to be running.
 
     // Print API key to stderr — visually distinct so first-run users don't
     // miss it. Stderr only (NOT tracing) so it never lands in shipped logs.
@@ -91,12 +88,19 @@ pub(super) fn resolve_api_key(config: &Config, db: &Database) -> String {
 /// broke the dashboard, the CLI and every saved token, presenting as an
 /// unexplained 401 with nothing in the log (reproduced 2026-07-31).
 ///
-/// Gating the writer itself, rather than each test helper, means a new test
-/// cannot reintroduce this by forgetting to override `data_dir`.
-#[cfg(test)]
-fn write_api_key_file(_data_dir: &std::path::Path, _key: &str) {}
+/// **`#[cfg(test)]` was NOT enough.** It applies only while compiling this
+/// crate as a test binary — i.e. `cargo test --lib`. An *integration* test in
+/// `tests/` links the library compiled WITHOUT `cfg(test)`, so the real writer
+/// was still live there and `cargo test` kept clobbering the file (hit again
+/// 2026-08-01, after the guard was believed to have fixed it).
+///
+/// So the write is no longer a side effect of resolving the key at all. Only
+/// the daemon's own startup calls [`publish_api_key_file`], and nothing that
+/// merely builds a `SharedState` can touch the user's data directory.
+pub(super) fn publish_api_key_file(data_dir: &std::path::Path, key: &str) {
+    write_api_key_file(data_dir, key)
+}
 
-#[cfg(not(test))]
 fn write_api_key_file(data_dir: &std::path::Path, key: &str) {
     let path = data_dir.join("api_key");
     #[cfg(unix)]

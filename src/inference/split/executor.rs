@@ -297,6 +297,16 @@ impl SplitModel {
                 .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
                 .forward(&input)
                 .map_err(|e| SwarmError::Internal(format!("Embedding forward failed: {e}")))?;
+            // The table is resident at `EMBEDDING_DTYPE` (f16) to keep a
+            // large-vocabulary model within a modest GPU's memory, but every
+            // layer downstream works in f32. Widen the LOOKUP RESULT rather
+            // than the table: this tensor is [batch, seq, hidden], so the cast
+            // costs a few KB per decode step instead of gigabytes of residency.
+            if emb.dtype() != candle_core::DType::F32 {
+                emb = emb
+                    .to_dtype(candle_core::DType::F32)
+                    .map_err(|e| SwarmError::Internal(format!("Embedding cast failed: {e}")))?;
+            }
             // Gemma models scale embeddings by sqrt(hidden_dim)
             if self.arch.use_gemma_norm() {
                 let scale = (self.hidden_dim as f64).sqrt();
