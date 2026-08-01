@@ -1293,6 +1293,64 @@ impl ModelProcessPool {
         false
     }
 
+    /// Make room in the RAM budget by unloading models nothing is using.
+    ///
+    /// Called when [`Self::admit_to_cpu`] refuses, BEFORE the refusal reaches
+    /// the user. Without this, a node whose budget is already spent refuses the
+    /// next model outright even when the resident one is doing nothing —
+    /// reported from a live node: 6210 MB resident, 5986 MB wanted, 8000 MB
+    /// budget, refused. The graphics-memory path has had pressure-based
+    /// eviction for exactly this; system memory had none, so the request failed
+    /// and only the next background cleanup pass fixed it.
+    ///
+    /// Only workers with **no in-flight requests** are candidates, read from
+    /// the pool's own response channels, so this can never take memory from a
+    /// request that is mid-generation. Longest-resident goes first.
+    ///
+    /// Deliberately does not consult the pin / reference-model lists that guard
+    /// the background idle-unload. Those exist to keep a wanted model *warm*,
+    /// which is a preference; this runs only when the alternative is failing
+    /// the request outright, and a worker respawns on its next use. Returns the
+    /// megabytes reclaimed.
+    async fn free_ram_for_admission(&self, exclude: &ModelId, needed_mb: u64) -> u64 {
+        let budget = self
+            .ram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if budget == 0 {
+            return 0;
+        }
+        let mut freed = 0u64;
+        loop {
+            let committed = self.ram_committed_mb();
+            if committed.saturating_add(needed_mb) <= budget {
+                break;
+            }
+            // Longest-resident worker that is not serving anything.
+            let victim = self
+                .workers
+                .iter()
+                .filter(|e| e.key() != exclude && e.value().responses.is_empty())
+                .min_by_key(|e| e.value().spawned_at)
+                .map(|e| e.key().clone());
+            let Some(victim) = victim else {
+                break; // everything left is busy — refuse rather than interrupt it
+            };
+            let reclaimed = self.ram_reserved_mb.get(&victim).map(|v| *v).unwrap_or(0);
+            tracing::info!(
+                model = %victim,
+                reclaimed_mb = reclaimed,
+                for_model = %exclude,
+                "Unloading an unused model to make room in the memory budget"
+            );
+            self.unload_model(&victim).await;
+            freed = freed.saturating_add(reclaimed);
+            if reclaimed == 0 {
+                break; // nothing accounted to it; avoid spinning
+            }
+        }
+        freed
+    }
+
     /// Release a worker's RAM charge. Must pair with every `admit_to_cpu`.
     fn release_ram_charge(&self, model_id: &ModelId) {
         self.ram_reserved_mb.remove(model_id);
@@ -1456,7 +1514,27 @@ impl ModelProcessPool {
         // this model, and nothing in the response would say so.
         if going_to_cpu {
             let estimated = self.estimate_cpu_footprint_mb(model_id);
-            if !self.admit_to_cpu(model_id, estimated) {
+            // Refusing is the last resort: first reclaim memory from models
+            // nothing is using, then ask again. Only then does the user see an
+            // error.
+            //
+            // Ask ONCE unless the answer was no. `admit_to_cpu` charges the
+            // reservation when it succeeds, so calling it a second time after a
+            // success weighs the model against its own charge and refuses a
+            // model that had already been let in.
+            let mut admitted = self.admit_to_cpu(model_id, estimated);
+            if !admitted {
+                let freed = self.free_ram_for_admission(model_id, estimated).await;
+                if freed > 0 {
+                    tracing::info!(
+                        model = %model_id,
+                        freed_mb = freed,
+                        "Reclaimed memory from unused models; retrying admission"
+                    );
+                }
+                admitted = self.admit_to_cpu(model_id, estimated);
+            }
+            if !admitted {
                 self.release_vram_charge(model_id);
                 if let Some(tx) = self.activity_tx.get() {
                     let _ = tx.send(

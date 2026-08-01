@@ -2,6 +2,22 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A model was refused for lack of memory even when the memory was free.** With
+  one model resident and a request arriving for another, the node compared the
+  new model against a budget the first was still holding and refused outright —
+  reported from a node with 6210 MB resident, 5986 MB wanted and an 8000 MB
+  limit. Nothing was actually using the resident model; it was simply still
+  loaded, and only a later background pass would clear it. Memory is now
+  reclaimed from models nothing is using before a refusal is returned, so the
+  request succeeds instead of failing. Models with work in flight are never
+  touched, so this cannot interrupt an answer in progress, and a model that
+  genuinely does not fit on its own is still refused — with a message that no
+  longer implies another model is to blame.
+
 ## [0.3.58-alpha] — 2026-07-31
 
 ### Fixed
