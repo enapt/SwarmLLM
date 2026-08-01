@@ -927,9 +927,46 @@ pub(crate) fn masked_fill(
     mask.where_cond(&on_true.broadcast_as(shape.dims())?, on_false)
 }
 
+/// Target size, in f32 elements, of ONE attention-score temporary.
+///
+/// The score matrix is `[batch, n_head, q_len, k_len]`, so it grows with the
+/// PRODUCT of the query and key lengths — quadratically on a prefill, where
+/// both are the prompt length. At 4600 prompt tokens and 8 heads that single
+/// temporary is 646 MB, and the softcap/mask/softmax steps each produce
+/// another of the same size. That is what exhausted a 6 GB card on a model
+/// whose weights are 1.6 GB (reported 2026-08-01): the load succeeded and
+/// reported 2883 MB resident, then the first long prompt died inside
+/// attention.
+///
+/// 16 Mi elements = 64 MiB per temporary, so even several live at once stay
+/// well inside the headroom a modest card has after the model is resident.
+const ATTN_SCORE_BUDGET_ELEMS: usize = 16 * 1024 * 1024;
+
+/// How many query positions to process at once so one score temporary stays
+/// near [`ATTN_SCORE_BUDGET_ELEMS`].
+///
+/// Returns `q_len` (i.e. "do it in one pass") whenever the whole thing already
+/// fits, so decode and short prefills take exactly the path they always did.
+fn attention_query_block(q_len: usize, k_len: usize, heads: usize) -> usize {
+    let per_query = heads.max(1).saturating_mul(k_len.max(1));
+    if per_query == 0 {
+        return q_len;
+    }
+    let budgeted = ATTN_SCORE_BUDGET_ELEMS / per_query;
+    budgeted.clamp(1, q_len.max(1))
+}
+
 /// Standard O(n^2) matmul attention with optional causal mask.
 /// Input/output layout: BHSD `(b, n_head, seq, head_dim)`.
 /// Supports optional Gemma 2 attention logit soft-capping.
+///
+/// Long prompts are processed in blocks of query positions to bound peak
+/// memory — see [`ATTN_SCORE_BUDGET_ELEMS`]. **This is exact, not an
+/// approximation**: the softmax runs over the KEY axis, so output row `i`
+/// depends only on query row `i` and the full key/value tensors. Splitting the
+/// query axis therefore computes the identical arithmetic on each row, in the
+/// same order, and merely materialises fewer of them at a time. No online
+/// rescaling is involved, unlike a true flash-attention tiling over keys.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn standard_attention(
     q: &Tensor,
@@ -944,8 +981,64 @@ pub(crate) fn standard_attention(
 ) -> CandleResult<Tensor> {
     let k = candle_transformers::utils::repeat_kv(k.clone(), n_head / n_kv_head)?;
     let v = candle_transformers::utils::repeat_kv(v.clone(), n_head / n_kv_head)?;
+    // `v` is used once per block; make it contiguous here rather than inside
+    // the loop so a blocked run does not repeat the copy per block.
+    let v = v.contiguous()?;
+    let kt = k.t()?;
 
-    let att = (q.matmul(&k.t()?)? / (head_dim as f64).sqrt())?;
+    let q_len = q.dim(2)?;
+    let k_len = k.dim(2)?;
+    let block = attention_query_block(q_len, k_len, n_head);
+
+    if block >= q_len {
+        return attention_scores_block(q, &kt, &v, mask, head_dim, neg_inf, attn_logit_softcap);
+    }
+
+    let mut parts: Vec<Tensor> = Vec::with_capacity(q_len.div_ceil(block));
+    let mut start = 0usize;
+    while start < q_len {
+        let len = block.min(q_len - start);
+        // `q` reaches here via reshape/transpose and may not be contiguous;
+        // narrowing it produces a strided view that candle's matmul rejects on
+        // some backends. The block is [b, heads, len, head_dim] — a few MB —
+        // so making it contiguous is cheap insurance against a device-specific
+        // failure that would not show up on the CPU path used in tests.
+        let q_blk = q.narrow(2, start, len)?.contiguous()?;
+        // The mask is [q_len, k_len] (2D, broadcast over batch/head) or already
+        // 4D. Either way the query axis is the second-from-last.
+        let mask_blk = match mask {
+            None => None,
+            Some(m) => Some(match m.rank() {
+                2 => m.narrow(0, start, len)?,
+                r => m.narrow(r - 2, start, len)?,
+            }),
+        };
+        parts.push(attention_scores_block(
+            &q_blk,
+            &kt,
+            &v,
+            mask_blk.as_ref(),
+            head_dim,
+            neg_inf,
+            attn_logit_softcap,
+        )?);
+        start += len;
+    }
+    Tensor::cat(&parts, 2)
+}
+
+/// One block of [`standard_attention`] — the original body, over whatever
+/// slice of query positions it is handed.
+fn attention_scores_block(
+    q: &Tensor,
+    kt: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    head_dim: usize,
+    neg_inf: &Tensor,
+    attn_logit_softcap: Option<f32>,
+) -> CandleResult<Tensor> {
+    let att = (q.matmul(kt)? / (head_dim as f64).sqrt())?;
     // Gemma 2 attention logit soft-capping: tanh(logits / cap) * cap
     let att = if let Some(cap) = attn_logit_softcap {
         let cap_f64 = cap as f64;
@@ -961,7 +1054,7 @@ pub(crate) fn standard_attention(
         }
     };
     let att = candle_nn::ops::softmax_last_dim(&att)?;
-    att.matmul(&v.contiguous()?)
+    att.matmul(v)
 }
 
 /// Unified attention dispatch: selects the best backend for the device.
@@ -1430,5 +1523,193 @@ mod cpu_decode_bench {
         report("Qwen2.5-7B-style GQA", 28, 4, 128, kv_lens, iters);
         // Llama-3-70B / Mistral-7B style (GQA: 32/8, head_dim=128)
         report("Llama-70B-style GQA", 32, 8, 128, kv_lens, iters);
+    }
+}
+
+#[cfg(test)]
+mod blocked_attention_tests {
+    use super::*;
+    use candle_core::{Device, Tensor};
+
+    /// Run `standard_attention` with the query-blocking threshold forced to a
+    /// given block size, by choosing shapes that straddle it.
+    fn run(
+        q_len: usize,
+        k_len: usize,
+        n_head: usize,
+        n_kv_head: usize,
+        head_dim: usize,
+        softcap: Option<f32>,
+    ) -> Tensor {
+        let dev = Device::Cpu;
+        // Deterministic, non-trivial values — a constant tensor would hide any
+        // row/column mix-up that blocking could introduce.
+        let mk = |b: usize, h: usize, s: usize, d: usize, seed: f32| {
+            let n = b * h * s * d;
+            let data: Vec<f32> = (0..n)
+                .map(|i| ((i as f32 * 0.7 + seed).sin()) * 0.5)
+                .collect();
+            Tensor::from_vec(data, (b, h, s, d), &dev).unwrap()
+        };
+        let q = mk(1, n_head, q_len, head_dim, 0.0);
+        let k = mk(1, n_kv_head, k_len, head_dim, 1.3);
+        let v = mk(1, n_kv_head, k_len, head_dim, 2.9);
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &dev).unwrap();
+        // Causal mask over the query block, offset so the last query attends to
+        // everything — the shape a prefill actually uses.
+        let offset = k_len - q_len;
+        let m: Vec<u8> = (0..q_len)
+            .flat_map(|i| (0..k_len).map(move |j| u8::from(j > offset + i)))
+            .collect();
+        let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
+        standard_attention(
+            &q,
+            &k,
+            &v,
+            Some(&mask),
+            head_dim,
+            n_head,
+            n_kv_head,
+            &neg_inf,
+            softcap,
+        )
+        .unwrap()
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        let a = a.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let b = b.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "shape mismatch between blocked and unblocked"
+        );
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f32::max)
+    }
+
+    /// The blocking claim is that it is EXACT, not approximate. Softmax runs
+    /// over the key axis, so output row i depends only on query row i — the
+    /// same arithmetic in the same order, just fewer rows materialised at once.
+    ///
+    /// Verified by forcing a block split through the real entry point: the
+    /// budget is 16Mi elements, so heads x k_len chosen to make the block
+    /// smaller than q_len.
+    #[test]
+    fn blocking_the_query_axis_is_bit_for_bit_identical() {
+        // per_query = heads * k_len. Pick k_len large enough that the computed
+        // block is < q_len, forcing the blocked path.
+        let heads = 8;
+        let k_len = 4096;
+        let q_len = 4096;
+        assert!(
+            attention_query_block(q_len, k_len, heads) < q_len,
+            "test must actually exercise the blocked path"
+        );
+
+        let blocked = run(q_len, k_len, heads, heads, 16, None);
+
+        // Same computation with the block forced to cover everything: call the
+        // single-block helper directly with identical inputs.
+        let dev = Device::Cpu;
+        let mk = |b: usize, h: usize, s: usize, d: usize, seed: f32| {
+            let n = b * h * s * d;
+            let data: Vec<f32> = (0..n)
+                .map(|i| ((i as f32 * 0.7 + seed).sin()) * 0.5)
+                .collect();
+            Tensor::from_vec(data, (b, h, s, d), &dev).unwrap()
+        };
+        let q = mk(1, heads, q_len, 16, 0.0);
+        let k = mk(1, heads, k_len, 16, 1.3);
+        let v = mk(1, heads, k_len, 16, 2.9).contiguous().unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &dev).unwrap();
+        let offset = k_len - q_len;
+        let m: Vec<u8> = (0..q_len)
+            .flat_map(|i| (0..k_len).map(move |j| u8::from(j > offset + i)))
+            .collect();
+        let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
+        let unblocked =
+            attention_scores_block(&q, &k.t().unwrap(), &v, Some(&mask), 16, &neg_inf, None)
+                .unwrap();
+
+        let d = max_abs_diff(&blocked, &unblocked);
+        assert_eq!(d, 0.0, "query blocking must be exact, max abs diff = {d}");
+    }
+
+    /// Gemma 2's softcap adds three more full-size temporaries, so it is the
+    /// model that benefits most — and the one whose numerics must not drift.
+    #[test]
+    fn blocking_is_exact_with_gemma_style_softcap() {
+        let heads = 8;
+        let k_len = 4096;
+        let q_len = 4096;
+        let blocked = run(q_len, k_len, heads, heads, 16, Some(50.0));
+
+        let dev = Device::Cpu;
+        let mk = |b: usize, h: usize, s: usize, d: usize, seed: f32| {
+            let n = b * h * s * d;
+            let data: Vec<f32> = (0..n)
+                .map(|i| ((i as f32 * 0.7 + seed).sin()) * 0.5)
+                .collect();
+            Tensor::from_vec(data, (b, h, s, d), &dev).unwrap()
+        };
+        let q = mk(1, heads, q_len, 16, 0.0);
+        let k = mk(1, heads, k_len, 16, 1.3);
+        let v = mk(1, heads, k_len, 16, 2.9).contiguous().unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &dev).unwrap();
+        let offset = k_len - q_len;
+        let m: Vec<u8> = (0..q_len)
+            .flat_map(|i| (0..k_len).map(move |j| u8::from(j > offset + i)))
+            .collect();
+        let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
+        let unblocked = attention_scores_block(
+            &q,
+            &k.t().unwrap(),
+            &v,
+            Some(&mask),
+            16,
+            &neg_inf,
+            Some(50.0),
+        )
+        .unwrap();
+
+        assert_eq!(max_abs_diff(&blocked, &unblocked), 0.0);
+    }
+
+    /// GQA must keep working — `repeat_kv` happens once, before blocking.
+    #[test]
+    fn grouped_query_attention_still_matches() {
+        let out = run(2048, 2048, 8, 4, 16, None);
+        assert_eq!(out.dims(), &[1, 8, 2048, 16]);
+    }
+
+    /// Decode and short prefills must take the original single-pass path, so
+    /// the common case pays nothing for this.
+    #[test]
+    fn short_sequences_are_not_blocked() {
+        // Decode: one query position.
+        assert_eq!(attention_query_block(1, 4096, 8), 1);
+        // A 128-token chunk against a long cache still fits in one pass.
+        assert_eq!(attention_query_block(128, 4600, 8), 128);
+    }
+
+    /// The whole point: peak score memory must stop growing with the square of
+    /// the prompt.
+    #[test]
+    fn the_block_bounds_peak_score_memory() {
+        let heads = 8;
+        for q_len in [2048usize, 4600, 8192, 16384] {
+            let blk = attention_query_block(q_len, q_len, heads);
+            let elems = blk * q_len * heads;
+            assert!(
+                elems <= ATTN_SCORE_BUDGET_ELEMS,
+                "q_len={q_len}: block {blk} gives {elems} elems, over budget"
+            );
+        }
+        // Unblocked, 4600 tokens x 8 heads would have been 646 MB per temporary.
+        let unbounded = 4600usize * 4600 * heads;
+        assert!(unbounded > 10 * ATTN_SCORE_BUDGET_ELEMS);
     }
 }
