@@ -4488,6 +4488,25 @@ owner-side cleanup — a coordinator dropping its own waiter — which is legiti
 Pinned by `daemon::state::pending_layer_result_tests`, including a replay of the
 run above. Verified failing without the fix.
 
+### Live verification (2026-08-01, same two machines)
+
+Three consecutive genuine 3-segment splits of
+`meta-llama-3.1-8b-instruct-q4-k-m` completed successfully — `HTTP 200`,
+`x-swarm-route: distributed`, `x-swarm-segments: 3`, `outcome=ok`, correct
+answers. 85s on the first (cold model load on the peer), then 26s and 32s warm.
+Assignment was local `[0..2)` → LAN peer `[2..10)` → local `[10..32)`, i.e. the
+same geometry that previously failed.
+
+**So the split path itself was never broken** — that was the open question, and
+it is now answered. The two earlier failures had two different causes: the slot
+collision fixed here, and (in the `fa8cfb9d` run) a genuine
+`OutboundFailure: Timeout` to the relay-only peer `7c10ea04` with no standby
+available, which is finding 2 below.
+
+Note the warm runs did NOT exercise the failover path — the peer answered
+prefill in 10.2s rather than timing out, so no standby was needed. The failover
+fix itself is covered by the unit tests, not by these runs.
+
 ### Why the earlier analyses missed it
 
 Both prior passes reasoned from the *surfaced* error rather than the request

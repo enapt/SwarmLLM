@@ -226,14 +226,23 @@ holds an incomplete release as a draft. Gotchas #222/#223/#224.
 **Release process:** clearing `prerelease` does NOT move `/releases/latest` —
 set `make_latest=true` in the same call (gotcha #225).
 
-**OPEN — distributed multi-segment inference.** Single-peer routing verified
-working. A genuine 3-segment split failed twice, differently: once
-`Tensor bytes too short` (**unexplained**), once a plain timeout to a 411 ms
-internet peer with no standby. **Read `docs/FUTURE_WORK.md` § "Multi-segment
-distributed inference" before touching this** — it records a corrected analysis
-after a fix was written against a claim that turned out to be false. Next test is
-named there: force the split onto the 4 ms LAN peer to separate "split path
-broken" from "bad peer chosen".
+**RESOLVED — distributed multi-segment inference.** `Tensor bytes too short` was
+never a wire-format defect. `pending_layer_results` is keyed by `request_id`
+alone, but a failed-over request has TWO forwards outstanding; the abandoned
+one's late error resolved the **standby's** waiter, so the standby's real result
+arrived to an empty map and was dropped, and its empty payload flowed downstream.
+The standby had succeeded in 9.7s — the request failed after 181s. Waiters now
+record the node they expect (`PendingLayerResult::awaiting`) and resolve through
+`SharedState::resolve_pending_layer_result` (gotcha #229). Both earlier analyses
+reasoned from the error string; grepping the whole `request_id` showed it in one
+pass — and showed the "next experiment" (force the split onto the LAN peer) had
+already happened by accident, since the failing run's only remote segment WAS the
+4 ms LAN peer. **Still open, in `docs/FUTURE_WORK.md`:** the segment timeout
+ignores peer speed (a CPU peer needs >15 s/layer where a GPU needs 1.2), the
+relay penalty does not hold its documented invariant (an unmeasured relay peer
+scores 250, beating a measured direct peer at 570 ms), and `greedy_assign`
+compares load before latency so one in-flight request diverts a segment to a far
+peer.
 
 **Session hygiene:** four wrong claims in one day from truncated greps and stale
 notes (gotcha #228). `MEMORY.md` is over its 24.4 KB load limit, so part never
