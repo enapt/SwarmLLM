@@ -2,6 +2,69 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.60-alpha] — 2026-08-01
+
+Splitting a model across machines now works end to end, and a modest graphics
+card can run modern models again.
+
+### Fixed
+
+- **A model split across three machines could fail with a misleading error
+  about tensor data.** When one machine took too long, the work was handed to a
+  standby — but the abandoned attempt, on being cleaned up afterwards, reported
+  its failure against the request that had already moved on. The standby's
+  correct answer then arrived to find nothing waiting for it and was discarded,
+  and the empty result from the failure was passed to the next machine in the
+  chain, which reported it as malformed data. Measured on two machines: the
+  standby had produced a correct answer in under ten seconds; the request
+  instead failed after three minutes. Answers are now matched to the machine
+  they were expected from, so an attempt that has been given up on can no
+  longer answer for the one that replaced it. Three consecutive three-way
+  splits of an 8B model have since completed correctly.
+
+- **A modest graphics card refused models it had room for.** A 6GB card was
+  turning away Gemma 2 2B — a model whose weights are 1.6GB — with the card
+  completely empty. The estimate of 5.4GB was accurate: 2.2GB of it was the
+  token vocabulary table, held at full precision, which on today's
+  large-vocabulary models is more memory than the entire rest of the model. It
+  is now held at half precision, which is all the values were ever worth, and
+  the result of each lookup is widened before use so nothing else changes.
+  Verified by asking two models the same questions before and after — every
+  answer identical, including across a three-machine split. Models gain in
+  proportion to their vocabulary; Llama 3.x and Gemma 2 gain the most.
+
+- **Work could be sent past a good nearby machine to a distant one.** Two
+  separate causes. A machine reachable only through a relay could outrank one
+  we were connected to directly, because the rule meant to prevent that added a
+  fixed amount to the relayed machine's travel time — and a fixed amount cannot
+  order two things. A machine we had never timed was also assumed to be fast,
+  so knowing nothing about it counted in its favour. Separately, the choice
+  between machines considered current workload before travel time, and workload
+  counts whole requests, so a single request already running on a machine 4ms
+  away was enough to divert the next piece of work to one 400ms away. Distance,
+  speed and workload are now weighed against each other rather than checked in
+  order.
+
+- **The test suite could overwrite a running node's API key**, after which
+  every request failed to authenticate with nothing in the log to explain it.
+  This was reported fixed previously; the guard only covered part of the build.
+  Writing the file is no longer a side effect of reading the key. If you meet
+  this on an older build, restarting the node restores the file.
+
+### Changed
+
+- **Nodes now learn how fast each machine they work with actually is**, and
+  wait accordingly, instead of applying one fixed allowance to everything from
+  a laptop CPU to a datacentre GPU. Prompt processing and answer generation are
+  measured separately — they differ by around a hundredfold on the same machine
+  — and a machine that has not served a model recently is given room to load it
+  first. That last case is what caused the failure above: a machine needed two
+  minutes to load an 8B model, did the work itself in ten seconds, and was cut
+  off at the two-minute mark. Estimates are forgotten after an hour of silence,
+  so a machine that was once busy is not written off for ever.
+
+- Per-machine speed figures are now visible in the admin performance view.
+
 ## [0.3.59-alpha] — 2026-08-01
 
 ### Fixed
