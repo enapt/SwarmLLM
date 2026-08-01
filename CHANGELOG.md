@@ -2,6 +2,38 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.61-alpha] — 2026-08-01
+
+Follow-up to v0.3.60 from the same tester's report: the graphics-memory fix in
+that release let a model *load* on a modest card, and this one lets it answer a
+long prompt once it has.
+
+### Fixed
+
+- **A long prompt could exhaust graphics memory even when the model had loaded
+  with room to spare.** Attention compares every position in the prompt against
+  every other, so its working buffer grows with the square of the prompt
+  length — at around 4,000 words that is gigabytes at once, several times over,
+  which is more memory than many models occupy. A card could therefore load a
+  model, report a sane amount of memory used, and then fail on the first long
+  request. Long prompts are now worked through in slices, so the buffer stays
+  bounded however long the prompt is.
+
+  The result is arithmetically identical rather than an approximation: each
+  position's answer depends only on its own row, so computing them in groups
+  changes nothing. Short prompts and ordinary word-by-word generation take the
+  original path unchanged.
+
+  This affected graphics cards only — processors already used a
+  memory-efficient form of attention, so the card was the weaker of the two
+  here. It also only affected models shared across machines: a model running
+  wholly on one machine already worked its prompt through in slices, and that
+  is why the problem was not seen sooner.
+
+  Confirmed on real hardware rather than argued: on an 8GB card the same test
+  runs to completion with the fix and fails with an out-of-memory error without
+  it, one setting apart.
+
 ## [0.3.60-alpha] — 2026-08-01
 
 Splitting a model across machines now works end to end, and a modest graphics
