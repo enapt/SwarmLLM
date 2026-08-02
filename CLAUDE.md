@@ -196,57 +196,47 @@ All 20 build phases complete. All subsystems wired — no stubs. **1588 lib + 81
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.56 → .59 (2026-07-31→08-01): memory admission, and a CI cache that shipped a broken release
+### Latest — v0.3.60 → .63 (2026-08-01→02): the split works, and two machines in one house find each other
 
-**v0.3.59** — a model was refused for memory that was free. Admission compared a
-new model against a budget a resident-but-idle one still held, and only a later
-background pass released it. Memory is now reclaimed from models with no work in
-flight *before* any refusal; in-flight is read from the worker pool's own
-per-request channels, the one place every execution path crosses, so no path can
-be missed. Verified on two nodes by the reporter, both directions.
+**v0.3.63** — a long prompt exhausted graphics memory in the **feed-forward**,
+the step right after the attention that .61 fixed. Same shape, still unbounded:
+three buffers, each `[tokens x intermediate]`, live at once (~700 MB for a 5k
+prompt on a small model). Blocked on the token axis; exact, tests assert max abs
+diff **0.0**. **The .61 changelog claim that single-machine requests were never
+at risk was WRONG** and a tester reproduced it — a machine holding a whole model
+is served as a ONE-SEGMENT PIPELINE through `handle_forward`, which does not
+chunk. **Chunked prefill bounds tokens on the LOCAL generate path only**; any new
+per-token temporary needs its own bound. Same release: two LAN machines routed
+through the anchor VPS at ~3 s and then went mutually invisible for hours — four
+causes, see `round_log_lan_peering_0802.md` and gotcha **#234** (a safety fix
+that silently disabled an unrelated fix through shared state). Also: a decrypt
+failure now answers `LayerResult::error` instead of dropping silently and
+burning the whole segment budget.
 
-**v0.3.58** — a model could be freed *while answering*. Busy-ness was derived
-from `active_pipelines` (distributed path only) and `serving_models` (peer-served
-only), so **a node answering its own client locally was in neither**. Also, a
-model with no request history counted as idle for ever rather than for as long as
-it had been loaded, and the message named graphics memory on CPU-only machines.
-Same release: **`cargo test` overwrote a running node's API key** — `SharedState::new`
-resolves the key and a test built from `Config::default()` inherits the REAL
-`data_dir`. Now a no-op in test builds (gotcha #226).
+**Open, found 08-02, NOT fixed:** `KEY_ROTATION_INTERVAL` is 600 s and
+`crypto/session.rs` keeps ONE key with no previous-key grace, so **every session
+has a re-key window every 10 minutes and any forward crossing it is discarded** —
+likely cause of the intermittent distributed failures across several releases.
+Recommendation (previous-key grace) in `docs/FUTURE_WORK.md`. Also open: a peer
+whose return path is dead stays `is_connected=true` and schedulable.
 
-**v0.3.57** — restored the Windows GPU download that **v0.3.56 shipped without**.
-Root cause: `release.yml` and `cache-warm.yml` shared a cache key and had to agree
-on the Vulkan SDK by hand. They had diverged since **v0.3.46** — ten releases —
-and got away with it while `latest` kept resolving to the pinned version. The
-toolchain now lives in one composite action (`.github/actions/gpu-build-env`) both
-call and neither can override; publishing checks each platform's archive **by
-name** (a count cannot tell a complete release from one missing a platform) and
-holds an incomplete release as a draft. Gotchas #222/#223/#224.
+**v0.3.60/.61 — RESOLVED: distributed multi-segment inference.** `Tensor bytes
+too short` was never a wire-format defect. `pending_layer_results` is keyed by
+`request_id` alone, but a failed-over request has TWO forwards outstanding; the
+abandoned one's late error resolved the **standby's** waiter (gotcha #229).
+Waiters now record the node they expect and resolve through
+`SharedState::resolve_pending_layer_result`. Plus peer-speed-sized segment
+budgets, `ReachTier` (direct beats relayed by construction), and the f16
+embedding table. **.61** blocked the attention query axis — the shipped GPU build
+is the only one with quadratic attention memory, because `flash-attn` is
+excluded from the `cuda` feature (gotcha #232).
 
-**Release process:** clearing `prerelease` does NOT move `/releases/latest` —
-set `make_latest=true` in the same call (gotcha #225).
-
-**RESOLVED — distributed multi-segment inference.** `Tensor bytes too short` was
-never a wire-format defect. `pending_layer_results` is keyed by `request_id`
-alone, but a failed-over request has TWO forwards outstanding; the abandoned
-one's late error resolved the **standby's** waiter, so the standby's real result
-arrived to an empty map and was dropped, and its empty payload flowed downstream.
-The standby had succeeded in 9.7s — the request failed after 181s. Waiters now
-record the node they expect (`PendingLayerResult::awaiting`) and resolve through
-`SharedState::resolve_pending_layer_result` (gotcha #229). Both earlier analyses
-reasoned from the error string; grepping the whole `request_id` showed it in one
-pass — and showed the "next experiment" (force the split onto the LAN peer) had
-already happened by accident, since the failing run's only remote segment WAS the
-4 ms LAN peer. **Still open, in `docs/FUTURE_WORK.md`:** the segment timeout
-ignores peer speed (a CPU peer needs >15 s/layer where a GPU needs 1.2), the
-relay penalty does not hold its documented invariant (an unmeasured relay peer
-scores 250, beating a measured direct peer at 570 ms), and `greedy_assign`
-compares load before latency so one in-flight request diverts a segment to a far
-peer.
-
-**Session hygiene:** four wrong claims in one day from truncated greps and stale
-notes (gotcha #228). `MEMORY.md` is over its 24.4 KB load limit, so part never
-reaches the session — prune before trusting it.
+**Release process:** `scratchpad/tag_when_green.sh <tag>` is the ONLY way to tag
+(requires conclusion `success` AND every job green, BEFORE tagging). `Cargo.toml`
++ `Cargo.lock` in the SAME commit (CI is `--locked`). **Do not push between the
+release commit and the tag** — it cancels the run the tagger waits on. After the
+workflow publishes: `gh release edit <tag> --prerelease=false --latest` — BOTH
+flags, clearing prerelease alone does not move `/releases/latest` (gotcha #225).
 
 ### Superseded — v0.3.49 / .50 / .51-alpha (2026-07-29): attribution, and a tokenizer bug still open
 
