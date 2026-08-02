@@ -73,9 +73,16 @@ long prompt once it has.
 
   This affected graphics cards only — processors already used a
   memory-efficient form of attention, so the card was the weaker of the two
-  here. It also only affected models shared across machines: a model running
-  wholly on one machine already worked its prompt through in slices, and that
-  is why the problem was not seen sooner.
+  here.
+
+  **Correction (2026-08-02):** this entry originally said the problem "only
+  affected models shared across machines" and that a single-machine request was
+  already safe. That was wrong, and a tester reproduced an out-of-memory failure
+  on exactly that path. A machine holding a whole model serves it as a
+  single-segment pipeline, which goes through the same code as a shared model
+  and is not sliced. The claim was made from reading which paths slice prompts,
+  without checking which path a whole-model request actually takes. Apologies to
+  anyone who read it and concluded their setup was unaffected.
 
   Confirmed on real hardware rather than argued: on an 8GB card the same test
   runs to completion with the fix and fails with an out-of-memory error without

@@ -133,8 +133,103 @@ pub(crate) struct Mlp {
     pub(crate) activation: Activation,
 }
 
+/// Peak MLP intermediate elements to keep live at once, matching
+/// [`ATTN_SCORE_BUDGET_ELEMS`]. 16 Mi elements = 64 MiB per temporary.
+///
+/// The feed-forward block holds `up` and `gate` — each
+/// `[tokens, intermediate]` — plus their product, all live at the same moment.
+/// At 5021 tokens and Gemma 2's 9216-wide intermediate that is ~185 MiB each,
+/// so roughly 700 MiB peak on top of a resident model. Reported live
+/// 2026-08-02 on a 6 GB card: the model loaded at 2829 MiB and the first long
+/// prompt died in `mlp:`.
+const MLP_INTERMEDIATE_BUDGET_ELEMS: usize = 16 * 1024 * 1024;
+
+/// Token count below which blocking is skipped entirely.
+///
+/// Decode passes a single token and must not pay for the width probe below, and
+/// a short prefill already fits — both take exactly the path they always did.
+const MLP_MIN_TOKENS_TO_BLOCK: usize = 512;
+
 impl Mlp {
+    /// Feed-forward block.
+    ///
+    /// Long inputs are processed in blocks of tokens to bound peak memory — see
+    /// [`MLP_INTERMEDIATE_BUDGET_ELEMS`]. **This is exact, not an
+    /// approximation**: every operation here is pointwise across tokens (two
+    /// projections, an activation, a product, a third projection), so row `i` of
+    /// the output depends only on row `i` of the input. Splitting the token axis
+    /// computes identical arithmetic and merely materialises fewer rows at once.
+    ///
+    /// Chunked prefill does NOT make this redundant. It bounds tokens only on
+    /// the local generate path; a node serving a pipeline segment goes through
+    /// `handle_forward`, which has no chunking — and a single machine holding a
+    /// whole model is served as a one-segment pipeline, which is why this was
+    /// reachable without any second machine involved.
     pub(crate) fn forward(
+        &self,
+        xs: &Tensor,
+        lora: Option<(&LoraAdapter, usize)>,
+    ) -> CandleResult<Tensor> {
+        self.forward_with_budget(xs, lora, MLP_INTERMEDIATE_BUDGET_ELEMS)
+    }
+
+    /// [`Mlp::forward`] with the memory budget injected, so a test can force the
+    /// blocked path without allocating the hundreds of megabytes the real
+    /// budget would require to exceed.
+    fn forward_with_budget(
+        &self,
+        xs: &Tensor,
+        lora: Option<(&LoraAdapter, usize)>,
+        budget_elems: usize,
+    ) -> CandleResult<Tensor> {
+        // Token axis is the second-to-last dim for both [b, seq, hidden] and
+        // [seq, hidden] inputs.
+        let rank = xs.rank();
+        if rank < 2 {
+            return self.forward_block(xs, lora);
+        }
+        let token_dim = rank - 2;
+        let tokens = xs.dim(token_dim)?;
+        if tokens < MLP_MIN_TOKENS_TO_BLOCK {
+            return self.forward_block(xs, lora);
+        }
+
+        // Measure the intermediate width instead of assuming an expansion
+        // ratio — it varies from ~2.7x to ~8x of hidden across architectures,
+        // and a guess would either under-bound (defeating the fix) or
+        // over-block (needless launches). One single-token projection against a
+        // prefill of hundreds is negligible, and it is never run for decode.
+        let probe = xs.narrow(token_dim, 0, 1)?;
+        let intermediate = self
+            .ffn_up
+            .forward(&probe)?
+            .dims()
+            .last()
+            .copied()
+            .unwrap_or(0);
+        let block = budget_elems
+            .checked_div(intermediate)
+            .map_or(tokens, |b| b.clamp(1, tokens));
+        if block >= tokens {
+            return self.forward_block(xs, lora);
+        }
+
+        let mut parts: Vec<Tensor> = Vec::with_capacity(tokens.div_ceil(block));
+        let mut start = 0usize;
+        while start < tokens {
+            let len = block.min(tokens - start);
+            // Narrowing yields a strided view; the projections' matmul rejects
+            // those on some backends, and a block is only a few MiB.
+            let slice = xs.narrow(token_dim, start, len)?.contiguous()?;
+            parts.push(self.forward_block(&slice, lora)?);
+            start += len;
+        }
+        Tensor::cat(&parts, token_dim)
+    }
+
+    /// One block's worth of the feed-forward computation — the whole thing when
+    /// the input is short enough not to need splitting.
+    fn forward_block(
         &self,
         xs: &Tensor,
         lora: Option<(&LoraAdapter, usize)>,
@@ -1786,5 +1881,125 @@ mod cuda_attention_memory_probe {
         let v0 = probe.to_vec1::<f32>().unwrap()[0];
         assert!(v0.is_finite(), "output must be finite, got {v0}");
         eprintln!("OK — completed, first output element {v0:.6}");
+    }
+}
+
+#[cfg(test)]
+mod blocked_mlp_tests {
+    use super::*;
+    use candle_core::{DType, Device, Tensor};
+
+    /// Build an `Mlp` from plain f32 tensors — `QMatMul::Tensor` skips
+    /// quantisation so the comparison isolates the blocking, not rounding.
+    fn mlp(hidden: usize, intermediate: usize, gated: bool, act: Activation) -> Mlp {
+        let dev = Device::Cpu;
+        let w = |o: usize, i: usize, seed: f32| {
+            let n = o * i;
+            let data: Vec<f32> = (0..n).map(|k| (k as f32 * seed).sin() * 0.05).collect();
+            let t = Tensor::from_vec(data, (o, i), &dev).unwrap();
+            QMatMul {
+                inner: QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(t)),
+            }
+        };
+        Mlp {
+            ffn_gate: gated.then(|| w(intermediate, hidden, 0.31)),
+            ffn_up: w(intermediate, hidden, 0.17),
+            ffn_down: w(hidden, intermediate, 0.23),
+            activation: act,
+        }
+    }
+
+    fn input(batch: usize, tokens: usize, hidden: usize) -> Tensor {
+        let n = batch * tokens * hidden;
+        let data: Vec<f32> = (0..n).map(|k| (k as f32 * 0.013).cos() * 0.5).collect();
+        Tensor::from_vec(data, (batch, tokens, hidden), &Device::Cpu).unwrap()
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        let a = a.flatten_all().unwrap().to_dtype(DType::F32).unwrap();
+        let b = b.flatten_all().unwrap().to_dtype(DType::F32).unwrap();
+        (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    }
+
+    #[test]
+    fn blocking_the_token_axis_is_bit_for_bit_identical() {
+        let (hidden, intermediate, tokens) = (64, 176, 600);
+        let m = mlp(hidden, intermediate, true, Activation::SiLU);
+        let xs = input(1, tokens, hidden);
+
+        let whole = m.forward_with_budget(&xs, None, usize::MAX).unwrap();
+        // 176-wide intermediate under a 8800-element budget => 50-token blocks.
+        let budget = 8_800;
+        assert!(
+            budget / intermediate < tokens,
+            "test must actually exercise the blocked path"
+        );
+        let blocked = m.forward_with_budget(&xs, None, budget).unwrap();
+
+        assert_eq!(whole.dims(), blocked.dims());
+        assert_eq!(
+            max_abs_diff(&whole, &blocked),
+            0.0,
+            "token blocking must be exact — every op in the MLP is pointwise across tokens"
+        );
+    }
+
+    #[test]
+    fn blocking_is_exact_for_a_gateless_gelu_mlp() {
+        // Starcoder2-style: no gate, so the activation runs on `up` directly.
+        let (hidden, intermediate, tokens) = (48, 160, 550);
+        let m = mlp(hidden, intermediate, false, Activation::Gelu);
+        let xs = input(1, tokens, hidden);
+
+        let whole = m.forward_with_budget(&xs, None, usize::MAX).unwrap();
+        let blocked = m.forward_with_budget(&xs, None, 6_400).unwrap();
+
+        assert_eq!(max_abs_diff(&whole, &blocked), 0.0);
+    }
+
+    #[test]
+    fn blocking_is_exact_with_a_batch_dimension() {
+        // The token axis is dim rank-2, so a batch must not be split or folded.
+        let (hidden, intermediate, tokens) = (32, 128, 520);
+        let m = mlp(hidden, intermediate, true, Activation::SiLU);
+        let xs = input(3, tokens, hidden);
+
+        let whole = m.forward_with_budget(&xs, None, usize::MAX).unwrap();
+        let blocked = m.forward_with_budget(&xs, None, 5_120).unwrap();
+
+        assert_eq!(whole.dims(), blocked.dims());
+        assert_eq!(max_abs_diff(&whole, &blocked), 0.0);
+    }
+
+    #[test]
+    fn a_decode_step_is_never_blocked_or_probed() {
+        // Decode passes one token and is latency-critical: it must take the
+        // unblocked path even with an absurdly small budget.
+        let m = mlp(32, 128, true, Activation::SiLU);
+        let xs = input(1, 1, 32);
+
+        let out = m.forward_with_budget(&xs, None, 1).unwrap();
+        let reference = m.forward_block(&xs, None).unwrap();
+
+        assert_eq!(max_abs_diff(&out, &reference), 0.0);
+    }
+
+    #[test]
+    fn a_short_prefill_takes_the_unblocked_path() {
+        let tokens = MLP_MIN_TOKENS_TO_BLOCK - 1;
+        let m = mlp(32, 128, true, Activation::SiLU);
+        let xs = input(1, tokens, 32);
+
+        let out = m.forward_with_budget(&xs, None, 1).unwrap();
+        let reference = m.forward_block(&xs, None).unwrap();
+
+        assert_eq!(max_abs_diff(&out, &reference), 0.0);
     }
 }

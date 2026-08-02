@@ -4841,3 +4841,31 @@ forgery carried the right key.
 Option 1 is the recommendation. Note that the receiving side is the one that
 must tolerate both keys, so a node upgraded alone still benefits when talking to
 an old peer that rotates.
+
+## Sibling paths to the MLP/attention memory blocking (2026-08-02)
+
+The v0.3.61 attention fix and the v0.3.63 MLP fix both bound a per-token
+temporary on the un-chunked `handle_forward` path. Two neighbours were checked
+and deliberately not changed:
+
+- **`MoeFfn::forward`** dispatches per expert, so each expert's projection sees
+  only the tokens routed to it — typically `tokens * n_experts_used /
+  n_experts`. That is already a fraction of the dense case, but it is NOT
+  bounded: a router that sends most tokens to one expert reproduces the dense
+  shape. No MoE model has been run on a modest card here yet, so this is
+  unverified rather than safe. If an OOM is reported with a `moe:` prefix, this
+  is the cause and the fix is the same token-axis blocking.
+- **The prefix-cache snapshot** allocates its own copy of the K/V it is
+  caching (`snapshot k narrow`). The same tester saw this OOM every 64 tokens
+  through a long prefill on a 6 GB card. It is non-fatal — the insert is skipped
+  and generation continues — but it means the prefix cache silently does nothing
+  on exactly the machines that would benefit most, and it emits a warning per
+  block. Worth either sizing the snapshot against free VRAM up front, or
+  disabling the cache for the rest of a request after the first failure instead
+  of retrying every block.
+
+**The general rule this keeps re-teaching:** chunked prefill bounds tokens on
+the LOCAL generate path only. Anything reached through `handle_forward` sees the
+whole prompt at once — and a single machine holding a whole model IS reached
+that way, as a one-segment pipeline. Any new per-token temporary needs its own
+bound; do not assume chunking upstream has already handled it.
