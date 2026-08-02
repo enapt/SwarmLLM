@@ -376,15 +376,30 @@ pub async fn enable_model_privacy(
 
     let last_index = manifest.shard_count.saturating_sub(1);
     let me = state.shared_state.identity.node_id();
+    // Confirm on disk, not just in the registry.
+    //
+    // This answer becomes the sentence "Prompt privacy is ON — prompts and
+    // answers stay here", which a user reasonably reads as a guarantee about
+    // where their text goes. The registry is a snapshot built at startup and
+    // updated by events, so after a model folder was deleted by hand — the only
+    // way to free one, there being no remove command — it still listed the
+    // shards and this claimed privacy was ready for a model that could not
+    // answer at all (reported 2026-08-02). The health monitor now reconciles the
+    // registry against disk each announce cycle, but that is up to a cycle
+    // late; a claim of this kind should be true when it is made, and two stat
+    // calls on a hand-run command cost nothing.
+    let store = state.shared_state.shard_store();
     let holds = |index: u32| {
+        let shard_id = crate::types::ShardId {
+            model_id: mid.clone(),
+            index,
+        };
         state
             .shared_state
             .model_registry
-            .shard_holders(&crate::types::ShardId {
-                model_id: mid.clone(),
-                index,
-            })
+            .shard_holders(&shard_id)
             .contains(me)
+            && store.shard_file_present(&shard_id)
     };
     let mut needed: Vec<u32> = Vec::new();
     for index in [0u32, last_index] {

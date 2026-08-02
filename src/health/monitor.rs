@@ -262,6 +262,61 @@ impl HealthMonitor {
         // leaking on v0.3.15 despite the manifest guard.
         hosted_shards.retain(|s| !crate::model::manifest::is_backup_artifact_id(&s.model_id.0));
 
+        // Drop any shard whose file is no longer on disk, and stop claiming it.
+        //
+        // The registry is populated once at startup and then updated by events;
+        // nothing watches the filesystem. A user who frees space the only way
+        // the software offers — deleting the folder, since there is no remove
+        // command — left the registry asserting shards that no longer exist.
+        // That is not merely cosmetic: THIS list is what the swarm announce
+        // below advertises, so the node kept offering peers work it could not
+        // do, and every surface reading the registry (the `privacy` command,
+        // the dashboard, the scheduler) reported it as held. Reported
+        // 2026-08-02; the reporter found it via `swarmllm privacy` still saying
+        // "both ends are already on this machine" for a deleted model.
+        //
+        // Correcting the registry here rather than at each reader is what makes
+        // one check fix all of them, and it feeds the existing retraction path:
+        // `shards_changed` fires below and re-announces with
+        // `complete_for_models`, which is what actually removes the claim from
+        // peers.
+        //
+        // Existence only, deliberately. A shard being downloaded is written at
+        // its final path and is legitimately incomplete for a while; size and
+        // hash are the accept gate's job (`verify_shard`), not this one. Absent
+        // is the only signal that cannot be a transient.
+        let store = self.shared_state.shard_store();
+        let mut vanished = Vec::new();
+        hosted_shards.retain(|s| {
+            if store.shard_file_present(s) {
+                true
+            } else {
+                vanished.push(s.clone());
+                false
+            }
+        });
+        for shard_id in vanished {
+            tracing::warn!(
+                model = %shard_id.model_id,
+                index = shard_id.index,
+                "Shard file is gone from disk — no longer claiming it to the swarm"
+            );
+            self.shared_state
+                .model_registry
+                .remove_shard_holder(&shard_id, &node_id);
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "model",
+                    "shard_vanished",
+                    format!(
+                        "A piece of {} was removed from disk — no longer offering it",
+                        shard_id.model_id
+                    ),
+                )
+                .with_model(shard_id.model_id.0.clone()),
+            );
+        }
+
         // If no shards from registry but we have a loaded model (and no shard_range),
         // represent the full model as shard index 0.
         if hosted_shards.is_empty() && self.shared_state.config.inference.shard_range.is_none() {

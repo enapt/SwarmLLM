@@ -4869,3 +4869,36 @@ the LOCAL generate path only. Anything reached through `handle_forward` sees the
 whole prompt at once — and a single machine holding a whole model IS reached
 that way, as a one-segment pipeline. Any new per-token temporary needs its own
 bound; do not assume chunking upstream has already handled it.
+
+## Model removal has no CLI command, and a missing model reports 500 (2026-08-02)
+
+Both surfaced by the report that found the shard registry asserting shards that
+had been deleted (fixed: the health monitor now reconciles against disk each
+announce cycle, and `enable-privacy` stats the files before claiming privacy is
+ready). Two things it raised that are NOT fixed:
+
+**1. No CLI way to remove a model.** `DELETE /api/admin/models/:id` exists and
+does the job properly — removes the files, clears the registry and DB rows,
+stops providing on the DHT, and broadcasts a retraction with
+`complete_for_models`. The dashboard uses it. The CLI has no equivalent, so a
+terminal-only user's only option is `rm -rf ~/.local/share/swarmllm/models/<id>/`,
+which does none of that. The disk reconciliation now limits the damage to one
+announce cycle, but the user still cannot cleanly do a thing the software does
+support. A `swarmllm remove-model <id>` wrapping the existing endpoint is small
+and would remove the reason anyone reaches for `rm -rf`.
+
+**2. A model whose files are gone answers 500, not 404.** Reported verbatim:
+
+```
+HTTP 500 {"error":{"code":"server_error",
+  "message":"Inference error: Model not available: Manifest not found: .../manifest.json"}}
+```
+
+`SwarmError::ModelNotAvailable` is documented to map to 404
+(`.claude/rules/completeness.md` § Error type discipline), and the text shows it
+WAS a `ModelNotAvailable` before something wrapped it in `Inference error:` and
+flattened it to 500. Same shape as the v0.3.46 fix where a real `Validation`
+became an `Inference` error crossing the worker IPC and turned a 400 into a 500.
+Worth finding the wrap site: clients that retry on 5xx will retry forever
+against a model that is simply not there, and 500 tells an operator to look for
+a bug in the server rather than a missing file.

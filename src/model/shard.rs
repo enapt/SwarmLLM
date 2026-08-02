@@ -165,6 +165,21 @@ impl ShardStore {
         model_dir(&self.data_dir, &model_id.0)
     }
 
+    /// Is this shard's file actually on disk right now?
+    ///
+    /// The shard registry is built at startup and updated by events; nothing
+    /// watches the filesystem, so a shard deleted by hand stays "held" in memory
+    /// until something asks this. The health monitor asks on each announce cycle
+    /// so the node stops advertising shards it cannot serve.
+    ///
+    /// Existence only, deliberately: a shard mid-download occupies its final
+    /// path while still incomplete, and judging *contents* is the accept gate's
+    /// job ([`ShardStore::verify_shard`]). Absent is the one signal that cannot
+    /// be a transient.
+    pub fn shard_file_present(&self, shard_id: &crate::types::ShardId) -> bool {
+        self.shard_path(&shard_id.model_id, shard_id.index).exists()
+    }
+
     /// Scan disk for locally available shard files, returning (index, path) pairs.
     pub fn scan_local_shards(&self, model_id: &ModelId, shard_count: u32) -> Vec<(u32, PathBuf)> {
         let limit = shard_count.max(1);
@@ -513,6 +528,57 @@ impl ShardStore {
 
 #[cfg(test)]
 mod tests {
+    // NOTE: `shard_file_present` tests live here rather than in the health
+    // monitor because the monitor needs a whole daemon to construct. The
+    // predicate is the part that can be wrong (path building, sanitisation);
+    // the monitor's use of it is a two-line retain.
+
+    #[test]
+    fn a_deleted_shard_file_is_reported_absent() {
+        // The reported failure: a user frees space with `rm -rf` (the only
+        // method offered — there is no remove command), and the node keeps
+        // announcing the shard to the swarm and telling `swarmllm privacy` it
+        // is held, until a restart.
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::ShardStore::new(dir.path());
+        let shard = crate::types::ShardId {
+            model_id: crate::types::ModelId("qwen2.5-0.5b-instruct-fp16".into()),
+            index: 1,
+        };
+
+        assert!(!store.shard_file_present(&shard), "nothing written yet");
+
+        let path = store.shard_path(&shard.model_id, shard.index);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"shard bytes").unwrap();
+        assert!(store.shard_file_present(&shard));
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            !store.shard_file_present(&shard),
+            "deletion must be visible immediately, not at the next restart"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_download_still_counts_as_present() {
+        // A shard being downloaded occupies its final path while short of its
+        // full size. Treating that as absent would make the node retract a
+        // shard it is in the middle of acquiring; judging contents belongs to
+        // `verify_shard`, not here.
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::ShardStore::new(dir.path());
+        let shard = crate::types::ShardId {
+            model_id: crate::types::ModelId("m".into()),
+            index: 0,
+        };
+        let path = store.shard_path(&shard.model_id, shard.index);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+
+        assert!(store.shard_file_present(&shard));
+    }
+
     use super::*;
 
     #[test]
