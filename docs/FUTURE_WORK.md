@@ -82,12 +82,37 @@ restarting it reconnected in 13s (it re-announced), while a peer that stayed up
 after a connection drop was never re-dialled at all. A jittered single re-dial is
 now scheduled on that path too.
 
-**Still open**: that is ONE attempt. If the peer is unreachable for longer than
-the jitter delay the dial fails and nothing re-enqueues it, since a failed dial
-raises `OutgoingConnectionError` rather than `ConnectionClosed`. A bounded
-backoff schedule for a peer we have previously identified would close the
-remaining gap; it was left out deliberately to avoid re-dial storms against peers
-that have genuinely left.
+**CLOSED 2026-08-02.** Three defects, each of which alone reproduced the symptom:
+
+1. **The re-dial was gated on `closed_addr`, which is `None` for every INBOUND
+   connection** — `handle_connection_established` records addresses only for
+   connections we dialled (gotcha #165). So a peer that dialled US was never
+   re-dialled at all, silently disabling the fix above for exactly the case it
+   was written for. Observed live: two LAN nodes 2 ms apart, mutually invisible
+   for over two hours, both still connected to the same anchor, zero dial
+   attempts between them. Re-dial now uses the peer's own advertised listen
+   addresses, read before the registry entry is dropped.
+2. **One attempt, as noted here.** A failed dial raises
+   `OutgoingConnectionError`, which only logged at `debug`. Now retried on a
+   bounded backoff (5s/15s/45s/2m/5m, ~8 min total) and only for peers we have
+   actually been connected to, so bootstrap/PEX/DHT dial targets are untouched.
+3. **The peer cache erased a peer the moment it disconnected.** It was rebuilt
+   from `peer_registry` — connected peers only — and written with
+   `replace_tree`, so a quiet peer was gone within one save interval and could
+   not be recovered even by a restart. The save now merges with what is stored,
+   connected peers first so truncation drops departed ones.
+
+**And the reason the pair was on a relay at all** — the real root cause of the
+2 ms neighbours talking through a VPS in another country: `filter_dialable`
+counted a `/p2p-circuit` address as proof the peer is publicly reachable, and so
+discarded its `192.168.1.60`. A circuit's public-looking component is the
+RELAY's address, not the peer's, and a peer that needs a relay is by definition
+one nothing can reach directly — which makes its LAN address the most valuable
+thing it advertises. Circuits no longer count toward `peer_has_public`; the
+Docker case the rule exists for is unchanged and still pinned by its own test.
+
+Verified live: the LAN peer went from relay-only to a direct
+`/ip4/192.168.1.60/tcp/8810` connection, latency 2940 ms → 4 ms.
 
 Original evidence:
 
@@ -4723,3 +4748,43 @@ shows it received the forward and started work; the follow-on failure was
 queueing. Verified by re-running the identical short request once the peer went
 idle — it succeeded in 42s. Check peer load and its inbound-forward count
 before concluding anything about the network here.
+
+## A peer whose return path is dead stays connected and schedulable (2026-08-02)
+
+**Status: OBSERVED, not fixed. Reproducible on demand.**
+
+Found while verifying the LAN re-dial fixes below. Blocking one direction of a
+peer's traffic (`nft add rule inet blk out ip daddr <us> drop` on the peer) makes
+every request to it time out, but libp2p never closes the TCP connection, so:
+
+- `is_connected=true` on every one of those failures,
+- the peer stays in `peer_registry` and in `connected_node_ids`,
+- and so it stays a **candidate the pipeline scheduler will pick**.
+
+Measured: 200 seconds of every health ping failing, with the peer listed as a
+normal healthy peer in `GET /api/admin/peers` throughout, latency field intact.
+
+```
+08:41:08  OutboundFailure ... error=Timeout  is_connected=true
+08:41:43  OutboundFailure ... error=Timeout  is_connected=true
+08:42:12  OutboundFailure ... error=Timeout  is_connected=true   (and so on)
+```
+
+Nothing converts repeated request_response timeouts into a disconnect. The
+health monitor's stale-peer sweep keys on `last_seen`, which the connection
+being open keeps fresh. A QUIC connection in the same situation dropped in about
+30 seconds; TCP + yamux tolerated the whole window, so which transport a peer
+happens to be on decides whether this is a 30-second or an unbounded problem.
+
+**Why it matters:** this is the ideal shape for routing a segment to a node that
+cannot answer. `connected_node_ids` is documented as the liveness oracle
+(`.claude/rules/architecture.md` § Scheduler Liveness Oracle) and here it says
+"live" for a peer that has not answered anything in minutes.
+
+**Fix sketch (not attempted).** Count consecutive rr failures per peer and close
+the connection after N — the count already exists in spirit in
+`pending_rr_observability`. Care needed on two points: a peer legitimately busy
+with a long prefill also times out (see the abandoned-segment entry above), so
+the threshold must not evict nodes that are merely slow; and closing the
+connection now schedules a re-dial, which is the right recovery but wants the
+backoff added in this same round rather than a tight loop.

@@ -92,9 +92,24 @@ pub fn filter_dialable(
     // address; drop the private noise. Same-LAN peers still find each other via
     // mDNS, and a peer with ONLY private addresses (no public) is kept so the
     // home two-machine / pool case still works.
+    //
+    // A relay circuit does NOT count. Its public-looking component is the
+    // RELAY's address, not the peer's, and a peer that needs a relay is by
+    // definition one nothing can reach directly — which makes its LAN address
+    // the single most valuable thing it advertises, not noise to discard.
+    // Counting circuits here inverted the rule for exactly the peers it hurts
+    // most: observed live 2026-08-02, a NAT'd node 2 ms away on the same LAN had
+    // its `192.168.1.60` dropped because it also advertised three circuits
+    // through the anchor, so every dial was routed through a VPS in another
+    // country at ~3 s RTT, and hole punching (which needs inbound the firewall
+    // was dropping) could never upgrade it.
     let peer_has_public = addrs.iter().any(|s| {
         s.parse::<Multiaddr>()
-            .map(|a| is_dialable(&a, local_peer_id) && !addr_is_private(&a))
+            .map(|a| {
+                is_dialable(&a, local_peer_id)
+                    && !addr_is_private(&a)
+                    && !crate::network::relay::is_relay_circuit_addr(&a)
+            })
             .unwrap_or(false)
     });
 
@@ -143,6 +158,31 @@ fn is_dialable(addr: &Multiaddr, local_peer_id: &PeerId) -> bool {
     !addr
         .iter()
         .any(|p| matches!(p, Protocol::P2p(pid) if pid == *local_peer_id))
+}
+
+/// Union of the addresses of currently-connected peers and what the cache
+/// already held, connected first.
+///
+/// The caller builds `current` from `peer_registry`, which holds only peers
+/// connected RIGHT NOW — `handle_connection_closed` drops a peer as soon as its
+/// last connection goes. Since [`save_peer_cache`] replaces the whole tree,
+/// saving `current` alone erased every quiet peer from the cache within one save
+/// interval, defeating the reason the cache exists: two machines in one house
+/// finding each other again after a reboot.
+///
+/// Connected peers are placed first so that [`save_peer_cache`]'s
+/// `MAX_CACHED_PEERS` truncation drops peers that have genuinely left rather
+/// than live ones. Callers still run [`filter_storable`] over the result, so a
+/// junk address is evicted on the next save — merging preserves stale-but-valid
+/// entries, it does not make the cache unpurgeable.
+pub fn merge_for_save(current: Vec<String>, previous: Vec<String>) -> Vec<String> {
+    let mut merged = current;
+    for prev in previous {
+        if !merged.contains(&prev) {
+            merged.push(prev);
+        }
+    }
+    merged
 }
 
 /// Save known peer multiaddrs to the database for reconnection on restart.
@@ -416,6 +456,111 @@ mod tests {
         let loaded = load_peer_cache(&db);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], "/ip4/2.2.2.2/udp/8800/quic-v1");
+    }
+
+    #[test]
+    fn a_relayed_peer_keeps_its_lan_address() {
+        // The live failure: a NAT'd peer on the same LAN advertises its real
+        // 192.168.1.60 alongside relay circuits through the anchor. Counting a
+        // circuit as "this peer is publicly reachable" threw the LAN address
+        // away, leaving a 2 ms neighbour reachable only via a VPS abroad.
+        let local: PeerId = "12D3KooWFRG6XJHsrfeT1ofsfKzP97E5j8N7g7Wx3FaTcXv27fiF"
+            .parse()
+            .unwrap();
+        let lan = "/ip4/192.168.1.60/udp/8800/quic-v1".to_string();
+        let circuit = "/dns4/swarmllm.duckdns.org/tcp/8810/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G/p2p-circuit/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY".to_string();
+        // We are on a LAN ourselves, so the private address is routable for us.
+        let local_addrs = vec!["/ip4/192.168.1.53/tcp/8810".to_string()];
+
+        let kept = filter_dialable(&[lan.clone(), circuit.clone()], &local, &local_addrs);
+
+        assert!(
+            kept.contains(&lan),
+            "a relayed peer's LAN address is the one worth dialling: {kept:?}"
+        );
+        assert!(kept.contains(&circuit), "the circuit stays as a fallback");
+    }
+
+    #[test]
+    fn a_genuinely_public_peer_still_loses_its_private_noise() {
+        // The Docker case the rule exists for must keep working: a peer with a
+        // REAL public address of its own has its container-bridge address
+        // dropped, because 172.17.0.1 resolves to the dialer's own bridge.
+        let local: PeerId = "12D3KooWFRG6XJHsrfeT1ofsfKzP97E5j8N7g7Wx3FaTcXv27fiF"
+            .parse()
+            .unwrap();
+        let public = "/ip4/212.132.104.177/tcp/8810".to_string();
+        let docker = "/ip4/172.17.0.1/tcp/8810".to_string();
+        let local_addrs = vec!["/ip4/192.168.1.53/tcp/8810".to_string()];
+
+        let kept = filter_dialable(&[public.clone(), docker.clone()], &local, &local_addrs);
+
+        assert!(kept.contains(&public));
+        assert!(
+            !kept.contains(&docker),
+            "a publicly-reachable peer's bridge address is still noise"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_disconnects_is_not_erased_from_the_cache() {
+        // The regression: `peer_registry` holds only connected peers, and
+        // `save_peer_cache` replaces the whole tree. A LAN peer that dropped was
+        // therefore erased from the cache on the next periodic save, so neither
+        // a re-dial nor a restart could find it again.
+        let lan_peer = "/ip4/192.168.1.60/udp/8800/quic-v1/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY".to_string();
+        let anchor = "/ip4/212.132.104.177/tcp/8810".to_string();
+
+        // Save while both are connected, then save again with only the anchor
+        // connected — exactly what happens when the LAN peer drops.
+        let merged = merge_for_save(vec![anchor.clone()], vec![lan_peer.clone(), anchor.clone()]);
+
+        assert!(
+            merged.contains(&lan_peer),
+            "disconnected LAN peer must survive a save: {merged:?}"
+        );
+        assert_eq!(merged.iter().filter(|a| **a == anchor).count(), 1);
+    }
+
+    #[test]
+    fn connected_peers_survive_truncation_ahead_of_departed_ones() {
+        // Ordering is the whole reason the merge is safe under the cap: at
+        // MAX_CACHED_PEERS the entries that fall off must be the ones no longer
+        // connected, never the live peer we are talking to right now.
+        let connected = "/ip4/192.168.1.60/udp/8800/quic-v1".to_string();
+        let departed: Vec<String> = (0..MAX_CACHED_PEERS + 50)
+            .map(|i| format!("/ip4/10.0.{}.{}/udp/8800/quic-v1", i / 256, i % 256))
+            .collect();
+
+        let merged = merge_for_save(vec![connected.clone()], departed);
+        let db = Database::open_temp().unwrap();
+        save_peer_cache(&db, &merged);
+        let loaded = load_peer_cache(&db);
+
+        assert_eq!(loaded.len(), MAX_CACHED_PEERS);
+        assert!(
+            loaded.contains(&connected),
+            "the connected peer must not be the one truncated away"
+        );
+    }
+
+    #[test]
+    fn merging_still_lets_a_junk_address_be_evicted() {
+        // Merging must not make the cache unpurgeable — the live anchor once
+        // re-dialled a remote peer's loopback address forever because bad
+        // entries were never overwritten. `filter_storable` runs over the union,
+        // so junk still leaves on the next save.
+        let local: PeerId = "12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY"
+            .parse()
+            .unwrap();
+        let good = "/ip4/212.132.104.177/tcp/8810".to_string();
+        let junk = "/ip4/127.0.0.1/tcp/8810".to_string();
+
+        let merged = merge_for_save(vec![good.clone()], vec![junk.clone()]);
+        let kept = filter_storable(&merged, &local);
+
+        assert!(kept.contains(&good));
+        assert!(!kept.contains(&junk), "loopback must still be evicted");
     }
 
     #[test]

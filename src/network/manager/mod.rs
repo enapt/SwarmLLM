@@ -133,6 +133,20 @@ const RELAY_FALLBACK_DELAY_SECS: u64 = 45;
 const REDIAL_JITTER_MIN_MS: u64 = 2000;
 /// Random window added on top of `REDIAL_JITTER_MIN_MS` (effective delay 2-5s).
 const REDIAL_JITTER_RANGE_MS: u64 = 3000;
+/// How many times a dial to a peer we were previously connected to is retried
+/// before we accept it has left. A single attempt was not enough: a re-dial that
+/// lands while the peer is still rebooting fails, and a failed dial raises
+/// `OutgoingConnectionError` rather than `ConnectionClosed`, so nothing
+/// re-enqueued it and the peer stayed forgotten until it announced itself.
+const MAX_REDIAL_ATTEMPTS: u32 = 5;
+/// Backoff before each successive retry. Reaches ~8 minutes in total, which
+/// covers a peer reboot without becoming a re-dial storm against one that has
+/// genuinely gone: attempts are capped and only peers we have actually been
+/// connected to are ever retried.
+const REDIAL_BACKOFF_MS: [u64; MAX_REDIAL_ATTEMPTS as usize] =
+    [5_000, 15_000, 45_000, 120_000, 300_000];
+/// Cap on `redial_attempts` so a churn storm cannot grow it without bound.
+const MAX_REDIAL_TRACKED_PEERS: usize = 256;
 
 /// NetworkManager owns the libp2p Swarm and is the sole interface to the P2P network.
 pub struct NetworkManager {
@@ -227,7 +241,16 @@ pub struct NetworkManager {
     shutdown_rx: watch::Receiver<bool>,
     /// Peers to re-dial after a short delay (e.g., mDNS simultaneous-dial race).
     /// Stores (peer_id, address, scheduled_time). Checked every second in the event loop.
-    pending_redial: Vec<(libp2p::PeerId, Multiaddr, std::time::Instant)>,
+    /// Peers to re-dial, with the addresses to try. The address list may be
+    /// empty — the dial then goes by peer id alone and the behaviours supply
+    /// addresses. See `handle_connection_closed`.
+    pending_redial: Vec<(libp2p::PeerId, Vec<Multiaddr>, std::time::Instant)>,
+    /// Re-dial attempts spent on peers we have previously been connected to,
+    /// with the addresses to keep trying. An entry exists only once
+    /// `try_enqueue_redial` has run for that peer, which is what confines the
+    /// retry to peers we actually know rather than every failed dial target.
+    /// Cleared when a connection to the peer is established.
+    redial_attempts: HashMap<libp2p::PeerId, (Vec<Multiaddr>, u32)>,
     /// S5: Receives model IDs for DHT provider queries from scheduler/auto-manage.
     dht_query_rx: mpsc::Receiver<crate::types::ModelId>,
     /// S5: Maps Kademlia QueryId → ShardId for routing GetProviders results.
@@ -475,6 +498,7 @@ impl NetworkManager {
             ping_sent_times: HashMap::new(),
             shutdown_rx,
             pending_redial: Vec::new(),
+            redial_attempts: HashMap::new(),
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
             relay_provider_registered: false,
@@ -1206,19 +1230,27 @@ impl NetworkManager {
                             .iter()
                             .enumerate()
                             .filter(|(_, (_, _, scheduled))| now >= *scheduled)
-                            .map(|(i, (peer_id, addr, _))| (i, *peer_id, addr.clone()))
+                            .map(|(i, (peer_id, addrs, _))| (i, *peer_id, addrs.clone()))
                             .collect();
                         // Remove in reverse order to preserve indices
-                        for (i, peer_id, addr) in ready.iter().rev() {
+                        for (i, peer_id, addrs) in ready.iter().rev() {
                             self.pending_redial.remove(*i);
                             if !self.swarm.is_connected(peer_id) {
+                                // `extend_addresses_through_behaviour` lets
+                                // Kademlia and the identify address book add
+                                // what they know on top of our hints, so a peer
+                                // whose recorded address has gone stale is still
+                                // reachable. With an empty hint list it is the
+                                // only source — which is the inbound-connection
+                                // case that previously got no dial at all.
                                 let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(*peer_id)
+                                    .addresses(addrs.clone())
                                     .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
-                                    .addresses(vec![addr.clone()])
+                                    .extend_addresses_through_behaviour()
                                     .build();
                                 match self.swarm.dial(opts) {
                                     Ok(()) => tracing::info!(
-                                        %peer_id, %addr,
+                                        %peer_id, addr_count = addrs.len(),
                                         "Re-dialing peer after connection race"
                                     ),
                                     Err(e) => tracing::debug!(
@@ -1330,12 +1362,31 @@ impl NetworkManager {
                     .collect::<Vec<_>>()
             })
             .collect();
+        // Carry forward addresses already in the cache. `peer_registry` holds
+        // only CURRENTLY connected peers — `handle_connection_closed` removes a
+        // peer the moment its last connection drops — and this save replaces the
+        // whole tree, so building it from the registry alone erased a peer from
+        // the cache within one save interval of it going quiet. The cache exists
+        // so "two machines in one house find each other again after a reboot"
+        // (see `filter_storable`), and that promise does not hold if a peer has
+        // to be connected at save time to stay in it.
+        //
+        // Connected peers go FIRST so that when `save_peer_cache` truncates at
+        // MAX_CACHED_PEERS it is peers that have genuinely left that fall off,
+        // not live ones. `filter_storable` still runs over the union, so a bad
+        // address is evicted on the next save exactly as before — merging keeps
+        // stale-but-valid entries, it does not make the cache unpurgeable.
+        let merged = crate::network::peer_cache::merge_for_save(
+            addrs,
+            crate::network::peer_cache::load_peer_cache(&self.shared_state.db),
+        );
         // Filter before persisting so the cache never grows entries the read
         // path would just discard.
         // Storable, not dialable: keep a peer's LAN addresses even when this
         // node currently has no use for them. Whether they are worth dialling
         // is a question about where we are now, and that is asked on read.
-        let addrs = crate::network::peer_cache::filter_storable(&addrs, self.swarm.local_peer_id());
+        let addrs =
+            crate::network::peer_cache::filter_storable(&merged, self.swarm.local_peer_id());
         if !addrs.is_empty() {
             crate::network::peer_cache::save_peer_cache(&self.shared_state.db, &addrs);
         }

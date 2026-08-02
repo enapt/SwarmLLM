@@ -741,6 +741,14 @@ impl NetworkManager {
                     ?peer_id, %error,
                     "Outgoing connection failed"
                 );
+                // A dial that fails raises THIS event, not `ConnectionClosed`,
+                // so the re-dial scheduled when the peer dropped is not
+                // re-enqueued by anything. One attempt is not enough: it lands
+                // 2-5s after the drop, which is exactly when a rebooting peer is
+                // still down. Retry on a bounded backoff.
+                if let Some(peer_id) = peer_id {
+                    self.schedule_redial_retry(peer_id);
+                }
             }
 
             SwarmEvent::IncomingConnectionError { error, .. } => {

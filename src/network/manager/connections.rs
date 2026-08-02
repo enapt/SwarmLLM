@@ -13,8 +13,54 @@ use crate::types::SwarmMessage;
 
 use super::{
     NetworkManager, MAX_CONNECTION_ADDRS, MAX_PEER_REMOTE_ADDRS, MAX_PENDING_REDIAL,
-    MAX_PING_ENTRIES, PING_SENT_TIMES_CUTOFF_SECS, REDIAL_JITTER_MIN_MS, REDIAL_JITTER_RANGE_MS,
+    MAX_PING_ENTRIES, MAX_REDIAL_ATTEMPTS, MAX_REDIAL_TRACKED_PEERS, PING_SENT_TIMES_CUTOFF_SECS,
+    REDIAL_BACKOFF_MS, REDIAL_JITTER_MIN_MS, REDIAL_JITTER_RANGE_MS,
 };
+
+/// Addresses to attempt when re-dialling a peer whose last connection just
+/// closed, most-specific first.
+///
+/// `closed_addr` is the address of the connection that died, and is `None`
+/// whenever that connection was INBOUND — `handle_connection_established`
+/// records addresses only for connections we dialled, because an inbound
+/// connection's remote address is the peer's ephemeral source port (gotcha
+/// #165). It is therefore never sufficient on its own, and `advertised_dialable`
+/// (the peer's own identify-advertised listen addresses, already filtered by
+/// [`crate::network::peer_cache::filter_dialable`]) carries the rest.
+///
+/// A relay-circuit `closed_addr` is dropped: re-dialling the circuit we just
+/// lost rebuilds a relayed path to a peer we may well reach directly, and the
+/// advertised set is the better answer. An empty result is legitimate — the
+/// caller dials by peer id and lets the behaviours supply addresses.
+fn redial_addresses(
+    closed_addr: Option<&libp2p::Multiaddr>,
+    advertised_dialable: &[String],
+) -> Vec<libp2p::Multiaddr> {
+    let mut out: Vec<libp2p::Multiaddr> = Vec::new();
+    if let Some(addr) = closed_addr {
+        if !crate::network::relay::is_relay_circuit_addr(addr) {
+            out.push(addr.clone());
+        }
+    }
+    for s in advertised_dialable {
+        if let Ok(a) = s.parse::<libp2p::Multiaddr>() {
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
+    }
+    out
+}
+
+/// Backoff before the next re-dial, or `None` once the peer should be treated
+/// as departed.
+///
+/// Indexing the schedule through this function is what makes "we have run out
+/// of attempts" and "how long until the next one" the same decision, so a
+/// schedule change cannot leave a stale bound behind or index past the end.
+fn redial_backoff_ms(attempts_so_far: u32) -> Option<u64> {
+    REDIAL_BACKOFF_MS.get(attempts_so_far as usize).copied()
+}
 
 impl NetworkManager {
     /// Handle new peer connection — track address, send PEX request.
@@ -40,6 +86,10 @@ impl NetworkManager {
             pending_tensor_forwards = self.pending_tensor_outbound.len(),
             "DIAG: connection established"
         );
+        // Reaching the peer is what the retry schedule was counting down to, so
+        // the budget resets here rather than expiring — a peer that flaps gets a
+        // fresh set of attempts each time it comes back.
+        self.redial_attempts.remove(&peer_id);
         // Track which address each connection uses — the Identify handler
         // uses this to add only the connected address to Kademlia.
         // SEC: Cap connection_addrs to prevent unbounded memory growth.
@@ -297,6 +347,41 @@ impl NetworkManager {
             // on the same shard → synchronous deadlock that freezes the event loop.
             let node_id_opt = node_id_for_cleanup;
             if let Some(node_id) = node_id_opt {
+                // Addresses to re-dial this peer on. MUST be read before the
+                // `peer_registry` removal below, which is the only place that
+                // still knows where this peer listens.
+                //
+                // `closed_addr` alone is not enough. It is populated only for
+                // connections WE dialled (see `handle_connection_established` —
+                // an inbound connection's remote address is the peer's
+                // ephemeral source port, and recording it poisoned Kademlia,
+                // gotcha #165). So for a peer that dialled US, `closed_addr` is
+                // always `None`, and gating the re-dial on it meant no re-dial
+                // was ever scheduled for that peer. That silently disabled the
+                // 2026-07-27 fix for exactly the case it was written for:
+                // observed 2026-08-02 with two LAN nodes 2 ms apart, mutually
+                // invisible for over two hours after one inbound connection
+                // dropped, both still connected to the same anchor, zero dial
+                // attempts between them.
+                //
+                // A relay-circuit address is skipped as a *hint* — re-dialling
+                // the circuit we just lost recreates a relayed path to a peer
+                // we may be able to reach directly. The peer's own advertised
+                // listen addresses are the better answer, and libp2p dials the
+                // whole set concurrently.
+                let advertised: Vec<String> = self
+                    .shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .map(|entry| entry.addresses.clone())
+                    .unwrap_or_default();
+                let local_addrs = self.shared_state.listen_multiaddrs.load();
+                let dialable = crate::network::peer_cache::filter_dialable(
+                    &advertised,
+                    self.swarm.local_peer_id(),
+                    &local_addrs,
+                );
+                let redial_addrs = redial_addresses(closed_addr.as_ref(), &dialable);
                 let in_active_pipeline = self.shared_state.active_pipelines.iter().any(|entry| {
                     entry
                         .value()
@@ -365,41 +450,42 @@ impl NetworkManager {
                     // ends re-dialling at once don't recreate the
                     // simultaneous-dial race. `try_enqueue_redial` dedups and
                     // caps, so a peer that has genuinely left costs one attempt.
-                    if let Some(addr) = closed_addr.clone() {
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        peer_id.hash(&mut hasher);
-                        let jitter_ms =
-                            REDIAL_JITTER_MIN_MS + (hasher.finish() % REDIAL_JITTER_RANGE_MS);
-                        tracing::info!(
-                            %peer_id, %addr, jitter_ms,
-                            "Scheduling re-dial for disconnected peer"
-                        );
-                        self.try_enqueue_redial(peer_id, addr, jitter_ms);
-                    }
-                } else {
-                    tracing::info!(%peer_id, "Keeping peer in registry (active pipeline) — scheduling reconnect");
-                    // Active pipeline needs this peer — reconnect immediately.
-                    if let Some(addr) = closed_addr.clone() {
-                        self.try_enqueue_redial(peer_id, addr, 500);
-                    }
-                }
-            } else {
-                // Peer was never registered (connection died before Identify).
-                // This typically happens during mDNS simultaneous-dial race.
-                // Schedule a re-dial with random jitter to break symmetry.
-                if let Some(addr) = closed_addr {
                     use std::hash::{Hash, Hasher};
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
                     peer_id.hash(&mut hasher);
                     let jitter_ms =
                         REDIAL_JITTER_MIN_MS + (hasher.finish() % REDIAL_JITTER_RANGE_MS);
                     tracing::info!(
-                        %peer_id, %addr, jitter_ms,
-                        "Scheduling re-dial after connection race"
+                        %peer_id,
+                        addr_count = redial_addrs.len(),
+                        jitter_ms,
+                        "Scheduling re-dial for disconnected peer"
                     );
-                    self.try_enqueue_redial(peer_id, addr, jitter_ms);
+                    self.try_enqueue_redial(peer_id, redial_addrs, jitter_ms);
+                } else {
+                    tracing::info!(%peer_id, "Keeping peer in registry (active pipeline) — scheduling reconnect");
+                    // Active pipeline needs this peer — reconnect immediately.
+                    self.try_enqueue_redial(peer_id, redial_addrs, 500);
                 }
+            } else {
+                // Peer was never registered (connection died before Identify).
+                // This typically happens during mDNS simultaneous-dial race.
+                // Schedule a re-dial with random jitter to break symmetry.
+                // No registry entry exists yet, so `closed_addr` is all we have;
+                // when it is absent the dial falls back to whatever addresses
+                // the behaviours know for this peer.
+                let redial_addrs: Vec<libp2p::Multiaddr> = closed_addr.into_iter().collect();
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                peer_id.hash(&mut hasher);
+                let jitter_ms = REDIAL_JITTER_MIN_MS + (hasher.finish() % REDIAL_JITTER_RANGE_MS);
+                tracing::info!(
+                    %peer_id,
+                    addr_count = redial_addrs.len(),
+                    jitter_ms,
+                    "Scheduling re-dial after connection race"
+                );
+                self.try_enqueue_redial(peer_id, redial_addrs, jitter_ms);
             }
         } // end else (num_established == 0)
     }
@@ -408,10 +494,15 @@ impl NetworkManager {
     /// queue is at `MAX_PENDING_REDIAL`. Shared by both the active-pipeline
     /// and the unregistered-peer reconnect paths so the dedup+cap
     /// invariant lives in one place (R97).
+    ///
+    /// `addrs` may be empty: the dial is then made by peer id alone and the
+    /// behaviours supply the addresses. An empty list is NOT a reason to skip
+    /// the re-dial — that gate is what left two LAN peers mutually invisible
+    /// (see the note in `handle_connection_closed`).
     fn try_enqueue_redial(
         &mut self,
         peer_id: libp2p::PeerId,
-        addr: libp2p::Multiaddr,
+        addrs: Vec<libp2p::Multiaddr>,
         delay_ms: u64,
     ) {
         let already_queued = self
@@ -420,7 +511,147 @@ impl NetworkManager {
             .any(|(pid, _, _)| *pid == peer_id);
         if !already_queued && self.pending_redial.len() < MAX_PENDING_REDIAL {
             let scheduled = std::time::Instant::now() + std::time::Duration::from_millis(delay_ms);
-            self.pending_redial.push((peer_id, addr, scheduled));
+            // Remember the addresses so a dial FAILURE can retry with the same
+            // set; the entry is also what marks this peer as one we have been
+            // connected to, and so may retry at all.
+            if self.redial_attempts.len() >= MAX_REDIAL_TRACKED_PEERS {
+                self.redial_attempts.clear();
+            }
+            self.redial_attempts
+                .entry(peer_id)
+                .or_insert_with(|| (addrs.clone(), 0));
+            self.pending_redial.push((peer_id, addrs, scheduled));
         }
+    }
+
+    /// Re-enqueue a re-dial after a dial failure, on a bounded backoff.
+    ///
+    /// Only peers with a `redial_attempts` entry are retried — that entry is
+    /// created by `try_enqueue_redial`, so it means "we were connected to this
+    /// peer and lost it", not "some dial somewhere failed". Bootstrap, PEX and
+    /// DHT dial targets are therefore untouched, which is what keeps this from
+    /// becoming a dial storm.
+    pub(super) fn schedule_redial_retry(&mut self, peer_id: libp2p::PeerId) {
+        let Some((addrs, attempts)) = self.redial_attempts.get_mut(&peer_id) else {
+            return;
+        };
+        let Some(delay_ms) = redial_backoff_ms(*attempts) else {
+            tracing::debug!(
+                %peer_id,
+                attempts = *attempts,
+                "Giving up re-dialling peer — treating it as departed"
+            );
+            self.redial_attempts.remove(&peer_id);
+            return;
+        };
+        *attempts += 1;
+        let attempt_no = *attempts;
+        let addrs = addrs.clone();
+        tracing::info!(
+            %peer_id,
+            attempt = attempt_no,
+            max_attempts = MAX_REDIAL_ATTEMPTS,
+            delay_ms,
+            addr_count = addrs.len(),
+            "Dial failed — retrying re-dial after backoff"
+        );
+        // Bypass `try_enqueue_redial`: it would re-create the attempts entry we
+        // are counting down, and the dedup check has already been satisfied by
+        // this peer's entry being drained before the dial was made.
+        if self.pending_redial.len() < MAX_PENDING_REDIAL
+            && !self
+                .pending_redial
+                .iter()
+                .any(|(pid, _, _)| *pid == peer_id)
+        {
+            let scheduled = std::time::Instant::now() + std::time::Duration::from_millis(delay_ms);
+            self.pending_redial.push((peer_id, addrs, scheduled));
+        }
+    }
+}
+
+#[cfg(test)]
+mod redial_address_tests {
+    use super::{redial_addresses, redial_backoff_ms, MAX_REDIAL_ATTEMPTS};
+    use libp2p::Multiaddr;
+
+    #[test]
+    fn the_retry_schedule_is_bounded_and_increasing() {
+        let mut prev = 0;
+        for attempt in 0..MAX_REDIAL_ATTEMPTS {
+            let d = redial_backoff_ms(attempt).expect("attempt within budget has a delay");
+            assert!(d > prev, "delays must grow: {d} after {prev}");
+            prev = d;
+        }
+        assert_eq!(
+            redial_backoff_ms(MAX_REDIAL_ATTEMPTS),
+            None,
+            "the budget must run out — an unbounded retry is a dial storm"
+        );
+    }
+
+    #[test]
+    fn the_retry_window_outlasts_a_peer_reboot() {
+        // The point of retrying at all: the first re-dial lands 2-5s after the
+        // drop, when a rebooting peer is still down. If the whole schedule
+        // expired before it came back, the retry would buy nothing.
+        let total: u64 = (0..MAX_REDIAL_ATTEMPTS).filter_map(redial_backoff_ms).sum();
+        assert!(
+            total >= 300_000,
+            "retry window {total}ms is too short to cover a restart"
+        );
+    }
+
+    const LAN: &str = "/ip4/192.168.1.60/udp/8800/quic-v1";
+    const LAN_TCP: &str = "/ip4/192.168.1.60/tcp/8810";
+    const CIRCUIT: &str = "/ip4/212.132.104.177/tcp/8810/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G/p2p-circuit";
+
+    #[test]
+    fn an_inbound_close_still_yields_addresses_to_dial() {
+        // The regression, in one assertion. `closed_addr` is None for every
+        // connection the PEER dialled, and the re-dial used to be gated on it —
+        // so a peer that reached us inbound was never re-dialled at all. Two LAN
+        // nodes 2 ms apart stayed mutually invisible for over two hours.
+        let advertised = vec![LAN.to_string(), LAN_TCP.to_string()];
+        let out = redial_addresses(None, &advertised);
+
+        assert_eq!(out.len(), 2, "advertised addresses must be used: {out:?}");
+        assert_eq!(out[0], LAN.parse::<Multiaddr>().unwrap());
+    }
+
+    #[test]
+    fn the_closed_address_is_tried_first() {
+        let closed: Multiaddr = LAN_TCP.parse().unwrap();
+        let out = redial_addresses(Some(&closed), &[LAN.to_string()]);
+
+        assert_eq!(out[0], closed, "the address that just worked leads");
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn a_relay_circuit_is_not_re_dialled_as_a_hint() {
+        // Re-dialling the circuit we just lost rebuilds a relayed path to a peer
+        // we may be able to reach directly — which is how the observed pair ended
+        // up talking through an anchor in another country while 2 ms apart.
+        let closed: Multiaddr = CIRCUIT.parse().unwrap();
+        let out = redial_addresses(Some(&closed), &[LAN.to_string()]);
+
+        assert_eq!(out, vec![LAN.parse::<Multiaddr>().unwrap()]);
+    }
+
+    #[test]
+    fn no_hints_and_no_advertised_addresses_is_allowed() {
+        // Empty is a legitimate answer: the caller dials by peer id and the
+        // behaviours supply addresses. It must NOT be turned back into a
+        // "skip the re-dial" signal.
+        assert!(redial_addresses(None, &[]).is_empty());
+    }
+
+    #[test]
+    fn duplicates_are_collapsed() {
+        let closed: Multiaddr = LAN.parse().unwrap();
+        let out = redial_addresses(Some(&closed), &[LAN.to_string(), LAN_TCP.to_string()]);
+
+        assert_eq!(out.len(), 2, "the shared address is listed once: {out:?}");
     }
 }
