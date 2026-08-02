@@ -1243,6 +1243,53 @@ impl PipelineExecutor {
     ) -> Result<LayerResult, SwarmError> {
         let failed_segment = &self.assignment.segments[failed_idx];
 
+        // Tell the node we are abandoning to stop.
+        //
+        // Without this it never finds out. It computes the whole forward to
+        // completion and every other request that arrives meanwhile queues
+        // behind work whose result nobody will read. Measured on two machines:
+        // a ~2000-token prefill left a CPU node saturated for several minutes
+        // after the coordinator had already given up, and an unrelated short
+        // request sent during that window failed for no reason of its own —
+        // then succeeded in 42s once the node went idle.
+        //
+        // Sent BEFORE the standby search, and regardless of its outcome,
+        // because the case that hurt had NO standby: the request was already
+        // lost, and the only thing still worth doing was freeing the peer.
+        //
+        // Best-effort by design. `CancelInference` is relay-eligible, so a
+        // NAT'd peer is reachable, but a peer that never receives it is no
+        // worse off than before. A peer that has already finished treats it as
+        // a no-op ("no in-flight decode for request").
+        //
+        // NOTE: today only the remote-generate path registers an abort handle,
+        // so a peer serving a *segment* will log that no-op rather than
+        // actually stopping. Sending it is still the correct half to ship
+        // first — it costs one small message, it is what the peer-side change
+        // will need in place, and it already stops us treating a written-off
+        // node as idle. See `docs/FUTURE_WORK.md` for the peer-side half.
+        if let Some(target_peer_bytes) = self
+            .shared_state
+            .resolve_peer_id_bytes(&failed_segment.node_id)
+        {
+            let _ = self
+                .network_tx
+                .send(NetworkCommand::SendDirectMessage {
+                    target_peer_bytes,
+                    message: crate::types::SwarmMessage::CancelInference(
+                        swarmllm_types::CancelInference { request_id },
+                    ),
+                    delivery_request_id: None,
+                })
+                .await;
+            tracing::debug!(
+                request_id = %request_id,
+                abandoned_node = %failed_segment.node_id,
+                segment = failed_idx,
+                "DIAG: asked the abandoned node to stop working on this segment"
+            );
+        }
+
         // Find a standby for this segment's layer range
         let standby = self
             .assignment
