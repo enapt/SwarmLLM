@@ -84,6 +84,12 @@ impl ModelExecutor {
     /// count with no "all" sentinel, so auto maps to a value larger than any
     /// real model's layer count (llama.cpp clamps to `n_layer`), matching what
     /// the upstream CLI does for `-ngl -1`.
+    // Without `llama` this returns early (see the refusal below), so the rest of
+    // the body is deliberately unreachable in that configuration.
+    #[cfg_attr(
+        not(feature = "llama"),
+        allow(unreachable_code, unused_variables, clippy::needless_return)
+    )]
     pub fn load_model(&mut self, path: &Path, gpu_layers: i32) -> Result<(), SwarmError> {
         #[cfg_attr(not(feature = "llama"), allow(unused_variables))]
         let n_gpu_layers: u32 = if gpu_layers < 0 {
@@ -112,6 +118,31 @@ impl ModelExecutor {
             gpu_layers = gpu_layers,
             "DIAG: load_model starting"
         );
+
+        // Refuse rather than pretend. Without the `llama` backend this executor
+        // cannot run a full GGUF at all, and it used to accept the model, report
+        // success, and then answer every prompt with a fixed sentence — over a
+        // normal 200 with streaming and plausible token counts. Nothing but a
+        // `backend_type="stub"` line in the daemon log distinguished it from
+        // real inference, so a user could believe a model was running when it
+        // was not (reported 2026-08-01).
+        //
+        // Three of the five released binaries are built without this feature —
+        // Linux CPU (including the .deb), macOS, and Windows CPU — so this was
+        // the common case, not an edge one. Fabricated output presented as
+        // model output is worse than any error, so this now fails at load with
+        // a message that names the alternative.
+        #[cfg(not(feature = "llama"))]
+        {
+            return Err(SwarmError::Validation(format!(
+                "This build cannot load a whole model file directly ({}). It runs models \
+                 in shards instead, which is how SwarmLLM shares them across machines — \
+                 add the model from the dashboard, or with `swarmllm get-model`, rather \
+                 than passing `-m`. (A GPU build can load a file directly; this one \
+                 cannot, and will not pretend to.)",
+                path.display()
+            )));
+        }
 
         #[cfg(feature = "llama")]
         {
@@ -1014,5 +1045,44 @@ mod tests {
         let mut exec = ModelExecutor::new();
         let result = exec.generate("test", &SamplingParams::default());
         assert!(result.is_err());
+    }
+
+    /// A build without the `llama` backend cannot run a whole GGUF, and must
+    /// say so rather than accept the model and answer with a fixed sentence.
+    ///
+    /// That is what it used to do: `-m` returned a canned reply over a normal
+    /// 200, with streaming and plausible token counts, and only a
+    /// `backend_type="stub"` line in the daemon log gave it away. Three of the
+    /// five released binaries are built this way (Linux CPU including the .deb,
+    /// macOS, Windows CPU), so it was the common case. Reported 2026-08-01.
+    #[cfg(not(feature = "llama"))]
+    #[test]
+    fn loading_a_gguf_without_the_backend_refuses_instead_of_faking_it() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        // Content is irrelevant — the refusal must come before any parsing.
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"GGUF")
+            .unwrap();
+
+        let mut exec = ModelExecutor::new();
+        let err = exec
+            .load_model(&path, -1)
+            .expect_err("must refuse a full GGUF without the llama backend");
+        assert!(
+            matches!(err, SwarmError::Validation(_)),
+            "should be a user-facing validation error, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("shards"),
+            "the message must point at the path that does work, got: {msg}"
+        );
+        assert!(
+            !exec.is_loaded(),
+            "a refused load must not leave the executor claiming a model is loaded"
+        );
     }
 }
