@@ -4656,3 +4656,70 @@ If it ever bites, the options are, cheapest first:
 Do NOT "fix" this by reverting the estimator to 4 bytes/element: that would
 re-refuse exactly the large-vocabulary models on modest GPUs that this release
 set out to make work, and the GPU path has no spike at all.
+
+## An abandoned segment keeps running on the peer, blocking everyone (2026-08-02)
+
+**Status: CONFIRMED on two machines, v0.3.62-alpha. Not fixed. Well specified.**
+
+When the coordinator gives up on a remote segment — timeout, then failover —
+**the peer is never told**. It keeps computing the abandoned prefill to
+completion. On a slow node that is minutes of saturation during which every
+other request queues behind work whose result nobody will ever read.
+
+Observed directly. A ~2000-token prompt over 8 layers of an 8B model was sent
+to a 6-core CPU container:
+
+```
+02:56:00  peer receives LayerForward, loads model in 2s, starts prefill
+03:01:37  coordinator times out at 337s, fails over, no standby -> request fails
+          ...peer keeps going...
+          a SHORT request sent meanwhile also fails (queued behind it)
+03:12     peer load average back to 0.10, worker 0% CPU, zero forwards received
+          the same short request then succeeds in 42s
+```
+
+The short request did not fail because of anything wrong with it. It failed
+because the node was still busy with work that had already been given up on.
+
+### Why the existing cancellation does not cover this
+
+`SwarmMessage::CancelInference` exists and works — for **remote-generate**
+only. `daemon/dispatch/remote_generate.rs` registers an abort handle, and the
+handler at `dispatch/mod.rs:2089` aborts it ("aborting inbound
+remote-generate"). The **segment forward** path (`handle_forward`) registers
+nothing, so a `CancelInference` naming that request finds no in-flight decode
+and logs "no in-flight decode for request".
+
+`pipeline/distributed.rs` checks `self.request.is_cancelled()` for its OWN
+loop, but never sends `CancelInference` to a peer it has abandoned.
+
+This is the recurring shape (gotcha #229, and the v0.3.50 fix for the same
+problem on the local path): cancellation implemented for one path and not its
+sibling. v0.3.50's changelog entry — "one abandoned request froze a model for
+everyone" — describes this bug exactly, one path over.
+
+### The fix, in two halves
+
+1. **Coordinator side (easy).** In `failover_segment` and the segment-timeout
+   arm, send `SwarmMessage::CancelInference` to the node being abandoned before
+   moving on. Cheap, and it is the half that matters most: it stops us adding
+   more work to a node we have written off.
+2. **Peer side (harder).** `handle_forward` must register something a cancel
+   can abort. The forward runs as a synchronous compute in the model worker
+   subprocess, so aborting mid-forward needs a cooperative check — the natural
+   place is the per-layer loop in `split::executor`, which already iterates
+   layers and could test a flag between them. Granularity of one layer is
+   plenty: the point is to stop a 340s prefill, not to be instant.
+
+Half 1 alone is worth shipping: even without the peer honouring it, the
+coordinator stops piling work onto a node it has abandoned, and the message is
+already relay-eligible so it reaches NAT'd peers.
+
+### Do not confuse this with a dropped send
+
+While diagnosing, the natural hypothesis was that the forward never arrived and
+the transport had silently dropped it. **It had not.** The peer's own journal
+shows it received the forward and started work; the follow-on failure was
+queueing. Verified by re-running the identical short request once the peer went
+idle — it succeeded in 42s. Check peer load and its inbound-forward count
+before concluding anything about the network here.
