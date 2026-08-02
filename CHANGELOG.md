@@ -2,6 +2,53 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.62-alpha] — 2026-08-02
+
+Three fixes. The first affects anyone running long prompts across machines; the
+second means a build can no longer answer with placeholder text.
+
+### Fixed
+
+- **A long prompt sent to another machine could fail after minutes with a
+  confusing message about tensor data**, even though the machine was working
+  normally and had been given plenty of time. Two places decided how long to
+  wait and v0.3.60 changed only one: the pipeline learned to size its deadline
+  from how fast that machine actually is and would allow up to ten minutes,
+  while the networking layer underneath still worked it out from a fixed rate
+  per layer and gave up after two, discarding the work. The machines that most
+  needed the longer wait — slow ones, or ones still loading a model — were
+  exactly the ones cut off, the opposite of what that change was for. The lower
+  layer no longer computes a deadline of its own; it only catches sends the
+  network dropped silently, and waits as long as the connection does. The
+  pipeline's deadline is capped to the same limit so neither can outlast the
+  other.
+
+- **Loading a model file directly with `-m` appeared to work and then answered
+  every question with the same fixed sentence.** The reply came back as a normal
+  success, streamed word by word, with believable token counts; only a line in
+  the daemon log distinguished it from a real answer, so it was possible to
+  believe a model was running when nothing was. Three of the five published
+  builds are affected — Linux without a GPU (including the `.deb`), macOS, and
+  Windows without a GPU — because they carry no engine for running a whole
+  model file. Those builds now say so when the model is loaded and point at
+  adding it in shards instead, which is how SwarmLLM shares a model across
+  machines and works on every build. Invented output presented as a real answer
+  is worse than any error, so this fails loudly rather than continuing.
+
+- **A log line implied an unrecognised model would be run anyway.** A model
+  whose architecture this build does not support logged "defaulting to Llama",
+  which is true only of the catalogue entry that lets it be listed, sized and
+  shared — not of running it, which is refused. The message now says what
+  actually happens.
+
+### Known limitation
+
+- Mixture-of-experts models from the Qwen3 series (`qwen3moe`, e.g.
+  Qwen3-30B-A3B) are **not supported** and are refused when loaded. They are a
+  different architecture from the Qwen 3.5 mixture-of-experts models this build
+  does handle, so they need their own support rather than being mapped onto the
+  existing one.
+
 ## [0.3.61-alpha] — 2026-08-01
 
 Follow-up to v0.3.60 from the same tester's report: the graphics-memory fix in
