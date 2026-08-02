@@ -2,6 +2,58 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.64-alpha] — 2026-08-02
+
+A node no longer offers the network pieces of a model it does not have.
+
+### Fixed
+
+- **Deleting a model left the node still claiming it.** A node worked out which
+  pieces of which models it held once, when it started, and never looked at the
+  disk again. Anyone who freed space by deleting a model folder — the only way
+  to do it from a terminal, since there is still no remove command — left the
+  node claiming those pieces until it was next restarted.
+
+  That was not only cosmetic. The same list is what a node advertises to the
+  rest of the network, so it kept offering other machines work it could no
+  longer do, and every screen and command reporting what is held said the same
+  thing. Requests routed to it for those pieces would fail.
+
+  A node now checks the disk each time it announces what it holds, stops
+  claiming anything that has gone, and tells the network. It checks only whether
+  the file is there: a piece still downloading sits at its final name while
+  incomplete, and judging its contents is the job of the check that already does
+  that.
+
+- **The command that reports whether prompts stay on this machine now confirms
+  the files itself**, rather than trusting that same list. It answers a question
+  about where someone's text goes, so it should be true when it is said, not
+  true as of the last announcement. Deleting a model's last piece now changes
+  the answer immediately.
+
+  Reported by a tester who deleted a model and was told prompt privacy was ready
+  for it. Their report also noted the model's files reappearing afterwards with
+  no explanation: that was the privacy command itself, which fetches the pieces
+  it finds missing — working as intended, just not visibly.
+
+### Changed
+
+- The note in v0.3.61 and v0.3.63 that slicing long prompts gives an
+  "arithmetically identical" result has been made precise. Every word still
+  receives exactly the same computation. On a processor the result is identical
+  to the last bit. On a graphics card it can differ in roughly the fourth
+  decimal place, because the card's maths library picks a different internal
+  strategy for a different batch size and so adds the same numbers in a
+  different order — now measured on real hardware rather than assumed, and far
+  below the rounding the model's own compression already introduces.
+
+### Known limitation
+
+- There is still no command-line way to remove a model. The dashboard and the
+  API can do it properly — clearing the records and telling the network — but
+  from a terminal the only option remains deleting the folder by hand. The fix
+  above limits the consequences of doing so to a single announcement cycle.
+
 ## [0.3.63-alpha] — 2026-08-02
 
 Two machines in one house find each other again, and a long prompt no longer
