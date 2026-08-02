@@ -18,11 +18,17 @@ reproduced on the released build before being fixed.
   top of the model itself. A card could load a model, report a sane amount of
   memory in use, and then fail on the first long question.
 
-  Long prompts are now worked through in slices there too. The result is
-  arithmetically identical rather than an approximation: every step in this part
-  of the model treats each word on its own, so computing them in groups changes
-  nothing. Ordinary word-by-word generation and short prompts take the original
-  path and pay nothing for this.
+  Long prompts are now worked through in slices there too. Every word receives
+  exactly the same computation rather than an approximation of it: every step in
+  this part of the model treats each word on its own, so computing them in
+  groups changes nothing. Ordinary word-by-word generation and short prompts
+  take the original path and pay nothing for this.
+
+  On a processor the result is identical to the last bit. On a graphics card it
+  can differ in roughly the fourth decimal place, because the card's maths
+  library picks a different internal strategy for a different batch size and so
+  adds the same numbers in a different order — measured, and far below the
+  rounding the model's own compression already introduces.
 
   This also corrects a claim in the v0.3.61 notes, which said single-machine
   requests were never affected. They were: a machine holding a whole model

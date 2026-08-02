@@ -154,11 +154,21 @@ impl Mlp {
     /// Feed-forward block.
     ///
     /// Long inputs are processed in blocks of tokens to bound peak memory — see
-    /// [`MLP_INTERMEDIATE_BUDGET_ELEMS`]. **This is exact, not an
-    /// approximation**: every operation here is pointwise across tokens (two
-    /// projections, an activation, a product, a third projection), so row `i` of
-    /// the output depends only on row `i` of the input. Splitting the token axis
-    /// computes identical arithmetic and merely materialises fewer rows at once.
+    /// [`MLP_INTERMEDIATE_BUDGET_ELEMS`]. **Each token receives exactly the same
+    /// computation, not an approximation of it**: every operation here is
+    /// pointwise across tokens (two projections, an activation, a product, a
+    /// third projection), so row `i` of the output depends only on row `i` of
+    /// the input. Splitting the token axis merely materialises fewer rows at
+    /// once. No online rescaling is involved.
+    ///
+    /// On CPU that is bit-for-bit identical, asserted at 0.0 max abs diff in
+    /// `blocked_mlp_tests`. **On GPU it is not guaranteed to be bit-identical**:
+    /// cuBLAS selects a kernel from the problem shape, so changing the row count
+    /// can change the order the inner dimension is accumulated in. Measured at
+    /// 2.3e-4 relative on an RTX 3070 (`cuda_mlp_memory_probe`) — float
+    /// reassociation, orders of magnitude below the error the model's own
+    /// quantisation already carries. Do not "fix" this by forcing one kernel;
+    /// the arithmetic per token is already correct.
     ///
     /// Chunked prefill does NOT make this redundant. It bounds tokens only on
     /// the local generate path; a node serving a pipeline segment goes through
@@ -2001,5 +2011,117 @@ mod blocked_mlp_tests {
         let reference = m.forward_block(&xs, None).unwrap();
 
         assert_eq!(max_abs_diff(&out, &reference), 0.0);
+    }
+}
+
+/// GPU-only causal check for the feed-forward memory fix, mirroring
+/// [`cuda_attention_memory_probe`].
+///
+/// Run with `cargo test --release --no-default-features
+/// --features candle-cuda -- --ignored cuda_mlp`.
+///
+/// The A/B that makes it evidence rather than a smoke test: with blocking on it
+/// completes; raising `MLP_INTERMEDIATE_BUDGET_ELEMS` so no split happens brings
+/// back `CUDA_ERROR_OUT_OF_MEMORY`. One constant apart. Re-run both halves if
+/// this code moves.
+#[cfg(test)]
+mod cuda_mlp_memory_probe {
+    use super::*;
+    use candle_core::{Device, Tensor};
+
+    #[test]
+    #[ignore]
+    fn feed_forward_survives_a_prefill_that_would_otherwise_exhaust_the_card() {
+        let dev = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("no CUDA device ({e}) — skipping");
+                return;
+            }
+        };
+        // Gemma-2-2b's shape at the prompt length the tester actually sent
+        // (~5000 tokens from a coding agent's system prompt).
+        let (hidden, intermediate, tokens) = (2304usize, 9216usize, 5021usize);
+        let one_temporary = tokens * intermediate * 4;
+        eprintln!(
+            "tokens={tokens} intermediate={intermediate}: ONE unblocked temporary is {:.0} MB, \
+             and up/gate/product are live together; blocking targets {:.0} MB",
+            one_temporary as f64 / 1e6,
+            (MLP_INTERMEDIATE_BUDGET_ELEMS * 4) as f64 / 1e6
+        );
+        eprintln!(
+            "chosen token block = {}",
+            (MLP_INTERMEDIATE_BUDGET_ELEMS / intermediate).clamp(1, tokens)
+        );
+
+        let w = |o: usize, i: usize, seed: f32| {
+            let data: Vec<f32> = (0..o * i).map(|k| (k as f32 * seed).sin() * 0.02).collect();
+            let t = Tensor::from_vec(data, (o, i), &dev).unwrap();
+            QMatMul {
+                inner: QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(t)),
+            }
+        };
+        let mlp = Mlp {
+            ffn_gate: Some(w(intermediate, hidden, 0.0007)),
+            ffn_up: w(intermediate, hidden, 0.0011),
+            ffn_down: w(hidden, intermediate, 0.0013),
+            activation: Activation::Gelu,
+        };
+
+        let xs = Tensor::from_vec(
+            (0..tokens * hidden)
+                .map(|k| (k as f32 * 0.0003).cos() * 0.5)
+                .collect::<Vec<f32>>(),
+            (1, tokens, hidden),
+            &dev,
+        )
+        .unwrap();
+
+        // Blocked vs unblocked IN THE SAME PROCESS. On CPU these are bit-for-bit
+        // identical (see `blocked_mlp_tests`). On GPU they need not be: cuBLAS
+        // selects a kernel from the problem shape, and changing the row count
+        // changes that choice, which changes the order the K dimension is
+        // accumulated in. The arithmetic each row receives is the same; the
+        // rounding of it is not guaranteed to be. Measure the gap rather than
+        // assuming either way.
+        let unblocked = mlp
+            .forward_with_budget(&xs, None, usize::MAX)
+            .expect("unblocked reference must run");
+        let out = mlp
+            .forward(&xs, None)
+            .expect("feed-forward must complete without exhausting device memory");
+        let diff = (&out - &unblocked)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let scale = unblocked
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        eprintln!(
+            "blocked vs unblocked on GPU: max abs diff {diff:.3e} against max |value| {scale:.3e}              (relative {:.3e})",
+            diff / scale.max(f32::MIN_POSITIVE)
+        );
+        assert!(
+            diff / scale.max(f32::MIN_POSITIVE) < 1e-3,
+            "blocking must not change the result beyond float reassociation, got {diff:.3e}"
+        );
+        assert_eq!(out.dims(), &[1, tokens, hidden]);
+        // Force realisation before claiming success.
+        let probe = out.narrow(1, 0, 1).unwrap().flatten_all().unwrap();
+        let v0 = probe.to_vec1::<f32>().unwrap()[0];
+        assert!(v0.is_finite(), "output must be finite, got {v0}");
+        eprintln!("OK — completed, first output element {v0:.6}");
     }
 }
