@@ -80,7 +80,19 @@ pub fn gguf_arch_to_model_architecture(arch: &str) -> crate::types::ModelArchite
         detected,
         crate::inference::model_arch::ModelArch::Unknown(_)
     ) {
-        tracing::warn!(arch, "Unknown model architecture, defaulting to Llama");
+        // Deliberately does NOT say "defaulting to Llama". That is true of this
+        // manifest field only — it exists so a model can still be catalogued,
+        // sized and gossiped — and reads as though inference will proceed with
+        // Llama handling. It will not: `split::loader` refuses an unrecognised
+        // architecture outright (`ModelArch::is_supported`). A tester reading
+        // this line reasonably concluded a Qwen3-MoE checkpoint would be run as
+        // a dense model and produce garbage; in fact it is rejected at load.
+        tracing::warn!(
+            arch,
+            "This model's architecture is not one this build can run — it can be \
+             catalogued and shared, but loading it for inference will be refused. \
+             The manifest records it as Llama-like for sizing purposes only."
+        );
     }
     detected.to_manifest_architecture()
 }
