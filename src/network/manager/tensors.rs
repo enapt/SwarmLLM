@@ -601,13 +601,12 @@ impl NetworkManager {
                     return None;
                 };
                 // Spawn decrypt + dispatch. The caller stores the
-                // ResponseChannel keyed by the returned request_id; if
-                // decrypt later fails, the channel is reaped by the existing
-                // stale-channel cleanup tick (same outcome as if the spawn
-                // succeeded but dispatch_authenticated saw a full outbound
-                // channel).
+                // ResponseChannel keyed by the returned request_id; a decrypt
+                // failure answers on it with `LayerResult::error` so the
+                // coordinator can fail over at once.
                 let shared_state = self.shared_state.clone();
                 let outbound_tx = self.outbound_tx.clone();
+                let self_command_tx = self.self_command_tx.clone();
                 let peer_bytes = peer.to_bytes();
                 tokio::spawn(async move {
                     let mut forward = forward;
@@ -626,6 +625,30 @@ impl NetworkManager {
                                 seq = forward.sequence_num,
                                 "DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption"
                             );
+                            // Answer, rather than leaving the coordinator to
+                            // discover this by timing out. Dropping the forward
+                            // silently cost it the WHOLE segment budget — 30s on
+                            // a decode hop, up to several minutes on a prefill —
+                            // and it then had no error to attribute, so it could
+                            // not fail over promptly either. Observed live
+                            // 2026-08-02: a 10-minute key rotation re-keyed this
+                            // session between the prefill and the first decode
+                            // token, the peer still held the old key, and a
+                            // request that was otherwise healthy died 30s later.
+                            //
+                            // The reason is deliberately generic: we cannot tell
+                            // a rotation race from a tampered ciphertext, and
+                            // saying which would tell an attacker whether their
+                            // forgery had the right key.
+                            let _ = self_command_tx
+                                .send(crate::types::NetworkCommand::SendTensorResult {
+                                    target_peer_bytes: peer_bytes.clone(),
+                                    result: crate::types::LayerResult::error(
+                                        request_id,
+                                        "Could not decrypt forward".to_string(),
+                                    ),
+                                })
+                                .await;
                             return;
                         }
                     };

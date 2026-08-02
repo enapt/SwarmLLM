@@ -154,6 +154,11 @@ pub struct NetworkManager {
     swarm: Swarm<SwarmBehaviour>,
     /// Receives commands from daemon tasks (broadcast, send tensor, etc.)
     inbound_rx: mpsc::Receiver<NetworkCommand>,
+    /// A sender into our OWN `inbound_rx`, for spawned tasks that must post a
+    /// command back into the event loop. The loop owns state a `tokio::spawn`
+    /// cannot borrow (`pending_tensor_channels` in particular), so a detached
+    /// task answers a peer by queueing a command rather than touching it.
+    self_command_tx: mpsc::Sender<NetworkCommand>,
     /// Sends decoded network messages to the dispatcher for routing.
     /// Each message carries the transport-authenticated sender identity.
     outbound_tx: mpsc::Sender<crate::types::AuthenticatedMessage>,
@@ -383,6 +388,7 @@ impl NetworkManager {
         identity: &Identity,
         config: &Config,
         inbound_rx: mpsc::Receiver<NetworkCommand>,
+        self_command_tx: mpsc::Sender<NetworkCommand>,
         outbound_tx: mpsc::Sender<crate::types::AuthenticatedMessage>,
         shutdown_rx: watch::Receiver<bool>,
         acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
@@ -476,6 +482,7 @@ impl NetworkManager {
             shared_state,
             swarm,
             inbound_rx,
+            self_command_tx,
             outbound_tx,
             acquisition_tx,
             deferred_broadcasts: Vec::new(),

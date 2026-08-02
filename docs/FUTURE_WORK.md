@@ -4788,3 +4788,56 @@ with a long prefill also times out (see the abandoned-segment entry above), so
 the threshold must not evict nodes that are merely slow; and closing the
 connection now schedules a re-dial, which is the right recovery but wants the
 backoff added in this same round rather than a tight loop.
+
+## Key rotation breaks in-flight distributed inference every 10 minutes (2026-08-02)
+
+**Status: ROOT-CAUSED on two machines, v0.3.62-alpha. Half fixed.**
+
+A healthy 3-segment split failed 92 seconds in, with
+`Timed out waiting for segment result (30s, 8 layers)`. The prefill had already
+succeeded on that same peer in 9.7 seconds. The cause was not the timeout.
+
+```
+08:57:21  prefill forward -> peer   (budget 360s, "default+coldload")
+08:57:30  prefill result back       elapsed_ms=9723        <- healthy
+08:57:35  LOCAL key rotation tick   active_sessions=2 rekey_initiated=2
+08:57:55  local installs new session with the peer
+08:58:10  first decode forward, sealed with the NEW key
+08:58:10  PEER: open() decryption FAILED  recv_nonce=0     <- still on old key
+08:58:23  peer installs the new session                   <- 13s too late
+08:58:40  coordinator gives up after its 30s segment budget
+```
+
+`KEY_ROTATION_INTERVAL` is 600s and `crypto/session.rs` keeps **one** key per
+peer — there is no previous-key grace window. So each session has a re-keying
+window every 10 minutes during which the two ends disagree, and any forward
+crossing it is discarded. A multi-token generation sends a forward per token per
+remote segment, so the odds of straddling the window are not small; this is a
+strong candidate for the intermittent distributed-inference failures reported
+against several releases, and is independent of peer speed.
+
+**Fixed in this round (the damage, not the cause):** the receiver now answers a
+decrypt failure with `LayerResult::error` instead of dropping the forward
+silently. Previously the coordinator learned nothing and burned its entire
+segment budget — 30s on a decode hop, minutes on a prefill — and had no error to
+attribute, so it could not fail over promptly either. The message is deliberately
+generic ("Could not decrypt forward"): a rotation race and a tampered ciphertext
+are indistinguishable here, and saying which would tell an attacker whether a
+forgery carried the right key.
+
+**Still open — the rotation race itself.** Options, cheapest first:
+
+1. **Keep the previous key for one rotation interval and try it on failure.**
+   Smallest change, closes the window entirely. Must not weaken the replay
+   protection: `session.rs` implements the RFC 6479 window and records a nonce
+   only after successful authentication, which an external audit found sound —
+   a second key needs its own window, not a shared one.
+2. **Do not rotate a session with a pipeline in flight.** `active_pipelines` and
+   `serving_models` between them know; defers the problem rather than removing
+   it, and a long generation would postpone rotation indefinitely.
+3. **Make rotation two-phase** — install the new key on both ends before either
+   sends with it. Correct, and the most work.
+
+Option 1 is the recommendation. Note that the receiving side is the one that
+must tolerate both keys, so a node upgraded alone still benefits when talking to
+an old peer that rotates.

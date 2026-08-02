@@ -300,6 +300,7 @@ impl Daemon {
             &self.identity,
             &self.config,
             network_rx,
+            network_tx.clone(),
             network_out_tx,
             shutdown_rx.clone(),
             Some(acquisition_tx.clone()),
