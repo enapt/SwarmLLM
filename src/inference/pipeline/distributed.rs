@@ -1282,7 +1282,12 @@ impl PipelineExecutor {
                     delivery_request_id: None,
                 })
                 .await;
-            tracing::debug!(
+            // info!, not debug!. The receiving side logs this at debug when it
+            // finds nothing to abort (the normal case today, and normal for
+            // hedge losers), so at default verbosity there is otherwise NO
+            // record anywhere that the cancel was sent — which made the send
+            // unverifiable in exactly the situation an operator cares about.
+            tracing::info!(
                 request_id = %request_id,
                 abandoned_node = %failed_segment.node_id,
                 segment = failed_idx,
