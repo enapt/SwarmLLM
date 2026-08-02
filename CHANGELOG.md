@@ -2,6 +2,68 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.63-alpha] — 2026-08-02
+
+Two machines in one house find each other again, and a long prompt no longer
+exhausts a modest graphics card. Both were reported by testers and both were
+reproduced on the released build before being fixed.
+
+### Fixed
+
+- **A long prompt could exhaust graphics memory even on a single machine.** The
+  previous release fixed this for the attention step; the feed-forward step
+  immediately after it has the same shape and was still unbounded. It briefly
+  holds three buffers, each as wide as the model's internal layer and as long as
+  the whole prompt — roughly 700MB for a 5,000-word prompt on a small model, on
+  top of the model itself. A card could load a model, report a sane amount of
+  memory in use, and then fail on the first long question.
+
+  Long prompts are now worked through in slices there too. The result is
+  arithmetically identical rather than an approximation: every step in this part
+  of the model treats each word on its own, so computing them in groups changes
+  nothing. Ordinary word-by-word generation and short prompts take the original
+  path and pay nothing for this.
+
+  This also corrects a claim in the v0.3.61 notes, which said single-machine
+  requests were never affected. They were: a machine holding a whole model
+  serves it by the same route as a machine sharing one, and that route does not
+  slice prompts. Anyone who read that and concluded their setup was unaffected
+  has our apologies.
+
+- **Two machines on the same home network could end up talking through a relay
+  server in another country** — four milliseconds of cable replaced by three
+  seconds of internet — and, once that relayed connection dropped, stop seeing
+  each other entirely until one was restarted. Observed on a home pair for over
+  two hours, both healthy and both still reaching the wider network throughout.
+
+  Four separate causes, each enough on its own. A machine behind a home router
+  advertises both its local address and a relay route, and the relay route was
+  being read as proof the machine is reachable from the internet — so its local
+  address was discarded as clutter, throwing away the one address that actually
+  works, for exactly the machines that most need it. Reconnection was only
+  attempted when we had been the side that opened the connection, so if the
+  other machine opened it, nothing was ever retried. A reconnection that failed
+  was not tried again, writing off a machine that happened to be rebooting at
+  that moment; it is now retried on a widening schedule for about eight minutes.
+  And the list of known machines was rebuilt from those currently connected, so
+  a machine dropped off it moments after going quiet and could not be found
+  again even after a restart, which is what that list is for.
+
+- **A machine that could not read the work it was sent now says so.** When two
+  machines briefly disagreed about their encryption key, the receiving one
+  discarded the work silently. The machine waiting could not tell that from a
+  slow reply, so it waited out its whole allowance — thirty seconds for a single
+  word, minutes for a long question — and then had nothing to blame, so it could
+  not promptly try elsewhere either. It now answers immediately, turning a failed
+  request into a retry. The underlying disagreement is a separate matter, still
+  open and documented.
+
+- **A machine whose work has been given up on is now told to stop.** When a
+  request moves elsewhere because one machine is taking too long, that machine
+  used to carry on to the end regardless, and anything else sent to it queued
+  behind work whose answer would be thrown away — leaving it unusable for
+  several minutes. It is now told, so it stops taking on more.
+
 ## [0.3.62-alpha] — 2026-08-02
 
 Three fixes. The first affects anyone running long prompts across machines; the
