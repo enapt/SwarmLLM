@@ -404,7 +404,29 @@ pub async fn messages(
         }
     }
 
-    // No local model, no cloud provider configured
+    // Nothing local and no cloud provider matched.
+    //
+    // Distinguish "you asked for a model that does not exist" from "this node
+    // has nothing loaded", because they need opposite things from the user. A
+    // typo'd or unavailable id is `ModelNotAvailable` → **404**, carrying the
+    // list of ids that ARE available; only a node with no models at all is
+    // `NoModelLoaded` → 503, whose hint tells the user to go and download one.
+    //
+    // The same rule already lived in the OpenAI handler ("the user likely
+    // mistyped"), reached through `model_not_found_error` — the single builder
+    // for this 404. This path never called it, so `/v1/messages` answered a
+    // misspelled model with 503 and "No model is loaded yet. Go to the
+    // dashboard and select a model", advice that is wrong when eight models are
+    // loaded and only the name was off. That surface is what Claude Code talks
+    // to, where a model id is typed by hand.
+    let model_id = crate::types::ModelId(req.model.clone());
+    if let Some(err) = state
+        .shared_state
+        .model_registry
+        .reject_if_unknown_model(&model_id)
+    {
+        return Err(ApiError(err));
+    }
     Err(ApiError(crate::error::SwarmError::NoModelLoaded))
 }
 

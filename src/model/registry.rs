@@ -384,6 +384,34 @@ impl ModelRegistry {
         SwarmError::ModelNotAvailable(ModelId(msg))
     }
 
+    /// `Some(error)` when the caller named a model this node does not have
+    /// while it DOES have others — i.e. the name is wrong, not merely early.
+    ///
+    /// **Every API surface that resolves a user-supplied model id should reject
+    /// through this**, so the answer does not depend on which endpoint was
+    /// used. The distinction it encodes:
+    ///
+    /// - Some models registered, this one absent → the user mistyped or asked
+    ///   for something unavailable. `ModelNotAvailable` → **404**, listing what
+    ///   IS available. Returning it immediately also avoids burning the
+    ///   cold-start wait on a name that will never appear.
+    /// - No models registered at all → the node may still be starting up or
+    ///   have nothing downloaded. `None` here, so the caller falls through to
+    ///   its cold-start wait or `NoModelLoaded` (503), whose hint tells the
+    ///   user to go and get a model.
+    ///
+    /// The OpenAI handler had this rule inline and `/v1/messages` did not, so
+    /// the same typo answered 404 with the model list on one endpoint and 503
+    /// "No model is loaded yet. Go to the dashboard and select a model" on the
+    /// other — advice that is simply wrong when eight models are loaded.
+    pub fn reject_if_unknown_model(&self, model_id: &ModelId) -> Option<SwarmError> {
+        if self.get_manifest(model_id).is_none() && !self.manifests.is_empty() {
+            Some(self.model_not_found_error(model_id))
+        } else {
+            None
+        }
+    }
+
     /// Get the number of registered models.
     #[cfg(test)]
     pub fn model_count(&self) -> usize {
@@ -519,6 +547,53 @@ impl Default for ModelRegistry {
 mod tests {
     use super::*;
     use crate::types::*;
+
+    /// The two branches an API surface must keep apart, because they need
+    /// opposite things from the user.
+    ///
+    /// `/v1/messages` used to answer a misspelled model with 503 "No model is
+    /// loaded yet. Go to the dashboard and select a model" while
+    /// `/v1/chat/completions` answered 404 with the list of models that were in
+    /// fact loaded. Same node, same request, different advice — and the 503
+    /// advice was wrong.
+    #[test]
+    fn an_unknown_model_is_rejected_only_when_others_exist() {
+        let registry = ModelRegistry::new();
+        let asked = ModelId("typo-model-name".into());
+
+        // Nothing registered: the node may still be starting or have nothing
+        // downloaded, so the caller must fall through to its cold-start wait /
+        // NoModelLoaded rather than claim the name is wrong.
+        assert!(
+            registry.reject_if_unknown_model(&asked).is_none(),
+            "an empty registry must not accuse the user of a bad model name"
+        );
+
+        registry.register_manifest(test_manifest("real-model", "Real"));
+
+        // Now the name really is wrong, and the answer must name what IS here.
+        let err = registry
+            .reject_if_unknown_model(&asked)
+            .expect("a wrong name must be rejected once models are known");
+        match err {
+            SwarmError::ModelNotAvailable(msg) => {
+                assert!(
+                    msg.0.contains("typo-model-name"),
+                    "names the request: {msg:?}"
+                );
+                assert!(
+                    msg.0.contains("real-model"),
+                    "lists what is available: {msg:?}"
+                );
+            }
+            other => panic!("must be ModelNotAvailable (404), got {other:?}"),
+        }
+
+        // A model that IS registered is never rejected here.
+        assert!(registry
+            .reject_if_unknown_model(&ModelId("real-model".into()))
+            .is_none());
+    }
 
     fn test_manifest(id: &str, name: &str) -> ModelManifest {
         ModelManifest {

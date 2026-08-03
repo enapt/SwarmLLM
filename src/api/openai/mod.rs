@@ -384,9 +384,12 @@ pub async fn chat_completions(
         // fall through to the cold-start wait (node may still be starting up).
         {
             let model_id = crate::types::ModelId(req.model.clone());
-            let registry = &state.shared_state.model_registry;
-            if registry.get_manifest(&model_id).is_none() && !registry.models().is_empty() {
-                return Err(ApiError(registry.model_not_found_error(&model_id)));
+            if let Some(err) = state
+                .shared_state
+                .model_registry
+                .reject_if_unknown_model(&model_id)
+            {
+                return Err(ApiError(err));
             }
         }
 
