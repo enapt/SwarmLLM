@@ -1080,16 +1080,35 @@ real warnings — and reading a lossy log is how several wrong conclusions here
 were reached (`.claude/rules/diagnosis.md` rule 2). **None of these is
 root-caused; do not act on the guesses without measuring.**
 
-- **3765 × `Rate limit exceeded ip=127.0.0.1 path=/api/admin/provider-health`**,
-  running at 8-16/min continuously for two days, then stopping on its own. The
-  dashboard polls this every 30s by default (2/min) against
-  `PROVIDER_HEALTH_RPM = 20`, so ONE tab cannot cause it. There were **58
-  established loopback connections** to the API at the time, consistent with
-  several dashboard tabs sharing a per-IP budget, plus the immediate fetch
-  `startHealthPolling` issues on every WebSocket reconnect. Worth asking:
-  the limit exists to bound OUTBOUND probes of cloud providers, so when it
-  trips, serving the last cached snapshot would be more useful to the dashboard
-  than a 429 — and would not touch the thing the limit protects.
+- **`Rate limit exceeded ip=127.0.0.1 path=/api/admin/provider-health`, and it
+  is LIVE: 2002 in the current daemon run alone** (15:41→19:09 UTC, ~10/min),
+  3765 across the log. **A 30-second sample showed zero and I briefly concluded
+  it had stopped — it had not.** Thirty seconds is not a steady-state window for
+  a ~10/min event (diagnosis rule 3, made against myself).
+
+  What is established: `PROVIDER_HEALTH_RPM = 20`, the dashboard's timer polls
+  every 30s (2/min), and `authFetch` does NOT retry on 429 — so there is no
+  amplification loop and one tab cannot do this. Roughly 30 requests/min are
+  arriving.
+
+  Two candidates, not distinguished:
+  1. **Many dashboard tabs** sharing one per-IP budget. 58 established loopback
+     connections were counted, consistent with ~10 tabs at up to 6 connections
+     each.
+  2. **WebSocket reconnect churn.** `notifications.js` `onopen` calls
+     `startHealthPolling()` on every RE-connect, and that fires
+     `fetchProviderHealth()` immediately before setting the timer — so N
+     reconnects cost N extra requests. ~10 excess/min would mean a reconnect
+     every ~6s, which would ALSO mean `loadInitial()` (much heavier) runs just
+     as often.
+
+  **What would settle it in one step:** count WebSocket opens per minute. The
+  daemon logs none at `info`, so either raise that or read the browser's network
+  panel. If it is (2), the fix is to not re-fetch immediately on reconnect when
+  the timer is already due; if it is (1), the honest fix is to serve the last
+  cached snapshot on 429 — the limit exists to bound OUTBOUND cloud probes, and
+  a cached answer does not touch those.
+
 - **668 × `Shard file missing on disk — skipping registration`** across six
   models. **Checked: this is once per STARTUP, not a loop** — it comes from
   `restore_persistent_state`, which walks every manifest the DB remembers and
