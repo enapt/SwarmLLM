@@ -149,19 +149,22 @@ pub(super) async fn enumerate_models(state: &AppState) -> Vec<(String, String, &
     let mut results = vec![];
     let mut seen = std::collections::HashSet::new();
 
-    // Local loaded model
-    if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
-        let slug = crate::types::slugify_model_name(&info.name);
-        seen.insert(slug.clone());
-        seen.insert(info.name.clone());
-        results.push((slug, info.name.clone(), "local"));
-    }
-
-    // Registry models
+    // Every locally-known model comes from the registry, classified by what this
+    // node actually holds.
+    //
+    // There used to be a separate "local loaded model" entry built by slugifying
+    // `loaded_model_info.name`. That name is GGUF-internal
+    // (`tinyllama_tinyllama-1.1b-chat-v1.0`), and slugifying strips the
+    // underscore, so the advertised id was `tinyllamatinyllama-1.1b-chat-v1.0` —
+    // **not a model id**, and rejected with "Model not available" by every tool
+    // it was passed to. The real model was listed separately in the same
+    // response, labelled `network`. An MCP client had no way to tell which of
+    // the two to use.
     for manifest in state.shared_state.model_registry.models() {
         if !seen.contains(&manifest.id.0) {
             seen.insert(manifest.id.0.clone());
-            results.push((manifest.id.0.clone(), manifest.name.clone(), "network"));
+            let source = crate::api::model_source_for(&state.shared_state, &manifest.id.0);
+            results.push((manifest.id.0.clone(), manifest.name.clone(), source));
         }
     }
 
@@ -364,9 +367,16 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
         // SEC: Do NOT auto-discover cloud providers — prevents unintended cost drain
         // from MCP clients triggering paid API calls without explicit model selection.
         let mut auto_models = Vec::new();
-        if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
-            let slug = crate::types::slugify_model_name(&info.name);
-            auto_models.push(slug);
+        // Registry ids, not a slug of the loaded model's GGUF name — that slug
+        // is not a usable id, so auto-selection used to pick a model every
+        // subsequent call would reject.
+        for manifest in state.shared_state.model_registry.models() {
+            if auto_models.len() >= max_models {
+                break;
+            }
+            if crate::api::model_source_for(&state.shared_state, &manifest.id.0) == "local" {
+                auto_models.push(manifest.id.0.clone());
+            }
         }
         // Only add network-available models (not cloud providers)
         for entry in state.shared_state.split_models.iter() {
@@ -660,10 +670,12 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
     // Collect available models with metadata for tier selection
     let mut candidates: Vec<(String, &str, u64)> = Vec::new(); // (model_id, source, size_hint)
 
-    // Local loaded model — always fastest
-    if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
-        let slug = crate::types::slugify_model_name(&info.name);
-        candidates.push((slug, "local", info.size_bytes));
+    // Fully-held models — always fastest. Registry ids for the same reason as
+    // above: a slug of the loaded model's GGUF name is not a usable id.
+    for manifest in state.shared_state.model_registry.models() {
+        if crate::api::model_source_for(&state.shared_state, &manifest.id.0) == "local" {
+            candidates.push((manifest.id.0.clone(), "local", manifest.total_size_bytes));
+        }
     }
 
     // Network models from split_models

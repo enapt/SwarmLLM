@@ -524,6 +524,41 @@ pub(crate) fn validate_tools<T>(
 /// The global count uses `any_holder_reachable`, matching the scheduler's
 /// liveness oracle, so a departed peer's stale announce cannot make a model look
 /// servable when it is not.
+/// How this node can serve `model_id`: `"local"`, `"hybrid"` or `"network"`.
+///
+/// The single classifier behind `/v1/models`' `owned_by` and the MCP model
+/// list, because they were answering differently. MCP built its "local" entry
+/// by slugifying `loaded_model_info.name` — a GGUF-internal name like
+/// `tinyllama_tinyllama-1.1b-chat-v1.0`, whose slug
+/// (`tinyllamatinyllama-1.1b-chat-v1.0`, underscore stripped) **is not a model
+/// id at all**. An MCP client was handed that id, and every call using it was
+/// rejected with "Model not available"; the genuinely local model appeared
+/// separately in the same list, labelled `network`.
+///
+/// Deriving the answer from shard holdings instead means there is one rule.
+/// `hybrid` is reported honestly rather than rounded to `local` — holding some
+/// shards is not the same as being able to answer alone.
+pub(crate) fn model_source_for(
+    shared: &crate::daemon::SharedState,
+    model_id: &str,
+) -> &'static str {
+    let Some(m) = shared
+        .model_registry
+        .get_manifest(&crate::types::ModelId(model_id.to_string()))
+    else {
+        // No manifest: it is servable (we listed it) but we cannot count shards.
+        return "network";
+    };
+    let (local, _reachable) = count_shard_availability(&m, shared);
+    if m.shard_count > 0 && local == m.shard_count as usize {
+        "local"
+    } else if local > 0 {
+        "hybrid"
+    } else {
+        "network"
+    }
+}
+
 pub(crate) fn count_shard_availability(
     m: &crate::types::ModelManifest,
     shared: &crate::daemon::SharedState,

@@ -599,22 +599,7 @@ pub async fn chat_completions(
 /// rounded to `local` — holding some shards is not the same as being able to
 /// answer alone.
 fn owned_by_for(state: &AppState, model_id: &str) -> String {
-    let Some(m) = state
-        .shared_state
-        .model_registry
-        .get_manifest(&crate::types::ModelId(model_id.to_string()))
-    else {
-        // No manifest: it is servable (we listed it) but we cannot count shards.
-        return "network".into();
-    };
-    let (local, _reachable) = crate::api::count_shard_availability(&m, &state.shared_state);
-    if m.shard_count > 0 && local == m.shard_count as usize {
-        "local".into()
-    } else if local > 0 {
-        "hybrid".into()
-    } else {
-        "network".into()
-    }
+    crate::api::model_source_for(&state.shared_state, model_id).to_string()
 }
 
 /// GET /v1/models
