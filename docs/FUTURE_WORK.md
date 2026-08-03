@@ -4766,13 +4766,21 @@ relay — reaching exactly 5**, while genuinely dead peers reached 34/40/56/121.
 Shipping 5 would have disconnected the relay a NAT'd node depends on. Raised to
 20, in the gap. Re-measure before changing it; the cost is asymmetric.
 
-**Not confirmed live on TCP.** The reproduction blocks one direction of a peer's
-traffic, but the LAN pair negotiates QUIC, which libp2p drops natively in ~30s —
-so the test exercised the surrounding machinery (close → re-dial → recover) and
-not the new threshold. Forcing TCP by blocking UDP did not re-negotiate within
-the window tried. The path to confirm it is a TCP-only pair (disable QUIC on one
-side) with the return path blocked, watching for the "has not answered anything
-in a row" warning.
+**Confirmed live on TCP, 2026-08-03.** The first attempt was a false positive:
+the LAN pair negotiates QUIC, which libp2p drops natively in ~30s, so the peer
+vanished without the new code running. Note `enable_quic = false` only disables
+the LISTENER — a node with it set still dials a peer's QUIC address, so forcing
+TCP requires killing QUIC at the far end (`nft ... udp sport 8800 drop`), not
+locally. With a TCP connection established and the return path then blocked
+(`tcp sport 8810 drop`), the warning fired and the connection was closed, with
+the re-dial scheduled behind it.
+
+**Latency is the trade-off.** At threshold 20 an unresponsive peer stays
+schedulable for roughly ten minutes — measured accumulation was ~5 failures in
+3 minutes. That is far better than the previous behaviour (never), but it is not
+fast. Lowering it is NOT the answer on its own; the anchor's measured worst run
+is 5. A count paired with "no success for N seconds" would be both faster and
+safer, and is the shape to reach for if ten minutes proves too slow.
 
 Original entry:
 
