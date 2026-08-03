@@ -1247,6 +1247,42 @@ impl ModelProcessPool {
         self.vram_reserved_mb.iter().map(|e| *e.value()).sum()
     }
 
+    /// Would this model fit on the GPU right now, without charging anything?
+    ///
+    /// The read-only half of [`Self::admit_to_gpu`], for callers that need to
+    /// *decide* rather than *load* — the scheduler asking whether this node can
+    /// serve a request well before it commits to serving it alone.
+    ///
+    /// Returns:
+    /// - `Some(true)`  — it fits, or a worker for it is already live and paid for
+    /// - `Some(false)` — it would be refused and fall back to the CPU
+    /// - `None`        — no budget configured, or the geometry could not be read,
+    ///   which must NOT be read as "no". Refusing to route on an unreadable file
+    ///   would be a worse failure than the one being avoided, and matches how
+    ///   `admit_to_gpu` treats the same gap.
+    ///
+    /// Deliberately shares `estimate_gpu_footprint_mb` and `vram_committed_mb`
+    /// with the admission gate, so the scheduler's view and the loader's view
+    /// cannot drift apart and disagree about whether a request could have run.
+    pub fn would_fit_on_gpu(&self, model_id: &ModelId) -> Option<bool> {
+        // Already resident means already charged: running it costs no new
+        // memory, whatever the budget currently says.
+        if self.workers.contains_key(model_id) {
+            return Some(true);
+        }
+        let budget = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if budget == 0 {
+            return None;
+        }
+        let estimated = self.estimate_gpu_footprint_mb(model_id);
+        if estimated == 0 {
+            return None;
+        }
+        Some(self.vram_committed_mb().saturating_add(estimated) <= budget)
+    }
+
     /// Decide whether `model_id` may be loaded onto the GPU, and charge it if so.
     ///
     /// Called inside `spawn_lock`, which already serializes spawns, so the

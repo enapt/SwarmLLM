@@ -150,6 +150,40 @@ fn regions_adjacent(a: &str, b: &str) -> bool {
     })
 }
 
+/// Should a node that holds every layer run the request alone?
+///
+/// Splitting the decision out because this is where the risk lives. The local
+/// fast path exists for good reasons — it stops peers holding overlapping shards
+/// being pulled in and failing the request with "Segment N failed with no
+/// standby", and avoids a tensor-parallel group whose round trips cost more than
+/// the work. Routing away too eagerly re-creates exactly those failures, so
+/// every condition below has to hold before the network is consulted:
+///
+/// - the node genuinely cannot fit the model right now (`Some(false)`). An
+///   unreadable estimate or no configured budget is `None` and must keep the
+///   local path — declining to serve because a file could not be read would be
+///   worse than the problem being solved.
+/// - the node HAS a graphics card. On a CPU-only node, running on the CPU is
+///   normal operation rather than a degradation, so there is nothing to route
+///   away from.
+/// - some other candidate actually holds the layers. Without one, going
+///   distributed just fails; the local CPU fallback at least answers.
+fn should_keep_local(
+    local_has_full_coverage: bool,
+    local_fits_on_gpu: Option<bool>,
+    has_gpu: bool,
+    remote_can_help: bool,
+) -> bool {
+    if !local_has_full_coverage {
+        // Not this function's decision — the caller falls through to
+        // distributed assignment on coverage grounds alone.
+        return false;
+    }
+    let out_of_room = matches!(local_fits_on_gpu, Some(false));
+    let worth_routing_away = out_of_room && has_gpu && remote_can_help;
+    !worth_routing_away
+}
+
 impl PipelineScheduler {
     pub fn new(shared_state: Arc<SharedState>) -> Self {
         Self { shared_state }
@@ -252,8 +286,45 @@ impl PipelineScheduler {
         // run entirely locally without involving remote peers.  This prevents
         // "Segment N failed with no standby" errors caused by remote peers that
         // hold overlapping shards being pulled into the pipeline unnecessarily.
-        if let Some(local_cand) = candidates.iter().find(|c| {
+        // Full local coverage is not the same as being able to run it now.
+        //
+        // Holding every layer answers "could this node serve the model at all";
+        // it says nothing about whether there is room for it at this moment. A
+        // node with a small model fully local, no graphics memory free, and an
+        // idle peer on the same LAN used to fail or crawl alone, because
+        // coverage was complete so the network was never consulted. Reported by
+        // a tester as the structural issue behind their out-of-memory reports,
+        // and they were right: without this, what ships is closer to sharing
+        // model storage than sharing inference.
+        let local_has_full_coverage = candidates.iter().any(|c| {
             c.node_id == *local_node_id
+                && c.available_ranges
+                    .iter()
+                    .any(|r| r.0 == 0 && r.1 >= num_layers)
+        });
+        let remote_can_help = candidates.iter().any(|c| c.node_id != *local_node_id);
+        let local_fits = self
+            .shared_state
+            .model_process_pool
+            .would_fit_on_gpu(model_id);
+        let has_gpu = self.shared_state.gpu_info.is_some();
+        let take_local_fast_path = should_keep_local(
+            local_has_full_coverage,
+            local_fits,
+            has_gpu,
+            remote_can_help,
+        );
+        if !take_local_fast_path && local_has_full_coverage {
+            tracing::info!(
+                model = %model_id,
+                num_layers,
+                "Local node holds every layer but has no room for it right now — \
+                 assembling a distributed pipeline instead of running it alone"
+            );
+        }
+        if let Some(local_cand) = candidates.iter().find(|c| {
+            take_local_fast_path
+                && c.node_id == *local_node_id
                 && c.available_ranges
                     .iter()
                     .any(|r| r.0 == 0 && r.1 >= num_layers)
@@ -1316,3 +1387,53 @@ fn manifest_layer_capacity_for_local(manifest: &ModelManifest, shared_state: &Sh
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod headroom_routing_tests {
+    use super::should_keep_local;
+
+    /// The ordinary case, and the one that must not regress: a node that holds
+    /// everything and has room runs it alone. The fast path exists to stop
+    /// peers being pulled in needlessly, and that stays true.
+    #[test]
+    fn a_node_with_room_still_runs_it_alone() {
+        assert!(should_keep_local(true, Some(true), true, true));
+    }
+
+    /// The case this was built for: full coverage, no room, an idle peer that
+    /// holds the layers — consult the network instead of running alone.
+    #[test]
+    fn a_node_out_of_room_routes_to_a_peer_that_can_help() {
+        assert!(!should_keep_local(true, Some(false), true, true));
+    }
+
+    /// No peer holds the layers, so going distributed would just fail. The
+    /// local CPU fallback is slow but it answers, which is strictly better.
+    #[test]
+    fn with_no_peer_able_to_help_it_stays_local() {
+        assert!(should_keep_local(true, Some(false), true, false));
+    }
+
+    /// On a CPU-only node, running on the CPU is normal operation rather than a
+    /// degradation — there is nothing to route away from, and doing so would
+    /// send work to the network for no reason.
+    #[test]
+    fn a_cpu_only_node_never_routes_away_on_headroom() {
+        assert!(should_keep_local(true, Some(false), false, true));
+    }
+
+    /// An unreadable estimate or no configured budget is "cannot judge", and
+    /// must keep the local path. Declining to serve because a file could not be
+    /// read would be a worse failure than the one being avoided.
+    #[test]
+    fn an_unknown_footprint_keeps_the_local_path() {
+        assert!(should_keep_local(true, None, true, true));
+    }
+
+    /// Without full coverage this function has no opinion — the caller goes
+    /// distributed regardless, on coverage grounds.
+    #[test]
+    fn without_full_coverage_it_defers_to_the_caller() {
+        assert!(!should_keep_local(false, Some(true), true, true));
+    }
+}

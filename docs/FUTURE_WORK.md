@@ -5012,10 +5012,38 @@ Worth finding the wrap site: clients that retry on 5xx will retry forever
 against a model that is simply not there, and 500 tells an operator to look for
 a bug in the server rather than a missing file.
 
-## Full local coverage bypasses the network, even with no headroom (2026-08-03)
+## Full local coverage bypasses the network, even with no headroom (2026-08-03) — FIXED
 
-**Status: CONFIRMED in code, deliberate, not fixed. Reported by a tester as the
-structural issue behind their OOM reports, and they are right.**
+**Status: FIXED 2026-08-03.** The scheduler's local fast path is now gated on
+headroom as well as coverage. `ModelProcessPool::would_fit_on_gpu` is the
+read-only half of `admit_to_gpu` — same estimator, same committed figure, so the
+scheduler's view and the loader's cannot drift — and `should_keep_local` is the
+pure decision, tested separately because this is where the regression risk sits.
+
+**Named prior art:** this is Head-Room Admission, the approach used to avoid vLLM
+preemptions — keep a margin at admission time and only admit if the target would
+still retain it. The difference in a swarm is what you do when the margin is
+gone: vLLM preempts and recomputes, we can route to a peer instead.
+
+**Four conditions must ALL hold before the network is consulted**, because
+routing away too eagerly re-creates the failures the fast path was added to
+prevent ("Segment N failed with no standby", and TP groups whose round trips
+cost more than the work):
+
+1. the node genuinely cannot fit the model now (`Some(false)`) — `None` means
+   the estimate was unreadable or no budget is set, and MUST keep the local path;
+2. the node actually has a GPU — on a CPU-only node, CPU is normal operation,
+   not a degradation to escape;
+3. some other candidate holds the layers — otherwise distributed just fails,
+   and the local CPU fallback at least answers;
+4. the node has full local coverage — otherwise this decision does not apply.
+
+**Not yet exercised on real hardware.** The predicate is unit-tested in all six
+combinations, but the path only fires on a GPU node that is genuinely out of
+budget with a peer holding the layers, which needs the tester's 6 GB card rather
+than this 8 GB one. Watch for the "no room for it right now" log line.
+
+Original entry:
 
 `inference/scheduler/mod.rs` has a fast path: if the local node holds layers
 `0..num_layers`, it returns a single local segment with `standbys: vec![]` and
