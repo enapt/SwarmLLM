@@ -199,80 +199,56 @@ All 20 build phases complete. All subsystems wired — no stubs. **1612 lib + 81
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.60 → .65 (2026-08-01→03): the split works, machines in one house find each other, and memory stays bounded
+### Latest — v0.3.66/.67 released + 14 UNRELEASED commits (2026-08-03)
 
-**v0.3.65** — diagnostic only. The GPU memory-admission gate logged ONLY on
-refusal, so a model that was admitted and then died with
-`CUDA_ERROR_OUT_OF_MEMORY` left no record of what the gate expected it to cost.
-Three causes were indistinguishable from outside: a low estimate, a budget still
-held by a model mid-eviction, and a genuinely unbounded allocation. Now
-`DIAG: admitting model to GPU` prints estimate/committed/headroom — compare
-against the worker's `vram_after_load_mb`.
+**Released.** **v0.3.67** — key rotation stopped losing work: both ends rotate on
+independent 10-min timers and each replaced its key outright, so a forward
+crossing the window was discarded (and crossed rotations left each side on a key
+from a different exchange). Now keeps the previous key 3 min with **its own
+replay window** — sharing one would let the same message be accepted twice
+(WireGuard does the same, for the same reason). Same release: `establish_session`
+made idempotent — Identify fires constantly (**172x for one peer in one log**)
+and each call reinstalled the STATIC key, so **forward secrecy lasted about a
+minute** before reverting. **v0.3.66** — eviction freed the GPU budget before the
+OS freed the memory (`start_kill` only signals), so the next admission passed
+against memory still occupied; dead peers disconnected in ~2 min not never; a
+missing model reports 404 not 500.
 
-**v0.3.64** — a node advertised model pieces it no longer had. The shard
-registry is built at startup and updated by events; nothing watched the disk, so
-deleting a model folder (the only way, there is still no CLI remove command)
-left the node offering peers work it could not do until restart. The health
-monitor now reconciles against disk each announce cycle; `enable-privacy` stats
-the files itself, because it asserts where a user's text goes and must be true
-when said. Existence only — a mid-download shard occupies its final path.
+**Unreleased (14 commits).** Peer-side cancellation (`handle_forward` registers
+an abort handle — a coordinator's `CancelInference` was received and ignored);
+MoE feed-forward token blocking; `swarmllm remove-model`; dead-peer detection
+paired with elapsed silence (~10 min → ~2); diagnostics reporting the RUNTIME
+auto-manage value; a non-lossy `DIAG: shard announce ingested` line.
 
-**Open from tester reports (2026-08-03), read `docs/FUTURE_WORK.md`:**
-(1) **A node with full local coverage never consults the network, even with no
-headroom** — `scheduler/mod.rs` returns one local segment + `standbys: vec![]`
-the moment it holds every layer. Holding the weights and having room to use them
-are different questions and only the first is asked, so a node fails alone with
-an idle LAN peer beside it. Deliberate, with good reasons in the comment; the
-gap is what coverage stands in for. **"Shard storage-sharing, not
-inference-sharing."** (2) Key rotation still breaks in-flight distributed
-inference every 10 min (one key, no previous-key grace). (3) A peer whose return
-path is dead stays `is_connected=true` and schedulable.
+**REVERTED, and read `.claude/rules/diagnosis.md` before retrying it:**
+headroom-aware routing. It never routed away (verified 3x) and rests on an
+estimator **2.3x pessimistic** (phi-3.5 `estimated_mb=5863` vs measured
+`vram_after_load_mb=2579`). **Fix the estimator before revisiting routing** —
+both figures are now logged side by side. `would_fit_on_gpu` was kept.
 
-**Ruled out, do not re-investigate:** the .61/.63 memory fixes apply to BOTH
-forward implementations — `forward_inner_impl` AND `forward_batch` call the same
-`lw.forward_attn` / `Mlp::forward`, so no execution path misses them. A tester's
-remaining OOM at 5143 tokens (5021 passes) is a margin being crossed, not a
-missing bound.
+**Open, and correctly framed:** the scheduler assigns a whole model to ONE
+full-coverage remote peer rather than splitting local+LAN when both are
+available. This is a **cost-model preference, not a bug** — the run that
+established it succeeded in 54s where the same shape had failed at 308s.
+Measure both options on the same request before changing anything. The announce
+path and candidate gathering are NOT at fault (proven, see FUTURE_WORK).
 
-**v0.3.63** — a long prompt exhausted graphics memory in the **feed-forward**,
-the step right after the attention that .61 fixed. Same shape, still unbounded:
-three buffers, each `[tokens x intermediate]`, live at once (~700 MB for a 5k
-prompt on a small model). Blocked on the token axis; exact, tests assert max abs
-diff **0.0**. **The .61 changelog claim that single-machine requests were never
-at risk was WRONG** and a tester reproduced it — a machine holding a whole model
-is served as a ONE-SEGMENT PIPELINE through `handle_forward`, which does not
-chunk. **Chunked prefill bounds tokens on the LOCAL generate path only**; any new
-per-token temporary needs its own bound. Same release: two LAN machines routed
-through the anchor VPS at ~3 s and then went mutually invisible for hours — four
-causes, see `round_log_lan_peering_0802.md` and gotcha **#234** (a safety fix
-that silently disabled an unrelated fix through shared state). Also: a decrypt
-failure now answers `LayerResult::error` instead of dropping silently and
-burning the whole segment budget.
+**Process — the reason `.claude/rules/diagnosis.md` and `.claude/agents/root-cause.md`
+now exist.** Four wrong causal claims in one session, three reaching commits
+before correction. Always the same shape: blaming the most recent change or most
+obvious component before showing the symptom does not happen without it. Rule 0
+is **look the failure mode up first** — WireGuard's per-keypair replay counter
+and vLLM's Head-Room Admission each changed an implementation that day. Then:
+baseline before blaming; an absence proves nothing from a lossy source (ring
+buffers, `debug!` at `info`); measurements need steady state (this system
+converges over minutes after a restart); assert the mechanism fired, not just
+that the outcome changed; and toggle a fix off to watch its test go red
+(`git stash` removes the test too — "0 tests ran" is not a failure).
 
-**Open, found 08-02, NOT fixed:** `KEY_ROTATION_INTERVAL` is 600 s and
-`crypto/session.rs` keeps ONE key with no previous-key grace, so **every session
-has a re-key window every 10 minutes and any forward crossing it is discarded** —
-likely cause of the intermittent distributed failures across several releases.
-Recommendation (previous-key grace) in `docs/FUTURE_WORK.md`. Also open: a peer
-whose return path is dead stays `is_connected=true` and schedulable.
+**Local test environment:** both nodes have **auto-manage OFF** and holdings
+frozen deliberately, so shard sets stop moving mid-test. Re-enable via
+`PUT /api/admin/config {"auto_manage_shards": true}` when done.
 
-**v0.3.60/.61 — RESOLVED: distributed multi-segment inference.** `Tensor bytes
-too short` was never a wire-format defect. `pending_layer_results` is keyed by
-`request_id` alone, but a failed-over request has TWO forwards outstanding; the
-abandoned one's late error resolved the **standby's** waiter (gotcha #229).
-Waiters now record the node they expect and resolve through
-`SharedState::resolve_pending_layer_result`. Plus peer-speed-sized segment
-budgets, `ReachTier` (direct beats relayed by construction), and the f16
-embedding table. **.61** blocked the attention query axis — the shipped GPU build
-is the only one with quadratic attention memory, because `flash-attn` is
-excluded from the `cuda` feature (gotcha #232).
-
-**Release process:** `scratchpad/tag_when_green.sh <tag>` is the ONLY way to tag
-(requires conclusion `success` AND every job green, BEFORE tagging). `Cargo.toml`
-+ `Cargo.lock` in the SAME commit (CI is `--locked`). **Do not push between the
-release commit and the tag** — it cancels the run the tagger waits on. After the
-workflow publishes: `gh release edit <tag> --prerelease=false --latest` — BOTH
-flags, clearing prerelease alone does not move `/releases/latest` (gotcha #225).
 
 ### Superseded — v0.3.49 → .59 (2026-07-29→08-01) — pointers only
 
