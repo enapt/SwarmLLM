@@ -1073,6 +1073,36 @@ wait past the ceiling, or the test looks like a failure when it is the design.
 **Not unit-tested**: the behaviour lives in the manager's tick loop and the
 evidence here is the live before/after above.
 
+## Log noise observed on a live node (measured 2026-08-04, NOT diagnosed)
+
+Counted on the development node's log. Recorded because volume like this buries
+real warnings — and reading a lossy log is how several wrong conclusions here
+were reached (`.claude/rules/diagnosis.md` rule 2). **None of these is
+root-caused; do not act on the guesses without measuring.**
+
+- **3765 × `Rate limit exceeded ip=127.0.0.1 path=/api/admin/provider-health`**,
+  running at 8-16/min continuously for two days, then stopping on its own. The
+  dashboard polls this every 30s by default (2/min) against
+  `PROVIDER_HEALTH_RPM = 20`, so ONE tab cannot cause it. There were **58
+  established loopback connections** to the API at the time, consistent with
+  several dashboard tabs sharing a per-IP budget, plus the immediate fetch
+  `startHealthPolling` issues on every WebSocket reconnect. Worth asking:
+  the limit exists to bound OUTBOUND probes of cloud providers, so when it
+  trips, serving the last cached snapshot would be more useful to the dashboard
+  than a 429 — and would not touch the thing the limit protects.
+- **668 × `Shard file missing on disk — skipping registration`** across six
+  models. This is v0.3.64's disk re-check doing its job, but it logs at WARN
+  every pass rather than once per (model, shard) transition, so a node whose
+  registry knows about shards it does not hold warns forever.
+- **1324 + 1310 `OutboundFailure` / `rr-message OutboundFailure` for a single
+  peer**, plus 668 `Dropping rr message — peer not connected and no relay path`.
+  This is the already-filed "repeatedly-failing peer is retried indefinitely
+  with no backoff" entry, seen live: one unhealthy peer dominates the log.
+
+**Before changing any of these, confirm the source is still producing them** —
+the provider-health one stopped without intervention, which is exactly the kind
+of thing that makes an after-the-fact fix look effective when nothing changed.
+
 ## Slow nodes go dark and never come back — the routing ratchet (analysed 2026-07-28)
 
 **Status: analysed, not fixed.** Raised as a design question ("GPU nodes will be
