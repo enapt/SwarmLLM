@@ -100,6 +100,17 @@ const CONTROL_TOKEN_NAMES: &[&str] = &[
 /// is idempotent, which lets a caller run it again with a different stop set
 /// (the router applies template-derived stops that the executor never sees).
 pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option<String> {
+    // Snapshot enough of the incoming text to identify it if the steps below
+    // consume all of it. Costs one small allocation per completion — this runs
+    // once per reply, never per token — and nothing at all when the model
+    // produced no text to begin with.
+    let had_content = !text.trim().is_empty();
+    let before: String = if had_content {
+        text.chars().take(EMPTIED_REPLY_LOG_CHARS).collect()
+    } else {
+        String::new()
+    };
+
     strip_control_token_artifacts(text);
     let mut matched = None;
     for stop in stops {
@@ -114,8 +125,33 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
     if start > 0 {
         text.drain(..start);
     }
+
+    // The model generated something and finalisation removed all of it. The
+    // caller will return `content: ""` with `finish_reason: "stop"` and HTTP
+    // 200, which is indistinguishable from a real answer — so without this line
+    // the only way to notice is for a human to see a blank reply. Every blank
+    // reply diagnosed here so far (a missing system turn, a template from the
+    // wrong model family, byte-fallback decoding) began that way.
+    //
+    // What was removed is the evidence: a leaked marker points at the template,
+    // a stop sequence matching at position 0 points at the prompt. Logged at
+    // WARN because a user is looking at an empty answer either way.
+    if had_content && text.trim().is_empty() {
+        tracing::warn!(
+            matched_stop = ?matched,
+            generated = %before.escape_debug(),
+            "reply is empty after finalisation — the model generated text and all of it was \
+             removed as control tokens or stop sequences; check the prompt and chat template \
+             for this model before looking at sampling"
+        );
+    }
+
     matched
 }
+
+/// How much of an emptied reply to put in the log. Enough to recognise a leaked
+/// template or a stray marker, short enough not to dump a whole generation.
+const EMPTIED_REPLY_LOG_CHARS: usize = 240;
 
 /// Remove control-token artifacts from generated text, in whatever spelling
 /// they arrive in.
@@ -317,6 +353,113 @@ mod finalize_reply_text_tests {
         let matched = finalize_reply_text(&mut t, &stops());
         assert_eq!(t, "Red, blue and yellow.");
         assert_eq!(matched, None, "a scrubbed artifact is not a stop match");
+    }
+
+    /// The condition the "reply is empty after finalisation" warning keys on:
+    /// the model DID generate text and every character of it was removed. The
+    /// caller then returns HTTP 200 with empty content and
+    /// `finish_reason: "stop"`, which no client can tell from a real answer —
+    /// so this case has to be recognisable in the log.
+    #[test]
+    fn a_reply_of_nothing_but_a_marker_finalises_to_empty() {
+        let mut t = "<|im_end|>".to_string();
+        finalize_reply_text(&mut t, &stops());
+        assert!(t.trim().is_empty(), "expected the marker to leave nothing");
+
+        // ...and a stop matching at position 0 does the same thing by a
+        // different route, which is the prompt-fault shape rather than the
+        // template-fault one.
+        let mut t = "\nUser: who asked?".to_string();
+        finalize_reply_text(&mut t, &["\nUser:".to_string()]);
+        assert!(t.trim().is_empty());
+    }
+
+    /// Capture what this crate logs while `f` runs.
+    fn captured_logs(f: impl FnOnce()) -> String {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+
+        let buf = Buf(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The warning has to actually reach the log, and has to carry the text
+    /// that was removed — that text is the entire diagnostic value, since it
+    /// distinguishes a template fault (a leaked marker) from a prompt fault (a
+    /// stop matching at position 0).
+    #[test]
+    fn an_emptied_reply_is_reported_with_what_was_removed() {
+        let logs = captured_logs(|| {
+            let mut t = "<|im_end|>".to_string();
+            finalize_reply_text(&mut t, &stops());
+        });
+        assert!(
+            logs.contains("reply is empty after finalisation"),
+            "an emptied reply must be visible in the log, got: {logs}"
+        );
+        assert!(
+            logs.contains("im_end"),
+            "the log must name what was removed, got: {logs}"
+        );
+    }
+
+    /// The counterpart, and the reason the warning is conditional: an ordinary
+    /// reply must stay silent. A diagnostic that fires on healthy traffic is
+    /// noise, and this one runs on every completion.
+    #[test]
+    fn an_ordinary_reply_logs_nothing() {
+        let logs = captured_logs(|| {
+            let mut t = "Rivers carve landscapes.<|im_end|>".to_string();
+            finalize_reply_text(&mut t, &stops());
+        });
+        assert!(logs.is_empty(), "a normal reply must not warn, got: {logs}");
+
+        // A model that generated nothing at all is a different condition and is
+        // already visible to the caller as zero tokens — it must not warn here.
+        let logs = captured_logs(|| {
+            let mut t = String::new();
+            finalize_reply_text(&mut t, &stops());
+        });
+        assert!(logs.is_empty(), "no generation must not warn, got: {logs}");
+    }
+
+    /// The snapshot taken for that warning is built with `chars().take(..)`, so
+    /// it must not split a multi-byte character. A panic here would abort a
+    /// perfectly good reply on any non-ASCII generation.
+    #[test]
+    fn finalising_multibyte_text_does_not_panic() {
+        let mut t = "日本語のテキストです。".repeat(40);
+        finalize_reply_text(&mut t, &stops());
+        assert!(t.starts_with("日本語"), "content must survive untouched");
+
+        let mut emoji = "🙂🙃".repeat(300);
+        emoji.push_str("<|im_end|>");
+        finalize_reply_text(&mut emoji, &stops());
+        assert!(emoji.starts_with("🙂"));
     }
 
     /// A genuine stop still ends the reply, and is reported so the caller can

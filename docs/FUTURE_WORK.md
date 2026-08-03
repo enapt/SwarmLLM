@@ -4178,6 +4178,22 @@ first: emit a WARN with the pre-truncation text so it is diagnosable from logs;
 count it in the trace/Prometheus outcome; or fail the request so retry-capable
 clients re-route. The first is worth doing regardless of the others.
 
+**The WARN is DONE (2026-08-03).** `finalize_reply_text` now logs
+`reply is empty after finalisation` with the removed text and the stop that
+matched, whenever the model generated something and finalisation consumed all of
+it. It is at the choke point, so all three text sources inherit it. Two tests
+capture the subscriber and assert it fires on an emptied reply and stays silent
+on both an ordinary reply and a genuinely empty generation — a diagnostic that
+fires on healthy traffic would be worse than none, since this runs on every
+completion.
+
+The removed text is the diagnostic: a leaked marker points at the chat template,
+a stop matching at position 0 points at the prompt. **Still open**: counting it
+as a distinct trace/Prometheus outcome, and whether to fail the request outright
+so retry-capable clients re-route. Failing it is the invasive one — an empty
+reply can be legitimate (a model answering an empty prompt), so that needs the
+counter first to show how often it happens in practice.
+
 ## Peer-gossiped versions could shorten the update-detection window
 
 **Status**: not built. Requested during the v0.3.44 update-lifecycle work
