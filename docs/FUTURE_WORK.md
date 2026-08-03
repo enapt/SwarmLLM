@@ -1103,8 +1103,16 @@ root-caused; do not act on the guesses without measuring.**
   second case.
 - **1324 + 1310 `OutboundFailure` / `rr-message OutboundFailure` for a single
   peer**, plus 668 `Dropping rr message — peer not connected and no relay path`.
-  This is the already-filed "repeatedly-failing peer is retried indefinitely
-  with no backoff" entry, seen live: one unhealthy peer dominates the log.
+  This matches the already-filed "repeatedly-failing peer is retried
+  indefinitely with no backoff" entry — one peer accounts for more failures than
+  every other combined (1324 vs 174/167/154/24).
+
+  **But these are HISTORICAL, not live.** The last one is stamped 13:02 UTC and
+  the current daemon started at 15:38 UTC, so none of them belong to the running
+  process — the log is appended across restarts. There is therefore no local
+  reproduction available right now, which is the main reason the backoff entry
+  stays deferred: a send-side throttle needs a misbehaving peer to test against,
+  and inventing one in a unit test would not exercise the path that matters.
 
 **Before changing any of these, confirm the source is still producing them** —
 the provider-health one stopped without intervention, which is exactly the kind
