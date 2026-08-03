@@ -594,7 +594,56 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
 ///
 /// Sends a tiny chat completion request (max_tokens=1) to one model per provider
 /// to measure latency and confirm availability. Returns per-provider status.
+///
+/// **Cached, because every uncached call spends real money.** Each call probes
+/// EVERY configured provider, and those probes are billable requests against the
+/// user's own API keys. The dashboard polls this on a 30s timer per open tab and
+/// again on every WebSocket reconnect, and the rate limiter's budget is per-IP —
+/// so several tabs share one budget and collectively drive far more probing than
+/// any of them intends.
+///
+/// Measured on a live node before this cache existed: ~30 requests/min arriving
+/// against a 20/min limit, i.e. ~60 outbound paid probes/min across three
+/// configured providers, continuously — **with OpenAI already answering
+/// `rate_limited`**, which is the provider telling us the volume is excessive.
+/// The 429s that produced 2002 log warnings in one run were the visible symptom;
+/// the cost was the real problem.
+///
+/// One probe round per TTL now serves every tab. The TTL matches the dashboard's
+/// own default poll interval, so the badge is exactly as fresh as the UI expects
+/// while the outbound volume no longer scales with the number of open tabs.
 pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    const HEALTH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+    {
+        let cache = state
+            .shared_state
+            .metrics
+            .provider_health_cache
+            .read()
+            .await;
+        let (ref cached, ref ts) = *cache;
+        if !cached.is_empty() && ts.elapsed() < HEALTH_CACHE_TTL {
+            return Json(serde_json::json!({ "providers": cached }));
+        }
+    }
+
+    let results = probe_provider_health(&state).await;
+    {
+        let mut cache = state
+            .shared_state
+            .metrics
+            .provider_health_cache
+            .write()
+            .await;
+        *cache = (results.clone(), std::time::Instant::now());
+    }
+    Json(serde_json::json!({ "providers": results }))
+}
+
+/// Probe every configured provider once. The billable part; call it through
+/// [`provider_health`] so the cache applies.
+async fn probe_provider_health(state: &AppState) -> Vec<serde_json::Value> {
     let config = state.shared_state.metrics.providers_config.read().await;
 
     // Build (provider_name, base_url, api_key, test_model) tuples
@@ -761,8 +810,7 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
             }
         });
 
-    let results = futures::future::join_all(probes_futures).await;
-    Json(serde_json::json!({ "providers": results }))
+    futures::future::join_all(probes_futures).await
 }
 
 /// POST /api/admin/provider-model-status — Probe availability of specific cloud models.

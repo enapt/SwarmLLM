@@ -634,6 +634,7 @@ impl SharedState {
                 }),
                 provider_model_map: DashMap::new(),
                 provider_models_cache: RwLock::new((Vec::new(), std::time::Instant::now())),
+                provider_health_cache: RwLock::new((Vec::new(), std::time::Instant::now())),
                 stats_cache: parking_lot::Mutex::new(None),
                 stats_building: std::sync::atomic::AtomicBool::new(false),
                 peer_speed: DashMap::new(),

@@ -84,6 +84,13 @@ pub struct MetricsProviders {
     pub providers_config: RwLock<crate::config::ProvidersConfig>,
     pub provider_model_map: DashMap<String, String>,
     pub provider_models_cache: RwLock<(Vec<serde_json::Value>, std::time::Instant)>,
+    /// Cached `/api/admin/provider-health` results, `(providers, built_at)`.
+    ///
+    /// Building this costs one billable request per configured provider, so it
+    /// must not be rebuilt per dashboard poll: the budget is per-IP and several
+    /// open tabs share it, which drove ~60 outbound paid probes/min on a live
+    /// node until this existed.
+    pub provider_health_cache: RwLock<(Vec<serde_json::Value>, std::time::Instant)>,
     /// Cached WebSocket stats JSON, shared across all connected clients.
     /// (built_at, message). Built on demand by the first WS client to tick
     /// with a stale cache; subsequent clients within TTL reuse the string.

@@ -1102,12 +1102,29 @@ root-caused; do not act on the guesses without measuring.**
      every ~6s, which would ALSO mean `loadInitial()` (much heavier) runs just
      as often.
 
-  **What would settle it in one step:** count WebSocket opens per minute. The
-  daemon logs none at `info`, so either raise that or read the browser's network
-  panel. If it is (2), the fix is to not re-fetch immediately on reconnect when
-  the timer is already due; if it is (1), the honest fix is to serve the last
-  cached snapshot on 429 — the limit exists to bound OUTBOUND cloud probes, and
-  a cached answer does not touch those.
+  **Settled, and (2) is ruled out.** Sampling the loopback connection set twice
+  90s apart: 58 connections before, 58 after, **zero appeared and zero
+  disappeared**, while 10 rejections occurred in the same window. Nothing is
+  reconnecting; these are persistent clients polling. So it is (1) — several
+  dashboard tabs sharing one per-IP budget.
+
+  **The 429s were the visible symptom; the cost was the real problem.** Each
+  uncached call probes EVERY configured provider with a billable
+  `max_tokens: 1` request. This node has **three** configured, so ~20 allowed
+  calls/min meant **~60 outbound paid requests per minute, continuously** — and
+  **OpenAI was already answering `rate_limited`**, i.e. the provider itself
+  saying the volume was too high.
+
+  **FIXED 2026-08-04**: `provider_health` now caches its result for 30s
+  (`metrics.provider_health_cache`), matching the dashboard's own default poll
+  interval and mirroring the existing `list_provider_models` cache in the same
+  file. One probe round now serves every tab. **Verification level, stated
+  honestly:** compiles, clippy-clean, full suite green, endpoint re-checked live,
+  and the cache-hit path is the same shape as its production-proven sibling — but
+  the probe-count reduction was NOT measured end-to-end, because
+  `provider_health` only probes fixed real provider URLs and confirming it would
+  have meant firing requests at third-party APIs. Confirm on the live node after
+  updating: the `Rate limit exceeded ... provider-health` line should stop.
 
 - **668 × `Shard file missing on disk — skipping registration`** across six
   models. **Checked: this is once per STARTUP, not a loop** — it comes from
