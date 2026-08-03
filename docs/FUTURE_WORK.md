@@ -4961,3 +4961,59 @@ admission would actually refuse, not whenever memory looks tight.
   same idea as expert routing, one level up. This is a restatement of the
   headroom-routing item above rather than a separate feature, and it is the
   clearest short description of what resource-aware routing would buy.
+
+## The GPU budget is freed before the memory is (2026-08-03)
+
+**Status: MECHANISM IDENTIFIED, not fixed. Matches a tester's "eviction race"
+hypothesis exactly; found within minutes of the v0.3.65 diagnostic shipping.**
+
+`ModelProcessPool` evicting a worker does this (`process_pool.rs` ~2659):
+
+```rust
+// Drop handle → aborts reader, kills child process → OS frees all CUDA memory
+drop(handle);
+self.release_vram_charge(model_id);
+```
+
+The comment asserts a synchronous chain that is not synchronous. `drop(handle)`
+signals the child to die; the kernel then tears the process down and reclaims
+its CUDA allocations on its own schedule. `release_vram_charge` runs immediately
+after, so **`vram_committed_mb` returns to zero while the card is still holding
+the evicted model's memory.**
+
+Any admission decision landing in that window sees a budget that looks free and
+is not. `admit_to_gpu` passes, the worker starts, and it dies with
+`CUDA_ERROR_OUT_OF_MEMORY` on a card that genuinely had no room — which is
+precisely the failure admission control exists to prevent, and precisely what a
+tester reported: an OOM at `index_pos=0` that "landed exactly when auto-manage
+was mid-eviction of a different model".
+
+The new `DIAG: admitting model to GPU` line makes this visible for the first
+time: a `committed_mb=0` immediately after an eviction, with the card still
+occupied, is the signature.
+
+**Fix sketch (not attempted).** Release the charge when the child has actually
+exited, not when it was asked to. `WorkerHandle`'s `Drop` kills the child; the
+charge should be released after a `wait()` on it, or the eviction path should
+await the child's exit before returning. Two cautions:
+
+1. Do not simply block the eviction path on process teardown — eviction runs
+   from auto-manage and from the request path, and a slow teardown would stall
+   whichever triggered it.
+2. Releasing too late is safer than too early but not free: the budget stays
+   spent, so a legitimate load is refused and lands on the CPU. Prefer waiting
+   with a bounded timeout and releasing anyway on expiry.
+
+### Related: the two numbers a report should compare are not directly comparable
+
+`estimated_mb` is the **worst-case steady state** — it includes the KV cache
+sized for the full context. `vram_after_load_mb` is measured **at load time**,
+before the KV cache is populated. Observed on an RTX 3070: phi-3.5-mini
+estimated at 5863 MB, `vram_after_load_mb=2579`. That 2.3x gap is NOT evidence
+of a bad estimate; the two measure different moments.
+
+Comparing them therefore answers "was the estimate too low" only in one
+direction: an actual figure ABOVE the estimate is definitely an under-estimate,
+while an actual figure below it proves nothing on its own. Anyone asked to send
+both numbers should be told this, or they will report a large overestimate that
+is not one.
