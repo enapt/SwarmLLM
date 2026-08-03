@@ -680,10 +680,16 @@ pub async fn model_metadata(
     let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
 
     if !header_path.exists() {
-        return Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "No GGUF header found for model '{}'",
-            model_id
-        ))));
+        // 404, not 400. The request was well-formed; the model's header simply
+        // is not on this node — either it was never downloaded or the id does
+        // not exist. `Validation` is reserved for bad input, and answering 400
+        // told a client its request was malformed when it was not.
+        return Err(ApiError(crate::error::SwarmError::ModelNotAvailable(
+            crate::types::ModelId(format!(
+                "No local metadata for model '{model_id}' — its GGUF header has not been \
+                 downloaded to this node"
+            )),
+        )));
     }
 
     let hp = header_path.clone();
