@@ -5310,3 +5310,44 @@ router silently not being the router is worth one line per assembly.
 holding shards 1..8, `pipeline-plan` for the 8B model returned **0 segments** —
 assembly failing outright, not merely choosing badly. Worth reproducing before
 concluding anything about the sink condition.
+
+## The LAN peer is not a routing candidate although it holds the shards (2026-08-03)
+
+**Status: NARROWED, not fixed. Do not act on a hypothesis without the check
+named at the bottom — this item has already produced several wrong guesses.**
+
+The local node routes an 8B request whole to a distant unmeasured peer rather
+than splitting with a LAN peer 4 ms away that holds shards 1..8. Captured
+candidates (debug log, `Pipeline candidate`):
+
+```
+node=225e6fe7 (local)    ranges=[(0, 10)]  can_be_first=true  can_be_last=false
+node=7c10ea04 (Belgium)  ranges=[(0, 32)]  can_be_first=true  can_be_last=true
+```
+
+The LAN peer is absent. The router is choosing correctly from a wrong set.
+
+**Established:**
+- NOT a post-restart transient: still absent at 26 minutes uptime.
+- Its announces ARE received: `Received shard announce from peer
+  node_id=9684263580c6660f shards=13`, roughly every 5 minutes. 13 matches its
+  holdings (8 of the 8B + 5 others).
+- NOT my disk-reconciliation change: zero `Shard file is gone from disk` on that
+  node over six hours.
+- NOT the `encrypted_pipeline` sink clause: that model reports
+  `encrypted_pipeline: false`.
+- The ingest path reads correctly — records holders, then retains only announced
+  shards for models declared complete.
+- `gather_candidates` filters only on blacklist and reachability, and the peer is
+  connected.
+
+**Explicitly NOT established.** I took "no `shard_announced` activity events from
+that peer" as evidence nothing was recorded. That is weak: the activity list is a
+bounded ring buffer and the busier peer's entries may simply have displaced them.
+Do not build on it.
+
+**The one check that settles it**, and the place to start: after ingest, log
+`models_announced` for that peer, or add an endpoint exposing
+`shard_holders(shard_id)`. That answers whether the holders are recorded and
+splits the search cleanly in two — ingest, or candidate gathering. Everything
+above is elimination; this is the measurement.
