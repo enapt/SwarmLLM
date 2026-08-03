@@ -221,10 +221,16 @@ paired with elapsed silence (~10 min → ~2); diagnostics reporting the RUNTIME
 auto-manage value; a non-lossy `DIAG: shard announce ingested` line.
 
 **REVERTED, and read `.claude/rules/diagnosis.md` before retrying it:**
-headroom-aware routing. It never routed away (verified 3x) and rests on an
-estimator **2.3x pessimistic** (phi-3.5 `estimated_mb=5863` vs measured
-`vram_after_load_mb=2579`). **Fix the estimator before revisiting routing** —
-both figures are now logged side by side. `would_fit_on_gpu` was kept.
+headroom-aware routing. It never routed away (verified 3x). `would_fit_on_gpu`
+was kept. **The "estimator is 2.3x pessimistic" reason given here previously was
+WRONG and is corrected in `docs/FUTURE_WORK.md`** — `estimated_mb=5863` is
+steady state, `vram_after_load_mb=2579` is sampled before candle allocates the
+KV cache, and comparing them is invalid. Re-measured live: 1737→7316 MiB across
+one phi-3.5 request = 5579 MB actual vs 5863 estimated, **5.1% high, erring
+safe**, and already pinned by `matches_measured_steady_state_on_phi35`. **Do not
+calibrate the estimator down** — it would under-charge by ~3.3 GB and bring back
+the OOM v0.3.66 fixed. The real precondition for a retry is why a priced
+distributed assignment still returns `route=local`.
 
 **Open, and correctly framed:** the scheduler assigns a whole model to ONE
 full-coverage remote peer rather than splitting local+LAN when both are

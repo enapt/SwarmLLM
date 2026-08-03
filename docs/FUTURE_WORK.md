@@ -5058,18 +5058,44 @@ whether it reproduced without the change afterwards. Re-running first would have
 cost one command. A failure appearing after a change is not evidence the change
 caused it, particularly on a node whose shard holdings move on their own.
 
-**Why it fired when it should not have.** The trigger is
-`would_fit_on_gpu == Some(false)`, which uses `estimate_worker_vram_mb`. That
-estimate is heavily pessimistic: phi-3.5 was admitted at **`estimated_mb=5863`
-against a measured `vram_after_load_mb=2579`** — 2.3x high. A budget of 6553 MB
-was therefore "full" after one 2.5 GB model, so `out_of_room` was true almost
-always on a node doing anything at all.
+**CORRECTION 2026-08-03 (second one) — the estimator is NOT pessimistic, and
+"fix the estimator first" was the wrong precondition.** This entry previously
+claimed `estimate_worker_vram_mb` was 2.3x high, citing phi-3.5 admitted at
+`estimated_mb=5863` against a measured `vram_after_load_mb=2579`. **Those two
+numbers do not measure the same thing and must never be compared.**
+`vram_after_load_mb` is sampled the instant loading finishes, and candle
+allocates the KV cache lazily on the *first append* — i.e. during the first
+forward, after that sample. Both ends of that comparison already carry a comment
+saying so (`model/auto_manage/vram.rs` on `CUDA_PROCESS_OVERHEAD_BYTES`, and
+`inference/model_worker.rs` where the figure is sampled). I read the gap without
+reading either.
 
-**This is the precondition for any retry.** Routing on a 2.3x-pessimistic
-estimate cannot work, whatever the routing logic does with it. Fix the estimator
-first — the gap is knowable, since both numbers are now logged side by side
-(`DIAG: admitting model to GPU` vs the worker's `vram_after_load_mb`) — and only
-then revisit routing.
+Re-measured live on the RTX 3070, sampling whole-device VRAM across one phi-3.5
+request: **1737 MiB idle → 7316 MiB steady state = 5579 MB actually consumed,
+against an estimate of 5863 MB — 5.1% high, in the safe direction.** The unit
+test `matches_measured_steady_state_on_phi35` already pinned this at +0.2%
+against the f16-adjusted steady state; it was passing the whole time.
+
+**So the gate was telling the truth.** An 8 GB card with a 6553 MB budget
+genuinely is nearly full after one phi-3.5 q4 — 2.3 GB of weights plus a
+~3 GB KV cache at 4096 tokens is real memory, not an estimator artefact.
+`out_of_room` being true on a node already running a model is the correct
+answer, and the frequency that looked like a bug is the actual hardware
+situation this feature was requested for.
+
+**Do not "fix" the estimator down.** Calibrating it to the load-time sample
+would make it under-estimate by ~3.3 GB and reintroduce the hard
+`CUDA_ERROR_OUT_OF_MEMORY` it was written to prevent (and which v0.3.66 spent a
+release fixing another instance of). If a future round wants to reduce
+over-charging, the only honest lever is the KV term — `effective_context` is
+capped at 4096 but a short request never touches it, so sizing admission to the
+*request* rather than the cap is the real headroom, and that is a different and
+much larger change.
+
+**The actual precondition for retrying** is unchanged from rounds 1-3 below:
+find out why a correctly-priced distributed assignment still comes back
+`route=local`. Start with the third bullet below (is it merely *labelled*
+local?) — that is cheap and would mean the feature already works.
 
 **Also still unexplained, and worth knowing before retrying:** with the penalty
 in place on BOTH routers, a constrained node still reported `route=local` for a
@@ -5224,8 +5250,21 @@ await the child's exit before returning. Two cautions:
 `estimated_mb` is the **worst-case steady state** — it includes the KV cache
 sized for the full context. `vram_after_load_mb` is measured **at load time**,
 before the KV cache is populated. Observed on an RTX 3070: phi-3.5-mini
-estimated at 5863 MB, `vram_after_load_mb=2579`. That 2.3x gap is NOT evidence
+estimated at 5863 MB, `vram_after_load_mb=2579`. That gap is NOT evidence
 of a bad estimate; the two measure different moments.
+
+**Settled by measurement, 2026-08-03.** Sampling whole-device VRAM across one
+phi-3.5 request on the same card: 1737 MiB idle → **7316 MiB steady state**, so
+the model really consumes 5579 MB against the 5863 MB estimate — **5.1% high, in
+the safe direction**. The load-time sample was 2581 MB in the same run; the
+~3 GB difference is the KV cache, allocated on the first append.
+
+This section was already here and correct when a later round nonetheless
+concluded from the same two numbers that the estimator was "2.3x pessimistic",
+reverted a feature partly on that basis, and recorded "fix the estimator first"
+as the precondition for retrying it. **A correct note is not protection if the
+wrong conclusion is written somewhere more prominent.** If you are about to
+report an over-estimate, re-read this paragraph first.
 
 Comparing them therefore answers "was the estimate too low" only in one
 direction: an actual figure ABOVE the estimate is definitely an under-estimate,
