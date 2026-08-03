@@ -5313,8 +5313,42 @@ concluding anything about the sink condition.
 
 ## The LAN peer is not a routing candidate although it holds the shards (2026-08-03)
 
-**Status: NARROWED, not fixed. Do not act on a hypothesis without the check
-named at the bottom — this item has already produced several wrong guesses.**
+**Status: RESOLVED as stated, and REFRAMED. The announce path is fine.** The
+measurement named at the bottom of the original entry was taken and answered it.
+
+**What the measurement showed.** A new `DIAG: shard announce ingested` line
+(non-lossy, unlike the activity ring buffer that misled the first pass) records
+exactly what each announce contributed:
+
+```
+DIAG: shard announce ingested node_id=9684263580c6660f shards_in_announce=13
+  models={"meta-llama-3.1-8b-instruct-q4-k-m": 8, "phi-3.5-mini-instruct.q4-k-m": 1,
+          "llama-3.2-3b-instruct-q4-k-m": 1, "llama-3.2-1b-instruct-q8-0": 3}
+```
+
+The LAN peer's 8 shards of the 8B model ARE ingested and recorded. And it DOES
+appear as a candidate:
+
+```
+node=225e6fe7 (local)  ranges=[(0, 10)]  can_be_first=true   can_be_last=false
+node=96842635 (LAN)    ranges=[(2, 32)]  can_be_first=false  can_be_last=true
+```
+
+So the earlier observation that it was absent was a transient registry state, not
+a defect in ingest or candidate gathering. **Nothing to fix here.**
+
+**What is actually left, and it is a preference not a bug.** With that split
+available, the scheduler still assigns the whole model to a single remote peer
+with full coverage rather than splitting local+LAN. On the run that produced
+this finding it SUCCEEDED — 54s, `outcome=ok` — where the same shape had
+previously failed at 308s. So the standing question is whether one remote hop
+should be preferred over a two-segment local+LAN chain, which is a cost-model
+judgement (fewer hops vs. nearer, more reliable peers), not a correctness bug.
+
+Anyone revisiting it should start from that framing and measure both options on
+the same request, rather than treating single-segment-remote as wrong on sight.
+The original entry below is retained because its elimination steps are still
+valid; its conclusion is not.
 
 The local node routes an 8B request whole to a distant unmeasured peer rather
 than splitting with a LAN peer 4 ms away that holds shards 1..8. Captured

@@ -800,6 +800,20 @@ pub(crate) async fn dispatch_network_messages(
                                                 );
                                             }
                                         }
+                                        // Structured record of what was actually ingested.
+                                        // The activity events below are a bounded ring buffer, so
+                                        // a busy peer's entries displace a quiet one's — which made
+                                        // "this peer never announced model X" indistinguishable
+                                        // from "its entry scrolled off" while investigating a peer
+                                        // that held the shards but never became a routing
+                                        // candidate. This line is per-announce and does not scroll.
+                                        tracing::debug!(
+                                            node_id = %announce.node_id,
+                                            shards_in_announce = announce.shards.len(),
+                                            models = ?models_announced,
+                                            complete_for = ?announce.complete_for_models.len(),
+                                            "DIAG: shard announce ingested"
+                                        );
                                         // Emit activity for each model announced
                                         let peer_label = crate::identity::nickname::short_display_name(
                                             &announce.node_id,
