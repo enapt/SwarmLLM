@@ -243,6 +243,17 @@ pub struct SharedState {
     /// aborted so the worker stops streaming tokens nobody will receive. Cleared
     /// when the decode finishes naturally.
     pub inbound_generate_aborts: DashMap<uuid::Uuid, (tokio::task::AbortHandle, Vec<u8>)>,
+    /// Abort handles for inbound SEGMENT FORWARDS we are computing for a
+    /// coordinator, keyed by request id, with the coordinator's peer bytes.
+    ///
+    /// The sibling of `inbound_generate_aborts`, and missing until 2026-08-03.
+    /// `CancelInference` was wired only to remote-generate, so when a
+    /// coordinator gave up on a segment and told us to stop, the handler found
+    /// nothing and logged "no in-flight decode for request" — we carried on to
+    /// the end and everything else queued behind work whose answer would be
+    /// discarded. Reported as a node left unusable for several minutes, with a
+    /// short request sent during that window failing for no reason of its own.
+    pub inbound_forward_aborts: DashMap<uuid::Uuid, (tokio::task::AbortHandle, Vec<u8>)>,
     /// Per-cancel-token cancel signals. The HTTP entry for `chat_completions`
     /// looks up an `Arc<AtomicBool>` by token (passed via the
     /// `x-swarmllm-cancel-token` header) and attaches it to the
@@ -569,6 +580,7 @@ impl SharedState {
             model_registry,
             active_pipelines: DashMap::new(),
             inbound_generate_aborts: DashMap::new(),
+            inbound_forward_aborts: DashMap::new(),
             cancel_signals: DashMap::new(),
             metrics: MetricsProviders {
                 node_stats: RwLock::new(NodeStats::default()),

@@ -299,6 +299,62 @@ pub(crate) fn layer_range_is_valid(start: usize, end: usize, total: usize) -> bo
 }
 
 #[cfg(test)]
+mod forward_cancellation_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Aborting a spawned forward must actually stop the work, not merely drop
+    /// the caller's interest in it. This is the property the whole change rests
+    /// on: `CancelInference` looks up an abort handle and fires it, and if the
+    /// task carried on regardless the peer would still be monopolised by work
+    /// nobody will read.
+    #[tokio::test]
+    async fn aborting_a_forward_task_stops_it_running() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let handle = tokio::spawn(async move {
+            // Stand in for a long prefill.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            flag.store(true, Ordering::Release);
+        });
+
+        let abort = handle.abort_handle();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        abort.abort();
+        let _ = handle.await;
+
+        assert!(
+            !finished.load(Ordering::Acquire),
+            "an abandoned forward must not run to completion"
+        );
+    }
+
+    /// The registry is keyed by request id, so a cancel for one request must not
+    /// stop a different one running concurrently for the same peer.
+    #[tokio::test]
+    async fn cancelling_one_forward_leaves_another_alone() {
+        let survivor_done = Arc::new(AtomicBool::new(false));
+        let flag = survivor_done.clone();
+        let survivor = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            flag.store(true, Ordering::Release);
+        });
+        let doomed = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
+        doomed.abort_handle().abort();
+        let _ = doomed.await;
+        let _ = survivor.await;
+
+        assert!(
+            survivor_done.load(Ordering::Acquire),
+            "an unrelated forward must keep running"
+        );
+    }
+}
+
+#[cfg(test)]
 mod layer_range_tests {
     use super::layer_range_is_valid;
 

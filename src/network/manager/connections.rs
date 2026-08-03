@@ -244,6 +244,28 @@ impl NetworkManager {
                     );
                 }
             }
+            // Same reasoning for segment forwards: with the coordinator gone
+            // there is nowhere to send the computed activations, so finishing
+            // one only burns the worker on output nobody can receive — and
+            // holds up every other request queued behind it.
+            let orphaned_forwards: Vec<uuid::Uuid> = self
+                .shared_state
+                .inbound_forward_aborts
+                .iter()
+                .filter(|e| e.value().1 == peer_bytes)
+                .map(|e| *e.key())
+                .collect();
+            for rid in orphaned_forwards {
+                if let Some((_, (abort, _))) = self.shared_state.inbound_forward_aborts.remove(&rid)
+                {
+                    abort.abort();
+                    tracing::info!(
+                        request_id = %rid,
+                        %peer_id,
+                        "Coordinator disconnected — abandoning inbound segment forward (no route to return it)"
+                    );
+                }
+            }
         }
         // Check if any in-flight tensor forwards are affected
         let affected_tensors: Vec<_> = self

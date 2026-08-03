@@ -4682,9 +4682,24 @@ Do NOT "fix" this by reverting the estimator to 4 bytes/element: that would
 re-refuse exactly the large-vocabulary models on modest GPUs that this release
 set out to make work, and the GPU path has no spike at all.
 
-## An abandoned segment keeps running on the peer, blocking everyone (2026-08-02)
+## An abandoned segment keeps running on the peer, blocking everyone (2026-08-02) — FIXED
 
-**Status: CONFIRMED on two machines, v0.3.62-alpha. Not fixed. Well specified.**
+**Status: FIXED 2026-08-03, both halves.** The coordinator sends
+`CancelInference` when it abandons a segment (v0.3.63), and the peer now acts on
+it: `inbound_forward_aborts` registers each spawned forward's abort handle, the
+`CancelInference` handler fires it, and aborting drops the future — which drops
+the worker's `ResponseGuard` and cancels the compute (R147).
+
+Same treatment on disconnect: a coordinator that vanished cannot receive the
+activations either, so `handle_connection_closed` abandons its in-flight
+forwards alongside the remote-generates it already abandoned.
+
+Note the handler previously logged "no in-flight decode for request" and moved
+on — the message was accurate about remote-generate and completely misleading
+about what was actually happening, which is why this looked wired up when it was
+not.
+
+Original entry:
 
 When the coordinator gives up on a remote segment — timeout, then failover —
 **the peer is never told**. It keeps computing the abandoned prefill to

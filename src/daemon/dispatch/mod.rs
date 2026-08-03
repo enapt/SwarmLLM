@@ -366,9 +366,20 @@ pub(crate) async fn dispatch_network_messages(
                                         let ntx = network_tx.clone();
                                         let pfc = peer_forward_counts.clone();
                                         let ps = peer_sender;
-                                        tokio::spawn(async move {
+                                        let forward_request_id = forward.request_id;
+                                        let abort_registry = shared_state.clone();
+                                        // The forward carries the authenticated sender's peer bytes
+                                        // (set on the decrypt path), which is what the
+                                        // disconnect sweep matches on.
+                                        let coordinator_bytes =
+                                            forward.sender_peer_bytes.clone().unwrap_or_default();
+                                        let handle = tokio::spawn(async move {
                                             let _permit = permit;
-                                            layer_forward::handle_layer_forward(ss, ntx, forward).await;
+                                            layer_forward::handle_layer_forward(ss.clone(), ntx, forward).await;
+                                            // Whether it finished or was abandoned, this request is no
+                                            // longer in flight — drop the abort handle so the map does
+                                            // not accumulate one entry per forward ever received.
+                                            ss.inbound_forward_aborts.remove(&forward_request_id);
                                             // Decrement per-peer count; remove entry if zero to prevent unbounded growth
                                             if let Some(c) = pfc.get(&ps) {
                                                 let prev = c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -378,6 +389,13 @@ pub(crate) async fn dispatch_network_messages(
                                                 }
                                             }
                                         });
+                                        // Registered AFTER the spawn, like the remote-generate path:
+                                        // a `CancelInference` naming this request can now actually stop
+                                        // it. Aborting drops the future, which drops the worker's
+                                        // ResponseGuard and cancels the compute (R147).
+                                        abort_registry
+                                            .inbound_forward_aborts
+                                            .insert(forward_request_id, (handle.abort_handle(), coordinator_bytes));
                                     }
                                     // StreamingToken: route to registered streaming channel
                                     SwarmMessage::StreamingToken(ref token) => {
@@ -2079,6 +2097,7 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated CancelInference");
                                             continue;
                                         }
+                                        let mut aborted_something = false;
                                         if let Some((_, (abort, _))) = shared_state
                                             .inbound_generate_aborts
                                             .remove(&cancel.request_id)
@@ -2089,10 +2108,30 @@ pub(crate) async fn dispatch_network_messages(
                                                 "CancelInference: aborting inbound remote-generate"
                                             );
                                             abort.abort();
-                                        } else {
+                                            aborted_something = true;
+                                        }
+                                        // The segment-forward sibling. Until this existed, a
+                                        // coordinator that had given up on a segment told us so and
+                                        // we ignored it: the handler found no remote-generate,
+                                        // logged "no in-flight decode", and we computed the whole
+                                        // abandoned prefill anyway while every other request queued
+                                        // behind it.
+                                        if let Some((_, (abort, _))) = shared_state
+                                            .inbound_forward_aborts
+                                            .remove(&cancel.request_id)
+                                        {
+                                            tracing::info!(
+                                                request_id = %cancel.request_id,
+                                                sender = ?authenticated_sender,
+                                                "CancelInference: abandoning inbound segment forward"
+                                            );
+                                            abort.abort();
+                                            aborted_something = true;
+                                        }
+                                        if !aborted_something {
                                             tracing::debug!(
                                                 request_id = %cancel.request_id,
-                                                "CancelInference: no in-flight decode for request"
+                                                "CancelInference: nothing in flight for request"
                                             );
                                         }
                                         // Also reach the worker directly. Two
