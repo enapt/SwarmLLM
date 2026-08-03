@@ -4887,7 +4887,9 @@ announce cycle, but the user still cannot cleanly do a thing the software does
 support. A `swarmllm remove-model <id>` wrapping the existing endpoint is small
 and would remove the reason anyone reaches for `rm -rf`.
 
-**2. A model whose files are gone answers 500, not 404.** Reported verbatim:
+**2. A model whose files are gone answers 500, not 404.** — **FIXED 2026-08-03**
+in `classify_worker_error`, which now recovers a flattened `ModelNotAvailable`
+the same way it already recovered `Validation`. Original report:
 
 ```
 HTTP 500 {"error":{"code":"server_error",
@@ -4962,10 +4964,15 @@ admission would actually refuse, not whenever memory looks tight.
   headroom-routing item above rather than a separate feature, and it is the
   clearest short description of what resource-aware routing would buy.
 
-## The GPU budget is freed before the memory is (2026-08-03)
+## The GPU budget is freed before the memory is (2026-08-03) — FIXED
 
-**Status: MECHANISM IDENTIFIED, not fixed. Matches a tester's "eviction race"
-hypothesis exactly; found within minutes of the v0.3.65 diagnostic shipping.**
+**Status: FIXED 2026-08-03.** An eviction now waits (bounded, 5s) for the
+subprocess to actually be reaped before handing its budget back, and says so in
+the log if the wait expires. `WorkerHandle` carries an `exited` flag set by a
+reaper task, because `Drop` cannot await. Kept below for the reasoning.
+
+Original entry — mechanism identified from a tester's "eviction race"
+hypothesis, within minutes of the v0.3.65 diagnostic shipping:
 
 `ModelProcessPool` evicting a worker does this (`process_pool.rs` ~2659):
 

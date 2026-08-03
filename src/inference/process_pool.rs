@@ -111,7 +111,21 @@ static RESPONSE_ATTEMPT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic:
 /// full-request mutex.
 struct WorkerHandle {
     /// The worker subprocess.
-    child: Child,
+    ///
+    /// `Option` so `Drop` can move it into a reaper task. Killing a process and
+    /// the OS reclaiming its device memory are separate events, and the budget
+    /// must not be handed back between them — see `exited`.
+    child: Option<Child>,
+    /// Set once the subprocess has actually been reaped, not merely signalled.
+    ///
+    /// `Child::start_kill` sends the signal and returns; the kernel tears the
+    /// process down and frees its CUDA allocations afterwards. Releasing the
+    /// VRAM charge on the signal made `vram_committed_mb` report zero while the
+    /// card was still full, so an admission landing in that window passed
+    /// against memory that did not exist and the new worker died with
+    /// `CUDA_ERROR_OUT_OF_MEMORY`. Reported as an out-of-memory crash that
+    /// "landed exactly when auto-manage was mid-eviction of a different model".
+    exited: Arc<AtomicBool>,
     /// Write half of the IPC socket. Brief lock held only for the duration of
     /// one outbound framed message (header + optional binary payload).
     writer: Mutex<IpcWriter>,
@@ -403,12 +417,43 @@ async fn dispatch_batch_result(
     }
 }
 
+/// How long an eviction waits for the subprocess to actually be reaped before
+/// handing its memory budget back.
+///
+/// Bounds the wait on what varies — process teardown, which is fast (the
+/// kernel is freeing already-allocated pages, not doing work proportional to
+/// the model) but not instant. Long enough that the normal case always
+/// completes inside it; short enough that a wedged process cannot stall an
+/// eviction triggered from the request path.
+const WORKER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Poll interval while waiting for a worker to be reaped.
+const WORKER_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
         // Stop the reader actor so it doesn't outlive the socket.
         self.reader_handle.abort();
-        // Kill the child process if still running
-        let _ = self.child.start_kill();
+        // Kill the child process if still running, then reap it in the
+        // background and publish the fact. `start_kill` only signals; whoever
+        // is waiting to reuse this worker's memory needs to know when the
+        // process is actually gone, which is when the OS has taken its device
+        // allocations back.
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+            let exited = self.exited.clone();
+            // No runtime in some unit tests; there the flag simply stays false
+            // and the waiter falls through on its timeout, which is the same
+            // conservative outcome as before this existed.
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    let _ = child.wait().await;
+                    exited.store(true, Ordering::Release);
+                });
+            } else {
+                self.exited.store(true, Ordering::Release);
+            }
+        }
         // Clean up the socket file (Unix only — Windows named pipes are
         // reclaimed by the kernel when all handles close).
         #[cfg(unix)]
@@ -1260,6 +1305,24 @@ impl ModelProcessPool {
         false
     }
 
+    /// Wait for a killed worker to actually be reaped, up to `limit`.
+    ///
+    /// Returns `true` if the process is confirmed gone. `false` means the wait
+    /// expired — the caller must decide, and today it frees the budget anyway
+    /// rather than strand the device forever on one stuck process.
+    async fn await_worker_exit(exited: &Arc<AtomicBool>, limit: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if exited.load(Ordering::Acquire) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(WORKER_EXIT_POLL).await;
+        }
+    }
+
     /// Release a worker's charge. Must pair with every `admit_to_gpu`.
     fn release_vram_charge(&self, model_id: &ModelId) {
         self.vram_reserved_mb.remove(model_id);
@@ -1924,7 +1987,8 @@ impl ModelProcessPool {
             self.progress_tx.get().cloned(),
         ));
         Ok(WorkerHandle {
-            child,
+            child: Some(child),
+            exited: Arc::new(AtomicBool::new(false)),
             writer: Mutex::new(write_half),
             responses,
             dead,
@@ -2615,6 +2679,18 @@ impl ModelProcessPool {
         if let Some(detail) = validation_detail(&message) {
             return SwarmError::Validation(detail);
         }
+        // Same flattening, same remedy, one variant over. A model whose files
+        // have gone reaches here as the text of a `ModelNotAvailable`, falls
+        // through to `Inference`, and is served as HTTP 500 `server_error` —
+        // telling the operator to look for a bug in the server when the actual
+        // cause is a missing file, and telling any retry-on-5xx client to keep
+        // re-sending a request that cannot succeed until the file comes back.
+        // The documented contract maps this to 404
+        // (`.claude/rules/completeness.md` § Error type discipline). Reported
+        // 2026-08-02 alongside a model deleted from disk.
+        if let Some(model) = model_unavailable_detail(&message) {
+            return SwarmError::ModelNotAvailable(crate::types::ModelId(model));
+        }
         SwarmError::Inference(message)
     }
 
@@ -2656,8 +2732,26 @@ impl ModelProcessPool {
             if let Ok(mut writer) = handle.writer.try_lock() {
                 let _ = send_daemon(&mut *writer, &DaemonMsg::Shutdown, &[]).await;
             }
-            // Drop handle → aborts reader, kills child process → OS frees all CUDA memory
+            // Dropping the handle signals the child; it does NOT wait for the
+            // OS to reclaim its device memory. Hold the budget until the
+            // process is genuinely gone, or the next admission decides against
+            // memory that is still occupied and its worker dies with
+            // CUDA_ERROR_OUT_OF_MEMORY — the exact failure admission exists to
+            // prevent.
+            let exited = handle.exited.clone();
             drop(handle);
+            let freed_cleanly = Self::await_worker_exit(&exited, WORKER_EXIT_WAIT).await;
+            if !freed_cleanly {
+                // Release anyway. Holding a charge forever for a process that
+                // will not die would refuse every later load on this device,
+                // which is a worse failure than the race being closed here.
+                tracing::warn!(
+                    model_id = %model_id,
+                    waited_ms = WORKER_EXIT_WAIT.as_millis(),
+                    "Worker did not exit in time — freeing its memory budget anyway; \
+                     a load starting now could still find the device occupied"
+                );
+            }
             self.release_vram_charge(model_id);
             // The process is gone, so it holds neither device's memory. A CPU
             // worker never had a VRAM charge and vice versa; releasing both is
@@ -3031,6 +3125,24 @@ mod tests {
 /// (`"prefill forward: Validation error: <detail>"`). Taking the text after the
 /// LAST marker drops that plumbing, which the caller can neither act on nor
 /// understand, and keeps the part that tells them what to change.
+/// Recover a `ModelNotAvailable` that was flattened to text crossing the worker
+/// IPC boundary, mirroring [`validation_detail`].
+///
+/// The worker's message carries the `Display` form, `"Model not available: {id}"`,
+/// often behind a prefix from whichever stage wrapped it. `rfind` takes the
+/// innermost marker so a message that has been wrapped more than once still
+/// yields the original id rather than a fragment of an outer wrapper.
+fn model_unavailable_detail(message: &str) -> Option<String> {
+    const MARKER: &str = "Model not available: ";
+    let idx = message.rfind(MARKER)?;
+    let detail = message[idx + MARKER.len()..].trim();
+    if detail.is_empty() {
+        None
+    } else {
+        Some(detail.to_string())
+    }
+}
+
 fn validation_detail(message: &str) -> Option<String> {
     const MARKER: &str = "Validation error: ";
     let idx = message.rfind(MARKER)?;
@@ -3044,7 +3156,37 @@ fn validation_detail(message: &str) -> Option<String> {
 
 #[cfg(test)]
 mod validation_detail_tests {
-    use super::validation_detail;
+    use super::{model_unavailable_detail, validation_detail};
+
+    /// A model whose files are gone must reach the caller as 404, not 500.
+    /// Reported with a real trace: the message plainly said "Model not
+    /// available" and the client still got `server_error`.
+    #[test]
+    fn a_missing_model_is_recovered_from_a_flattened_message() {
+        let msg = "Inference error: Model not available: Manifest not found: \
+                   /home/u/.local/share/swarmllm/models/qwen2.5-0.5b/manifest.json";
+        let got = model_unavailable_detail(msg).expect("should be recognised");
+        assert!(got.starts_with("Manifest not found:"));
+    }
+
+    /// Doubly-wrapped messages happen (worker → pipeline → router). Take the
+    /// innermost marker so the id survives rather than a wrapper fragment.
+    #[test]
+    fn the_innermost_marker_wins() {
+        let msg = "Worker: Model not available: outer: Model not available: real-model-id";
+        assert_eq!(
+            model_unavailable_detail(msg).as_deref(),
+            Some("real-model-id")
+        );
+    }
+
+    /// An ordinary inference failure must NOT be reclassified as a missing
+    /// model — that would turn a real server fault into a 404 and hide it.
+    #[test]
+    fn an_unrelated_failure_is_left_alone() {
+        assert!(model_unavailable_detail("CUDA out of memory").is_none());
+        assert!(model_unavailable_detail("Model not available: ").is_none());
+    }
 
     /// The case this exists for: an over-long prompt must reach the user as
     /// their problem, with the sentence that says how to fix it intact.
@@ -3147,6 +3289,55 @@ mod admission_tests {
         p.release_vram_charge(&a);
         assert_eq!(p.vram_committed_mb(), 0);
         assert!(p.admit_to_gpu(&ModelId("b".into()), 2000));
+    }
+
+    /// The budget must not come back before the memory does.
+    ///
+    /// `Child::start_kill` only signals; the OS frees the process's device
+    /// allocations afterwards. Releasing the charge on the signal made the
+    /// budget read as free while the card was still full, so the next admission
+    /// passed against memory that did not exist and its worker died with
+    /// CUDA_ERROR_OUT_OF_MEMORY.
+    #[tokio::test]
+    async fn waiting_for_exit_returns_as_soon_as_the_process_is_reaped() {
+        let exited = Arc::new(AtomicBool::new(false));
+        let flag = exited.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            flag.store(true, Ordering::Release);
+        });
+
+        let started = std::time::Instant::now();
+        let confirmed =
+            ModelProcessPool::await_worker_exit(&exited, std::time::Duration::from_secs(5)).await;
+
+        assert!(confirmed, "must report the process confirmed gone");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "must return when the process exits, not sit out the whole limit"
+        );
+    }
+
+    /// A process that never dies must not strand the device forever. The wait
+    /// expires and says so, and the caller frees the budget anyway — a worse
+    /// outcome than the race, but better than refusing every later load.
+    #[tokio::test]
+    async fn waiting_for_exit_gives_up_rather_than_stranding_the_device() {
+        let never = Arc::new(AtomicBool::new(false));
+        let confirmed =
+            ModelProcessPool::await_worker_exit(&never, std::time::Duration::from_millis(60)).await;
+        assert!(!confirmed, "an expired wait must be reported, not hidden");
+    }
+
+    /// An already-reaped worker costs nothing to wait for.
+    #[tokio::test]
+    async fn waiting_for_an_already_exited_worker_is_immediate() {
+        let done = Arc::new(AtomicBool::new(true));
+        let started = std::time::Instant::now();
+        assert!(
+            ModelProcessPool::await_worker_exit(&done, std::time::Duration::from_secs(5)).await
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
     }
 
     /// An unreadable header yields a 0 estimate, which must NOT be read as "it
