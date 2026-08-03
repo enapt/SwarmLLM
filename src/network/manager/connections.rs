@@ -15,6 +15,7 @@ use super::{
     NetworkManager, MAX_CONNECTION_ADDRS, MAX_CONSECUTIVE_RR_FAILURES, MAX_PEER_REMOTE_ADDRS,
     MAX_PENDING_REDIAL, MAX_PING_ENTRIES, MAX_REDIAL_ATTEMPTS, MAX_REDIAL_TRACKED_PEERS,
     PING_SENT_TIMES_CUTOFF_SECS, REDIAL_BACKOFF_MS, REDIAL_JITTER_MIN_MS, REDIAL_JITTER_RANGE_MS,
+    RR_FAILURES_AFTER_SILENCE, RR_SILENCE_BEFORE_SHORT_RUN_COUNTS,
 };
 
 /// Addresses to attempt when re-dialling a peer whose last connection just
@@ -50,6 +51,25 @@ fn redial_addresses(
         }
     }
     out
+}
+
+/// Should a peer with this failure run, silent for this long, be disconnected?
+///
+/// Two ways in, because the two signals fail differently. A long run alone
+/// (`MAX_CONSECUTIVE_RR_FAILURES`) catches a peer that answers occasionally but
+/// mostly does not. A shorter run plus sustained silence
+/// (`RR_FAILURES_AFTER_SILENCE` after `RR_SILENCE_BEFORE_SHORT_RUN_COUNTS`)
+/// catches a dead return path in about two minutes instead of ten.
+///
+/// The short path cannot be reached by a merely busy peer: any successful
+/// response resets both the run and the clock, so reaching it requires
+/// answering NOTHING for the whole window. Neither threshold may go near the
+/// anchor's measured worst healthy run of 5.
+fn should_close_unresponsive(failures: u32, silent_for: std::time::Duration) -> bool {
+    if failures >= MAX_CONSECUTIVE_RR_FAILURES {
+        return true;
+    }
+    failures >= RR_FAILURES_AFTER_SILENCE && silent_for >= RR_SILENCE_BEFORE_SHORT_RUN_COUNTS
 }
 
 /// Backoff before the next re-dial, or `None` once the peer should be treated
@@ -572,12 +592,14 @@ impl NetworkManager {
     /// connection mid-pipeline would fail a request that was about to succeed —
     /// the same exemption `check_peer_health` already makes for staleness.
     pub(super) fn note_rr_failure(&mut self, peer: libp2p::PeerId) {
-        let count = self.rr_failures.entry(peer).or_insert(0);
-        *count += 1;
-        if *count < MAX_CONSECUTIVE_RR_FAILURES {
+        let now = std::time::Instant::now();
+        let entry = self.rr_failures.entry(peer).or_insert((0, now));
+        entry.0 += 1;
+        let failures = entry.0;
+        let silent_for = now.saturating_duration_since(entry.1);
+        if !should_close_unresponsive(failures, silent_for) {
             return;
         }
-        let failures = *count;
         if let Some(node_id) = self.peer_to_node.get(&peer).map(|r| r.clone()) {
             let in_active_pipeline = self.shared_state.active_pipelines.iter().any(|entry| {
                 entry
@@ -656,6 +678,63 @@ impl NetworkManager {
 mod redial_address_tests {
     use super::{redial_addresses, redial_backoff_ms, MAX_REDIAL_ATTEMPTS};
     use libp2p::Multiaddr;
+
+    use super::{
+        should_close_unresponsive, MAX_CONSECUTIVE_RR_FAILURES, RR_FAILURES_AFTER_SILENCE,
+        RR_SILENCE_BEFORE_SHORT_RUN_COUNTS,
+    };
+    use std::time::Duration;
+
+    /// The anchor — a healthy, critical relay — was measured reaching 5
+    /// consecutive failures in normal operation. Neither route to closing may
+    /// fire anywhere near that, whatever the elapsed time.
+    #[test]
+    fn a_healthy_peers_worst_measured_run_never_closes() {
+        for secs in [0u64, 90, 600, 3600] {
+            assert!(
+                !should_close_unresponsive(5, Duration::from_secs(secs)),
+                "5 failures must never close, even after {secs}s — that is the relay's worst run"
+            );
+        }
+    }
+
+    /// A burst of failures with no elapsed silence must not close: a busy peer
+    /// fails in bursts while still answering in between, and any answer resets
+    /// both signals.
+    #[test]
+    fn a_burst_without_silence_does_not_close() {
+        assert!(!should_close_unresponsive(
+            RR_FAILURES_AFTER_SILENCE,
+            Duration::from_secs(1)
+        ));
+    }
+
+    /// The point of the change: a dead return path is caught in about two
+    /// minutes rather than ten.
+    #[test]
+    fn sustained_silence_closes_on_the_shorter_run() {
+        assert!(should_close_unresponsive(
+            RR_FAILURES_AFTER_SILENCE,
+            RR_SILENCE_BEFORE_SHORT_RUN_COUNTS
+        ));
+        assert!(
+            !should_close_unresponsive(
+                RR_FAILURES_AFTER_SILENCE - 1,
+                RR_SILENCE_BEFORE_SHORT_RUN_COUNTS
+            ),
+            "the short route still needs its own failure count"
+        );
+    }
+
+    /// The long run remains a route on its own, for a peer that answers
+    /// occasionally and so keeps resetting the clock without ever recovering.
+    #[test]
+    fn a_long_run_closes_regardless_of_elapsed_time() {
+        assert!(should_close_unresponsive(
+            MAX_CONSECUTIVE_RR_FAILURES,
+            Duration::from_secs(0)
+        ));
+    }
 
     #[test]
     fn the_retry_schedule_is_bounded_and_increasing() {

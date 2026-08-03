@@ -175,6 +175,46 @@ const MAX_REDIAL_TRACKED_PEERS: usize = 256;
 /// high just delays eviction of one that has already stopped answering.
 const MAX_CONSECUTIVE_RR_FAILURES: u32 = 20;
 
+/// A shorter failure run is enough once the peer has also been silent this long.
+///
+/// The count alone cannot be lowered: the anchor's measured worst healthy run is
+/// 5, so anything near that disconnects the relay a NAT'd node depends on. But
+/// 20 failures took roughly ten minutes to accumulate, which is a long time to
+/// keep offering work to a machine that cannot do it.
+///
+/// The two signals fail differently, which is why pairing them is safe. A busy
+/// peer produces failures in bursts while still answering *something* in
+/// between — and any success resets both the count and the clock. A peer whose
+/// return path is dead produces failures AND answers nothing at all, so it is
+/// the only one that accumulates a run while the clock runs uninterrupted.
+/// Ninety seconds matches the existing staleness window
+/// (`PING_INTERVAL` × `MAX_MISSED_PINGS`), so this does not invent a second
+/// notion of how long silence may last.
+const RR_SILENCE_BEFORE_SHORT_RUN_COUNTS: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Failure run that suffices once `RR_SILENCE_BEFORE_SHORT_RUN_COUNTS` has
+/// passed with no successful response at all.
+///
+/// Above the anchor's measured worst healthy run of 5, and reached in about two
+/// minutes rather than ten.
+const RR_FAILURES_AFTER_SILENCE: u32 = 8;
+
+/// The anchor — a healthy, critical relay — was measured reaching 5 consecutive
+/// failures during normal operation. Both thresholds must stay clear of that,
+/// or a routine bad patch disconnects the relay a NAT'd node depends on.
+///
+/// Enforced at compile time rather than by a test: these are constants, so a
+/// change that violates the invariant should fail the build immediately rather
+/// than wait for the suite.
+const _: () = assert!(
+    RR_FAILURES_AFTER_SILENCE > 5,
+    "the short-run threshold must exceed the measured healthy worst run"
+);
+const _: () = assert!(
+    MAX_CONSECUTIVE_RR_FAILURES > RR_FAILURES_AFTER_SILENCE,
+    "the long-run threshold must be the more conservative of the two"
+);
+
 /// NetworkManager owns the libp2p Swarm and is the sole interface to the P2P network.
 pub struct NetworkManager {
     shared_state: Arc<SharedState>,
@@ -283,10 +323,10 @@ pub struct NetworkManager {
     /// retry to peers we actually know rather than every failed dial target.
     /// Cleared when a connection to the peer is established.
     redial_attempts: HashMap<libp2p::PeerId, (Vec<Multiaddr>, u32)>,
-    /// Consecutive request/response failures per peer, reset by any success.
-    /// At `MAX_CONSECUTIVE_RR_FAILURES` the connection is closed so the
-    /// re-dial path can replace it. See that constant.
-    rr_failures: HashMap<libp2p::PeerId, u32>,
+    /// Consecutive request/response failures per peer, with when that peer last
+    /// answered anything. Both are reset by any success. See
+    /// `MAX_CONSECUTIVE_RR_FAILURES` and `RR_FAILURES_AFTER_SILENCE`.
+    rr_failures: HashMap<libp2p::PeerId, (u32, std::time::Instant)>,
     /// S5: Receives model IDs for DHT provider queries from scheduler/auto-manage.
     dht_query_rx: mpsc::Receiver<crate::types::ModelId>,
     /// S5: Maps Kademlia QueryId → ShardId for routing GetProviders results.

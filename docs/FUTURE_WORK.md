@@ -4790,12 +4790,18 @@ locally. With a TCP connection established and the return path then blocked
 (`tcp sport 8810 drop`), the warning fired and the connection was closed, with
 the re-dial scheduled behind it.
 
-**Latency is the trade-off.** At threshold 20 an unresponsive peer stays
-schedulable for roughly ten minutes — measured accumulation was ~5 failures in
-3 minutes. That is far better than the previous behaviour (never), but it is not
-fast. Lowering it is NOT the answer on its own; the anchor's measured worst run
-is 5. A count paired with "no success for N seconds" would be both faster and
-safer, and is the shape to reach for if ten minutes proves too slow.
+**Latency — improved 2026-08-03.** Threshold 20 alone took roughly ten minutes.
+The count could not simply be lowered (the anchor's measured worst healthy run
+is 5), so it is now paired with elapsed silence: 8 failures suffice once 90
+seconds have passed with no successful response at all, catching a dead return
+path in about two minutes. `should_close_unresponsive` is the pure predicate.
+
+The pairing is safe because the two signals fail differently. A busy peer fails
+in bursts while still answering something in between, and any success resets
+BOTH the run and the clock — so only a peer answering nothing at all can
+accumulate a run while the clock runs uninterrupted. Pinned by a test asserting
+that 5 failures never close regardless of elapsed time, and that both thresholds
+sit above the measured healthy worst case.
 
 Original entry:
 
