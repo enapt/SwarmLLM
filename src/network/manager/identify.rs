@@ -114,22 +114,31 @@ impl NetworkManager {
             if let Some(x25519_pub) =
                 crate::crypto::session::ed25519_pubkey_to_x25519(&ed_key.to_bytes())
             {
-                tracing::info!(
-                    %peer_id,
-                    node_id = %node_id,
-                    session_type = "static",
-                    "DIAG: key exchange initiated"
-                );
-                self.shared_state
+                // Identify fires constantly, and this is a no-op whenever a
+                // session already exists. Log only when something actually
+                // changed: the previous pair of INFO lines announced an
+                // establishment on every event, which reads as continuous key
+                // churn and would send anyone reading these logs after a
+                // decryption failure straight down the wrong path.
+                let installed = self
+                    .shared_state
                     .session_manager
                     .establish_session(&node_id, x25519_pub);
-                tracing::info!(
-                    %peer_id,
-                    node_id = %node_id,
-                    session_type = "static",
-                    session_count = self.shared_state.session_manager.session_count(),
-                    "DIAG: encryption session established"
-                );
+                if installed {
+                    tracing::info!(
+                        %peer_id,
+                        node_id = %node_id,
+                        session_type = "static",
+                        session_count = self.shared_state.session_manager.session_count(),
+                        "DIAG: encryption session established"
+                    );
+                } else {
+                    tracing::trace!(
+                        %peer_id,
+                        node_id = %node_id,
+                        "DIAG: session already present — Identify left it intact"
+                    );
+                }
             }
         }
 

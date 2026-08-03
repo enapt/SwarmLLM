@@ -269,7 +269,11 @@ impl SessionManager {
     /// Establish a session with a peer given their X25519 public key.
     /// Nonce reuse across re-established sessions is prevented by `remove_session()`
     /// clearing all session state on disconnect, forcing a fresh ECDH handshake.
-    pub fn establish_session(&self, peer: &NodeId, peer_x25519_pub: PublicKey) {
+    /// Returns whether a session was actually installed. `false` means one
+    /// already existed and was deliberately left alone — the caller must not
+    /// report that as an establishment, or the logs claim churn that is not
+    /// happening.
+    pub fn establish_session(&self, peer: &NodeId, peer_x25519_pub: PublicKey) -> bool {
         let shared_secret = self.local_secret.diffie_hellman(&peer_x25519_pub);
         let cipher_key = derive_cipher_key(
             shared_secret.as_bytes(),
@@ -302,10 +306,11 @@ impl SessionManager {
         // `remove_session`, after which this correctly builds a fresh one.
         if self.sessions.contains_key(peer) {
             tracing::trace!(peer = %peer, "Session already established — leaving it intact");
-            return;
+            return false;
         }
         self.install_session(peer, cipher_key);
         tracing::debug!(peer = %peer, "Established encryption session");
+        true
     }
 
     /// Initiate an ephemeral ECDH key exchange for forward secrecy.
@@ -815,10 +820,17 @@ mod tests {
         sm_a.remove_session(&node_b);
         assert!(!sm_a.has_session(&node_b));
 
-        sm_a.establish_session(&node_b, *sm_b.local_public_key());
+        assert!(
+            sm_a.establish_session(&node_b, *sm_b.local_public_key()),
+            "rebuilding after removal must report that it installed one"
+        );
         assert!(
             sm_a.has_session(&node_b),
             "a removed session must be rebuilt"
+        );
+        assert!(
+            !sm_a.establish_session(&node_b, *sm_b.local_public_key()),
+            "a repeat must report that it did nothing, so logs do not claim churn"
         );
 
         let sealed = sm_a.seal(&node_b, b"back", aad_bytes()).unwrap();
