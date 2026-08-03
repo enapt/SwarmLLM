@@ -1111,6 +1111,44 @@ asymmetry Petals' own paper names, arriving by a different route.
 Note (1) alone may be sufficient and is much the simplest; (2) is the principled
 version. Measure before building either.
 
+### Prior art, looked up 2026-08-03 (researched, NOT built)
+
+The standard answer is **Peak EWMA**, the latency-aware policy in Finagle,
+Linkerd and `tower` (`tower::load::PeakEwma`). The detail that transfers is not
+the cost function but the smoothing: **its weight is a function of elapsed wall
+time, not of update count** — `w = exp(-elapsed / decay_time)` — so an estimate
+that stops being updated relaxes on its own. Ours is a fixed α=0.3 per update
+with no time term, which is exactly why an unrouted peer's number is frozen
+forever. That is the shape fix (1) should take.
+
+Two adaptations our case needs, and they are why this cannot be copied
+wholesale:
+
+- Peak EWMA decays toward the **latest observation** to recover cautiously from
+  a spike. We need decay toward the **neutral prior** in the *absence* of
+  observations, because our failure is starvation rather than a spike. Linkerd's
+  own writeup names this limit: the assumption that history stays informative
+  "breaks down" for endpoints that stop being sampled.
+- **Decay alone does not create exploration.** It unfreezes a wrong estimate and
+  returns the peer to the prior — worth doing — but a peer priced at the
+  `UNKNOWN_COMPUTE_MS` prior (25 ms/layer) still loses every comparison to a
+  measured GPU at ~1 ms/layer. So (1) fixes "frozen at a stale value" and does
+  NOT fix "never selected"; only (2) does. **Do not ship (1) and record the
+  ratchet as closed.**
+
+**Deliberately not implemented on 2026-08-03**, because this file's own
+instruction is to measure first and there was one node available — a routing
+cost-model change validated only by unit tests is how the headroom-routing
+revert happened. What it needs is two nodes holding the same model with a real
+speed gap, the estimate for the slow one forced stale, and a before/after on
+whether it is ever selected.
+
+Sources: [Linkerd, "Beyond Round Robin: Load Balancing for
+Latency"](https://linkerd.io/2016/03/16/beyond-round-robin-load-balancing-for-latency/);
+[Finagle
+`PeakEwma.scala`](https://github.com/twitter/finagle/blob/9cc08d15216497bb03a1cafda96b7266cfbbcff1/finagle-core/src/main/scala/com/twitter/finagle/loadbalancer/PeakEwma.scala);
+[`tower::load::peak_ewma`](https://tower-rs.github.io/tower/src/tower/load/peak_ewma.rs.html).
+
 ## Inference performance — research backlog (R135 brief)
 
 > **STATUS as of 2026-05-20 (post-R139):**
