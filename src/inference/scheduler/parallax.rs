@@ -166,22 +166,10 @@ fn vertex_cost(c: &NodeCandidate, range: (u32, u32), local: &NodeId) -> VertexCo
     };
 
     let load_ms = c.load * LOAD_COMPENSATOR_MS;
-    // A node with no room for the model serves from its CPU fallback. Price
-    // that here as well as in the greedy assigner: parallax routing is the
-    // DEFAULT, so penalising only the greedy path left the feature doing
-    // nothing — the DP kept choosing the local node on its zero network cost,
-    // and every request ran locally exactly as before. Verified by watching a
-    // constrained node still report `route=local` with the greedy penalty in
-    // place.
-    let out_of_room_ms = if c.out_of_room {
-        super::OUT_OF_ROOM_COST_PENALTY
-    } else {
-        0.0
-    };
     VertexCost {
         network_ms,
         compute_ms,
-        load_ms: load_ms + out_of_room_ms,
+        load_ms,
     }
 }
 
@@ -486,7 +474,6 @@ mod tests {
             est_tokens_per_sec,
             observed_latency_ms_per_layer: None,
             is_pool_member: false,
-            out_of_room: false,
         }
     }
 

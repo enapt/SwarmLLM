@@ -257,7 +257,6 @@ fn greedy_assign_multi_range_candidate() {
             est_tokens_per_sec: 0.0,
             observed_latency_ms_per_layer: None,
             is_pool_member: false,
-            out_of_room: false,
         },
         NodeCandidate {
             node_id: NodeId([2u8; 32]),
@@ -276,7 +275,6 @@ fn greedy_assign_multi_range_candidate() {
             est_tokens_per_sec: 0.0,
             observed_latency_ms_per_layer: None,
             is_pool_member: false,
-            out_of_room: false,
         },
     ];
 
@@ -1094,7 +1092,6 @@ fn cost_cand(
         est_tokens_per_sec: 0.0,
         observed_latency_ms_per_layer: ms_per_layer,
         is_pool_member: false,
-        out_of_room: false,
     }
 }
 

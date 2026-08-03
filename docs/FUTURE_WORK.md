@@ -5038,8 +5038,35 @@ cost more than the work):
    and the local CPU fallback at least answers;
 4. the node has full local coverage — otherwise this decision does not apply.
 
-**PARTIAL — the decision works, the routing still does not. Reopened
-2026-08-03 after testing it.** Do not assume this feature is live.
+**REVERTED 2026-08-03. It did not achieve its goal AND it caused a real
+failure.** `would_fit_on_gpu` is kept (harmless, and the right primitive); the
+scheduler gate, the `out_of_room` field and the cost penalty are gone.
+
+**What it broke.** On a node holding 7 of 9 shards of an 8B model, with
+phi-3.5 resident, a request was priced away from the local node entirely and
+sent whole to a peer in Belgium: 308 seconds, then `Segment 0 failed with no
+standby available`. Before the change that request produced a 3-segment split
+using the 5 ms LAN peer. So the feature turned a working split into a failure —
+the exact regression the local fast path exists to prevent, which the design
+notes warned about and I introduced anyway.
+
+**Why it fired when it should not have.** The trigger is
+`would_fit_on_gpu == Some(false)`, which uses `estimate_worker_vram_mb`. That
+estimate is heavily pessimistic: phi-3.5 was admitted at **`estimated_mb=5863`
+against a measured `vram_after_load_mb=2579`** — 2.3x high. A budget of 6553 MB
+was therefore "full" after one 2.5 GB model, so `out_of_room` was true almost
+always on a node doing anything at all.
+
+**This is the precondition for any retry.** Routing on a 2.3x-pessimistic
+estimate cannot work, whatever the routing logic does with it. Fix the estimator
+first — the gap is knowable, since both numbers are now logged side by side
+(`DIAG: admitting model to GPU` vs the worker's `vram_after_load_mb`) — and only
+then revisit routing.
+
+**Also still unexplained, and worth knowing before retrying:** with the penalty
+in place on BOTH routers, a constrained node still reported `route=local` for a
+model that did fit nowhere. So the pricing did not reach the decision even when
+correct. Findings from that investigation are below and remain valid.
 
 Exercised on real hardware by constraining a node's budget
 (`[resources] max_gpu_vram_mb = 300`, isolated data dir, model symlinked, phi-3.5
