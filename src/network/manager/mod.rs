@@ -148,6 +148,33 @@ const REDIAL_BACKOFF_MS: [u64; MAX_REDIAL_ATTEMPTS as usize] =
 /// Cap on `redial_attempts` so a churn storm cannot grow it without bound.
 const MAX_REDIAL_TRACKED_PEERS: usize = 256;
 
+/// Consecutive request/response failures to one peer before the connection is
+/// closed as unusable.
+///
+/// libp2p keeps a TCP+yamux connection open long after the peer stopped
+/// answering: blocking one direction of a peer's traffic left every request
+/// timing out for 200s with `is_connected=true` the whole time, so it stayed in
+/// `connected_node_ids` — the scheduler's liveness oracle — and kept being
+/// offered work it could not do. A QUIC connection in the same state dropped in
+/// ~30s, so which transport a peer happens to be on decided whether this was a
+/// half-minute problem or an unbounded one.
+///
+/// Any successful response resets the count, so this only fires on a peer that
+/// has answered NOTHING across the whole run.
+///
+/// The number is measured, not guessed. Counting the worst consecutive-failure
+/// run per peer across a full day of this node's logs: the **anchor — a healthy,
+/// critical relay — reached 5**, while peers that were genuinely gone reached
+/// 34, 40, 56 and 121. A threshold of 5 would therefore have disconnected the
+/// relay during normal operation, which is a far worse outcome than the bug
+/// being fixed. 20 sits in the gap: four times the worst healthy run observed,
+/// and well under the shortest dead-peer run.
+///
+/// Re-measure before changing it. The cost of being wrong is asymmetric — too
+/// low disconnects working peers (and the relay a NAT'd node depends on), too
+/// high just delays eviction of one that has already stopped answering.
+const MAX_CONSECUTIVE_RR_FAILURES: u32 = 20;
+
 /// NetworkManager owns the libp2p Swarm and is the sole interface to the P2P network.
 pub struct NetworkManager {
     shared_state: Arc<SharedState>,
@@ -256,6 +283,10 @@ pub struct NetworkManager {
     /// retry to peers we actually know rather than every failed dial target.
     /// Cleared when a connection to the peer is established.
     redial_attempts: HashMap<libp2p::PeerId, (Vec<Multiaddr>, u32)>,
+    /// Consecutive request/response failures per peer, reset by any success.
+    /// At `MAX_CONSECUTIVE_RR_FAILURES` the connection is closed so the
+    /// re-dial path can replace it. See that constant.
+    rr_failures: HashMap<libp2p::PeerId, u32>,
     /// S5: Receives model IDs for DHT provider queries from scheduler/auto-manage.
     dht_query_rx: mpsc::Receiver<crate::types::ModelId>,
     /// S5: Maps Kademlia QueryId → ShardId for routing GetProviders results.
@@ -506,6 +537,7 @@ impl NetworkManager {
             shutdown_rx,
             pending_redial: Vec::new(),
             redial_attempts: HashMap::new(),
+            rr_failures: HashMap::new(),
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
             relay_provider_registered: false,

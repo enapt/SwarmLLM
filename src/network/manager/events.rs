@@ -163,6 +163,10 @@ impl NetworkManager {
                         pending_tensor_out = self.pending_tensor_outbound.len(),
                         "DIAG: received response"
                     );
+                    // The peer answered, so it is not the silent-but-connected case
+                    // the failure counter exists for. Reset before anything else so
+                    // a peer that answers even one request never accumulates.
+                    self.rr_failures.remove(&peer);
                     // Clean up tensor outbound tracking (response received = not a failure)
                     self.pending_tensor_outbound.remove(&request_id);
                     self.pending_tensor_result_outbound.remove(&request_id);
@@ -198,6 +202,7 @@ impl NetworkManager {
                     pending_channels = self.pending_tensor_channels.len(),
                     "DIAG: OutboundFailure"
                 );
+                self.note_rr_failure(peer);
                 // Check if this was a pending tensor forward — notify the pipeline
                 if let Some((inference_uuid, sent_at, _target, _, _)) =
                     self.pending_tensor_outbound.remove(&request_id)

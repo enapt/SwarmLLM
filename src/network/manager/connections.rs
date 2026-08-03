@@ -12,9 +12,9 @@ use crate::network::protocol::SwarmRequest;
 use crate::types::SwarmMessage;
 
 use super::{
-    NetworkManager, MAX_CONNECTION_ADDRS, MAX_PEER_REMOTE_ADDRS, MAX_PENDING_REDIAL,
-    MAX_PING_ENTRIES, MAX_REDIAL_ATTEMPTS, MAX_REDIAL_TRACKED_PEERS, PING_SENT_TIMES_CUTOFF_SECS,
-    REDIAL_BACKOFF_MS, REDIAL_JITTER_MIN_MS, REDIAL_JITTER_RANGE_MS,
+    NetworkManager, MAX_CONNECTION_ADDRS, MAX_CONSECUTIVE_RR_FAILURES, MAX_PEER_REMOTE_ADDRS,
+    MAX_PENDING_REDIAL, MAX_PING_ENTRIES, MAX_REDIAL_ATTEMPTS, MAX_REDIAL_TRACKED_PEERS,
+    PING_SENT_TIMES_CUTOFF_SECS, REDIAL_BACKOFF_MS, REDIAL_JITTER_MIN_MS, REDIAL_JITTER_RANGE_MS,
 };
 
 /// Addresses to attempt when re-dialling a peer whose last connection just
@@ -90,6 +90,9 @@ impl NetworkManager {
         // the budget resets here rather than expiring — a peer that flaps gets a
         // fresh set of attempts each time it comes back.
         self.redial_attempts.remove(&peer_id);
+        // A fresh connection starts with a clean slate — the count is about one
+        // connection's silence, not the peer's history.
+        self.rr_failures.remove(&peer_id);
         // Track which address each connection uses — the Identify handler
         // uses this to add only the connected address to Kademlia.
         // SEC: Cap connection_addrs to prevent unbounded memory growth.
@@ -190,6 +193,12 @@ impl NetworkManager {
         num_established: u32,
     ) {
         let closed_addr = self.connection_addrs.remove(&connection_id);
+        // Drop the failure count with the connection it described. Also the
+        // only place the map shrinks, so cap it against a churn storm.
+        self.rr_failures.remove(&peer_id);
+        if self.rr_failures.len() > MAX_REDIAL_TRACKED_PEERS {
+            self.rr_failures.clear();
+        }
         // NETWORKING_PLAN Phase 1 — drop this connection from the peer's direct
         // set (no-op if it was a relay circuit, which was never inserted).
         if let Some(set) = self.peer_direct_conns.get_mut(&peer_id) {
@@ -522,6 +531,57 @@ impl NetworkManager {
                 .or_insert_with(|| (addrs.clone(), 0));
             self.pending_redial.push((peer_id, addrs, scheduled));
         }
+    }
+
+    /// Count a request/response failure against `peer`, and close the
+    /// connection once the peer has failed `MAX_CONSECUTIVE_RR_FAILURES` in a
+    /// row without answering anything.
+    ///
+    /// A live connection is not evidence a peer is usable. libp2p holds a
+    /// TCP+yamux connection open indefinitely while every request to it times
+    /// out, and `connected_node_ids` — which the scheduler treats as the
+    /// liveness oracle — is derived from exactly that. Closing the connection
+    /// is what removes the peer from it, and `handle_connection_closed` then
+    /// schedules the bounded-backoff re-dial, so a peer that recovers comes
+    /// back on its own.
+    ///
+    /// A peer serving an active pipeline is never closed on this path. A long
+    /// forward legitimately keeps a node busy for minutes, and tearing down the
+    /// connection mid-pipeline would fail a request that was about to succeed —
+    /// the same exemption `check_peer_health` already makes for staleness.
+    pub(super) fn note_rr_failure(&mut self, peer: libp2p::PeerId) {
+        let count = self.rr_failures.entry(peer).or_insert(0);
+        *count += 1;
+        if *count < MAX_CONSECUTIVE_RR_FAILURES {
+            return;
+        }
+        let failures = *count;
+        if let Some(node_id) = self.peer_to_node.get(&peer).map(|r| r.clone()) {
+            let in_active_pipeline = self.shared_state.active_pipelines.iter().any(|entry| {
+                entry
+                    .value()
+                    .segments
+                    .iter()
+                    .any(|seg| seg.node_id == node_id)
+            });
+            if in_active_pipeline {
+                tracing::debug!(
+                    %peer,
+                    failures,
+                    "Peer is unresponsive but is serving an active pipeline — not closing"
+                );
+                return;
+            }
+        }
+        self.rr_failures.remove(&peer);
+        tracing::warn!(
+            %peer,
+            failures,
+            "Peer has not answered anything in a row — closing the connection so it \
+             stops being offered work; a re-dial is scheduled"
+        );
+        // Triggers ConnectionClosed → registry eviction + jittered re-dial.
+        let _ = self.swarm.disconnect_peer_id(peer);
     }
 
     /// Re-enqueue a re-dial after a dial failure, on a bounded backoff.

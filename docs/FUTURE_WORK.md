@@ -4749,9 +4749,32 @@ queueing. Verified by re-running the identical short request once the peer went
 idle — it succeeded in 42s. Check peer load and its inbound-forward count
 before concluding anything about the network here.
 
-## A peer whose return path is dead stays connected and schedulable (2026-08-02)
+## A peer whose return path is dead stays connected and schedulable (2026-08-02) — FIXED
 
-**Status: OBSERVED, not fixed. Reproducible on demand.**
+**Status: FIXED 2026-08-03.** The network manager counts consecutive
+request/response failures per peer, reset by any success, and closes the
+connection at `MAX_CONSECUTIVE_RR_FAILURES`. Closing removes the peer from
+`connected_node_ids` (the scheduler's liveness oracle) and triggers the
+bounded-backoff re-dial added in v0.3.63, so a peer that recovers returns on its
+own. Peers serving an active pipeline are exempt — a long forward legitimately
+keeps a node quiet for minutes.
+
+**The threshold is measured, and the first value was wrong.** 5 looked safe by
+reasoning about the 30s ping cadence. Counting worst-case consecutive-failure
+runs across a full day of real logs showed the **anchor — a healthy, critical
+relay — reaching exactly 5**, while genuinely dead peers reached 34/40/56/121.
+Shipping 5 would have disconnected the relay a NAT'd node depends on. Raised to
+20, in the gap. Re-measure before changing it; the cost is asymmetric.
+
+**Not confirmed live on TCP.** The reproduction blocks one direction of a peer's
+traffic, but the LAN pair negotiates QUIC, which libp2p drops natively in ~30s —
+so the test exercised the surrounding machinery (close → re-dial → recover) and
+not the new threshold. Forcing TCP by blocking UDP did not re-negotiate within
+the window tried. The path to confirm it is a TCP-only pair (disable QUIC on one
+side) with the return path blocked, watching for the "has not answered anything
+in a row" warning.
+
+Original entry:
 
 Found while verifying the LAN re-dial fixes below. Blocking one direction of a
 peer's traffic (`nft add rule inet blk out ip daddr <us> drop` on the peer) makes
