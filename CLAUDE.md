@@ -271,86 +271,49 @@ frozen deliberately, so shard sets stop moving mid-test. Re-enable via
 `PUT /api/admin/config {"auto_manage_shards": true}` when done.
 
 
-### Superseded — v0.3.49 → .59 (2026-07-29→08-01) — pointers only
+### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
-Full detail in `memory/round_log_*.md` and the CHANGELOG. Read those before
-re-deriving any of it.
+Read the named round log before re-deriving any of these.
 
-- **SPM tokenizer CLOSED** (.49-.51): `spm_encode` applied stale merge-queue
-  entries; **64.9% of inputs mis-tokenised** on Phi-3.5's real vocab, now 0
-  mismatches vs reference `sentencepiece` over 4,128 inputs. Pinned by
-  `spm_merge_tests`.
-- **.51**: a hash cannot tell "wrong bytes" from "not all the bytes" —
-  `verify_shard` checks `size_bytes` FIRST; trust docked only for
-  right-size-wrong-hash (#203).
-- **.50**: one abandoned request froze a model for everyone (cancellation wired
-  only to an explicit header). RAII guard on handler drop, **non-streaming
-  only**. Also un-stranded every pre-.44 node — `/releases/latest` 404s while
-  every release is prerelease.
-- **.56-.59**: memory admission (reclaim from idle-but-resident models BEFORE
-  refusing; in-flight read from the worker pool's own channels). A model could
-  be freed *while answering* — `active_pipelines` is coordinator-only and
-  `serving_models` is peer-served-only, so a node answering its OWN client was
-  in neither (#194). `cargo test` overwrote a running node's API key (#226).
-  A shared CI cache shipped a release with no Windows GPU build for ten
-  releases (#222/#223/#224).
-
-### v0.3.39 – v0.3.46 (07-27→29) — pointers; detail in `round_log_overnight_0728.md`
-
-- **.46**: local replies had `▁` for every space — `CachedDecoder` built
-  `is_sentencepiece:false, has_tokenizer:false` under a comment that went stale,
-  so decoding could only take a **GPT-2** byte fallback. Same defect produced
-  the unexplained `<0x0A>` — one cause, two symptoms a day apart (#200).
-  **Peer-served work is decoded on the SERVING side, so every cross-node check
-  looked clean.**
-- **.45**: my own .44 shard check ate good shards — an all-zero manifest hash is
-  FAILURE when auditing a held shard, but means *nothing to compare* at an
-  accept gate.
-- **.44**: overlay trust was satisfiable by coincidence (`100.64.0.0/10` is
-  shared CGNAT) → Tailscale `whois`, where **`Unavailable` must never read as
-  yes** (#199). **Credits are self-attested and unenforced by design.**
-- **.42**: a default that lives only in `#[serde(default)]` never reaches a
-  config the daemon already wrote (#198). **Empty was NOT always accidental.**
-- **.41**: **`is_loopback()` means "the last TCP hop began in this daemon's
-  netns" and is wrong BOTH ways** (#195) — subnet routers SNAT.
-  `api::dashboard_trust::classify` is the one decision point.
-- **.40**: `prefill_chunk_tokens` bounded decode interruption in TOKENS not time
-  (#191). **The first fix made GPUs WORSE**; the pacer self-disables if a shrink
-  did not help — do not remove that check.
-- **.39**: `current_exe()` returns `"...(deleted)"` once the binary is replaced,
-  and replacing it IS updating (#188). Rule: **timeouts must bound what actually
+- **v0.3.49-.59** (07-29→08-01): **SPM tokenizer CLOSED** — stale merge-queue
+  entries mis-tokenised **64.9% of inputs** on Phi-3.5's vocab, now 0 vs
+  reference (`spm_merge_tests`). A hash cannot tell "wrong bytes" from "not all
+  the bytes" — check `size_bytes` FIRST (#203). One abandoned request froze a
+  model for everyone. Memory admission reclaims from idle-but-resident models;
+  a model could be freed *while answering* because `active_pipelines` is
+  coordinator-only and `serving_models` peer-served-only (#194). `cargo test`
+  overwrote a running node's API key (#226).
+- **v0.3.39-.46** (07-27→29, `round_log_overnight_0728.md`): `CachedDecoder`
+  built `is_sentencepiece:false` under a stale comment, so local replies took a
+  **GPT-2 byte fallback** — `▁` for every space, and the same defect produced the
+  unexplained `<0x0A>` (#200). **Peer-served work is decoded on the SERVING
+  side, so cross-node checks looked clean.** Overlay trust was satisfiable by
+  coincidence (`100.64.0.0/10` is shared CGNAT) → Tailscale `whois`, where
+  **`Unavailable` must never read as yes** (#199). A default living only in
+  `#[serde(default)]` never reaches a config the daemon already wrote (#198).
+  `is_loopback()` is wrong BOTH ways (#195). `prefill_chunk_tokens` bounded
+  decode interruption in TOKENS not time (#191) — **the first fix made GPUs
+  WORSE**; the pacer self-disables if a shrink did not help, do not remove that
+  check. `current_exe()` returns `"...(deleted)"` once the binary is replaced,
+  and replacing it IS updating (#188). **Timeouts must bound what actually
   varies** (#189, #190).
-
-### v0.3.15 – v0.3.38 (07-23→28) — pointers; full detail in the round logs
-
-Read the named `memory/round_log_*.md` before re-deriving any of these.
-
-- **Read gotcha #179 before touching connection selection.** A relay carrying an
-  INBOUND connection is a bare `/p2p/<peer>` with no transport component, so it
-  counted as direct and won every send. And **retraction alone is futile — the
-  blacklist is REQUIRED**, since the DHT re-advertises a retracted holder.
-- **#165**: we published an inbound connection's ephemeral source port as
-  dialable; **poisoned caches need a node RESTART, not just a new binary.**
-- **#163**: `max_established_per_peer = 1` structurally disabled DCUtR — a hole
-  punch needs a 2nd concurrent connection. Hole punching verified live 07-25.
-- **#169**: the control-token leak chased across four releases was a **prompt**
-  bug, not an output-scrubber bug — `grep "chat template failed" node.log` had
-  been firing on every request for releases.
-  `inference::finalize_reply_text` owns the ordered scrub→truncate→trim.
-- **"tok/s per node per shard" is NOT measurable in a pipeline** — use each
-  segment's share of inter-token latency.
-- **v0.3.38**: idle VRAM was never reclaimed. The demand-EMA gate exists because
-  `record_request` is called ONLY from the outbound router path, so serving a
-  peer never updates it.
-
-### Prior rounds (pre-v0.3.15)
-
-- **R143-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT
-  v1→v2, `--anchor`), request cancellation, `gpu_layers` plumbing. Gotchas #150-160.
-- **R136-R142**: SWARM-SPEC v0.1 cascade (L0 Q8_0, L1 n-gram, L2 hedge, L3
-  prefetch); `swarmpool://` invites v2; cross-pool gossip/routing.
+- **v0.3.15-.38** (07-23→28): **read gotcha #179 before touching connection
+  selection** — a relay carrying an INBOUND connection is a bare `/p2p/<peer>`
+  with no transport component, so it counted as direct and won every send; and
+  **retraction alone is futile, the blacklist is REQUIRED** since the DHT
+  re-advertises a retracted holder. We published an inbound connection's
+  ephemeral source port as dialable — **poisoned caches need a node RESTART**
+  (#165). `max_established_per_peer = 1` structurally disabled DCUtR (#163).
+  The control-token leak chased across four releases was a **prompt** bug
+  (#169) — `grep "chat template failed" node.log`. **"tok/s per node per shard"
+  is NOT measurable in a pipeline** — use each segment's share of inter-token
+  latency. Idle VRAM was never reclaimed; the demand-EMA gate exists because
+  `record_request` is called ONLY from the outbound router path.
+- **R136-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT
+  v1→v2, `--anchor`), request cancellation, `gpu_layers` plumbing, per-shard
+  download backoff (#150-160); SWARM-SPEC v0.1 cascade (L0 Q8_0, L1 n-gram, L2
+  hedge, L3 prefetch); `swarmpool://` invites v2; cross-pool gossip/routing.
 - **Pre-R136**: the 20 build phases. `docs/ARCHITECTURE.md` § phase history.
-
 
 ## Public-Facing Repo (2026-07-22)
 
