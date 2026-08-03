@@ -1035,6 +1035,44 @@ attention if either cap grows materially.
 
 ---
 
+## Idle GPU memory was never reclaimed with auto-manage off (FIXED 2026-08-04)
+
+`try_idle_vram_unload` frees the memory of a model nobody is using. Its own doc
+comment said it "runs every cycle, independent of memory pressure". It did not:
+it was called from inside `evaluate_and_prune`, which runs only when
+`auto_manage.enabled` is true (the manager tick gates `evaluate()` on it) AND
+`auto_manage.prune_enabled` is true. Both settings are about which shard FILES a
+node keeps on disk.
+
+So turning auto-manage off — a reasonable thing to do, meaning "stop managing my
+disk" — also pinned every loaded model in memory indefinitely. **Observed on the
+development node: an 8 GB card sitting at 7304 MiB with three idle workers,
+hours after its last request, with no idle-unload line in the log since the
+previous day.**
+
+Unloading changes nothing the swarm can see — shards stay on disk, holder status
+is unchanged, a cold start costs one reload — and the behaviour already has its
+own off-switch, `idle_unload_secs = 0`, which is what a user who wants models
+pinned should set. So the call now runs from the manager tick regardless of
+either toggle.
+
+**Verified by before/after on a real node**, config identical, auto-manage off,
+`idle_unload_secs = 10` so the 12x hard-idle ceiling lands at 120s:
+
+- with the fix: `Idle unload — freed model (shards kept on disk)
+  model=phi-3.5-mini-instruct.q4-k-m idle_secs=125 threshold_secs=10`
+- without it: nothing, model still resident after the same wait.
+
+**Two traps for anyone re-testing this.** The first attempt used TinyLlama and
+proved nothing: it is the smoke-tier **reference model**, which
+`is_reference_model` deliberately exempts from idle unload. The second stalled on
+the region-demand reprieve — a networked node sees demand for a popular model
+and keeps it warm until `idle_unload_secs * 12`. Pick a non-reference model and
+wait past the ceiling, or the test looks like a failure when it is the design.
+
+**Not unit-tested**: the behaviour lives in the manager's tick loop and the
+evidence here is the live before/after above.
+
 ## Slow nodes go dark and never come back — the routing ratchet (analysed 2026-07-28)
 
 **Status: analysed, not fixed.** Raised as a design question ("GPU nodes will be

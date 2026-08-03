@@ -133,12 +133,6 @@ impl AutoShardManager {
             self.try_vram_soft_unload(resource_pressure).await;
         }
 
-        // VRAM efficiency — free idle, low-demand models from GPU regardless of
-        // memory pressure, so reservation follows real demand rather than a
-        // static contribution setting (shards stay on disk; holder status
-        // unchanged; a cold start just costs one reload).
-        self.try_idle_vram_unload(config.idle_unload_secs).await;
-
         // Check if we're in reduced hours
         let schedule_pressure = self.schedule_pressure_bonus().await;
 
@@ -1046,7 +1040,7 @@ impl AutoShardManager {
     /// request) and our holder status is unchanged, so this only reclaims VRAM
     /// pinned for a model nobody is currently using. Runs every cycle,
     /// independent of memory pressure. `0` disables it.
-    async fn try_idle_vram_unload(&self, idle_unload_secs: u64) {
+    pub(super) async fn try_idle_vram_unload(&self, idle_unload_secs: u64) {
         if idle_unload_secs == 0 {
             return;
         }

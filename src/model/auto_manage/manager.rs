@@ -325,6 +325,30 @@ impl AutoShardManager {
                     // worst-case stall window is ~one interval.
                     sweep_stalled_p2p_permits(&self.shared_state);
 
+                    // Reclaiming GPU memory from a model nobody is using is a
+                    // LOCAL memory concern, not a participation policy, so it runs
+                    // whatever the auto-manage toggle says.
+                    //
+                    // It used to sit inside `evaluate_and_prune`, which meant it
+                    // was gated behind BOTH `auto_manage.enabled` and
+                    // `prune_enabled` — two settings about which shard FILES this
+                    // node keeps on disk. Turning auto-manage off (a reasonable
+                    // thing to do: "stop managing my disk") therefore also pinned
+                    // every loaded model in VRAM indefinitely, against a doc
+                    // comment promising it ran "every cycle, independent of memory
+                    // pressure". Observed on an 8 GB card sitting at 7.3 GB with
+                    // three idle workers hours after its last request.
+                    //
+                    // The behaviour has its own off-switch — `idle_unload_secs = 0`
+                    // — which is the setting a user who wants models pinned should
+                    // reach for. Unloading changes nothing the swarm can see:
+                    // shards stay on disk, holder status is unchanged, and a cold
+                    // start costs one reload.
+                    self.try_idle_vram_unload(
+                        self.shared_state.config.auto_manage.idle_unload_secs,
+                    )
+                    .await;
+
                     // Re-check enabled -- admin API can toggle at runtime
                     if self.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         self.evaluate().await;
