@@ -2,6 +2,52 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.66-alpha] — 2026-08-03
+
+Three fixes, all from tester reports. The first two are worth updating for if you
+run a graphics card or more than one machine.
+
+### Fixed
+
+- **A machine could run out of graphics memory immediately after freeing some.**
+  Unloading a model handed its memory allowance straight back, but asking a
+  process to stop and the system actually reclaiming its graphics memory are two
+  different moments. In between, the machine believed it had room it did not
+  have — so the next model was allowed to load and died out of memory on a card
+  that was still full. That is precisely the failure the memory check exists to
+  prevent, and it explains an out-of-memory crash reported as landing exactly
+  while a different model was being unloaded.
+
+  Unloading now waits for the process to actually be gone before giving the
+  allowance back, up to five seconds. If it takes longer the allowance is
+  returned anyway and the log says so — holding it forever for a process that
+  will not die would refuse every later load, which is worse.
+
+- **A machine that had stopped answering was still being offered work.** A
+  connection staying open is not evidence the machine on the other end is
+  answering: when the return path fails, the connection can stay open while every
+  request times out, and it kept being counted as available. Measured at over
+  three minutes of this with the machine listed as healthy throughout.
+
+  One that fails many requests in a row without answering anything is now
+  disconnected, which stops it being offered work and starts the reconnection
+  attempts added in v0.3.63, so a machine that recovers comes back on its own. A
+  machine currently working on part of a request is left alone — a long piece of
+  work legitimately keeps one quiet for minutes.
+
+  How many failures in a row was measured rather than reasoned about, and the
+  first answer was wrong: a healthy relay reached exactly the value first chosen,
+  while machines that had genuinely gone reached six times it. The threshold now
+  sits in the gap. It takes around ten minutes to act, which is far better than
+  never but not fast; that is recorded as a known limit.
+
+- **A model whose files have gone now reports "not found" rather than a server
+  error.** The message from the worker plainly said the model was unavailable,
+  but the type was lost on the way and anything unrecognised was treated as a
+  fault in the server — so callers were told to look for a bug, and anything that
+  retries on server errors would retry forever against a file that is simply not
+  there.
+
 ## [0.3.65-alpha] — 2026-08-03
 
 A diagnostic release. No behaviour changes — it exists so a specific failure
