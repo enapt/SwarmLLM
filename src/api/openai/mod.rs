@@ -695,9 +695,21 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
 
 /// POST /v1/embeddings — OpenAI-compatible embeddings endpoint.
 ///
-/// Not available with subprocess inference (Phase 17) — models run in isolated
-/// worker processes without in-process tensor access. Use a dedicated embedding
-/// model or cloud provider instead.
+/// Not available locally. Use a cloud provider or a dedicated embedding model.
+///
+/// **`state.local_embedders` is NOT the thing to wire in here**, however much
+/// the name suggests it. `LocalEmbedder` holds only `token_embd.weight` — it
+/// maps a token id to its row of the embedding table, which is the first step
+/// of a forward pass and exists so a privacy-mode node can embed before handing
+/// activations to a peer. An embeddings API is expected to return a *pooled
+/// representation of the whole input* from a model trained for retrieval, and
+/// per-token lookup rows are not that. Returning them would produce
+/// correctly-shaped vectors that quietly rank nothing usefully — worse than an
+/// honest 503, because nothing about the response would look wrong.
+///
+/// (The older note here blamed subprocess isolation. That is not the binding
+/// reason: `local_embedders` runs in-process. The reason is that this node has
+/// no embedding model, only a language model's input table.)
 pub async fn embeddings(
     State(_state): State<AppState>,
     crate::api::server::JsonBody(_req): crate::api::server::JsonBody<EmbeddingRequest>,
