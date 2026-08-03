@@ -5233,9 +5233,41 @@ while an actual figure below it proves nothing on its own. Anyone asked to send
 both numbers should be told this, or they will report a large overestimate that
 is not one.
 
-## Parallax routing is the default and never runs (2026-08-03)
+## Parallax routing fails transiently after a restart, and the fallback is silent (2026-08-03)
 
-**Status: CONFIRMED on a live node, not fixed.**
+**Status: CORRECTED. The original claim here — that parallax NEVER runs — was
+wrong, and is left below only because the correction matters more than the
+claim.**
+
+What actually happens: parallax fails for a window after a node restarts, while
+the shard registry is still filling from gossip, and silently falls back to
+greedy. Once the registry has populated it succeeds
+(`DIAG: parallax routing selected chain`). The original measurement counted
+fallbacks over a window that was entirely inside that post-restart period, and I
+generalised from it.
+
+**The part that is real and still worth fixing:** both branches log at `debug!`
+while nodes run at `info`, so which router chose a route is invisible in
+practice — that is what let me reach a wrong conclusion, and it would do the same
+to anyone debugging a bad route. Raise both to `info`.
+
+**The genuine finding from the same investigation**, and the one that explains
+the bad routing: the LAN peer is **not in the candidate list at all**, though it
+holds shards 1..8 of the model and is connected at 4 ms. Captured candidates:
+
+```
+node=225e6fe7 (local)   ranges=[(0, 10)]  can_be_first=true  can_be_last=false
+node=7c10ea04 (Belgium) ranges=[(0, 32)]  can_be_first=true  can_be_last=true
+```
+
+With the LAN peer absent there is no local+LAN split to choose, so routing the
+whole model to a distant peer is the only option available — the router is
+picking correctly from a candidate set that is wrong. Find why
+`gather_candidates` omits it: the local node appears not to have recorded a
+shard announce from it for this model, so start at the announce/ingest path
+rather than the scheduler.
+
+Original entry (claim now known to be overstated):
 
 `inference.parallax_routing` defaults to **true**, so the shortest-path DP is
 supposed to be the router. It is not. On this swarm it fails every time and
