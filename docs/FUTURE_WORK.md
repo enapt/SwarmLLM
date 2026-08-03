@@ -5038,17 +5038,25 @@ cost more than the work):
    and the local CPU fallback at least answers;
 4. the node has full local coverage — otherwise this decision does not apply.
 
-**REVERTED 2026-08-03. It did not achieve its goal AND it caused a real
-failure.** `would_fit_on_gpu` is kept (harmless, and the right primitive); the
+**REVERTED 2026-08-03 — because it did not achieve its goal, and rests on an
+estimator too pessimistic to route on. NOT because of the failure the revert
+commit blamed it for; see the correction below.** `would_fit_on_gpu` is kept (harmless, and the right primitive); the
 scheduler gate, the `out_of_room` field and the cost penalty are gone.
 
-**What it broke.** On a node holding 7 of 9 shards of an 8B model, with
-phi-3.5 resident, a request was priced away from the local node entirely and
-sent whole to a peer in Belgium: 308 seconds, then `Segment 0 failed with no
-standby available`. Before the change that request produced a 3-segment split
-using the 5 ms LAN peer. So the feature turned a working split into a failure —
-the exact regression the local fast path exists to prevent, which the design
-notes warned about and I introduced anyway.
+**CORRECTION — it did NOT break that.** The revert commit blamed this feature
+for a request that went whole to a peer in Belgium and failed after 308s. It was
+not responsible: the identical request failed the identical way AFTER the
+revert. The real cause was shard churn — auto-manage had repartitioned the local
+node from 7/9 shards `[0, 3..8]` down to 3/9 `[0, 1, 2]`, so no local split was
+possible any more and the only full-coverage holder was that peer. That is the
+known "latency and reliability hostage to an uncontrolled peer" problem, not a
+routing regression.
+
+**Method note, because I got this wrong in the acting direction:** I attributed a
+failure to my most recent change and reverted on that basis, and only checked
+whether it reproduced without the change afterwards. Re-running first would have
+cost one command. A failure appearing after a change is not evidence the change
+caused it, particularly on a node whose shard holdings move on their own.
 
 **Why it fired when it should not have.** The trigger is
 `would_fit_on_gpu == Some(false)`, which uses `estimate_worker_vram_mb`. That
