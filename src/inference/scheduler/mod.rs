@@ -304,8 +304,13 @@ impl PipelineScheduler {
                 // hard "No node available" for a perfectly valid boomerang.
                 self.shared_state.config.inference.parallax_partial_ranges || encrypted,
             ) {
+                // Both arms log at `info`, deliberately. Nodes run at `info`, so
+                // at `debug` which router actually chose a route was invisible in
+                // every real log — and reading that absence as "parallax never
+                // runs" produced a wrong diagnosis on 2026-08-03. This is once
+                // per pipeline assembly, not per token, so it is affordable.
                 Ok(segs) => {
-                    tracing::debug!(
+                    tracing::info!(
                         model = %model_id,
                         segments = segs.len(),
                         "DIAG: parallax routing selected chain"
@@ -313,10 +318,10 @@ impl PipelineScheduler {
                     segs
                 }
                 Err(e) => {
-                    tracing::debug!(
+                    tracing::info!(
                         model = %model_id,
                         err = %e,
-                        "parallax routing unavailable — falling back to greedy"
+                        "DIAG: parallax routing unavailable — falling back to greedy"
                     );
                     self.greedy_assign(num_layers, &candidates, encrypted)?
                 }

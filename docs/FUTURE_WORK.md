@@ -5285,10 +5285,12 @@ greedy. Once the registry has populated it succeeds
 fallbacks over a window that was entirely inside that post-restart period, and I
 generalised from it.
 
-**The part that is real and still worth fixing:** both branches log at `debug!`
-while nodes run at `info`, so which router chose a route is invisible in
-practice — that is what let me reach a wrong conclusion, and it would do the same
-to anyone debugging a bad route. Raise both to `info`.
+**The part that is real and still worth fixing: DONE 2026-08-03.** Both branches
+logged at `debug!` while nodes run at `info`, so which router chose a route was
+invisible in practice — that is what let me reach a wrong conclusion, and it
+would have done the same to anyone debugging a bad route. Both are now `info`
+and both carry the `DIAG:` prefix, so `grep "DIAG: parallax"` answers "which
+router ran, and why not the other one" from an ordinary node log.
 
 **The genuine finding from the same investigation**, and the one that explains
 the bad routing: the LAN peer is **not in the candidate list at all**, though it
