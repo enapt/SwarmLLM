@@ -268,10 +268,18 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
         "tensor_parallel: {}  gpu_layers: {}",
         ss.config.inference.tensor_parallel, ss.config.inference.gpu_layers
     );
+    // Read the runtime atomic, not the startup-frozen config. Turning
+    // auto-manage off is a live toggle (`PUT /api/admin/config`), so printing
+    // the config value reported it as still ON after it had been switched off —
+    // which is exactly the wrong answer for a diagnostics page someone consults
+    // when trying to work out why shards are moving on their own.
     let _ = writeln!(
         out,
         "auto_manage: {}  shard_size_mb: {}",
-        ss.config.auto_manage.enabled, ss.config.model.shard_size_mb
+        ss.models
+            .auto_manage_enabled
+            .load(std::sync::atomic::Ordering::Relaxed),
+        ss.config.model.shard_size_mb
     );
 
     // How this node is reachable. An anchor advertising only private
