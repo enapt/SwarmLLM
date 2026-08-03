@@ -196,7 +196,40 @@ All 20 build phases complete. All subsystems wired — no stubs. **1590 lib + 81
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.60 → .63 (2026-08-01→02): the split works, and two machines in one house find each other
+### Latest — v0.3.60 → .65 (2026-08-01→03): the split works, machines in one house find each other, and memory stays bounded
+
+**v0.3.65** — diagnostic only. The GPU memory-admission gate logged ONLY on
+refusal, so a model that was admitted and then died with
+`CUDA_ERROR_OUT_OF_MEMORY` left no record of what the gate expected it to cost.
+Three causes were indistinguishable from outside: a low estimate, a budget still
+held by a model mid-eviction, and a genuinely unbounded allocation. Now
+`DIAG: admitting model to GPU` prints estimate/committed/headroom — compare
+against the worker's `vram_after_load_mb`.
+
+**v0.3.64** — a node advertised model pieces it no longer had. The shard
+registry is built at startup and updated by events; nothing watched the disk, so
+deleting a model folder (the only way, there is still no CLI remove command)
+left the node offering peers work it could not do until restart. The health
+monitor now reconciles against disk each announce cycle; `enable-privacy` stats
+the files itself, because it asserts where a user's text goes and must be true
+when said. Existence only — a mid-download shard occupies its final path.
+
+**Open from tester reports (2026-08-03), read `docs/FUTURE_WORK.md`:**
+(1) **A node with full local coverage never consults the network, even with no
+headroom** — `scheduler/mod.rs` returns one local segment + `standbys: vec![]`
+the moment it holds every layer. Holding the weights and having room to use them
+are different questions and only the first is asked, so a node fails alone with
+an idle LAN peer beside it. Deliberate, with good reasons in the comment; the
+gap is what coverage stands in for. **"Shard storage-sharing, not
+inference-sharing."** (2) Key rotation still breaks in-flight distributed
+inference every 10 min (one key, no previous-key grace). (3) A peer whose return
+path is dead stays `is_connected=true` and schedulable.
+
+**Ruled out, do not re-investigate:** the .61/.63 memory fixes apply to BOTH
+forward implementations — `forward_inner_impl` AND `forward_batch` call the same
+`lw.forward_attn` / `Mlp::forward`, so no execution path misses them. A tester's
+remaining OOM at 5143 tokens (5021 passes) is a margin being crossed, not a
+missing bound.
 
 **v0.3.63** — a long prompt exhausted graphics memory in the **feed-forward**,
 the step right after the attention that .61 fixed. Same shape, still unbounded:
@@ -238,154 +271,77 @@ release commit and the tag** — it cancels the run the tagger waits on. After t
 workflow publishes: `gh release edit <tag> --prerelease=false --latest` — BOTH
 flags, clearing prerelease alone does not move `/releases/latest` (gotcha #225).
 
-### Superseded — v0.3.49 / .50 / .51-alpha (2026-07-29): attribution, and a tokenizer bug still open
+### Superseded — v0.3.49 → .59 (2026-07-29→08-01) — pointers only
 
-**FIXED 2026-07-29 — the SPM tokenizer defect is closed.** `spm_encode` applied
-stale entries from its merge priority queue: merging extends `left` to cover
-`right`, so a queued bigram naming `left` still named a live, adjacent symbol
-but one whose text had grown past the piece that was scored. Applying it built a
-symbol for text never checked against the vocabulary, and the final lookup
-missed and dumped the span through byte fallback. `Merge` now carries the
-combined size it was scored at and the loop rejects any entry whose symbols no
-longer match it — the same guard as llama.cpp's `llm_tokenizer_spm`.
+Full detail in `memory/round_log_*.md` and the CHANGELOG. Read those before
+re-deriving any of it.
 
-Scope was **much worse than the "1 word in 4" estimate**: against Phi-3.5's real
-vocabulary over a 4,128-line corpus, **64.9% of inputs were mis-tokenised**.
-Verified against the real `sentencepiece` library with Phi-3.5's own
-`tokenizer.model` — **0 mismatches on 4,128 inputs** after the fix. Live: "What
-colour is a banana?" went from `The text "a␦␦␦ debido a que debido a que…` to a
-correct answer. Pinned by `spm_merge_tests`; `examples/spm_probe.rs` diffs any
-GGUF header against a reference. The BPE path rescans from current state each
-iteration and was never exposed.
+- **SPM tokenizer CLOSED** (.49-.51): `spm_encode` applied stale merge-queue
+  entries; **64.9% of inputs mis-tokenised** on Phi-3.5's real vocab, now 0
+  mismatches vs reference `sentencepiece` over 4,128 inputs. Pinned by
+  `spm_merge_tests`.
+- **.51**: a hash cannot tell "wrong bytes" from "not all the bytes" —
+  `verify_shard` checks `size_bytes` FIRST; trust docked only for
+  right-size-wrong-hash (#203).
+- **.50**: one abandoned request froze a model for everyone (cancellation wired
+  only to an explicit header). RAII guard on handler drop, **non-streaming
+  only**. Also un-stranded every pre-.44 node — `/releases/latest` 404s while
+  every release is prerelease.
+- **.56-.59**: memory admission (reclaim from idle-but-resident models BEFORE
+  refusing; in-flight read from the worker pool's own channels). A model could
+  be freed *while answering* — `active_pipelines` is coordinator-only and
+  `serving_models` is peer-served-only, so a node answering its OWN client was
+  in neither (#194). `cargo test` overwrote a running node's API key (#226).
+  A shared CI cache shipped a release with no Windows GPU build for ten
+  releases (#222/#223/#224).
 
-**v0.3.51 — stop blaming peers for OUR truncated downloads.** A failed shard
-hash always docked the sender's trust, but a hash cannot tell "wrong bytes" from
-"only some bytes arrived". Tell: one peer failed the same shard four times with
-a DIFFERENT computed hash each time (corrupt storage gives the SAME wrong hash;
-varying output means varying amounts arrived) while timing out constantly.
-`verify_shard` now checks the manifest's `size_bytes` FIRST via the existing
-`quarantine_shard_if_size_mismatch` — which was already called from the startup
-and periodic scans and NOT from the accept gate for untrusted bytes. New
-`SwarmError::ShardIncomplete`; trust is docked only for right-size-wrong-hash.
+### v0.3.39 – v0.3.46 (07-27→29) — pointers; detail in `round_log_overnight_0728.md`
 
-**v0.3.50 — one abandoned request froze a model for everyone.** Cancellation was
-only ever wired to an explicit `x-swarmllm-cancel-token` header that one internal
-caller sets, so a client that simply disconnected signalled nothing: the request
-ran to completion holding the executor, and every later request queued behind it.
-Requests now always carry a cancel flag, flipped by an RAII guard when the
-handler future drops. **Non-streaming paths ONLY** — a streaming handler returns
-as soon as the SSE body exists and generation continues after, so arming it there
-would cut every stream.
+- **.46**: local replies had `▁` for every space — `CachedDecoder` built
+  `is_sentencepiece:false, has_tokenizer:false` under a comment that went stale,
+  so decoding could only take a **GPT-2** byte fallback. Same defect produced
+  the unexplained `<0x0A>` — one cause, two symptoms a day apart (#200).
+  **Peer-served work is decoded on the SERVING side, so every cross-node check
+  looked clean.**
+- **.45**: my own .44 shard check ate good shards — an all-zero manifest hash is
+  FAILURE when auditing a held shard, but means *nothing to compare* at an
+  accept gate.
+- **.44**: overlay trust was satisfiable by coincidence (`100.64.0.0/10` is
+  shared CGNAT) → Tailscale `whois`, where **`Unavailable` must never read as
+  yes** (#199). **Credits are self-attested and unenforced by design.**
+- **.42**: a default that lives only in `#[serde(default)]` never reaches a
+  config the daemon already wrote (#198). **Empty was NOT always accidental.**
+- **.41**: **`is_loopback()` means "the last TCP hop began in this daemon's
+  netns" and is wrong BOTH ways** (#195) — subnet routers SNAT.
+  `api::dashboard_trust::classify` is the one decision point.
+- **.40**: `prefill_chunk_tokens` bounded decode interruption in TOKENS not time
+  (#191). **The first fix made GPUs WORSE**; the pacer self-disables if a shrink
+  did not help — do not remove that check.
+- **.39**: `current_exe()` returns `"...(deleted)"` once the binary is replaced,
+  and replacing it IS updating (#188). Rule: **timeouts must bound what actually
+  varies** (#189, #190).
 
-**v0.3.50 also un-stranded every pre-.44 node.** Those query
-`/releases/latest`, which 404s while every release is `prerelease: true`, so they
-were told "you are running the latest version" forever. Publishing one release
-as non-prerelease is the ONLY mechanism that reaches them. Keep doing this, or
-they strand again.
-
-**v0.3.49 shipped a changelog claim that was false** — it was cut to fix a stray
-`▁` in shared answers, the fix addressed a real sibling decoder path, and the
-symptom was unchanged because the cause was the tokenizer bug above. CHANGELOG
-was corrected after release rather than left standing.
-
-**Process — two self-inflicted failures worth not repeating.** (1) I tagged
-`.50` on a commit whose CI had FAILED, because the wait script conflated
-"completed" with "succeeded"; caught while still a draft with 0 assets, tag and
-draft deleted. Use `scratchpad/tag_when_green.sh`: it requires the run
-conclusion to be exactly `success` AND every individual job green, verified
-BEFORE tagging. (2) The break itself was a `Cargo.toml` bump without the matching
-`Cargo.lock` — CI builds `--locked`. Run `cargo check` and confirm `Cargo.lock`
-is in the release commit. Also: rapid pushes cancel the in-flight CI run you are
-waiting on; stop pushing during a release window.
-
-**Left running twice**: a stray test node kept advertising shards to the swarm
-after I reported cleanup done. `pkill` errored both times and I did not verify.
-Always confirm with `pgrep -af "bin/swarmllm"` after killing.
-
-### v0.3.39 – v0.3.46 (07-27→29) — one line each; detail in `round_log_overnight_0728.md` + CHANGELOG
-
-- **v0.3.46**: local replies had `▁` in place of every space — `CachedDecoder`
-  was built `is_sentencepiece:false, has_tokenizer:false` under a comment that
-  went stale when `standalone_tokenizer()` was added, so decoding could only
-  take a **GPT-2** byte-decoder fallback. Same defect produced the unexplained
-  `<0x0A>` — one cause, two symptoms a day apart (#200). **Peer-served work is
-  decoded on the SERVING side, so every cross-node check looked clean.** Also:
-  over-long prompt returned 500 (a real `Validation` flattened crossing the
-  worker IPC) → now 400; Windows GPU build fixed (Vulkan lib dir never added to
-  `LIB`; `msvc-dev-cmd` replaces `LIB` afterwards; SDK version now pinned).
-- **v0.3.45**: my own .44 shard check ate good shards — `verify_shard` treats an
-  all-zero manifest hash as FAILURE, right when auditing a held shard, wrong as
-  an accept-gate where a missing hash means *nothing to compare*. Every shard of
-  a hash-less manifest was rejected, **deleted**, and its sender penalised.
-  Also: `provider-model-status` got its own rate bucket (it sat with human-
-  triggered mutations while being fired automatically by the dashboard).
-- **v0.3.44**: external security audit — overlay trust was satisfiable by
-  coincidence (`100.64.0.0/10` is shared CGNAT and `listen_multiaddrs` includes
-  every BOUND interface), now answered by Tailscale's `whois` LocalAPI with a
-  three-way verdict where **`Unavailable` must never read as yes** (#199); P2P
-  shards were announced *before* verification; `vec![0u8; len]` committed a
-  declared size before any payload arrived. Update lifecycle drains then `exec`s.
-  **Credits are self-attested and unenforced by design** — researched, written
-  up in FUTURE_WORK, NOT fixed.
-- **v0.3.42**: nodes set up before 2026-07-21 could never rejoin — a default
-  that lives only in `#[serde(default)]` never reaches a config the daemon
-  already wrote, and the wizard writes every field on "Start SwarmLLM" (#198).
-  **Empty was NOT always accidental** (the anchor and the bench cluster rely on
-  it), so the naive fix would have broken both.
-- **v0.3.41**: the dashboard works from another device. **`is_loopback()` means
-  "the last TCP hop began in this daemon's netns" and is wrong BOTH ways**
-  (#195) — a same-host reverse proxy passes it for a remote phone; a Tailscale
-  subnet router never does, because they **SNAT by default**.
-  `api::dashboard_trust::classify` is now the one decision point. Also: an async
-  fn runs to its first `await` before returning, so a memo from the return value
-  cannot break a cycle — that caused a **1266-request storm** (#197).
-- **v0.3.40**: a slow machine no longer stalls everyone else —
-  `prefill_chunk_tokens` bounded decode interruption in TOKENS not time (#191);
-  CPU 470s→49s, GPU 14.8s→1.3s. **The first version made GPUs WORSE** (fixed
-  per-call cost dominates, so shrinking raised apparent ms/token — a feedback
-  loop pinned at the floor); the pacer self-disables if a shrink did not help —
-  **do not remove that check**. `active_pipelines` is the COORDINATOR's map and
-  never holds peer-served work (#194) — use `state.serving_models`.
-- **v0.3.39**: `current_exe()` returns `"...(deleted)"` once the binary is
-  replaced, and replacing it IS updating — an updated-not-restarted node failed
-  EVERY inference while still advertising its shards (#188). Two "separate
-  crashes" were ONE defect (`split_models` keyed `(model,start,end)`, two
-  lookups, DashMap order picked, #187). New rule: **timeouts must bound what
-  actually varies** (#189, #190).
-
-### v0.3.15 – v0.3.38 (07-23→28) — pointers only; full detail in the round logs
+### v0.3.15 – v0.3.38 (07-23→28) — pointers; full detail in the round logs
 
 Read the named `memory/round_log_*.md` before re-deriving any of these.
 
-- **v0.3.38**: idle VRAM was never reclaimed — the demand-EMA gate's reprieve
-  applied indefinitely. The gate exists because `record_request` is called ONLY
-  from the outbound router path, so serving a peer never updates it.
-- **v0.3.37**: `swarmllm chat --model X` panicked (clap compares INNER value
-  types of same-named args, #183); a wrong-sized shard was registered as HELD
-  because startup checks only `exists()` (#184). **Ragged batching measured on
-  GPU: NOT worth building** — 4x work, 23% throughput.
-- **v0.3.36**: the dashboard rate-limited ITSELF on load (#182) — found by
-  loading the page in a real browser, which no test does.
-- **v0.3.35**: six fixes, all traced not diffed — retry killed BOTH attempts
-  (#180); `FIRST_TOKEN_TIMEOUT` ignored prefill (#181).
-  **`parallax_partial_ranges` ships OFF** (~12.0s vs ~10.2s).
-- **v0.3.33/34**: **read gotcha #179 before touching connection selection.** A
-  relay carrying an INBOUND connection is a bare `/p2p/<peer>` with no transport
-  component, so it counted as direct and won every send. And **retraction alone
-  is futile — the blacklist is REQUIRED**, since the DHT re-advertises a
-  retracted holder.
-- **v0.3.30-32**: one `RequestTrace` feeds every surface; stale shard-holder
-  claims self-correct; a fresh node gets a 1.5s DHT grace. **"tok/s per node per
-  shard" is NOT measurable in a pipeline** — use each segment's share of
-  inter-token latency.
-- **v0.3.22-29**: the control-token leak chased across four releases was a
-  **prompt** bug, not an output-scrubber bug (#169) — `grep "chat template
-  failed" node.log` had been firing on every request for releases.
-  `inference::finalize_reply_text` now owns the ordered scrub→truncate→trim.
-- **v0.3.15-21**: the networking line — NAT relay, additive protocol/feature
-  handshake, multi-relay + DHT discovery. **Hole punching verified live 07-25.**
-  We published an inbound connection's ephemeral source port as dialable (#165);
-  poisoned caches need a node RESTART, not just a new binary.
+- **Read gotcha #179 before touching connection selection.** A relay carrying an
+  INBOUND connection is a bare `/p2p/<peer>` with no transport component, so it
+  counted as direct and won every send. And **retraction alone is futile — the
+  blacklist is REQUIRED**, since the DHT re-advertises a retracted holder.
+- **#165**: we published an inbound connection's ephemeral source port as
+  dialable; **poisoned caches need a node RESTART, not just a new binary.**
+- **#163**: `max_established_per_peer = 1` structurally disabled DCUtR — a hole
+  punch needs a 2nd concurrent connection. Hole punching verified live 07-25.
+- **#169**: the control-token leak chased across four releases was a **prompt**
+  bug, not an output-scrubber bug — `grep "chat template failed" node.log` had
+  been firing on every request for releases.
+  `inference::finalize_reply_text` owns the ordered scrub→truncate→trim.
+- **"tok/s per node per shard" is NOT measurable in a pipeline** — use each
+  segment's share of inter-token latency.
+- **v0.3.38**: idle VRAM was never reclaimed. The demand-EMA gate exists because
+  `record_request` is called ONLY from the outbound router path, so serving a
+  peer never updates it.
 
 ### Prior rounds (pre-v0.3.15)
 
