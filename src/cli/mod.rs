@@ -10,6 +10,7 @@ pub mod get_model;
 pub mod peers;
 pub mod pool;
 pub mod privacy;
+pub mod remove_model;
 pub mod run;
 pub mod split_test;
 pub mod status;

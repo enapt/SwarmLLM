@@ -102,6 +102,17 @@ enum Commands {
         #[arg(long)]
         all: bool,
     },
+    /// Remove a model from this machine and tell the network it has gone.
+    ///
+    /// Deleting the folder by hand removes the files but leaves this node
+    /// advertising the model to others. This does both.
+    RemoveModel {
+        /// Model id to remove, e.g. llama-3.2-3b-instruct-q4-k-m.
+        model: String,
+        /// Do not ask for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Make prompt privacy possible for a model by fetching the pieces it needs.
     ///
     /// Prompt privacy keeps prompts and answers on this machine, which requires
@@ -354,6 +365,11 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
             cli::get_model::get_model(port, &data_dir, tier, all).await
+        }
+        Commands::RemoveModel { model, yes } => {
+            let port = resolve_client_port(cli.port);
+            let data_dir = resolve_data_dir(&cli.data_dir);
+            cli::remove_model::remove_model(port, &data_dir, &model, yes).await
         }
         Commands::Privacy { model } => {
             let port = resolve_client_port(cli.port);

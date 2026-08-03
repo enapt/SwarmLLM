@@ -4945,7 +4945,9 @@ The v0.3.61 attention fix and the v0.3.63 MLP fix both bound a per-token
 temporary on the un-chunked `handle_forward` path. Two neighbours were checked
 and deliberately not changed:
 
-- **`MoeFfn::forward`** dispatches per expert, so each expert's projection sees
+- **`MoeFfn::forward`** — **FIXED 2026-08-03**, blocked on the token axis via
+  `expert_ffn`, sharing the dense path's budget. Original reasoning: it
+  dispatches per expert, so each expert's projection sees
   only the tokens routed to it — typically `tokens * n_experts_used /
   n_experts`. That is already a fraction of the dense case, but it is NOT
   bounded: a router that sends most tokens to one expert reproduces the dense
@@ -4974,7 +4976,9 @@ had been deleted (fixed: the health monitor now reconciles against disk each
 announce cycle, and `enable-privacy` stats the files before claiming privacy is
 ready). Two things it raised that are NOT fixed:
 
-**1. No CLI way to remove a model.** `DELETE /api/admin/models/:id` exists and
+**1. No CLI way to remove a model.** — **FIXED 2026-08-03**: `swarmllm
+remove-model <id> [--yes]` wraps the endpoint, asks before deleting, and reports
+the active-pipeline 503 as "try again" rather than an error to debug. Original: `DELETE /api/admin/models/:id` exists and
 does the job properly — removes the files, clears the registry and DB rows,
 stops providing on the DHT, and broadcasts a retraction with
 `complete_for_models`. The dashboard uses it. The CLI has no equivalent, so a

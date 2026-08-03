@@ -651,6 +651,56 @@ pub(crate) fn topk_cpu(
     Ok((idx_tensor, w_tensor))
 }
 
+/// One expert's gated feed-forward over the tokens routed to it, blocked on the
+/// token axis exactly as [`Mlp::forward`] is.
+///
+/// Routing means each expert usually sees a fraction of the tokens, which is
+/// why this was not the path that OOM'd first — but a fraction is not a bound.
+/// A router that sends most tokens to one expert reproduces the dense shape:
+/// `gate_out`, `up_out`, their activation and their product are all
+/// `[tokens, intermediate]` and live at the same moment, which is what exhausted
+/// a 6 GB card on the dense path.
+///
+/// Exact for the same reason: every step here treats each token independently,
+/// so splitting rows changes only how many are materialised at once.
+fn expert_ffn(
+    batch_input: &Tensor,
+    gate_w: &Tensor,
+    up_w: &Tensor,
+    down_w: &Tensor,
+) -> CandleResult<Tensor> {
+    let tokens = batch_input.dim(0)?;
+    // `gate_w` is [intermediate, hidden]; the projection widens to its dim 0.
+    let intermediate = gate_w.dim(0)?;
+    let block = if tokens < MLP_MIN_TOKENS_TO_BLOCK || intermediate == 0 {
+        tokens
+    } else {
+        (MLP_INTERMEDIATE_BUDGET_ELEMS / intermediate).clamp(1, tokens)
+    };
+
+    let run = |input: &Tensor| -> CandleResult<Tensor> {
+        let gate_out = input.matmul(&gate_w.t()?)?;
+        let up_out = input.matmul(&up_w.t()?)?;
+        let activated = candle_nn::ops::silu(&gate_out)?;
+        let combined = (activated * up_out)?;
+        combined.matmul(&down_w.t()?)
+    };
+
+    if block >= tokens {
+        return run(batch_input);
+    }
+
+    let mut parts: Vec<Tensor> = Vec::with_capacity(tokens.div_ceil(block));
+    let mut start = 0usize;
+    while start < tokens {
+        let len = block.min(tokens - start);
+        let slice = batch_input.narrow(0, start, len)?.contiguous()?;
+        parts.push(run(&slice)?);
+        start += len;
+    }
+    Tensor::cat(&parts, 0)
+}
+
 impl MoeFfn {
     /// MoE forward pass with batched expert dispatch.
     ///
@@ -700,11 +750,7 @@ impl MoeFfn {
             let up_w = self.up_exps.get(eidx)?;
             let down_w = self.down_exps.get(eidx)?;
 
-            let gate_out = batch_input.matmul(&gate_w.t()?)?;
-            let up_out = batch_input.matmul(&up_w.t()?)?;
-            let activated = candle_nn::ops::silu(&gate_out)?;
-            let combined = (activated * up_out)?;
-            let expert_out = combined.matmul(&down_w.t()?)?; // [batch_tokens, hidden]
+            let expert_out = expert_ffn(&batch_input, &gate_w, &up_w, &down_w)?; // [batch_tokens, hidden]
 
             // Apply per-token weights
             let weight_vec: Vec<f32> = batch.iter().map(|&(_, w)| w).collect();
@@ -1891,6 +1937,87 @@ mod cuda_attention_memory_probe {
         let v0 = probe.to_vec1::<f32>().unwrap()[0];
         assert!(v0.is_finite(), "output must be finite, got {v0}");
         eprintln!("OK — completed, first output element {v0:.6}");
+    }
+}
+
+#[cfg(test)]
+mod blocked_expert_ffn_tests {
+    use super::*;
+    use candle_core::{DType, Device, Tensor};
+
+    fn w(o: usize, i: usize, seed: f32) -> Tensor {
+        let data: Vec<f32> = (0..o * i).map(|k| (k as f32 * seed).sin() * 0.05).collect();
+        Tensor::from_vec(data, (o, i), &Device::Cpu).unwrap()
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        let a = a.flatten_all().unwrap().to_dtype(DType::F32).unwrap();
+        let b = b.flatten_all().unwrap().to_dtype(DType::F32).unwrap();
+        (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    }
+
+    /// A lopsided router sends most tokens to one expert, which reproduces the
+    /// dense shape that exhausted a 6 GB card. Blocking must be exact.
+    #[test]
+    fn blocking_one_expert_is_bit_for_bit_identical() {
+        let (hidden, intermediate, tokens) = (48, 160, 700);
+        let (g, u, d) = (
+            w(intermediate, hidden, 0.017),
+            w(intermediate, hidden, 0.023),
+            w(hidden, intermediate, 0.031),
+        );
+        let input = Tensor::from_vec(
+            (0..tokens * hidden)
+                .map(|k| (k as f32 * 0.011).cos() * 0.4)
+                .collect::<Vec<f32>>(),
+            (tokens, hidden),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        // The real budget leaves this unblocked; compare against an explicit
+        // single-shot run of the same arithmetic.
+        let blocked = expert_ffn(&input, &g, &u, &d).unwrap();
+        let whole = {
+            let gate_out = input.matmul(&g.t().unwrap()).unwrap();
+            let up_out = input.matmul(&u.t().unwrap()).unwrap();
+            let activated = candle_nn::ops::silu(&gate_out).unwrap();
+            let combined = (activated * up_out).unwrap();
+            combined.matmul(&d.t().unwrap()).unwrap()
+        };
+
+        assert_eq!(blocked.dims(), whole.dims());
+        assert_eq!(max_abs_diff(&blocked, &whole), 0.0);
+    }
+
+    /// An expert given only a handful of tokens takes the unblocked path, so
+    /// routing that spreads tokens thinly pays nothing for this.
+    #[test]
+    fn a_lightly_loaded_expert_is_not_blocked() {
+        let (hidden, intermediate, tokens) = (32, 128, 8);
+        let (g, u, d) = (
+            w(intermediate, hidden, 0.013),
+            w(intermediate, hidden, 0.019),
+            w(hidden, intermediate, 0.029),
+        );
+        let input = Tensor::from_vec(
+            (0..tokens * hidden)
+                .map(|k| k as f32 * 0.001)
+                .collect::<Vec<f32>>(),
+            (tokens, hidden),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let out = expert_ffn(&input, &g, &u, &d).unwrap();
+        assert_eq!(out.dims(), &[tokens, hidden]);
     }
 }
 
