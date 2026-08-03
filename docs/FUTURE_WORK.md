@@ -5038,10 +5038,48 @@ cost more than the work):
    and the local CPU fallback at least answers;
 4. the node has full local coverage — otherwise this decision does not apply.
 
-**Not yet exercised on real hardware.** The predicate is unit-tested in all six
-combinations, but the path only fires on a GPU node that is genuinely out of
-budget with a peer holding the layers, which needs the tester's 6 GB card rather
-than this 8 GB one. Watch for the "no room for it right now" log line.
+**PARTIAL — the decision works, the routing still does not. Reopened
+2026-08-03 after testing it.** Do not assume this feature is live.
+
+Exercised on real hardware by constraining a node's budget
+(`[resources] max_gpu_vram_mb = 300`, isolated data dir, model symlinked, phi-3.5
+fully local, peers holding it). Three rounds:
+
+1. **The gate fires correctly.** Instrumented, all four inputs as intended:
+   `local_has_full_coverage=true local_fits=Some(false) has_gpu=true
+   remote_can_help=true take_local_fast_path=false`, and the "no room for it
+   right now" line is emitted. Admission independently confirms the premise
+   ("Not enough GPU memory budget ... loading it on the CPU instead").
+2. **Skipping the fast path is not enough.** The general assignment then ranks
+   the local node by latency, which is zero, so it wins every segment and the
+   request runs locally regardless. Result: `route=local segments=1`.
+3. **Pricing it did not fix it either.** `NodeCandidate.out_of_room` +
+   `OUT_OF_ROOM_COST_PENALTY` were added to `estimated_cost_per_layer` — and
+   that is the GREEDY assigner, while `parallax_routing` defaults to TRUE, so
+   the penalty was on a path that does not run. (The codebase's signature
+   defect, committed again by me.) Pricing it in the parallax DP too STILL
+   yields `route=local segments=1`.
+
+So something after the assignment continues to select local, and it has not been
+found. Candidates for the next attempt, cheapest first:
+
+- Confirm what `assemble_pipeline_for` actually RETURNS under these conditions
+  (log the segment list, not just the gate decision). `route=local` may mean the
+  assignment was distributed and something downstream collapsed it, which would
+  point at `execute_request` rather than the scheduler at all.
+- Check whether the parallax DP is even reached, or whether it errors and falls
+  back to greedy — the fallback is silent.
+- Check the trace's Route classification: a single-segment assignment on the
+  local node may be *labelled* `local` while genuinely having gone through the
+  distributed path, in which case the routing is fine and only the label misled.
+  That last one would mean the feature works and this write-up is wrong; it is
+  cheap to rule out and should be ruled out FIRST.
+
+**What is safe about the current state:** every piece is inert. `should_keep_local`
+returns the old answer in every case except the narrow one, and in that case the
+only observed effect is an extra log line — the request still runs locally, as it
+did before. Nothing regressed; the feature simply does not do what its commit
+message says yet.
 
 Original entry:
 

@@ -46,6 +46,10 @@ struct NodeCandidate {
     observed_latency_ms_per_layer: Option<f32>,
     /// True if this node is in our device pool (preferred for routing — free, trusted, low latency).
     is_pool_member: bool,
+    /// True when this is US and the model does not currently fit in our GPU
+    /// budget, so serving it here means the CPU fallback. Priced, not excluded —
+    /// see `OUT_OF_ROOM_COST_PENALTY`.
+    out_of_room: bool,
 }
 
 /// Maximum number of GPUs in a tensor-parallel group. AllReduce communication
@@ -149,6 +153,16 @@ fn regions_adjacent(a: &str, b: &str) -> bool {
             || (x.eq_ignore_ascii_case(b) && y.eq_ignore_ascii_case(a))
     })
 }
+
+/// Cost added per layer to a node that has no room for the model right now.
+///
+/// Serving from the CPU fallback is roughly an order of magnitude slower than
+/// the GPU, so a peer that can use its GPU should win comfortably — but this is
+/// a PRICE, not an exclusion. If no peer covers the layers, the local node still
+/// wins by default and answers slowly, which beats failing. Excluding it
+/// outright would turn "slow" into "no node available for layer N", the exact
+/// failure the local fast path was added to prevent.
+pub(super) const OUT_OF_ROOM_COST_PENALTY: f32 = 10_000.0;
 
 /// Should a node that holds every layer run the request alone?
 ///
@@ -671,6 +685,18 @@ impl PipelineScheduler {
             // carries no network component, which is correct: there isn't one.
             let observed_latency_ms_per_layer =
                 self.shared_state.observed_latency_ms_per_layer(&node_id);
+            // Only ever true of ourselves — we cannot know a peer's headroom,
+            // and guessing would be worse than not pricing it at all.
+            // `would_fit_on_gpu` returning `None` (unreadable estimate, no
+            // budget) must NOT read as "no room", so only `Some(false)` counts.
+            let out_of_room = &node_id == local_node_id
+                && self.shared_state.gpu_info.is_some()
+                && matches!(
+                    self.shared_state
+                        .model_process_pool
+                        .would_fit_on_gpu(&manifest.id),
+                    Some(false)
+                );
             candidates.push(NodeCandidate {
                 node_id,
                 shard_id: first_shard_id,
@@ -685,6 +711,7 @@ impl PipelineScheduler {
                 est_tokens_per_sec,
                 observed_latency_ms_per_layer,
                 is_pool_member: is_pool,
+                out_of_room,
             });
         }
 
@@ -852,7 +879,17 @@ impl PipelineScheduler {
             });
 
         let load_multiplier = 1.0 + candidate.load.max(0.0);
-        candidate.latency_ms as f32 / covered + compute_per_layer * load_multiplier
+        let base = candidate.latency_ms as f32 / covered + compute_per_layer * load_multiplier;
+        // A node with no room serves from its CPU fallback. Skipping the local
+        // fast path is not enough on its own: the general assignment then ranks
+        // the local node by latency, which is zero, so it wins every segment and
+        // the request runs locally anyway. Observed doing exactly that before
+        // this existed.
+        if candidate.out_of_room {
+            base + OUT_OF_ROOM_COST_PENALTY
+        } else {
+            base
+        }
     }
 
     /// Greedy layer assignment: cover all layers 0..num_layers using sorted candidates.
