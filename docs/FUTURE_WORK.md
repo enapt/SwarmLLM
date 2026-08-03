@@ -4820,9 +4820,43 @@ the threshold must not evict nodes that are merely slow; and closing the
 connection now schedules a re-dial, which is the right recovery but wants the
 backoff added in this same round rather than a tight loop.
 
-## Key rotation breaks in-flight distributed inference every 10 minutes (2026-08-02)
+## Key rotation breaks in-flight distributed inference every 10 minutes (2026-08-02) — FIXED
 
-**Status: ROOT-CAUSED on two machines, v0.3.62-alpha. Half fixed.**
+**Status: FIXED 2026-08-03.** `CachedSession` now keeps the key it replaced in a
+`previous` slot for `PREVIOUS_KEY_GRACE` (3 min), and `open` falls back to it
+when the current key fails. Both handshake sides and the static path go through
+one `install_session`, which rotates rather than overwrites, under the map entry
+lock so no `seal`/`open` sees the peer as sessionless mid-rekey.
+
+**The security-critical detail: the superseded key carries its OWN replay
+window.** Sharing one window between two keys would have made this a real
+weakening — the same bytes could be accepted twice, once under each key. This is
+what WireGuard does for the same reason (per-keypair replay counter, previous
+keypair retained because messages under it can still be in flight).
+`try_open_with` keeps the RFC 6479 discipline unchanged per key: check the
+window without mutating, decrypt, record only on success.
+
+Pinned by tests, including the failing case: with the grace set to zero the
+regression test fails, so it genuinely catches the defect rather than passing
+vacuously. Also pinned: replay under the superseded key is still rejected, only
+ONE superseded key is retained (no chain), and it expires.
+
+**Not addressed — the sender half.** WireGuard also declines to *send* on an
+unconfirmed keypair. Here a node still starts sealing with a new key the moment
+it derives one, so the fix relies on the receiver having that key already or
+within its previous slot. With both ends keeping two keys this covers the
+observed skew (tens of seconds) and crossed rotations, but a node that has not
+yet performed the exchange at all still cannot decrypt. Closing that needs the
+sender to hold the new key back until the peer proves it has it.
+
+**Follow-up spotted while here, not investigated:** `establish_session` (the
+static path) is called repeatedly and resets `send_nonce` to 0 each time with
+the SAME derived key. If that happens on a live session the peer's replay window
+is already past those counters and should reject them. It evidently mostly
+works, so the caller probably guards on `has_session` — worth confirming, because
+if it does not, it is a second and quieter source of decrypt failures.
+
+Original entry:
 
 A healthy 3-segment split failed 92 seconds in, with
 `Timed out waiting for segment result (30s, 8 layers)`. The prefill had already

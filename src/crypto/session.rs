@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -123,6 +123,36 @@ impl ReplayWindow {
     }
 }
 
+/// How long a superseded key stays usable for DECRYPTION after a rekey.
+///
+/// Both ends rotate on independent 10-minute timers and each rekey replaced the
+/// key outright, so there was a window in which one side sealed with a key the
+/// other had not installed yet — and, when two rotations crossed, in which each
+/// side held a key derived from a *different* exchange. Anything crossing that
+/// window was discarded. Observed live 2026-08-02: a prefill succeeded, a
+/// rotation landed, and the next decode failed to decrypt on the peer 13s
+/// before it installed the matching key.
+///
+/// Keeping the superseded key for a bounded period is what WireGuard does for
+/// the same reason — messages encrypted under the previous session can still be
+/// in flight when a new one is created. Three minutes is far longer than the
+/// tens of seconds of skew actually seen, and short enough to bound how long a
+/// compromised old key remains useful.
+const PREVIOUS_KEY_GRACE: Duration = Duration::from_secs(180);
+
+/// A superseded key, kept briefly so in-flight messages still open.
+///
+/// It carries its OWN replay window. Sharing one window between two keys would
+/// break anti-replay: a counter consumed under the new key would suppress a
+/// legitimate message under the old one, and — worse — advancing the shared
+/// window from old-key traffic would let an attacker replay under the new key.
+/// WireGuard likewise keeps the replay counter per keypair.
+struct PreviousKey {
+    cipher_key: Zeroizing<[u8; 32]>,
+    replay_window: std::sync::Mutex<ReplayWindow>,
+    retired_at: Instant,
+}
+
 /// A cached pairwise session derived from X25519 ECDH.
 pub struct CachedSession {
     /// SEC: wrapped in `Zeroizing` so eviction / SessionManager drop overwrites
@@ -134,6 +164,9 @@ pub struct CachedSession {
     /// it requires mutable access for both check and record operations.
     replay_window: std::sync::Mutex<ReplayWindow>,
     created_at: Instant,
+    /// The key this one replaced, usable for decryption only, until
+    /// [`PREVIOUS_KEY_GRACE`] elapses.
+    previous: Option<PreviousKey>,
 }
 
 impl CachedSession {
@@ -143,6 +176,7 @@ impl CachedSession {
             send_nonce: AtomicU64::new(0),
             replay_window: std::sync::Mutex::new(ReplayWindow::new()),
             created_at: Instant::now(),
+            previous: None,
         }
     }
 
@@ -158,6 +192,45 @@ impl CachedSession {
         nonce[4..12].copy_from_slice(&counter.to_le_bytes());
         Ok(nonce)
     }
+}
+
+/// Attempt one authenticated decryption under a single key, honouring that
+/// key's own replay window.
+///
+/// Order is the same discipline `open` has always used and must keep: check the
+/// window WITHOUT mutating it, decrypt, and only record the nonce once the
+/// message is proven authentic. Recording before authentication would let an
+/// injected packet with a high nonce advance the window and lock out genuine
+/// traffic (RFC 6479).
+///
+/// Returns `None` on either a window rejection or an authentication failure —
+/// the caller may then try another key, and must not treat either as proof of
+/// an attack, since a rekey in flight produces exactly this.
+fn try_open_with(
+    cipher_key: &[u8; 32],
+    replay_window: &std::sync::Mutex<ReplayWindow>,
+    sealed: &[u8],
+    aad: &[u8],
+    recv_nonce: u64,
+) -> Option<Vec<u8>> {
+    {
+        let window = replay_window.lock().unwrap_or_else(|e| e.into_inner());
+        if !window.check(recv_nonce) {
+            return None;
+        }
+    }
+    let cipher = ChaCha20Poly1305::new_from_slice(cipher_key).ok()?;
+    let nonce = Nonce::from_slice(&sealed[..12]);
+    let payload = chacha20poly1305::aead::Payload {
+        msg: &sealed[12..],
+        aad,
+    };
+    let plaintext = cipher.decrypt(nonce, payload).ok()?;
+    {
+        let mut window = replay_window.lock().unwrap_or_else(|e| e.into_inner());
+        window.record(recv_nonce);
+    }
+    Some(plaintext)
 }
 
 /// Manages pairwise encryption sessions with peers.
@@ -203,8 +276,7 @@ impl SessionManager {
             &self.local_public,
             &peer_x25519_pub,
         );
-        self.sessions
-            .insert(peer.clone(), CachedSession::new(cipher_key));
+        self.install_session(peer, cipher_key);
         tracing::debug!(peer = %peer, "Established encryption session");
     }
 
@@ -270,8 +342,7 @@ impl SessionManager {
             &peer_ephemeral_pub,
         );
 
-        self.sessions
-            .insert(peer.clone(), CachedSession::new(cipher_key));
+        self.install_session(peer, cipher_key);
         tracing::debug!(peer = %peer, "Established ephemeral forward-secret session");
         true
     }
@@ -301,11 +372,44 @@ impl SessionManager {
             &peer_ephemeral_pub,
         );
 
-        self.sessions
-            .insert(peer.clone(), CachedSession::new(cipher_key));
+        self.install_session(peer, cipher_key);
         tracing::debug!(peer = %peer, "Accepted ephemeral forward-secret session (responder)");
 
         our_pub_bytes
+    }
+
+    /// Install a freshly derived key, rotating the one it replaces into the
+    /// previous slot rather than discarding it.
+    ///
+    /// Both handshake sides go through here so neither can drop a key the other
+    /// end may still be sealing with. Done under the map entry lock so a
+    /// concurrent `seal`/`open` never observes the peer as sessionless mid-rekey
+    /// — a remove-then-insert would open exactly that gap.
+    fn install_session(&self, peer: &NodeId, cipher_key: Zeroizing<[u8; 32]>) {
+        use dashmap::mapref::entry::Entry;
+        match self.sessions.entry(peer.clone()) {
+            Entry::Occupied(mut occupied) => {
+                let session = occupied.get_mut();
+                let retired_key = std::mem::replace(&mut session.cipher_key, cipher_key);
+                let retired_window = std::mem::replace(
+                    &mut session.replay_window,
+                    std::sync::Mutex::new(ReplayWindow::new()),
+                );
+                // The new key starts its own nonce sequence; the retired key
+                // keeps the window it accumulated, so replays under it are
+                // still caught.
+                session.send_nonce.store(0, Ordering::SeqCst);
+                session.created_at = Instant::now();
+                session.previous = Some(PreviousKey {
+                    cipher_key: retired_key,
+                    replay_window: retired_window,
+                    retired_at: Instant::now(),
+                });
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(CachedSession::new(cipher_key));
+            }
+        }
     }
 
     /// Remove the encryption session for a disconnected peer.
@@ -391,65 +495,59 @@ impl SessionManager {
         nonce_counter_bytes.copy_from_slice(&sealed[4..12]);
         let recv_nonce = u64::from_le_bytes(nonce_counter_bytes);
 
-        // Pre-check: reject replayed or out-of-window nonces without modifying state.
-        {
-            let window = session
-                .replay_window
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if !window.check(recv_nonce) {
-                tracing::warn!(
-                    peer = %peer,
-                    recv_nonce,
-                    window_top = window.top,
-                    "Rejecting replayed/out-of-window nonce"
-                );
-                return Err(SwarmError::DecryptionFailed);
-            }
-        }
-
-        // Decrypt BEFORE committing nonce state — a forged packet must not
-        // advance the nonce window (prevents DoS via injected high-nonce packets).
-        let nonce = Nonce::from_slice(&sealed[..12]);
-        let ciphertext = &sealed[12..];
-
-        let cipher = ChaCha20Poly1305::new_from_slice(&session.cipher_key[..])
-            .map_err(|e| SwarmError::Encryption(format!("Cipher init failed: {e}")))?;
-
-        let payload = chacha20poly1305::aead::Payload {
-            msg: ciphertext,
+        if let Some(plaintext) = try_open_with(
+            &session.cipher_key,
+            &session.replay_window,
+            sealed,
             aad,
-        };
-        let plaintext = cipher.decrypt(nonce, payload).map_err(|_| {
-            tracing::error!(
+            recv_nonce,
+        ) {
+            tracing::trace!(
                 peer = %peer,
                 recv_nonce,
                 aad_len = aad.len(),
-                sealed_len = sealed.len(),
-                ciphertext_len = ciphertext.len(),
-                "DIAG: open() decryption FAILED — likely AAD mismatch or key mismatch"
+                plaintext_len = plaintext.len(),
+                "DIAG: open() decryption success"
             );
-            SwarmError::DecryptionFailed
-        })?;
+            return Ok(plaintext);
+        }
 
-        tracing::trace!(
+        // Fall back to the key this one replaced. A rekey does not reach both
+        // ends at the same instant, and when two rotations cross, each end can
+        // briefly hold a key from a different exchange — so a message that fails
+        // under the current key is very often perfectly valid under the previous
+        // one, not an attack. The previous key carries its own replay window, so
+        // this is a second authenticated check, not a relaxed one.
+        if let Some(previous) = session.previous.as_ref() {
+            if previous.retired_at.elapsed() <= PREVIOUS_KEY_GRACE {
+                if let Some(plaintext) = try_open_with(
+                    &previous.cipher_key,
+                    &previous.replay_window,
+                    sealed,
+                    aad,
+                    recv_nonce,
+                ) {
+                    tracing::debug!(
+                        peer = %peer,
+                        recv_nonce,
+                        retired_secs = previous.retired_at.elapsed().as_secs(),
+                        "Opened with the superseded key — the peer has not adopted the new one yet"
+                    );
+                    return Ok(plaintext);
+                }
+            }
+        }
+
+        tracing::error!(
             peer = %peer,
             recv_nonce,
             aad_len = aad.len(),
-            plaintext_len = plaintext.len(),
-            "DIAG: open() decryption success"
+            sealed_len = sealed.len(),
+            had_previous = session.previous.is_some(),
+            "DIAG: open() decryption FAILED under both current and superseded keys \
+             — likely AAD mismatch or an unrelated key"
         );
-
-        // Decryption succeeded — commit the nonce to the sliding window.
-        {
-            let mut window = session
-                .replay_window
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            window.record(recv_nonce);
-        }
-
-        Ok(plaintext)
+        Err(SwarmError::DecryptionFailed)
     }
 
     /// Evict sessions older than `max_age` and pending ephemeral exchanges older than 60s.
@@ -616,6 +714,104 @@ mod tests {
         sm_b.establish_session(&node_a, *sm_a.local_public_key());
 
         (sm_a, sm_b, node_a, node_b)
+    }
+
+    /// Perform a full ephemeral rekey between two managers, as the rotation
+    /// tick does. Returns nothing — both sides end up holding the new key with
+    /// the one it replaced in their previous slot.
+    fn rekey(sm_a: &SessionManager, sm_b: &SessionManager, node_a: &NodeId, node_b: &NodeId) {
+        let a_eph = sm_a.initiate_ephemeral_exchange(node_b);
+        let b_eph = sm_b.accept_ephemeral_exchange(node_a, &a_eph);
+        assert!(sm_a.complete_ephemeral_session(node_b, &b_eph));
+    }
+
+    /// The defect this exists for: a message sealed just before a rekey must
+    /// still open just after it. Rotation reached the two ends tens of seconds
+    /// apart, and every forward crossing that gap was discarded — observed live
+    /// as a prefill succeeding and the next decode failing to decrypt.
+    #[test]
+    fn a_message_sealed_before_a_rekey_still_opens_after_it() {
+        let (sm_a, sm_b, node_a, node_b) = make_session_pair();
+        let aad = b"in-flight";
+        let sealed = sm_a.seal(&node_b, b"activations", aad).unwrap();
+
+        // B rotates before the message lands.
+        rekey(&sm_b, &sm_a, &node_b, &node_a);
+
+        let opened = sm_b
+            .open(&node_a, &sealed, aad)
+            .expect("a message in flight across a rekey must still open");
+        assert_eq!(opened, b"activations");
+    }
+
+    /// Anti-replay must hold on the superseded key too. Keeping a second key
+    /// would be a real weakening if it came with a fresh window — the same
+    /// message could then be accepted twice, once under each key.
+    #[test]
+    fn a_replay_under_the_superseded_key_is_still_rejected() {
+        let (sm_a, sm_b, node_a, node_b) = make_session_pair();
+        let aad = b"replay";
+        let sealed = sm_a.seal(&node_b, b"once", aad).unwrap();
+
+        rekey(&sm_b, &sm_a, &node_b, &node_a);
+
+        assert!(sm_b.open(&node_a, &sealed, aad).is_ok(), "first delivery");
+        assert!(
+            sm_b.open(&node_a, &sealed, aad).is_err(),
+            "the same bytes must not be accepted a second time under the old key"
+        );
+    }
+
+    /// The new key keeps its own window, unaffected by traffic on the old one.
+    #[test]
+    fn the_new_key_works_normally_after_a_rekey() {
+        let (sm_a, sm_b, node_a, node_b) = make_session_pair();
+        let aad = b"after";
+
+        rekey(&sm_a, &sm_b, &node_a, &node_b);
+
+        let sealed = sm_a.seal(&node_b, b"fresh", aad).unwrap();
+        assert_eq!(sm_b.open(&node_a, &sealed, aad).unwrap(), b"fresh");
+    }
+
+    /// Two rekeys in a row must retire the intermediate key, not keep a chain.
+    /// Only one superseded key is held, so exposure stays bounded.
+    #[test]
+    fn only_one_superseded_key_is_retained() {
+        let (sm_a, sm_b, node_a, node_b) = make_session_pair();
+        let aad = b"chain";
+        let oldest = sm_a.seal(&node_b, b"oldest", aad).unwrap();
+
+        rekey(&sm_b, &sm_a, &node_b, &node_a);
+        rekey(&sm_b, &sm_a, &node_b, &node_a);
+
+        assert!(
+            sm_b.open(&node_a, &oldest, aad).is_err(),
+            "a key two rotations old must no longer open anything"
+        );
+    }
+
+    /// A superseded key stops working once the grace period has passed, so a
+    /// compromised old key is not useful indefinitely.
+    #[test]
+    fn the_superseded_key_expires() {
+        let (sm_a, sm_b, node_a, node_b) = make_session_pair();
+        let aad = b"expiry";
+        let sealed = sm_a.seal(&node_b, b"stale", aad).unwrap();
+
+        rekey(&sm_b, &sm_a, &node_b, &node_a);
+
+        // Age the retirement past the grace window.
+        {
+            let mut session = sm_b.sessions.get_mut(&node_a).unwrap();
+            let previous = session.previous.as_mut().expect("previous key present");
+            previous.retired_at = Instant::now() - (PREVIOUS_KEY_GRACE + Duration::from_secs(1));
+        }
+
+        assert!(
+            sm_b.open(&node_a, &sealed, aad).is_err(),
+            "the superseded key must stop opening messages once the grace expires"
+        );
     }
 
     #[test]
