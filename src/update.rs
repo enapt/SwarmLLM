@@ -331,7 +331,54 @@ impl UpdateChecker {
         }
     }
 
+    /// Build a checker with an explicit binary path, for tests that need to
+    /// control where the staging file lives.
+    #[cfg(test)]
+    fn for_test(binary_path: PathBuf) -> Self {
+        let (tx, _rx) = tokio::sync::broadcast::channel(4);
+        Self {
+            config: UpdateConfig::default(),
+            repo: "example/repo".to_string(),
+            binary_path,
+            state: Arc::new(RwLock::new(UpdateState::default())),
+            dashboard_tx: tx,
+            shared: None,
+        }
+    }
+
     pub async fn download_update(&self, info: &UpdateInfo) -> Result<PathBuf, SwarmError> {
+        // A verified binary for this exact release may already be staged beside
+        // the running one — reuse it rather than fetching ~1 GB again.
+        //
+        // Nothing in the periodic loop remembers what is already on disk, so
+        // without this a node in `download` mode re-downloaded the SAME release
+        // on every check (hourly by default) for as long as the update went
+        // unapplied. `download` is precisely the mode that leaves an update
+        // unapplied indefinitely — it stages and stops by design, pending
+        // binary signing — so this repeats for that mode rather than being an
+        // edge case.
+        //
+        // Decided by hashing the file, never by its name, size or mtime: a
+        // truncated or superseded staging file must not be mistaken for a good
+        // one, and a release whose sidecar checksum is missing is not
+        // reusable at all (the download path rejects those outright).
+        //
+        // This must stay ABOVE the writability probe below, which uses
+        // `File::create` and therefore TRUNCATES an existing staging file
+        // before anything has had a chance to look at it.
+        if let Some(expected) = info.checksum_sha256.as_deref() {
+            let staged = self.preferred_tmp_path();
+            if staged_file_matches(&staged, expected).await {
+                tracing::info!(
+                    version = %info.latest_version,
+                    path = %staged.display(),
+                    "Update for this release is already staged and verified — reusing it \
+                     rather than downloading again"
+                );
+                return Ok(staged);
+            }
+        }
+
         // SECURITY: Only allow downloads from GitHub to prevent SSRF via poisoned API response
         if !info.download_url.starts_with("https://github.com/")
             && !info
@@ -894,6 +941,32 @@ fn checksum_matches(sidecar_body: &str, actual_hash: &str) -> bool {
     actual_hash.eq_ignore_ascii_case(sidecar_hash(sidecar_body))
 }
 
+/// Whether an already-staged file is exactly the binary `expected` describes.
+///
+/// Streams the file rather than reading it whole: the CUDA release binary is
+/// ~1 GB, and this runs on a node that may be busy serving. Any read failure —
+/// no such file, unreadable, a directory — answers `false`, which is the safe
+/// direction: the caller then downloads, rather than trusting something it
+/// could not check.
+async fn staged_file_matches(staged: &std::path::Path, expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+
+    let Ok(mut file) = tokio::fs::File::open(staged).await else {
+        return false;
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        match file.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return false,
+        }
+    }
+    checksum_matches(expected, &hex::encode(hasher.finalize()))
+}
+
 /// Build-variant suffix for release asset names (`""` for a CPU build).
 ///
 /// The OS/arch pair alone does not identify a release binary: a GPU build and a
@@ -1236,5 +1309,112 @@ mod tests {
         assert!(state.update_available.is_none());
         assert!(state.last_checked.is_none());
         assert!(state.last_error.is_none());
+    }
+}
+
+#[cfg(test)]
+mod staged_reuse_tests {
+    use super::*;
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(bytes);
+        hex::encode(h.finalize())
+    }
+
+    fn info_for(checksum: Option<String>) -> UpdateInfo {
+        UpdateInfo {
+            latest_version: "0.9.9".to_string(),
+            current_version: "0.9.8".to_string(),
+            // A syntactically valid GitHub URL that would fail to connect.
+            // Reaching it at all is the failure this test detects.
+            download_url: "https://github.com/example/repo/releases/download/v0/x".to_string(),
+            changelog: String::new(),
+            published_at: String::new(),
+            checksum_sha256: checksum,
+            downloaded: false,
+            self_update_supported: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_matching_staged_file_is_recognised() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("swarmllm.update.tmp");
+        std::fs::write(&staged, b"pretend binary").unwrap();
+        assert!(staged_file_matches(&staged, &sha256_hex(b"pretend binary")).await);
+    }
+
+    /// Everything that is not a verified match must answer false, because the
+    /// caller treats false as "download it". Trusting a stale or truncated
+    /// staging file would install the wrong binary.
+    #[tokio::test]
+    async fn anything_unverified_is_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("swarmllm.update.tmp");
+
+        // Missing.
+        assert!(!staged_file_matches(&staged, &sha256_hex(b"x")).await);
+
+        // Present but stale — the shape left behind when a newer release
+        // supersedes a staged one.
+        std::fs::write(&staged, b"an older release").unwrap();
+        assert!(!staged_file_matches(&staged, &sha256_hex(b"the new release")).await);
+
+        // Truncated.
+        std::fs::write(&staged, b"pretend bin").unwrap();
+        assert!(!staged_file_matches(&staged, &sha256_hex(b"pretend binary")).await);
+
+        // A directory in the way.
+        let as_dir = dir.path().join("dir.update.tmp");
+        std::fs::create_dir(&as_dir).unwrap();
+        assert!(!staged_file_matches(&as_dir, &sha256_hex(b"")).await);
+    }
+
+    /// The sidecar is `"<hash>  <filename>"` and its case varies by platform,
+    /// so reuse has to accept the same spellings the download path does —
+    /// otherwise a Windows node re-downloads every hour forever.
+    #[tokio::test]
+    async fn sidecar_format_and_case_are_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("swarmllm.update.tmp");
+        std::fs::write(&staged, b"pretend binary").unwrap();
+        let hash = sha256_hex(b"pretend binary");
+
+        assert!(staged_file_matches(&staged, &format!("{hash}  swarmllm-linux-x86_64")).await);
+        assert!(staged_file_matches(&staged, &hash.to_uppercase()).await);
+    }
+
+    /// The behaviour that matters: with the release already staged and
+    /// verified, `download_update` returns it WITHOUT going to the network.
+    ///
+    /// Before this, nothing in the periodic loop remembered what was on disk,
+    /// so a node in `download` mode re-fetched the same ~1 GB release every
+    /// check — hourly by default — for as long as the update stayed unapplied,
+    /// which in that mode is indefinitely.
+    ///
+    /// The URL points at a host this test cannot reach, so if the reuse path
+    /// were removed this would attempt a real download and fail rather than
+    /// silently passing.
+    #[tokio::test]
+    async fn an_already_staged_release_is_not_downloaded_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm");
+        std::fs::write(&binary, b"running binary").unwrap();
+
+        let checker = UpdateChecker::for_test(binary.clone());
+        let staged = checker.preferred_tmp_path();
+        std::fs::write(&staged, b"pretend binary").unwrap();
+
+        let info = info_for(Some(sha256_hex(b"pretend binary")));
+        let got = checker.download_update(&info).await.expect("reuses staged");
+        assert_eq!(got, staged);
+        assert_eq!(
+            std::fs::read(&staged).unwrap(),
+            b"pretend binary",
+            "the staged binary must survive — the writability probe truncates, \
+             so the reuse check has to run before it"
+        );
     }
 }

@@ -4341,6 +4341,26 @@ Options, roughly in order of how much they change:
    should be discarded when a newer version appears, rather than leaving a stale
    ~980 MB file that will never be applied.
 
+   **Partly done 2026-08-03, and the actual defect was worse than described.**
+   The staging path is fixed (`<binary>.update.tmp`), so a newer release
+   overwrites the old file rather than accumulating — the stale-file concern was
+   mostly unfounded. What WAS happening: `download_update` had no idea what was
+   already on disk, so a node in `download` mode re-fetched **the same release
+   on every check — hourly by default — for as long as the update went
+   unapplied**, which in that mode is indefinitely. For a CUDA node that is
+   ~980 MB per hour, forever, on a machine whose owner had opted into automatic
+   *downloads* and reasonably expected one.
+
+   It now reuses a staged file when its SHA256 matches the release's sidecar,
+   and downloads otherwise. The check hashes the file rather than trusting its
+   name, size or mtime, and had to be placed above the writability probe, which
+   uses `File::create` and truncates. Pinned by `staged_reuse_tests`, including
+   an end-to-end one that fails (by reaching the network) if the reuse path is
+   removed.
+
+   **Still open from this item**: nothing prunes the staged file once it is
+   applied or once the node moves past that version, so the disk cost persists.
+
 Recommendation: (2) now and (1) with a migration; (3) only after signing.
 
 ## RESOLVED 2026-07-29 — words were tokenized to byte-fallback garbage
