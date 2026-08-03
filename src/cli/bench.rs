@@ -99,6 +99,10 @@ pub async fn run_bench(
 
     // --- Concurrent throughput test ---
     let mut concurrent_results: Vec<BenchResult> = Vec::new();
+    // Reported in the JSON as well as on stderr: the two are different streams,
+    // so a harness parsing stdout would otherwise see only a smaller `requests`
+    // count with nothing saying why.
+    let mut concurrent_failures: Vec<String> = Vec::new();
     if concurrency > 1 {
         if !json_output {
             println!("\nConcurrent throughput ({concurrency} parallel requests):");
@@ -131,7 +135,10 @@ pub async fn run_bench(
         for handle in handles {
             match handle.await? {
                 Ok(r) => concurrent_results.push(r),
-                Err(e) => eprintln!("  Request failed: {e}"),
+                Err(e) => {
+                    eprintln!("  Request failed: {e}");
+                    concurrent_failures.push(e.to_string());
+                }
             }
         }
 
@@ -232,6 +239,12 @@ pub async fn run_bench(
                 };
                 Some(serde_json::json!({
                     "requests": concurrent_results.len(),
+                    // `requests` counts only the ones that SUCCEEDED, so a run
+                    // where half the requests failed is otherwise
+                    // indistinguishable from a smaller run that went fine.
+                    "requested": concurrency,
+                    "failed": concurrent_failures.len(),
+                    "errors": concurrent_failures,
                     "total_tokens": total_tokens,
                     "wall_time_ms": total_ms,
                     "aggregate_tokens_per_sec": if total_ms > 0.0 { total_tokens as f64 / (total_ms / 1000.0) } else { 0.0 },
@@ -285,7 +298,28 @@ async fn run_one_blocking(
         .send()
         .await?;
     super::exit_if_api_key_rejected(sent.status(), data_dir, port);
+    // A refused request is a FAILED run, not a run that produced no tokens.
+    //
+    // This checked nothing, so any error response parsed as JSON with no
+    // `usage` field and became a perfectly ordinary result of 0 tokens and
+    // 0.0 tok/s. A nonexistent model rejected in 5 ms, a worker dying
+    // mid-generation and a genuinely slow reload all reported the same number,
+    // and the JSON summary on stdout showed no sign that anything had gone
+    // wrong (reported 2026-07-31). The streaming path already used
+    // `error_for_status`; this one did not.
+    let status = sent.status();
     let resp: serde_json::Value = sent.json().await?;
+    if !status.is_success() {
+        let msg = resp
+            .get("error")
+            .and_then(|e| {
+                e.get("message")
+                    .and_then(|m| m.as_str())
+                    .or_else(|| e.as_str())
+            })
+            .unwrap_or("no error message");
+        anyhow::bail!("request failed ({status}): {msg}");
+    }
     let elapsed = start.elapsed();
     let prompt_tokens = resp["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
     let completion_tokens = resp["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;

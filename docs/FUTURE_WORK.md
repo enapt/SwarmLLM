@@ -4524,6 +4524,23 @@ Two things worth keeping from the exchange:
   reload all collapse to the same number. The error itself IS printed — but to
   **stderr**, while the results JSON goes to stdout, so anything parsing stdout
   sees only the zero. Do not use that field alone as a health signal.
+
+  **FIXED 2026-08-03.** The cause was that `run_one_blocking` never looked at
+  the HTTP status: it parsed any response as JSON, found no `usage`, and
+  recorded a perfectly ordinary result of 0 tokens at 0.0 tok/s. (The streaming
+  path already used `error_for_status`; only the non-streaming one was blind.)
+  A refused request is now a failed run — verified live: an unknown model id
+  exits 1 carrying the daemon's own 404 message and its list of available
+  models, where it previously reported success. The concurrent block's JSON also
+  gained `requested`, `failed` and `errors`, because `requests` counted only the
+  survivors, so a run where half the requests failed looked like a smaller run
+  that went fine.
+
+  **Note for anyone reproducing this**: bench's flag is `--model-id`, not
+  `--model`. The global `--model` (a GGUF *path*) silently swallows
+  `--model X`, and the bench then benchmarks whichever model `/v1/models`
+  happens to list first — which is how this was nearly mis-measured again while
+  fixing it.
 - The daemon side is correct: an unknown model returns 404 with the available
   list and a dashboard hint (verified 2026-08-01).
 
