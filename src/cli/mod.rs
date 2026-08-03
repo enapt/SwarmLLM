@@ -72,6 +72,36 @@ pub(crate) fn exit_api_key_rejected(data_dir: &std::path::Path, port: u16) -> ! 
     std::process::exit(1);
 }
 
+/// Explain a rejected API key if that is what this response is, otherwise do
+/// nothing.
+///
+/// **Every CLI command that sends an authenticated request must call this on the
+/// response status before interpreting the body.** The daemon answers a bad key
+/// with 401 and a JSON `authentication_error`, which each command was then
+/// rendering in its own words — "Download request failed (401 Unauthorized)",
+/// "Could not remove <model>: request failed", or reqwest's raw
+/// `error_for_status` text. All of them describe the transport and none of them
+/// name the cause, which is almost always the CLI and the daemon disagreeing
+/// about the data directory.
+///
+/// Only 401 is treated this way. The daemon uses it exclusively for
+/// authentication (`api/middleware.rs`); a 403 or 503 means something else and
+/// must keep its own message — notably the 503 that `remove-model` maps to
+/// "serving a request right now".
+///
+/// Enforced by `cli_commands_explain_a_rejected_key` in
+/// `tests/repo_consistency.rs`, so a new command inherits the requirement
+/// instead of having to remember it.
+pub(crate) fn exit_if_api_key_rejected(
+    status: reqwest::StatusCode,
+    data_dir: &std::path::Path,
+    port: u16,
+) {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        exit_api_key_rejected(data_dir, port);
+    }
+}
+
 /// Whether a daemon response body is an authentication failure.
 pub(crate) fn body_is_auth_error(body: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body)
@@ -92,17 +122,23 @@ pub(crate) async fn discover_model(
     base: &str,
     api_key: &str,
     model_override: Option<String>,
+    data_dir: &std::path::Path,
+    port: u16,
 ) -> anyhow::Result<String> {
     if let Some(m) = model_override {
         return Ok(m);
     }
-    let models_resp: serde_json::Value = client
+    let resp = client
         .get(format!("{base}/v1/models"))
         .header("Authorization", format!("Bearer {api_key}"))
         .send()
-        .await?
-        .json()
         .await?;
+    // A rejected key answers with an error body that has no `data` array, so
+    // without this the fallback below reported "No models available — load a
+    // model first" — sending the user to download a model to fix an auth
+    // problem.
+    exit_if_api_key_rejected(resp.status(), data_dir, port);
+    let models_resp: serde_json::Value = resp.json().await?;
     models_resp["data"][0]["id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("No models available — load a model first"))

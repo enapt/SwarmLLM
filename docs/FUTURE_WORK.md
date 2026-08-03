@@ -4097,10 +4097,23 @@ step 2 treats "cannot read the database" and "no key stored" identically.
    instance owns this data directory — generating and clobbering is the wrong
    move. Failing loudly ("another node appears to be using this data directory")
    would be better than silently breaking the running node's tooling.
-2. **Make the divergence diagnosable.** When a CLI request is rejected, the
-   message should distinguish "the key in <path> was refused by the running
-   daemon — it may be stale" from "no key found". Today both read as
-   the daemon being absent.
+2. **Make the divergence diagnosable. DONE 2026-08-03.** `exit_api_key_rejected`
+   already carried the right message, but only `status` and `peers` called it —
+   the codebase's signature "one invariant, N paths" defect, two callers out of
+   eight. `chat`, `bench`, `pool` (all five subcommands), `get-model`,
+   `remove-model` and `enable-privacy` each rendered a 401 in their own words:
+   "Download request failed (401 Unauthorized)", "Could not remove <model>:
+   request failed", reqwest's raw `error_for_status` text, "Not in a device
+   pool.", and — worst — `discover_model`'s **"No models available — load a
+   model first"**, which sent the user to download a model to fix an auth
+   problem.
+
+   All of them now go through `cli::exit_if_api_key_rejected(status, data_dir,
+   port)`, verified live against a running daemon with a deliberately stale key
+   file. `cli_commands_explain_a_rejected_key` in `tests/repo_consistency.rs`
+   greps `src/cli/*.rs` for any command that builds an Authorization header
+   without handling a rejected key, so a NEW command inherits the requirement
+   rather than having to remember it (checked to fail when the call is removed).
 3. The soak harness now resolves the key through the dashboard bootstrap
    instead of the file, which is why this was caught at all.
 
@@ -4360,7 +4373,21 @@ against any GGUF header on disk.
 pair from current state on every iteration rather than using a lazy queue, so it
 has no stale-entry exposure.
 
-## Shard verification may be penalising peers for OUR truncated reads
+## Shard verification may be penalising peers for OUR truncated reads — FIXED v0.3.51
+
+**All three checks below were implemented and are in the code today** (confirmed
+2026-08-03 by re-reading both sites, since the entry never got its status):
+
+1. `model/shard.rs::verify_shard` checks the declared `size_bytes` BEFORE
+   hashing, via `quarantine_shard_if_size_mismatch`, and logs both the expected
+   and actual byte counts.
+2. A short read returns `SwarmError::ShardIncomplete { expected_bytes,
+   actual_bytes }` — a distinct outcome from a hash mismatch, not a subset of it.
+3. `network/manager/requests.rs` only applies `TrustEvent::ShardVerificationFail`
+   when the transfer was complete AND the hash is wrong. An incomplete transfer
+   logs "NOT penalising the sender", discards, and retries.
+
+The penalty was kept, as the entry required. Original analysis follows.
 
 **Observed 2026-07-29**, four failures from one peer across ~2 hours:
 

@@ -82,6 +82,7 @@ pub async fn get_model(
     };
 
     let status = resp.status();
+    super::exit_if_api_key_rejected(status, data_dir, port);
     let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
     if !status.is_success() {
         let msg = body

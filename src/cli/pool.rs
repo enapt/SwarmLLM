@@ -38,12 +38,18 @@ async fn pool_post(
     auth: &str,
     path: &str,
     body: Option<serde_json::Value>,
+    data_dir: &std::path::Path,
+    port: u16,
 ) -> anyhow::Result<serde_json::Value> {
     let mut req = client.post(format!("{base}{path}")).bearer_auth(auth);
     if let Some(json) = body {
         req = req.json(&json);
     }
-    let parsed: serde_json::Value = req.send().await?.json().await?;
+    let resp = req.send().await?;
+    // Otherwise a rejected key prints the daemon's raw error object, which
+    // names the transport and not the data-directory mismatch behind it.
+    super::exit_if_api_key_rejected(resp.status(), data_dir, port);
+    let parsed: serde_json::Value = resp.json().await?;
     if let Some(err) = parsed.get("error") {
         eprintln!("Error: {err}");
         std::process::exit(1);
@@ -70,6 +76,8 @@ pub async fn run_pool_command(
                 auth_header,
                 "/api/pool/create",
                 Some(serde_json::json!({ "name": name })),
+                data_dir,
+                port,
             )
             .await?;
             println!("Pool created: {}", body["name"].as_str().unwrap_or(&name));
@@ -80,8 +88,16 @@ pub async fn run_pool_command(
             println!("\nNext: Run 'swarmllm pool invite-code' to generate a code for your other devices.");
         }
         PoolAction::InviteCode => {
-            let body =
-                pool_post(&client, &base, auth_header, "/api/pool/generate-code", None).await?;
+            let body = pool_post(
+                &client,
+                &base,
+                auth_header,
+                "/api/pool/generate-code",
+                None,
+                data_dir,
+                port,
+            )
+            .await?;
             if let Some(code) = body.get("code").and_then(|v| v.as_str()) {
                 println!("Invite Code: {code}");
                 println!();
@@ -98,6 +114,8 @@ pub async fn run_pool_command(
                 auth_header,
                 "/api/pool/join",
                 Some(serde_json::json!({ "code": code })),
+                data_dir,
+                port,
             )
             .await?;
             println!("Join request sent! Your device will be added to the pool");
@@ -110,6 +128,9 @@ pub async fn run_pool_command(
                 .bearer_auth(auth_header)
                 .send()
                 .await?;
+            // The one pool subcommand that does not go through `pool_post`;
+            // without this a rejected key reports "Not in a device pool."
+            super::exit_if_api_key_rejected(resp.status(), data_dir, port);
             let body: serde_json::Value = resp.json().await?;
             if body.get("in_pool").and_then(|v| v.as_bool()) == Some(true) {
                 println!(
@@ -173,7 +194,16 @@ pub async fn run_pool_command(
             }
         }
         PoolAction::Leave => {
-            pool_post(&client, &base, auth_header, "/api/pool/leave", None).await?;
+            pool_post(
+                &client,
+                &base,
+                auth_header,
+                "/api/pool/leave",
+                None,
+                data_dir,
+                port,
+            )
+            .await?;
             println!("Left the device pool. Credits will no longer be forwarded.");
         }
     }

@@ -27,6 +27,7 @@ pub async fn enable_privacy(
     };
 
     let status = resp.status();
+    super::exit_if_api_key_rejected(status, data_dir, port);
     let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
 
     if !status.is_success() {

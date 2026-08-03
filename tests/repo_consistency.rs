@@ -114,3 +114,61 @@ fn docs_report_the_actual_i18n_counts() {
         );
     }
 }
+
+/// Every CLI command that sends an authenticated request must translate a 401
+/// into `cli::exit_api_key_rejected`'s explanation, via
+/// `cli::exit_if_api_key_rejected`.
+///
+/// The daemon answers a stale or mismatched key with 401, and each command used
+/// to render that in its own words — "Download request failed (401
+/// Unauthorized)", "Could not remove <model>: request failed", reqwest's raw
+/// `error_for_status` text, or, worst, `discover_model`'s "No models available
+/// — load a model first", which sends the user to download a model to fix an
+/// auth problem. None of them named the cause, which is almost always the CLI
+/// and the daemon disagreeing about the data directory.
+///
+/// This is the codebase's signature defect — one invariant, N paths, with a
+/// correct helper that two of eight callers used. A grep test is the cheapest
+/// thing that makes a NEW command inherit the requirement rather than having to
+/// remember it.
+#[test]
+fn cli_commands_explain_a_rejected_key() {
+    let cli_dir = repo_root().join("src/cli");
+    let mut offenders = Vec::new();
+
+    for entry in std::fs::read_dir(&cli_dir).expect("src/cli must exist") {
+        let path = entry.expect("readable dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        // `mod.rs` defines the helpers; `run.rs` starts the daemon rather than
+        // calling it; `update.rs` talks to GitHub, not to our own API.
+        if matches!(name.as_str(), "mod.rs" | "run.rs" | "update.rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("readable source");
+
+        // "Sends an authenticated request" = builds an Authorization header, by
+        // either spelling reqwest offers.
+        let authenticates = src.contains("Bearer ") || src.contains("bearer_auth");
+        if !authenticates {
+            continue;
+        }
+        // Commands that delegate every authenticated call to a shared helper
+        // (`discover_model`, `pool_post`) inherit the check from it.
+        let handles_it =
+            src.contains("exit_if_api_key_rejected") || src.contains("exit_api_key_rejected");
+        if !handles_it {
+            offenders.push(name);
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these CLI commands send authenticated requests but never explain a rejected key: {offenders:?}\n\
+         Call `super::exit_if_api_key_rejected(status, data_dir, port)` on the response status \
+         before interpreting the body — otherwise a stale api_key file surfaces as a confusing \
+         message about models, downloads or the transport."
+    );
+}

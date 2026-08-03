@@ -17,7 +17,7 @@ pub async fn run_chat(
     let base = format!("http://localhost:{port}");
     let client = reqwest::Client::new();
 
-    let model = discover_model(&client, &base, &api_key, model_override).await?;
+    let model = discover_model(&client, &base, &api_key, model_override, data_dir, port).await?;
 
     println!("SwarmLLM Chat — model: {model}");
     println!("Type your message and press Enter. Type 'quit' or Ctrl-D to exit.\n");
@@ -45,7 +45,7 @@ pub async fn run_chat(
 
         messages.push(serde_json::json!({"role": "user", "content": input}));
 
-        let resp: serde_json::Value = client
+        let http = client
             .post(format!("{base}/v1/chat/completions"))
             .header("Authorization", format!("Bearer {api_key}"))
             .json(&serde_json::json!({
@@ -55,9 +55,12 @@ pub async fn run_chat(
                 "temperature": temperature,
             }))
             .send()
-            .await?
-            .json()
             .await?;
+        // A rejected key would otherwise surface as the daemon's raw
+        // `authentication_error` in the loop below, which says nothing about
+        // the data directory that actually causes it.
+        super::exit_if_api_key_rejected(http.status(), data_dir, port);
+        let resp: serde_json::Value = http.json().await?;
 
         if let Some(err) = resp.get("error") {
             // Extract just the message field rather than dumping the full

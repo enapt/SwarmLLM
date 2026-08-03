@@ -46,7 +46,7 @@ pub async fn run_bench(
     let base = format!("http://localhost:{port}");
     let client = reqwest::Client::new();
 
-    let model = discover_model(&client, &base, &api_key, model_override).await?;
+    let model = discover_model(&client, &base, &api_key, model_override, data_dir, port).await?;
 
     if !json_output {
         println!("SwarmLLM Benchmark");
@@ -69,9 +69,15 @@ pub async fn run_bench(
 
     for i in 0..iterations {
         let r = if streaming {
-            run_one_stream(&client, &base, &api_key, &model, prompt, max_tokens).await?
+            run_one_stream(
+                &client, &base, &api_key, &model, prompt, max_tokens, data_dir, port,
+            )
+            .await?
         } else {
-            run_one_blocking(&client, &base, &api_key, &model, prompt, max_tokens).await?
+            run_one_blocking(
+                &client, &base, &api_key, &model, prompt, max_tokens, data_dir, port,
+            )
+            .await?
         };
 
         if !json_output {
@@ -106,11 +112,18 @@ pub async fn run_bench(
             let key = api_key.clone();
             let model = model.clone();
             let prompt = prompt.to_string();
+            let dir = data_dir.to_path_buf();
             handles.push(tokio::spawn(async move {
                 if streaming {
-                    run_one_stream(&client, &base, &key, &model, &prompt, max_tokens).await
+                    run_one_stream(
+                        &client, &base, &key, &model, &prompt, max_tokens, &dir, port,
+                    )
+                    .await
                 } else {
-                    run_one_blocking(&client, &base, &key, &model, &prompt, max_tokens).await
+                    run_one_blocking(
+                        &client, &base, &key, &model, &prompt, max_tokens, &dir, port,
+                    )
+                    .await
                 }
             }));
         }
@@ -248,6 +261,7 @@ pub async fn run_bench(
 
 /// Non-streaming run: POST and wait for the full JSON response. Total time
 /// rolls prefill + decode together; `ttft_ms` is `None`.
+#[allow(clippy::too_many_arguments)]
 async fn run_one_blocking(
     client: &reqwest::Client,
     base: &str,
@@ -255,9 +269,11 @@ async fn run_one_blocking(
     model: &str,
     prompt: &str,
     max_tokens: u32,
+    data_dir: &std::path::Path,
+    port: u16,
 ) -> anyhow::Result<BenchResult> {
     let start = std::time::Instant::now();
-    let resp: serde_json::Value = client
+    let sent = client
         .post(format!("{base}/v1/chat/completions"))
         .header("Authorization", format!("Bearer {api_key}"))
         .json(&serde_json::json!({
@@ -267,9 +283,9 @@ async fn run_one_blocking(
             "temperature": 0.0,
         }))
         .send()
-        .await?
-        .json()
         .await?;
+    super::exit_if_api_key_rejected(sent.status(), data_dir, port);
+    let resp: serde_json::Value = sent.json().await?;
     let elapsed = start.elapsed();
     let prompt_tokens = resp["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
     let completion_tokens = resp["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
@@ -285,6 +301,7 @@ async fn run_one_blocking(
 
 /// Streaming run: POST with `stream: true`, parse SSE chunks, capture TTFT
 /// (time to first non-empty `delta.content`).
+#[allow(clippy::too_many_arguments)]
 async fn run_one_stream(
     client: &reqwest::Client,
     base: &str,
@@ -292,9 +309,11 @@ async fn run_one_stream(
     model: &str,
     prompt: &str,
     max_tokens: u32,
+    data_dir: &std::path::Path,
+    port: u16,
 ) -> anyhow::Result<BenchResult> {
     let start = std::time::Instant::now();
-    let resp = client
+    let sent = client
         .post(format!("{base}/v1/chat/completions"))
         .header("Authorization", format!("Bearer {api_key}"))
         .json(&serde_json::json!({
@@ -305,8 +324,11 @@ async fn run_one_stream(
             "stream": true,
         }))
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    // Checked before `error_for_status`, which would otherwise turn a rejected
+    // key into reqwest's raw "HTTP status client error (401 Unauthorized)".
+    super::exit_if_api_key_rejected(sent.status(), data_dir, port);
+    let resp = sent.error_for_status()?;
 
     let mut byte_stream = resp.bytes_stream();
     // SSE line buffer — accumulates a single `data: ...\n\n` event.
