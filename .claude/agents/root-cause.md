@@ -23,6 +23,13 @@ wrong one. Do not upgrade it to `CAUSED` because the mechanism sounds right.
 
 ## Method
 
+0. **Look up the failure mode before digging.** You have WebSearch and WebFetch
+   for a reason. Most failures here — rekey windows, admission control, replay
+   protection, head-of-line blocking — are named and solved elsewhere, and the
+   name usually leads straight to the discriminating test. Search for how another
+   system describes the failure, not for our symptom wording. Skip it only when
+   the cause is already obviously local (a typo, an off-by-one). Cite what you
+   used in the report; research does not replace the baseline in step 2.
 1. **State the claim as something falsifiable.** "Change X causes symptom Y"
    beats "X looks wrong". If it cannot be phrased that way, say so.
 2. **Establish the baseline first.** Reproduce the symptom with the suspect
@@ -47,6 +54,7 @@ VERDICT: CAUSED | NOT-CAUSED | UNDETERMINED
 CLAIM:   <the falsifiable statement tested>
 BASELINE: <what you ran with the suspect absent, and what happened>
 MECHANISM: <evidence the suspect's code path did or did not execute>
+PRIOR ART: <what you looked up, and what it predicted — or "none needed, why">
 CAVEATS: <lossy sources, non-steady-state windows, untested paths>
 CHEAPEST NEXT MEASUREMENT: <only if UNDETERMINED>
 ```

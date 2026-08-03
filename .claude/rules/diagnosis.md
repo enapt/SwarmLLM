@@ -9,6 +9,50 @@ The shape is always the same: **a symptom is attributed to the most recent
 change, or the most obvious component, before establishing that it does not
 happen without it.**
 
+## 0. Look it up before you dig in
+
+Before diagnosing an unfamiliar failure or implementing anything non-trivial,
+search for how the problem is understood elsewhere. Most things this project
+hits — key rotation, admission control, replay protection, pipeline scheduling,
+NAT traversal — are solved problems in systems with more scars than ours. Their
+solution usually names the failure mode, and often contains the one detail you
+would otherwise get wrong.
+
+**This is not ceremony. Both times it was done on 2026-08-03 it changed the
+implementation:**
+
+- **Key rotation.** WireGuard keeps the previous session key *and maintains the
+  replay counter per keypair*. That second half is the part that matters: a
+  previous-key grace window sharing one replay window would have let the same
+  message be accepted twice, once under each key. The design was already heading
+  for the grace window; the research is what stopped it being a security
+  regression.
+- **Headroom routing.** vLLM's approach has a name — Head-Room Admission — and
+  reading it surfaced the distinction that mattered: vLLM *preempts and
+  recomputes* when saturated because it has nowhere else to go, whereas a swarm
+  can route to a peer. That framed the whole design.
+
+Where it was skipped the same day, the work went worse. Time spent was minutes
+in both cases.
+
+**What to search for**, in rough order of usefulness:
+
+1. The failure mode as another system names it ("rekey window", "admission
+   control", "head-of-line blocking") rather than our symptom wording.
+2. How a comparable system solves it, and *why* — the rationale is what
+   transfers, since our constraints differ.
+3. Known traps in that solution. The per-keypair replay counter is exactly this
+   kind of finding: obvious once read, easy to miss otherwise.
+
+**Do not let research replace measurement.** It tells you what is likely and
+what to watch for; it does not tell you what YOUR system is doing. Rules 1-6
+below still apply in full — a mechanism that is correct in the literature and
+never executes here is still not the cause.
+
+**Cite what you used.** Put the source in the code comment or the FUTURE_WORK
+entry, so the next person can check whether the reasoning still holds rather
+than re-deriving it. `PREVIOUS_KEY_GRACE` naming WireGuard is the pattern.
+
 ## 1. Get a baseline BEFORE you blame
 
 A failure appearing after a change is not evidence the change caused it.
