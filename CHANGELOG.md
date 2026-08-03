@@ -2,6 +2,66 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+Not yet tagged. Mostly fixes to things that reported the wrong cause when
+something went wrong, plus one that wasted a lot of bandwidth.
+
+### Fixed
+
+- **A machine set to download updates automatically re-downloaded the same
+  release every hour, forever.** Downloading and installing are separate steps,
+  and the download step stops after saving the file. Nothing checked whether the
+  release had already been saved, so on the next check it fetched the whole
+  thing again — about a gigabyte each time on a machine with a graphics card —
+  for as long as the update went unapplied. It now keeps what it already has,
+  re-fetching only if the saved copy is missing, incomplete, or from a different
+  release. Only affects machines that opted in to automatic downloads; the
+  default only notifies.
+
+- **A machine that stopped work on behalf of another left a small note behind
+  each time.** Work computed for someone else is recorded so it can be stopped
+  if abandoned. If it finished very quickly — an unknown model, a piece the
+  machine does not hold — the record was written after the tidy-up had already
+  run, and nothing else would ever remove it.
+
+- **Commands blamed the wrong thing when they could not authenticate.** Asking
+  to chat reported that no models were available and suggested downloading one;
+  checking a pool said you were not in one; removing a model said the request had
+  failed. The real cause is nearly always the command and the node looking in
+  different folders for the key, which is now what they say, along with the file
+  they read and how to point both at the same place.
+
+- **A mistyped model name gave two different answers depending on the
+  interface.** One said the model was not found and listed what is available.
+  The other said no model was loaded at all and advised downloading one — wrong
+  advice on a machine with models ready, and it was the interface Claude Code
+  uses, where names are typed by hand. Both now answer the same way.
+
+- **The benchmark scored a refused request as a normal result of zero speed.**
+  It never checked whether a request had succeeded, so a model that does not
+  exist, a machine too busy, and a genuinely slow reply all produced the same
+  number. Refused requests now stop the benchmark and say why, and the summary
+  for parallel runs reports how many were attempted and what failed.
+
+- **Unloading a model that does not exist reported success**, while deleting the
+  same name correctly reported it was not found.
+
+### Changed
+
+- **A reply that comes back blank now says so in the log**, along with what was
+  removed. Every blank-reply fault traced so far — a missing instruction turn, a
+  format belonging to a different model, text decoded wrongly — was previously
+  invisible because the empty answer was returned as an ordinary success.
+
+- **The log now shows which route planner chose a route**, and why the better one
+  was not used when it was not. Both lines existed but were written at a level
+  nodes do not record, so in practice neither appeared.
+
+- **The benchmark warns when `--model` is used instead of `--model-id`**, which
+  was previously taken as an unrelated option and silently measured a different
+  model.
+
 ## [0.3.67-alpha] — 2026-08-03
 
 The protection between machines was being weakened and losing work every few
