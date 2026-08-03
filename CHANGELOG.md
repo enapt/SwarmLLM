@@ -2,6 +2,29 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.65-alpha] — 2026-08-03
+
+A diagnostic release. No behaviour changes — it exists so a specific failure
+some testers are hitting can be explained rather than guessed at.
+
+### Added
+
+- **A machine now records what it expected a model to cost before loading it
+  onto a graphics card.** The check that decides whether a model fits only said
+  anything when it refused one. A model that was allowed in and then ran out of
+  memory anyway left no record of what that decision had expected — which is
+  exactly the case that needs explaining.
+
+  Three different causes look identical without it: an expectation that was too
+  low, memory still held by a model being unloaded, and something asking for
+  memory without limit. The new line reports the expected size, what is already
+  committed and the headroom left, so it can be compared against the size the
+  model actually turned out to be.
+
+  If you have hit an out-of-memory error on a graphics card that should have had
+  room, this is the release to reproduce it on — the numbers it prints are what
+  we would need to tell those causes apart.
+
 ## [0.3.64-alpha] — 2026-08-02
 
 A node no longer offers the network pieces of a model it does not have.
