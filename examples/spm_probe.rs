@@ -61,11 +61,21 @@ fn main() {
         meta.pre_tokenizer,
         meta.add_space_prefix
     );
+    // Refuse rather than warn. Warning and carrying on produced a clean bill of
+    // health for a run that tested nothing: with a BPE vocabulary there are no
+    // scores, so the SPM encoder built below returns ZERO tokens for every
+    // word, each of which was then printed "ok" (no byte fallback in an empty
+    // list) and summarised as "0/16 words hit byte fallback". A reader checking
+    // whether a Llama-3 node tokenises correctly got a pass from a probe that
+    // never ran. Exiting is the honest answer.
     if meta.tokenizer_model != "llama" {
         eprintln!(
-            "WARNING: tokenizer.ggml.model is '{}', not 'llama' — this is not the SPM path",
-            meta.tokenizer_model
+            "This vocabulary is '{}' (pre-tokenizer '{}'), not SentencePiece — \n\
+             spm_probe only exercises the SPM encoder and would report a \n\
+             meaningless pass here. Nothing was checked.",
+            meta.tokenizer_model, meta.pre_tokenizer
         );
+        std::process::exit(2);
     }
 
     // Build the SPM tokenizer directly, with BOS off so the output is only the
@@ -111,16 +121,27 @@ fn main() {
         let byte_fallback = pieces
             .iter()
             .any(|p| p.starts_with("<0x") && p.ends_with('>'));
-        if byte_fallback {
+        // An empty encoding is a failure in its own right, not a word that
+        // merely avoided byte fallback. Counting only byte fallback let a
+        // tokenizer that produced nothing at all report "ok" on every line.
+        let empty = ids.is_empty();
+        if byte_fallback || empty {
             failures += 1;
         }
-        println!(
-            "{:<16} {:<6} {:?}  {}",
-            w,
-            if byte_fallback { "FAIL" } else { "ok" },
-            pieces,
-            ids.len()
-        );
+        let verdict = if empty {
+            "EMPTY"
+        } else if byte_fallback {
+            "FAIL"
+        } else {
+            "ok"
+        };
+        println!("{:<16} {:<6} {:?}  {}", w, verdict, pieces, ids.len());
     }
-    println!("\n{failures}/{} words hit byte fallback", words.len());
+    println!(
+        "\n{failures}/{} words failed to encode cleanly",
+        words.len()
+    );
+    if failures > 0 {
+        std::process::exit(1);
+    }
 }

@@ -4449,6 +4449,17 @@ against the old code with exactly the real symptom in miniature
 (`abcd` → `<0x61><0x62><0x63>d`). `examples/spm_probe.rs` reproduces and diffs
 against any GGUF header on disk.
 
+**`spm_probe` only applies to SentencePiece vocabularies, and now says so by
+refusing (exit 2) rather than passing.** Run against a BPE model — any Llama-3,
+`tokenizer.ggml.model = gpt2` — it used to print a warning and then report every
+word "ok" with `0/16 words hit byte fallback`, because the SPM encoder built
+from a scoreless vocabulary returns an EMPTY token list and an empty list
+trivially contains no `<0xNN>` piece. That is a clean bill of health from a run
+that checked nothing, on exactly the model family whose tokenisation someone
+would be trying to confirm (fixed 2026-08-03). An empty encoding is now also
+counted as a failure in its own right, and any failure exits non-zero so the
+probe can be used in a script.
+
 **The BPE path was checked and is not affected** — it rescans for the best-ranked
 pair from current state on every iteration rather than using a lazy queue, so it
 has no stale-entry exposure.
