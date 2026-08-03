@@ -5232,3 +5232,49 @@ direction: an actual figure ABOVE the estimate is definitely an under-estimate,
 while an actual figure below it proves nothing on its own. Anyone asked to send
 both numbers should be told this, or they will report a large overestimate that
 is not one.
+
+## Parallax routing is the default and never runs (2026-08-03)
+
+**Status: CONFIRMED on a live node, not fixed.**
+
+`inference.parallax_routing` defaults to **true**, so the shortest-path DP is
+supposed to be the router. It is not. On this swarm it fails every time and
+falls back to greedy:
+
+```
+DEBUG parallax routing unavailable — falling back to greedy
+      model=meta-llama-3.1-8b-instruct-q4-k-m
+      err=Pipeline assembly failed: parallax: no valid sink vertex (ends at num_layers, can_be_last)
+```
+
+Counted over a run: `falling back to greedy` fired on every attempt,
+`parallax routing selected chain` **zero times**.
+
+**Both branches log at `debug!`**, and nodes run at `info`, so this has been
+invisible. The FUTURE_WORK note on headroom routing predicted exactly this
+("check whether the parallax DP is even reached, or whether it errors and falls
+back to greedy — the fallback is silent") and it turned out to be the case.
+
+**Why it matters beyond tidiness.** Greedy and the DP choose differently:
+greedy prefers the widest contiguous range, so a single peer holding the WHOLE
+model beats a local+LAN split every time. Observed: an 8B request routed whole
+to an unmeasured peer in Belgium (`lat=None`, 38 shards) rather than splitting
+across the local node (holds shard 0) and a 4 ms LAN peer (holds 1..8), which
+between them cover every layer. It took 308s and failed. So the swarm has been
+routing on the fallback, not the router that was designed and benchmarked.
+
+**Next steps.** Find why no candidate satisfies the sink condition (a range
+ending at `num_layers` AND `can_be_last`). The LAN peer holds shard 8 of 9, so
+`can_be_last` ought to be true and its range ought to reach layer 32 —
+establishing which of those two is false is the whole job. Suspect the
+interaction with `parallax_partial_ranges` (default OFF), which makes a peer's
+ranges indivisible; the code comment at the call site already describes a
+related "no node available" failure from the same cause.
+
+**Raise the log level of both branches to `info` while investigating** — a
+router silently not being the router is worth one line per assembly.
+
+**Also observed and unexplained:** with the LAN peer connected at 4 ms and
+holding shards 1..8, `pipeline-plan` for the 8B model returned **0 segments** —
+assembly failing outright, not merely choosing badly. Worth reproducing before
+concluding anything about the sink condition.
