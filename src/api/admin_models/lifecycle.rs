@@ -175,6 +175,19 @@ pub async fn unload_model(
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
+    // Same existence check `delete_model` makes, for the same reason: without
+    // it an unknown id answered 200 with `estimated_freed_mb: 0`, so a typo in
+    // the dashboard or a script reported "unloaded, freed 0 MB" — success for
+    // work on something that does not exist, and inconsistent with delete,
+    // which 404s the identical id.
+    //
+    // This keeps unload idempotent where that actually means something: a model
+    // the node KNOWS but has not loaded still returns 200, because "make sure
+    // this is not resident" is genuinely already true.
+    if shared.model_registry.get_manifest(&mid).is_none() {
+        return Err(ApiError(crate::error::SwarmError::ModelNotAvailable(mid)));
+    }
+
     // Get model name and estimated size before removing
     let model_display_name = shared.model_registry.display_name(&mid);
     let estimated_mb = shared
