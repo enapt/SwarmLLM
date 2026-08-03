@@ -4902,3 +4902,62 @@ became an `Inference` error crossing the worker IPC and turned a 400 into a 500.
 Worth finding the wrap site: clients that retry on 5xx will retry forever
 against a model that is simply not there, and 500 tells an operator to look for
 a bug in the server rather than a missing file.
+
+## Full local coverage bypasses the network, even with no headroom (2026-08-03)
+
+**Status: CONFIRMED in code, deliberate, not fixed. Reported by a tester as the
+structural issue behind their OOM reports, and they are right.**
+
+`inference/scheduler/mod.rs` has a fast path: if the local node holds layers
+`0..num_layers`, it returns a single local segment with `standbys: vec![]` and
+never consults a peer. The comment explains why, and both reasons are sound —
+it stops peers holding overlapping shards being pulled in and failing the
+request with "Segment N failed with no standby", and it avoids a tensor-parallel
+group whose AllReduce round trips would be slower than just doing the work.
+
+The gap is what coverage is standing in for. **"I hold every layer" and "I have
+the headroom to run THIS request right now" are different questions, and only
+the first is asked.** A node with a small model fully resident, a long prompt,
+and a second model mid-eviction fails alone — while a paired machine on the same
+LAN sits idle, because coverage was complete so the network was never consulted.
+
+The reporter's framing is worth keeping: without this, what ships is **shard
+storage-sharing, not inference-sharing** — a way to split a model too big for
+one machine, but no way to move an ordinary request off a machine that is
+momentarily out of room. At the modest end of the hardware range, which is who
+this is for, that is exactly when sharing would matter most.
+
+Note this is NOT the same as the memory fixes in v0.3.61/.63. Those bounded
+temporaries that grew with prompt length and are fixed. This is about what
+happens when the machine genuinely has no room, whatever the reason.
+
+**Fix sketch (not attempted).** The fast path needs a headroom predicate as well
+as a coverage one, and a way to fall back rather than fail:
+
+1. Ask `ModelProcessPool` whether this model would be admitted to the GPU right
+   now (`estimate_gpu_footprint_mb` vs committed + budget) — the machinery
+   already exists and is what `admit_to_gpu` uses.
+2. If it would not fit and a peer holds the layers, build a distributed
+   assignment instead of the local fast path.
+3. If it would not fit and no peer can help, keep today's behaviour (CPU
+   fallback), which at least answers.
+
+The risk to weigh: headroom is a moving target, so a predicate that is too eager
+sends work to the network that the local node could have done, which is the
+regression the fast path was added to prevent. Prefer to consult it only when
+admission would actually refuse, not whenever memory looks tight.
+
+### Attached ideas from the same report, recorded not endorsed
+
+- **Real `qwen3moe` support** rather than the clean refusal shipped in v0.3.62.
+  Qwen3-30B-A3B and friends are ~3B active per token, which is a genuine fit for
+  pooled modest hardware.
+- **Disk-backed expert paging for MoE**, opt-in: only a few experts fire per
+  token, so inactive ones could stay mmap'd. The reporter's own caveat is the
+  important part — read-only access to a static GGUF does not meaningfully wear
+  an SSD, but pairing it with anything that writes back (persisted prefix-cache
+  snapshots, OS swap under pressure) would. Keep those paths separate.
+- **"The swarm as the MoE"** — routing to whichever peer can answer now is the
+  same idea as expert routing, one level up. This is a restatement of the
+  headroom-routing item above rather than a separate feature, and it is the
+  clearest short description of what resource-aware routing would buy.

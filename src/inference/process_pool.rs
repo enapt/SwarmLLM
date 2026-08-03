@@ -1226,6 +1226,26 @@ impl ModelProcessPool {
         }
         let committed = self.vram_committed_mb();
         if committed.saturating_add(estimated_mb) <= budget {
+            // Record what we believed BEFORE the worker allocates anything.
+            //
+            // Admission only ever logged when it refused, so a model that was
+            // admitted and then died with CUDA_ERROR_OUT_OF_MEMORY left no trace
+            // of what this gate had expected it to cost. That is precisely the
+            // case that needs explaining, and without this line it cannot be
+            // told apart from the outside: an estimate that was too low, a
+            // budget already spent by a model still being evicted, and a
+            // genuinely unbounded allocation all look identical in the logs.
+            // Compare `estimated_mb` here against the worker's own
+            // `vram_after_load_mb` — a large gap is an under-estimate, a close
+            // match with an OOM anyway points at the eviction timing instead.
+            tracing::info!(
+                model = %model_id,
+                estimated_mb,
+                committed_mb = committed,
+                budget_mb = budget,
+                headroom_mb = budget.saturating_sub(committed.saturating_add(estimated_mb)),
+                "DIAG: admitting model to GPU"
+            );
             self.vram_reserved_mb.insert(model_id.clone(), estimated_mb);
             return true;
         }
