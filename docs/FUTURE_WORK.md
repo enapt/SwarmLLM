@@ -1091,9 +1091,16 @@ root-caused; do not act on the guesses without measuring.**
   trips, serving the last cached snapshot would be more useful to the dashboard
   than a 429 — and would not touch the thing the limit protects.
 - **668 × `Shard file missing on disk — skipping registration`** across six
-  models. This is v0.3.64's disk re-check doing its job, but it logs at WARN
-  every pass rather than once per (model, shard) transition, so a node whose
-  registry knows about shards it does not hold warns forever.
+  models. **Checked: this is once per STARTUP, not a loop** — it comes from
+  `restore_persistent_state`, which walks every manifest the DB remembers and
+  warns per missing shard. On this node that is ~30 lines per boot, so 668 is
+  roughly twenty restarts across the log, not a runaway. **Deliberately left
+  alone:** the comment immediately below it records an external report where a
+  node believed it held a shard it could not serve, and at startup there is no
+  way to tell "never held this" from "held it and the file vanished" — the
+  states that would justify different levels. A per-model summary
+  ("5 of 8 shards present") would be quieter, but only if it keeps naming the
+  second case.
 - **1324 + 1310 `OutboundFailure` / `rr-message OutboundFailure` for a single
   peer**, plus 668 `Dropping rr message — peer not connected and no relay path`.
   This is the already-filed "repeatedly-failing peer is retried indefinitely
