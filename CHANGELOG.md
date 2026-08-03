@@ -2,6 +2,58 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.67-alpha] — 2026-08-03
+
+The protection between machines was being weakened and losing work every few
+minutes. Worth updating if you run more than one machine.
+
+### Fixed
+
+- **Work was being lost every time two machines renewed their shared key.**
+  Machines renew the key protecting their traffic every ten minutes, each on its
+  own clock. Renewing replaced the old key outright, so there was a gap where one
+  machine had started using a key the other had not been given yet — and, when
+  two renewals crossed, a gap where each held a key from a different exchange.
+  Anything sent across those gaps could not be read and was discarded.
+
+  Seen on two machines: the long part of a request succeeded, a renewal landed,
+  and the next step failed to decrypt on the other machine thirteen seconds
+  before it adopted the matching key. Since every request eventually crosses one
+  of these windows, this is a strong candidate for the occasional unexplained
+  failures of requests split across machines reported over several releases.
+
+  A machine now keeps the key it replaced for three minutes and tries it when the
+  current one does not work, which is what WireGuard does for the same reason.
+  The kept key carries its own duplicate-detection state, so keeping it does not
+  weaken anything.
+
+- **The stronger protection was silently lasting about a minute.** Machines
+  exchange a fresh, short-lived key so that traffic recorded today cannot be
+  unscrambled later with a key stolen tomorrow. But whenever two machines
+  re-introduced themselves — which they do constantly, measured at 172 times for
+  one peer in a single log — the connection was rebuilt from their permanent
+  identity keys, discarding the short-lived one. Re-introducing a machine we
+  already have a working connection with now leaves it alone.
+
+  As a result, short-lived keys now persist as designed rather than reverting
+  each minute. This is the intended behaviour, but it is a change from what
+  earlier versions actually did.
+
+- **The logs no longer report key exchanges that did not happen.** With the above
+  fixed, the surrounding log lines still announced an exchange every time —
+  twenty-one announcements in fifteen minutes while zero were occurring. These
+  are the lines read after a decryption failure, so they would have suggested
+  keys were churning and sent the reader looking in the wrong place.
+
+### Known limitation
+
+- A machine still starts using a new key as soon as it has one, rather than
+  waiting for the other end to confirm it. With both ends now keeping the
+  previous key, this covers the timing differences actually observed, but a
+  machine that has not yet performed an exchange at all still cannot read what it
+  is sent. Closing that needs the sender to hold the new key back until the
+  other end proves it has it.
+
 ## [0.3.66-alpha] — 2026-08-03
 
 Three fixes, all from tester reports. The first two are worth updating for if you
