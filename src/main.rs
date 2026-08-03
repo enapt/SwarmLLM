@@ -300,6 +300,25 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
         anchor: false,
     });
 
+    // `bench` is the one subcommand where the global `--model` is a trap rather
+    // than a harmless duplicate.
+    //
+    // That flag names a GGUF *file* for `swarmllm run`. Subcommands with their
+    // own `--model` (chat, privacy, remove-model) bind their own copy and are
+    // fine. But bench's flag is `--model-id`, so `swarmllm bench --model <id>`
+    // is absorbed by the global one and the benchmark silently measures
+    // whichever model `/v1/models` lists first — a wrong answer wearing the
+    // shape of a right one. Hit while fixing bench's own failure reporting on
+    // 2026-08-03; it took a JSON dump to notice the model name was not the one
+    // asked for.
+    if cli.model.is_some() && matches!(command, Commands::Bench { .. }) {
+        eprintln!(
+            "Note: --model does not select the model to benchmark — it names a GGUF file \
+             for `swarmllm run`."
+        );
+        eprintln!("      Use --model-id <id> instead, or results will be for another model.");
+    }
+
     let resolve_data_dir = |cli_data_dir: &Option<PathBuf>| -> PathBuf {
         swarmllm::config::resolve_data_dir(cli_data_dir.as_deref())
     };
