@@ -373,13 +373,21 @@ pub(crate) async fn dispatch_network_messages(
                                         // disconnect sweep matches on.
                                         let coordinator_bytes =
                                             forward.sender_peer_bytes.clone().unwrap_or_default();
+                                        // Shared with the task so a forward that finishes before the
+                                        // abort handle is registered does not strand its entry.
+                                        let forward_finished =
+                                            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                        let finished_in_task = forward_finished.clone();
                                         let handle = tokio::spawn(async move {
                                             let _permit = permit;
                                             layer_forward::handle_layer_forward(ss.clone(), ntx, forward).await;
                                             // Whether it finished or was abandoned, this request is no
                                             // longer in flight — drop the abort handle so the map does
                                             // not accumulate one entry per forward ever received.
-                                            ss.inbound_forward_aborts.remove(&forward_request_id);
+                                            ss.clear_inbound_forward_abort(
+                                                &forward_request_id,
+                                                &finished_in_task,
+                                            );
                                             // Decrement per-peer count; remove entry if zero to prevent unbounded growth
                                             if let Some(c) = pfc.get(&ps) {
                                                 let prev = c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -389,13 +397,18 @@ pub(crate) async fn dispatch_network_messages(
                                                 }
                                             }
                                         });
-                                        // Registered AFTER the spawn, like the remote-generate path:
-                                        // a `CancelInference` naming this request can now actually stop
-                                        // it. Aborting drops the future, which drops the worker's
-                                        // ResponseGuard and cancels the compute (R147).
-                                        abort_registry
-                                            .inbound_forward_aborts
-                                            .insert(forward_request_id, (handle.abort_handle(), coordinator_bytes));
+                                        // Registered after the spawn because the abort handle does not
+                                        // exist until then; the helper withdraws the entry again if the
+                                        // task has already finished. A `CancelInference` naming this
+                                        // request can now actually stop it — aborting drops the future,
+                                        // which drops the worker's ResponseGuard and cancels the
+                                        // compute (R147).
+                                        abort_registry.register_inbound_forward_abort(
+                                            forward_request_id,
+                                            handle.abort_handle(),
+                                            coordinator_bytes,
+                                            &forward_finished,
+                                        );
                                     }
                                     // StreamingToken: route to registered streaming channel
                                     SwarmMessage::StreamingToken(ref token) => {

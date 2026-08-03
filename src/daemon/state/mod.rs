@@ -253,6 +253,16 @@ pub struct SharedState {
     /// the end and everything else queued behind work whose answer would be
     /// discarded. Reported as a node left unusable for several minutes, with a
     /// short request sent during that window failing for no reason of its own.
+    ///
+    /// **Register and clear via [`SharedState::register_inbound_forward_abort`]
+    /// and [`SharedState::clear_inbound_forward_abort`], never by touching this
+    /// map directly.** Unlike `inbound_generate_aborts` — whose insert and
+    /// remove both run in the same task, in order — a forward's entry is
+    /// removed by the spawned task itself, while the abort handle only exists
+    /// after `tokio::spawn` has returned. A forward that fails immediately can
+    /// therefore run its removal before the insert has happened, leaving an
+    /// entry for a task that is already finished and that nothing will ever
+    /// remove. The pair above closes that window.
     pub inbound_forward_aborts: DashMap<uuid::Uuid, (tokio::task::AbortHandle, Vec<u8>)>,
     /// Per-cancel-token cancel signals. The HTTP entry for `chat_completions`
     /// looks up an `Arc<AtomicBool>` by token (passed via the
@@ -994,6 +1004,49 @@ impl SharedState {
                 false
             }
         }
+    }
+
+    /// Record that an inbound segment forward is in flight and can be aborted.
+    ///
+    /// Call this immediately after `tokio::spawn`, passing the same `finished`
+    /// flag the task was given. If the task has ALREADY completed — which it
+    /// can, because it starts running the instant it is spawned while the abort
+    /// handle only exists once `spawn` returns — the entry is withdrawn again
+    /// straight away.
+    ///
+    /// Without that re-check the removal inside the task is a no-op (there is
+    /// nothing there yet) and this insert then strands an entry for a finished
+    /// task. Nothing else would ever clear it: `CancelInference` only removes
+    /// the id it names, and the disconnect sweep only fires if that particular
+    /// coordinator drops. On the primary serving path that is one stranded
+    /// entry per fast-failing forward, each pinning its task's allocation, for
+    /// as long as the node runs.
+    pub fn register_inbound_forward_abort(
+        &self,
+        request_id: uuid::Uuid,
+        handle: tokio::task::AbortHandle,
+        coordinator_bytes: Vec<u8>,
+        finished: &std::sync::atomic::AtomicBool,
+    ) {
+        self.inbound_forward_aborts
+            .insert(request_id, (handle, coordinator_bytes));
+        if finished.load(std::sync::atomic::Ordering::Acquire) {
+            self.inbound_forward_aborts.remove(&request_id);
+        }
+    }
+
+    /// Mark an inbound segment forward as no longer in flight.
+    ///
+    /// Called by the spawned task itself, whether it finished normally or was
+    /// abandoned. Sets `finished` BEFORE removing, so a registration racing
+    /// with this call always observes the flag and withdraws its own entry.
+    pub fn clear_inbound_forward_abort(
+        &self,
+        request_id: &uuid::Uuid,
+        finished: &std::sync::atomic::AtomicBool,
+    ) {
+        finished.store(true, std::sync::atomic::Ordering::Release);
+        self.inbound_forward_aborts.remove(request_id);
     }
 
     pub fn try_assemble_chunked_forward(
@@ -2145,6 +2198,132 @@ impl SharedState {
             return None;
         }
         self.resolve_peer_id_bytes(node_id)
+    }
+}
+
+#[cfg(test)]
+mod inbound_forward_abort_tests {
+    use std::sync::atomic::AtomicBool;
+
+    fn test_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use tokio::sync::Mutex;
+
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            identity,
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// An abort handle needs a real task to point at; this one is already
+    /// finished by the time it is used, which is precisely the case under test.
+    async fn finished_abort_handle() -> tokio::task::AbortHandle {
+        let handle = tokio::spawn(async {});
+        let abort = handle.abort_handle();
+        let _ = handle.await;
+        abort
+    }
+
+    /// The ordinary ordering: register while the forward is still running, then
+    /// clear when it finishes. The entry must be present in between so a
+    /// `CancelInference` can find it, and gone afterwards.
+    #[tokio::test]
+    async fn a_forward_is_cancellable_while_running_and_forgotten_after() {
+        let state = test_state();
+        let id = uuid::Uuid::new_v4();
+        let finished = AtomicBool::new(false);
+
+        state.register_inbound_forward_abort(
+            id,
+            finished_abort_handle().await,
+            vec![1, 2, 3],
+            &finished,
+        );
+        assert!(
+            state.inbound_forward_aborts.contains_key(&id),
+            "a running forward must be findable by CancelInference"
+        );
+
+        state.clear_inbound_forward_abort(&id, &finished);
+        assert!(
+            state.inbound_forward_aborts.is_empty(),
+            "a finished forward must leave nothing behind"
+        );
+    }
+
+    /// The race: the spawned task runs to completion BEFORE the parent has
+    /// registered the abort handle, so its own removal finds nothing and the
+    /// registration lands afterwards.
+    ///
+    /// Without the `finished` re-check inside `register_inbound_forward_abort`
+    /// this strands an entry for an already-finished task. Nothing else clears
+    /// it — `CancelInference` only removes the id it names, and the disconnect
+    /// sweep only fires if that coordinator drops — so on a busy serving node
+    /// it is one permanent entry per fast-failing forward.
+    #[tokio::test]
+    async fn a_forward_that_finishes_before_it_is_registered_strands_nothing() {
+        let state = test_state();
+        let id = uuid::Uuid::new_v4();
+        let finished = AtomicBool::new(false);
+
+        // The task got there first.
+        state.clear_inbound_forward_abort(&id, &finished);
+        // ...and only now does the parent learn the abort handle.
+        state.register_inbound_forward_abort(
+            id,
+            finished_abort_handle().await,
+            vec![1, 2, 3],
+            &finished,
+        );
+
+        assert!(
+            state.inbound_forward_aborts.is_empty(),
+            "a forward that finished before registration must not strand an entry"
+        );
+    }
+
+    /// Each forward carries its own flag, so one finishing early must not
+    /// withdraw a different forward that is genuinely still running.
+    #[tokio::test]
+    async fn one_finished_forward_does_not_deregister_another() {
+        let state = test_state();
+        let running = uuid::Uuid::new_v4();
+        let done = uuid::Uuid::new_v4();
+        let running_flag = AtomicBool::new(false);
+        let done_flag = AtomicBool::new(false);
+
+        state.register_inbound_forward_abort(
+            running,
+            finished_abort_handle().await,
+            vec![9],
+            &running_flag,
+        );
+        state.clear_inbound_forward_abort(&done, &done_flag);
+        state.register_inbound_forward_abort(
+            done,
+            finished_abort_handle().await,
+            vec![9],
+            &done_flag,
+        );
+
+        assert!(
+            state.inbound_forward_aborts.contains_key(&running),
+            "the still-running forward must remain cancellable"
+        );
+        assert!(
+            !state.inbound_forward_aborts.contains_key(&done),
+            "the finished forward must not be left behind"
+        );
     }
 }
 
