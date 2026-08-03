@@ -4849,12 +4849,29 @@ observed skew (tens of seconds) and crossed rotations, but a node that has not
 yet performed the exchange at all still cannot decrypt. Closing that needs the
 sender to hold the new key back until the peer proves it has it.
 
-**Follow-up spotted while here, not investigated:** `establish_session` (the
-static path) is called repeatedly and resets `send_nonce` to 0 each time with
-the SAME derived key. If that happens on a live session the peer's replay window
-is already past those counters and should reject them. It evidently mostly
-works, so the caller probably guards on `has_session` — worth confirming, because
-if it does not, it is a second and quieter source of decrypt failures.
+**Follow-up CONFIRMED and FIXED 2026-08-03, and it was worse than suspected.**
+There was no guard: the Identify handler called `establish_session`
+unconditionally, and Identify fires constantly — measured at 172 times for one
+peer in a single log, in bursts of five within two seconds, roughly once a
+minute. Two consequences, both fixed by making `establish_session` idempotent
+(the guard lives inside it, so no caller can reintroduce either):
+
+1. It reset `send_nonce` to 0 and cleared the replay window while the peer's
+   window still held those counters, so our next messages looked like replays
+   unless the peer's own reset happened to coincide.
+2. **It silently defeated forward secrecy.** The key derived there is the STATIC
+   one from long-term identity keys. Reinstalling it after an ephemeral exchange
+   discarded the forward-secret session and reverted the link to the static key
+   — so an ephemeral session survived about a minute, and a peer still using it
+   could not decrypt what we sent. Visible in the original failure: the peer
+   failed to decrypt at 08:58:10 and established a static session 13s later.
+
+**A test for (2) was vacuous on the first attempt and had to be rewritten.**
+Asserting that decryption still worked passed even with the guard removed,
+because the previous-key fallback added in the same round happily decrypts a
+static-sealed message and hides the downgrade. It now asserts the session KEY is
+unchanged, and fails with the guard removed. Anything testing forward secrecy
+here must assert the key, not decryptability.
 
 Original entry:
 

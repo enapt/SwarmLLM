@@ -276,6 +276,34 @@ impl SessionManager {
             &self.local_public,
             &peer_x25519_pub,
         );
+        // Idempotent by design: never replace a session that already exists.
+        //
+        // This is called from the Identify handler, which fires repeatedly —
+        // measured at 172 times for one peer in a single log, in bursts of five
+        // within two seconds. Every call used to reinstall the session, which
+        // did two harmful things.
+        //
+        // It reset `send_nonce` to 0 and cleared the replay window while the
+        // peer's window still held the counters we had already used, so our next
+        // messages looked like replays to it unless its own reset happened to
+        // land at the same moment.
+        //
+        // Worse, the key derived here is the STATIC one, from long-term
+        // identity keys. Reinstalling it after an ephemeral exchange threw away
+        // the forward-secret session and silently reverted the link to the
+        // static key — so forward secrecy lasted only until the next Identify,
+        // about a minute, and the peer still using the ephemeral key could not
+        // decrypt what we sent. Observed in the failure that prompted this
+        // work: the peer failed to decrypt at 08:58:10 and re-established a
+        // static session 13s later.
+        //
+        // Keeping the guard HERE rather than at the caller means a future
+        // caller cannot reintroduce either problem. A genuine disconnect calls
+        // `remove_session`, after which this correctly builds a fresh one.
+        if self.sessions.contains_key(peer) {
+            tracing::trace!(peer = %peer, "Session already established — leaving it intact");
+            return;
+        }
         self.install_session(peer, cipher_key);
         tracing::debug!(peer = %peer, "Established encryption session");
     }
@@ -723,6 +751,82 @@ mod tests {
         let a_eph = sm_a.initiate_ephemeral_exchange(node_b);
         let b_eph = sm_b.accept_ephemeral_exchange(node_a, &a_eph);
         assert!(sm_a.complete_ephemeral_session(node_b, &b_eph));
+    }
+
+    /// Identify fires repeatedly, and re-establishing used to reset the nonce
+    /// sequence — after which our messages looked like replays to a peer whose
+    /// window still held those counters.
+    #[test]
+    fn re_establishing_does_not_reset_the_nonce_sequence() {
+        let (sm_a, sm_b, node_a, node_b) = make_session_pair();
+        let aad = b"nonces";
+
+        let first = sm_a.seal(&node_b, b"one", aad).unwrap();
+        assert_eq!(sm_b.open(&node_a, &first, aad).unwrap(), b"one");
+
+        // Identify fires again for a peer we already have a session with.
+        sm_a.establish_session(&node_b, *sm_b.local_public_key());
+
+        let second = sm_a.seal(&node_b, b"two", aad).unwrap();
+        assert_eq!(
+            sm_b.open(&node_a, &second, aad).unwrap(),
+            b"two",
+            "a repeat Identify must not restart our nonces into the peer's used range"
+        );
+    }
+
+    /// The more serious half: a static re-establish must not throw away a
+    /// forward-secret session. It did, so forward secrecy lasted only until the
+    /// next Identify — about a minute — and the peer still on the ephemeral key
+    /// could not decrypt what we sent.
+    #[test]
+    fn a_static_re_establish_does_not_clobber_an_ephemeral_session() {
+        let (sm_a, sm_b, node_a, node_b) = make_session_pair();
+        let aad = b"forward-secrecy";
+
+        rekey(&sm_a, &sm_b, &node_a, &node_b);
+        let ephemeral_key = *sm_a.sessions.get(&node_b).unwrap().cipher_key;
+
+        // Identify fires afterwards, as it constantly does.
+        sm_a.establish_session(&node_b, *sm_b.local_public_key());
+
+        // Assert the KEY, not merely that decryption still works: the
+        // previous-key fallback would happily decrypt a static-sealed message
+        // and hide the downgrade, which is exactly how the first version of
+        // this test passed with the guard removed.
+        let key_now = *sm_a.sessions.get(&node_b).unwrap().cipher_key;
+        assert_eq!(
+            key_now, ephemeral_key,
+            "a static re-establish must not revert the link to the long-term key"
+        );
+
+        let sealed = sm_a.seal(&node_b, b"still ephemeral", aad).unwrap();
+        assert_eq!(
+            sm_b.open(&node_a, &sealed, aad).unwrap(),
+            b"still ephemeral"
+        );
+    }
+
+    /// The guard must not prevent a session being built after a real
+    /// disconnect, which is what `remove_session` marks.
+    #[test]
+    fn a_session_is_rebuilt_after_removal() {
+        let (sm_a, sm_b, node_a, node_b) = make_session_pair();
+        sm_a.remove_session(&node_b);
+        assert!(!sm_a.has_session(&node_b));
+
+        sm_a.establish_session(&node_b, *sm_b.local_public_key());
+        assert!(
+            sm_a.has_session(&node_b),
+            "a removed session must be rebuilt"
+        );
+
+        let sealed = sm_a.seal(&node_b, b"back", aad_bytes()).unwrap();
+        assert_eq!(sm_b.open(&node_a, &sealed, aad_bytes()).unwrap(), b"back");
+    }
+
+    fn aad_bytes() -> &'static [u8] {
+        b"rebuild"
     }
 
     /// The defect this exists for: a message sealed just before a rekey must
