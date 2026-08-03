@@ -4097,6 +4097,28 @@ step 2 treats "cannot read the database" and "no key stored" identically.
    instance owns this data directory — generating and clobbering is the wrong
    move. Failing loudly ("another node appears to be using this data directory")
    would be better than silently breaking the running node's tooling.
+
+   **Re-examined 2026-08-03: the trigger guessed above is NOT reachable, and
+   this no longer needs building.** Two checks:
+
+   - *A second daemon cannot reach the generate branch.* Started one against a
+     data directory a running node already owned: it exits 1 with
+     `Database already open. Cannot acquire lock.` The redb lock is taken
+     BEFORE `resolve_api_key`, so the fall-through-and-clobber path the entry
+     hypothesised cannot execute, and the key file was verified byte-identical
+     afterwards.
+   - *Nothing else writes the file.* `publish_api_key_file` has exactly one
+     caller — `Daemon::run`, after the database is open. Confirmed live: the
+     running node's `api_key` mtime did not move across several full
+     `cargo test` runs and rebuilds.
+
+   The observation that opened this entry predates the fix for gotcha #226,
+   which moved the file write OUT of `resolve_api_key` precisely because
+   anything constructing a `SharedState` — every test built on
+   `Config::default()`, which inherits the real data dir — was overwriting a
+   running node's key. That is almost certainly what was seen on 2026-07-29,
+   and it is fixed. **If divergence is ever observed again, this reasoning is
+   the thing to re-check first, because it would mean a new writer appeared.**
 2. **Make the divergence diagnosable. DONE 2026-08-03.** `exit_api_key_rejected`
    already carried the right message, but only `status` and `peers` called it —
    the codebase's signature "one invariant, N paths" defect, two callers out of
