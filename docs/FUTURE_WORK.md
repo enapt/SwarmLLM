@@ -1286,6 +1286,15 @@ between two forwards, with the peer still holding the old key. v0.3.67 added the
 .67+ should tolerate it — but `NodeCapability.version` is **self-attested**, so
 the reported v0.3.68 proves nothing about what that node actually runs.
 
+**Update 2026-08-04, after v0.3.69**: the peer stopped producing them —
+**0 decrypt errors and 0 failovers in the 20 minutes after both nodes updated**,
+and a request that previously died at 284s every time now routes to that same
+peer and completes in ~7s (4 rounds, ~1s each). Consistent with a session
+re-key or a restart on their side clearing whatever state was stale. It also
+means the failover-recovery path could NOT be exercised live afterwards, because
+the trigger stopped occurring — see the note on verification level in the
+failover entry.
+
 **Why it is not being chased further right now:** it needs the other node's logs,
 which is someone else's machine. And the failover fix shipped alongside changes
 its cost from a 284-second dead request to one extra hop, which is the right
