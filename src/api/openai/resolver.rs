@@ -8,6 +8,32 @@ use super::peer_forward::peer_http_url;
 /// peer may be able to handle the request directly or assemble its own pipeline.
 pub(super) fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
     for entry in state.shared_state.peer_registry.iter() {
+        // SECURITY: forwarding sends this node's `Authorization` header
+        // verbatim, and that header carries `shared_state.api_key` — the SAME
+        // key that guards `/api/admin/*`. Over plain HTTP, to an address taken
+        // from gossip.
+        //
+        // Without this gate the selection loop accepted ANY peer whose gossiped
+        // `NodeCapability.hosted_shards` mentioned the model, so a node had only
+        // to claim a popular model to be handed the admin key of everyone who
+        // asked for it — no shards, no work, no interaction required. Whoever
+        // held it could then read and rewrite config, delete models, mint pool
+        // invites and spend credits on any of those nodes whose API they could
+        // reach. Confirmed reachable on the public swarm 2026-08-04: a local
+        // request produced an outbound POST to `http://<public-ip>:8800`.
+        //
+        // A peer is only eligible if the operator admitted it to their pool,
+        // which is a deliberate act (issuing or accepting a `swarmpool://`
+        // invite). Everything else falls through to the libp2p path below —
+        // which is where this should go anyway: `pipeline::remote_generate`
+        // covers exactly this case ("one remote peer holds the entire layer
+        // range") over an authenticated, encrypted transport with no credential
+        // crossing the boundary, and is documented as 5-7x faster than the
+        // per-token alternative. This HTTP hop is a fallback that was quietly
+        // costing more than it bought.
+        if !crate::pool::scope::is_pool_member(&state.shared_state, entry.key()) {
+            continue;
+        }
         let peer = entry.value();
         if let Some(ref cap) = peer.capability {
             let has_model = cap.hosted_shards.iter().any(|s| s.model_id.0 == model);

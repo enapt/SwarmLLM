@@ -35,6 +35,29 @@ All notable changes to SwarmLLM are documented here.
   sharing level is no longer the slowest one. Setting `max_cpu_threads` yourself
   is still honoured exactly as given.
 
+### Security
+
+- **Your node's access key is no longer sent to other machines.** When you asked
+  for a model your own node did not have, it could hand the request — including
+  your node's access key — to another machine that had advertised that model. The
+  key was sent as-is, unencrypted, and it is the same key that protects your
+  settings, your models and your dashboard. Choosing which machine to send it to
+  relied only on that machine's own claim about what it stores, so a node could
+  advertise a popular model and collect keys from everyone who asked for it.
+
+  Requests now only go that route to machines you have deliberately added to a
+  device pool. Everything else uses the normal peer-to-peer path, which is
+  encrypted, verifies who it is talking to, and never sends your key — and is
+  also considerably faster, so nothing is lost by this.
+
+  **Affects every release up to and including v0.3.71-alpha.** You were exposed
+  only if you requested a model your node did not hold locally while another
+  machine advertised it. For a leaked key to be *used* against you, your node's
+  web interface also has to be reachable from where that machine is. If you have
+  ever port-forwarded the SwarmLLM port, opened it via UPnP, or run a node on a
+  public server, **change your node's access key** — delete the `api_key` file in
+  your data directory and restart, then re-enter the new key in the dashboard.
+
 ### Fixed
 
 - **A node no longer floods its own log when one link goes bad.** A peer that

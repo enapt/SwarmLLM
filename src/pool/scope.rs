@@ -4,6 +4,33 @@ use std::sync::atomic::Ordering::Relaxed;
 use crate::daemon::state::SharedState;
 use crate::types::NodeId;
 
+/// Whether this peer is one the operator has explicitly admitted to their pool.
+///
+/// **This is the credential-trust question, and it is NOT the same as
+/// [`allowed_node_set`].** That one answers "may this node take part in my
+/// inference", returns `None` (meaning *everyone*) whenever private mode is off,
+/// and is about routing scope. Handing a secret to a peer needs a positive act
+/// of trust, not the absence of a restriction — so this returns `false` by
+/// default and only `true` for a node that joined via a `swarmpool://` invite
+/// the operator issued or accepted.
+///
+/// LAN membership deliberately does not count. A private address is not an
+/// authenticated boundary — the same reasoning that keeps `dashboard_trust_lan`
+/// off by default (gotcha #195).
+pub fn is_pool_member(shared: &SharedState, node_id: &NodeId) -> bool {
+    if node_id == shared.identity.node_id() {
+        return true;
+    }
+    // `try_read` matches `allowed_node_set`: on contention fall back to "not a
+    // member", which is the safe direction for a trust check.
+    match shared.credits.pool_state.try_read() {
+        Ok(guard) => guard
+            .as_ref()
+            .is_some_and(|ps| ps.members.iter().any(|m| m.node_id == *node_id)),
+        Err(_) => false,
+    }
+}
+
 /// Returns the set of NodeIds allowed for inference and shard management.
 ///
 /// - `None` → unrestricted (normal swarm mode, all peers allowed)
@@ -197,6 +224,50 @@ mod tests {
         let executor = Arc::new(Mutex::new(ModelExecutor::new()));
         let (state, _, _) = SharedState::new(config, identity, db, executor, None);
         state
+    }
+
+    /// **Trust for handing over a credential must be a positive act.**
+    ///
+    /// `find_peer_with_model` -> `forward_to_peer` sends this node's
+    /// `Authorization` header verbatim, and that header carries the API key
+    /// which also guards `/api/admin/*`. Before this gate existed, ANY peer
+    /// whose gossiped capability mentioned the requested model was eligible, so
+    /// advertising a popular model was enough to harvest the admin key of every
+    /// node that asked for it.
+    ///
+    /// A stranger must not qualify by default, however well-connected or
+    /// well-scored — none of which is a statement by the operator.
+    #[test]
+    fn a_stranger_is_not_a_pool_member() {
+        let state = make_state(Config::default());
+        let stranger = crate::types::NodeId([9u8; 32]);
+        assert!(!is_pool_member(&state, &stranger));
+    }
+
+    /// Not the same question as `allowed_node_set`, which returns `None`
+    /// (meaning *everyone may take part in inference*) whenever private mode is
+    /// off. Reusing that here would have made every peer credential-trusted on
+    /// a default install — the exact opposite of the intent.
+    #[test]
+    fn unrestricted_routing_scope_does_not_imply_credential_trust() {
+        let state = make_state(Config::default());
+        assert!(
+            allowed_node_set(&state).is_none(),
+            "precondition: routing is unrestricted by default"
+        );
+        let stranger = crate::types::NodeId([7u8; 32]);
+        assert!(
+            !is_pool_member(&state, &stranger),
+            "an unrestricted routing scope must not make a stranger trusted"
+        );
+    }
+
+    /// The local node is always itself.
+    #[test]
+    fn the_local_node_is_always_a_member() {
+        let state = make_state(Config::default());
+        let me = state.identity.node_id().clone();
+        assert!(is_pool_member(&state, &me));
     }
 
     /// R134.7: cross-pool extras are empty when the user has not opted in,
