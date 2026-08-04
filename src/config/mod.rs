@@ -1315,6 +1315,65 @@ max_concurrent_requests = 42
         assert_eq!(max, 0, "offering the machine keeps unlimited");
     }
 
+    /// CPU inference had no thread limit at all — candle's rayon pool defaults
+    /// to every logical core. Measured on a 6-core node set to Minimal: a single
+    /// request held 529-534% of 600%, with ~10% of the machine idle.
+    #[test]
+    fn cpu_threads_leave_the_machine_usable_at_the_default_level() {
+        let rc = ResourceConfig::default(); // max_cpu_threads = 0
+        let cores = 8;
+        let min = rc.inference_cpu_threads(cores, swarmllm_types::ContributionMode::Minimal);
+        let mod_ = rc.inference_cpu_threads(cores, swarmllm_types::ContributionMode::Moderate);
+        let max = rc.inference_cpu_threads(cores, swarmllm_types::ContributionMode::Maximum);
+
+        assert!(
+            min < cores,
+            "the DEFAULT level must leave cores free, got {min} of {cores}"
+        );
+        assert!(
+            min < mod_ && mod_ < max,
+            "more contribution must allow more, got {min}/{mod_}/{max}"
+        );
+        assert_eq!(max, cores, "offering the machine gives the whole machine");
+
+        // Never 0: rayon reads 0 as "pick the default", i.e. every core — the
+        // exact behaviour being fixed. Single-core machines still get 1.
+        for c in [
+            swarmllm_types::ContributionMode::Minimal,
+            swarmllm_types::ContributionMode::Moderate,
+            swarmllm_types::ContributionMode::Maximum,
+        ] {
+            assert_eq!(rc.inference_cpu_threads(1, c.clone()), 1);
+            assert!(rc.inference_cpu_threads(0, c) >= 1);
+        }
+    }
+
+    /// An explicit thread count is the owner's decision and wins in either
+    /// direction, but is still clamped to the machine — more threads than cores
+    /// only adds contention.
+    #[test]
+    fn an_explicit_cpu_thread_count_wins_over_contribution() {
+        let rc = ResourceConfig {
+            max_cpu_threads: 6,
+            ..Default::default()
+        };
+        assert_eq!(
+            rc.inference_cpu_threads(8, swarmllm_types::ContributionMode::Minimal),
+            6,
+            "asking for MORE than the minimal default must be honoured"
+        );
+        assert_eq!(
+            rc.inference_cpu_threads(8, swarmllm_types::ContributionMode::Maximum),
+            6,
+            "asking for FEWER than the machine must be honoured"
+        );
+        assert_eq!(
+            rc.inference_cpu_threads(4, swarmllm_types::ContributionMode::Maximum),
+            4,
+            "clamped to the cores that actually exist"
+        );
+    }
+
     /// An explicit figure is the owner's decision and wins in either direction,
     /// including asking for MORE than the contribution default would give.
     #[test]

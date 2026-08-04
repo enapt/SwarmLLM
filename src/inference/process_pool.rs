@@ -763,6 +763,9 @@ pub struct ModelProcessPool {
     /// knobs here. The pool cannot reach `SharedState`, and this has to be
     /// readable from inside `spawn_lock` where the admission decision happens.
     vram_budget_mb: std::sync::atomic::AtomicU64,
+    /// CPU threads each worker's rayon pool may use. 0 until set at startup,
+    /// which the spawn path reads as "not configured" and leaves alone.
+    cpu_threads: std::sync::atomic::AtomicUsize,
     /// GPU memory charged to each live worker, in MB.
     ///
     /// Admission needs to know what is already committed, and it cannot ask the
@@ -910,6 +913,7 @@ impl ModelProcessPool {
             gpu_layers: std::sync::atomic::AtomicI32::new(-1),
             cpu_pinned_models: dashmap::DashSet::new(),
             vram_budget_mb: std::sync::atomic::AtomicU64::new(0),
+            cpu_threads: std::sync::atomic::AtomicUsize::new(0),
             vram_reserved_mb: dashmap::DashMap::new(),
             ram_budget_mb: std::sync::atomic::AtomicU64::new(0),
             ram_reserved_mb: dashmap::DashMap::new(),
@@ -1240,6 +1244,16 @@ impl ModelProcessPool {
     pub fn set_vram_budget_mb(&self, budget_mb: u64) {
         self.vram_budget_mb
             .store(budget_mb, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set the CPU thread count handed to each worker's rayon pool.
+    ///
+    /// Resolved from `resources.max_cpu_threads` / `node.contribution` at
+    /// startup, like the other mirrors here — the pool cannot reach
+    /// `SharedState`, and this has to be readable from inside the spawn path.
+    pub fn set_cpu_threads(&self, threads: usize) {
+        self.cpu_threads
+            .store(threads.max(1), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// GPU memory already committed to live workers, in MB.
@@ -1957,9 +1971,25 @@ impl ModelProcessPool {
             args.push(window_str);
         }
 
-        let child = tokio::process::Command::new(&exe)
-            .args(&args)
-            .kill_on_drop(true)
+        // Bound the worker's CPU parallelism to what the owner agreed to give.
+        //
+        // candle parallelises CPU tensor ops through rayon, whose global pool
+        // defaults to every logical core, and nothing narrowed it — so a single
+        // request took the whole machine regardless of contribution level
+        // (measured: 529-534% of 600% on a 6-core node set to Minimal). The
+        // worker is a separate process, so setting this in its environment is
+        // enough to size its rayon pool and cannot affect the daemon's own
+        // runtime.
+        //
+        // Deliberately does NOT override an operator-set RAYON_NUM_THREADS:
+        // someone who exported it has made exactly this decision already.
+        let cpu_threads = self.cpu_threads.load(std::sync::atomic::Ordering::Relaxed);
+        let mut command = tokio::process::Command::new(&exe);
+        command.args(&args).kill_on_drop(true);
+        if cpu_threads > 0 && std::env::var_os("RAYON_NUM_THREADS").is_none() {
+            command.env("RAYON_NUM_THREADS", cpu_threads.to_string());
+        }
+        let child = command
             .spawn()
             .map_err(|e| SwarmError::ServiceUnavailable(format!("spawn worker: {e}")))?;
 

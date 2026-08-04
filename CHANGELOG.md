@@ -4,6 +4,26 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Inference no longer takes every processor core on the machine.** There was
+  no limit on this at all: one request from anywhere in the network could use the
+  entire processor. Measured on a 6-core node set to the *lowest* sharing level,
+  a single request held about 88% of the machine — which is what makes a computer
+  stutter while it works.
+
+  It now follows the same sharing level as everything else: half the cores at
+  minimal, three quarters at moderate, all of them at maximum, and you can set
+  `max_cpu_threads` yourself to override that either way. Graphics-card nodes are
+  unaffected.
+
+  **This is usually faster, not slower.** On a machine with hyper-threading,
+  running one thread per real core beats running two per core, because this kind
+  of work waits on memory rather than arithmetic. Measured on an 8-core (16
+  thread) laptop, halving the threads made it **46% quicker** — 2.28 vs 1.56
+  tokens/second. On a machine without hyper-threading there is a real reduction,
+  though smaller than the thread count suggests, for the same reason.
+
 ### Fixed
 
 - **The limit on how many machines a node connects to now actually works.** The

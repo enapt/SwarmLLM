@@ -53,6 +53,10 @@ pub struct ResourceConfig {
     pub max_disk_mb: u64,
     #[serde(default)]
     pub max_bandwidth_mbps: u64,
+    /// Cap on CPU threads used for inference. `0` (default) resolves from
+    /// `node.contribution` — see [`ResourceConfig::inference_cpu_threads`].
+    #[serde(default)]
+    pub max_cpu_threads: u32,
     #[serde(default)]
     pub schedule: ResourceSchedule,
 }
@@ -274,6 +278,68 @@ impl ResourceConfig {
         }
     }
 
+    /// CPU threads the inference worker may use, from the total core count.
+    ///
+    /// CPU inference had no thread limit at all: candle parallelises through
+    /// rayon, whose default pool is every logical core, and nothing narrowed it.
+    /// Measured on a 6-core node set to `Minimal` (2026-08-04), a single request
+    /// held **529–534% of 600%** with ~10% of the machine idle — the whole box,
+    /// at the lowest contribution setting. Of every resource this software
+    /// spends, CPU starvation is the one the person sitting in front of the
+    /// machine feels first: it is what makes a desktop stutter.
+    ///
+    /// This is the same fraction-of-the-whole shape as
+    /// [`Self::inference_vram_budget_mb`], and deliberately so — "how much of my
+    /// machine does this get" should mean the same thing whichever resource is
+    /// being asked about.
+    ///
+    /// **It does not necessarily cost throughput, and on an SMT machine it gains
+    /// some.** Measured 2026-08-04 on a Ryzen 7 5800H (8 physical cores, 16
+    /// logical), phi-3.5 Q4_K_M, 201 tokens, model warm, two runs each:
+    ///
+    /// | threads | tok/s        |
+    /// |---------|--------------|
+    /// | 8       | 2.31, 2.25   |
+    /// | 16      | 1.52, 1.60   |
+    ///
+    /// Halving the threads was **~46% faster**. Quantised inference is bound by
+    /// memory bandwidth rather than arithmetic, so running two threads on one
+    /// physical core makes them compete for the same cache and load ports
+    /// instead of adding throughput. llama.cpp defaults to physical cores for
+    /// exactly this reason. At `Minimal` on a 2-way SMT machine this fraction
+    /// lands on the physical core count, which is the figure you would pick
+    /// deliberately.
+    ///
+    /// On a machine without SMT the reduction is real — though sub-proportional,
+    /// for the same memory-bound reason. That trade is still worth making: a node
+    /// whose owner uninstalls it because their machine stutters contributes
+    /// nothing at all, and there is no failure mode here beyond "slower". GPU
+    /// nodes are unaffected, since offloaded layers do not run on these threads.
+    ///
+    /// Never returns 0, which rayon would read as "pick the default" — i.e. every
+    /// core, the exact behaviour being fixed.
+    pub fn inference_cpu_threads(
+        &self,
+        total_cores: usize,
+        contribution: ContributionMode,
+    ) -> usize {
+        let total = total_cores.max(1);
+        if self.max_cpu_threads > 0 {
+            // An explicit setting wins outright, in either direction — the same
+            // rule the memory and bandwidth ceilings follow. Still clamped to
+            // the machine, since more threads than cores only adds contention.
+            return (self.max_cpu_threads as usize).min(total).max(1);
+        }
+        let fraction = match contribution {
+            // Default. Leave half the machine to whatever else its owner is
+            // doing — the same split `vram_fraction_for` uses.
+            ContributionMode::Minimal => 0.5,
+            ContributionMode::Moderate => 0.75,
+            ContributionMode::Maximum => 1.0,
+        };
+        (((total as f64) * fraction).round() as usize).clamp(1, total)
+    }
+
     pub fn inference_ram_budget_mb(
         &self,
         system_ram_total_mb: u64,
@@ -313,6 +379,7 @@ impl Default for ResourceConfig {
             max_ram_mb: 0,
             max_disk_mb: default_max_disk(),
             max_bandwidth_mbps: 0,
+            max_cpu_threads: 0,
             schedule: ResourceSchedule::default(),
         }
     }

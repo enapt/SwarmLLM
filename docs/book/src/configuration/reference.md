@@ -18,7 +18,8 @@ Every configuration option, organized by section.
 | `max_gpu_vram_mb` | integer | `0` | Max GPU memory in MB. `0` = auto-detect |
 | `max_ram_mb` | integer | `0` | Max system RAM in MB for models loaded on the CPU. `0` = auto: 50% of system RAM on a machine with a GPU, 80% on a CPU-only node (where serving models is the machine's purpose). An explicitly configured value is clamped to what is actually free, so a figure larger than the machine cannot push it into swap. A model that does not fit is refused with a 503 rather than loaded |
 | `max_disk_mb` | integer | `50000` | Max disk space in MB for model storage |
-| `max_bandwidth_mbps` | integer | `0` | Max upload bandwidth. `0` = unlimited |
+| `max_bandwidth_mbps` | integer | `0` | Max upload bandwidth for serving model files to peers. `0` = auto, from `[node] contribution` — 10 Mbps at minimal, 50 at moderate, unlimited at maximum |
+| `max_cpu_threads` | integer | `0` | CPU threads used for inference. `0` = auto, from `[node] contribution` — half the cores at minimal, three quarters at moderate, all at maximum. Lower is not necessarily slower: quantised inference is limited by memory bandwidth, so on a machine with hyper-threading, using one thread per *physical* core is typically faster as well as leaving the machine usable |
 
 ## `[resources.schedule]` — Usage Schedule
 

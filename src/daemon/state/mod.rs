@@ -877,6 +877,25 @@ impl SharedState {
         if let Some(budget) = crate::model::auto_manage::compute_vram_budget(&state) {
             state.model_process_pool.set_vram_budget_mb(budget);
         }
+        // CPU parallelism, resolved the same way. Without this a single request
+        // took every core on the machine whatever the contribution level said —
+        // measured at 529-534% of 600% on a 6-core node set to Minimal.
+        {
+            let total_cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            let threads = state
+                .config
+                .resources
+                .inference_cpu_threads(total_cores, state.config.node.contribution.clone());
+            state.model_process_pool.set_cpu_threads(threads);
+            tracing::info!(
+                contribution = ?state.config.node.contribution,
+                total_cores,
+                inference_cpu_threads = threads,
+                "Inference CPU parallelism set from the contribution level"
+            );
+        }
         // The CPU-side sibling. `resources.max_ram_mb` has been documented in
         // the shipped config as "0 = auto (50% of system RAM)" since before any
         // code read it — the setting was inert, so a user capping RAM to protect
