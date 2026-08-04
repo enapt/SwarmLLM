@@ -357,6 +357,14 @@ impl HealthMonitor {
             self.shared_state
                 .model_registry
                 .remove_shard_holder(&shard_id, &node_id);
+            // The split-model cache asserts the same thing this reconcile just
+            // disproved — "we can serve this model locally" — and nothing else
+            // clears it when files vanish (`auto_manage::scan` only evicts for
+            // models that gained shards). Left behind, it wins the local fast
+            // path in the API layer, spawns a worker, and turns a servable
+            // request into a 404 while peers hold every shard. Observed live
+            // 2026-08-04, with this very warning already in the log.
+            self.shared_state.evict_split_models(&shard_id.model_id);
             self.shared_state.emit_activity(
                 crate::daemon::state::ActivityEvent::new(
                     "model",

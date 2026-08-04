@@ -1905,9 +1905,63 @@ impl SharedState {
 
     /// Check if a complete (all layers covered) split model is loaded.
     pub fn has_complete_split_model(&self, model_id: &crate::types::ModelId) -> bool {
-        self.split_models
+        let claimed = self
+            .split_models
             .iter()
-            .any(|e| e.key().0 == *model_id && e.value().is_complete)
+            .any(|e| e.key().0 == *model_id && e.value().is_complete);
+        if !claimed {
+            return false;
+        }
+        // `split_models` is an in-memory cache of what is on disk, and nothing
+        // watches the filesystem. Taking it at its word is how a model whose
+        // shard files are gone still won the local fast path: the request never
+        // reached the router, a worker was spawned, the loader failed with "No
+        // shard files found for model X in <dir>", and the caller got a 404 —
+        // while two connected peers held every shard and the dashboard reported
+        // the model `ready`. Observed live 2026-08-04.
+        //
+        // The periodic reconcile in `health::monitor` had already fired and
+        // correctly stopped announcing those shards to the swarm; it just did
+        // not touch this map. One invariant, two representations, one updated.
+        // Checking here as well as fixing the source means a stale entry can
+        // never route a request into a dead end, including inside the window
+        // before the next reconcile.
+        //
+        // Cost is a handful of `stat` calls on a path taken once per request,
+        // not per token.
+        if self.model_shard_files_present(model_id) {
+            return true;
+        }
+        tracing::warn!(
+            model = %model_id,
+            "Split-model entry claims this model but its shard files are gone from \
+             disk — dropping the entry and routing to the network instead"
+        );
+        self.evict_split_models(model_id);
+        false
+    }
+
+    /// Whether every shard this node is supposed to hold for `model_id` is
+    /// actually a file on disk.
+    ///
+    /// Existence only — the same standard the swarm-announce reconcile uses.
+    /// A shard mid-download is written at its final path and is legitimately
+    /// incomplete for a while; size and hash are `verify_shard`'s job.
+    pub fn model_shard_files_present(&self, model_id: &crate::types::ModelId) -> bool {
+        let store = self.shard_store();
+        let mut expected = self
+            .model_registry
+            .shards_for_node(self.identity.node_id())
+            .into_iter()
+            .filter(|s| s.model_id == *model_id)
+            .peekable();
+        if expected.peek().is_none() {
+            // The registry no longer credits this node with any shard of this
+            // model, so there is nothing local to serve from — whatever the
+            // split cache still believes.
+            return false;
+        }
+        expected.all(|s| store.shard_file_present(&s))
     }
 
     /// Ensure a split model metadata entry exists for the given key.

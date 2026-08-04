@@ -315,4 +315,39 @@ mod tests {
         assert!(get_split_model_meta(&state, &mid).is_none());
         assert!(!state.has_complete_split_model(&mid));
     }
+
+    /// A complete split entry whose shard files are gone must NOT win the local
+    /// fast path.
+    ///
+    /// Observed live 2026-08-04: a node holding zero shard files for a model
+    /// still claimed it here, so the request never reached the router. A worker
+    /// was spawned, the loader failed with "No shard files found for model X in
+    /// <dir>", and the caller got a **404 — while two connected peers held
+    /// every shard and the dashboard reported the model `ready`**. The periodic
+    /// disk reconcile had already fired and stopped announcing those shards to
+    /// the swarm; it simply did not clear this cache.
+    ///
+    /// `make_shared_state` uses a temp data dir with no shard files written, so
+    /// a complete-looking entry here is exactly the stale case.
+    #[test]
+    fn a_complete_entry_with_no_shard_files_does_not_win_the_fast_path() {
+        let state = make_shared_state();
+        let mid = ModelId("llama-3.2-3b-instruct-q4-k-m".into());
+        // Spans the whole model and is marked complete — the shape that took
+        // the fast path and produced the 404.
+        state
+            .split_models
+            .insert((mid.clone(), 0, 28), entry(0, 28, true));
+
+        assert!(
+            !state.has_complete_split_model(&mid),
+            "an entry with no shard files on disk must not claim the fast path"
+        );
+        // ...and the stale entry is dropped rather than left to mislead the
+        // next caller.
+        assert!(
+            !state.split_models.iter().any(|e| e.key().0 == mid),
+            "the stale entry should have been evicted, not merely ignored"
+        );
+    }
 }
