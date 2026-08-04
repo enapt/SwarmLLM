@@ -1208,6 +1208,59 @@ unit, so it would not have helped them anyway. The recovery steps are documented
 in `deploy/anchor/README.md` § Maintenance instead, keyed on the `203/EXEC`
 symptom so it is greppable.
 
+## A computed segment result never reaches the coordinator (measured 2026-08-04)
+
+**Not a regression — reproduced identically on v0.3.67 and v0.3.68.** Recorded
+because the failure is now pinned to one hop, which earlier investigations of
+this pair were not.
+
+Setup: Proxmox CT (`225e6…` coordinator, holds a `tinyllama` directory with
+**zero** shard files) requests TinyLlama; the WSL node holds both shards and is
+4-24 ms away. Every attempt fails after exactly the segment timeout:
+`Pipeline assembly failed: Timed out waiting for segment result (284s, 22 layers)`.
+
+**The serving side does everything right, fast.** Traced end to end on two
+request ids (`47d5e7ca`, `98652b41`), the WSL node logs, within ~250 ms:
+
+```
+dispatcher received LayerForward, spawning handler   request_id=98652b41 …
+LayerForward processed via worker subprocess         request_id=98652b41 …
+sent tensor result as response (same substream)      peer_id=12D3KooWKwvC…
+```
+
+No error, no warning. The coordinator then waits **284 seconds** and reports
+`segment TIMED OUT — no result received` for that same request id, followed by
+`stale tensor forward — notifying pipeline + disconnecting peer`.
+
+**So the answer is computed and written to the substream in a quarter of a
+second, and never arrives.** That rules out model availability, scheduling,
+worker health and compute — all of which were suspected in earlier rounds — and
+narrows it to delivery of the response on the return hop.
+
+**Both nodes are otherwise healthy**: each serves a model it holds locally, on
+the same binaries, in the same session (WSL answered TinyLlama directly; Proxmox
+answered llama-3.2-1b directly).
+
+**Context that probably matters**: `Proxmox → WSL` inbound is firewall-blocked
+(WSL2 mirrored networking), so the connection is either WSL-dialled-outbound or
+relayed. A response sent "as response (same substream)" depends on that
+substream still being live at the coordinator, and this is the pair where relay
+and multi-interface churn have caused trouble before.
+
+**Ruled out by control, so do not re-suspect it:** the v0.3.68 inbound-forward
+abort-handle change. It is on exactly this path, so it was the first suspect —
+but the WSL node was rolled back to v0.3.67 (`swarmllm.old`), the request
+re-run under identical conditions, and it **failed the same way with the same
+284s timeout**. Restored to .68 afterwards.
+
+**Cheapest next step**: instrument the coordinator's receive side, not the
+sender's. The sender says it wrote the response; the question is whether the
+coordinator's `pending_layer_results` waiter ever sees it, or whether the
+substream/connection it is keyed to has already been replaced. `resolve_pending_layer_result`
+logs an "ignoring LayerResult from a node this request is no longer waiting on"
+line — check whether that fires, because it would mean the result DID arrive and
+was discarded by the failover pinning.
+
 ## Slow nodes go dark and never come back — the routing ratchet (analysed 2026-07-28)
 
 **Status: analysed, not fixed.** Raised as a design question ("GPU nodes will be
