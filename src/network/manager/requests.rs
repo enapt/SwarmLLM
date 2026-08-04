@@ -200,7 +200,11 @@ impl NetworkManager {
                     return;
                 }
                 let prepared = self.prepare_shard_read(&shard_req);
-                let bw_limit = self.shared_state.config.resources.max_bandwidth_mbps;
+                let bw_limit = self
+                    .shared_state
+                    .config
+                    .resources
+                    .shard_upload_mbps(self.shared_state.config.node.contribution.clone());
                 let ticket = uuid::Uuid::new_v4();
                 self.pending_shard_responses
                     .insert(ticket, (std::time::Instant::now(), channel));

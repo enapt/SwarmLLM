@@ -6,6 +6,14 @@ All notable changes to SwarmLLM are documented here.
 
 ### Changed
 
+- **Sharing model files with other machines no longer uses your whole
+  connection by default.** Uploading model pieces to peers is done purely to
+  help others, but the upload speed was unlimited unless someone had set a
+  figure — so a fresh install could saturate a home internet connection while
+  seeding. It is now limited by default, more generously the more you have
+  offered to share, and unlimited only if you have offered the machine.
+  Setting a figure yourself still overrides it either way.
+
 - **How much work a node accepts from others now follows what its owner agreed
   to share.** A node would take up to 64 pieces of other people's work at once,
   and up to 32 from a single machine, no matter what — and the default is the

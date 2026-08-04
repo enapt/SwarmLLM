@@ -242,6 +242,38 @@ impl ResourceConfig {
     /// than inherited.
     ///
     /// Sibling of [`Self::inference_vram_budget_mb`].
+    /// Upload cap for serving shards to peers, in Mbps. `0` means unlimited.
+    ///
+    /// Uploading model files to other peers is **pure contribution** — none of
+    /// it is the owner's own work — so an unset cap must not mean "use the whole
+    /// connection". It did: the default is `0`, and `0` was taken as unlimited
+    /// at every contribution level, so a stock install would saturate a home
+    /// uplink seeding shards. Saturating someone's internet is the classic
+    /// complaint against peer-to-peer software and it is exactly the kind of
+    /// swamping a contribution setting exists to prevent.
+    ///
+    /// Unlike memory, there is no total to take a fraction of — the node cannot
+    /// know the link speed — so an unset cap resolves to a conservative absolute
+    /// figure instead, and only `Maximum` (an explicit offer of the machine)
+    /// keeps unlimited. An explicit `max_bandwidth_mbps` always wins, in either
+    /// direction.
+    ///
+    /// Note this throttles shard SERVING only. Tensor forwards during inference
+    /// are latency-critical and bounded by the concurrency limits instead.
+    pub fn shard_upload_mbps(&self, contribution: ContributionMode) -> u64 {
+        if self.max_bandwidth_mbps > 0 {
+            return self.max_bandwidth_mbps;
+        }
+        match contribution {
+            // ~1.25 MB/s. Slow for a 500 MB shard, but this is background
+            // seeding on a connection someone else is trying to use.
+            ContributionMode::Minimal => 10,
+            ContributionMode::Moderate => 50,
+            // Offered the machine: take them at their word.
+            ContributionMode::Maximum => 0,
+        }
+    }
+
     pub fn inference_ram_budget_mb(
         &self,
         system_ram_total_mb: u64,

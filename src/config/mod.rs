@@ -1193,6 +1193,40 @@ max_concurrent_requests = 42
         );
     }
 
+    /// Seeding shards to peers is pure contribution, so an unset cap must not
+    /// mean "use the whole connection". It did — `0` was unlimited at every
+    /// level, so a stock install could saturate a home uplink.
+    #[test]
+    fn shard_upload_is_capped_unless_the_machine_was_offered() {
+        let rc = ResourceConfig::default(); // max_bandwidth_mbps = 0
+        let min = rc.shard_upload_mbps(swarmllm_types::ContributionMode::Minimal);
+        let mod_ = rc.shard_upload_mbps(swarmllm_types::ContributionMode::Moderate);
+        let max = rc.shard_upload_mbps(swarmllm_types::ContributionMode::Maximum);
+
+        assert!(min > 0, "the DEFAULT must not be unlimited, got {min}");
+        assert!(
+            mod_ > min,
+            "more contribution must allow more, got {min}/{mod_}"
+        );
+        assert_eq!(max, 0, "offering the machine keeps unlimited");
+    }
+
+    /// An explicit figure is the owner's decision and wins in either direction,
+    /// including asking for MORE than the contribution default would give.
+    #[test]
+    fn an_explicit_bandwidth_cap_wins_over_contribution() {
+        let rc = ResourceConfig {
+            max_bandwidth_mbps: 500,
+            ..Default::default()
+        };
+        for c in [
+            swarmllm_types::ContributionMode::Minimal,
+            swarmllm_types::ContributionMode::Maximum,
+        ] {
+            assert_eq!(rc.shard_upload_mbps(c), 500);
+        }
+    }
+
     #[test]
     fn vram_budget_no_gpu() {
         let rc = ResourceConfig::default();
