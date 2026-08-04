@@ -2,6 +2,22 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- **How much work a node accepts from others now follows what its owner agreed
+  to share.** A node would take up to 64 pieces of other people's work at once,
+  and up to 32 from a single machine, no matter what — and the default is the
+  lowest sharing level. On the hardware this is aimed at, that is how a machine
+  becomes unusable for the person sitting in front of it. At the default it now
+  accepts 8 at once and 4 from any one machine; offering more raises it.
+
+- **The share of system memory follows the same setting**, as the graphics
+  memory share already does. A limit that covers one kind of memory and not the
+  other is not really a limit, and running out of system memory is the worse
+  case: it makes the whole computer slow, not just this program.
+
 ## [0.3.70-alpha] — 2026-08-04
 
 The release to take if you run this on a machine you also use. Memory is now
