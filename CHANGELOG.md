@@ -2,7 +2,12 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.72-alpha] — 2026-08-05
+
+Follows 0.3.71. Contains a security fix — see below for whether it affected you
+and what to do about it. Also makes inference noticeably faster on machines
+without a graphics card, and stops a node refusing to answer for a model the
+network can serve.
 
 ### Changed
 
