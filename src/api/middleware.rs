@@ -109,7 +109,6 @@ enum BucketKind {
     /// actually polls at (30s by default, i.e. 2/min). Sharing the probe bucket
     /// meant the dashboard's own default polling plus ordinary interaction
     /// exceeded the limit and the page 429'd itself.
-    ProviderHealth,
     /// Cloud-model availability probes. Makes external API calls, so it stays
     /// capped — but in its own bucket, because it is fired AUTOMATICALLY by the
     /// dashboard rather than by a person doing something sensitive.
@@ -125,14 +124,6 @@ enum BucketKind {
 
 /// Requests per minute for sensitive key-management endpoints.
 const SENSITIVE_ADMIN_RPM: u64 = 5;
-/// Requests per minute for provider health polling.
-///
-/// Budgets are keyed by client IP, not by browser tab, so this has to cover
-/// **every dashboard open on one machine at once** — which is ordinary usage.
-/// At the 30s default cadence each tab costs 2/min, so a value of 6 was exactly
-/// three tabs and started refusing at the third. 20 leaves room for around ten
-/// while still bounding how fast we can be made to call out to cloud providers.
-const PROVIDER_HEALTH_RPM: u64 = 20;
 /// Requests per minute for cloud-model availability probes.
 ///
 /// Sized by the same argument as `PROVIDER_HEALTH_RPM`, and for the same reason
@@ -195,9 +186,20 @@ impl RateLimiter {
         // Sensitive endpoints: external-API probes always restricted; key/provider
         // mutations restricted but reads use the normal admin bucket (page loads
         // call these on every refresh and hitting 5/min breaks the dashboard).
-        let (kind, limit) = if path == "/api/admin/provider-health" {
-            (BucketKind::ProviderHealth, PROVIDER_HEALTH_RPM)
-        } else if path == "/api/admin/provider-model-status" {
+        // `/api/admin/provider-health` deliberately has NO dedicated bucket.
+        //
+        // It used to, to bound how fast we could be made to call out to cloud
+        // providers — each request probed every configured provider with a
+        // billable call. `provider_health` now caches its result for 30s, so
+        // the outbound cost is bounded by that TTL no matter how often the
+        // endpoint is hit, and the request itself is a cheap cached read like
+        // any other dashboard GET.
+        //
+        // Keeping the old 20/min then throttled only the cheap part: budgets
+        // are per-IP, several dashboard tabs share one, and a node was logging
+        // ~800 refusals an hour for reads that cost nothing — while the badge
+        // those tabs draw went stale. Falls through to the normal admin bucket.
+        let (kind, limit) = if path == "/api/admin/provider-model-status" {
             (BucketKind::ProviderModelStatus, PROVIDER_MODEL_STATUS_RPM)
         } else if ((path == "/api/admin/providers" || path == "/api/admin/api-key") && is_mutating)
             // Auto-update endpoints: download + SHA256 verify + atomic
@@ -1031,12 +1033,13 @@ mod tests {
     fn health_polling_and_model_probes_do_not_share_a_budget() {
         let limiter = RateLimiter::new(200, 200);
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        for _ in 0..PROVIDER_HEALTH_RPM + 3 {
+        // Spend the ordinary admin budget that health polling now shares.
+        for _ in 0..205 {
             let _ = limiter.try_acquire(ip, "/api/admin/provider-health", false);
         }
         assert!(
             !limiter.try_acquire(ip, "/api/admin/provider-health", false),
-            "health budget should be spent for this test to mean anything"
+            "admin budget should be spent for this test to mean anything"
         );
         assert!(
             limiter.try_acquire(ip, "/api/admin/provider-model-status", false),
@@ -1059,15 +1062,28 @@ mod tests {
         }
     }
 
-    /// Health polling still calls out to cloud providers, so it stays bounded.
+    /// Health polling is NOT throttled on its own any more.
+    ///
+    /// It used to have a 20/min bucket to bound how fast we could be made to
+    /// call out to cloud providers, back when every request probed each one.
+    /// `provider_health` caches for 30s, so the outbound cost is bounded by
+    /// that TTL however often the endpoint is hit — and the old bucket then
+    /// throttled only a cheap cached read. Budgets are per-IP and several
+    /// dashboard tabs share one, so a node logged ~800 refusals an hour while
+    /// the badge those tabs draw went stale.
+    ///
+    /// Well past the retired 20/min must now succeed.
     #[test]
-    fn provider_health_polling_is_still_capped() {
+    fn health_polling_is_not_capped_below_the_ordinary_admin_budget() {
         let limiter = RateLimiter::new(200, 200);
         let ip: IpAddr = "10.9.9.9".parse().unwrap();
-        for _ in 0..PROVIDER_HEALTH_RPM {
-            assert!(limiter.try_acquire(ip, "/api/admin/provider-health", false));
+        for i in 0..60 {
+            assert!(
+                limiter.try_acquire(ip, "/api/admin/provider-health", false),
+                "poll {i} refused — health reads are cached and must not be \
+                 throttled below the ordinary admin budget"
+            );
         }
-        assert!(!limiter.try_acquire(ip, "/api/admin/provider-health", false));
     }
 
     /// Ticket issuance is still bounded — it writes to `ws_tickets` on every call.

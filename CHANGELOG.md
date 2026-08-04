@@ -2,6 +2,19 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **The dashboard was refusing its own status checks.** The provider status
+  check used to contact every cloud provider on each call, so it was rate
+  limited to protect against that cost. It now remembers the answer for thirty
+  seconds, which caps the real cost regardless — but the limit stayed, so it was
+  turning away cheap repeat reads instead. On a machine with a few dashboard
+  tabs open that was around eight hundred refusals an hour, while the status
+  dots those tabs draw went stale. The check now shares the ordinary allowance
+  for dashboard reads.
+
 ## [0.3.69-alpha] — 2026-08-04
 
 A follow-up to 0.3.68, fixing a stall that has been costing whole requests
