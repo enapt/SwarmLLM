@@ -6,6 +6,18 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A machine judged slow once could never earn its way back.** How fast each
+  machine answers is remembered, and that figure is only updated when work is
+  actually sent there. It never expired — so a single slow reading, which a
+  machine can easily produce while first loading a model, made it look slow
+  permanently. It was then passed over, which meant it was never measured again.
+
+  This fell hardest on ordinary hardware, which is both the most likely to be
+  slow while loading and the least able to afford being written off. A reading
+  older than ten minutes is now set aside, and the machine is judged on its
+  stated capability again, exactly as one that had never been measured.
+
+
 - **Failed downloads were quietly filling the disk and never released.** A piece
   of a model that fails its integrity check is set aside rather than deleted, so
   it can be looked at instead of vanishing silently. Nothing ever removed those

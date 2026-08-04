@@ -28,7 +28,7 @@
 //! prompts. It is used to size a *timeout* with a safety factor, not to make a
 //! precise promise.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Which half of inference a sample came from. Prefill and decode have
 /// separate coefficients — see the module docs.
@@ -42,6 +42,17 @@ pub enum WorkKind {
 /// a peer that has genuinely changed (another workload arriving, thermal
 /// throttling) without letting one outlier dominate.
 const ALPHA: f32 = 0.3;
+
+/// How long a measured speed keeps influencing ranking.
+///
+/// Long enough that a peer in steady use is always measured — an active
+/// coordinator re-measures a peer on every request it routes there — and short
+/// enough that a peer which fell out of rotation returns to a neutral price
+/// rather than staying frozen at whatever it happened to score once.
+///
+/// Ten minutes was picked to sit well above a normal request's gap and well
+/// below the timescale over which hardware actually changes.
+const RANKING_STALE_AFTER: Duration = Duration::from_secs(600);
 
 /// Observed compute speed of one peer, as two separately-normalised EMAs.
 #[derive(Debug, Clone)]
@@ -132,7 +143,26 @@ impl PeerSpeed {
     /// decode coefficient is the honest choice where we have it. Prefill is
     /// converted at a nominal activation width when decode is unseen, so a
     /// peer we have only ever prefilled through still ranks.
+    /// **An observation expires.** Past [`RANKING_STALE_AFTER`] this returns
+    /// `None`, so the scheduler prices the peer from its advertised capability
+    /// instead — the same path a peer we have never measured already takes.
+    ///
+    /// Without an expiry the EMA has no decay and is only ever updated when we
+    /// route to a peer, so a single bad sample is permanent: a peer measured
+    /// slow once — during a cold model load, or a momentary load spike — keeps
+    /// that number for the life of the process, is priced badly, is therefore
+    /// not routed to, and so is never re-measured. That is a ratchet, and it
+    /// falls hardest on modest hardware, which is also the hardware most likely
+    /// to produce one slow sample while loading.
+    ///
+    /// Expiring rather than decaying is deliberate: there is no prior stored
+    /// here to decay *toward*, and the capability estimate the caller already
+    /// falls back to is exactly that prior. Falling back cannot price a peer
+    /// worse than one that was never measured at all, which bounds the risk.
     pub fn ranking_ms_per_layer(&self) -> Option<f32> {
+        if self.updated_at.elapsed() >= RANKING_STALE_AFTER {
+            return None;
+        }
         if let Some(d) = self.decode_ms_per_layer {
             return Some(d);
         }
@@ -357,5 +387,58 @@ mod tests {
             now + std::time::Duration::from_secs(120),
             std::time::Duration::from_secs(60)
         ));
+    }
+}
+
+#[cfg(test)]
+mod ranking_staleness_tests {
+    use super::*;
+
+    fn measured_slow() -> PeerSpeed {
+        let mut s = PeerSpeed::default();
+        // One slow decode sample, as a cold model load would produce.
+        s.observe(WorkKind::Decode, 2_200, 22, 4096);
+        s
+    }
+
+    /// A fresh measurement must still rank — expiry must not simply disable
+    /// observed latency, which is the whole point of measuring peers.
+    #[test]
+    fn a_fresh_observation_still_ranks() {
+        let s = measured_slow();
+        assert!(
+            s.ranking_ms_per_layer().is_some(),
+            "a just-taken measurement must be used"
+        );
+    }
+
+    /// **The ratchet.** The EMA is only updated when we route to a peer, and it
+    /// has no decay — so one slow sample (a cold load, a load spike) used to
+    /// price that peer badly forever, which stopped it being routed to, which
+    /// stopped it ever being re-measured. Expiring the observation returns it
+    /// to the neutral capability-based price a never-measured peer gets.
+    #[test]
+    fn a_stale_observation_stops_ranking_so_the_peer_is_repriced() {
+        let mut s = measured_slow();
+        s.updated_at = Instant::now() - (RANKING_STALE_AFTER + Duration::from_secs(1));
+        assert!(
+            s.ranking_ms_per_layer().is_none(),
+            "a stale measurement must stop pricing the peer — otherwise one bad \
+             sample is permanent and the peer can never earn its way back"
+        );
+    }
+
+    /// Re-measuring must lift the expiry, or a peer that came back would still
+    /// be treated as unknown despite fresh evidence.
+    #[test]
+    fn re_measuring_restores_ranking() {
+        let mut s = measured_slow();
+        s.updated_at = Instant::now() - (RANKING_STALE_AFTER + Duration::from_secs(1));
+        assert!(s.ranking_ms_per_layer().is_none());
+        s.observe(WorkKind::Decode, 30, 22, 4096);
+        assert!(
+            s.ranking_ms_per_layer().is_some(),
+            "a fresh sample must make the peer measurable again"
+        );
     }
 }

@@ -1422,6 +1422,43 @@ asymmetry Petals' own paper names, arriving by a different route.
 Note (1) alone may be sufficient and is much the simplest; (2) is the principled
 version. Measure before building either.
 
+### Measured 2026-08-04 — the cold-start half of this entry was OVERSTATED, and (1) is now built
+
+**Correction.** This entry says an unmeasured node "falls back to
+`UNKNOWN_COMPUTE_MS = 25` → priced like a very slow node". Reading
+`vertex_cost` against the live nodes shows that is only true when
+`est_tokens_per_sec == 0.0`. A peer that has gossiped a `NodeCapability` always
+carries a real figure — **including a CPU-only one**, which
+`health/monitor.rs` fills from `estimate_tokens_per_sec_7b(50.0, false)`
+(assumed ~50 GB/s DDR) rather than leaving at zero. So `UNKNOWN_COMPUTE_MS` is
+reached only in the window before capability gossip lands (≤30s), not as a
+standing state. **The permanent cold-start exclusion described here does not
+exist.**
+
+**What is real is the other half: a measured estimate never expired.**
+`ranking_ms_per_layer` returned the stored EMA with no decay and no staleness
+check, and `record_peer_segment_latency` is called only when we route. So one
+slow sample — a cold model load, a momentary load spike — priced that peer badly
+for the life of the process, which stopped it being routed to, which stopped it
+ever being re-measured. That is the ratchet, and it falls hardest on modest
+hardware, which is also the most likely to produce one slow sample while
+loading.
+
+**Built (v0.3.70)**: `ranking_ms_per_layer` returns `None` once the observation
+is older than `RANKING_STALE_AFTER` (10 min), so the scheduler prices the peer
+from its advertised capability — the identical path a never-measured peer takes.
+
+**Expiry rather than decay, deliberately.** There is no prior stored in
+`PeerSpeed` to decay *toward*, and the capability estimate the caller already
+falls back to IS that prior. Falling back cannot price a peer worse than one
+never measured, which bounds the risk of a routing change — the class of change
+this project has had to revert before.
+
+**Still not built, and still the principled version: (2), exploration.** Expiry
+un-freezes a wrong number; it does not make the scheduler *try* a peer it prices
+badly on honest evidence. A genuinely slower node still loses every comparison,
+correctly. **Do not record the ratchet as closed.**
+
 ### Prior art, looked up 2026-08-03 (researched, NOT built)
 
 The standard answer is **Peak EWMA**, the latency-aware policy in Finagle,
