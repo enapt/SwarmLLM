@@ -6064,3 +6064,68 @@ Do not build on it.
 `shard_holders(shard_id)`. That answers whether the holders are recorded and
 splits the search cleanly in two — ingest, or candidate gathering. Everything
 above is elimination; this is the measurement.
+
+## An unmeasured peer gets a 296-second budget while a standby sits unused (2026-08-04)
+
+**Observed live**, reproducing the stale-split-model 404 fix on a fresh node:
+
+```
+DIAG: pipeline assembled  segments=1 standbys=1
+Pipeline segment  segment=0 node=e561df35d8c9a3ac layer_start=0 layer_end=28
+DIAG: waiting for remote segment result  timeout_secs=296 timeout_basis="default"
+```
+
+The peer never answered. The request waited the full **296 seconds** and then
+failed. `standbys=1` — a hot standby had been identified for that segment and was
+never used. No failover line appears in the log at all.
+
+296s is `SEGMENT_TIMEOUT_MAX_SECS`, reached because `timeout_basis="default"`:
+`state.metrics.peer_speed` had no measurement for that peer, so the budget fell
+back to the ceiling rather than being sized. A node that has just joined has no
+measurements for anybody, so **a user's first request into a new swarm can hang
+for five minutes** if the scheduler picks a peer that is advertising shards but
+not answering.
+
+**Why the obvious fix is wrong.** Shortening the default is precisely the mistake
+`.claude/rules/architecture.md` § "Timeouts: bound what actually varies" was
+written about: the budget has to cover a genuinely slow peer doing real work, and
+a shorter constant would start killing those. The 296s is not too long *for a
+working peer* — it is only absurd for one that has produced nothing at all.
+
+**The distinction that is missing is liveness, not duration.** The inactivity-vs-
+total rule does not help directly, because a single-segment forward has exactly
+one response and no intermediate progress, so inactivity and total are the same
+number. What does separate the two cases is whether the peer ever acknowledged
+the send at the transport layer:
+
+- ACK received → it has the work; give it the full sized budget.
+- No ACK within ~10-15s → it is not processing anything; fail over to the standby
+  now rather than at +296s.
+
+The machinery for the fast half already exists and is documented in
+`.claude/rules/architecture.md` § "ACK-Timeout Fast-Fail for rr Sends":
+`SendDirectMessage.delivery_request_id: Some(uuid)` plus the 10s
+`RR_ACK_TIMEOUT_SECS` sweep, which is what makes the remote-generate fast path
+surface an error in ~10-20s instead of at `FIRST_TOKEN_TIMEOUT`. Tensor forwards
+go through `pending_tensor_outbound` instead and do not take part in it.
+
+**Before building this**, check three things, because this is the most
+latency-critical path in the system and the failure modes are asymmetric:
+
+1. Whether an ACK is actually observable for a tensor forward, or whether
+   libp2p's request_response only surfaces the full response. If the former is
+   not distinguishable, this design does not work and needs rethinking rather
+   than forcing.
+2. That failing over does not leave the original forward outstanding in a way
+   that lets its late error consume the standby's waiter — that is gotcha #229,
+   which cost a request 181s in exactly this area. `resolve_pending_layer_result`
+   with `awaiting` pinning is the existing protection and any new failover path
+   MUST go through it.
+3. That the standby is actually a *different* node with the shards, not the same
+   peer under another route.
+
+**Not urgent for the common case**: once a peer has been routed to successfully
+even once, `peer_speed` sizes its budget and the ceiling stops applying. This
+bites new nodes and peers that advertise but never serve — which is also the
+population the routing ratchet (documented above) is about, and the two are
+probably worth designing together.
