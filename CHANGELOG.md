@@ -2,7 +2,11 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.71-alpha] — 2026-08-04
+
+Follows 0.3.70. That release made memory come back; this one makes the amount a
+machine gives away match what its owner actually agreed to — for work, memory
+and upload speed alike, instead of only some of them.
 
 ### Changed
 
