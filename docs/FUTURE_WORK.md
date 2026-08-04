@@ -4734,6 +4734,21 @@ shard downloads — exponential cooldown (30→60→120→240→300s cap) record
 terminal failure sites, cleared on success, self-evicting when idle. A
 per-`NodeId` equivalent for rr sends would fit the same pattern.
 
+**CONFIRMED 2026-08-04, and it argues AGAINST building this as specified.**
+There is failure traffic to look at — 22 `OutboundFailure`s in 90 minutes on the
+Proxmox node — but **every one of them is to a single peer, the WSL node**, and
+that pair has a known environmental asymmetry: WSL2 mirrored networking blocks
+inbound connections, so Proxmox cannot dial it and reaches it outbound/relayed
+only. Those failures are a **transport direction problem, not an unhealthy
+peer**. A send-side backoff keyed on `OutboundFailure` would demote a peer whose
+compute is fine and which is reachable by other routes — treating the symptom
+and making the pair worse.
+
+So the honest position is: the reproduction that exists is the wrong shape for
+this fix. Before building it, wait for (or construct) a peer that fails
+independently of one directional transport quirk — otherwise the first thing the
+backoff will do is penalise a working node.
+
 **Care needed on the clearing rule.** The inverse defect is already documented
 as the "routing ratchet": `observed_latency_ms_per_layer` is only recorded when
 we route, with no decay, so an unrouted node is never re-measured and can never
@@ -4804,6 +4819,20 @@ Options, roughly in order of how much they change:
    applied or once the node moves past that version, so the disk cost persists.
 
 Recommendation: (2) now and (1) with a migration; (3) only after signing.
+
+**CONFIRMED 2026-08-04: option (2) is ALREADY IMPLEMENTED.** The dashboard
+banner is not passive — `notifications.js` renders an **"Apply & restart"**
+button when `info.downloaded` is set, and a **"Download & apply"** button when it
+is not, the latter chaining `update/check` → `update/apply` in one click. So a
+staged update is one click from applied, and the "people believe they are
+current" harm is already mitigated for anyone who looks at the dashboard.
+
+**What remains is only the naming**, i.e. option (1): a setting called
+`auto_update = "stable"` maps to `UpdateMode::Download`, which stages and stops.
+That is a config-schema change touching existing installs, so per the
+config-defaults rule it needs a `migrate_superseded_defaults` entry, and it
+changes a user-visible setting name — a decision rather than a defect. Left for
+the maintainer.
 
 ## RESOLVED 2026-07-29 — words were tokenized to byte-fallback garbage
 
