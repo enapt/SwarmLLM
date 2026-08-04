@@ -163,17 +163,50 @@ impl Default for NodeConfig {
     }
 }
 
+/// Fraction of total VRAM inference may claim, by contribution setting.
+///
+/// This used to be a flat 0.8 whatever the user had chosen — so a node set to
+/// contribute **minimally** still had 80% of its graphics card claimed. That is
+/// the wrong default for who actually runs this: home machines, gaming PCs,
+/// people who want to help without handing over the box. `Minimal` is also the
+/// DEFAULT mode, so out of the box the software said "contribute minimally" and
+/// then took 6.5 GB of an 8 GB card.
+///
+/// Observed 2026-08-04 on a development machine set to `minimal`: 7990 of
+/// 8192 MiB in use.
+///
+/// The numbers are deliberately not aggressive. Inference still needs room to
+/// be useful, and this is a ceiling on what may be RESIDENT, not a promise to
+/// use it — the idle-unload path returns memory once the machine is quiet, so
+/// the ceiling only binds while work is actually being done. Anyone who wants a
+/// different figure sets `max_gpu_vram_mb` and that wins outright.
+fn vram_fraction_for(contribution: swarmllm_types::ContributionMode) -> f64 {
+    match contribution {
+        // Default. Leave the majority of the card to whatever else the person
+        // is doing with their computer.
+        swarmllm_types::ContributionMode::Minimal => 0.5,
+        swarmllm_types::ContributionMode::Moderate => 0.65,
+        // An explicit offer of the machine.
+        swarmllm_types::ContributionMode::Maximum => 0.8,
+    }
+}
+
 impl ResourceConfig {
     /// Compute the effective VRAM budget for inference model loading.
     ///
     /// - If `max_gpu_vram_mb > 0`: use it as a hard cap.
     /// - Else if GPU detected (`gpu_vram_total_mb > 0`): use 80% of total.
     /// - Else: `None` (CPU-only node, no budget = unlimited).
-    pub fn inference_vram_budget_mb(&self, gpu_vram_total_mb: u64) -> Option<u64> {
+    pub fn inference_vram_budget_mb(
+        &self,
+        gpu_vram_total_mb: u64,
+        contribution: swarmllm_types::ContributionMode,
+    ) -> Option<u64> {
         if self.max_gpu_vram_mb > 0 {
+            // An explicit ceiling is the user's own decision and always wins.
             Some(self.max_gpu_vram_mb)
         } else if gpu_vram_total_mb > 0 {
-            Some((gpu_vram_total_mb as f64 * 0.8) as u64)
+            Some((gpu_vram_total_mb as f64 * vram_fraction_for(contribution)) as u64)
         } else {
             None
         }

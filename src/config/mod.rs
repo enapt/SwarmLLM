@@ -1102,25 +1102,59 @@ max_concurrent_requests = 42
         assert_eq!(params.max_peers, 200);
     }
 
+    /// An explicit ceiling is the user's own decision and overrides the
+    /// contribution-derived fraction entirely, in either direction.
     #[test]
-    fn vram_budget_explicit_cap() {
+    fn vram_budget_explicit_cap_wins_over_contribution() {
         let rc = ResourceConfig {
             max_gpu_vram_mb: 4000,
             ..Default::default()
         };
-        assert_eq!(rc.inference_vram_budget_mb(8000), Some(4000));
+        for mode in [
+            swarmllm_types::ContributionMode::Minimal,
+            swarmllm_types::ContributionMode::Moderate,
+            swarmllm_types::ContributionMode::Maximum,
+        ] {
+            assert_eq!(rc.inference_vram_budget_mb(8000, mode), Some(4000));
+        }
     }
 
+    /// **The budget follows what the user agreed to contribute.**
+    ///
+    /// It was a flat 80% whatever they had chosen — and `Minimal` is the
+    /// DEFAULT, so a stock install claimed 6.5 GB of an 8 GB card on machines
+    /// that are mostly gaming PCs and home desktops.
     #[test]
-    fn vram_budget_auto_80_percent() {
+    fn vram_budget_scales_with_contribution() {
         let rc = ResourceConfig::default(); // max_gpu_vram_mb = 0
-        assert_eq!(rc.inference_vram_budget_mb(8000), Some(6400));
+        let minimal = rc
+            .inference_vram_budget_mb(8000, swarmllm_types::ContributionMode::Minimal)
+            .unwrap();
+        let moderate = rc
+            .inference_vram_budget_mb(8000, swarmllm_types::ContributionMode::Moderate)
+            .unwrap();
+        let maximum = rc
+            .inference_vram_budget_mb(8000, swarmllm_types::ContributionMode::Maximum)
+            .unwrap();
+
+        assert!(
+            minimal < moderate && moderate < maximum,
+            "more contribution must mean more headroom, got {minimal}/{moderate}/{maximum}"
+        );
+        assert_eq!(maximum, 6400, "an explicit offer of the machine keeps 80%");
+        assert!(
+            minimal <= 4000,
+            "the DEFAULT setting must leave most of the card to the person using              the computer, got {minimal} of 8000"
+        );
     }
 
     #[test]
     fn vram_budget_no_gpu() {
         let rc = ResourceConfig::default();
-        assert_eq!(rc.inference_vram_budget_mb(0), None);
+        assert_eq!(
+            rc.inference_vram_budget_mb(0, swarmllm_types::ContributionMode::Maximum),
+            None
+        );
     }
 
     #[test]

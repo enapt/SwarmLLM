@@ -4,6 +4,16 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **How much of your graphics card is used now follows what you agreed to
+  share.** It was a flat 80% of the card no matter what — and the default
+  setting is the *lowest* contribution level, so a stock install claimed
+  6.5 GB of an 8 GB card on machines that are mostly gaming PCs and home
+  desktops. The share now scales with the setting, leaving most of the card to
+  whoever is using the computer unless they have offered more. Setting an
+  explicit limit still overrides everything.
+
 ### Fixed
 
 - **Memory is now always given back, whatever the model is for.** Models kept
