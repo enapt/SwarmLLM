@@ -6,6 +6,15 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Machines short of graphics memory stopped retrying something that could not
+  work.** While reading a long prompt, the reuse cache saves its progress at
+  intervals. On a card with little memory to spare that save fails — survivable,
+  the answer is unaffected — but it then tried again at every later interval,
+  each attempt needing more memory than the one that had just failed. A long
+  prompt on a six gigabyte card did this every sixty-four words, warning each
+  time. It now stops after the first failure and keeps whatever was saved
+  before it.
+
 - **A machine judged slow once could never earn its way back.** How fast each
   machine answers is remembered, and that figure is only updated when work is
   actually sent there. It never expired — so a single slow reading, which a
