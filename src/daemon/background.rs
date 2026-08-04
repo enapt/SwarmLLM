@@ -81,6 +81,83 @@ pub(super) async fn drain(mut tasks: BackgroundTasks) {
     }
 }
 
+/// How long a quarantined shard is kept before its disk is reclaimed.
+///
+/// A shard that fails BLAKE3 verification is renamed `shard_NNN.bin.quarantine`
+/// rather than deleted, so the bytes survive for inspection instead of a
+/// corruption being silently erased. Nothing ever removed them, and nothing
+/// surfaces them either — so in practice they were pure, invisible disk loss.
+///
+/// **Measured on the development node 2026-08-04: 5.5 GB across two models**,
+/// including an entire 8-shard model quarantined by the v0.3.44 accept-gate bug
+/// on 28 July and still resident a week later. This matters beyond wasted
+/// space: `dir_size` counts every file under the models directory, so those
+/// bytes count toward `max_disk_mb` — meaning a node prunes LIVE shards to stay
+/// under a budget that dead files are consuming.
+///
+/// A day is long enough that an operator who notices a verification failure can
+/// still look, and short enough that a bad batch does not squeeze out real
+/// shards.
+const QUARANTINE_RETENTION_SECS: u64 = 24 * 60 * 60;
+
+/// Delete quarantined shards older than [`QUARANTINE_RETENTION_SECS`].
+///
+/// Returns `(files_removed, bytes_reclaimed)`. Errors are logged and skipped —
+/// failing to reclaim disk must never take the verification pass down with it.
+fn sweep_expired_quarantine(models_dir: &std::path::Path) -> (u32, u64) {
+    let mut files = 0u32;
+    let mut bytes = 0u64;
+    let Ok(model_dirs) = std::fs::read_dir(models_dir) else {
+        return (0, 0);
+    };
+    for model_dir in model_dirs.flatten() {
+        if !model_dir.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(model_dir.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("quarantine") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            // `modified()` is unavailable on some filesystems; treat an unknown
+            // age as "not yet expired" rather than deleting something we cannot
+            // date.
+            let expired = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .map(|age| age.as_secs() >= QUARANTINE_RETENTION_SECS)
+                .unwrap_or(false);
+            if !expired {
+                continue;
+            }
+            let size = meta.len();
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    files += 1;
+                    bytes = bytes.saturating_add(size);
+                    tracing::info!(
+                        path = %path.display(),
+                        bytes = size,
+                        "Reclaimed an expired quarantined shard"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "Could not remove quarantined shard");
+                }
+            }
+        }
+    }
+    (files, bytes)
+}
+
 /// BLAKE3 hash check runs after API is up so the dashboard is responsive
 /// immediately. Bad shards are quarantined.
 pub(super) fn spawn_shard_verification(
@@ -166,6 +243,31 @@ pub(super) fn spawn_shard_verification(
                 }
             }
         }
+        // Reclaim disk from quarantined shards old enough that nobody is going
+        // to inspect them. Done here because this is the pass that creates
+        // them, so the two halves of their lifetime stay in one place.
+        let models_dir = shard_store.models_dir();
+        let (swept_files, swept_bytes) =
+            tokio::task::spawn_blocking(move || sweep_expired_quarantine(&models_dir))
+                .await
+                .unwrap_or_default();
+        if swept_files > 0 {
+            let mb = swept_bytes / (1024 * 1024);
+            tracing::info!(
+                files = swept_files,
+                mb,
+                "Reclaimed disk from expired quarantined shards"
+            );
+            shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "system",
+                    "quarantine_reclaimed",
+                    format!("Recovered {mb} MB from {swept_files} quarantined shard files"),
+                )
+                .with_detail_num(mb as i64),
+            );
+        }
+
         if quarantined > 0 {
             tracing::warn!(
                 verified,
@@ -1120,5 +1222,99 @@ mod tests {
         }
         // Sanity: the real magic is 4 bytes.
         assert_eq!(KV_SNAPSHOT_MAGIC.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod quarantine_sweep_tests {
+    use super::{sweep_expired_quarantine, QUARANTINE_RETENTION_SECS};
+
+    /// Build a models dir with one model directory containing `files`, each
+    /// given an age in seconds.
+    fn models_dir_with(files: &[(&str, u64, u64)]) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let model = root.path().join("some-model");
+        std::fs::create_dir_all(&model).unwrap();
+        for (name, size, age_secs) in files {
+            let p = model.join(name);
+            std::fs::write(&p, vec![0u8; *size as usize]).unwrap();
+            let when = std::time::SystemTime::now() - std::time::Duration::from_secs(*age_secs);
+            // std::fs::FileTimes (stable since 1.75; MSRV here is 1.80) — no
+            // extra dependency just to age a fixture.
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_times(std::fs::FileTimes::new().set_modified(when))
+                .unwrap();
+        }
+        root
+    }
+
+    /// The disk leak: nothing ever removed quarantined shards. 5.5 GB had
+    /// accumulated on the development node, including a whole model quarantined
+    /// a week earlier — and because `dir_size` counts every file, those bytes
+    /// counted toward `max_disk_mb`, so the node would prune LIVE shards to
+    /// stay under a budget dead files were consuming.
+    #[test]
+    fn an_expired_quarantined_shard_is_reclaimed() {
+        let root = models_dir_with(&[(
+            "shard_000.bin.quarantine",
+            4096,
+            QUARANTINE_RETENTION_SECS + 60,
+        )]);
+        let (files, bytes) = sweep_expired_quarantine(root.path());
+        assert_eq!(files, 1);
+        assert_eq!(bytes, 4096);
+        assert!(!root
+            .path()
+            .join("some-model/shard_000.bin.quarantine")
+            .exists());
+    }
+
+    /// The retention window is the whole point — a shard quarantined moments
+    /// ago must still be there for an operator who noticed the failure.
+    #[test]
+    fn a_recent_quarantined_shard_is_kept() {
+        let root = models_dir_with(&[("shard_000.bin.quarantine", 4096, 60)]);
+        let (files, bytes) = sweep_expired_quarantine(root.path());
+        assert_eq!((files, bytes), (0, 0), "recent quarantine must be kept");
+        assert!(root
+            .path()
+            .join("some-model/shard_000.bin.quarantine")
+            .exists());
+    }
+
+    /// Only `.quarantine` files. Deleting a live shard, a header or a manifest
+    /// here would be far worse than the leak this fixes.
+    #[test]
+    fn nothing_but_quarantine_files_is_touched() {
+        let old = QUARANTINE_RETENTION_SECS + 600;
+        let root = models_dir_with(&[
+            ("shard_000.bin", 2048, old),
+            ("gguf_header.bin", 1024, old),
+            ("manifest.json", 512, old),
+            ("hf_source.json", 64, old),
+            ("shard_001.bin.quarantine", 999, old),
+        ]);
+        let (files, bytes) = sweep_expired_quarantine(root.path());
+        assert_eq!((files, bytes), (1, 999), "only the quarantine file");
+        let m = root.path().join("some-model");
+        for keep in [
+            "shard_000.bin",
+            "gguf_header.bin",
+            "manifest.json",
+            "hf_source.json",
+        ] {
+            assert!(m.join(keep).exists(), "{keep} must survive");
+        }
+    }
+
+    /// An empty or absent models dir must be a no-op, not an error.
+    #[test]
+    fn an_empty_models_dir_is_harmless() {
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(sweep_expired_quarantine(empty.path()), (0, 0));
+        assert_eq!(
+            sweep_expired_quarantine(&empty.path().join("does-not-exist")),
+            (0, 0)
+        );
     }
 }

@@ -6,6 +6,18 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Failed downloads were quietly filling the disk and never released.** A piece
+  of a model that fails its integrity check is set aside rather than deleted, so
+  it can be looked at instead of vanishing silently. Nothing ever removed those
+  files afterwards, and nothing showed them either — one machine had **5.5 GB**
+  set aside this way, including a whole model from a week earlier.
+
+  Worse than the space itself: that space counted towards the storage limit, so
+  a machine would delete models it was actually sharing to stay under a limit
+  the dead files were using up. Set-aside pieces are now cleared after a day,
+  and the space recovered is reported.
+
+
 - **The dashboard was refusing its own status checks.** The provider status
   check used to contact every cloud provider on each call, so it was rate
   limited to protect against that cost. It now remembers the answer for thirty
