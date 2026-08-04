@@ -1096,50 +1096,70 @@ impl AutoShardManager {
             if active_models.contains(&model_id) {
                 continue;
             }
-            // Never idle-unload a DELIBERATELY-held model. Mirror the
-            // pressure-prune protections, plus the swarm-wide reference/test
-            // models: a reference model (the shared cross-swarm benchmark set,
-            // fetched via `swarmllm get-model`) is held ON PURPOSE so a
-            // consistent model stays warm across the swarm — evicting it on idle
-            // would defeat that. Also never touch a user-pinned, pool-pinned,
-            // locked, or encrypted-pipeline model.
-            if crate::model::reference::is_reference_model(&model_id.0) {
-                continue;
-            }
-            if self
+            // Never idle-unload a DELIBERATELY-held model: user-pinned,
+            // pool-pinned, locked, or encrypted-pipeline. Those express an
+            // explicit choice by someone.
+            //
+            // **Reference models are NOT exempt here, deliberately.** They used
+            // to be, on the reasoning that the shared cross-swarm benchmark set
+            // is "held ON PURPOSE so a consistent model stays warm". That
+            // conflates two different things: staying a HOLDER of the shards
+            // (on disk, cheap, and what actually keeps the set available to the
+            // swarm) versus keeping the model resident in VRAM (expensive, and
+            // costing exactly one reload to undo).
+            //
+            // `is_reference_model` is not consulted anywhere in the disk-prune
+            // path, so the shards were never at risk from this loop — the
+            // exemption only ever pinned memory. And because the project
+            // actively encourages fetching that set (`swarmllm get-model`), the
+            // effect was that following the project's own advice permanently
+            // cost a user their GPU: once anything touched those models they
+            // were resident for the life of the process, with no time bound at
+            // all.
+            //
+            // Observed on the development machine 2026-08-04: two of three
+            // resident models were reference models, the GPU sat at 7990 of
+            // 8192 MiB, and nothing had been released for two days. A benchmark
+            // can afford a cold load; a user's desktop cannot afford a
+            // permanently full GPU.
+            // Deliberate holds are a REPRIEVE, not a permanent exemption.
+            //
+            // Every one of these is a statement about keeping the model's
+            // SHARDS — pinned by the user, pinned by a pool owner, locked, or
+            // flagged for the encrypted pipeline. None of them says "and keep it
+            // in memory for ever", but that is what an unconditional `continue`
+            // meant: a single pin anywhere permanently removed that model's VRAM
+            // from the machine, with no time bound.
+            //
+            // Memory must always come back eventually and stay inside the
+            // configured limits, whatever the model is for. So these delay the
+            // unload exactly as regional demand does below, and the same hard
+            // ceiling (`idle_hard_unload_secs`, 12x the idle window) overrides
+            // them. A pinned model stays warm while the machine is quiet and is
+            // still released before it can hold a card all day; the shards are
+            // untouched either way, so the pin keeps doing its actual job.
+            let deliberately_held = self
                 .shared_state
                 .models
                 .model_trust
                 .get(&model_id)
                 .map(|t| t.pinned_by_user)
                 .unwrap_or(false)
-            {
-                continue;
-            }
-            if self
-                .shared_state
-                .encrypted_pipeline_models
-                .get(&model_id)
-                .map(|v| *v)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if self
-                .shared_state
-                .models
-                .locked_shards
-                .iter()
-                .any(|e| e.key().model_id == model_id)
-            {
-                continue;
-            }
-            if shard_pins
-                .iter()
-                .any(|p| p.model_id == model_id.0 && p.target_node_id == local_id)
-            {
-                continue;
-            }
+                || self
+                    .shared_state
+                    .encrypted_pipeline_models
+                    .get(&model_id)
+                    .map(|v| *v)
+                    .unwrap_or(false)
+                || self
+                    .shared_state
+                    .models
+                    .locked_shards
+                    .iter()
+                    .any(|e| e.key().model_id == model_id)
+                || shard_pins
+                    .iter()
+                    .any(|p| p.model_id == model_id.0 && p.target_node_id == local_id);
             // Idle: no local request within the window (never-requested counts
             // as idle — it was loaded but has served nothing).
             let last_req = self
@@ -1186,7 +1206,7 @@ impl AutoShardManager {
                 .get(&(model_id.clone(), our_region.clone()))
                 .map(|v| *v)
                 .unwrap_or(0.0);
-            if ema >= IDLE_DEMAND_EMA_THRESHOLD && !hard_idle {
+            if (ema >= IDLE_DEMAND_EMA_THRESHOLD || deliberately_held) && !hard_idle {
                 continue;
             }
 
@@ -1650,6 +1670,49 @@ mod tests {
 #[cfg(test)]
 mod idle_hard_unload_tests {
     use super::{idle_hard_unload_secs, IDLE_DEMAND_EMA_THRESHOLD, IDLE_HARD_UNLOAD_MULTIPLIER};
+
+    /// The gate as the loop now evaluates it: demand OR a deliberate hold buys
+    /// a reprieve, and the hard ceiling overrides both.
+    fn keeps_reprieve(ema: f64, deliberately_held: bool, idle_secs: i64, window: u64) -> bool {
+        let hard_idle = idle_secs >= idle_hard_unload_secs(window);
+        (ema >= IDLE_DEMAND_EMA_THRESHOLD || deliberately_held) && !hard_idle
+    }
+
+    /// **Memory always comes back.** A pinned, locked, pool-pinned or
+    /// encrypted-pipeline model used to `continue` unconditionally, so a single
+    /// pin anywhere removed that model's VRAM from the machine permanently.
+    /// Those flags are about keeping SHARDS, never about residency, and the
+    /// shards are untouched by this loop either way.
+    #[test]
+    fn a_deliberately_held_model_is_still_released_at_the_ceiling() {
+        let window = 300;
+        let past_ceiling = idle_hard_unload_secs(window) + 1;
+        assert!(
+            !keeps_reprieve(0.0, true, past_ceiling, window),
+            "a held model must still be released once past the hard ceiling — \
+             memory has to come back whatever the model is for"
+        );
+        assert!(
+            !keeps_reprieve(9.9, true, past_ceiling, window),
+            "not even demand AND a pin may hold memory past the ceiling"
+        );
+    }
+
+    /// The reprieve must still do its job while the machine is merely quiet,
+    /// or pinning a model would stop meaning anything at all.
+    #[test]
+    fn a_deliberate_hold_still_keeps_a_briefly_idle_model_warm() {
+        let window = 300;
+        let briefly_idle = 600; // past the idle window, far under the ceiling
+        assert!(
+            keeps_reprieve(0.0, true, briefly_idle, window),
+            "a pinned model should stay warm while the node is quiet"
+        );
+        assert!(
+            !keeps_reprieve(0.0, false, briefly_idle, window),
+            "an unpinned, unwanted model has nothing holding it and goes"
+        );
+    }
 
     /// The reported case: two models resident 2h16 past their last request,
     /// regional demand barely over the line, on a node that then hit GPU-OOM.

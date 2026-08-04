@@ -6,6 +6,20 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Memory is now always given back, whatever the model is for.** Models kept
+  for testing and comparison, and any model pinned, locked or marked private,
+  were skipped when reclaiming graphics memory — permanently, with no time
+  limit. Those settings are about keeping a model's *files*, not about holding
+  memory, but the effect was that a machine following the project's own advice
+  to fetch the shared test models lost that memory for as long as it ran.
+
+  Seen on a development machine: two of three models held in memory were test
+  models, the card sat at 7990 of 8192 megabytes, and nothing had been released
+  for two days. Those settings now delay reclamation while the machine is quiet
+  rather than preventing it, and the existing one-hour ceiling overrides them.
+  The model's files are untouched either way, so pinning still does its job.
+
+
 - **Nodes run under WSL were invisible to other machines, with nothing to say
   so.** Windows asks whether to allow an app through the firewall when it starts
   one itself, but never for a Linux program running under WSL — so incoming
