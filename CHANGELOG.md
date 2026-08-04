@@ -2,7 +2,11 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.70-alpha] — 2026-08-04
+
+The release to take if you run this on a machine you also use. Memory is now
+always given back and stays inside the share you agreed to, instead of models
+sitting in your graphics card indefinitely.
 
 ### Changed
 
