@@ -1193,6 +1193,41 @@ stale cached peer is reintroduced.
 earlier attempts on live traffic both routed cleanly and never fired the
 mechanism, so they proved nothing about it.
 
+## Whole-model-to-one-peer vs local+LAN split — MEASURED, did not reproduce (2026-08-04)
+
+Long recorded as "the scheduler assigns a whole model to ONE full-coverage
+remote peer rather than splitting local+LAN when both are available", framed as
+a cost-model preference rather than a bug, with the instruction to measure both
+options before touching anything.
+
+**Measured on exactly that topology and it chose the split.** llama-3.2-3b:
+coordinator holds shards 0-2 locally, the LAN peer holds shard 3 at **3ms**, and
+a third peer holds **all four** at 601ms — so a whole-model delegation was
+available and was not taken. Three runs out of three:
+
+```
+DIAG: parallax routing selected chain  model=llama-3.2-3b  segments=2
+Pipeline segment  segment=0 node=<local>    layer_start=0  layer_end=21
+Pipeline segment  segment=1 node=<lan peer> layer_start=21 layer_end=28
+request complete  route=distributed segments=2
+```
+
+**4s warm, 43s on the first run** — that first figure is a cold model load on the
+CPU-only LAN peer, not routing cost, and is the sort of sample that used to
+poison a peer's speed estimate permanently (see the ratchet entry).
+
+**What this does and does not settle.** The stated preference did not reproduce,
+so the entry should not be carried forward as a known behaviour. It does NOT
+show the split is *faster* than delegating the whole model — that alternative
+cannot be forced from outside the scheduler, so the comparison the original
+entry asked for remains unmade. If it matters, the way to get it is a temporary
+scheduler override that pins the assignment, not another observation of what it
+picks on its own.
+
+**Incidentally, this was only observable because the parallax routing lines were
+raised from `debug!` to `info!` earlier the same day.** At `debug` on a node
+running at `info`, none of the above appears.
+
 ## The updater could leave a node with NO binary (reported, FIXED 2026-08-04)
 
 **Reported against 0.3.57 → 0.3.58** (Debian 13 LXC on Proxmox VE 9, systemd

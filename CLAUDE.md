@@ -247,12 +247,16 @@ calibrate the estimator down** — it would under-charge by ~3.3 GB and bring ba
 the OOM v0.3.66 fixed. The real precondition for a retry is why a priced
 distributed assignment still returns `route=local`.
 
-**Open, and correctly framed:** the scheduler assigns a whole model to ONE
-full-coverage remote peer rather than splitting local+LAN when both are
-available. This is a **cost-model preference, not a bug** — the run that
-established it succeeded in 54s where the same shape had failed at 308s.
-Measure both options on the same request before changing anything. The announce
-path and candidate gathering are NOT at fault (proven, see FUTURE_WORK).
+**MEASURED 2026-08-04 — did not reproduce.** This said the scheduler assigns a
+whole model to ONE full-coverage remote peer rather than splitting local+LAN.
+Tested on exactly that topology (llama-3.2-3b: local holds shards 0-2, the LAN
+peer holds shard 3 at 3ms, and a remote peer holds ALL FOUR at 601ms) it chose
+the **split**, three runs out of three: `parallax routing selected chain
+segments=2`, segment 0 local layers 0-21, segment 1 on the LAN peer layers
+21-28. **4s warm** (43s on the first, cold-load run). The announce path and
+candidate gathering were already proven not at fault; the preference itself is
+now unreproduced. What was NOT measured is whether whole-to-one-peer would have
+been faster — that alternative cannot be forced from outside the scheduler.
 
 **Process — the reason `.claude/rules/diagnosis.md` and `.claude/agents/root-cause.md`
 now exist.** Four wrong causal claims in one session, three reaching commits
