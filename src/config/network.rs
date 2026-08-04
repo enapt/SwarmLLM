@@ -192,7 +192,7 @@ pub fn default_bootstrap_peers() -> Vec<String> {
 }
 
 /// Detect WSL2 by checking /proc/version for "microsoft" or "WSL".
-pub(super) fn is_wsl2() -> bool {
+pub(crate) fn is_wsl2() -> bool {
     std::fs::read_to_string("/proc/version")
         .map(|v| {
             let lower = v.to_lowercase();
@@ -230,7 +230,7 @@ fn parse_wslinfo_networking_mode(stdout: &str) -> Option<bool> {
 /// 2. Fallback for older WSL that predates `wslinfo`: the `loopback0`
 ///    interface, which mirrored mode creates — the same signal Docker uses to
 ///    special-case mirrored mode (moby/moby#48075).
-pub(super) fn wsl_networking_is_mirrored() -> bool {
+pub(crate) fn wsl_networking_is_mirrored() -> bool {
     if let Some(mirrored) = wslinfo_networking_mode(std::time::Duration::from_secs(2)) {
         return mirrored;
     }

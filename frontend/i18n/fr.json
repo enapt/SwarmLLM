@@ -27,6 +27,7 @@
   "activity.hf_probe_started": "Vérification de {model} sur HuggingFace avant le téléchargement",
   "activity.hf_source_discovered": "Source HF découverte pour {model}",
   "activity.hf_sources_cap_reached": "Le catalogue des modèles découverts est plein ({count}). Les nouveaux modèles des pairs sont ignorés — supprimez des modèles inutilisés dans Paramètres pour libérer de la place.",
+  "activity.inbound_blocked": "Les autres machines ne peuvent pas joindre ce nœud. Ses ports doivent être autorisés dans le pare-feu Windows — voyez le journal pour la commande exacte.",
   "activity.inference_completed": "Inférence terminée : {model}",
   "activity.inference_failed": "Inférence échouée : {detail}",
   "activity.inference_request": "Requête d'inférence : {model}",

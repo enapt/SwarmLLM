@@ -27,6 +27,7 @@
   "activity.hf_probe_started": "Sprawdzanie {model} w HuggingFace przed pobraniem",
   "activity.hf_source_discovered": "Odkryto źródło HF dla {model}",
   "activity.hf_sources_cap_reached": "Katalog wykrytych modeli jest pełny ({count}). Nowe modele od rówieśników są odrzucane — usuń nieużywane modele w Ustawieniach, aby zwolnić miejsce.",
+  "activity.inbound_blocked": "Inne komputery nie mogą połączyć się z tym węzłem. Jego porty trzeba dopuścić w zaporze Windows — dokładne polecenie znajdziesz w dzienniku.",
   "activity.inference_completed": "Wnioskowanie zakończone: {model}",
   "activity.inference_failed": "Wnioskowanie nie powiodło się: {detail}",
   "activity.inference_request": "Żądanie wnioskowania: {model}",

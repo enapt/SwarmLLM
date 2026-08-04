@@ -32,7 +32,19 @@ pub struct HealthMonitor {
         (crate::types::ShardId, crate::types::NodeId),
         (u32, std::time::Instant),
     >,
+    /// When this monitor started, for the inbound-reachability grace period.
+    started_at: std::time::Instant,
+    /// Latch so the WSL firewall warning is emitted at most once per run, and
+    /// the check stops costing anything once it has resolved either way.
+    wsl_firewall_warned: bool,
 }
+
+/// How long to wait before concluding that nothing can dial in.
+///
+/// Long enough that a node which has simply not been found yet is never
+/// accused of a firewall problem: mDNS answers in seconds, but a peer that has
+/// to come via the DHT or a bootstrap round can take minutes to dial back.
+const WSL_FIREWALL_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// How long a download tracking entry can sit unchanged before being treated
 /// as stalled. Generous enough to tolerate slow peers and HF rate limiting.
@@ -65,6 +77,43 @@ const PEER_SPEED_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3
 /// cache to prefetch against anyway.
 const PREFETCH_HISTORY_MAX_IDLE_MS: u64 = 600_000;
 
+/// Verdict of the "can anything reach this node" check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InboundCheck {
+    /// A remote peer has dialled us — inbound demonstrably works.
+    Reachable,
+    /// Not enough evidence yet: still inside the grace period, or we have not
+    /// met anyone who *could* dial back.
+    KeepWaiting,
+    /// Connected to peers for a good while and nothing has ever dialled in.
+    Blocked,
+}
+
+/// Decide whether inbound connections are reaching this node.
+///
+/// Split out from `maybe_warn_wsl_firewall` because the decision is the part
+/// worth pinning: the first version of this warning had no decision at all — it
+/// fired unconditionally at config-load on every WSL2 mirrored node, including
+/// ones whose ports were already open and verified working.
+///
+/// Both negative arms matter. Outbound connections prove nothing about inbound,
+/// so peers alone are not evidence of reachability; and *no* peers is a
+/// discovery problem, where a firewall message would send someone off after the
+/// wrong thing entirely.
+pub(crate) fn inbound_warning_decision(
+    observed_inbound: bool,
+    uptime: std::time::Duration,
+    connected_peers: usize,
+) -> InboundCheck {
+    if observed_inbound {
+        return InboundCheck::Reachable;
+    }
+    if uptime < WSL_FIREWALL_GRACE || connected_peers == 0 {
+        return InboundCheck::KeepWaiting;
+    }
+    InboundCheck::Blocked
+}
+
 impl HealthMonitor {
     pub fn new(
         shared_state: Arc<SharedState>,
@@ -81,6 +130,8 @@ impl HealthMonitor {
             shard_announce_counter: 0,
             acq_liveness: std::collections::HashMap::new(),
             peer_dl_liveness: std::collections::HashMap::new(),
+            started_at: std::time::Instant::now(),
+            wsl_firewall_warned: false,
         }
     }
 
@@ -139,6 +190,8 @@ impl HealthMonitor {
                         self.broadcast_wishlist_announcement().await;
                         self.broadcast_pool_model_availability().await;
                     }
+
+                    self.maybe_warn_wsl_firewall();
 
                     // Cleanup tasks: run every tick (cheap, local-only)
                     self.cleanup_acquisition_progress();
@@ -1055,6 +1108,92 @@ impl HealthMonitor {
     /// 2. Completed/Failed entries older than 5 minutes are evicted (was 1h —
     ///    too long, kept stale UI around long after the user cared).
     ///
+    /// Warn, once, when a WSL2 mirrored-mode node is demonstrably unreachable.
+    ///
+    /// Under WSL2 mirrored networking the node is a first-class LAN citizen — a
+    /// real address, working QUIC/mDNS/UPnP — but the **Windows** firewall still
+    /// governs inbound, and Windows only prompts to allow apps it launches
+    /// itself. A Linux binary under WSL gets no prompt at all, so inbound is
+    /// silently dropped while the node looks perfectly healthy from the inside:
+    /// it dials out fine, holds peers, and advertises its address correctly.
+    /// Only the other machine sees it, as sends that never complete. Measured
+    /// 2026-08-04: a peer 2ms away on the same subnet could not open TCP 8810 or
+    /// UDP 8800, and cross-machine requests died on the segment timeout at 284s.
+    ///
+    /// **The condition has to be observed, not assumed.** This warning first
+    /// shipped as an unconditional line at config-load time, which meant every
+    /// mirrored-mode node saw it on every start — including this development
+    /// machine after the ports had been opened and verified working. Telling
+    /// someone to fix a problem they have already fixed is how warnings stop
+    /// being read.
+    ///
+    /// `observed_inbound_connection` is the evidence: any non-loopback peer
+    /// dialling us proves inbound arrives. Outbound proves nothing, which is why
+    /// having peers is not enough on its own — this node had three.
+    ///
+    /// Deliberately gated on having tried for a while AND having outbound peers.
+    /// A node that simply has not met anyone yet is not evidence of a firewall,
+    /// and warning during startup would reintroduce the false positive with
+    /// extra steps.
+    fn maybe_warn_wsl_firewall(&mut self) {
+        use std::sync::atomic::Ordering;
+        if self.wsl_firewall_warned {
+            return;
+        }
+        let decision = inbound_warning_decision(
+            self.shared_state
+                .observed_inbound_connection
+                .load(Ordering::Relaxed),
+            self.started_at.elapsed(),
+            self.shared_state.connected_node_ids.len(),
+        );
+        match decision {
+            InboundCheck::KeepWaiting => return,
+            InboundCheck::Reachable => {
+                // Proven reachable — stop paying for the check for this run.
+                self.wsl_firewall_warned = true;
+                return;
+            }
+            InboundCheck::Blocked => {}
+        }
+        self.wsl_firewall_warned = true;
+        // The remedy is Windows-specific, so only say it where it applies. The
+        // *observation* above is platform-neutral and worth keeping general if
+        // another unreachable-but-healthy case turns up.
+        if !(crate::config::network::is_wsl2()
+            && crate::config::network::wsl_networking_is_mirrored())
+        {
+            return;
+        }
+        let port = self.shared_state.config.node.listen_port;
+        tracing::warn!(
+            p2p_tcp = port + 10,
+            quic_udp = port,
+            peers = self.shared_state.connected_node_ids.len(),
+            "Other machines cannot reach this node — it has been connected for a while \
+             and nothing has ever dialled IN. Windows only asks to allow the firewall \
+             for apps it launches, never for a Linux program under WSL, so inbound is \
+             being dropped even though this node is on the LAN. Run this once in an \
+             Administrator PowerShell: \
+             New-NetFirewallRule -DisplayName 'SwarmLLM P2P TCP' -Direction Inbound \
+             -Protocol TCP -LocalPort {} -Action Allow ; \
+             New-NetFirewallRule -DisplayName 'SwarmLLM P2P QUIC' -Direction Inbound \
+             -Protocol UDP -LocalPort {} -Action Allow",
+            port + 10,
+            port
+        );
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "network",
+                "inbound_blocked",
+                "Other machines can't reach this node. Its ports need allowing through \
+                 the Windows firewall — see the log for the exact command."
+                    .to_string(),
+            )
+            .with_toast("warning", 12000),
+        );
+    }
+
     /// This is the single source of truth for download liveness — replaces the
     /// scattered cleanup logic that left both `acquisition_progress` and
     /// `peer_shard_downloads` drifting when a download task died silently.
@@ -1252,6 +1391,59 @@ impl HealthMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of the check. This warning first shipped unconditional at
+    /// config-load, so it fired on every WSL2 mirrored node on every start —
+    /// including one whose ports had been opened and verified working, telling
+    /// its owner to fix an already-fixed problem.
+    #[test]
+    fn a_node_that_has_been_dialled_is_never_warned() {
+        let long = WSL_FIREWALL_GRACE * 10;
+        assert_eq!(
+            inbound_warning_decision(true, long, 5),
+            InboundCheck::Reachable
+        );
+        // Still reachable even with no peers connected right now — inbound was
+        // observed at some point, which is what the firewall question asks.
+        assert_eq!(
+            inbound_warning_decision(true, long, 0),
+            InboundCheck::Reachable
+        );
+    }
+
+    /// Outbound connections prove nothing about inbound, so "we have peers" is
+    /// not evidence of reachability — the machine that produced this bug had
+    /// three peers while dropping every inbound packet.
+    #[test]
+    fn peers_without_any_inbound_is_the_blocked_case() {
+        assert_eq!(
+            inbound_warning_decision(false, WSL_FIREWALL_GRACE * 2, 3),
+            InboundCheck::Blocked
+        );
+    }
+
+    /// Two ways to have no evidence yet, neither of which is a firewall.
+    #[test]
+    fn no_evidence_yet_does_not_accuse_the_firewall() {
+        // Inside the grace period: a peer reached via the DHT or a bootstrap
+        // round can take minutes to dial back.
+        assert_eq!(
+            inbound_warning_decision(false, std::time::Duration::from_secs(5), 3),
+            InboundCheck::KeepWaiting
+        );
+        // No peers at all: nobody has had the chance to dial in, so this is a
+        // discovery problem and a firewall message would misdirect entirely.
+        assert_eq!(
+            inbound_warning_decision(false, WSL_FIREWALL_GRACE * 2, 0),
+            InboundCheck::KeepWaiting
+        );
+    }
+
+    /// Long enough that a slow-to-be-discovered node is never accused.
+    #[test]
+    fn inbound_grace_period_is_generous() {
+        assert!(WSL_FIREWALL_GRACE >= std::time::Duration::from_secs(300));
+    }
 
     #[test]
     fn ping_interval_is_30s() {

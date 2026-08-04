@@ -27,6 +27,7 @@
   "activity.hf_probe_started": "डाउनलोड से पहले HuggingFace पर {model} की जाँच की जा रही है",
   "activity.hf_source_discovered": "{model} के लिए HF स्रोत खोजा गया",
   "activity.hf_sources_cap_reached": "खोजे गए मॉडलों की सूची भर गई है ({count})। साथियों से नए मॉडल हटाए जा रहे हैं — स्थान खाली करने के लिए सेटिंग्स में अप्रयुक्त मॉडल हटाएं।",
+  "activity.inbound_blocked": "अन्य मशीनें इस नोड तक नहीं पहुँच पा रही हैं। इसके पोर्ट को Windows फ़ायरवॉल में अनुमति देनी होगी — सटीक कमांड लॉग में देखें।",
   "activity.inference_completed": "अनुमान पूर्ण: {model}",
   "activity.inference_failed": "अनुमान विफल: {detail}",
   "activity.inference_request": "अनुमान अनुरोध: {model}",

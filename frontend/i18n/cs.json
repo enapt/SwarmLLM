@@ -27,6 +27,7 @@
   "activity.hf_probe_started": "Kontrola {model} na HuggingFace před stažením",
   "activity.hf_source_discovered": "Objeven zdroj HF pro {model}",
   "activity.hf_sources_cap_reached": "Katalog objevených modelů je plný ({count}). Nové modely od peerů jsou zahazovány — odstraňte nepoužívané modely v Nastavení pro uvolnění místa.",
+  "activity.inbound_blocked": "Ostatní počítače se k tomuto uzlu nedostanou. Jeho porty je potřeba povolit ve firewallu Windows — přesný příkaz najdete v protokolu.",
   "activity.inference_completed": "Inference dokončena: {model}",
   "activity.inference_failed": "Inference selhala: {detail}",
   "activity.inference_request": "Požadavek inference: {model}",

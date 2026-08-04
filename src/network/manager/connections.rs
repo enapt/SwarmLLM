@@ -141,6 +141,16 @@ impl NetworkManager {
         if matches!(endpoint, libp2p::core::ConnectedPoint::Dialer { .. }) {
             self.connection_addrs
                 .insert(connection_id, remote_addr.clone());
+        } else if !is_loopback {
+            // A remote peer dialled US and it worked — the only direct proof
+            // that inbound reaches this node. Outbound succeeds from behind
+            // almost any firewall, so nothing else in a healthy-looking node
+            // distinguishes "reachable" from "silently dropping inbound".
+            // Loopback is excluded: the dashboard's own browser would satisfy
+            // it while proving nothing about the LAN.
+            self.shared_state
+                .observed_inbound_connection
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         // NETWORKING_PLAN Phase 1 — record DIRECT (non-relay-circuit)
         // connections so the relay send path can prefer the app-level relay over

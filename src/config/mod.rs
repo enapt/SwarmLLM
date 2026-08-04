@@ -288,7 +288,7 @@ mod credit;
 pub use credit::*;
 
 /// Network/transport config: NetworkConfig and is_wsl2 helper.
-mod network;
+pub(crate) mod network;
 pub use network::*;
 
 /// Operational config: LoggingConfig, UiConfig, UpdateConfig +
@@ -566,21 +566,13 @@ impl Config {
             // A warning is the right level: it is not an error here (outbound
             // works, and a node that only makes requests is fine), but it is
             // never what someone running a peer-to-peer node intends.
-            let port = config.node.listen_port;
-            tracing::warn!(
-                p2p_tcp = port + 10,
-                quic_udp = port,
-                "Other machines probably cannot reach this node. Windows only asks to \
-                 allow the firewall for apps it launches, never for a Linux program \
-                 under WSL — so inbound is being dropped even though this node is on \
-                 the LAN. Run this once in an Administrator PowerShell: \
-                 New-NetFirewallRule -DisplayName 'SwarmLLM P2P TCP' -Direction Inbound \
-                 -Protocol TCP -LocalPort {} -Action Allow ; \
-                 New-NetFirewallRule -DisplayName 'SwarmLLM P2P QUIC' -Direction Inbound \
-                 -Protocol UDP -LocalPort {} -Action Allow",
-                port + 10,
-                port
-            );
+            // The warning itself is NOT emitted here. Whether the firewall is
+            // actually blocking anything is not knowable at config-load time,
+            // and emitting it unconditionally meant every mirrored-mode node saw
+            // it on every start — including ones where the ports had already been
+            // opened, which is telling someone to fix a problem they have fixed.
+            // `health::monitor` raises it only once inbound has demonstrably
+            // failed to arrive; see `maybe_warn_wsl_firewall`.
         } else if network::is_wsl2() {
             // Parse TOML into a Value to check which keys were explicitly set.
             // Raw string search (e.g., config_text.contains("enable_quic")) would

@@ -27,6 +27,7 @@
   "activity.hf_probe_started": "{model} wordt op HuggingFace gecontroleerd vóór het downloaden",
   "activity.hf_source_discovered": "HF-bron ontdekt voor {model}",
   "activity.hf_sources_cap_reached": "De catalogus van ontdekte modellen is vol ({count}). Nieuwe modellen van peers worden verwijderd — verwijder ongebruikte modellen in Instellingen om ruimte vrij te maken.",
+  "activity.inbound_blocked": "Andere machines kunnen deze node niet bereiken. De poorten moeten worden toegestaan in de Windows-firewall — zie het logboek voor de precieze opdracht.",
   "activity.inference_completed": "Inferentie voltooid: {model}",
   "activity.inference_failed": "Inferentie mislukt: {detail}",
   "activity.inference_request": "Inferentieverzoek: {model}",

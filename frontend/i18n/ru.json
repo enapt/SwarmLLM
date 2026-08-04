@@ -27,6 +27,7 @@
   "activity.hf_probe_started": "Проверка {model} на HuggingFace перед загрузкой",
   "activity.hf_source_discovered": "Обнаружен источник HF для {model}",
   "activity.hf_sources_cap_reached": "Каталог обнаруженных моделей переполнен ({count}). Новые модели от узлов отбрасываются — удалите неиспользуемые модели в Настройках, чтобы освободить место.",
+  "activity.inbound_blocked": "Другие компьютеры не могут подключиться к этому узлу. Его порты нужно разрешить в брандмауэре Windows — точная команда есть в журнале.",
   "activity.inference_completed": "Инференс завершён: {model}",
   "activity.inference_failed": "Инференс не удался: {detail}",
   "activity.inference_request": "Запрос инференса: {model}",

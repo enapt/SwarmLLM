@@ -348,6 +348,21 @@ pub struct SharedState {
     /// the pool invite-code generator so a freshly-minted code carries every
     /// address a remote peer might reach this node on.
     pub listen_multiaddrs: arc_swap::ArcSwap<Vec<String>>,
+    /// Whether any remote peer has ever successfully dialled US.
+    ///
+    /// This is the only direct evidence that inbound connections reach this
+    /// node: outbound works from behind almost anything, so a node with peers,
+    /// a real address and clean logs can still be unreachable — and looks
+    /// perfectly healthy from the inside. Set once by
+    /// `handle_connection_established` for the first non-loopback connection
+    /// where we are the LISTENER, never cleared.
+    ///
+    /// Read by the WSL2 firewall check, which previously warned every mirrored-
+    /// mode node on every start whether or not anything was actually blocked —
+    /// telling people to run PowerShell commands they may already have run.
+    /// Loopback is excluded because the dashboard's own browser connection
+    /// would otherwise satisfy it without proving anything about the LAN.
+    pub observed_inbound_connection: std::sync::atomic::AtomicBool,
     /// Runtime mirror of `config.api.dashboard_trust_lan` — whether a browser
     /// on a private/LAN address is handed the dashboard's API key.
     ///
@@ -800,6 +815,7 @@ impl SharedState {
             )),
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
             listen_multiaddrs: arc_swap::ArcSwap::from_pointee(Vec::new()),
+            observed_inbound_connection: std::sync::atomic::AtomicBool::new(false),
             dashboard_trust_lan: std::sync::atomic::AtomicBool::new(config.api.dashboard_trust_lan),
             publicly_reachable: std::sync::atomic::AtomicBool::new(false),
             hole_punch_successes: AtomicU64::new(0),

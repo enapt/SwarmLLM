@@ -27,6 +27,7 @@
   "activity.hf_probe_started": "Checking {model} on HuggingFace before downloading",
   "activity.hf_source_discovered": "Discovered HF source for {model}",
   "activity.hf_sources_cap_reached": "Discovered model catalogue is full ({count}). New models from peers are being dropped — remove unused models in Settings to free slots.",
+  "activity.inbound_blocked": "Other machines can't reach this node. Its ports need allowing through the Windows firewall — see the log for the exact command.",
   "activity.inference_completed": "Inference completed: {model}",
   "activity.inference_failed": "Inference failed: {detail}",
   "activity.inference_request": "Inference request: {model}",
