@@ -356,12 +356,33 @@ impl PrefixCache {
             match snapshot_at(&entry.layers, pos, dim, max_seq_len) {
                 Ok(snap) => snapshots.push((pos, Arc::new(snap))),
                 Err(e) => {
+                    // Stop at the first failure instead of trying the rest.
+                    //
+                    // `compute_insert_points` returns ASCENDING block
+                    // boundaries and a snapshot copies `[0..pos]` of every
+                    // layer's K and V, so each remaining point allocates
+                    // strictly MORE than the one that just failed. Once one
+                    // fails there is no prospect of a later one succeeding.
+                    //
+                    // Continuing was not free: on a 6 GB card a long prefill
+                    // failed here every 64 tokens, so the request paid a futile
+                    // allocation attempt and emitted a warning per block, on
+                    // exactly the machine least able to spare either. Reported
+                    // 2026-08-02.
+                    //
+                    // Snapshots already taken at SMALLER positions are kept —
+                    // they succeeded and are still useful prefixes — so this
+                    // degrades to "cache as much as fitted" rather than
+                    // dropping the lot.
                     tracing::warn!(
                         model_key,
                         pos,
+                        captured = snapshots.len(),
                         error = %e,
-                        "prefix-cache: snapshot failed — skipping this insert point"
+                        "prefix-cache: snapshot failed — keeping what fitted and \
+                         skipping the larger insert points for this request"
                     );
+                    break;
                 }
             }
         }
@@ -930,6 +951,40 @@ pub fn deserialize_snapshot_full(
 
 #[cfg(test)]
 mod tests {
+
+    /// The insert points must ASCEND, because the snapshot loop now stops at
+    /// the first failure instead of trying the rest.
+    ///
+    /// That break is only sound while every later point allocates more than the
+    /// one that failed — a snapshot copies `[0..pos]` of every layer's K and V,
+    /// so ascending positions mean monotonically growing allocations. If this
+    /// ever returned unordered or descending points, breaking would start
+    /// skipping points that could still have fitted, and the prefix cache would
+    /// quietly cache less than it can.
+    #[test]
+    fn insert_points_ascend_so_stopping_at_the_first_failure_is_sound() {
+        for (block, min_tokens, available) in [
+            (64usize, 32usize, 512usize),
+            (16, 16, 100),
+            (128, 64, 129),
+            (64, 32, 64),
+        ] {
+            let cache = PrefixCache::new(true, 8, block, min_tokens, 8192);
+            let points = cache.compute_insert_points(available);
+            for w in points.windows(2) {
+                assert!(
+                    w[1] > w[0],
+                    "insert points must strictly ascend (block={block}, min={min_tokens}, \
+                     available={available}), got {points:?}"
+                );
+            }
+            assert!(
+                points.iter().all(|p| *p <= available),
+                "no insert point may exceed the available positions: {points:?}"
+            );
+        }
+    }
+
     use super::*;
     use candle_core::{DType, Device};
 
