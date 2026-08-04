@@ -224,24 +224,54 @@ pub(super) fn build_spec_verify_forward(
 /// from dsd.rs (R136 Layer 1 multi-segment) so it's available without
 /// the `llama` feature gate.
 #[allow(clippy::too_many_arguments)]
+/// Run one speculative-verify round through the pipeline's segments.
+///
+/// **The target peer is resolved HERE, from `segment.node_id`, on every send.**
+/// It used to be passed in as a parallel `peer_id_for_segment` array that the
+/// caller resolved once, before its decode loop — and mid-request failover
+/// rewrites `assignment.segments[i].node_id` in place
+/// (`distributed.rs`, "failing over to standby node"). The array then still
+/// named the FAILED node while `register_pending_layer_result` below pinned the
+/// waiter to the new one, so every subsequent round sent the work to the node
+/// that had just failed and waited for an answer from a node that was never
+/// asked. The abandoned node's reply arrived and was correctly discarded as
+/// "from a node this request is no longer waiting on", and the request then sat
+/// until its segment timeout — 284s, measured live 2026-08-04, on a request
+/// whose first token had already succeeded via failover in 243ms.
+///
+/// Deriving both the send target and the `awaiting` pin from the same
+/// `segment.node_id` makes that disagreement unrepresentable.
 pub(super) async fn forward_verify_through_segments(
     shared_state: &Arc<SharedState>,
     network_tx: &mpsc::Sender<NetworkCommand>,
     request_id: uuid::Uuid,
     index_pos: u32,
     segments: &[crate::types::PipelineSegment],
-    peer_id_for_segment: &[Option<Vec<u8>>],
     verify_tokens: &[u32],
     truncate_kv_to: Option<u32>,
 ) -> Result<Vec<Vec<f32>>, SwarmError> {
     let num_segments = segments.len();
-    debug_assert_eq!(num_segments, peer_id_for_segment.len());
+    let local_node_id = shared_state.identity.node_id().clone();
 
     let mut activation_bytes: Vec<u8> = pack_verify_tokens_to_le_bytes(verify_tokens);
 
     for (idx, segment) in segments.iter().enumerate() {
         let is_last = idx == num_segments - 1;
-        let target_peer_bytes = &peer_id_for_segment[idx];
+        // Resolved fresh from the CURRENT assignment, never cached across rounds.
+        let target_peer_bytes: Option<Vec<u8>> = if segment.node_id == local_node_id {
+            None
+        } else {
+            match shared_state.resolve_peer_id_bytes(&segment.node_id) {
+                Some(p) => Some(p),
+                None => {
+                    return Err(SwarmError::Inference(format!(
+                        "verify round: no route to segment holder {} — it left mid-request",
+                        segment.node_id
+                    )));
+                }
+            }
+        };
+        let target_peer_bytes = target_peer_bytes.as_ref();
 
         let forward = build_spec_verify_forward(
             request_id,
@@ -701,7 +731,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    fn make_test_state() -> Arc<SharedState> {
+    pub(super) fn make_test_state() -> Arc<SharedState> {
         let config = Config::default();
         let identity = Identity::generate();
         let temp = tempfile::tempdir().unwrap();
@@ -1053,7 +1083,11 @@ mod tests {
             },
             layer_range: (0, 8),
         }];
-        let peer_id_for_segment: Vec<Option<Vec<u8>>> = vec![Some(vec![1, 2, 3, 4])];
+        // The peer must be RESOLVABLE, or the function now fails earlier on
+        // routing and this stops testing the closed-channel arm it exists for.
+        state
+            .peer_id_map
+            .insert(NodeId([42u8; 32]), vec![1, 2, 3, 4]);
         let verify_tokens: Vec<u32> = vec![100, 101, 102];
 
         let result = forward_verify_through_segments(
@@ -1062,7 +1096,6 @@ mod tests {
             request_id,
             10,
             &segments,
-            &peer_id_for_segment,
             &verify_tokens,
             None,
         )
@@ -1076,5 +1109,87 @@ mod tests {
             state.pending_layer_results.is_empty(),
             "pending_layer_results leak after network-drop failure path"
         );
+    }
+}
+
+#[cfg(test)]
+mod failover_retarget_tests {
+    use super::tests::make_test_state;
+    use super::*;
+    use crate::types::{ModelId, NodeId, PipelineSegment, ShardId};
+
+    fn seg(node: NodeId) -> PipelineSegment {
+        PipelineSegment {
+            node_id: node,
+            shard_id: ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            },
+            layer_range: (0, 22),
+        }
+    }
+
+    /// **The regression test for the 284-second hang after a failover.**
+    ///
+    /// A verify round must send to whichever node the assignment names *now*.
+    /// `distributed.rs` rewrites `segments[i].node_id` in place when it fails
+    /// over to a standby, so anything the caller resolved before its decode
+    /// loop is stale from that moment on.
+    ///
+    /// Measured live 2026-08-04: token 1 succeeded via failover in 243 ms, then
+    /// every later round was sent to the FAILED node while the waiter was
+    /// pinned to the standby. The failed node's reply was discarded as "from a
+    /// node this request is no longer waiting on" and the request sat until its
+    /// 284 s segment timeout — 12 failovers, 10 timeouts on one node.
+    ///
+    /// The property: the peer the round dispatches to is derived from
+    /// `segment.node_id`, the same field `register_pending_layer_result` pins
+    /// the waiter to, so the two cannot disagree.
+    #[tokio::test]
+    async fn a_verify_round_targets_the_node_the_assignment_names_now() {
+        let state = make_test_state();
+        let failed = NodeId([1u8; 32]);
+        let standby = NodeId([2u8; 32]);
+        state.peer_id_map.insert(failed.clone(), vec![0xFA, 0x11]);
+        state.peer_id_map.insert(standby.clone(), vec![0x5B, 0x22]);
+
+        let (tx, mut rx) = mpsc::channel::<NetworkCommand>(8);
+
+        // Assignment as it looks AFTER failover has rewritten it.
+        let segments = vec![seg(standby.clone())];
+        let request_id = uuid::Uuid::new_v4();
+
+        tokio::spawn(async move {
+            let _ = forward_verify_through_segments(
+                &state,
+                &tx,
+                request_id,
+                0,
+                &segments,
+                &[7u32],
+                None,
+            )
+            .await;
+        });
+
+        let cmd = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a forward must be dispatched")
+            .expect("channel open");
+
+        match cmd {
+            NetworkCommand::SendTensor {
+                target_peer_bytes, ..
+            } => {
+                assert_eq!(
+                    target_peer_bytes,
+                    vec![0x5B, 0x22],
+                    "must dispatch to the STANDBY the assignment now names, not the \
+                     node it failed over from — sending to the old node is what hung \
+                     the request for 284s"
+                );
+            }
+            other => panic!("expected SendTensor, got {other:?}"),
+        }
     }
 }

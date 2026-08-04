@@ -79,7 +79,6 @@ pub(super) async fn forward_verify_with_hedge(
     primary_request_id: uuid::Uuid,
     index_pos: u32,
     segments: &[crate::types::PipelineSegment],
-    peer_id_for_segment: &[Option<Vec<u8>>],
     verify_tokens: &[u32],
     truncate_kv_to: Option<u32>,
     hedge_key: HedgeKey,
@@ -101,7 +100,6 @@ pub(super) async fn forward_verify_with_hedge(
             primary_request_id,
             index_pos,
             segments,
-            peer_id_for_segment,
             verify_tokens,
             truncate_kv_to,
         )
@@ -123,7 +121,6 @@ pub(super) async fn forward_verify_with_hedge(
                 primary_request_id,
                 index_pos,
                 segments,
-                peer_id_for_segment,
                 verify_tokens,
                 truncate_kv_to,
             )
@@ -141,7 +138,6 @@ pub(super) async fn forward_verify_with_hedge(
                 primary_request_id,
                 index_pos,
                 segments,
-                peer_id_for_segment,
                 verify_tokens,
                 truncate_kv_to,
             )
@@ -151,7 +147,6 @@ pub(super) async fn forward_verify_with_hedge(
 
     // Primary call as an owned future.
     let primary_segments = segments.to_vec();
-    let primary_peer_id_for_segment = peer_id_for_segment.to_vec();
     let primary_verify_tokens = verify_tokens.to_vec();
     let primary_state = state.clone();
     let primary_network_tx = network_tx.clone();
@@ -162,7 +157,6 @@ pub(super) async fn forward_verify_with_hedge(
             primary_request_id,
             index_pos,
             &primary_segments,
-            &primary_peer_id_for_segment,
             &primary_verify_tokens,
             truncate_kv_to,
         )
@@ -220,7 +214,6 @@ pub(super) async fn forward_verify_with_hedge(
     let hedge_network_tx = network_tx.clone();
     let hedge_segments = vec![hedge_segment];
     let alt_peer_bytes_for_cancel = alt_peer_bytes.clone();
-    let hedge_peer_for_seg = vec![Some(alt_peer_bytes)];
     let hedge_verify_tokens = verify_tokens.to_vec();
     let hedge_fut = async move {
         super::forward_verify_through_segments(
@@ -229,7 +222,6 @@ pub(super) async fn forward_verify_with_hedge(
             hedge_request_id,
             index_pos,
             &hedge_segments,
-            &hedge_peer_for_seg,
             &hedge_verify_tokens,
             truncate_kv_to,
         )
@@ -270,7 +262,9 @@ pub(super) async fn forward_verify_with_hedge(
     let (loser_request_id, loser_peer) = if winner_is_hedge {
         (
             primary_request_id,
-            peer_id_for_segment.first().cloned().flatten(),
+            segments
+                .first()
+                .and_then(|seg| state.resolve_peer_id_bytes(&seg.node_id)),
         )
     } else {
         (hedge_request_id, Some(alt_peer_bytes_for_cancel))

@@ -110,10 +110,16 @@ impl PipelineExecutor {
         // the worker subprocess in `forward_verify_through_segments`; remote
         // segments need a resolved peer_id_bytes so we can fall through
         // cleanly if any are missing.
-        let peer_id_for_segment = match self.resolve_peer_id_for_segments(request_id, "DSD") {
-            Some(v) => v,
-            None => return Ok(None),
-        };
+        // Eligibility pre-check only. The resolved list is deliberately NOT
+        // kept: failover rewrites `assignment.segments[i].node_id` mid-request,
+        // so a list captured here would name the failed node for every later
+        // round. The send path resolves from the live segment instead.
+        if self
+            .resolve_peer_id_for_segments(request_id, "DSD")
+            .is_none()
+        {
+            return Ok(None);
+        }
 
         // Build prompt and confirm a draft model is loaded BEFORE any pipeline
         // forward — we want to fail fast and fall back cleanly. The lock is
@@ -256,7 +262,6 @@ impl PipelineExecutor {
                 request_id,
                 current_pos as u32,
                 &self.assignment.segments,
-                &peer_id_for_segment,
                 &verify_tokens,
                 pending_truncate,
             )

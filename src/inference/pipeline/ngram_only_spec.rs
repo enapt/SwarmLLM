@@ -107,11 +107,16 @@ impl PipelineExecutor {
         let max_tokens = self.request.sampling_params.max_tokens;
 
         // Resolve per-segment peer ids upfront (None for local segments).
-        let peer_id_for_segment = match self.resolve_peer_id_for_segments(request_id, "ngram-only")
+        // Eligibility pre-check only. The resolved list is deliberately NOT
+        // kept: failover rewrites `assignment.segments[i].node_id` mid-request,
+        // so a list captured here would name the failed node for every later
+        // round. The send path resolves from the live segment instead.
+        if self
+            .resolve_peer_id_for_segments(request_id, "ngram-only")
+            .is_none()
         {
-            Some(v) => v,
-            None => return Ok(None),
-        };
+            return Ok(None);
+        }
 
         // ── Tokenise prompt locally for n-gram lookup ──
         let prompt = self.build_prompt().await;
@@ -222,7 +227,6 @@ impl PipelineExecutor {
                     request_id,
                     current_pos as u32,
                     &self.assignment.segments,
-                    &peer_id_for_segment,
                     &verify_tokens,
                     truncate_for_this_round,
                 )
@@ -286,7 +290,6 @@ impl PipelineExecutor {
                 request_id,
                 current_pos as u32,
                 &self.assignment.segments,
-                &peer_id_for_segment,
                 &verify_tokens,
                 truncate_for_this_round,
                 hedge_key,

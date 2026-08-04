@@ -2,6 +2,26 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A request that switched to a backup machine mid-answer then hung until it
+  gave up.** When the machine handling a request fails, the work moves to a
+  backup. The first word came back from the backup correctly — but every word
+  after it was still being sent to the machine that had just failed, while the
+  request waited for a reply from the backup that was never asked. The reply
+  from the failed machine arrived and was correctly ignored as coming from the
+  wrong place, and the request then sat doing nothing until it timed out.
+
+  Measured on two machines: the first word arrived from the backup in 243
+  milliseconds, and the request then failed 284 seconds later. Twelve such
+  switchovers produced ten timeouts.
+
+  The machine to send to is now worked out fresh each time from the current
+  plan, so it cannot disagree with the machine the request is waiting on. This
+  affected the two fastest answering modes; the ordinary one was never affected.
+
 ## [0.3.68-alpha] — 2026-08-04
 
 Worth updating. Two of these affect you whether or not you ever look at the
