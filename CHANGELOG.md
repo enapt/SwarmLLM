@@ -2,10 +2,23 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.68-alpha] — 2026-08-04
 
-Not yet tagged. Mostly fixes to things that reported the wrong cause when
-something went wrong, plus one that wasted a lot of bandwidth.
+Worth updating. Two of these affect you whether or not you ever look at the
+dashboard: one could leave a machine unable to start after an update, and one
+was spending money on cloud provider accounts in the background.
+
+> **Read this if your node updates itself (`mode = "install"`).** The fix below
+> for interrupted updates protects every update *after* this one — it cannot
+> protect the update that delivers it, because your machine still runs the old
+> code while installing this version. If you would rather not take that one last
+> chance, install this release by hand instead: stop the service, replace the
+> program file, start it again.
+>
+> If a node does end up unable to start, with the service reporting
+> `status=203/EXEC` in a loop, it is recoverable and nothing is lost — look for
+> `swarmllm.old` and `swarmllm.update.tmp` next to where the program should be,
+> and copy one of them back into place (`chmod 755` it, then start the service).
 
 ### Fixed
 
