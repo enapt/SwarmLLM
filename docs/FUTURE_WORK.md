@@ -1154,6 +1154,45 @@ root-caused; do not act on the guesses without measuring.**
 the provider-health one stopped without intervention, which is exactly the kind
 of thing that makes an after-the-fact fix look effective when nothing changed.
 
+## Failover left the rest of the request going to the failed node — FIXED v0.3.69
+
+`ngram_only_spec.rs` and `dsd.rs` resolved peer ids **once, before the decode
+loop**, into a `peer_id_for_segment` array. `distributed.rs` rewrites
+`assignment.segments[i].node_id` in place when it fails over. So from the moment
+of a failover the verify loop sent every round to the **failed** node while
+`register_pending_layer_result` pinned the waiter to the **standby** — the failed
+node's reply was correctly discarded as "from a node this request is no longer
+waiting on", and the request sat until its segment timeout.
+
+Measured before the fix: first token recovered via failover in 243 ms, request
+then failed 284 s later. **12 failovers, 10 timeouts** on one coordinator.
+
+Fixed by deriving the send target from `segment.node_id` inside
+`forward_verify_through_segments` — the same field the waiter is pinned to, so
+the two cannot disagree. The parallel array is gone from the signature entirely,
+which fixes both callers at once and makes the stale state unrepresentable.
+
+**Verified live under a deliberately induced failure (2026-08-04).** Two
+disposable nodes: a coordinator with no shards and a server holding TinyLlama.
+Mid-request the server was killed with `SIGKILL`:
+
+```
+Remote segment returned error, attempting failover … node=a240af28 error=OutboundFailure
+asked the abandoned node to stop working on this segment
+failing over to standby node … failed_node=a240af28 backup_node=225e6fe7
+```
+
+Round distribution for that request: **1 on the killed node, 79 on the standby,
+0 timeouts**, completing HTTP 200 in 27 s with a correct answer. That is the
+property the fix establishes — every round after a failover goes to the node the
+assignment now names. Pinned by
+`a_verify_round_targets_the_node_the_assignment_names_now`, which fails when a
+stale cached peer is reintroduced.
+
+**Inducing a failover deliberately is the only reliable way to test this** — two
+earlier attempts on live traffic both routed cleanly and never fired the
+mechanism, so they proved nothing about it.
+
 ## The updater could leave a node with NO binary (reported, FIXED 2026-08-04)
 
 **Reported against 0.3.57 → 0.3.58** (Debian 13 LXC on Proxmox VE 9, systemd
