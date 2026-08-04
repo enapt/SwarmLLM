@@ -57,6 +57,22 @@ chmod +x "$tmp/sw"
 GOT=$("$tmp/sw" --version 2>/dev/null | awk '{print $NF}')
 [[ "$GOT" == "$LATEST" ]] || { log "new binary reports '$GOT', expected '$LATEST' — aborting"; exit 1; }
 
-install -m 0755 "$tmp/sw" "$BIN"
+# Swap atomically, and never write into $BIN directly.
+#
+# `install` opens the destination and writes through it. $tmp is a mktemp -d in
+# /tmp — usually a DIFFERENT filesystem from $BIN — so this was a real copy into
+# the live path: a crash, OOM or power loss part way through leaves a truncated
+# binary and the service fails to exec. (It would also hit ETXTBSY whenever the
+# old binary is the one currently running.)
+#
+# Staging beside the target keeps the swap on one filesystem, so `mv` is
+# rename(2): atomic, never opens $BIN for writing, and the path is never absent
+# or partial. Same reasoning as `preserve_current_binary` in src/update.rs,
+# which was fixed for a report of a node left with no binary at all.
+staged="$(dirname "$BIN")/.$(basename "$BIN").new.$$"
+install -m 0755 "$tmp/sw" "$staged"
+# Keep a rollback target, as a hard link so a ~1 GB binary costs nothing.
+ln -f "$BIN" "$BIN.old" 2>/dev/null || cp -f "$BIN" "$BIN.old" 2>/dev/null || true
+mv -f "$staged" "$BIN"
 systemctl restart "$SERVICE"
 log "updated $CUR -> $LATEST and restarted $SERVICE"

@@ -653,19 +653,21 @@ impl UpdateChecker {
         {
             let backup_path = self.binary_path.with_extension("old");
 
-            // Step 1: Rename current binary to .old (backup)
+            // Keep a rollback copy WITHOUT moving the original out of the way,
+            // then replace the binary in a single atomic step. See
+            // `preserve_current_binary` for why the order matters.
             if self.binary_path.exists() {
-                std::fs::rename(&self.binary_path, &backup_path).map_err(|e| {
-                    SwarmError::ServiceUnavailable(format!("Failed to backup current binary: {e}"))
+                preserve_current_binary(&self.binary_path, &backup_path).map_err(|e| {
+                    SwarmError::ServiceUnavailable(format!("Failed to back up current binary: {e}"))
                 })?;
             }
 
-            // Step 2: Rename .update.tmp to current binary path
-            if let Err(e) = std::fs::rename(tmp_path, &self.binary_path) {
-                // Rollback: restore backup
-                let _ = std::fs::rename(&backup_path, &self.binary_path);
+            if let Err(e) = swap_binary_into_place(tmp_path, &self.binary_path) {
+                // Nothing to roll back: the binary was never moved. It is still
+                // the old version, which is exactly what a failed update should
+                // leave behind.
                 return Err(SwarmError::ServiceUnavailable(format!(
-                    "Failed to install update (rolled back): {e}"
+                    "Failed to install update (binary left untouched): {e}"
                 )));
             }
 
@@ -912,6 +914,64 @@ fn platform_strings() -> (&'static str, &'static str) {
     };
 
     (os, arch)
+}
+
+/// Keep a rollback copy of the running binary at `backup`, **without removing
+/// the original**.
+///
+/// The distinction is the whole point. The previous implementation *renamed*
+/// the binary to `.old` and then renamed the download into place, which leaves
+/// a window — however short — where the path systemd invokes does not exist. If
+/// the machine dies in that window the service is bricked: systemd reports
+/// `status=203/EXEC` in a restart loop with no binary on disk.
+///
+/// **That is not hypothetical.** Reported on 0.3.57 → 0.3.58 (Debian 13 LXC,
+/// `mode = "install"`): the host became unresponsive mid-swap, leaving a valid
+/// `swarmllm.old` (0.3.57) and a valid `swarmllm.update.tmp` (0.3.58) and
+/// nothing at `swarmllm`. It took **two days** to surface, because the running
+/// process kept serving from its open inode and reported the new version over
+/// the API the entire time — so the failure appeared long after the update that
+/// caused it, pointing at nothing.
+///
+/// Hard-links first: the release binary is ~1 GB, and a link is instant and
+/// costs no space while still pinning the old inode as a rollback target. Falls
+/// back to a copy on filesystems that refuse links.
+#[cfg(not(target_os = "windows"))]
+fn preserve_current_binary(
+    binary: &std::path::Path,
+    backup: &std::path::Path,
+) -> std::io::Result<()> {
+    // `hard_link` fails if the destination exists, and a previous update will
+    // have left one.
+    if backup.exists() {
+        std::fs::remove_file(backup)?;
+    }
+    match std::fs::hard_link(binary, backup) {
+        Ok(()) => Ok(()),
+        Err(_) => std::fs::copy(binary, backup).map(|_| ()),
+    }
+}
+
+/// Replace `binary` with `staged` in one atomic step.
+///
+/// `rename(2)` over an existing destination is atomic: any observer sees either
+/// the old file or the new one, never nothing. That is what keeps the service
+/// startable if the machine dies mid-update.
+///
+/// Permissions are set on the staged file BEFORE the rename, so the destination
+/// is never briefly non-executable either. `download_update` already chmods what
+/// it writes; this covers a file staged by an older build or restored by hand.
+#[cfg(not(target_os = "windows"))]
+fn swap_binary_into_place(
+    staged: &std::path::Path,
+    binary: &std::path::Path,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(staged, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::rename(staged, binary)
 }
 
 /// Extract the bare hash from a `.sha256` sidecar body.
@@ -1416,5 +1476,109 @@ mod staged_reuse_tests {
             "the staged binary must survive — the writability probe truncates, \
              so the reuse check has to run before it"
         );
+    }
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod atomic_replace_tests {
+    use super::{preserve_current_binary, swap_binary_into_place};
+
+    /// **The regression test for the bricked-service report.**
+    ///
+    /// A node updating on 0.3.57 → 0.3.58 was left with no binary at all: the
+    /// host died between "move the old one aside" and "put the new one in
+    /// place", and systemd then failed with `203/EXEC` in a restart loop.
+    ///
+    /// So the property is not about the end state — the old code reached the
+    /// same end state — it is that **the canonical path is never absent part
+    /// way through**. This asserts exactly that, at the point the reporter's
+    /// machine stopped: after the backup exists and before the swap.
+    ///
+    /// Implementing `preserve_current_binary` as a rename again makes this fail.
+    #[test]
+    fn the_binary_is_never_absent_part_way_through_an_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm");
+        let backup = dir.path().join("swarmllm.old");
+        let staged = dir.path().join("swarmllm.update.tmp");
+        std::fs::write(&binary, b"old version 0.3.57").unwrap();
+        std::fs::write(&staged, b"new version 0.3.58").unwrap();
+
+        preserve_current_binary(&binary, &backup).unwrap();
+
+        // The crash point. systemd must still find something to exec here.
+        assert!(
+            binary.exists(),
+            "the binary must never be moved aside — a crash here bricks the service"
+        );
+        assert_eq!(std::fs::read(&binary).unwrap(), b"old version 0.3.57");
+        assert!(backup.exists(), "a rollback target must exist by now");
+
+        swap_binary_into_place(&staged, &binary).unwrap();
+
+        assert_eq!(std::fs::read(&binary).unwrap(), b"new version 0.3.58");
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            b"old version 0.3.57",
+            "the backup must still hold the OLD build for rollback"
+        );
+        assert!(
+            !staged.exists(),
+            "the staged file is consumed by the rename"
+        );
+    }
+
+    /// A backup left by a previous update must not block this one. `hard_link`
+    /// refuses an existing destination, so a stale `.old` would otherwise fail
+    /// every update after the first.
+    #[test]
+    fn a_stale_backup_from_a_previous_update_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm");
+        let backup = dir.path().join("swarmllm.old");
+        std::fs::write(&binary, b"current").unwrap();
+        std::fs::write(&backup, b"ancient").unwrap();
+
+        preserve_current_binary(&binary, &backup).unwrap();
+
+        assert_eq!(std::fs::read(&backup).unwrap(), b"current");
+        assert!(binary.exists());
+    }
+
+    /// If the staged file is missing or unreadable the running binary must be
+    /// left exactly as it was — a failed update is not allowed to cost the node
+    /// its working build.
+    #[test]
+    fn a_failed_swap_leaves_the_running_binary_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm");
+        let backup = dir.path().join("swarmllm.old");
+        std::fs::write(&binary, b"old version").unwrap();
+
+        preserve_current_binary(&binary, &backup).unwrap();
+        let missing = dir.path().join("swarmllm.update.tmp");
+        assert!(swap_binary_into_place(&missing, &binary).is_err());
+
+        assert!(binary.exists(), "binary must survive a failed update");
+        assert_eq!(std::fs::read(&binary).unwrap(), b"old version");
+    }
+
+    /// The replacement must be executable the instant it lands, not a moment
+    /// later — the destination is what systemd execs.
+    #[cfg(unix)]
+    #[test]
+    fn the_installed_binary_is_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm");
+        let staged = dir.path().join("swarmllm.update.tmp");
+        std::fs::write(&binary, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        swap_binary_into_place(&staged, &binary).unwrap();
+
+        let mode = std::fs::metadata(&binary).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "installed binary must be executable");
     }
 }

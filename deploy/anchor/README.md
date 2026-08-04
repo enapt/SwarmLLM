@@ -173,5 +173,31 @@ last looked with `journalctl -u swarmllm-update --since -1d`.
 - **Check the auto-updater**: `systemctl list-timers swarmllm-update.timer`.
 - **Back up** `/var/lib/swarmllm` (holds the node identity keypair + credit
   balance) and snapshot the VM so you can roll back cleanly.
+- **Service won't start, `status=203/EXEC` in a restart loop**: the binary is
+  missing from the path the unit invokes. Check first:
+
+  ```bash
+  ls -l /usr/local/bin/swarmllm*
+  ```
+
+  If you see a `swarmllm.old` and/or a `swarmllm.update.tmp` but no `swarmllm`,
+  an update was interrupted part way through. Both leftovers are complete,
+  verified binaries — check which is which and put one back:
+
+  ```bash
+  /usr/local/bin/swarmllm.old --version          # the previous build
+  sudo cp /usr/local/bin/swarmllm.old /usr/local/bin/swarmllm
+  sudo chmod 755 /usr/local/bin/swarmllm
+  sudo systemctl start swarmllm-anchor
+  ```
+
+  **This can no longer be caused by the updater**, in either the daemon or
+  `swarmllm-update.sh`: both now stage the download beside the target and swap
+  it in with a single `rename(2)`, which is atomic, so the path is never absent
+  or half-written even if the machine dies mid-update. It was possible before
+  that fix, and the symptom is delayed — a running node keeps serving from its
+  open file handle, so the failure only appears at the next restart, potentially
+  days later.
+
 - **Retiring it**: once enough publicly-reachable nodes exist organically, the
   network self-sustains and you can stop the anchor — nothing else depends on it.

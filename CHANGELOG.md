@@ -9,6 +9,25 @@ something went wrong, plus one that wasted a lot of bandwidth.
 
 ### Fixed
 
+- **An interrupted update could leave a machine with no program to run at all.**
+  Installing an update moved the current version aside and then put the new one
+  in place. Between those two steps there was briefly nothing at the location
+  the system starts the service from, so a crash, a power cut or an unresponsive
+  host in that moment left the service unable to start, looping on a missing
+  file, until someone fixed it by hand.
+
+  Reported by a tester upgrading from 0.3.57 to 0.3.58. What made it hard to
+  spot: the already-running node carried on serving normally for about two days,
+  because a running program keeps working from the copy it already has open. The
+  problem only appeared at the next restart, long after the update that caused
+  it.
+
+  The new version is now put in place in a single step that cannot be
+  interrupted half way, so that location always holds a working program. A copy
+  of the previous version is still kept alongside it to roll back to. The same
+  flaw in the separate updater used by relay nodes was fixed the same way, and
+  the recovery steps are now in that node's setup guide.
+
 - **A machine set to download updates automatically re-downloaded the same
   release every hour, forever.** Downloading and installing are separate steps,
   and the download step stops after saving the file. Nothing checked whether the

@@ -1154,6 +1154,60 @@ root-caused; do not act on the guesses without measuring.**
 the provider-health one stopped without intervention, which is exactly the kind
 of thing that makes an after-the-fact fix look effective when nothing changed.
 
+## The updater could leave a node with NO binary (reported, FIXED 2026-08-04)
+
+**Reported against 0.3.57 → 0.3.58** (Debian 13 LXC on Proxmox VE 9, systemd
+unit, `mode = "install"`). After a host restart the service would not start:
+`Main process exited, code=exited, status=203/EXEC`, looping. `/opt/swarmllm/swarmllm`
+did not exist. Both `swarmllm.old` (0.3.57) and `swarmllm.update.tmp` (0.3.58)
+were present and each ran correctly — there was simply nothing at the path
+systemd invokes.
+
+**Cause, confirmed in the code and still present on main when reported.**
+`apply_update_with_version` did:
+
+```rust
+std::fs::rename(&self.binary_path, &backup_path)?;   // canonical path now GONE
+std::fs::rename(tmp_path, &self.binary_path)?;
+```
+
+Between those two calls the binary does not exist. Any crash, OOM or power loss
+in that window bricks the service until a human intervenes.
+
+**Why it was so hard to attribute, and the part worth remembering:** the running
+process kept serving from its open inode and reported the NEW version over the
+API for ~2 days with no binary on disk. The failure surfaced at the next restart,
+long after the update that caused it — so nothing pointed at the updater. **A
+process outliving its own executable means "it works right now" says nothing
+about whether it can start again.**
+
+**Fix**: keep the rollback copy with a hard link (instant, no extra space for a
+~1 GB binary; falls back to a copy) and then replace the target with one
+`rename(2)`, which is atomic — the path is never absent or half-written. There is
+no rollback step any more because the binary is never moved. Permissions are set
+on the staged file BEFORE the rename so the destination is never briefly
+non-executable.
+
+**The same bug existed a second time**, in `deploy/anchor/swarmllm-update.sh`:
+`install -m 0755 "$tmp/sw" "$BIN"` where `$tmp` is a `mktemp -d` in `/tmp`, i.e.
+usually a different filesystem — so `install` wrote *through* the live path
+rather than renaming, leaving a truncated binary if interrupted (and hitting
+ETXTBSY whenever the target was the running build). It now stages beside the
+target and `mv`s it over.
+
+**Pinned by `atomic_replace_tests`**, whose central assertion is transient rather
+than end-state: the end state was always correct, so only "the canonical path
+exists at the crash point" distinguishes the two implementations. Reintroducing
+the move-aside fails 3 of the 4 tests.
+
+**Deliberately NOT done**: the reporter's optional suggestion of a startup
+fallback to `.old`. Our shipped anchor unit runs as a non-root user under
+`ProtectSystem=strict`, so such a hook needs `ExecStartPre=+` — a root shell on
+every start of a deliberately hardened unit — and the reporter runs their own
+unit, so it would not have helped them anyway. The recovery steps are documented
+in `deploy/anchor/README.md` § Maintenance instead, keyed on the `203/EXEC`
+symptom so it is greppable.
+
 ## Slow nodes go dark and never come back — the routing ratchet (analysed 2026-07-28)
 
 **Status: analysed, not fixed.** Raised as a design question ("GPU nodes will be
