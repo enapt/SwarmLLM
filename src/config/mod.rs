@@ -1148,6 +1148,51 @@ max_concurrent_requests = 42
         );
     }
 
+    /// RAM must follow the contribution level too. A limit that governs one
+    /// kind of memory and not the other is a suggestion, not a limit — and RAM
+    /// exhaustion is the worse failure, because it swaps and degrades the whole
+    /// machine rather than just this daemon.
+    #[test]
+    fn ram_budget_scales_with_contribution() {
+        let rc = ResourceConfig::default(); // max_ram_mb = 0
+        for has_gpu in [true, false] {
+            let min = rc
+                .inference_ram_budget_mb(16000, has_gpu, swarmllm_types::ContributionMode::Minimal)
+                .unwrap();
+            let max = rc
+                .inference_ram_budget_mb(16000, has_gpu, swarmllm_types::ContributionMode::Maximum)
+                .unwrap();
+            assert!(
+                min < max,
+                "has_gpu={has_gpu}: minimal ({min}) must claim less RAM than maximum ({max})"
+            );
+        }
+        // The documented shapes still hold for a node that has offered itself.
+        assert_eq!(
+            rc.inference_ram_budget_mb(16000, true, swarmllm_types::ContributionMode::Maximum),
+            Some(8000),
+            "GPU node at maximum keeps the documented 50%"
+        );
+        assert_eq!(
+            rc.inference_ram_budget_mb(16000, false, swarmllm_types::ContributionMode::Maximum),
+            Some(12800),
+            "CPU-only at maximum keeps the documented 80%"
+        );
+    }
+
+    /// An explicit RAM ceiling is the user's own decision and still wins.
+    #[test]
+    fn ram_budget_explicit_cap_wins_over_contribution() {
+        let rc = ResourceConfig {
+            max_ram_mb: 3000,
+            ..Default::default()
+        };
+        assert_eq!(
+            rc.inference_ram_budget_mb(16000, true, swarmllm_types::ContributionMode::Minimal),
+            Some(3000)
+        );
+    }
+
     #[test]
     fn vram_budget_no_gpu() {
         let rc = ResourceConfig::default();
@@ -1164,8 +1209,14 @@ max_concurrent_requests = 42
             ..Default::default()
         };
         // An explicit cap wins regardless of what hardware is present.
-        assert_eq!(rc.inference_ram_budget_mb(16000, true), Some(3000));
-        assert_eq!(rc.inference_ram_budget_mb(16000, false), Some(3000));
+        assert_eq!(
+            rc.inference_ram_budget_mb(16000, true, swarmllm_types::ContributionMode::Maximum),
+            Some(3000)
+        );
+        assert_eq!(
+            rc.inference_ram_budget_mb(16000, false, swarmllm_types::ContributionMode::Maximum),
+            Some(3000)
+        );
     }
 
     /// With a GPU, system RAM is support work — half the machine is generous.
@@ -1173,7 +1224,10 @@ max_concurrent_requests = 42
     #[test]
     fn ram_budget_auto_is_half_the_machine_when_a_gpu_is_present() {
         let rc = ResourceConfig::default(); // max_ram_mb = 0
-        assert_eq!(rc.inference_ram_budget_mb(16000, true), Some(8000));
+        assert_eq!(
+            rc.inference_ram_budget_mb(16000, true, swarmllm_types::ContributionMode::Maximum),
+            Some(8000)
+        );
     }
 
     /// On a CPU-only node, serving models IS the machine's job, so half of it
@@ -1181,7 +1235,10 @@ max_concurrent_requests = 42
     #[test]
     fn ram_budget_auto_is_most_of_the_machine_when_there_is_no_gpu() {
         let rc = ResourceConfig::default();
-        assert_eq!(rc.inference_ram_budget_mb(16000, false), Some(12800));
+        assert_eq!(
+            rc.inference_ram_budget_mb(16000, false, swarmllm_types::ContributionMode::Maximum),
+            Some(12800)
+        );
     }
 
     /// The regression that a flat 50% default would have shipped: an 8 GB
@@ -1196,7 +1253,9 @@ max_concurrent_requests = 42
         let rc = ResourceConfig::default();
         const LLAMA_3B_CPU_ESTIMATE_MB: u64 = 4575;
 
-        let cpu_only = rc.inference_ram_budget_mb(8192, false).unwrap();
+        let cpu_only = rc
+            .inference_ram_budget_mb(8192, false, swarmllm_types::ContributionMode::Maximum)
+            .unwrap();
         assert!(
             cpu_only >= LLAMA_3B_CPU_ESTIMATE_MB,
             "budget {cpu_only} MB must still fit a 3B model at {LLAMA_3B_CPU_ESTIMATE_MB} MB"
@@ -1204,7 +1263,9 @@ max_concurrent_requests = 42
 
         // The flat-50% behaviour, which is still correct where a GPU does the
         // work, is exactly what would have refused this model on a CPU-only box.
-        let with_gpu = rc.inference_ram_budget_mb(8192, true).unwrap();
+        let with_gpu = rc
+            .inference_ram_budget_mb(8192, true, swarmllm_types::ContributionMode::Maximum)
+            .unwrap();
         assert!(
             with_gpu < LLAMA_3B_CPU_ESTIMATE_MB,
             "precondition: a flat 50% default ({with_gpu} MB) would have refused it"
@@ -1215,8 +1276,14 @@ max_concurrent_requests = 42
     #[test]
     fn ram_budget_unknown_machine() {
         let rc = ResourceConfig::default();
-        assert_eq!(rc.inference_ram_budget_mb(0, true), None);
-        assert_eq!(rc.inference_ram_budget_mb(0, false), None);
+        assert_eq!(
+            rc.inference_ram_budget_mb(0, true, swarmllm_types::ContributionMode::Maximum),
+            None
+        );
+        assert_eq!(
+            rc.inference_ram_budget_mb(0, false, swarmllm_types::ContributionMode::Maximum),
+            None
+        );
     }
 }
 

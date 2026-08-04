@@ -180,14 +180,14 @@ impl Default for NodeConfig {
 /// use it — the idle-unload path returns memory once the machine is quiet, so
 /// the ceiling only binds while work is actually being done. Anyone who wants a
 /// different figure sets `max_gpu_vram_mb` and that wins outright.
-fn vram_fraction_for(contribution: swarmllm_types::ContributionMode) -> f64 {
+fn vram_fraction_for(contribution: ContributionMode) -> f64 {
     match contribution {
         // Default. Leave the majority of the card to whatever else the person
         // is doing with their computer.
-        swarmllm_types::ContributionMode::Minimal => 0.5,
-        swarmllm_types::ContributionMode::Moderate => 0.65,
+        ContributionMode::Minimal => 0.5,
+        ContributionMode::Moderate => 0.65,
         // An explicit offer of the machine.
-        swarmllm_types::ContributionMode::Maximum => 0.8,
+        ContributionMode::Maximum => 0.8,
     }
 }
 
@@ -200,7 +200,7 @@ impl ResourceConfig {
     pub fn inference_vram_budget_mb(
         &self,
         gpu_vram_total_mb: u64,
-        contribution: swarmllm_types::ContributionMode,
+        contribution: ContributionMode,
     ) -> Option<u64> {
         if self.max_gpu_vram_mb > 0 {
             // An explicit ceiling is the user's own decision and always wins.
@@ -242,18 +242,35 @@ impl ResourceConfig {
     /// than inherited.
     ///
     /// Sibling of [`Self::inference_vram_budget_mb`].
-    pub fn inference_ram_budget_mb(&self, system_ram_total_mb: u64, has_gpu: bool) -> Option<u64> {
+    pub fn inference_ram_budget_mb(
+        &self,
+        system_ram_total_mb: u64,
+        has_gpu: bool,
+        contribution: ContributionMode,
+    ) -> Option<u64> {
         if self.max_ram_mb > 0 {
             return Some(self.max_ram_mb);
         }
         if system_ram_total_mb == 0 {
             return None;
         }
-        if has_gpu {
-            Some(system_ram_total_mb / 2)
+        // The situational base: system RAM is support work where a GPU runs the
+        // models, and is the whole job where it does not.
+        let base = if has_gpu {
+            system_ram_total_mb as f64 * 0.5
         } else {
-            Some(system_ram_total_mb / 5 * 4)
-        }
+            system_ram_total_mb as f64 * 0.8
+        };
+        // Then scaled by what the owner agreed to give, exactly as VRAM is.
+        // A contribution level that governs one kind of memory and not the other
+        // is not a limit, it is a suggestion — and RAM exhaustion is worse than
+        // VRAM exhaustion, because the failure mode is swapping, which degrades
+        // the entire machine rather than just this daemon.
+        //
+        // Expressed relative to Maximum so the documented CPU-only 80% and
+        // GPU-node 50% still hold for a node that has explicitly offered itself.
+        let scale = vram_fraction_for(contribution) / vram_fraction_for(ContributionMode::Maximum);
+        Some((base * scale) as u64)
     }
 }
 

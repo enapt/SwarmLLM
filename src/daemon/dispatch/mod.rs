@@ -9,12 +9,44 @@ use crate::types::{AuthenticatedMessage, EphemeralKeyExchange, NetworkCommand, S
 
 use super::state::{SharedState, TpAllReduceCollector};
 
-/// Maximum number of concurrent LayerForward tasks.
-const MAX_CONCURRENT_FORWARDS: usize = 64;
-/// Maximum concurrent forwards per individual peer to prevent single-peer semaphore exhaustion.
-/// Set to 32 to support tensor-parallel inference (24 per-layer TP forwards per token step)
-/// while still preventing a single peer from consuming all semaphore permits.
-const MAX_FORWARDS_PER_PEER: usize = 32;
+/// Maximum concurrent LayerForward tasks, at the highest contribution level.
+///
+/// This is work done FOR OTHER PEOPLE, so how much of it a node accepts has to
+/// follow what its owner agreed to give — see [`max_concurrent_forwards`].
+const MAX_CONCURRENT_FORWARDS_MAX: usize = 64;
+
+/// Concurrent peer forwards this node will run at once, by contribution level.
+///
+/// This was a flat 64 on every node whatever its owner had chosen, and
+/// `Minimal` is the DEFAULT — so a stock home machine would accept 64
+/// simultaneous inference forwards from the swarm. On the hardware this is
+/// actually aimed at (gaming PCs, home desktops) that is precisely how a node
+/// gets swamped: each forward is a real model step, and 64 of them at once
+/// makes the machine unusable for the person sitting in front of it.
+///
+/// A contribution setting has to mean something everywhere resources are spent,
+/// not only where it was convenient to plumb it. This is the concurrency half
+/// of that; `vram_fraction_for` in `config/node.rs` is the memory half.
+///
+/// The floor is deliberately not 1: a single-permit node cannot participate in
+/// tensor-parallel work at all, and refusing everything is its own kind of
+/// broken. `Minimal` still accepts real work — just not an unbounded amount of
+/// it.
+fn max_concurrent_forwards(contribution: &swarmllm_types::ContributionMode) -> usize {
+    match contribution {
+        swarmllm_types::ContributionMode::Minimal => 8,
+        swarmllm_types::ContributionMode::Moderate => 24,
+        swarmllm_types::ContributionMode::Maximum => MAX_CONCURRENT_FORWARDS_MAX,
+    }
+}
+
+/// Concurrent forwards from ONE peer, so a single peer cannot take the whole
+/// semaphore. Half the total, floored at 4 — below that a tensor-parallel group
+/// (24 per-layer forwards per token step at full size) cannot make progress at
+/// all, and the cap stops being a limit and starts being a failure.
+fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usize {
+    (max_concurrent_forwards(contribution) / 2).max(4)
+}
 const MAX_NICKNAME_REGISTRY: usize = 10_000;
 /// Interval for sweeping stale zero-count entries from peer_forward_counts.
 const FORWARD_COUNTS_CLEANUP_SECS: u64 = 60;
@@ -237,7 +269,16 @@ pub(crate) async fn dispatch_network_messages(
     network_tx: mpsc::Sender<NetworkCommand>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let forward_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FORWARDS));
+    let contribution = shared_state.config.node.contribution.clone();
+    let forward_limit = max_concurrent_forwards(&contribution);
+    let per_peer_limit = max_forwards_per_peer(&contribution);
+    tracing::info!(
+        ?contribution,
+        forward_limit,
+        per_peer_limit,
+        "Peer-work concurrency set from the contribution level"
+    );
+    let forward_semaphore = Arc::new(tokio::sync::Semaphore::new(forward_limit));
     // SEC: Per-peer concurrent forward counter to prevent single-peer semaphore exhaustion
     let peer_forward_counts: Arc<
         dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>,
@@ -342,12 +383,12 @@ pub(crate) async fn dispatch_network_messages(
                                             .entry(peer_sender.clone())
                                             .or_insert_with(|| std::sync::atomic::AtomicUsize::new(0));
                                         let prev = peer_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        if prev >= MAX_FORWARDS_PER_PEER {
+                                        if prev >= per_peer_limit {
                                             peer_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                             tracing::warn!(
                                                 sender = %peer_sender,
                                                 current = prev,
-                                                max = MAX_FORWARDS_PER_PEER,
+                                                max = per_peer_limit,
                                                 "LayerForward rejected — per-peer limit reached"
                                             );
                                             continue;
@@ -2196,3 +2237,57 @@ pub(crate) async fn dispatch_network_messages(
 mod layer_forward;
 mod remote_generate;
 mod vision;
+
+#[cfg(test)]
+mod contribution_limits_tests {
+    use super::{max_concurrent_forwards, max_forwards_per_peer, MAX_CONCURRENT_FORWARDS_MAX};
+    use swarmllm_types::ContributionMode;
+
+    /// **A node must not be swamped with other people's work beyond what its
+    /// owner agreed to give.** This was a flat 64 concurrent forwards on every
+    /// node — and `Minimal` is the DEFAULT — so a stock home machine accepted 64
+    /// simultaneous model steps from the swarm.
+    #[test]
+    fn peer_work_is_bounded_by_the_contribution_level() {
+        let min = max_concurrent_forwards(&ContributionMode::Minimal);
+        let mod_ = max_concurrent_forwards(&ContributionMode::Moderate);
+        let max = max_concurrent_forwards(&ContributionMode::Maximum);
+
+        assert!(
+            min < mod_ && mod_ < max,
+            "more contribution must mean more accepted work, got {min}/{mod_}/{max}"
+        );
+        assert_eq!(
+            max, MAX_CONCURRENT_FORWARDS_MAX,
+            "an explicit offer keeps the old ceiling"
+        );
+        assert!(
+            min <= 8,
+            "the DEFAULT must not let a home machine be swamped, got {min}"
+        );
+    }
+
+    /// The point of the per-peer cap is that ONE peer cannot take everything.
+    /// It has to stay strictly below the total at every level, or it stops
+    /// being a cap at all.
+    #[test]
+    fn one_peer_can_never_take_the_whole_budget() {
+        for c in [
+            ContributionMode::Minimal,
+            ContributionMode::Moderate,
+            ContributionMode::Maximum,
+        ] {
+            let total = max_concurrent_forwards(&c);
+            let per_peer = max_forwards_per_peer(&c);
+            assert!(
+                per_peer < total,
+                "{c:?}: one peer ({per_peer}) must not be able to take the whole \
+                 budget ({total})"
+            );
+            assert!(
+                per_peer >= 4,
+                "{c:?}: below 4 a tensor-parallel group cannot progress, got {per_peer}"
+            );
+        }
+    }
+}
