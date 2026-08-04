@@ -41,7 +41,7 @@ Every configuration option, organized by section.
 | `peer_exchange` | boolean | `true` | Share peer lists with connected nodes |
 | `enable_relay` | boolean | `true` | Act as relay for peers behind firewalls |
 | `enable_relay_client` | boolean | `true` | Use relays when behind a firewall |
-| `max_peers` | integer | `200` | Max simultaneous peer connections |
+| `max_peers` | integer | *(from `contribution`)* | Max simultaneous peer connections. Unset it follows `[node] contribution` — minimal `150`, moderate `300`, maximum `500`. An explicit value wins in either direction. |
 | `auto_relay` | boolean | `true` | Auto-use relay when NAT detected |
 | `relay_max_circuit_duration_secs` | integer | `3600` | Max relay circuit duration |
 | `relay_max_circuits` | integer | `16` | Max relay circuits to serve |

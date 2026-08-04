@@ -9,6 +9,7 @@
 
 use super::default_true;
 use serde::{Deserialize, Serialize};
+use swarmllm_types::ContributionMode;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NetworkConfig {
@@ -37,8 +38,13 @@ pub struct NetworkConfig {
     pub enable_relay: bool,
     #[serde(default = "default_true")]
     pub enable_relay_client: bool,
-    #[serde(default = "default_max_peers")]
-    pub max_peers: u32,
+    /// Ceiling on simultaneously established peer connections.
+    ///
+    /// `None` (the default) resolves from `node.contribution` — see
+    /// [`NetworkConfig::effective_max_connections`]. An explicit value always
+    /// wins, in either direction.
+    #[serde(default)]
+    pub max_peers: Option<u32>,
     /// Maximum duration for a single relay circuit in seconds.
     #[serde(default = "default_relay_circuit_duration")]
     pub relay_max_circuit_duration_secs: u64,
@@ -272,8 +278,54 @@ fn wslinfo_networking_mode(timeout: std::time::Duration) -> Option<bool> {
     }
 }
 
-fn default_max_peers() -> u32 {
-    200
+/// Absolute ceiling on established connections, whatever the contribution mode.
+///
+/// This is the value the daemon enforced unconditionally before `max_peers`
+/// was wired up, so no node's ceiling rises as a result of that fix. It also
+/// keeps a comfortable margin under the tightest file-descriptor limit a user
+/// is likely to meet — macOS still defaults `RLIMIT_NOFILE` to 256 for a
+/// process started from a shell, and connections compete with shard reads and
+/// the database for descriptors.
+pub const MAX_ESTABLISHED_CONNECTIONS_CEILING: u32 = 500;
+
+impl NetworkConfig {
+    /// Ceiling on simultaneously established connections.
+    ///
+    /// **`max_peers` was inert until 2026-08-04**: it was parsed, logged at
+    /// startup and shown in the dashboard, but no code ever limited anything by
+    /// it. The only real cap was a hardcoded 500, so a user who set
+    /// `max_peers = 20` on a constrained box got no protection and no warning.
+    ///
+    /// The figures are deliberately generous, because the cost of getting this
+    /// wrong is asymmetric. Gossipsub bounds message amplification by the
+    /// **mesh degree** (D ≈ 6–12), not by how many peers are connected, so
+    /// holding 300 connections does not mean 300× the gossip traffic — the
+    /// per-connection cost is mostly memory for the Noise/Yamux session. Set
+    /// this too low, though, and the node cannot reach enough of the DHT to
+    /// route, which partitions it from the swarm. A node that is slightly
+    /// chattier than ideal is a much better failure than one that is alone.
+    ///
+    /// Numbers are connection counts, not distinct peers: a single peer briefly
+    /// holds up to `max_connections_per_peer` while a hole punch upgrades a
+    /// relayed connection to a direct one, so the steady-state peer count sits
+    /// at or a little below this.
+    pub fn effective_max_connections(&self, contribution: ContributionMode) -> u32 {
+        match self.max_peers {
+            // An explicit setting wins outright, in either direction — the same
+            // rule `max_gpu_vram_mb` and `max_bandwidth_mbps` follow. Only a
+            // literal 0 is refused, since it would isolate the node completely
+            // rather than expressing any preference about resource use.
+            Some(explicit) => explicit.max(1),
+            None => match contribution {
+                // Default mode. Still far more than the ~20–40 DHT contacts and
+                // ~12 mesh peers a node needs to participate fully.
+                ContributionMode::Minimal => 150,
+                ContributionMode::Moderate => 300,
+                // An explicit offer of the machine.
+                ContributionMode::Maximum => MAX_ESTABLISHED_CONNECTIONS_CEILING,
+            },
+        }
+    }
 }
 
 fn default_tensor_compress_level() -> i32 {
@@ -311,7 +363,7 @@ impl Default for NetworkConfig {
             peer_exchange: true,
             enable_relay: true,
             enable_relay_client: true,
-            max_peers: default_max_peers(),
+            max_peers: None,
             relay_max_circuit_duration_secs: default_relay_circuit_duration(),
             relay_max_circuits: default_relay_max_circuits(),
             auto_relay: true,
@@ -363,6 +415,66 @@ impl<'de> Deserialize<'de> for ExternalAddresses {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The connection ceiling tightens as the contribution mode drops, and the
+    /// default mode (Minimal) is well below the absolute ceiling.
+    ///
+    /// Before `max_peers` was wired up every node got a hardcoded 500
+    /// regardless of contribution, so the Minimal assertion here is the one
+    /// that fails if the resolution is removed.
+    #[test]
+    fn connection_ceiling_scales_with_contribution() {
+        let cfg = NetworkConfig::default();
+        assert_eq!(cfg.max_peers, None, "default must be auto, not a number");
+
+        let minimal = cfg.effective_max_connections(ContributionMode::Minimal);
+        let moderate = cfg.effective_max_connections(ContributionMode::Moderate);
+        let maximum = cfg.effective_max_connections(ContributionMode::Maximum);
+
+        assert!(
+            minimal < moderate && moderate < maximum,
+            "contribution must tighten the ceiling monotonically: {minimal} / {moderate} / {maximum}"
+        );
+        assert!(
+            minimal < MAX_ESTABLISHED_CONNECTIONS_CEILING,
+            "the default mode must not hand out the absolute ceiling"
+        );
+        assert_eq!(maximum, MAX_ESTABLISHED_CONNECTIONS_CEILING);
+        // Low enough to protect a home machine, high enough to still route:
+        // gossipsub needs ~12 mesh peers and Kademlia ~20-40 contacts.
+        assert!(
+            minimal >= 100,
+            "{minimal} is too low to hold a healthy DHT routing table"
+        );
+    }
+
+    /// An explicit `max_peers` is the user's decision and wins in BOTH
+    /// directions — the same rule `max_gpu_vram_mb` and `max_bandwidth_mbps`
+    /// follow. Only a literal 0 is refused, since it isolates the node.
+    #[test]
+    fn explicit_max_peers_overrides_contribution() {
+        let low = NetworkConfig {
+            max_peers: Some(12),
+            ..Default::default()
+        };
+        assert_eq!(low.effective_max_connections(ContributionMode::Maximum), 12);
+
+        let high = NetworkConfig {
+            max_peers: Some(900),
+            ..Default::default()
+        };
+        assert_eq!(
+            high.effective_max_connections(ContributionMode::Minimal),
+            900,
+            "an explicit ceiling above the default must not be clamped down"
+        );
+
+        let zero = NetworkConfig {
+            max_peers: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(zero.effective_max_connections(ContributionMode::Minimal), 1);
+    }
 
     #[test]
     fn wslinfo_mode_parsing() {

@@ -525,6 +525,9 @@ impl NetworkManager {
                     enable_upnp,
                     known_peers,
                     Some(&config.network),
+                    config
+                        .network
+                        .effective_max_connections(config.node.contribution.clone()),
                 )
                 .map_err(|e| {
                     Box::new(std::io::Error::other(e.to_string()))

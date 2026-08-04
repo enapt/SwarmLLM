@@ -2,6 +2,33 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **The limit on how many machines a node connects to now actually works.** The
+  `max_peers` setting was read at startup, written into the config file, and
+  reported by the dashboard — but nothing ever enforced it. Whatever it said,
+  every node allowed up to 500 connections at once. Anyone who lowered it on a
+  small or busy machine got no protection, and no indication anything was wrong.
+
+  It is enforced now, and left alone it follows the same sharing level as
+  memory, work and upload speed: fewer connections at the lowest setting, more
+  as you offer more. Setting a number yourself still overrides that in either
+  direction.
+
+  Connections are much cheaper than model work — they are mostly a little memory
+  each, and network chatter does not grow with the number of them — so the
+  figures are deliberately generous. A node that is slightly chattier than ideal
+  is a far better outcome than one that cannot find the swarm.
+
+  Two details worth knowing. If your config file says `max_peers = 200`, that
+  number was put there by the software itself rather than chosen by you, so it
+  is ignored in favour of the sharing-level default; any other value is treated
+  as your decision and kept. And bootstrap/relay anchor nodes keep the full
+  capacity, since being reachable by as much of the network as possible is the
+  entire job.
+
 ## [0.3.71-alpha] — 2026-08-04
 
 Follows 0.3.70. That release made memory come back; this one makes the amount a

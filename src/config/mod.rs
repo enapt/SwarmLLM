@@ -25,7 +25,13 @@ impl OperationalParams {
             max_concurrent_requests: config.inference.max_concurrent_requests,
             auto_manage_interval_minutes: config.auto_manage.interval_minutes,
             max_batch_size: config.inference.max_batch_size,
-            max_peers: config.network.max_peers,
+            // The RESOLVED ceiling, not the raw `Option`. This is what the
+            // dashboard and `GET /api/admin/config` report, and reporting the
+            // unresolved value would show `null` on the default path while the
+            // daemon was actually enforcing a contribution-derived figure.
+            max_peers: config
+                .network
+                .effective_max_connections(config.node.contribution.clone()),
             session_timeout_secs: config.inference.session_timeout_seconds,
             contribution: config.node.contribution.clone(),
             contribution_auto: config.node.contribution_auto,
@@ -165,6 +171,26 @@ pub(crate) fn migrate_superseded_defaults(config: &mut Config, source: &str) {
             );
             config.updates.check_interval_hours = fresh;
         }
+    }
+
+    // `max_peers` was inert until 2026-08-04 — parsed and displayed, never
+    // enforced. For most of the project's life the daemon also wrote every
+    // field to disk, so an existing config almost certainly carries the old
+    // default of 200 whether or not anyone chose it.
+    //
+    // Now that the key does something, leaving that value in place would read
+    // as a deliberate choice and override the contribution-derived ceiling. It
+    // cannot be one: nobody could have tuned a setting that had no effect. This
+    // is exactly the case the migration list is for — a value that was the
+    // daemon's, not the user's.
+    const SUPERSEDED_MAX_PEERS: u32 = 200;
+    if config.network.max_peers == Some(SUPERSEDED_MAX_PEERS) {
+        tracing::info!(
+            source,
+            "max_peers was a stranded copy of an old default (and was never enforced \
+             until now); resolving it from the contribution mode instead"
+        );
+        config.network.max_peers = None;
     }
 }
 
@@ -340,6 +366,21 @@ impl Config {
         // every inference knob is off, and a promise that depends on an
         // unrelated default staying put is not one worth making.
         self.inference.gpu_layers = 0;
+        // Connection capacity is the one resource an anchor exists to spend.
+        //
+        // `contribution` defaults to `Minimal`, and since 2026-08-04 that
+        // resolves to a 150-connection ceiling — a sensible figure for the
+        // gaming PC the setting was written for, and completely wrong for a
+        // bootstrap/relay node whose whole purpose is being reachable by as
+        // much of the swarm as possible. `deploy/anchor/config.toml` sets no
+        // contribution, so without this an anchor would silently inherit the
+        // consumer cap and start refusing the peers it exists to serve.
+        //
+        // An explicit `max_peers` still wins: someone running an anchor on a
+        // small VPS may well want a lower figure than this.
+        if self.network.max_peers.is_none() {
+            self.network.max_peers = Some(network::MAX_ESTABLISHED_CONNECTIONS_CEILING);
+        }
     }
 
     /// Load config with priority: CLI overrides > env vars > config file > defaults.
@@ -1033,6 +1074,57 @@ auto_relay = false
         assert_eq!(config.auto_manage.max_concurrent_downloads, 3);
     }
 
+    /// An anchor's whole job is being reachable, so it must not inherit the
+    /// consumer connection cap. `deploy/anchor/config.toml` sets no
+    /// contribution, so without the override in `apply_anchor_mode` an anchor
+    /// resolves to Minimal and starts refusing the peers it exists to serve.
+    #[test]
+    fn anchor_mode_keeps_full_connection_capacity() {
+        let mut config = Config::default();
+        assert!(
+            config
+                .network
+                .effective_max_connections(config.node.contribution.clone())
+                < network::MAX_ESTABLISHED_CONNECTIONS_CEILING,
+            "precondition: a default node is capped below the ceiling"
+        );
+
+        config.apply_anchor_mode();
+        assert_eq!(
+            config
+                .network
+                .effective_max_connections(config.node.contribution.clone()),
+            network::MAX_ESTABLISHED_CONNECTIONS_CEILING
+        );
+    }
+
+    /// Someone running an anchor on a small VPS may want fewer connections than
+    /// the ceiling; anchor mode must not stamp over that.
+    #[test]
+    fn anchor_mode_respects_an_explicit_max_peers() {
+        let mut config = Config::default();
+        config.network.max_peers = Some(64);
+        config.apply_anchor_mode();
+        assert_eq!(config.network.max_peers, Some(64));
+    }
+
+    /// `max_peers = 200` on disk is the old daemon-written default for a key
+    /// that was never enforced, so it cannot be a deliberate choice. Left in
+    /// place it would override the contribution-derived ceiling forever.
+    #[test]
+    fn stranded_max_peers_default_is_migrated_away() {
+        let mut config = Config::default();
+        config.network.max_peers = Some(200);
+        migrate_superseded_defaults(&mut config, "test");
+        assert_eq!(config.network.max_peers, None);
+
+        // A value that is not the old default is a real choice and stays.
+        let mut chosen = Config::default();
+        chosen.network.max_peers = Some(64);
+        migrate_superseded_defaults(&mut chosen, "test");
+        assert_eq!(chosen.network.max_peers, Some(64));
+    }
+
     #[test]
     fn operational_params_from_config() {
         let config = Config::default();
@@ -1040,7 +1132,14 @@ auto_relay = false
         assert_eq!(params.max_concurrent_requests, 10);
         assert_eq!(params.auto_manage_interval_minutes, 5);
         assert_eq!(params.max_batch_size, 1);
-        assert_eq!(params.max_peers, 200);
+        // Resolved from the default contribution mode (Minimal), not the raw
+        // `Option`. Params are what the daemon actually enforces.
+        assert_eq!(
+            params.max_peers,
+            config
+                .network
+                .effective_max_connections(ContributionMode::Minimal)
+        );
         assert_eq!(params.session_timeout_secs, 600);
         assert!(params.contribution_auto);
         assert_eq!(params.max_gpu_vram_mb, 0);
@@ -1099,7 +1198,12 @@ max_concurrent_requests = 42
         assert_eq!(params.max_concurrent_requests, 42);
         // Defaults for others
         assert_eq!(params.max_batch_size, 1);
-        assert_eq!(params.max_peers, 200);
+        // A config that does not mention `max_peers` resolves it from the
+        // contribution mode, which defaults to Minimal.
+        assert_eq!(
+            params.max_peers,
+            NetworkConfig::default().effective_max_connections(ContributionMode::Minimal)
+        );
     }
 
     /// An explicit ceiling is the user's own decision and overrides the

@@ -94,6 +94,7 @@ pub fn build_behaviour(
     enable_upnp: bool,
     known_peers: usize,
     network_config: Option<&NetworkConfig>,
+    max_total: u32,
 ) -> Result<SwarmBehaviour, Box<dyn std::error::Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
@@ -301,12 +302,18 @@ pub fn build_behaviour(
         );
     }
     let max_per_peer = configured_max_per_peer.max(1);
+    // `max_total` comes from `network.max_peers`, resolved against the node's
+    // contribution mode by `NetworkConfig::effective_max_connections`.
+    //
+    // Until 2026-08-04 this was a hardcoded 500 and `max_peers` was inert —
+    // parsed, logged at startup and displayed in the dashboard, but never
+    // enforced anywhere. Setting it had no effect whatsoever.
     let conn_limits = connection_limits::ConnectionLimits::default()
         .with_max_established_per_peer(Some(max_per_peer))
-        .with_max_established(Some(500));
+        .with_max_established(Some(max_total));
     tracing::info!(
         max_per_peer,
-        max_total = 500,
+        max_total,
         "DIAG: connection limits configured"
     );
     let connection_limits = connection_limits::Behaviour::new(conn_limits);
@@ -362,6 +369,7 @@ mod tests {
             false,
             0,
             None,
+            150,
         );
         assert!(result.is_ok());
     }
@@ -386,6 +394,7 @@ mod tests {
             false,
             0,
             None,
+            150,
         );
         assert!(result.is_ok());
     }
@@ -405,6 +414,7 @@ mod tests {
             false,
             0,
             None,
+            150,
         );
         assert!(result.is_ok());
         let behaviour = result.unwrap();
@@ -431,6 +441,7 @@ mod tests {
             false,
             0,
             None,
+            150,
         );
         let behaviour = result.unwrap();
         assert!(!behaviour.autonat_client.is_enabled());

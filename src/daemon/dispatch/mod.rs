@@ -32,6 +32,23 @@ const MAX_CONCURRENT_FORWARDS_MAX: usize = 64;
 /// tensor-parallel work at all, and refusing everything is its own kind of
 /// broken. `Minimal` still accepts real work — just not an unbounded amount of
 /// it.
+///
+/// **This is also the only bound on inference upload bandwidth, deliberately.**
+/// Shard serving is rate-limited by `ResourceConfig::shard_upload_mbps`, and the
+/// obvious symmetry would be to throttle tensor forwards the same way. That
+/// would make things worse, not better. A forward is latency-critical: the
+/// coordinator is holding a segment timeout open waiting for it, so slowing the
+/// bytes down does not produce a slower answer, it produces a *timeout* — and
+/// the peer has then burned the compute for nothing and taken a serve-failure
+/// penalty for it. Throttling converts a degraded success into a failure.
+///
+/// Bounding concurrency instead limits how many forwards can be in flight, and
+/// therefore the peak, without stretching any single one past its deadline. The
+/// complementary half is admission: `state.metrics.peer_speed` measures each
+/// peer's real prefill/decode rate and both sizes the segment timeouts and ranks
+/// candidates, so a node on a thin uplink is chosen less often rather than
+/// being handed work it will fail to deliver. Refusing work you cannot serve is
+/// the correct control here; serving it slowly is not.
 fn max_concurrent_forwards(contribution: &swarmllm_types::ContributionMode) -> usize {
     match contribution {
         swarmllm_types::ContributionMode::Minimal => 8,

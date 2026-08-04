@@ -34,7 +34,10 @@ max_bandwidth_mbps = 0         # 0 = unlimited
 #   disable_default_bootstrap = true
 enable_relay = true
 enable_relay_client = true
-max_peers = 200
+# Ceiling on simultaneous peer connections. Left unset it follows
+# [node] contribution — minimal 150, moderate 300, maximum 500. Set a number
+# to override that in either direction.
+# max_peers = 150
 enable_mdns = true                 # LAN discovery via mDNS (finds peers on same network)
 enable_autonat = true              # NAT detection (set false on WSL2 to prevent connection races)
 enable_dcutr = true                # Hole punching (set false on WSL2 to prevent connection races)
