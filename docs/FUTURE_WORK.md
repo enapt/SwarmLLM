@@ -1261,6 +1261,43 @@ logs an "ignoring LayerResult from a node this request is no longer waiting on"
 line — check whether that fires, because it would mean the result DID arrive and
 was discarded by the failover pinning.
 
+## `Could not decrypt forward` from one peer (open, 2026-08-04)
+
+The trigger behind the failover storm fixed in the same round. One peer
+(`e561df35…`) answered 5 forwards with `Error("Could not decrypt forward")`,
+each of which forced a failover.
+
+**What is established:**
+
+- **Our own nodes never produce it.** Both the WSL node and the Proxmox CT log
+  zero `Could not decrypt` of their own; Proxmox's 5 are ones it RECEIVED. So
+  the failure is on that peer's decrypt side, for ciphertext we sent.
+- The remote answers rather than dropping, which is the 2026-08-02 fix working —
+  otherwise the coordinator would have burned the whole segment budget with no
+  error to attribute.
+- The message is deliberately generic (`tensors.rs`): we cannot distinguish a
+  rotation race from a tampered ciphertext, and saying which would tell an
+  attacker whether their forgery had the right key. **Do not "improve" it into
+  something specific.**
+
+**Most likely cause**, per the comment at that site: a session re-key landing
+between two forwards, with the peer still holding the old key. v0.3.67 added the
+3-minute previous-key grace window for exactly this, so a peer genuinely running
+.67+ should tolerate it — but `NodeCapability.version` is **self-attested**, so
+the reported v0.3.68 proves nothing about what that node actually runs.
+
+**Why it is not being chased further right now:** it needs the other node's logs,
+which is someone else's machine. And the failover fix shipped alongside changes
+its cost from a 284-second dead request to one extra hop, which is the right
+behaviour whatever the cause — a peer that cannot decrypt SHOULD be failed away
+from quickly.
+
+**If it needs diagnosing later**, the useful next step is on the sending side:
+log the session epoch / key id used to seal each forward alongside the
+`request_id`, so a rotation race shows up as a mismatch rather than having to be
+inferred. Do not add anything that reveals which of the two failure modes
+occurred to the peer itself.
+
 ## Slow nodes go dark and never come back — the routing ratchet (analysed 2026-07-28)
 
 **Status: analysed, not fixed.** Raised as a design question ("GPU nodes will be

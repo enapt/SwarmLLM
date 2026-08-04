@@ -2,7 +2,10 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.69-alpha] — 2026-08-04
+
+A follow-up to 0.3.68, fixing a stall that has been costing whole requests
+whenever work moves between machines.
 
 ### Fixed
 

@@ -43,12 +43,20 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists — build jobs will append/clobber assets"
           else
-            # Mark prerelease automatically for alpha/beta/rc tags.
-            if echo "$TAG" | grep -qiE '(alpha|beta|rc)'; then
-              PRERELEASE=--prerelease
-            else
-              PRERELEASE=
-            fi
+            # Deliberately NOT marking alpha tags as prereleases.
+            #
+            # Every release this project ships is tagged `-alpha`, so doing so
+            # marked EVERY release a prerelease — and GitHub's
+            # `/releases/latest` skips those. That endpoint is what nodes older
+            # than v0.3.44 poll, so they would see nothing at all and strand on
+            # whatever they were running. It also leaves the newest release
+            # unlabelled as "Latest" for anyone browsing.
+            #
+            # Every release from v0.3.62 to v0.3.68 was flipped back to
+            # non-prerelease by hand afterwards, which is a manual step that
+            # will eventually be forgotten. The convention IS non-prerelease, so
+            # the automation should match it.
+            PRERELEASE=
             # Use this version's CHANGELOG section as the release body. Without
             # it the release carries only GitHub's auto-generated commit list,
             # so the people deciding whether to update — including everyone
