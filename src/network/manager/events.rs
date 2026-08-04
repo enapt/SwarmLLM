@@ -242,12 +242,25 @@ impl NetworkManager {
                 if let Some((label, _, delivery_uuid)) =
                     self.pending_rr_observability.remove(&request_id)
                 {
-                    tracing::warn!(
-                        %peer,
-                        label,
-                        %error,
-                        "rr-message OutboundFailure — upstream will handle via its own timeout"
-                    );
+                    // A caller blocked on this failure needs to hear about it
+                    // every time; a fire-and-forget notification failing the
+                    // same way every 30s does not. Suppression is keyed on
+                    // (peer, label) so one broken link cannot hide a second,
+                    // different failure.
+                    let decision = if delivery_uuid.is_some() {
+                        crate::network::manager::RrFailureLog::Emit { suppressed: 0 }
+                    } else {
+                        self.observe_rr_failure_for_log(peer, &label)
+                    };
+                    if let crate::network::manager::RrFailureLog::Emit { suppressed } = decision {
+                        tracing::warn!(
+                            %peer,
+                            label,
+                            %error,
+                            suppressed_since_last = suppressed,
+                            "rr-message OutboundFailure — upstream will handle via its own timeout"
+                        );
+                    }
                     // Close the streaming caller's channel immediately so it
                     // sees the failure now, not after FIRST_TOKEN_TIMEOUT.
                     if let Some(uuid) = delivery_uuid {

@@ -1313,31 +1313,76 @@ max_concurrent_requests = 42
     #[test]
     fn cpu_threads_leave_the_machine_usable_at_the_default_level() {
         let rc = ResourceConfig::default(); // max_cpu_threads = 0
-        let cores = 8;
-        let min = rc.inference_cpu_threads(cores, swarmllm_types::ContributionMode::Minimal);
-        let mod_ = rc.inference_cpu_threads(cores, swarmllm_types::ContributionMode::Moderate);
-        let max = rc.inference_cpu_threads(cores, swarmllm_types::ContributionMode::Maximum);
+        let (phys, logical) = (8usize, 16usize); // a typical 2-way SMT desktop
+        let min =
+            rc.inference_cpu_threads(phys, logical, swarmllm_types::ContributionMode::Minimal);
+        let mod_ =
+            rc.inference_cpu_threads(phys, logical, swarmllm_types::ContributionMode::Moderate);
+        let max =
+            rc.inference_cpu_threads(phys, logical, swarmllm_types::ContributionMode::Maximum);
 
         assert!(
-            min < cores,
-            "the DEFAULT level must leave cores free, got {min} of {cores}"
+            min < phys,
+            "the DEFAULT level must leave cores free, got {min} of {phys}"
         );
         assert!(
             min < mod_ && mod_ < max,
             "more contribution must allow more, got {min}/{mod_}/{max}"
         );
-        assert_eq!(max, cores, "offering the machine gives the whole machine");
 
-        // Never 0: rayon reads 0 as "pick the default", i.e. every core — the
-        // exact behaviour being fixed. Single-core machines still get 1.
+        // Never 0: rayon reads 0 as "pick the default", i.e. every logical core
+        // — the exact behaviour being fixed. Single-core machines still get 1.
         for c in [
             swarmllm_types::ContributionMode::Minimal,
             swarmllm_types::ContributionMode::Moderate,
             swarmllm_types::ContributionMode::Maximum,
         ] {
-            assert_eq!(rc.inference_cpu_threads(1, c.clone()), 1);
-            assert!(rc.inference_cpu_threads(0, c) >= 1);
+            assert_eq!(rc.inference_cpu_threads(1, 2, c.clone()), 1);
+            assert!(rc.inference_cpu_threads(0, 0, c) >= 1);
         }
+    }
+
+    /// **No contribution level may exceed the physical core count.**
+    ///
+    /// Swept on a Ryzen 7 5800H (8 physical / 16 logical), phi-3.5 Q4_K_M:
+    /// 4 threads 2.26 tok/s, 6 -> 2.36, 8 -> 2.18, 12 -> 1.75, 16 -> 1.49.
+    /// Throughput is flat to about the physical count and then falls off a
+    /// cliff, because quantised inference is bound by memory bandwidth and two
+    /// threads sharing one physical core contend rather than add.
+    ///
+    /// The first version scaled a fraction of LOGICAL cores, which made
+    /// `Maximum` the slowest setting on the machine — someone offering their
+    /// whole computer got 37% less throughput than the default. Offering more
+    /// must never cost performance.
+    #[test]
+    fn no_contribution_level_oversubscribes_physical_cores() {
+        let rc = ResourceConfig::default();
+        for (phys, logical) in [(8usize, 16usize), (4, 8), (6, 6), (2, 4), (1, 2)] {
+            for c in [
+                swarmllm_types::ContributionMode::Minimal,
+                swarmllm_types::ContributionMode::Moderate,
+                swarmllm_types::ContributionMode::Maximum,
+            ] {
+                let t = rc.inference_cpu_threads(phys, logical, c.clone());
+                assert!(
+                    t <= phys,
+                    "{c:?} asked for {t} threads on {phys} physical cores ({logical} logical) \
+                     — past the physical count throughput only falls"
+                );
+                assert!(t >= 1, "{c:?} must never resolve to zero threads");
+            }
+        }
+    }
+
+    /// Maximum means the whole machine's real compute, which is its physical
+    /// cores — not its hyper-threads.
+    #[test]
+    fn maximum_contribution_means_every_physical_core() {
+        let rc = ResourceConfig::default();
+        assert_eq!(
+            rc.inference_cpu_threads(8, 16, swarmllm_types::ContributionMode::Maximum),
+            8
+        );
     }
 
     /// An explicit thread count is the owner's decision and wins in either
@@ -1350,19 +1395,31 @@ max_concurrent_requests = 42
             ..Default::default()
         };
         assert_eq!(
-            rc.inference_cpu_threads(8, swarmllm_types::ContributionMode::Minimal),
+            rc.inference_cpu_threads(8, 16, swarmllm_types::ContributionMode::Minimal),
             6,
             "asking for MORE than the minimal default must be honoured"
         );
         assert_eq!(
-            rc.inference_cpu_threads(8, swarmllm_types::ContributionMode::Maximum),
+            rc.inference_cpu_threads(8, 16, swarmllm_types::ContributionMode::Maximum),
             6,
             "asking for FEWER than the machine must be honoured"
         );
+        // Clamped to LOGICAL, not physical: oversubscribing hyper-threads is
+        // usually slower here, but it is a legitimate deliberate choice and
+        // quietly overriding it would be worse than honouring it.
+        let big = ResourceConfig {
+            max_cpu_threads: 16,
+            ..Default::default()
+        };
         assert_eq!(
-            rc.inference_cpu_threads(4, swarmllm_types::ContributionMode::Maximum),
-            4,
-            "clamped to the cores that actually exist"
+            big.inference_cpu_threads(8, 16, swarmllm_types::ContributionMode::Minimal),
+            16,
+            "an explicit request for the logical count is the user's call"
+        );
+        assert_eq!(
+            big.inference_cpu_threads(2, 2, swarmllm_types::ContributionMode::Maximum),
+            2,
+            "but never more threads than the OS actually has"
         );
     }
 

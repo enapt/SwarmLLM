@@ -17,14 +17,32 @@ All notable changes to SwarmLLM are documented here.
   `max_cpu_threads` yourself to override that either way. Graphics-card nodes are
   unaffected.
 
-  **This is usually faster, not slower.** On a machine with hyper-threading,
-  running one thread per real core beats running two per core, because this kind
-  of work waits on memory rather than arithmetic. Measured on an 8-core (16
-  thread) laptop, halving the threads made it **46% quicker** — 2.28 vs 1.56
-  tokens/second. On a machine without hyper-threading there is a real reduction,
-  though smaller than the thread count suggests, for the same reason.
+  **This is usually faster, not slower.** This kind of work waits on memory
+  rather than arithmetic, so past a point extra threads just get in each other's
+  way. Measured across a range on an 8-core (16-thread) laptop:
+
+  | threads | tokens/second |
+  |---------|---------------|
+  | 4       | 2.26          |
+  | 6       | 2.36          |
+  | 8       | 2.18          |
+  | 12      | 1.75          |
+  | 16      | 1.49          |
+
+  Speed holds up to roughly the number of *real* cores and then drops away
+  sharply — using all 16 threads is **37% slower** than using 6. So the setting
+  now shares out real cores rather than hyper-threads, which means the highest
+  sharing level is no longer the slowest one. Setting `max_cpu_threads` yourself
+  is still honoured exactly as given.
 
 ### Fixed
+
+- **A node no longer floods its own log when one link goes bad.** A peer that
+  failed the same way repeatedly produced a warning every thirty seconds
+  indefinitely — 1928 of them over three days on one machine, which was most of
+  everything that machine logged. Repeats are now collapsed into one line every
+  few minutes, carrying a count of what it stood for, so a genuinely broken link
+  still reports itself without burying everything else.
 
 - **The limit on how many machines a node connects to now actually works.** The
   `max_peers` setting was read at startup, written into the config file, and

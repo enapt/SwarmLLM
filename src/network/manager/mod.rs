@@ -215,6 +215,59 @@ const _: () = assert!(
     "the long-run threshold must be the more conservative of the two"
 );
 
+/// Per-(peer, label) state for throttling repeated identical rr failures.
+#[derive(Debug, Clone)]
+pub(crate) struct RrFailureSuppression {
+    /// When the most recent warning was actually emitted.
+    last_logged: std::time::Instant,
+    /// Failures swallowed since then, reported with the next emitted line so
+    /// the rate is never hidden — only the repetition is.
+    suppressed: u64,
+}
+
+/// How long to hold identical rr failures for the same peer before emitting
+/// another line.
+///
+/// Five minutes against a 30-second failure cadence turns 10 lines into 1,
+/// which is enough to stop one broken link drowning a log without ever making
+/// the reader wait long to learn the link is broken.
+pub(crate) const RR_FAILURE_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Cap on distinct (peer, label) pairs tracked, so a churn of peers cannot grow
+/// this without bound. Far above any real peer count for a single node's
+/// message labels; the map is cleared wholesale if it is ever exceeded, since
+/// losing suppression state costs at most one extra log line per pair.
+pub(crate) const MAX_RR_FAILURE_SUPPRESSION_ENTRIES: usize = 4096;
+
+/// What to do with an rr failure that is about to be logged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RrFailureLog {
+    /// Emit a warning. Carries how many identical failures were suppressed
+    /// since the last emitted one (0 on the first).
+    Emit { suppressed: u64 },
+    /// Identical to one logged recently — count it and stay quiet.
+    Suppress,
+}
+
+impl RrFailureSuppression {
+    /// Decide whether this failure should be logged, updating the state.
+    ///
+    /// Deliberately time-based rather than count-based: a peer failing once an
+    /// hour should say so every time, while one failing twice a minute should
+    /// not. A count-based rule ("every 50th") gets both of those wrong.
+    fn observe(&mut self, now: std::time::Instant, window: std::time::Duration) -> RrFailureLog {
+        if now.duration_since(self.last_logged) >= window {
+            let suppressed = self.suppressed;
+            self.last_logged = now;
+            self.suppressed = 0;
+            RrFailureLog::Emit { suppressed }
+        } else {
+            self.suppressed += 1;
+            RrFailureLog::Suppress
+        }
+    }
+}
+
 /// NetworkManager owns the libp2p Swarm and is the sole interface to the P2P network.
 pub struct NetworkManager {
     shared_state: Arc<SharedState>,
@@ -278,6 +331,25 @@ pub struct NetworkManager {
     ///    the caller fails fast instead of waiting 120s for first-token.
     pending_rr_observability:
         HashMap<OutboundRequestId, (String, std::time::Instant, Option<uuid::Uuid>)>,
+    /// Suppression state for repeated identical rr failures, keyed by
+    /// (peer, message label).
+    ///
+    /// A peer that fails the same way every 30 seconds produces one warning
+    /// every 30 seconds forever. Measured 2026-08-04: **1928 identical
+    /// `OutboundFailure` warnings over three days**, all to one peer, all
+    /// `label="DirectMessage"`, all `Timeout while waiting for a response` —
+    /// 247 in a single four-hour window, which was 80% of that node's entire
+    /// warning volume.
+    ///
+    /// That is worse than noise. This project's diagnosis rules turn on being
+    /// able to read a log and trust what is and is not in it, and a repeating
+    /// line at that rate buries everything else — including the second and
+    /// third contributors to whatever is actually wrong.
+    ///
+    /// The failure is still reported; it is reported *once* per window, with a
+    /// count of what it stood in for, which is strictly more information than
+    /// the same line 247 times.
+    rr_failure_log_suppression: HashMap<(libp2p::PeerId, String), RrFailureSuppression>,
     /// Holds ResponseChannels for pending tensor forwards, keyed by inference UUID.
     /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
     /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
@@ -572,6 +644,7 @@ impl NetworkManager {
             pending_tensor_outbound: HashMap::new(),
             pending_tensor_result_outbound: HashMap::new(),
             pending_rr_observability: HashMap::new(),
+            rr_failure_log_suppression: HashMap::new(),
             pending_tensor_channels: HashMap::new(),
             connection_addrs: HashMap::new(),
             peer_direct_conns: HashMap::new(),
@@ -607,6 +680,41 @@ impl NetworkManager {
     /// transports (e.g. WSL2 QUIC substream negotiation at 14–25s) PEX replies can
     /// arrive successfully but after specific dispatch handlers already declared
     /// the peer stale. Any rr activity proves liveness — treat it as a heartbeat.
+    /// Record an rr failure and decide whether it should be logged now.
+    ///
+    /// See `rr_failure_log_suppression` for why this exists: one peer failing
+    /// identically every 30s produced 1928 warnings in three days and drowned
+    /// everything else in that node's log.
+    pub(super) fn observe_rr_failure_for_log(
+        &mut self,
+        peer: libp2p::PeerId,
+        label: &str,
+    ) -> RrFailureLog {
+        let now = std::time::Instant::now();
+        if self.rr_failure_log_suppression.len() >= MAX_RR_FAILURE_SUPPRESSION_ENTRIES {
+            // Losing this state costs at most one extra line per pair, so a
+            // wholesale clear is a fine way to stay bounded under peer churn.
+            self.rr_failure_log_suppression.clear();
+        }
+        match self
+            .rr_failure_log_suppression
+            .get_mut(&(peer, label.to_string()))
+        {
+            Some(state) => state.observe(now, RR_FAILURE_LOG_WINDOW),
+            None => {
+                // First failure of this shape — always say so immediately.
+                self.rr_failure_log_suppression.insert(
+                    (peer, label.to_string()),
+                    RrFailureSuppression {
+                        last_logged: now,
+                        suppressed: 0,
+                    },
+                );
+                RrFailureLog::Emit { suppressed: 0 }
+            }
+        }
+    }
+
     fn refresh_peer_last_seen(&self, peer: &libp2p::PeerId) {
         if let Some(node_id) = self.peer_to_node.get(peer) {
             if let Some(mut peer_info) = self.shared_state.peer_registry.get_mut(&*node_id) {
@@ -1478,6 +1586,68 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One peer failing identically every 30s produced **1928 warnings over
+    /// three days** — 247 in one four-hour window, 80% of that node's entire
+    /// warning volume. A log at that rate hides everything else in it,
+    /// including the second and third contributors to whatever is wrong.
+    #[test]
+    fn a_repeating_failure_is_logged_once_per_window_with_its_count() {
+        let t0 = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(300);
+        let mut s = RrFailureSuppression {
+            last_logged: t0,
+            suppressed: 0,
+        };
+
+        // The 30s cadence that produced the real spam: 9 more inside the
+        // window, all held.
+        for i in 1..=9u64 {
+            assert_eq!(
+                s.observe(t0 + std::time::Duration::from_secs(30 * i), window),
+                RrFailureLog::Suppress,
+                "failure at +{}s should have been held",
+                30 * i
+            );
+        }
+        // Window elapses: one line, carrying what it stood in for. The count is
+        // the point — suppressing silently would understate the problem.
+        assert_eq!(
+            s.observe(t0 + std::time::Duration::from_secs(301), window),
+            RrFailureLog::Emit { suppressed: 9 }
+        );
+        // ...and the counter resets, so the next line is not cumulative.
+        assert_eq!(
+            s.observe(t0 + std::time::Duration::from_secs(602), window),
+            RrFailureLog::Emit { suppressed: 0 }
+        );
+    }
+
+    /// Time-based, not count-based. A peer failing once an hour should say so
+    /// every time; a count rule ("every 50th") would silence it for two days.
+    #[test]
+    fn an_infrequent_failure_is_never_suppressed() {
+        let t0 = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(300);
+        let mut s = RrFailureSuppression {
+            last_logged: t0,
+            suppressed: 0,
+        };
+        for i in 1..=5u64 {
+            assert_eq!(
+                s.observe(t0 + std::time::Duration::from_secs(3600 * i), window),
+                RrFailureLog::Emit { suppressed: 0 }
+            );
+        }
+    }
+
+    /// Long enough to collapse a 30s cadence, short enough that a reader is
+    /// never left wondering whether a broken link is still broken.
+    #[test]
+    fn rr_failure_window_collapses_the_observed_cadence() {
+        assert!(RR_FAILURE_LOG_WINDOW >= std::time::Duration::from_secs(120));
+        assert!(RR_FAILURE_LOG_WINDOW <= std::time::Duration::from_secs(900));
+    }
 
     #[test]
     fn resolve_peer_id_round_trips_valid_bytes() {

@@ -4724,6 +4724,7 @@ dependencies = [
  "libp2p-stream",
  "llama-cpp-2",
  "memmap2",
+ "num_cpus",
  "parking_lot",
  "rand 0.8.6",
  "redb",

@@ -897,17 +897,18 @@ impl SharedState {
         // took every core on the machine whatever the contribution level said —
         // measured at 529-534% of 600% on a 6-core node set to Minimal.
         {
-            let total_cores = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
-            let threads = state
-                .config
-                .resources
-                .inference_cpu_threads(total_cores, state.config.node.contribution.clone());
+            let (physical_cores, logical_cores) =
+                crate::config::ResourceConfig::detect_cpu_topology();
+            let threads = state.config.resources.inference_cpu_threads(
+                physical_cores,
+                logical_cores,
+                state.config.node.contribution.clone(),
+            );
             state.model_process_pool.set_cpu_threads(threads);
             tracing::info!(
                 contribution = ?state.config.node.contribution,
-                total_cores,
+                physical_cores,
+                logical_cores,
                 inference_cpu_threads = threads,
                 "Inference CPU parallelism set from the contribution level"
             );

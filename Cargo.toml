@@ -113,6 +113,10 @@ redb = "4"
 
 # Concurrent state
 dashmap = "6"
+# Physical (not logical) core count. Already in the tree transitively; the
+# distinction matters because exceeding physical cores makes quantised
+# inference SLOWER — see `ResourceConfig::inference_cpu_threads`.
+num_cpus = "1"
 parking_lot = "0.12"
 async-trait = "0.1"
 # Lock-free atomic Arc swaps — used for hot-path read-mostly snapshots

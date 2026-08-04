@@ -278,57 +278,68 @@ impl ResourceConfig {
         }
     }
 
-    /// CPU threads the inference worker may use, from the total core count.
+    /// CPU threads the inference worker may use.
+    ///
+    /// **`total_cores` must be PHYSICAL cores, not logical.** Both halves of
+    /// this function's job depend on that distinction.
     ///
     /// CPU inference had no thread limit at all: candle parallelises through
-    /// rayon, whose default pool is every logical core, and nothing narrowed it.
-    /// Measured on a 6-core node set to `Minimal` (2026-08-04), a single request
-    /// held **529–534% of 600%** with ~10% of the machine idle — the whole box,
-    /// at the lowest contribution setting. Of every resource this software
-    /// spends, CPU starvation is the one the person sitting in front of the
-    /// machine feels first: it is what makes a desktop stutter.
+    /// rayon, whose default pool is every *logical* core, and nothing narrowed
+    /// it. Measured on a 6-core node set to `Minimal` (2026-08-04), a single
+    /// request held **529-534% of 600%** with ~10% of the machine idle — the
+    /// whole box, at the lowest contribution setting. Of every resource this
+    /// software spends, CPU starvation is the one the person sitting in front
+    /// of the machine feels first: it is what makes a desktop stutter.
     ///
-    /// This is the same fraction-of-the-whole shape as
-    /// [`Self::inference_vram_budget_mb`], and deliberately so — "how much of my
-    /// machine does this get" should mean the same thing whichever resource is
-    /// being asked about.
+    /// **More threads is not more throughput.** Swept on a Ryzen 7 5800H
+    /// (8 physical / 16 logical), phi-3.5 Q4_K_M, 201 tokens, model warm:
     ///
-    /// **It does not necessarily cost throughput, and on an SMT machine it gains
-    /// some.** Measured 2026-08-04 on a Ryzen 7 5800H (8 physical cores, 16
-    /// logical), phi-3.5 Q4_K_M, 201 tokens, model warm, two runs each:
+    /// | threads | tok/s |
+    /// |---------|-------|
+    /// | 4       | 2.26  |
+    /// | 6       | 2.36  |
+    /// | 8       | 2.18  |
+    /// | 12      | 1.75  |
+    /// | 16      | 1.49  |
     ///
-    /// | threads | tok/s        |
-    /// |---------|--------------|
-    /// | 8       | 2.31, 2.25   |
-    /// | 16      | 1.52, 1.60   |
+    /// Throughput is flat to about the physical core count and then falls off a
+    /// cliff — 16 threads is **37% slower** than 6. Quantised inference is bound
+    /// by memory bandwidth rather than arithmetic, so two threads on one
+    /// physical core contend for the same cache and load ports instead of
+    /// adding anything. llama.cpp defaults to physical cores for this reason.
     ///
-    /// Halving the threads was **~46% faster**. Quantised inference is bound by
-    /// memory bandwidth rather than arithmetic, so running two threads on one
-    /// physical core makes them compete for the same cache and load ports
-    /// instead of adding throughput. llama.cpp defaults to physical cores for
-    /// exactly this reason. At `Minimal` on a 2-way SMT machine this fraction
-    /// lands on the physical core count, which is the figure you would pick
-    /// deliberately.
+    /// The first version of this scaled a fraction of *logical* cores, which
+    /// made `Maximum` (16 threads here) the **slowest** setting available: a
+    /// user generously offering their whole machine got 37% less throughput
+    /// than the default. Taking the fraction of physical cores instead means
+    /// every level sits on the plateau, and offering more never costs
+    /// performance — it only shortens how long the machine is busy.
     ///
-    /// On a machine without SMT the reduction is real — though sub-proportional,
-    /// for the same memory-bound reason. That trade is still worth making: a node
-    /// whose owner uninstalls it because their machine stutters contributes
-    /// nothing at all, and there is no failure mode here beyond "slower". GPU
-    /// nodes are unaffected, since offloaded layers do not run on these threads.
+    /// Below the plateau the reduction is real but sub-proportional, and worth
+    /// it regardless: a node whose owner uninstalls it because their machine
+    /// stutters contributes nothing. GPU nodes are unaffected, since offloaded
+    /// layers do not run on these threads.
     ///
-    /// Never returns 0, which rayon would read as "pick the default" — i.e. every
-    /// core, the exact behaviour being fixed.
+    /// Never returns 0, which rayon would read as "pick the default" — i.e.
+    /// every logical core, the exact behaviour being fixed.
     pub fn inference_cpu_threads(
         &self,
-        total_cores: usize,
+        physical_cores: usize,
+        logical_cores: usize,
         contribution: ContributionMode,
     ) -> usize {
-        let total = total_cores.max(1);
+        let physical = physical_cores.max(1);
+        let logical = logical_cores.max(physical);
         if self.max_cpu_threads > 0 {
             // An explicit setting wins outright, in either direction — the same
-            // rule the memory and bandwidth ceilings follow. Still clamped to
-            // the machine, since more threads than cores only adds contention.
-            return (self.max_cpu_threads as usize).min(total).max(1);
+            // rule the memory and bandwidth ceilings follow.
+            //
+            // Clamped to LOGICAL cores, not physical: asking for more threads
+            // than the OS has is meaningless, but asking for more than the
+            // physical count is a legitimate (if usually slower here) choice
+            // that belongs to whoever set it. Quietly overriding a deliberate
+            // number is worse than honouring a suboptimal one.
+            return (self.max_cpu_threads as usize).clamp(1, logical);
         }
         let fraction = match contribution {
             // Default. Leave half the machine to whatever else its owner is
@@ -337,7 +348,22 @@ impl ResourceConfig {
             ContributionMode::Moderate => 0.75,
             ContributionMode::Maximum => 1.0,
         };
-        (((total as f64) * fraction).round() as usize).clamp(1, total)
+        (((physical as f64) * fraction).round() as usize).clamp(1, physical)
+    }
+
+    /// Physical and logical core counts, in that order.
+    ///
+    /// The two differ on any SMT machine and the difference is load-bearing —
+    /// see [`Self::inference_cpu_threads`]. `available_parallelism` reports
+    /// LOGICAL cores, so it is the wrong input for a thread budget on its own.
+    pub fn detect_cpu_topology() -> (usize, usize) {
+        let logical = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        // Falls back to the logical count on platforms where it cannot tell,
+        // which is the pre-existing behaviour rather than a new guess.
+        let physical = num_cpus::get_physical().max(1).min(logical.max(1));
+        (physical.max(1), logical.max(1))
     }
 
     pub fn inference_ram_budget_mb(
