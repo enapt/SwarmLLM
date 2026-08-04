@@ -505,6 +505,41 @@ impl Config {
                  keeping full networking (QUIC/mDNS/UPnP/AutoNAT/DCUtR), NAT-mode safe \
                  defaults NOT applied"
             );
+            // ...but nothing will be able to CONNECT to it until the Windows
+            // firewall allows the ports, and Windows never asks.
+            //
+            // Running the Windows build natively triggers the usual "allow this
+            // app through the firewall?" prompt, so those users are covered by
+            // the OS. A Linux binary under WSL gets no prompt at all: the
+            // firewall is on by default, silently drops inbound, and the node
+            // looks perfectly healthy from the inside — it holds a real LAN
+            // address, advertises it correctly, and dials out fine. Only the
+            // other machine sees the problem, as sends that never complete.
+            //
+            // Measured 2026-08-04 on exactly this setup: a peer 2ms away on the
+            // same subnet could not open TCP 8810 or UDP 8800, one direction of
+            // every request depended on the connection this node had dialled
+            // out, and cross-machine requests died on the segment timeout after
+            // 284 seconds. Opening the two ports fixed it outright.
+            //
+            // A warning is the right level: it is not an error here (outbound
+            // works, and a node that only makes requests is fine), but it is
+            // never what someone running a peer-to-peer node intends.
+            let port = config.node.listen_port;
+            tracing::warn!(
+                p2p_tcp = port + 10,
+                quic_udp = port,
+                "Other machines probably cannot reach this node. Windows only asks to \
+                 allow the firewall for apps it launches, never for a Linux program \
+                 under WSL — so inbound is being dropped even though this node is on \
+                 the LAN. Run this once in an Administrator PowerShell: \
+                 New-NetFirewallRule -DisplayName 'SwarmLLM P2P TCP' -Direction Inbound \
+                 -Protocol TCP -LocalPort {} -Action Allow ; \
+                 New-NetFirewallRule -DisplayName 'SwarmLLM P2P QUIC' -Direction Inbound \
+                 -Protocol UDP -LocalPort {} -Action Allow",
+                port + 10,
+                port
+            );
         } else if network::is_wsl2() {
             // Parse TOML into a Value to check which keys were explicitly set.
             // Raw string search (e.g., config_text.contains("enable_quic")) would

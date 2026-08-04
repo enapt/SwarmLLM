@@ -1228,6 +1228,47 @@ picks on its own.
 raised from `debug!` to `info!` earlier the same day.** At `debug` on a node
 running at `info`, none of the above appears.
 
+## WSL nodes are unreachable until the Windows firewall is opened — FIXED 2026-08-04
+
+**Windows never asks.** Running the Windows build natively triggers the usual
+"allow this app through the firewall?" prompt — confirmed, there are existing
+`swarmllm.exe` and `swarmllm-windows-x86_64` rules on the dev machine from
+exactly that. A **Linux binary under WSL gets no prompt at all**, and those
+program-scoped rules do not cover it.
+
+The result is a node that looks perfectly healthy from the inside: it holds a
+real LAN address (mirrored mode makes it a first-class LAN citizen), advertises
+`/ip4/<lan>/tcp/<p2p>` and `/udp/<port>/quic-v1` **correctly**, and dials out
+fine. Only the other machine sees anything wrong.
+
+**Measured on this pair.** From a peer 2ms away on the same subnet, TCP connect
+to `192.168.1.53:8810` and `:8800` both failed; the Windows firewall was enabled
+on all three profiles with **no inbound rule for either port**. Consequences:
+
+- **22 `OutboundFailure`s in 90 minutes**, every one of them to this node.
+- Every request into it depended on the connection it had dialled outward.
+- Cross-machine requests died on the segment timeout — the **284s** failures
+  chased at length earlier the same day.
+
+**After opening TCP `port+10` and UDP `port`:** both ports reachable,
+**0 `OutboundFailure`s**, and a request that only this node could serve
+(`phi-3.5`, held nowhere else) completed `route=distributed segments=1
+node=225e6fe7…` in 52s (cold GPU load) with a correct answer.
+
+**Fix for everyone else:** the node already detects WSL2 mirrored networking, so
+it now WARNS at startup that inbound is probably blocked and prints the two
+`New-NetFirewallRule` commands with the actual ports substituted. It is a
+warning, not an error — outbound works, and a node that only makes requests is
+fine — but it is never what someone running a peer-to-peer node intends.
+
+**Deliberately not automated.** Adding the rule requires elevation, and a Linux
+process silently rewriting the Windows host firewall is not something this
+should do uninvited.
+
+**Note for other platforms**: the same shape exists anywhere a host firewall is
+on by default and does not prompt. It bites hardest here because the Windows
+firewall IS on by default while `ufw`/`firewalld` typically are not.
+
 ## The updater could leave a node with NO binary (reported, FIXED 2026-08-04)
 
 **Reported against 0.3.57 → 0.3.58** (Debian 13 LXC on Proxmox VE 9, systemd

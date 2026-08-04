@@ -6,6 +6,20 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Nodes run under WSL were invisible to other machines, with nothing to say
+  so.** Windows asks whether to allow an app through the firewall when it starts
+  one itself, but never for a Linux program running under WSL — so incoming
+  connections were silently dropped. The node looked entirely healthy from the
+  inside: correct address on the local network, correctly advertised, outgoing
+  connections fine. Only the other machine saw anything wrong, as work that
+  never came back.
+
+  On two machines two milliseconds apart this caused every request between them
+  to fail after nearly five minutes. Opening the two ports fixed it outright.
+  The node now says so at startup and prints the exact commands to run, rather
+  than leaving people to discover it.
+
+
 - **Starting a download appeared to do nothing for about half a minute.**
   Before fetching a model, the file is checked on HuggingFace — which reads
   sixteen megabytes to find out how the model is laid out. On an ordinary home
