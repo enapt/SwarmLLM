@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "Unduhan selesai: {model}",
   "activity.hf_download_failed": "Unduhan gagal: {detail}",
   "activity.hf_download_stalled": "Unduhan {model} dari HuggingFace macet — dibatalkan",
+  "activity.hf_probe_started": "Memeriksa {model} di HuggingFace sebelum mengunduh",
   "activity.hf_source_discovered": "Menemukan sumber HF untuk {model}",
   "activity.hf_sources_cap_reached": "Katalog model yang ditemukan penuh ({count}). Model baru dari peer dilewati — hapus model yang tidak digunakan di Pengaturan untuk membebaskan ruang.",
   "activity.inference_completed": "Inferensi selesai: {model}",

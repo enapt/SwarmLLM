@@ -6,6 +6,15 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Starting a download appeared to do nothing for about half a minute.**
+  Before fetching a model, the file is checked on HuggingFace — which reads
+  sixteen megabytes to find out how the model is laid out. On an ordinary home
+  connection that takes around twenty-five seconds, during which nothing was
+  shown at all and the file on disk stayed empty. That is the first thing anyone
+  does after choosing a model, and it looks exactly like something that has
+  hung. It now says it is checking the file first.
+
+
 - **Machines short of graphics memory stopped retrying something that could not
   work.** While reading a long prompt, the reuse cache saves its progress at
   intervals. On a card with little memory to spare that save fails — survivable,

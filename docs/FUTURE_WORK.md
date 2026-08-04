@@ -4110,6 +4110,27 @@ or layer-shard layout computation on a large file. If it is the probe, the fix i
 progress reporting rather than speed — say "checking the file on HuggingFace"
 instead of showing a 0-byte file.
 
+**ANSWERED and FIXED 2026-08-04. It is the probe, and it is not slow by
+accident.** `hf_download_shards` runs `probe_gguf_file` synchronously before
+spawning the download, and that probe fetches **`GGUF_HEADER_PROBE_SIZE` =
+16 MB** as a range request, after a HEAD — both with 5/30/120s retry backoff. At
+ordinary home bandwidth 16 MB is the reported ~25s. The handler's own comment
+claimed the probe "reads ~few KB header", wrong by three orders of magnitude,
+which is presumably why nobody looked here.
+
+**The 16 MB is deliberate and was left alone**: large-vocabulary GGUF headers
+approach 10 MB, and the margin avoids a second round trip. Making it adaptive
+(read a few KB, parse `tensor_data_offset`, fetch exactly that) is possible but
+is a real change to the probe protocol for a one-off cost.
+
+**What was fixed is the silence.** There was **no activity event at all** before
+the probe — the user clicked download and the dashboard showed nothing for 25
+seconds. It now emits `hf_probe_started` ("Checking {model} on HuggingFace
+before downloading") with an info toast, translated across all 21 locales.
+
+**Still open**: an adaptive two-stage probe, if the one-off 16 MB ever matters
+enough. Progress reporting was the cheaper and more honest fix.
+
 ## "Newest direct connection" can select a dead one (observed 2026-07-26) — FIXED v0.3.34
 
 > **Fixed by option 1 below, adapted.** Rather than plumbing the application's

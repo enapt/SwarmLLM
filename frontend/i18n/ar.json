@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "اكتمل التنزيل: {model}",
   "activity.hf_download_failed": "فشل التنزيل: {detail}",
   "activity.hf_download_stalled": "تعليق تنزيل {model} من HuggingFace — تم الإلغاء",
+  "activity.hf_probe_started": "يجري التحقق من {model} على HuggingFace قبل التنزيل",
   "activity.hf_source_discovered": "تم اكتشاف مصدر HF لـ {model}",
   "activity.hf_sources_cap_reached": "كتالوج النماذج المكتشفة ممتلئ ({count}). يتم تجاهل النماذج الجديدة من الأقران — أزل النماذج غير المستخدمة في الإعدادات لتحرير مساحة.",
   "activity.inference_completed": "اكتمل الاستدلال: {model}",

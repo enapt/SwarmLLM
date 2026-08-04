@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "Download voltooid: {model}",
   "activity.hf_download_failed": "Download mislukt: {detail}",
   "activity.hf_download_stalled": "HuggingFace-download van {model} vastgelopen — afgebroken",
+  "activity.hf_probe_started": "{model} wordt op HuggingFace gecontroleerd vóór het downloaden",
   "activity.hf_source_discovered": "HF-bron ontdekt voor {model}",
   "activity.hf_sources_cap_reached": "De catalogus van ontdekte modellen is vol ({count}). Nieuwe modellen van peers worden verwijderd — verwijder ongebruikte modellen in Instellingen om ruimte vrij te maken.",
   "activity.inference_completed": "Inferentie voltooid: {model}",

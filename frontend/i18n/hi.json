@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "डाउनलोड पूर्ण: {model}",
   "activity.hf_download_failed": "डाउनलोड विफल: {detail}",
   "activity.hf_download_stalled": "{model} का HuggingFace डाउनलोड रुक गया — रोक दिया",
+  "activity.hf_probe_started": "डाउनलोड से पहले HuggingFace पर {model} की जाँच की जा रही है",
   "activity.hf_source_discovered": "{model} के लिए HF स्रोत खोजा गया",
   "activity.hf_sources_cap_reached": "खोजे गए मॉडलों की सूची भर गई है ({count})। साथियों से नए मॉडल हटाए जा रहे हैं — स्थान खाली करने के लिए सेटिंग्स में अप्रयुक्त मॉडल हटाएं।",
   "activity.inference_completed": "अनुमान पूर्ण: {model}",

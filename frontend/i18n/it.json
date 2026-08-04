@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "Download completato: {model}",
   "activity.hf_download_failed": "Download fallito: {detail}",
   "activity.hf_download_stalled": "Download di {model} da HuggingFace bloccato — interrotto",
+  "activity.hf_probe_started": "Controllo di {model} su HuggingFace prima del download",
   "activity.hf_source_discovered": "Fonte HF scoperta per {model}",
   "activity.hf_sources_cap_reached": "Il catalogo dei modelli scoperti è pieno ({count}). I nuovi modelli dei peer vengono scartati — rimuovi i modelli inutilizzati nelle Impostazioni per liberare spazio.",
   "activity.inference_completed": "Inferenza completata: {model}",

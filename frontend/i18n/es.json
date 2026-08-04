@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "Descarga completada: {model}",
   "activity.hf_download_failed": "Descarga fallida: {detail}",
   "activity.hf_download_stalled": "La descarga de {model} desde HuggingFace se detuvo — abortada",
+  "activity.hf_probe_started": "Comprobando {model} en HuggingFace antes de descargar",
   "activity.hf_source_discovered": "Fuente HF descubierta para {model}",
   "activity.hf_sources_cap_reached": "El catálogo de modelos descubiertos está lleno ({count}). Se están descartando modelos nuevos de los pares — elimina modelos no utilizados en Ajustes para liberar espacio.",
   "activity.inference_completed": "Inferencia completada: {model}",

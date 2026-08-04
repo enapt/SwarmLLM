@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "ダウンロード完了：{model}",
   "activity.hf_download_failed": "ダウンロード失敗：{detail}",
   "activity.hf_download_stalled": "{model} の HuggingFace ダウンロードが停滞 — 中止しました",
+  "activity.hf_probe_started": "ダウンロード前に HuggingFace で {model} を確認しています",
   "activity.hf_source_discovered": "{model}のHFソースを検出",
   "activity.hf_sources_cap_reached": "発見されたモデルのカタログが満杯です（{count}）。ピアからの新しいモデルが破棄されています — 設定で未使用のモデルを削除して空きを作ってください。",
   "activity.inference_completed": "推論完了：{model}",

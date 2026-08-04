@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "Загрузка завершена: {model}",
   "activity.hf_download_failed": "Загрузка не удалась: {detail}",
   "activity.hf_download_stalled": "Загрузка {model} с HuggingFace зависла — прервана",
+  "activity.hf_probe_started": "Проверка {model} на HuggingFace перед загрузкой",
   "activity.hf_source_discovered": "Обнаружен источник HF для {model}",
   "activity.hf_sources_cap_reached": "Каталог обнаруженных моделей переполнен ({count}). Новые модели от узлов отбрасываются — удалите неиспользуемые модели в Настройках, чтобы освободить место.",
   "activity.inference_completed": "Инференс завершён: {model}",

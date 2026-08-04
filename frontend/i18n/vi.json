@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "Tải xuống hoàn tất: {model}",
   "activity.hf_download_failed": "Tải xuống thất bại: {detail}",
   "activity.hf_download_stalled": "Tải {model} từ HuggingFace bị treo — đã huỷ",
+  "activity.hf_probe_started": "Đang kiểm tra {model} trên HuggingFace trước khi tải xuống",
   "activity.hf_source_discovered": "Phát hiện nguồn HF cho {model}",
   "activity.hf_sources_cap_reached": "Danh mục mô hình đã khám phá đã đầy ({count}). Các mô hình mới từ các nút ngang hàng đang bị loại bỏ — xoá các mô hình không sử dụng trong Cài đặt để giải phóng dung lượng.",
   "activity.inference_completed": "Suy luận hoàn tất: {model}",

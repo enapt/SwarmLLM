@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "다운로드 완료: {model}",
   "activity.hf_download_failed": "다운로드 실패: {detail}",
   "activity.hf_download_stalled": "{model}의 HuggingFace 다운로드 정지 — 중단됨",
+  "activity.hf_probe_started": "다운로드 전에 HuggingFace에서 {model}을(를) 확인하는 중",
   "activity.hf_source_discovered": "{model}의 HF 소스 발견됨",
   "activity.hf_sources_cap_reached": "발견된 모델 카탈로그가 가득 찼습니다 ({count}). 피어의 새 모델이 삭제되고 있습니다 — 설정에서 사용하지 않는 모델을 제거하여 공간을 확보하세요.",
   "activity.inference_completed": "추론 완료: {model}",

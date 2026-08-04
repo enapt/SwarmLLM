@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "Nedladdning klar: {model}",
   "activity.hf_download_failed": "Nedladdning misslyckades: {detail}",
   "activity.hf_download_stalled": "HuggingFace-nedladdning av {model} hängde — avbruten",
+  "activity.hf_probe_started": "Kontrollerar {model} på HuggingFace före nedladdning",
   "activity.hf_source_discovered": "HF-källa upptäckt för {model}",
   "activity.hf_sources_cap_reached": "Katalogen över upptäckta modeller är full ({count}). Nya modeller från jämlikar släpps — ta bort oanvända modeller i Inställningar för att frigöra utrymme.",
   "activity.inference_completed": "Inferens klar: {model}",

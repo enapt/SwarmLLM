@@ -150,7 +150,29 @@ pub async fn hf_download_shards(
 
     // ── Synchronous probe + architecture check ──────────────────────────
     // Probe before spawning the download task so we can return an immediate
-    // HTTP error for unsupported architectures (fast: reads ~few KB header).
+    // HTTP error for unsupported architectures.
+    //
+    // **This is NOT fast**, whatever an earlier comment here claimed ("reads
+    // ~few KB header"). `GGUF_HEADER_PROBE_SIZE` is **16 MB**, fetched as a
+    // range request, on top of a HEAD — and both retry with 5/30/120s backoff.
+    // On an ordinary home connection that is the ~25 seconds a tester reported
+    // sitting on a zero-byte `.tmp` before anything appeared to happen
+    // (2026-07-26). It is the FIRST thing a new user does after picking a
+    // model, and a stalled-looking download is exactly when someone concludes
+    // it is broken and kills it.
+    //
+    // The size is deliberate — large-vocabulary headers approach 10 MB, so the
+    // margin avoids a second round trip — so the honest fix is to say what is
+    // happening rather than to pretend it is instant.
+    state.shared_state.emit_activity(
+        crate::daemon::state::ActivityEvent::new(
+            "download",
+            "hf_probe_started",
+            format!("Checking {filename} on HuggingFace before downloading"),
+        )
+        .with_detail_str(&repo_id)
+        .with_toast("info", 4000),
+    );
     let configured_shard_size = state.shared_state.config.model.shard_size_bytes();
     let info =
         crate::model::huggingface::probe_gguf_file(&repo_id, &filename, configured_shard_size)

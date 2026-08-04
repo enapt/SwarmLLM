@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "ดาวน์โหลดเสร็จสิ้น: {model}",
   "activity.hf_download_failed": "การดาวน์โหลดล้มเหลว: {detail}",
   "activity.hf_download_stalled": "การดาวน์โหลด {model} จาก HuggingFace ค้าง — ยกเลิกแล้ว",
+  "activity.hf_probe_started": "กำลังตรวจสอบ {model} บน HuggingFace ก่อนดาวน์โหลด",
   "activity.hf_source_discovered": "ค้นพบ HF source สำหรับ {model}",
   "activity.hf_sources_cap_reached": "แคตตาล็อกโมเดลที่ค้นพบเต็มแล้ว ({count}) โมเดลใหม่จากเพียร์กำลังถูกทิ้ง — ลบโมเดลที่ไม่ใช้งานในการตั้งค่าเพื่อเพิ่มพื้นที่",
   "activity.inference_completed": "การอนุมานเสร็จสิ้น: {model}",

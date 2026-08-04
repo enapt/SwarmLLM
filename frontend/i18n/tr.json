@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "İndirme tamamlandı: {model}",
   "activity.hf_download_failed": "İndirme başarısız: {detail}",
   "activity.hf_download_stalled": "{model} HuggingFace indirmesi takıldı — iptal edildi",
+  "activity.hf_probe_started": "İndirmeden önce {model} HuggingFace üzerinde denetleniyor",
   "activity.hf_source_discovered": "{model} için HuggingFace kaynağı keşfedildi",
   "activity.hf_sources_cap_reached": "Keşfedilen model kataloğu dolu ({count}). Eşlerden gelen yeni modeller atılıyor — yer açmak için Ayarlar'dan kullanılmayan modelleri kaldırın.",
   "activity.inference_completed": "Çıkarım tamamlandı: {model}",

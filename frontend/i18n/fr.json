@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "Téléchargement terminé : {model}",
   "activity.hf_download_failed": "Téléchargement échoué : {detail}",
   "activity.hf_download_stalled": "Téléchargement de {model} depuis HuggingFace bloqué — abandonné",
+  "activity.hf_probe_started": "Vérification de {model} sur HuggingFace avant le téléchargement",
   "activity.hf_source_discovered": "Source HF découverte pour {model}",
   "activity.hf_sources_cap_reached": "Le catalogue des modèles découverts est plein ({count}). Les nouveaux modèles des pairs sont ignorés — supprimez des modèles inutilisés dans Paramètres pour libérer de la place.",
   "activity.inference_completed": "Inférence terminée : {model}",

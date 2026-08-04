@@ -24,6 +24,7 @@
   "activity.hf_download_complete": "Pobieranie zakończone: {model}",
   "activity.hf_download_failed": "Pobieranie nie powiodło się: {detail}",
   "activity.hf_download_stalled": "Pobieranie {model} z HuggingFace zawiesiło się — przerwano",
+  "activity.hf_probe_started": "Sprawdzanie {model} w HuggingFace przed pobraniem",
   "activity.hf_source_discovered": "Odkryto źródło HF dla {model}",
   "activity.hf_sources_cap_reached": "Katalog wykrytych modeli jest pełny ({count}). Nowe modele od rówieśników są odrzucane — usuń nieużywane modele w Ustawieniach, aby zwolnić miejsce.",
   "activity.inference_completed": "Wnioskowanie zakończone: {model}",
