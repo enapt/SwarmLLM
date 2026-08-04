@@ -4737,10 +4737,23 @@ per-`NodeId` equivalent for rr sends would fit the same pattern.
 **CONFIRMED 2026-08-04, and it argues AGAINST building this as specified.**
 There is failure traffic to look at — 22 `OutboundFailure`s in 90 minutes on the
 Proxmox node — but **every one of them is to a single peer, the WSL node**, and
-that pair has a known environmental asymmetry: WSL2 mirrored networking blocks
-inbound connections, so Proxmox cannot dial it and reaches it outbound/relayed
-only. Those failures are a **transport direction problem, not an unhealthy
-peer**. A send-side backoff keyed on `OutboundFailure` would demote a peer whose
+that pair has an environmental asymmetry: Proxmox cannot open a connection TO
+the WSL node, so it depends on the connection the WSL node dialled out. Those
+failures are a **transport direction problem, not an unhealthy peer**.
+
+**The cause is the Windows host firewall, not WSL2** — an earlier version of this
+paragraph said mirrored networking "blocks inbound connections", which is
+backwards. Mirrored mode makes the WSL node a **first-class LAN citizen**: it
+holds `192.168.1.53` on the same subnet as the Proxmox node and correctly
+advertises `/ip4/192.168.1.53/tcp/8810` and `/udp/8800/quic-v1`. Nothing about
+the addressing is wrong. Measured 2026-08-04: a TCP connect from Proxmox to
+`192.168.1.53:8810` and `:8800` fails, and the Windows firewall is enabled on all
+three profiles with **no inbound rule for either port**. So this is a fixable
+host configuration, not a property of WSL — see the environment note.
+
+That matters for this entry twice over: the one "unhealthy peer" available to
+test against is not unhealthy, and it is not even a transport limitation — it is
+an unopened port. A send-side backoff keyed on `OutboundFailure` would demote a peer whose
 compute is fine and which is reachable by other routes — treating the symptom
 and making the pair worse.
 
