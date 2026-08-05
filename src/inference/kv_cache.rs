@@ -452,6 +452,7 @@ impl KvCacheManager {
                     },
                     last_accessed: last_accessed_system,
                     ttl_secs: self.ttl.as_secs(),
+                    built_by: current_build_stamp(),
                 };
 
                 db.put_json("kv_sessions", user_session_id, &persisted)?;
@@ -473,7 +474,24 @@ impl KvCacheManager {
         let now = SystemTime::now();
         let mut restored = 0;
 
+        let stamp = current_build_stamp();
         for persisted in entries {
+            // Resume positions are only meaningful to the build that counted
+            // them — see `PersistedSession::built_by`.
+            if persisted.built_by != stamp {
+                tracing::info!(
+                    user_session_id = %persisted.user_session_id,
+                    saved_by = %if persisted.built_by.is_empty() {
+                        "an earlier version"
+                    } else {
+                        persisted.built_by.as_str()
+                    },
+                    "Discarding a conversation saved by a different version — \
+                     it will be re-read from the start rather than resumed"
+                );
+                continue;
+            }
+
             // A record stamped ahead of our clock is the freshest thing we
             // have, not the oldest, so a failed `duration_since` means zero
             // elapsed. `SystemTime` is not monotonic — an NTP step, a resume
@@ -547,6 +565,26 @@ pub struct PersistedSession {
     pub last_accessed: SystemTime,
     /// The TTL in seconds that was in effect when the session was saved.
     pub ttl_secs: u64,
+    /// The build that produced `cached_tokens`.
+    ///
+    /// `cached_tokens` is a token COUNT, used directly as the position to
+    /// resume generation from, and there is no way to check it against the
+    /// text in `cached_prompt` without re-running the tokenizer that produced
+    /// it. So a release that changes tokenization or prompt construction makes
+    /// every persisted count silently wrong — and an auto-update restart
+    /// inside the session TTL is exactly when that gets read back.
+    ///
+    /// Comparing the build is deliberately blunt: resuming a conversation is
+    /// an optimisation, and re-processing a prompt costs a moment, while
+    /// resuming at the wrong position corrupts the answer. A record written
+    /// before this field existed deserializes as empty and is discarded.
+    #[serde(default)]
+    pub built_by: String,
+}
+
+/// The value stamped into [`PersistedSession::built_by`].
+fn current_build_stamp() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// Result of pipeline validation for a KV-cache session.
@@ -903,6 +941,7 @@ mod tests {
             cached_prompt: "Hello".to_string(),
             last_accessed: SystemTime::now() - Duration::from_secs(3600),
             ttl_secs: 60,
+            built_by: current_build_stamp(),
         };
         db.put_json("kv_sessions", "user-sess-1", &expired).unwrap();
 
@@ -933,12 +972,66 @@ mod tests {
             cached_prompt: "Hello".to_string(),
             last_accessed: SystemTime::now() - Duration::from_secs(5),
             ttl_secs: 3600,
+            built_by: current_build_stamp(),
         };
         db.put_json("kv_sessions", "user-sess-2", &fresh).unwrap();
 
         let mut mgr = KvCacheManager::new(Duration::from_secs(600));
         assert_eq!(mgr.restore_from_db(&db).unwrap(), 1);
         assert_eq!(mgr.active_sessions(), 1);
+    }
+
+    /// `cached_tokens` is a token COUNT used directly as the position to resume
+    /// generation from, and nothing can check it against `cached_prompt`
+    /// without re-running the tokenizer that produced it. A release that
+    /// changes tokenization or prompt construction therefore makes every
+    /// persisted count wrong — and an auto-update restart inside the session
+    /// TTL is exactly when those get read back.
+    ///
+    /// v0.3.77 changed both at once (Llama-3 tokenisation roughly halved, and
+    /// the system message stopped being rendered twice), which would have had a
+    /// resumed conversation restart from a position around twice too far in.
+    #[test]
+    fn a_session_saved_by_another_build_is_not_resumed() {
+        let db = Database::open_temp().unwrap();
+        let id = uuid::Uuid::new_v4();
+
+        let mut stale = PersistedSession {
+            user_session_id: "from-an-older-build".to_string(),
+            internal_id: id,
+            pipeline: make_pipeline(id),
+            cached_tokens: 120, // counted by a tokenizer we no longer use
+            cache_holders: vec![],
+            cached_prompt: "Hello".to_string(),
+            last_accessed: SystemTime::now(),
+            ttl_secs: 3600,
+            built_by: "0.0.1-something-else".to_string(),
+        };
+        db.put_json("kv_sessions", "from-an-older-build", &stale)
+            .unwrap();
+
+        let mut mgr = KvCacheManager::new(Duration::from_secs(600));
+        assert_eq!(
+            mgr.restore_from_db(&db).unwrap(),
+            0,
+            "a count from a different build must not become a resume position"
+        );
+
+        // A record written before the stamp existed deserializes as empty and
+        // is treated the same way.
+        stale.built_by = String::new();
+        db.put_json("kv_sessions", "from-an-older-build", &stale)
+            .unwrap();
+        let mut mgr = KvCacheManager::new(Duration::from_secs(600));
+        assert_eq!(mgr.restore_from_db(&db).unwrap(), 0);
+
+        // Same record from THIS build still restores — otherwise this test
+        // would pass with restore broken entirely.
+        stale.built_by = current_build_stamp();
+        db.put_json("kv_sessions", "from-an-older-build", &stale)
+            .unwrap();
+        let mut mgr = KvCacheManager::new(Duration::from_secs(600));
+        assert_eq!(mgr.restore_from_db(&db).unwrap(), 1);
     }
 
     #[test]
@@ -965,6 +1058,7 @@ mod tests {
             cached_prompt: "Hello".to_string(),
             last_accessed: SystemTime::now() + Duration::from_secs(30),
             ttl_secs: 600,
+            built_by: current_build_stamp(),
         };
         db.put_json("kv_sessions", "user-sess-future", &future)
             .unwrap();

@@ -57,6 +57,17 @@ All notable changes to SwarmLLM are documented here.
   With these fixed, the prompt SwarmLLM builds for Llama 3 is now identical,
   character for character, to the one the reference implementation produces.
 
+- **A conversation resumed after an update could restart mid-sentence.** When a
+  node restarts, conversations still within their ten-minute window are resumed
+  where they left off, using a saved count of how many words had been read so
+  far. That count only means anything to the version that made it — and this
+  release changes how words are counted. A node auto-updating in the middle of a
+  conversation would have resumed from roughly twice as far in as it should.
+
+  Saved conversations now record which version wrote them and are re-read from
+  the start if that does not match. Re-reading costs a moment; resuming in the
+  wrong place produces a wrong answer.
+
 - **Qwen models were given number tokens they were not trained on.** The rule
   used for Qwen grouped digits up to three at a time; Qwen models expect one
   digit at a time.
