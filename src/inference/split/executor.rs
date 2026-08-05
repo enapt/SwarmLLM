@@ -291,30 +291,7 @@ impl SplitModel {
         // Determine the hidden state to start from
         let mut layer_in = if is_first && !skip_embedding {
             // First segment: input is token IDs → apply embedding
-            let mut emb = self
-                .tok_embeddings
-                .as_ref()
-                .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
-                .forward(&input)
-                .map_err(|e| SwarmError::Internal(format!("Embedding forward failed: {e}")))?;
-            // The table is resident at `EMBEDDING_DTYPE` (f16) to keep a
-            // large-vocabulary model within a modest GPU's memory, but every
-            // layer downstream works in f32. Widen the LOOKUP RESULT rather
-            // than the table: this tensor is [batch, seq, hidden], so the cast
-            // costs a few KB per decode step instead of gigabytes of residency.
-            if emb.dtype() != candle_core::DType::F32 {
-                emb = emb
-                    .to_dtype(candle_core::DType::F32)
-                    .map_err(|e| SwarmError::Internal(format!("Embedding cast failed: {e}")))?;
-            }
-            // Gemma models scale embeddings by sqrt(hidden_dim)
-            if self.arch.use_gemma_norm() {
-                let scale = (self.hidden_dim as f64).sqrt();
-                emb = emb
-                    .affine(scale, 0.0)
-                    .map_err(|e| SwarmError::Internal(format!("Embedding scale failed: {e}")))?;
-            }
-            emb
+            self.embed_tokens(&input)?
         } else {
             // Non-first segment or pre-embedded: input is already hidden states
             input
@@ -806,6 +783,45 @@ impl SplitModel {
     /// Returns one output tensor per request in the same order as `items`.
     /// Falls back to sequential `forward()` when the batch is heterogeneous
     /// (mixed seq_lens or differing index_pos for seq_len > 1).
+    /// Embed tokens into the hidden state every downstream layer expects.
+    ///
+    /// **Both the single-item and batched forward paths must go through this.**
+    /// The embedding table is resident at `EMBEDDING_DTYPE` (f16) to keep a
+    /// large-vocabulary model inside a modest GPU, while every layer downstream
+    /// works in f32 — so the LOOKUP RESULT has to be widened. `forward_batch`
+    /// did the lookup and the Gemma scale but not the cast, so as soon as two
+    /// requests arrived together the f16 tensor reached the first norm and the
+    /// whole batch failed with `attn_norm: unsupported dtype for rmsnorm F16`.
+    ///
+    /// Measured 2026-08-05 on a CPU-only node running the released binary: one
+    /// request succeeded, two concurrent requests both returned 500, and a
+    /// single request succeeded again immediately after. Every request on that
+    /// node failed for as long as a second one overlapped it.
+    ///
+    /// Widening the result rather than the table costs a few KB per step
+    /// instead of gigabytes of residency.
+    fn embed_tokens(&self, input: &Tensor) -> Result<Tensor, SwarmError> {
+        let mut emb = self
+            .tok_embeddings
+            .as_ref()
+            .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
+            .forward(input)
+            .map_err(|e| SwarmError::Internal(format!("Embedding forward failed: {e}")))?;
+        if emb.dtype() != candle_core::DType::F32 {
+            emb = emb
+                .to_dtype(candle_core::DType::F32)
+                .map_err(|e| SwarmError::Internal(format!("Embedding cast failed: {e}")))?;
+        }
+        // Gemma models scale embeddings by sqrt(hidden_dim).
+        if self.arch.use_gemma_norm() {
+            let scale = (self.hidden_dim as f64).sqrt();
+            emb = emb
+                .affine(scale, 0.0)
+                .map_err(|e| SwarmError::Internal(format!("Embedding scale failed: {e}")))?;
+        }
+        Ok(emb)
+    }
+
     pub fn forward_batch(
         &mut self,
         items: &[BatchItem<'_>],
@@ -833,20 +849,7 @@ impl SplitModel {
                 .to_device(&self.device)
                 .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
             let hidden = if is_first {
-                let mut emb = self
-                    .tok_embeddings
-                    .as_ref()
-                    .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
-                    .forward(&input)
-                    .map_err(|e| SwarmError::Internal(format!("Embedding: {e}")))?;
-                // Apply Gemma embedding scale (sqrt(hidden_dim)) — matches forward_inner_impl
-                if self.arch.use_gemma_norm() {
-                    let scale = (self.hidden_dim as f64).sqrt();
-                    emb = emb
-                        .affine(scale, 0.0)
-                        .map_err(|e| SwarmError::Internal(format!("Gemma scale: {e}")))?;
-                }
-                emb
+                self.embed_tokens(&input)?
             } else {
                 input
             };

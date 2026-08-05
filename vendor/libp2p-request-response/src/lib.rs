@@ -739,7 +739,34 @@ where
             .map(|p: usize| connections.remove(p))
             .expect("Expected connection to be established before closing.");
 
-        debug_assert_eq!(connections.is_empty(), remaining_established == 0);
+        // SwarmLLM patch: trust `remaining_established` and clean up, rather
+        // than asserting the two views agree.
+        //
+        // Upstream asserts this bookkeeping matches the swarm's. Observed
+        // diverging once on 2026-08-05 (debug build, during a burst of four
+        // concurrent requests immediately after `PEX: dialed new peers
+        // count=4`): the swarm reported no connections remaining while this
+        // behaviour still held entries. The `debug_assert` then panicked a
+        // tokio worker and the supervisor took the whole daemon down.
+        //
+        // Release builds compile the assertion out, so users never saw the
+        // panic — but they got the silent half of the same bug: the `if` below
+        // was false, so the peer's entry was never removed, leaving a record of
+        // connections that no longer exist. That can only mislead a later send.
+        //
+        // `remaining_established` comes from the swarm, which is the authority
+        // on what is actually open, so it wins. Kept as a warning rather than
+        // dropped in silence: the divergence itself is worth knowing about, and
+        // one observation is not enough to say what causes it.
+        if remaining_established == 0 && !connections.is_empty() {
+            tracing::warn!(
+                %peer_id,
+                stale = connections.len(),
+                "request_response: swarm reports no connections left but this \
+                 behaviour still held some — dropping the stale entries"
+            );
+            connections.clear();
+        }
         if connections.is_empty() {
             self.connected.remove(&peer_id);
         }

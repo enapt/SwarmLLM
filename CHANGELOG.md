@@ -6,6 +6,16 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Two requests at the same time no longer fail on a computer without a
+  graphics card.** Any node running on the processor alone returned an error for
+  every request as soon as two arrived together — one at a time worked, two
+  overlapping failed both. That covers most home machines, and it also meant a
+  node could not serve a second person while already busy.
+
+  Reproduced on a processor-only machine running the released build: one request
+  succeeded, two concurrent ones both failed, and a single request succeeded
+  again straight after. Four at once now all succeed.
+
 - **Options this server cannot honour are now refused instead of ignored.** Two
   settings in the OpenAI-compatible API were accepted and then quietly did
   nothing: asking for several alternative replies returned one, and asking to
