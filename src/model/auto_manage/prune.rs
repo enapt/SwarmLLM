@@ -575,6 +575,58 @@ impl AutoShardManager {
             }
         }
 
+        // Say something when the node is over its disk budget and cannot do
+        // anything about it.
+        //
+        // Refusing to prune here is correct — every candidate was rejected
+        // because removing it would drop a shard below the swarm's replica
+        // target, and a local disk preference is not worth under-replicating
+        // the network. But nothing said so, so a user who lowered
+        // `max_disk_mb` after downloading saw their setting exceeded
+        // indefinitely with no explanation, which reads exactly like a setting
+        // that does not work (see gotcha #236 for how that feels from outside).
+        //
+        // Rate-limited to the urgent case so a node sitting slightly over
+        // budget does not repeat this every tick.
+        // How long between repeats of the over-budget warning. The condition
+        // does not clear on its own, so this is a rate limit, not a debounce.
+        const OVER_BUDGET_WARNING_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+        let should_warn_over_budget = pressure_urgent
+            && prune_candidates.is_empty()
+            && match self.last_over_budget_warning.lock() {
+                Ok(mut last) => {
+                    let now = std::time::Instant::now();
+                    let due = last
+                        .map(|t| now.duration_since(t) >= OVER_BUDGET_WARNING_EVERY)
+                        .unwrap_or(true);
+                    if due {
+                        *last = Some(now);
+                    }
+                    due
+                }
+                // Contention here is not a reason to spam; stay quiet.
+                Err(_) => false,
+            };
+        if should_warn_over_budget {
+            tracing::warn!(
+                resource_pressure = format!("{resource_pressure:.2}"),
+                "Storage is over the configured budget, but nothing can be removed without \
+                 dropping a model below the number of copies the network needs. Raise \
+                 max_disk_mb, or delete a model yourself to choose which one goes."
+            );
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "model",
+                    "storage_over_budget",
+                    "Storage is over your configured limit, but nothing can be removed \
+                     without leaving the network short of a model. Raise the limit or \
+                     remove a model yourself."
+                        .to_string(),
+                )
+                .with_toast("warning", 10000),
+            );
+        }
+
         // Sort by score descending (most prunable first)
         prune_candidates.sort_by(|a, b| {
             b.score

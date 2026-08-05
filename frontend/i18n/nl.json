@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "Een modeldeel haalde de integriteitscontrole niet — wordt automatisch opnieuw gedownload",
   "activity.shard_verified": "Shards geverifieerd",
   "activity.shard_write_failed": "Shard naar schijf schrijven mislukt",
+  "activity.storage_over_budget": "De opslag overschrijdt je ingestelde limiet, maar er kan niets worden verwijderd zonder het netwerk een model te ontnemen. Verhoog de limiet of verwijder zelf een model.",
   "activity.upnp_mapped": "Je router heeft een openbaar adres geopend ({detail}) — dit knooppunt is nu bereikbaar via internet.",
   "activity.vram_soft_unload": "Weinig GPU-geheugen: {model} teruggebracht naar {count} delen om ruimte te maken",
   "browse.action_download": "Downloaden",

@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "Część modelu nie przeszła sprawdzenia integralności — automatycznie pobieram ją ponownie",
   "activity.shard_verified": "Shardy zweryfikowane",
   "activity.shard_write_failed": "Nie udało się zapisać sharda na dysk",
+  "activity.storage_over_budget": "Zajęte miejsce przekracza ustawiony limit, ale nic nie da się usunąć bez pozbawienia sieci kopii modelu. Zwiększ limit lub sam usuń model.",
   "activity.upnp_mapped": "Router otworzył adres publiczny ({detail}) — ten węzeł jest teraz osiągalny z internetu.",
   "activity.vram_soft_unload": "Mało pamięci GPU: zmniejszono {model} do {count} części, aby zwolnić miejsce",
   "browse.action_download": "Pobierz",

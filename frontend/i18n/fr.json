@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "Une partie du modèle a échoué au contrôle d'intégrité — nouveau téléchargement automatique",
   "activity.shard_verified": "Fragments vérifiés",
   "activity.shard_write_failed": "Échec de l'écriture du fragment sur le disque",
+  "activity.storage_over_budget": "Le stockage dépasse la limite que vous avez définie, mais rien ne peut être supprimé sans priver le réseau d'un modèle. Augmentez la limite ou supprimez un modèle vous-même.",
   "activity.upnp_mapped": "Votre routeur a ouvert une adresse publique ({detail}) — ce nœud est désormais accessible depuis Internet.",
   "activity.vram_soft_unload": "Mémoire GPU faible : {model} réduit à {count} parties pour libérer de l'espace",
   "browse.action_download": "Télécharger",

@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "A model part failed its integrity check — re-downloading automatically",
   "activity.shard_verified": "Verified shards",
   "activity.shard_write_failed": "Failed to write shard to disk",
+  "activity.storage_over_budget": "Storage is over your configured limit, but nothing can be removed without leaving the network short of a model. Raise the limit or remove a model yourself.",
   "activity.upnp_mapped": "Your router opened a public address ({detail}) — this node is now reachable across the internet.",
   "activity.vram_soft_unload": "Low GPU memory: reduced {model} to {count} parts to free up space",
   "browse.action_download": "Download",

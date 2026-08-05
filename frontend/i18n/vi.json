@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "Một phần của mô hình không qua được kiểm tra toàn vẹn — tự động tải lại",
   "activity.shard_verified": "Đã xác minh mảnh",
   "activity.shard_write_failed": "Không thể ghi mảnh xuống đĩa",
+  "activity.storage_over_budget": "Dung lượng đã vượt giới hạn bạn đặt, nhưng không thể xoá gì mà không khiến mạng lưới thiếu bản sao của một mô hình. Hãy tăng giới hạn hoặc tự xoá một mô hình.",
   "activity.upnp_mapped": "Bộ định tuyến của bạn đã mở một địa chỉ công khai ({detail}) — nút này giờ có thể truy cập được từ internet.",
   "activity.vram_soft_unload": "Bộ nhớ GPU thấp: đã giảm {model} xuống {count} phần để giải phóng dung lượng",
   "browse.action_download": "Tải về",

@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "En modelldel klarade inte integritetskontrollen — laddas automatiskt om",
   "activity.shard_verified": "Shards verifierade",
   "activity.shard_write_failed": "Kunde inte skriva shard till disk",
+  "activity.storage_over_budget": "Lagringen överskrider din inställda gräns, men inget kan tas bort utan att nätverket blir utan en kopia av en modell. Höj gränsen eller ta bort en modell själv.",
   "activity.upnp_mapped": "Din router öppnade en offentlig adress ({detail}) — den här noden är nu nåbar via internet.",
   "activity.vram_soft_unload": "Lite GPU-minne: minskade {model} till {count} delar för att frigöra utrymme",
   "browse.action_download": "Ladda ner",

@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "Část modelu neprošla kontrolou integrity — automaticky se stahuje znovu",
   "activity.shard_verified": "Fragmenty ověřeny",
   "activity.shard_write_failed": "Zápis fragmentu na disk selhal",
+  "activity.storage_over_budget": "Úložiště překračuje nastavený limit, ale nelze nic odstranit, aniž by síť přišla o kopii některého modelu. Zvyšte limit nebo model odstraňte sami.",
   "activity.upnp_mapped": "Váš router otevřel veřejnou adresu ({detail}) — tento uzel je nyní dostupný z internetu.",
   "activity.vram_soft_unload": "Málo paměti GPU: model {model} byl zmenšen na {count} částí, aby se uvolnilo místo",
   "browse.action_download": "Stáhnout",

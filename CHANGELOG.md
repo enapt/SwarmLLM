@@ -6,6 +6,14 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A node over its storage limit now explains why it cannot shrink.** If you
+  lower the storage limit after models are already downloaded, the node can end
+  up permanently above it — because removing anything would leave the network
+  short of a copy of that model, which it correctly refuses to do. It said
+  nothing at all, so the setting looked broken. It now tells you once, and says
+  what to do: raise the limit, or remove a model yourself so you choose which
+  one goes.
+
 - **Mistyping a model name from HuggingFace now says so.** It reported
   `Provider error: HEAD returned 401 Unauthorized` with a "bad gateway" status,
   which reads as the server being broken and suggests you need to sign in —

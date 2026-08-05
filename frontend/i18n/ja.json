@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "モデルのパーツが整合性チェックに失敗しました — 自動的に再ダウンロードします",
   "activity.shard_verified": "シャードを検証しました",
   "activity.shard_write_failed": "シャードのディスク書き込みに失敗しました",
+  "activity.storage_over_budget": "ストレージが設定した上限を超えていますが、ネットワークからモデルの複製が失われるため何も削除できません。上限を引き上げるか、ご自身でモデルを削除してください。",
   "activity.upnp_mapped": "ルーターが公開アドレス（{detail}）を開きました。このノードはインターネットから到達可能になりました。",
   "activity.vram_soft_unload": "GPU メモリが不足しています：空きを作るため {model} を {count} パーツに減らしました",
   "browse.action_download": "ダウンロード",

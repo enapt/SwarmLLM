@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "某个模型部分未通过完整性校验 — 正在自动重新下载",
   "activity.shard_verified": "已验证分片",
   "activity.shard_write_failed": "无法将分片写入磁盘",
+  "activity.storage_over_budget": "存储已超出你设置的上限，但删除任何内容都会让网络缺少某个模型的副本。请提高上限，或自行删除一个模型。",
   "activity.upnp_mapped": "路由器已开放公网地址（{detail}）——此节点现在可通过互联网访问。",
   "activity.vram_soft_unload": "GPU 内存不足:已将 {model} 缩减为 {count} 个部分以释放空间",
   "browse.action_download": "下载",

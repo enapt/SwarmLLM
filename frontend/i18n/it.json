@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "Una parte del modello non ha superato il controllo di integrità — riscarico automaticamente",
   "activity.shard_verified": "Frammenti verificati",
   "activity.shard_write_failed": "Impossibile scrivere il frammento su disco",
+  "activity.storage_over_budget": "Lo spazio supera il limite impostato, ma non si può rimuovere nulla senza lasciare la rete senza copie sufficienti di un modello. Aumenta il limite o rimuovi tu un modello.",
   "activity.upnp_mapped": "Il tuo router ha aperto un indirizzo pubblico ({detail}) — questo nodo è ora raggiungibile da Internet.",
   "activity.vram_soft_unload": "Memoria GPU bassa: {model} ridotto a {count} parti per liberare spazio",
   "browse.action_download": "Scarica",

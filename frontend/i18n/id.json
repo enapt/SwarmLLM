@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "Bagian model gagal pemeriksaan integritas — diunduh ulang otomatis",
   "activity.shard_verified": "Shard terverifikasi",
   "activity.shard_write_failed": "Gagal menulis shard ke disk",
+  "activity.storage_over_budget": "Penyimpanan melebihi batas yang Anda tetapkan, tetapi tidak ada yang bisa dihapus tanpa membuat jaringan kekurangan salinan sebuah model. Naikkan batasnya atau hapus sendiri sebuah model.",
   "activity.upnp_mapped": "Router Anda membuka alamat publik ({detail}) — node ini kini dapat dijangkau melalui internet.",
   "activity.vram_soft_unload": "Memori GPU rendah: {model} dikurangi jadi {count} bagian untuk membebaskan ruang",
   "browse.action_download": "Unduh",

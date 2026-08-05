@@ -148,6 +148,14 @@ pub struct AutoShardManager {
     notify: Arc<tokio::sync::Notify>,
     /// Semaphore to limit concurrent shard downloads.
     pub(super) download_semaphore: Arc<tokio::sync::Semaphore>,
+    /// When the "over budget, nothing prunable" warning was last emitted.
+    ///
+    /// The condition does not clear on its own — the node stays over budget
+    /// until someone raises the limit or removes a model — so without a rate
+    /// limit it repeats on every evaluation. Two fired within half a second on
+    /// the first run, which is the same log-flooding shape fixed for rr
+    /// failures in v0.3.73.
+    pub(super) last_over_budget_warning: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 /// A candidate shard identified for auto-download.
@@ -194,6 +202,7 @@ impl AutoShardManager {
             shutdown_rx,
             notify,
             download_semaphore,
+            last_over_budget_warning: std::sync::Mutex::new(None),
         }
     }
 

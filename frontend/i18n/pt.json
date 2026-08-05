@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "Uma parte do modelo falhou na verificação de integridade — baixando novamente automaticamente",
   "activity.shard_verified": "Fragmentos verificados",
   "activity.shard_write_failed": "Falha ao gravar fragmento no disco",
+  "activity.storage_over_budget": "O armazenamento excede o limite que definiu, mas nada pode ser removido sem deixar a rede sem cópias suficientes de um modelo. Aumente o limite ou remova um modelo manualmente.",
   "activity.upnp_mapped": "Seu roteador abriu um endereço público ({detail}) — este nó já está acessível pela internet.",
   "activity.vram_soft_unload": "Memória de GPU baixa: {model} reduzido para {count} partes para liberar espaço",
   "browse.action_download": "Baixar",

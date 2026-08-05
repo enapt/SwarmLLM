@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "मॉडल का एक हिस्सा integrity जाँच में फेल हुआ — स्वचालित रूप से दोबारा डाउनलोड किया जा रहा है",
   "activity.shard_verified": "शार्ड सत्यापित",
   "activity.shard_write_failed": "शार्ड डिस्क पर लिखने में विफल",
+  "activity.storage_over_budget": "संग्रहण आपकी तय सीमा से अधिक है, लेकिन कुछ भी हटाने पर नेटवर्क में किसी मॉडल की प्रति कम पड़ जाएगी। सीमा बढ़ाएँ या कोई मॉडल स्वयं हटाएँ।",
   "activity.upnp_mapped": "आपके राउटर ने एक सार्वजनिक पता खोला ({detail}) — यह नोड अब इंटरनेट से पहुँच योग्य है।",
   "activity.vram_soft_unload": "GPU मेमोरी कम है: जगह बनाने के लिए {model} को {count} हिस्सों तक घटाया",
   "browse.action_download": "डाउनलोड",

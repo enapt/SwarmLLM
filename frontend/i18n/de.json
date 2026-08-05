@@ -75,6 +75,7 @@
   "activity.shard_verification_failed": "Ein Modellteil hat die Integritätsprüfung nicht bestanden — wird automatisch erneut heruntergeladen",
   "activity.shard_verified": "Shards verifiziert",
   "activity.shard_write_failed": "Shard konnte nicht auf Datenträger geschrieben werden",
+  "activity.storage_over_budget": "Der Speicher überschreitet Ihr festgelegtes Limit, aber es kann nichts entfernt werden, ohne dem Netzwerk ein Modell zu entziehen. Erhöhen Sie das Limit oder entfernen Sie selbst ein Modell.",
   "activity.upnp_mapped": "Dein Router hat eine öffentliche Adresse geöffnet ({detail}) – dieser Knoten ist jetzt über das Internet erreichbar.",
   "activity.vram_soft_unload": "Wenig GPU-Speicher: {model} auf {count} Teile reduziert, um Platz zu schaffen",
   "browse.action_download": "Herunterladen",
