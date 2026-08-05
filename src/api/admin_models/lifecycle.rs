@@ -25,13 +25,11 @@ pub async fn delete_model(
     // applying the same gate here means a "Delete model" click during an
     // in-flight inference returns 503 instead of yanking shards out from
     // under the running token loop.
-    let in_use = shared.active_pipelines.iter().any(|entry| {
-        entry
-            .value()
-            .segments
-            .iter()
-            .any(|seg| seg.shard_id.model_id == mid)
-    });
+    // `active_pipelines` alone missed the common case — see
+    // `SharedState::model_is_in_use`. Deleting while the local model was
+    // answering returned 200, removed all 8 shard files and killed the worker
+    // mid-reply.
+    let in_use = shared.model_is_in_use(&mid);
     if in_use {
         return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             format!(

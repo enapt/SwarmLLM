@@ -162,15 +162,19 @@ pub async fn delete_shard(
     // active token loop returns 503 instead of yanking the file out from
     // under the in-flight inference (which would surface as a confusing
     // mid-stream error to the client).
-    let in_use = shared.active_pipelines.iter().any(|entry| {
-        entry
-            .value()
-            .segments
-            .iter()
-            // `seg.shard_id` names only the FIRST shard of the segment; a
-            // segment spanning several would leave the others unguarded and let
-            // this delete pull a file out from under a live token loop.
-            .any(|seg| {
+    // Two questions, both of which must be no.
+    //
+    // 1. Is ANY inference running against this model? `active_pipelines` alone
+    //    misses local split replies and peer-served work — see
+    //    `SharedState::model_is_in_use`. Those paths do not name individual
+    //    shards anywhere, so for them the whole model has to be off limits;
+    //    refusing a shard delete during a live reply is the right call.
+    // 2. If a distributed pipeline IS running, does it span THIS shard?
+    //    `seg.shard_id` names only the segment's FIRST shard, so a segment
+    //    covering several would leave the rest unguarded.
+    let in_use = shared.model_is_in_use(&mid)
+        || shared.active_pipelines.iter().any(|entry| {
+            entry.value().segments.iter().any(|seg| {
                 seg.shard_id.model_id == mid
                     && shared
                         .model_registry
@@ -178,7 +182,7 @@ pub async fn delete_shard(
                         .iter()
                         .any(|s| s.index == shard_index)
             })
-    });
+        });
     if in_use {
         return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             format!(

@@ -1904,6 +1904,45 @@ impl SharedState {
     }
 
     /// Check if a complete (all layers covered) split model is loaded.
+    /// Whether any inference is currently running against this model.
+    ///
+    /// **`active_pipelines` alone is not the answer**, and every delete path
+    /// used to ask it on its own. It is the COORDINATOR's map of DISTRIBUTED
+    /// assignments (gotcha #194), so it holds nothing for two very ordinary
+    /// cases: work this node is serving for a peer, and — the common one — a
+    /// reply the local model is producing through the split fast path, which
+    /// bypasses the router entirely.
+    ///
+    /// Measured 2026-08-05: deleting a model from the API while it was
+    /// answering returned `200 files_removed: 8`, took all 8 shard files, and
+    /// killed the worker mid-reply (`Worker reader exiting — evicting`). That
+    /// is precisely the outcome the guard exists to prevent, on the path a
+    /// single-node user is most likely to take: clicking "delete" in the
+    /// dashboard while a chat is still streaming.
+    ///
+    /// `active_traces` is the oracle that actually covers everything, because
+    /// every in-flight request registers one for progress reporting regardless
+    /// of which path serves it. The other two are kept as belt-and-braces: a
+    /// path that somehow skips the trace is still caught.
+    pub fn model_is_in_use(&self, model_id: &crate::types::ModelId) -> bool {
+        if self
+            .active_traces
+            .iter()
+            .any(|e| e.value().model == model_id.0)
+        {
+            return true;
+        }
+        if self.serving_models.contains_key(model_id) {
+            return true;
+        }
+        self.active_pipelines.iter().any(|e| {
+            e.value()
+                .segments
+                .iter()
+                .any(|s| s.shard_id.model_id == *model_id)
+        })
+    }
+
     pub fn has_complete_split_model(&self, model_id: &crate::types::ModelId) -> bool {
         let claimed = self
             .split_models

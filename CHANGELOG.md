@@ -2,6 +2,18 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Deleting a model while it is answering no longer destroys the reply.** The
+  safeguard that is supposed to refuse this only recognised replies being
+  assembled across several machines. A reply your own machine was producing —
+  which is what happens on a single computer, and what the chat page does — was
+  not recognised at all, so pressing delete removed the files out from under it
+  and killed the reply in progress. It now refuses while any reply is running,
+  wherever it is being produced.
+
 ## [0.3.74-alpha] — 2026-08-05
 
 Follows 0.3.73. Mostly things that were wrong for everyone and had simply never
