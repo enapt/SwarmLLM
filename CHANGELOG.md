@@ -2,7 +2,10 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.73-alpha] — 2026-08-05
+
+Follows 0.3.72, which is the release you want the details of — this one finishes
+a single fix from it that a six-hour measurement showed was only half applied.
 
 ### Fixed
 
