@@ -17,10 +17,11 @@ only half applied.
   text was shown to you as the model's answer. Measured on llama-3.2-3b: one run
   in three.
 
-  A mismatched closing bracket is now repaired. Only brackets are ever added —
-  nothing about the tool's name or its arguments is guessed at, so a garbled
-  reply still shows as text rather than turning into a tool call that looks fine
-  but does the wrong thing. Genuinely cut-off replies are still left as text.
+  Two versions of this were seen live — the wrong kind of closing bracket, and
+  one missing off the end — and both are now repaired. Only brackets are ever
+  added. Nothing about the tool's name or its arguments is guessed at, so a reply
+  that was genuinely cut off part-way through a value still shows as text rather
+  than becoming a tool call that looks fine and does the wrong thing.
 
 ### Fixed
 

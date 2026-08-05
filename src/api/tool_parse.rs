@@ -258,7 +258,75 @@ fn parse_embedded_json(text: &str) -> Option<Value> {
             _ => {}
         }
     }
-    None
+    // Never reached brace depth 0 — the generation stopped before closing up.
+    // If the ONLY thing missing is closing delimiters, completing them invents
+    // nothing, so the call is recoverable; anything else stays text.
+    close_open_delimiters(text.get(start..)?).and_then(|fixed| serde_json::from_str(&fixed).ok())
+}
+
+/// Complete a candidate that ends with delimiters still open, e.g. a model that
+/// stopped one `}` short of finishing.
+///
+/// Observed live on llama-3.2-3b alongside the mismatched-closer case, and it is
+/// the same defect from the user's side — a complete, correct tool call shown as
+/// raw text because of one absent character:
+///
+/// ```text
+/// {"tool_calls": [{"id": …, "function": {"name": "get_weather",
+///                  "arguments": {"city": "Paris"}}}]
+///                                                  ^ missing final }
+/// ```
+///
+/// **This is NOT general truncation repair.** It refuses anything where the cut
+/// landed mid-value, because completing THOSE would fabricate an argument the
+/// model never finished saying — a tool call that parses cleanly and does the
+/// wrong thing, which is worse than the leak. Specifically it refuses when the
+/// text ends inside a string literal, or on a dangling `,` or `:`.
+fn close_open_delimiters(slice: &str) -> Option<String> {
+    /// Same near-miss budget as [`repair_unbalanced_close`].
+    const MAX_CLOSERS: usize = 4;
+    let mut stack: Vec<u8> = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for &b in slice.as_bytes() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match b {
+            b'\\' if in_string => escaped = true,
+            b'"' => in_string = !in_string,
+            b'{' | b'[' if !in_string => stack.push(b),
+            b'}' if !in_string => {
+                if stack.last() != Some(&b'{') {
+                    return None;
+                }
+                stack.pop();
+            }
+            b']' if !in_string => {
+                if stack.last() != Some(&b'[') {
+                    return None;
+                }
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    // Cut mid-string: the next characters were part of a value we do not have.
+    if in_string || stack.is_empty() || stack.len() > MAX_CLOSERS {
+        return None;
+    }
+    // Cut immediately after a separator: a key or value was about to follow.
+    match slice.trim_end().chars().last()? {
+        ',' | ':' => return None,
+        _ => {}
+    }
+    let mut out = String::with_capacity(slice.len() + stack.len());
+    out.push_str(slice.trim_end());
+    for open in stack.iter().rev() {
+        out.push(if *open == b'[' { ']' } else { '}' });
+    }
+    Some(out)
 }
 
 /// Rewrite a JSON candidate whose closers are the wrong KIND, e.g. `}` used to
@@ -543,15 +611,37 @@ mod tests {
         assert!(parse_tool_calls("I would use {the tool} if I could.").is_none());
     }
 
-    /// Truncation stays text by design — a cut-off generation is not a near
-    /// miss, and completing it would be guessing at arguments the model never
-    /// produced.
+    /// **The other string a live model produced**: the array closes correctly
+    /// but the final `}` never arrives. Everything semantic is present, so
+    /// completing the delimiter invents nothing.
     #[test]
-    fn a_truncated_generation_is_not_repaired() {
-        // Nothing is ever closed: no balanced object exists at all.
+    fn a_call_missing_only_its_final_brace_is_recovered() {
+        let observed = r#"{"tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]"#;
+        let calls = parse_tool_calls(observed).expect("should recover the call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert!(calls[0].arguments.contains("Paris"));
+    }
+
+    /// A cut that landed MID-VALUE must stay text. Completing it would fabricate
+    /// an argument the model never finished saying — a call that parses cleanly
+    /// and does the wrong thing, which is worse than showing the raw text.
+    #[test]
+    fn a_cut_inside_a_value_is_never_completed() {
+        // Ends inside the city string: "Par… could have been Paris or Parma.
+        assert!(parse_tool_calls(
+            r#"{"tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Par"#
+        )
+        .is_none());
+        // Ends on a dangling separator: a value was about to follow.
+        assert!(parse_tool_calls(
+            r#"{"tool_calls": [{"function": {"name": "get_weather", "arguments": {"city":"#
+        )
+        .is_none());
+        // Ends before the name is known at all.
         assert!(
-            parse_tool_calls(r#"{"tool_calls": [{"function": {"name": "get_weather", "arg"#)
-                .is_none()
+            parse_tool_calls(r#"{"tool_calls": [{"function": {"nam"#).is_none(),
+            "a call with no recoverable name must not be invented"
         );
     }
 
