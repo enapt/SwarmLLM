@@ -6153,3 +6153,67 @@ even once, `peer_speed` sizes its budget and the ceiling stops applying. This
 bites new nodes and peers that advertise but never serve — which is also the
 population the routing ratchet (documented above) is about, and the two are
 probably worth designing together.
+
+## Continuous batching gives no aggregate throughput gain (2026-08-06) — MEASURED, NOT DIAGNOSED
+
+On the RTX 3070 Laptop (8 GB, WSL2) with `llama-3.2-3b-instruct-q4-k-m`, running
+N concurrent chat completions (60 tokens each, identical prompt lengths):
+
+| concurrency | aggregate tok/s (median of 3) | GPU memory |
+|---|---|---|
+| 1 | 31.6 | 4247 MiB |
+| 4 | 23.5 | 7031 MiB |
+| 8 | 22.3 | 7871 MiB |
+
+**Serving four requests at once produces less total throughput than serving
+one.** Batching is supposed to amortise the weight reads that dominate decode,
+so aggregate throughput should climb steeply with concurrency and it does not
+climb at all. Memory meanwhile reaches 96% of the card.
+
+A run with `inference.max_concurrent_decode_batch = 4` measured *better* than the
+default of 8 (c=4 ≈ 35 tok/s, c=8 ≈ 29, four trials each, spread 1.2-1.3x), but
+that was a separate run and the two are not directly comparable — see below.
+
+### What is NOT established, and a warning about measuring this
+
+An earlier pass on the same machine appeared to show a sharp cliff: throughput
+collapsing at c=6 exactly as memory saturated, with two identical c=8 trials
+taking 25.13s and 47.68s. That looked like a clean memory-pressure story, and
+the admission path supports it — `SlotTable::can_admit` checks only the slot
+count and the layer range, with **no memory accounting of any kind**, and
+`batch_generate_max_slots` is a fixed 8.
+
+**The cliff did not survive a controlled re-measurement.** It was taken while
+`cargo build` jobs and node restarts were running on the same machine. With the
+system quiet and three or four trials per point, the spread drops to 1.2-1.3x
+and there is no cliff — just a flat, disappointing curve. Capping slots to 4 also
+did not reduce peak memory (still ~7870 MiB), which the per-slot-KV explanation
+predicts it should.
+
+So: the flat curve is real and reproducible. The cliff was an artifact, and no
+cause for the flat curve has been established. Anyone picking this up:
+
+- **Measure on a quiet machine.** Nothing else compiling, no other daemon
+  starting. This laptop under WSL2 shares the GPU with the desktop compositor.
+- **Discard the first trial at each concurrency level** — it is consistently an
+  outlier (11.3 vs 29.9/23.5 at c=4; 9.2 vs 23.8/22.3 at c=8), which itself is
+  worth explaining and may be the first allocation of each new slot.
+- **Do not assume the memory story.** It is the obvious explanation, it has a
+  supporting code path, and the one discriminating test run so far did not
+  support it.
+
+### Where to look
+
+- `SlotTable::can_admit` (`src/inference/slot_table.rs`) — count and layer range
+  only; sizing slots by available VRAM is the obvious improvement IF memory
+  turns out to matter, but that is exactly what is unestablished.
+- `SplitModel::forward_batch` (`src/inference/split/executor.rs`) — falls back to
+  **sequential per-item forwards** unless every item shares `(seq_len,
+  index_pos)`. Concurrent requests diverge in `index_pos` as soon as they start
+  at different times, so the batched path may rarely run at all. This is the
+  first thing to instrument: count how often the homogeneity check passes in a
+  real concurrent workload. If it almost never passes, the flat curve is fully
+  explained and the fix is a batched forward that handles ragged positions.
+- The router's own `max_batch_size` defaults to 1 ("no batching, sequential,
+  backward-compatible"); the worker's slot table is the live mechanism. Two
+  batching layers with different defaults is itself worth a look.
