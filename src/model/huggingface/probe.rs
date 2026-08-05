@@ -39,6 +39,18 @@ where
     Err(last_err.unwrap_or_else(|| "exhausted retries".into()))
 }
 
+/// True when a probe failure is something the person asking can correct — a
+/// wrong repo name, a wrong filename, a private repo needing a token — rather
+/// than HuggingFace being unavailable.
+///
+/// Used to choose the HTTP status. Reporting a mistyped model name as `502 Bad
+/// Gateway` tells someone the server is broken when the thing to fix is their
+/// spelling.
+pub fn probe_failure_is_user_fixable(message: &str) -> bool {
+    message.contains("could not be read. Either the name is wrong")
+        || message.contains("has no file named")
+}
+
 pub async fn probe_gguf_file(
     repo_id: &str,
     filename: &str,
@@ -58,7 +70,28 @@ pub async fn probe_gguf_file(
         if !status.is_success() {
             // 5xx / 429 are transient; 4xx (other than 429) are permanent.
             let transient = status.is_server_error() || status.as_u16() == 429;
-            return Err((format!("HEAD returned {status}"), transient));
+            // Say what actually happened, in the words of someone adding a
+            // model rather than the words of the HTTP layer.
+            //
+            // HuggingFace answers 401 for a repo that does not exist as well as
+            // for one that is private — deliberately, so a probe cannot be used
+            // to discover which private repos exist. Passing "401 Unauthorized"
+            // straight through therefore tells someone who simply mistyped a
+            // name that they need credentials, which is the wrong thing to go
+            // and fix. Name both possibilities instead.
+            let msg = match status.as_u16() {
+                401 | 403 => format!(
+                    "{repo_id} could not be read. Either the name is wrong, or the repository is private and needs an access token — HuggingFace answers the same way for both, so check the name first."
+                ),
+                404 => format!("{repo_id} has no file named {filename}."),
+                429 => "HuggingFace is rate-limiting this node; it will retry shortly."
+                    .to_string(),
+                _ if status.is_server_error() => {
+                    format!("HuggingFace returned an error ({status}); it will retry shortly.")
+                }
+                _ => format!("HuggingFace refused the request for {filename} ({status})."),
+            };
+            return Err((msg, transient));
         }
         let total_size = head_resp
             .headers()

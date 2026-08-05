@@ -6,6 +6,14 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Mistyping a model name from HuggingFace now says so.** It reported
+  `Provider error: HEAD returned 401 Unauthorized` with a "bad gateway" status,
+  which reads as the server being broken and suggests you need to sign in —
+  when usually the name is just wrong. HuggingFace answers identically for a
+  repository that does not exist and one that is private, so the message now
+  names both possibilities and tells you to check the spelling first. A wrong
+  filename in a real repository says exactly that.
+
 - **Requests to an address this server does not have now explain themselves.**
   They returned an empty response with no explanation at all. Anything asking for
   the older-style completions address — which a lot of existing software still

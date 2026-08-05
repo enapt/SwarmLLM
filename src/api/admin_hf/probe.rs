@@ -77,6 +77,11 @@ pub async fn hf_probe(
                 "network_replicas": network_replicas,
             })))
         }
+        // A wrong name is the caller's to fix, not a gateway failure. Reporting
+        // it as 502 says "this server is broken" about a typo.
+        Err(e) if crate::model::huggingface::probe_failure_is_user_fixable(&e) => Err(ApiError(
+            crate::error::SwarmError::NotFound(crate::api::scrub_truncate_error(&e)),
+        )),
         Err(e) => Err(ApiError(crate::error::SwarmError::ProviderError {
             status: 502,
             body: crate::api::scrub_truncate_error(&e),
