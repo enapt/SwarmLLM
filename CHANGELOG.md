@@ -2,7 +2,10 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.76-alpha] — 2026-08-05
+
+Follows 0.3.75. Acts on a tester report: a node's cloud access disappeared and
+there was no way to look at provider configuration to find out why.
 
 ### Fixed
 
