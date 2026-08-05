@@ -211,8 +211,8 @@ pub fn spawn_split_stream(
     // remember this — but the sender still has to be TOLD which trace it
     // belongs to, and this path never did, so every locally-streamed request
     // reported no first-token time.
-    let token_tx = match trace {
-        Some(t) => token_tx.with_trace(t),
+    let token_tx = match trace.as_ref() {
+        Some(t) => token_tx.with_trace(t.clone()),
         None => token_tx,
     };
     // Records why generation stopped when it produced nothing. Without this the
@@ -245,14 +245,21 @@ pub fn spawn_split_stream(
     //
     // Guarded by `TraceGuard` rather than removed at the end of the happy path,
     // because this task can also exit through the disconnect branch below.
+    // Reuse the caller's trace when it supplied one, rather than making a
+    // second object for the same request id. Both would register under `rid`,
+    // so the later one silently displaced the earlier and only one of them
+    // could ever be published — leaving progress reports landing on an object
+    // nothing would go on to record.
     let trace_guard = TraceGuard::register(
         &state.shared_state,
         rid,
-        std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
-            rid,
-            model_id.0.clone(),
-            "chat",
-        )),
+        trace.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+                rid,
+                model_id.0.clone(),
+                "chat",
+            ))
+        }),
     );
     tokio::spawn(async move {
         let _trace_guard = trace_guard;

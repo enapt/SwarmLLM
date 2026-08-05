@@ -1825,6 +1825,13 @@ async fn handle_generate(
         ));
     }
 
+    prompt_fits_window(
+        prompt_tokens,
+        gen.sampling.max_tokens,
+        model.context_window(),
+        gen.model_id.0.as_str(),
+    )?;
+
     // Prefix-cache lookup: if a cached prefix is a strict prefix of this
     // prompt, hydrate the request's KV with the snapshot and only forward
     // the suffix. Try local first (free); on miss, probe cross-node (Item 8
@@ -2501,6 +2508,15 @@ async fn try_register_generate_slot(
             "empty prompt after tokenization".into(),
         )));
     }
+    // Same check as the non-batched path — and this is the one that runs by
+    // default, since `continuous_batching` is on.
+    prompt_fits_window(
+        prompt_tokens,
+        gen.sampling.max_tokens,
+        model.context_window(),
+        gen.model_id.0.as_str(),
+    )
+    .map_err(SlotAdmitError::Fatal)?;
 
     // Prefix-cache lookup + per-request KV hydration if we hit. Cheap clone of
     // K/V tensors — no compute.
@@ -3376,6 +3392,40 @@ fn take_complete_utf8(carry: &mut Vec<u8>) -> String {
     }
 }
 
+/// Reject a prompt that cannot fit the model's context window, with numbers the
+/// caller can act on.
+///
+/// **Both tokenization sites must call this.** Chunked prefill discovers the
+/// overflow one 128-token chunk at a time, so the executor's own guard can only
+/// report `index_pos + chunk_len` — a value just past the limit whatever the
+/// prompt actually was. Every over-long prompt therefore got the SAME number: a
+/// 600-word and a 1500-word prompt were both told "Sequence length (4224)
+/// exceeds model context window (4096)", so "reduce your prompt" gave no hint
+/// whether to cut a little or three quarters of it (measured 2026-08-05). It
+/// also burned a full prefill before failing.
+///
+/// The executor guard stays as the backstop for paths that do not come through
+/// here; this exists to make the message actionable.
+fn prompt_fits_window(
+    prompt_tokens: usize,
+    max_new_tokens: u32,
+    window: usize,
+    model_id: &str,
+) -> Result<(), SwarmError> {
+    let needed = prompt_tokens.saturating_add(max_new_tokens as usize);
+    if needed <= window {
+        return Ok(());
+    }
+    let over = needed - window;
+    Err(SwarmError::Validation(format!(
+        "This conversation is too long for {model_id}: {prompt_tokens} tokens of prompt \
+         plus {max_new_tokens} reserved for the reply is {needed}, and the model's limit \
+         is {window}. Shorten it by about {over} tokens (roughly {words} words), or ask \
+         for a shorter reply.",
+        words = (over * 3) / 4,
+    )))
+}
+
 /// Decode a single token to text using the model's vocabulary.
 ///
 /// `carry` holds bytes left over from a codepoint that was not finished by the
@@ -3475,6 +3525,41 @@ mod decode_raw_vocab_tests {
 #[cfg(test)]
 mod utf8_stream_tests {
     use super::take_complete_utf8;
+
+    use super::prompt_fits_window;
+
+    /// **The message has to say how much to cut.** Chunked prefill discovers
+    /// the overflow one chunk at a time, so the executor could only ever report
+    /// a position just past the limit — a 600-word prompt and a 1500-word
+    /// prompt were both told "Sequence length (4224)", which gives no idea
+    /// whether to trim a sentence or three quarters of the conversation.
+    #[test]
+    fn an_overlong_prompt_is_told_its_real_size_and_overage() {
+        let err = prompt_fits_window(9000, 100, 4096, "llama-3.2-3b").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("9000"),
+            "must state the real prompt size: {msg}"
+        );
+        assert!(msg.contains("4096"), "must state the limit: {msg}");
+        // 9000 + 100 - 4096 = 5004 over.
+        assert!(msg.contains("5004"), "must state how much to cut: {msg}");
+    }
+
+    /// The reservation for the reply counts — a prompt that fits alone can
+    /// still not leave room to answer.
+    #[test]
+    fn the_reply_reservation_is_included() {
+        assert!(prompt_fits_window(4000, 96, 4096, "m").is_ok());
+        assert!(prompt_fits_window(4000, 97, 4096, "m").is_err());
+    }
+
+    /// A prompt that fits is not refused.
+    #[test]
+    fn a_prompt_that_fits_passes() {
+        assert!(prompt_fits_window(10, 10, 4096, "m").is_ok());
+        assert!(prompt_fits_window(4096, 0, 4096, "m").is_ok());
+    }
 
     /// **A codepoint can span several tokens.** Emoji and most non-Latin
     /// scripts arrive as byte-fallback tokens — one token per BYTE — so

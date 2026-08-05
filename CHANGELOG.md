@@ -6,6 +6,13 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A too-long conversation now tells you how much to shorten it.** The error
+  reported the same number — 4224 — whether you were slightly over the limit or
+  ten times over it, so "reduce your prompt" gave no idea whether to trim a
+  sentence or most of the conversation. It now states your actual size, the
+  model's limit, and roughly how many words to cut. It also refuses immediately
+  instead of working through the whole prompt first and failing at the end.
+
 - **Two requests at the same time no longer fail on a computer without a
   graphics card.** Any node running on the processor alone returned an error for
   every request as soon as two arrived together — one at a time worked, two

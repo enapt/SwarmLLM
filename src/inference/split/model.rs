@@ -55,6 +55,16 @@ pub struct SplitModel {
 }
 
 impl SplitModel {
+    /// The model's context window in tokens.
+    ///
+    /// Exposed so a caller that holds the WHOLE prompt can check it before
+    /// starting a chunked prefill. The executor's own guard sees one chunk at a
+    /// time and can only report a position just past the limit, which is the
+    /// same number for every over-long prompt.
+    pub fn context_window(&self) -> usize {
+        self.max_seq_len
+    }
+
     /// Return a reference to the loaded vocabulary, if available.
     pub fn vocab(&self) -> Option<&Vec<String>> {
         self.vocabulary.as_ref()
