@@ -2,7 +2,12 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.74-alpha] — 2026-08-05
+
+Follows 0.3.73. Mostly things that were wrong for everyone and had simply never
+been tested for: replying to two people at once on a machine without a graphics
+card, writing in a language that is not English, and asking for a specific reply
+length.
 
 ### Fixed
 
