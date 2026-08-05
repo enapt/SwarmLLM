@@ -6,6 +6,16 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Emoji and many non-Latin characters came out as garbage.** A local model
+  asked for three emoji replied with nine "�" symbols instead — every time. Most
+  characters outside plain English are sent by the model a byte at a time, and
+  each byte was being turned into text on its own, which destroys the character.
+  Now the pieces are held until the character is complete. Verified on
+  llama-3.2-3b: `🌙🌃🔥` where it was `���������`, both streamed and not.
+
+  This affected anyone writing in a language that uses them, not just people
+  asking for emoji.
+
 - **Streamed replies from your own machine were missing from the statistics.**
   A reply streamed by the local model — which is what the chat page, Claude Code
   and most apps use — was not counted anywhere: the request total did not move,

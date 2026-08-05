@@ -1922,6 +1922,9 @@ async fn handle_generate(
     let stop_sequences = &gen.sampling.stop;
     let mut generated: Vec<u32> = Vec::new();
     let mut accumulated_text = String::new();
+    // Bytes of a codepoint the previous token did not finish. Same lifetime as
+    // `accumulated_text`: it belongs to THIS generation and must not be shared.
+    let mut utf8_carry: Vec<u8> = Vec::new();
     let mut index_pos = prompt_tokens;
     let mut finish_reason = "length".to_string();
     let mut matched_stop_sequence: Option<String> = None;
@@ -1949,6 +1952,7 @@ async fn handle_generate(
             &mut index_pos,
             &mut generated,
             &mut accumulated_text,
+            &mut utf8_carry,
         )
         .await?;
         finish_reason = outcome;
@@ -1983,7 +1987,7 @@ async fn handle_generate(
                 break;
             }
 
-            let text = decode_token(model, next_token);
+            let text = decode_token(model, next_token, &mut utf8_carry);
             accumulated_text.push_str(&text);
 
             // Check user-provided stop sequences
@@ -2033,7 +2037,7 @@ async fn handle_generate(
         // Skip when max_tokens == 0 — user explicitly requested no completion
         // tokens.
         if finish_reason == "length" && gen.sampling.max_tokens > 0 && !eos.contains(&next_token) {
-            let text = decode_token(model, next_token);
+            let text = decode_token(model, next_token, &mut utf8_carry);
             generated.push(next_token);
             send_worker(
                 writer,
@@ -2108,6 +2112,9 @@ async fn swift_decode_loop(
     index_pos: &mut usize,
     generated: &mut Vec<u32>,
     accumulated_text: &mut String,
+    // Threaded rather than owned here: SWIFT decodes into the SAME reply as the
+    // caller, so a codepoint can straddle the boundary between them.
+    utf8_carry: &mut Vec<u8>,
 ) -> Result<(String, Option<String>), SwarmError> {
     let model_key = model.kv_model_key().to_string();
 
@@ -2126,6 +2133,10 @@ async fn swift_decode_loop(
         token: u32,
         generated: &mut Vec<u32>,
         accumulated_text: &mut String,
+        // Paired with `accumulated_text` — see `decode_token`. Passing a fresh
+        // buffer per call would defeat the point: the carry only works if it
+        // survives from one token to the next.
+        utf8_carry: &mut Vec<u8>,
     ) -> Result<EmitOutcome, SwarmError> {
         if eos.contains(&token) {
             return Ok(EmitOutcome::Stop);
@@ -2133,7 +2144,7 @@ async fn swift_decode_loop(
         if generated.len() as u32 >= max_tokens {
             return Ok(EmitOutcome::Length);
         }
-        let text = decode_token(model, token);
+        let text = decode_token(model, token, utf8_carry);
         accumulated_text.push_str(&text);
         if let Some(matched) =
             crate::inference::sampling::find_stop_sequence(accumulated_text, stop_sequences)
@@ -2258,6 +2269,7 @@ async fn swift_decode_loop(
             *next_token,
             generated,
             accumulated_text,
+            utf8_carry,
         )
         .await?
         {
@@ -2281,6 +2293,7 @@ async fn swift_decode_loop(
                     *tok,
                     generated,
                     accumulated_text,
+                    utf8_carry,
                 )
                 .await?
                 {
@@ -2546,6 +2559,7 @@ async fn try_register_generate_slot(
         eos,
         stop_sequences,
         accumulated_text: String::new(),
+        utf8_carry: Vec::new(),
         sampling,
         prompt_tokens,
         prompt_ids,
@@ -2874,7 +2888,7 @@ async fn step_decode_pool(
                 slot.finish_stop();
                 continue;
             }
-            let text = decode_token(model, last_token);
+            let text = decode_token(model, last_token, &mut slot.utf8_carry);
             slot.accumulated_text.push_str(&text);
             if let Some(matched) = crate::inference::sampling::find_stop_sequence(
                 &slot.accumulated_text,
@@ -3020,7 +3034,7 @@ async fn step_decode_pool(
         };
         if new_generated_count >= slot.max_tokens as usize {
             if slot.max_tokens > 0 && !slot.eos.contains(&next_tok) {
-                let text = decode_token(model, next_tok);
+                let text = decode_token(model, next_tok, &mut slot.utf8_carry);
                 let logprob = if slot.use_logprobs {
                     next_logprob
                 } else {
@@ -3314,13 +3328,65 @@ fn export_snapshot_for_hash(
     None
 }
 
+/// Emit the longest complete UTF-8 prefix of `carry`, keeping any incomplete
+/// trailing sequence for the next token.
+///
+/// **A codepoint can span several tokens.** Emoji and most non-Latin scripts are
+/// emitted as byte-fallback tokens — one token per BYTE — so converting each
+/// token to text on its own turns every one of those bytes into U+FFFD. Asking
+/// llama-3.2-3b for three emoji returned nine replacement characters,
+/// deterministically, 3 runs out of 3 (2026-08-05).
+///
+/// Buffering the tail is what every streaming detokenizer does for this reason
+/// (llama.cpp's examples accumulate bytes; HuggingFace `tokenizers` ships a
+/// `DecodeStream` for it).
+fn take_complete_utf8(carry: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(carry) {
+            Ok(s) => {
+                out.push_str(s);
+                carry.clear();
+                return out;
+            }
+            Err(e) => {
+                let good = e.valid_up_to();
+                if good > 0 {
+                    // Valid by construction — `valid_up_to` is a UTF-8 boundary.
+                    out.push_str(std::str::from_utf8(&carry[..good]).unwrap_or_default());
+                }
+                match e.error_len() {
+                    // Truncated at the end: the rest of this codepoint is in the
+                    // next token. Keep it rather than corrupting it.
+                    None => {
+                        carry.drain(..good);
+                        return out;
+                    }
+                    // Genuinely invalid bytes. Emit one replacement and skip
+                    // them, or we would spin on the same bytes forever.
+                    Some(bad) => {
+                        out.push('\u{FFFD}');
+                        carry.drain(..good + bad);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Decode a single token to text using the model's vocabulary.
-fn decode_token(model: &SplitModel, token_id: u32) -> String {
+///
+/// `carry` holds bytes left over from a codepoint that was not finished by the
+/// previous token; it is a required parameter rather than internal state so a
+/// caller cannot decode a stream without one and silently mangle every
+/// multi-byte character. Flush it with [`take_complete_utf8`] when generation
+/// ends so a trailing partial sequence is not dropped in silence.
+fn decode_token(model: &SplitModel, token_id: u32, carry: &mut Vec<u8>) -> String {
     if let Some(vocab) = model.vocab() {
         if let Some(token_str) = vocab.get(token_id as usize) {
             if let Some(tokenizer) = model.tokenizer() {
-                let bytes = tokenizer.decode_token(token_str);
-                return String::from_utf8_lossy(&bytes).into_owned();
+                carry.extend_from_slice(&tokenizer.decode_token(token_str));
+                return take_complete_utf8(carry);
             }
             // No tokenizer: the raw vocab entry is NOT user-facing text.
             //
@@ -3401,6 +3467,70 @@ mod decode_raw_vocab_tests {
         // Not a byte-fallback token despite the shape — left alone.
         assert_eq!(decode_raw_vocab_entry("<0xZZ>"), "<0xZZ>");
         assert_eq!(decode_raw_vocab_entry("<s>"), "<s>");
+    }
+}
+
+#[cfg(test)]
+mod utf8_stream_tests {
+    use super::take_complete_utf8;
+
+    /// **A codepoint can span several tokens.** Emoji and most non-Latin
+    /// scripts arrive as byte-fallback tokens — one token per BYTE — so
+    /// converting each token to text on its own turns every byte into U+FFFD.
+    /// Asking llama-3.2-3b for three emoji returned nine replacement
+    /// characters, deterministically, 3 runs out of 3 (2026-08-05).
+    #[test]
+    fn a_codepoint_split_across_tokens_survives() {
+        let mut carry = Vec::new();
+        let mut out = String::new();
+        // "\u{1F389}" is F0 9F 8E 89 — four separate byte-fallback tokens.
+        for b in [0xF0u8, 0x9F, 0x8E, 0x89] {
+            carry.push(b);
+            out.push_str(&take_complete_utf8(&mut carry));
+        }
+        assert_eq!(out, "\u{1F389}");
+        assert!(carry.is_empty(), "nothing should be left pending");
+        assert!(!out.contains('\u{FFFD}'), "no replacement characters");
+    }
+
+    /// Nothing is emitted early: a partial codepoint must be held back rather
+    /// than flushed as garbage the caller has already streamed to the user.
+    #[test]
+    fn a_partial_codepoint_is_held_not_emitted() {
+        let mut carry = vec![0xF0u8, 0x9F];
+        assert_eq!(take_complete_utf8(&mut carry), "");
+        assert_eq!(
+            carry,
+            vec![0xF0, 0x9F],
+            "the tail must be kept for next time"
+        );
+    }
+
+    /// Text before an incomplete tail still flows immediately — buffering must
+    /// not stall a stream waiting for a codepoint that has not started.
+    #[test]
+    fn complete_text_before_a_partial_tail_is_emitted_at_once() {
+        let mut carry = b"hello \xF0\x9F".to_vec();
+        assert_eq!(take_complete_utf8(&mut carry), "hello ");
+        assert_eq!(carry, vec![0xF0, 0x9F]);
+    }
+
+    /// Genuinely invalid bytes must be consumed, not retried forever — a lone
+    /// continuation byte can never become valid however many follow it.
+    #[test]
+    fn invalid_bytes_terminate_instead_of_spinning() {
+        let mut carry = vec![0x80u8, b'o', b'k'];
+        let out = take_complete_utf8(&mut carry);
+        assert_eq!(out, "\u{FFFD}ok");
+        assert!(carry.is_empty());
+    }
+
+    /// Multi-byte text that arrives whole in one token is unaffected.
+    #[test]
+    fn whole_codepoints_pass_through_unchanged() {
+        let mut carry = "\u{65E5}\u{672C}\u{8A9E}".as_bytes().to_vec();
+        assert_eq!(take_complete_utf8(&mut carry), "\u{65E5}\u{672C}\u{8A9E}");
+        assert!(carry.is_empty());
     }
 }
 

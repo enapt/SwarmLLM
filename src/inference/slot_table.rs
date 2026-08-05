@@ -71,6 +71,13 @@ pub struct Slot {
     pub eos: Vec<u32>,
     pub stop_sequences: Vec<String>,
     pub accumulated_text: String,
+    /// Bytes of a codepoint this slot's previous token did not finish.
+    ///
+    /// **Per slot, never shared.** Slots decode interleaved on the batch path,
+    /// so one buffer across them would splice bytes from different users'
+    /// replies into each other. Paired with `accumulated_text` for exactly the
+    /// same reason it is: both belong to one reply.
+    pub utf8_carry: Vec<u8>,
     pub sampling: SamplingParams,
     /// Total prompt token count — set at admission, used in `GenerateDone`.
     pub prompt_tokens: usize,
@@ -354,6 +361,7 @@ mod tests {
             eos: vec![2],
             stop_sequences: vec![],
             accumulated_text: String::new(),
+            utf8_carry: Vec::new(),
             sampling: SamplingParams {
                 temperature: 0.0,
                 top_p: 1.0,
@@ -396,6 +404,7 @@ mod tests {
             eos: vec![2],
             stop_sequences: vec![],
             accumulated_text: String::new(),
+            utf8_carry: Vec::new(),
             sampling: SamplingParams {
                 temperature: 0.0,
                 top_p: 1.0,
