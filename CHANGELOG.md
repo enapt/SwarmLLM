@@ -78,6 +78,13 @@ All notable changes to SwarmLLM are documented here.
 
   Identifiers are now assigned by SwarmLLM and are unique.
 
+- **Asking for word-by-word confidence scores now says they are unavailable.**
+  A request could ask for per-word probability scores alongside the answer. For
+  a model running on your own machine those are never produced, and the reply
+  came back looking exactly like one where they had not been asked for — so a
+  program expecting them found nothing and could not tell why. Such a request is
+  now refused with an explanation. Cloud models still return them.
+
 - **Qwen models were given number tokens they were not trained on.** The rule
   used for Qwen grouped digits up to three at a time; Qwen models expect one
   digit at a time.

@@ -1485,7 +1485,7 @@ the sidecar holds.
 ## HTTP API Routes
 
 ### OpenAI-Compatible (Bearer auth required)
-- `POST   /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls + logprobs support)
+- `POST   /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls). `logprobs` is refused for a model running locally — every local path pins `token_logprobs: vec![]`, so it is only ever returned by a cloud provider (see Deferred Items).
 - `POST   /v1/responses` — OpenAI Responses API (gpt-5 / o-series default)
 - `GET    /v1/responses/{id}` — Retrieve a stored response (30-day TTL); pass `?stream=true&starting_after={seq}` to resume a background SSE stream
 - `DELETE /v1/responses/{id}` — Delete a stored response
@@ -1918,6 +1918,11 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 - **Binary signature on auto-update (audit_2026-04-29 C1)** — `src/update.rs` verifies the SHA256 sidecar fetched from the same GitHub release as the binary; a compromised maintainer account/CI token can publish a matching pair. Real fix: generate an offline signing keypair, embed the public key at compile time, publish a detached signature as a third release asset, and verify it before applying the rename. Deferred until a key-custody decision is made — see `memory/signing_options.md` for the three concrete options (raw Ed25519, minisign, or Sigstore/Cosign keyless), recommended approach (minisign), and step-by-step rollout plan. Until landed, defence-in-depth fixes keep the blast radius local: `update/check` + `update/apply` are loopback-only (`2e1c5b1`), `apply_update` re-checks `latest_version > running_version` at apply time (post-`cb2c688`), `info.downloaded` only flips true when the staging path is on the same filesystem as the binary, and auto-update is opt-in via `config.updates.auto_update` (default `Disabled`).
 
 ### Won't fix unless a concrete caller appears
+
+- **Per-token logprobs from local inference** — the machinery exists at both ends and is not joined up in the middle. `sampling::sample_token_with_logprobs` can compute them, `SamplingParams` carries `logprobs` / `top_logprobs` from both API layers, and `ChoiceLogProbs` / `TokenLogProb` serialize correctly (pinned by `logprobs_response_serializes`). But every local execution site pins `token_logprobs: vec![]` — see the note on `InferenceOutput::from_gen_result` — so nothing ever reaches the response. Completing it means returning per-token logits across the worker IPC boundary for the split path, and across the wire for the distributed path, on every token. Until then `/v1/chat/completions` REFUSES `logprobs` for a locally-served model rather than answering 200 with the field absent, which is indistinguishable from a request that never asked for it (`reject_unsupported_local_options`). Cloud-routed models are unaffected and still return logprobs.
+
+- **`seed` is accepted and ignored for local models.** It rides in `extras` and is forwarded verbatim to a cloud provider, but nothing seeds the local sampler, so two requests with the same seed give different text (measured 2026-08-06). Unlike `n` and `logit_bias`, this is NOT refused: OpenAI documents `seed` as best-effort and explicitly does not guarantee determinism, so a caller cannot rely on it in the first place. Wiring it through would mean threading the seed into the sampler's RNG per request.
+
 
 - **Speculative decoding in subprocess** — IPC scaffolding for routing speculative decoding through worker subprocesses was removed; the path runs through the direct executor only. Speculative decoding is experimental and the worker-subprocess plumbing would need to track per-position logit returns, KV-cache state, and partial-accept truncation — substantial complexity for a feature whose target audience overlaps tightly with the user base that already has the legacy in-process executor working. Revisit if subprocess isolation becomes a hard requirement (e.g., per-model crash containment for a hosted deployment).
 

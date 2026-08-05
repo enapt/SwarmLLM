@@ -260,6 +260,34 @@ impl Drop for CancelOnDisconnect {
     }
 }
 
+/// Options a request may legitimately ask for that a model running on THIS
+/// machine cannot deliver.
+///
+/// Called only after every cloud-provider and peer-forwarding path has declined,
+/// so a cloud-routed model is never affected by what is listed here.
+///
+/// `logprobs`: per-token probabilities never come back from local inference —
+/// every local path pins `token_logprobs: vec![]` (see
+/// `InferenceOutput::from_gen_result`), and the sampler's
+/// `sample_token_with_logprobs` is not on any of them. Answering 200 with the
+/// field absent is indistinguishable from "the model had nothing to report",
+/// and a caller that asked for it will reach into a value that is not there.
+/// The same reasoning is why `n > 1` is refused rather than quietly answered
+/// once.
+fn reject_unsupported_local_options(
+    req: &ChatCompletionRequest,
+) -> Option<crate::error::SwarmError> {
+    if req.logprobs {
+        return Some(crate::error::SwarmError::Validation(
+            "logprobs are not available from a model running on this machine — \
+             only cloud providers return them. Remove `logprobs` from the \
+             request, or choose a cloud model."
+                .to_string(),
+        ));
+    }
+    None
+}
+
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -490,6 +518,12 @@ pub async fn chat_completions(
         }
 
         return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+    }
+
+    // Past every cloud-provider and peer-forwarding path, so this request is
+    // being answered by a model on this machine.
+    if let Some(err) = reject_unsupported_local_options(&req) {
+        return Err(ApiError(err));
     }
 
     let params = req.to_sampling_params();
@@ -869,6 +903,54 @@ mod tests {
         let params = req.to_sampling_params();
         assert!(params.logprobs);
         assert_eq!(params.top_logprobs, 5);
+    }
+
+    /// Asking a local model for logprobs used to answer 200 with the field
+    /// simply absent — the same shape as a request that never asked. Every
+    /// local path pins `token_logprobs: vec![]`, so it was never going to
+    /// arrive, and a caller reading `choices[0].logprobs.content` finds
+    /// nothing there with no indication why.
+    #[test]
+    fn asking_a_local_model_for_logprobs_is_refused_not_ignored() {
+        let mut req = ChatCompletionRequest {
+            model: "m".into(),
+            messages: vec![],
+            temperature: 0.7,
+            top_p: 1.0,
+            max_tokens: 16,
+            stream: false,
+            stop: None,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            tools: None,
+            tool_choice: None,
+            logprobs: false,
+            top_logprobs: None,
+            response_format: None,
+            session_id: None,
+            lora_adapter: None,
+            cache_control: None,
+            extras: Default::default(),
+        };
+
+        assert!(
+            reject_unsupported_local_options(&req).is_none(),
+            "a request that did not ask for logprobs must pass"
+        );
+
+        req.logprobs = false;
+        assert!(reject_unsupported_local_options(&req).is_none());
+
+        req.logprobs = true;
+        let err = reject_unsupported_local_options(&req).expect("must be refused");
+        assert!(
+            matches!(err, crate::error::SwarmError::Validation(_)),
+            "must be a 400 the caller can act on, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("logprobs"),
+            "the message must name the option: {err}"
+        );
     }
 
     #[test]
