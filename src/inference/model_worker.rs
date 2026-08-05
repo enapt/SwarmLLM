@@ -2032,11 +2032,29 @@ async fn handle_generate(
             index_pos += 1;
         }
 
-        // If the loop exhausted max_tokens (not EOS/stop), the last sampled
-        // token was never sent. Emit it now to avoid the off-by-one.
-        // Skip when max_tokens == 0 — user explicitly requested no completion
-        // tokens.
-        if finish_reason == "length" && gen.sampling.max_tokens > 0 && !eos.contains(&next_token) {
+        // The loop samples one token ahead: when it exits on `length`,
+        // `next_token` holds a candidate that was never sent.
+        //
+        // That candidate is the (max_tokens + 1)-th token and sending it
+        // unconditionally — as this did, to "avoid the off-by-one" — created
+        // one instead. Measured 2026-08-05: EVERY request returned exactly
+        // `max_tokens + 1` completion tokens (1->2, 2->3, 5->6, 8->9, 16->17).
+        // `max_tokens` is a hard limit people size cost and latency against, so
+        // exceeding it is not a rounding detail; on a cloud-proxied request it
+        // is billable.
+        //
+        // Kept, but bounded: it may only ever top the reply UP TO the limit,
+        // never past it. If a future change does leave the loop one short, this
+        // still covers it; if it does not, this does nothing.
+        //
+        // Both decode paths carried this pattern and both are verified exact
+        // (`continuous_batching` false and true, confirmed from the worker's own
+        // `BatchGenerate configured enabled=` line rather than assumed).
+        if finish_reason == "length"
+            && (generated.len() as u32) < gen.sampling.max_tokens
+            && gen.sampling.max_tokens > 0
+            && !eos.contains(&next_token)
+        {
             let text = decode_token(model, next_token, &mut utf8_carry);
             generated.push(next_token);
             send_worker(
@@ -3033,33 +3051,17 @@ async fn step_decode_pool(
             _ => unreachable!("filtered to is_decoding above"),
         };
         if new_generated_count >= slot.max_tokens as usize {
-            if slot.max_tokens > 0 && !slot.eos.contains(&next_tok) {
-                let text = decode_token(model, next_tok, &mut slot.utf8_carry);
-                let logprob = if slot.use_logprobs {
-                    next_logprob
-                } else {
-                    None
-                };
-                send_worker(
-                    writer,
-                    &WorkerMsg::Token {
-                        request_id: slot.request_id,
-                        token_id: next_tok,
-                        text,
-                        is_eos: false,
-                        logprob,
-                    },
-                    &[],
-                )
-                .await
-                .map_err(|e| SwarmError::Internal(format!("send final Token: {e}")))?;
-                if let crate::inference::slot_table::SlotState::Decoding {
-                    generated_count, ..
-                } = &mut slot.state
-                {
-                    *generated_count += 1;
-                }
-            }
+            // The limit is already reached, so `next_tok` is the
+            // (max_tokens + 1)-th token and must NOT be sent.
+            //
+            // This used to send it, which made every request on the batched
+            // path return exactly one token too many. Measured 2026-08-05
+            // against a streamed reply, counting the deltas on the wire rather
+            // than trusting the usage field: max_tokens=3 produced 4 chunks,
+            // max_tokens=8 produced 9. So the text genuinely exceeded the
+            // limit — this was not a mis-count. `max_tokens` is what people
+            // size cost and latency against, and on a cloud-proxied request the
+            // extra token is billable.
             slot.finish_length();
         }
     }

@@ -6,6 +6,13 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **`max_tokens` is now an exact limit.** Every reply came back one token longer
+  than asked for — 8 requested, 9 produced, every time, on both decoding paths.
+  It is the setting people use to bound how long a reply runs and what it costs,
+  and when a request is passed to a paid cloud provider the extra token is
+  billed. Verified by counting what actually arrives rather than trusting the
+  reported total: 1, 3, 8 and 16 now produce exactly that many.
+
 - **Emoji and many non-Latin characters came out as garbage.** A local model
   asked for three emoji replied with nine "�" symbols instead — every time. Most
   characters outside plain English are sent by the model a byte at a time, and
