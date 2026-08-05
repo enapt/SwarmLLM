@@ -6,6 +6,13 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Options this server cannot honour are now refused instead of ignored.** Two
+  settings in the OpenAI-compatible API were accepted and then quietly did
+  nothing: asking for several alternative replies returned one, and asking to
+  suppress particular words had no effect. Either way the request appeared to
+  succeed, so there was no way to tell. They now return a clear error naming the
+  option. The values every client sends by default are unaffected.
+
 - **`max_tokens` is now an exact limit.** Every reply came back one token longer
   than asked for — 8 requested, 9 produced, every time, on both decoding paths.
   It is the setting people use to bound how long a reply runs and what it costs,

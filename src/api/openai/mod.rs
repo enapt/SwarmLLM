@@ -89,6 +89,40 @@ fn validate_chat_request(
         ))));
     }
 
+    // Say so when an option cannot be honoured, rather than accepting it and
+    // quietly doing something else.
+    //
+    // `n` and `logit_bias` arrive in `extras` — nothing reads either, so a
+    // client asking for three completions received one, and a client
+    // suppressing a token got it anyway with no indication. Silence is the
+    // worst of the three options here: the caller believes the setting took
+    // effect and cannot tell that it did not. An explicit refusal costs them
+    // one clear error instead of a wrong result they have to debug.
+    //
+    // `n: 1` is accepted because it is the default and SDKs send it verbatim;
+    // only a request for MORE than one completion is refused. Likewise an empty
+    // `logit_bias` object is a no-op and passes.
+    if let Some(n) = req.extras.get("n").and_then(|v| v.as_u64()) {
+        if n > 1 {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "n must be 1 — this server returns a single completion per request \
+                 (asked for {n})"
+            ))));
+        }
+    }
+    if req
+        .extras
+        .get("logit_bias")
+        .and_then(|v| v.as_object())
+        .is_some_and(|m| !m.is_empty())
+    {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "logit_bias is not supported by this server — remove it rather than \
+             relying on it being applied"
+                .to_string(),
+        )));
+    }
+
     // SEC: Cap individual message content size and total prompt size
     super::validate_content_size(req.messages.iter().map(|msg| {
         match &msg.content {
