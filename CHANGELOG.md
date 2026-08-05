@@ -2,7 +2,11 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.75-alpha] — 2026-08-05
+
+Follows 0.3.74. Mostly about the software explaining itself: several things it
+was already doing correctly, or refusing to do for good reason, gave you nothing
+to go on. One is a real fault — deleting a model while it was answering.
 
 ### Fixed
 

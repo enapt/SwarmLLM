@@ -26,6 +26,27 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.pending_activation_chunks` — R139 Tier 4K. `DashMap<Uuid, ChunkAssemblyState>` on the ROOT SharedState (cross-cuts the RR-decrypt path in `network/manager/tensors.rs` and the persistent-stream reader in `network/pipeline_stream.rs`). Receiver-side assembly for STREAM-chunked activation forwards. Entry-locked insert via `state.try_assemble_chunked_forward(forward, sender_peer_bytes)`. Periodic stale-entry sweep wired to the HealthMonitor tick via `state.sweep_stale_chunk_assemblies(ttl_secs)`. Chunk-meta is bound into AAD via `build_layer_forward_aad`, so reorder/truncation/cross-transfer-substitution fail Poly1305 before reaching the assembly.
 - `state.listen_multiaddrs` — R140. `arc_swap::ArcSwap<Vec<String>>` on the ROOT SharedState (cross-cuts NetworkManager-writes and PoolManager-reads). Live snapshot of the swarm's reachable addresses, each terminated with `/p2p/<local_peer_id>`. Written by `NetworkManager::refresh_listen_multiaddrs()` (events.rs) on `NewListenAddr` / `ExpiredListenAddr` / `ListenerClosed` / `ExternalAddrConfirmed` / UPnP `NewExternalAddr` / `ExpiredExternalAddr`, plus once at startup after `listen_on()` (and after the `network.external_addresses` config override is added). **R143: the snapshot is the UNION of `swarm.listeners()` (bound sockets — private LAN on a NAT'd node) AND `swarm.external_addresses()` (UPnP-mapped / AutoNAT-confirmed / relay-circuit / manually-declared public addrs).** Without the union a NAT'd node's invite code silently shipped a LAN-only address. Built via the extracted, unit-tested `build_reachable_multiaddr_list(candidates, peer_id)` + `ensure_p2p_suffix` helpers; filtered through `addr_is_remotely_reachable` — keeps LAN + Tailscale CGN (100.64.0.0/10) + public, drops loopback / unspecified / link-local / IMDS. Read by `PoolManager::handle_generate_invite_code` when minting v2 `swarmpool://` codes; empty list → `SwarmError::ServiceUnavailable`. When the list has entries but NONE pass the stricter `pool::invite::any_internet_reachable` (public IP / DNS / relay-circuit — excludes LAN + CGN), invite generation still succeeds but emits a `pool`/`invite_lan_only` warning ActivityEvent so the user isn't handed a LAN-only code that dies over the internet.
 - `state.dashboard_trust_lan` — `AtomicBool` on the ROOT SharedState. Runtime mirror of `config.api.dashboard_trust_lan`, the opt-in that lets a browser on a private/LAN address be handed the dashboard's API key. `state.config` is startup-frozen and this is a setting the user flips *because* their dashboard is unreachable, so a restart requirement would defeat it — same reasoning as R121's `contribution_auto`. Written by `PUT /api/admin/config` (`api/admin.rs`), read by `api::dashboard_trust::classify`. New code gating on LAN dashboard trust MUST read this atomic, NOT the config field. The sibling `config.api.dashboard_trust_overlay` is read straight from config: it is not runtime-toggleable because the tailnet case works by default and turning it *off* is a deliberate hardening step, not a recovery action.
+- `state.observed_inbound_connection` — `AtomicBool` on the ROOT SharedState.
+  Set once by `handle_connection_established` for the first non-loopback
+  connection where we are the LISTENER. **The only direct evidence that inbound
+  reaches this node**: outbound succeeds from behind almost anything, so a node
+  with peers, a real LAN address and clean logs can still be silently dropping
+  every inbound packet and look perfectly healthy from the inside. Read by the
+  WSL2 firewall check in `health::monitor`, which previously warned every
+  mirrored-mode node on every start whether or not anything was blocked. Any
+  future "are we reachable" question should use this rather than inferring from
+  peer count — having peers proves only that WE dialled successfully.
+- **`SharedState::model_is_in_use` is the answer to "may I delete this model's
+  files?"** — NOT `active_pipelines` on its own. That is the COORDINATOR's map of
+  DISTRIBUTED assignments (gotcha #194) and holds nothing for peer-served work or
+  for a reply the local model is producing through the split fast path, which
+  bypasses the router entirely. Deleting during a local reply therefore returned
+  `200 files_removed: 8` and killed the worker mid-stream (measured 2026-08-05) —
+  the exact outcome the guard below exists to prevent, on the most common
+  single-node path. The helper asks `active_traces` first, because every
+  in-flight request registers one for progress reporting whichever path serves
+  it; `serving_models` and `active_pipelines` remain as belt-and-braces. Both
+  `delete_model` and `delete_shard` go through it.
 - **`api::dashboard_trust::classify` is the single answer to "may this request be handed the API key automatically?"** Do NOT re-derive it with `addr.ip().is_loopback()`. That predicate means "the last TCP hop began inside this daemon's network namespace", which is simultaneously broader than intended (a same-host reverse proxy such as `tailscale serve` satisfies it on behalf of a fully remote client) and narrower (a container publish, a NAT, or a Tailscale subnet router never satisfies it — not even from the host's own `localhost` — because subnet routers SNAT by default). Same-origin checks belong on `Origin` vs the request's own `Host` (`websocket.rs::ws_origin_allowed`), never on a hardcoded loopback allowlist: that mistake independently cost every non-loopback dashboard its live WebSocket updates. See gotcha #195.
 - `state.relay_proven_features` — `DashMap<NodeId, RelayProvenFeatures { features: u64, proven_at: Instant }>` on the ROOT SharedState (`daemon/state/relay.rs`). Records relay features a peer has *demonstrably* used by relaying a message addressed to us: `handle_relayed_tensor` records `features::TENSOR_RELAY`, `handle_relayed_envelope` records `features::RELAY` (via `record_relay_proven_features`, which ORs bits + refreshes `proven_at`). The relay send path's feature gates (`target_supports_{relay,tensor_relay}` in `network/manager/relay.rs`) consult `relay_feature_proven(peer, bit)` FIRST, before the gossiped `NodeCapability.features`. **This is the cold-start return-path fix**: a serving node reaches a coordinator known only via `ensure_relayed_origin_known` (whose `peer_registry` entry has `capability: None`, because the capability-gossip handler at `daemon/dispatch/mod.rs` is update-only and can't populate a not-yet-existing entry). Without the proof, the return relay of a computed `LayerResult` was refused until a capability-gossip round landed (≤30s), dropping the first result. Freshness = `RELAY_ROUTE_TTL_SECS` (re-proven on every inbound relayed message, so an active session never goes stale); swept alongside `relay_routes` in `sweep_stale_relay_state`. New relay send paths that gate on a peer's relay capability MUST consult this proof, not just the gossiped capability.
 
@@ -558,6 +579,31 @@ been firing on every request for several releases. `build_prompt_with_model`
 falling back at all is a bug report, not a safety net: the fallbacks
 (gemma/vicuna/llava/ChatML) exist for models that ship no template, and any
 model that DOES ship one should be rendering it.
+
+## API errors must be readable by the caller
+
+Every failure the API can produce has to come back as
+`{"error": {"message", "type", "param", "code"}}`. Two ways to break that, both
+of which shipped:
+
+- **Using axum's `Json<T>` as a request extractor.** Its rejection is raw text
+  with a 422. Nine handlers used the `JsonBody<T>` wrapper and 27 did not, so
+  most admin, model and pool endpoints returned something the dashboard could
+  not read. `getApiErrorMessage` does `await resp.json()` inside a try/catch, so
+  raw text throws, the catch swallows it, and the user gets the generic fallback
+  with the real reason discarded — every one of those endpoints could only ever
+  say "action failed". Use `JsonBody<T>` in the request-body position.
+- **No `.fallback()` on the router.** An unrouted path returned a bare 404 with
+  an empty body. `/v1/completions` is the case that matters: OpenAI deprecated it
+  but plenty of tooling still calls it, and an empty 404 gives no hint that
+  `/v1/chat/completions` exists. `unknown_route` now answers in the envelope and
+  names the replacement.
+
+Choose the STATUS from the cause, not from where the error came from.
+`probe_failure_is_user_fixable` is the pattern: a mistyped HuggingFace repo is a
+404 the caller can act on, while a rate limit or an upstream outage stays a 502.
+Reporting a typo as `502 Bad Gateway` says this server is broken about something
+in the caller's own input.
 
 ## Timeouts: bound what actually varies
 
