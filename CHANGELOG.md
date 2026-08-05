@@ -2,7 +2,10 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.77-alpha] — 2026-08-05
+
+Follows 0.3.76. Peer response times were mostly blank, and blank in a way that
+also affected which machines get picked for shared work.
 
 ### Fixed
 
