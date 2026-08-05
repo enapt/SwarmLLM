@@ -44,8 +44,9 @@ All notable changes to SwarmLLM are documented here.
 - **Llama 3 models were told the date was 26 July 2024.** Their prompt includes
   today's date, taken from a clock the prompt builder is meant to supply.
   SwarmLLM did not supply one, so the instructions fell back to the fixed date
-  written into them — the day the model was published. Ask one what year it is
-  and it answered 2024. It now gets the real date.
+  written into them — the day the model was published. Asked to repeat the date
+  from its own context, a model on the old build answered "Today 26 Jul 2024".
+  It now gets the real date.
 
 - **A blank line was being inserted into the prompt at each section.** Notes
   that model authors write between sections of their prompt instructions are
