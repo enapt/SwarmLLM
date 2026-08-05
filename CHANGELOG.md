@@ -23,6 +23,16 @@ only half applied.
   that was genuinely cut off part-way through a value still shows as text rather
   than becoming a tool call that looks fine and does the wrong thing.
 
+- **A node no longer wrongly believes it is reachable from the internet.** Other
+  machines help each other check whether they can be reached from outside. But
+  the check accepted an answer from a machine on the same home network testing a
+  home-network address — which proves only that your own network works. A node
+  behind a router could therefore conclude it was reachable from the internet
+  when it was not, and skip setting up the relay that would have let distant
+  machines reach it. Seen live on a node that had been told its own
+  `192.168.x.x`, and even a `169.254.x.x` address, were publicly reachable. Only
+  genuinely public addresses count now.
+
 - **Log flooding from a bad link is now actually stopped.** The previous release
   collapsed repeated warnings from one failing connection, but only one of the
   two lines each failure produced — so a six-hour measurement on a live node

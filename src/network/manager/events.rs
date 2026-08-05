@@ -441,13 +441,36 @@ impl NetworkManager {
                 let server = event.server;
                 match event.result {
                     Ok(()) => {
-                        // Address is reachable from the internet. The v2 client has
-                        // already emitted ToSwarm::ExternalAddrConfirmed for it
-                        // (caught by the ExternalAddrConfirmed arm below → Kademlia
-                        // Server mode + refresh_listen_multiaddrs).
-                        tracing::info!(%tested_addr, %server, "AutoNAT: address confirmed reachable (public)");
-                        if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
-                            stats.nat_status = Some("Public".to_string());
+                        // A probe succeeded — but "reachable" is only "public" if
+                        // the address that was tested is routable from the open
+                        // internet.
+                        //
+                        // AutoNAT servers are ordinary peers, so a node on the same
+                        // LAN happily confirms our RFC1918 address, and we would
+                        // then declare ourselves Public and skip reserving a relay
+                        // — leaving us unreachable from the internet while the
+                        // dashboard says otherwise. Observed live 2026-08-05 on a
+                        // NAT'd node reporting `nat: Public` with confirmations for
+                        // `192.168.1.53`, `10.255.255.254` and even the link-local
+                        // `169.254.83.107`. This is the same false-Public that
+                        // AutoNAT v2 was adopted to fix, arriving by another route.
+                        let internet =
+                            crate::pool::invite::multiaddr_is_internet_reachable(&tested_addr);
+                        if internet {
+                            tracing::info!(%tested_addr, %server, "AutoNAT: address confirmed reachable (public)");
+                            if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write()
+                            {
+                                stats.nat_status = Some("Public".to_string());
+                            }
+                        } else {
+                            // Useful (it proves the LAN path works) but says
+                            // nothing about the internet, so it must not clear a
+                            // Private verdict or suppress the relay.
+                            tracing::debug!(
+                                %tested_addr, %server,
+                                "AutoNAT: probe succeeded for a non-internet address — \
+                                 proves LAN reachability only, NOT public"
+                            );
                         }
                     }
                     Err(e) => {

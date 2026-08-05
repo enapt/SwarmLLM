@@ -210,7 +210,16 @@ pub fn any_internet_reachable(multiaddrs: &[String]) -> bool {
         })
 }
 
-fn multiaddr_is_internet_reachable(addr: &libp2p::Multiaddr) -> bool {
+/// Whether a multiaddr is reachable from the open internet.
+///
+/// Public IP or DNS name, or a relay circuit. Deliberately EXCLUDES private
+/// ranges, link-local, loopback and CGNAT (100.64.0.0/10, which Tailscale hands
+/// out) — those are reachable from somewhere, but not from the internet.
+///
+/// Shared with the AutoNAT handler, which must not accept a LAN peer's
+/// successful probe of a LAN address as proof of internet reachability. See
+/// `network::manager::events`.
+pub(crate) fn multiaddr_is_internet_reachable(addr: &libp2p::Multiaddr) -> bool {
     use libp2p::multiaddr::Protocol;
     let mut via_relay = false;
     for proto in addr.iter() {
@@ -254,6 +263,46 @@ fn is_public_ipv6(ip: std::net::Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A LAN peer confirming a LAN address does not make this node public.**
+    ///
+    /// AutoNAT servers are ordinary peers, so a node on the same subnet happily
+    /// confirms an RFC1918 address. Treating that as "Public" makes a NAT'd node
+    /// skip reserving a relay and sit unreachable from the internet while
+    /// reporting otherwise. Observed live 2026-08-05: a node reporting
+    /// `nat: Public` on the strength of confirmations for these exact addresses.
+    #[test]
+    fn a_confirmed_private_address_is_not_internet_reachable() {
+        for addr in [
+            "/ip4/192.168.1.53/tcp/8810",   // RFC1918, confirmed by a LAN peer
+            "/ip4/10.255.255.254/tcp/8810", // RFC1918
+            "/ip4/169.254.83.107/tcp/8810", // link-local — never routable
+            "/ip4/172.17.0.1/tcp/8810",     // Docker bridge
+            "/ip4/127.0.0.1/tcp/8810",      // loopback
+            "/ip4/100.64.0.7/tcp/8810",     // CGNAT / Tailscale
+        ] {
+            let m: libp2p::Multiaddr = addr.parse().unwrap();
+            assert!(
+                !multiaddr_is_internet_reachable(&m),
+                "{addr} must not count as internet-reachable"
+            );
+        }
+    }
+
+    /// The addresses that genuinely do mean public reachability.
+    #[test]
+    fn public_addresses_and_relay_circuits_are_internet_reachable() {
+        for addr in [
+            "/ip4/203.0.113.7/tcp/8810",
+            "/dns4/anchor.example.net/tcp/8810",
+        ] {
+            let m: libp2p::Multiaddr = addr.parse().unwrap();
+            assert!(
+                multiaddr_is_internet_reachable(&m),
+                "{addr} should count as internet-reachable"
+            );
+        }
+    }
 
     fn sample_payload() -> InviteCodePayload {
         InviteCodePayload {
