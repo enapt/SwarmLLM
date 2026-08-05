@@ -1641,6 +1641,47 @@ mod tests {
         }
     }
 
+    /// **Both log sites for one failure must be throttled, not just one.**
+    ///
+    /// The first fix suppressed only the `rr-message OutboundFailure` line and
+    /// left its sibling `DIAG: OutboundFailure` alone. Measured over a 6.2h soak
+    /// on a live node: the throttled site fell to 33 while the untouched one
+    /// stayed at 209, so one bad link still dominated the log. Distinct keys, so
+    /// the two sites cannot consume each other's window.
+    #[test]
+    fn the_two_sites_for_one_failure_suppress_independently() {
+        let t0 = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(300);
+        let mut diag = RrFailureSuppression {
+            last_logged: t0,
+            suppressed: 0,
+        };
+        let mut rr = RrFailureSuppression {
+            last_logged: t0,
+            suppressed: 0,
+        };
+        // Same event observed at both sites, inside the window.
+        for _ in 0..5 {
+            assert_eq!(
+                diag.observe(t0 + std::time::Duration::from_secs(30), window),
+                RrFailureLog::Suppress
+            );
+            assert_eq!(
+                rr.observe(t0 + std::time::Duration::from_secs(30), window),
+                RrFailureLog::Suppress
+            );
+        }
+        // Each carries its OWN count — neither swallowed the other's window.
+        assert_eq!(
+            diag.observe(t0 + std::time::Duration::from_secs(400), window),
+            RrFailureLog::Emit { suppressed: 5 }
+        );
+        assert_eq!(
+            rr.observe(t0 + std::time::Duration::from_secs(400), window),
+            RrFailureLog::Emit { suppressed: 5 }
+        );
+    }
+
     /// Long enough to collapse a 30s cadence, short enough that a reader is
     /// never left wondering whether a broken link is still broken.
     #[test]

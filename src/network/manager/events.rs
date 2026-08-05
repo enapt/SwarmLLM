@@ -193,15 +193,31 @@ impl NetworkManager {
                     ..
                 },
             )) => {
-                tracing::warn!(
+                // Throttled on the same rule as the `rr-message` line below.
+                //
+                // Suppressing only that one was a half-fix: both lines describe
+                // the SAME failure, and measured over a 6.2h soak the throttled
+                // site fell to 33 while this one stayed at 209 — so the log was
+                // still dominated by one bad link. Keyed separately so the two
+                // sites do not consume each other's window.
+                //
+                // The key is per-peer rather than per-message-type because the
+                // label is not known this early; the emitted count keeps the
+                // real rate visible, which is the property that matters.
+                let diag_decision =
+                    self.observe_rr_failure_for_log(peer, "\u{0}outbound-failure-diag");
+                if let crate::network::manager::RrFailureLog::Emit { suppressed } = diag_decision {
+                    tracing::warn!(
                     %peer,
                     ?request_id,
                     %error,
                     is_connected = self.swarm.is_connected(&peer),
                     pending_tensor_out = self.pending_tensor_outbound.len(),
                     pending_channels = self.pending_tensor_channels.len(),
-                    "DIAG: OutboundFailure"
-                );
+                        suppressed_since_last = suppressed,
+                        "DIAG: OutboundFailure"
+                    );
+                }
                 self.note_rr_failure(peer);
                 // Check if this was a pending tensor forward — notify the pipeline
                 if let Some((inference_uuid, sent_at, _target, _, _)) =

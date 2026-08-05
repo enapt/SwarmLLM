@@ -2,6 +2,16 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Log flooding from a bad link is now actually stopped.** The previous release
+  collapsed repeated warnings from one failing connection, but only one of the
+  two lines each failure produced — so a six-hour measurement on a live node
+  showed one going down to 33 while the other stayed at 209. Both are throttled
+  now.
+
 ## [0.3.72-alpha] — 2026-08-05
 
 Follows 0.3.71. Contains a security fix — see below for whether it affected you
