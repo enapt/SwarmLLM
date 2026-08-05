@@ -4,6 +4,76 @@ use std::collections::HashMap;
 
 // ── BPE Tokenizer from GGUF merges ──
 
+/// The GPT-2 pre-tokenizer pattern. Also the fallback for an unrecognised
+/// `tokenizer.ggml.pre`: it is a sane general byte-level BPE splitter, unlike a
+/// plain whitespace split, which strands every leading space as its own token.
+const PRE_GPT2: &str = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)";
+
+/// The Llama-3 pattern. Shared verbatim by DBRX / SMAUG / CHATGLM4 in
+/// llama.cpp, which is why those names map here too.
+const PRE_LLAMA3: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+/// Qwen2. Identical to [`PRE_LLAMA3`] except numbers are split one digit at a
+/// time (`\p{N}`) rather than in groups of up to three.
+const PRE_QWEN2: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+/// Qwen3.5 — like Qwen2 but combining marks stay attached to their base letter.
+const PRE_QWEN35: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+/// GPT-4o, and Llama-4. Splits runs of case so `SCREAMINGCase` breaks sensibly.
+const PRE_GPT4O: &str = r"[^\r\n\p{L}\p{N}]?((?=[\p{L}])([^a-z]))*((?=[\p{L}])([^A-Z]))+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\r\n\p{L}\p{N}]?((?=[\p{L}])([^a-z]))+((?=[\p{L}])([^A-Z]))*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+/// Pre-tokenizer regex patterns for a GGUF `tokenizer.ggml.pre` value.
+///
+/// Mirrors the `regex_exprs` table in llama.cpp's `llm_tokenizer_bpe`
+/// constructor (`src/llama-vocab.cpp`) and its `tokenizer_pre` string → enum
+/// mapping. Several pre-types apply a LIST of patterns *in sequence*, each pass
+/// re-splitting the fragments produced by the previous one — hence the slice.
+///
+/// Returns `None` for an unrecognised name so the caller can say so out loud;
+/// llama.cpp refuses to load the model in that case, which is too harsh for a
+/// node that would otherwise serve the rest of the swarm.
+///
+/// **Adding a model family means adding its name here.** Getting this wrong is
+/// not a hard failure — it silently inflates every prompt and feeds the model
+/// token sequences it was never trained on, which is why the fallback warns.
+fn pre_tokenizer_patterns(pre_type: &str) -> Option<&'static [&'static str]> {
+    Some(match pre_type {
+        // The Llama-3 pattern and everything llama.cpp routes to it.
+        "llama3" | "llama-v3" | "llama-bpe" | "falcon3" | "falcon-h1" | "pixtral" | "midm-2.0"
+        | "lfm2" | "jina-v5-nano" | "dbrx" | "smaug-bpe" | "glm4" | "chatglm-bpe" | "jais-2" => {
+            &[PRE_LLAMA3]
+        }
+        "qwen2" | "deepseek-r1-qwen" | "kormo" | "f2llmv2" | "megrez" | "stablelm2" | "hunyuan"
+        | "solar-open" => &[PRE_QWEN2],
+        "qwen35" => &[PRE_QWEN35],
+        "gpt-4o" | "llama4" | "kanana2" | "talkie" | "minimax-m2" => &[PRE_GPT4O],
+        "gpt-2" | "gpt2" | "phi-2" | "jina-es" | "jina-de" | "gigachat" | "jina-v2-es"
+        | "jina-v2-de" | "a.x-4.0" | "mellum" | "modern-bert" | "exaone4" | "jina-v1-en"
+        | "jina-v2-code" | "roberta-bpe" | "mpt" | "olmo" | "jais" | "trillion"
+        | "granite-docling" => &[PRE_GPT2],
+        // Sequential lists: each entry re-splits the previous pass's fragments.
+        "default" => &[
+            r"[\p{P}\$\+<=>\^~\|]+",
+            PRE_GPT2,
+            r"\p{N}+",
+            r"[0-9][0-9][0-9]",
+        ],
+        "falcon" => &[r"[\p{P}\$\+<=>\^~\|`]+", PRE_GPT2, r"[0-9][0-9][0-9]"],
+        "starcoder" | "refact" | "command-r" | "smollm" | "codeshell" | "exaone" | "minerva-7b"
+        | "mellum2" => &[r"\p{N}", PRE_GPT2],
+        "deepseek-coder" => &[
+            r"[\r\n]",
+            r"\s?\p{L}+",
+            r"\s?\p{P}+",
+            r"[一-龥ࠀ-一가-퟿]+",
+            r"\p{N}",
+        ],
+        "whitespace" => &[r"\S+|\s+"],
+        _ => return None,
+    })
+}
+
 /// BPE tokenizer built from GGUF metadata.
 /// Supports both GPT-2/Qwen2 byte-level BPE and SentencePiece BPE (LLaMA).
 pub struct BpeTokenizer {
@@ -16,8 +86,9 @@ pub struct BpeTokenizer {
     byte_encoder: [char; 256],
     /// GPT-2 unicode char → byte reverse mapping
     byte_decoder: HashMap<char, u8>,
-    /// Pre-tokenization regex pattern
-    pre_tok_re: fancy_regex::Regex,
+    /// Pre-tokenization regex patterns, applied in sequence: each pass
+    /// re-splits the fragments the previous pass produced.
+    pre_tok_res: Vec<fancy_regex::Regex>,
     /// Special tokens sorted by length descending (for matching)
     special_tokens: Vec<(String, u32)>,
     /// Whether this is a SentencePiece tokenizer (uses ▁ for spaces, no byte encoding)
@@ -55,22 +126,35 @@ impl BpeTokenizer {
         // Build GPT-2 byte encoder
         let (byte_encoder, byte_decoder) = build_gpt2_byte_encoder();
 
-        // Pre-tokenization regex based on model type
-        let pattern = match pre_type {
-            "qwen2" => {
-                // Qwen2 pre-tokenization pattern (from HuggingFace tokenizers)
-                r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+        // Pre-tokenization patterns for this model family. An unrecognised name
+        // is reported rather than silently mis-tokenising every prompt: the
+        // wrong splitter still produces valid-looking tokens, just far more of
+        // them, and none of the space-prefixed ones the model was trained on.
+        let patterns = pre_tokenizer_patterns(pre_type).unwrap_or_else(|| {
+            if !is_sentencepiece {
+                tracing::warn!(
+                    pre_tokenizer = %pre_type,
+                    "Unknown GGUF pre-tokenizer; falling back to the GPT-2 splitter. \
+                     Prompts for this model may use more tokens than they should. \
+                     Please report this pre-tokenizer name so it can be added."
+                );
             }
-            "gpt-2" | "gpt2" => {
-                r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
-            }
-            _ => {
-                // Default fallback: split on whitespace boundaries
-                r"[^\s]+|\s+"
-            }
-        };
-        let pre_tok_re = fancy_regex::Regex::new(pattern)
-            .unwrap_or_else(|_| fancy_regex::Regex::new(r"[^\s]+|\s+").unwrap());
+            &[PRE_GPT2]
+        });
+        let pre_tok_res: Vec<fancy_regex::Regex> = patterns
+            .iter()
+            .filter_map(|p| match fancy_regex::Regex::new(p) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    tracing::error!(
+                        pre_tokenizer = %pre_type,
+                        error = %e,
+                        "Pre-tokenizer pattern failed to compile; skipping it"
+                    );
+                    None
+                }
+            })
+            .collect();
 
         // Collect special tokens (e.g., <|im_start|>, <|im_end|>, <s>, </s>, <unk>,
         // <bos>, <eos>, <start_of_turn>, <end_of_turn>)
@@ -90,7 +174,7 @@ impl BpeTokenizer {
             merge_ranks,
             byte_encoder,
             byte_decoder,
-            pre_tok_re,
+            pre_tok_res,
             special_tokens,
             is_sentencepiece,
         }
@@ -166,20 +250,42 @@ impl BpeTokenizer {
         result
     }
 
-    /// Pre-tokenize text using the model's regex pattern.
-    fn pre_tokenize(&self, text: &str) -> Vec<String> {
-        let mut pieces = Vec::new();
-        let mut search_start = 0;
-        while search_start < text.len() {
-            match self.pre_tok_re.find_from_pos(text, search_start) {
-                Ok(Some(m)) => {
-                    pieces.push(m.as_str().to_string());
-                    search_start = m.end();
+    /// Pre-tokenize text using the model's regex patterns.
+    ///
+    /// Patterns are applied in sequence: each pass re-splits the fragments the
+    /// previous pass produced, matching llama.cpp's `unicode_regex_split`.
+    ///
+    /// Text that a pattern does NOT match is kept as its own fragment rather
+    /// than dropped. Several of these patterns cover only part of their input
+    /// by design (the GPT-2 one does not match interior whitespace runs), so
+    /// discarding the gaps would delete characters from the prompt outright.
+    fn pre_tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        let mut fragments: Vec<&'a str> = vec![text];
+        for re in &self.pre_tok_res {
+            let mut next: Vec<&'a str> = Vec::with_capacity(fragments.len());
+            for frag in fragments.drain(..) {
+                let mut cursor = 0;
+                while cursor < frag.len() {
+                    match re.find_from_pos(frag, cursor) {
+                        Ok(Some(m)) if m.end() > m.start() => {
+                            if m.start() > cursor {
+                                next.push(&frag[cursor..m.start()]);
+                            }
+                            next.push(&frag[m.start()..m.end()]);
+                            cursor = m.end();
+                        }
+                        // No further match, or a zero-width one that would not
+                        // advance the cursor: keep the remainder intact.
+                        _ => break,
+                    }
                 }
-                _ => break,
+                if cursor < frag.len() {
+                    next.push(&frag[cursor..]);
+                }
             }
+            fragments = next;
         }
-        pieces
+        fragments
     }
 
     /// BPE encode a single pre-token word.
@@ -750,6 +856,168 @@ fn build_gpt2_byte_encoder() -> ([char; 256], HashMap<char, u8>) {
     }
 
     (encoder, decoder)
+}
+
+#[cfg(test)]
+mod pre_tokenizer_tests {
+    use super::*;
+
+    /// A tiny GPT-2-style byte-level vocab carrying the space-prefixed word
+    /// tokens a real Llama-3 vocab has. `Ġ` is byte 0x20 under the GPT-2 byte
+    /// encoding, so `Ġworld` is the token for " world".
+    /// Every single-byte token (so nothing ever falls back to the unknown id),
+    /// plus the multi-character tokens these tests exercise.
+    fn bpe_vocab() -> Vec<String> {
+        let (encoder, _) = build_gpt2_byte_encoder();
+        let mut v: Vec<String> = encoder.iter().map(|c| c.to_string()).collect();
+        for extra in [
+            "he", "hel", "hell", "hello", "wo", "wor", "worl", "world", "Ġw", "Ġwo", "Ġwor",
+            "Ġworl", "Ġworld", "Ġh", "Ġhe", "Ġhel", "Ġhell", "Ġhello", "ĠĠ", "12", "123",
+        ] {
+            v.push(extra.to_string());
+        }
+        v
+    }
+
+    /// Merge rank is list order, and a real merge file ranks the
+    /// space-prefixed pairs above the bare ones — so `Ġ w` must outrank `w o`,
+    /// or the space never gets absorbed regardless of the pre-tokenizer.
+    fn merges() -> Vec<String> {
+        [
+            "Ġ w", "Ġw o", "Ġwo r", "Ġwor l", "Ġworl d", "Ġ h", "Ġh e", "Ġhe l", "Ġhel l",
+            "Ġhell o", "Ġ Ġ", "h e", "he l", "hel l", "hell o", "w o", "wo r", "wor l", "worl d",
+            "1 2", "12 3",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    fn encode_with(pre: &str, text: &str) -> Vec<String> {
+        let vocab = bpe_vocab();
+        let tok = BpeTokenizer::from_gguf(&vocab, &merges(), pre, "gpt2");
+        tok.encode(text)
+            .into_iter()
+            .map(|id| vocab[id as usize].clone())
+            .collect()
+    }
+
+    /// The defect this guards: `llama-bpe` — the pre-tokenizer name on every
+    /// Llama-3/3.1/3.2 GGUF — was absent from the match and fell through to a
+    /// naive whitespace split. That stranded each space as its own `Ġ` token
+    /// instead of attaching it to the following word, roughly doubling the
+    /// prompt and handing the model sequences it was never trained on.
+    /// Measured before the fix: "The quick brown fox jumps over the lazy dog"
+    /// took 19 tokens against the reference tokenizer's 9.
+    #[test]
+    fn llama3_attaches_a_leading_space_to_the_following_word() {
+        assert_eq!(
+            encode_with("llama-bpe", "hello world"),
+            vec!["hello", "Ġworld"],
+            "a space must merge into the word after it, not stand alone"
+        );
+    }
+
+    /// Every alias llama.cpp routes to the Llama-3 pattern must behave the same
+    /// — a node that recognises `llama-bpe` but not `llama3` still mis-tokenises.
+    #[test]
+    fn every_llama3_alias_maps_to_the_same_pattern() {
+        for alias in [
+            "llama3",
+            "llama-v3",
+            "llama-bpe",
+            "falcon3",
+            "falcon-h1",
+            "pixtral",
+            "dbrx",
+            "smaug-bpe",
+            "glm4",
+        ] {
+            assert_eq!(
+                encode_with(alias, "hello world"),
+                vec!["hello", "Ġworld"],
+                "pre-tokenizer alias {alias} did not get the Llama-3 pattern"
+            );
+        }
+    }
+
+    /// An unrecognised name must still attach leading spaces. The old fallback
+    /// was a whitespace split, so ANY model family not explicitly listed was
+    /// silently mis-tokenised; the GPT-2 splitter is the sane general default.
+    #[test]
+    fn an_unknown_pre_tokenizer_falls_back_to_gpt2_not_a_whitespace_split() {
+        assert!(pre_tokenizer_patterns("some-future-model").is_none());
+        assert_eq!(
+            encode_with("some-future-model", "hello world"),
+            vec!["hello", "Ġworld"],
+            "the fallback must not strand the space as its own token"
+        );
+    }
+
+    /// Qwen2 splits numbers one digit at a time; Llama-3 groups up to three.
+    /// The Qwen arm previously held the Llama-3 pattern, so Qwen models were
+    /// given three-digit number tokens they were not trained on.
+    #[test]
+    fn qwen2_splits_digits_singly_and_llama3_groups_them() {
+        assert_eq!(encode_with("qwen2", "123"), vec!["1", "2", "3"]);
+        assert_eq!(encode_with("llama-bpe", "123"), vec!["123"]);
+    }
+
+    /// Pre-tokenizer patterns need not cover their whole input — the GPT-2 one
+    /// does not match interior whitespace runs. Fragments between matches must
+    /// survive; dropping them deleted characters from the prompt outright.
+    #[test]
+    fn text_between_matches_is_never_dropped() {
+        let vocab = bpe_vocab();
+        for pre in ["gpt-2", "llama-bpe", "qwen2", "default", "starcoder"] {
+            let tok = BpeTokenizer::from_gguf(&vocab, &merges(), pre, "gpt2");
+            for text in [
+                "hello   world",
+                "hello \t world",
+                "  hello  ",
+                "hello!!!  world",
+            ] {
+                let decoded: Vec<u8> = tok
+                    .encode(text)
+                    .iter()
+                    .flat_map(|id| tok.decode_token(&vocab[*id as usize]))
+                    .collect();
+                assert_eq!(
+                    String::from_utf8_lossy(&decoded),
+                    text,
+                    "pre-tokenizer {pre} lost characters from {text:?}"
+                );
+            }
+        }
+    }
+
+    /// Every pattern in the table must compile under `fancy_regex`; a pattern
+    /// that does not is dropped at build time and silently weakens splitting.
+    #[test]
+    fn every_pattern_in_the_table_compiles() {
+        for pre in [
+            "llama-bpe",
+            "qwen2",
+            "qwen35",
+            "gpt-4o",
+            "llama4",
+            "gpt-2",
+            "default",
+            "falcon",
+            "starcoder",
+            "deepseek-coder",
+            "whitespace",
+        ] {
+            let pats = pre_tokenizer_patterns(pre)
+                .unwrap_or_else(|| panic!("{pre} missing from the table"));
+            for p in pats {
+                assert!(
+                    fancy_regex::Regex::new(p).is_ok(),
+                    "pattern for {pre} failed to compile: {p}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

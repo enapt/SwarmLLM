@@ -2,6 +2,42 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Llama 3 models were using roughly twice as many tokens per prompt as they
+  should.** Every Llama-3, 3.1 and 3.2 model file asks for a text-splitting rule
+  named `llama-bpe`, and SwarmLLM did not recognise that name. It quietly fell
+  back to splitting on spaces, which left every space as a token of its own
+  instead of joining it to the word that follows — the form these models are
+  actually trained on. "The quick brown fox jumps over the lazy dog" became 19
+  tokens instead of 9.
+
+  Two consequences, both invisible until now: prompts cost about twice as much
+  work to process, and the model was being fed text in a shape it had never seen
+  during training, which degrades its answers. Reading a prompt is the large
+  majority of the work in a long request, so this was slowing down the most
+  widely used family of models on the network.
+
+  Checked against the reference tokenizer on fifteen varied samples: previously
+  fourteen of them were split differently, using 43% more tokens overall. All
+  fifteen now match it exactly.
+
+- **Qwen models were given number tokens they were not trained on.** The rule
+  used for Qwen grouped digits up to three at a time; Qwen models expect one
+  digit at a time.
+
+- **Characters could be dropped from a prompt entirely.** Text that a splitting
+  rule did not match was discarded rather than kept, so runs of spaces between
+  words could vanish before the model ever saw them.
+
+- **An unrecognised splitting rule now says so.** Model families SwarmLLM does
+  not know about fall back to a general-purpose rule that handles spaces
+  correctly, and log a warning naming the rule, instead of silently producing
+  inflated prompts. Every name the reference implementation knows is now
+  recognised.
+
 ## [0.3.77-alpha] — 2026-08-05
 
 Follows 0.3.76. Peer response times were mostly blank, and blank in a way that
