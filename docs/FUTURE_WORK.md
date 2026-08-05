@@ -6209,11 +6209,27 @@ cause for the flat curve has been established. Anyone picking this up:
   turns out to matter, but that is exactly what is unestablished.
 - `SplitModel::forward_batch` (`src/inference/split/executor.rs`) — falls back to
   **sequential per-item forwards** unless every item shares `(seq_len,
-  index_pos)`. Concurrent requests diverge in `index_pos` as soon as they start
-  at different times, so the batched path may rarely run at all. This is the
-  first thing to instrument: count how often the homogeneity check passes in a
-  real concurrent workload. If it almost never passes, the flat curve is fully
-  explained and the fix is a batched forward that handles ragged positions.
+  index_pos)`. Note `batch_eligible` in `model_worker.rs` does NOT require
+  matching `index_pos` — it only rejects prefill — so a batch can pass
+  eligibility and then silently take the sequential path inside `forward_batch`.
+  Concurrent requests diverge in `index_pos` as soon as they start at different
+  times or carry different prompt lengths, which is the normal case.
+
+  **This was tested behaviourally and is probably NOT the main cause.** Four
+  concurrent requests with identical prompt lengths started together (so
+  `index_pos` matches throughout decode, and the batched path definitely runs)
+  reached 32.5 tok/s; the same four with prompt lengths 51/67/76/90 reached
+  27.0. So the homogeneity requirement costs ~20% — real, worth fixing with a
+  ragged-position batched forward, but it does not explain the flat curve,
+  because **32.5 tok/s across four requests is barely above the 31.6 one request
+  achieves alone.**
+
+  Which is the sharper question: on the batched path's best case, four streams
+  deliver what one does. Decode should be latency-bound here — 31.6 tok/s over a
+  ~2 GB model is ~63 GB/s against the card's ~448 GB/s, so there is bandwidth
+  headroom and batching should convert it into throughput. It does not. Look for
+  per-item work inside the "batched" forward (attention in particular) before
+  assuming the matmuls are shared.
 - The router's own `max_batch_size` defaults to 1 ("no batching, sequential,
   backward-compatible"); the worker's slot table is the live mechanism. Two
   batching layers with different defaults is itself worth a look.
