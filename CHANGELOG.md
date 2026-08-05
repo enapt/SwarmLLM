@@ -2,6 +2,24 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Peer response times are measured again, and stop disappearing.** The latency
+  shown for each connected machine was usually blank, and when it did appear it
+  vanished again within seconds. Two causes: the regular health check already
+  measures a round trip every 30 seconds and was throwing the number away, and
+  the routine that refreshes a peer's details replaced its record wholesale —
+  wiping both the measured latency and the peer's current workload each time,
+  which happens constantly. Both now carry across. Measured on a live node: all
+  four peers had a response time within two minutes and still had one six
+  minutes later, where before all four were blank after four.
+
+  This is not only a display detail — the same numbers decide whether a machine
+  is fast enough to join a split-model group, and how work is balanced across
+  peers.
+
 ## [0.3.76-alpha] — 2026-08-05
 
 Follows 0.3.75. Acts on a tester report: a node's cloud access disappeared and

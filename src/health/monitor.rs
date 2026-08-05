@@ -299,6 +299,11 @@ impl HealthMonitor {
             active_request_count,
         };
 
+        // Record the send so the pong can be turned into a live RTT. Stored
+        // before the send: a pong cannot arrive before the ping leaves, but the
+        // reverse ordering would race under a fast LAN peer.
+        *self.shared_state.last_health_ping.lock() = Some((nonce, std::time::Instant::now()));
+
         if let Err(e) = self.network_tx.send(NetworkCommand::Broadcast(msg)).await {
             tracing::warn!(error = %e, "Failed to send health ping");
         }

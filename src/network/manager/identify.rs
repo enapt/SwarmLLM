@@ -159,6 +159,25 @@ impl NetworkManager {
             .map(|p| p.verified_transaction_count)
             .unwrap_or(0);
         let was_lan = existing.as_ref().map(|p| p.is_lan_peer).unwrap_or(false);
+        // Measured state must survive an Identify too.
+        //
+        // This handler REPLACES the registry entry, and Identify fires
+        // constantly — 172 times for a single peer in one log. Everything not
+        // carried across is therefore erased every few seconds. `latency_ms`
+        // was being reset to None and `active_request_count` to 0, so a
+        // measurement taken from a health pong lived only until the next
+        // Identify. Observed 2026-08-05: three of four peers had a live
+        // latency 100s after startup and all four read `None` by 4.5 minutes.
+        //
+        // Neither is cosmetic. `inference.tp_max_latency_ms` admits peers to a
+        // tensor-parallel group on the latency, and the scheduler's
+        // load-awareness reads the request count — both were being handed a
+        // freshly-blanked value.
+        let prev_latency_ms = existing.as_ref().and_then(|p| p.latency_ms);
+        let prev_active_requests = existing
+            .as_ref()
+            .map(|p| p.active_request_count)
+            .unwrap_or(0);
         drop(existing);
         // A peer is on our LAN only if the ACTUAL connection to it runs over a
         // private/loopback/link-local address, or it observes US on such an
@@ -184,10 +203,10 @@ impl NetworkManager {
                 .collect(),
             capability,
             last_seen: chrono::Utc::now(),
-            latency_ms: None,
+            latency_ms: prev_latency_ms,
             trust_score,
             peer_id_bytes: Some(peer_id.to_bytes()),
-            active_request_count: 0,
+            active_request_count: prev_active_requests,
             first_seen,
             verified_transaction_count: vtc,
             is_lan_peer: is_lan,

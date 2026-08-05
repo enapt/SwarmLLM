@@ -1596,7 +1596,7 @@ pub(crate) async fn dispatch_network_messages(
                                         }
                                     }
                                     // Health pongs: update the sender's load in peer_registry
-                                    SwarmMessage::HealthPong { node_id: Some(sender_id), active_request_count, .. } => {
+                                    SwarmMessage::HealthPong { node_id: Some(sender_id), active_request_count, nonce, .. } => {
                                         // SEC: Verify sender matches the health pong's node_id
                                         if let Some(ref sender) = authenticated_sender {
                                             if sender != &sender_id {
@@ -1606,9 +1606,41 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated HealthPong");
                                             continue;
                                         }
+                                        // The round trip we just completed IS a
+                                        // latency measurement, and it was being
+                                        // thrown away. `latency_ms` was written from
+                                        // exactly one other place — an occasional
+                                        // rr_ping/PEX exchange — so what the dashboard
+                                        // and `/api/admin/peers` present as a peer's
+                                        // latency was an artefact of whenever that last
+                                        // happened, `None` for peers it never happened
+                                        // to, and never refreshed. Observed 2026-08-05:
+                                        // two of three connected peers read `lat=None`
+                                        // after 47 minutes of healthy two-way traffic.
+                                        //
+                                        // Not merely cosmetic: `tp_max_latency_ms`
+                                        // admits peers to a tensor-parallel group on
+                                        // this number.
+                                        //
+                                        // Only the CURRENT nonce counts. A pong echoing
+                                        // an older one arrived after the next ping went
+                                        // out, so measuring it against the newer send
+                                        // time would report a far-too-small RTT.
+                                        let rtt_ms = {
+                                            let guard = shared_state.last_health_ping.lock();
+                                            match *guard {
+                                                Some((sent_nonce, sent_at)) if sent_nonce == nonce => {
+                                                    Some(sent_at.elapsed().as_millis().min(u32::MAX as u128) as u32)
+                                                }
+                                                _ => None,
+                                            }
+                                        };
                                         if let Some(mut peer) = shared_state.peer_registry.get_mut(&sender_id) {
                                             peer.active_request_count = active_request_count;
                                             peer.last_seen = chrono::Utc::now();
+                                            if let Some(rtt) = rtt_ms {
+                                                peer.latency_ms = Some(rtt);
+                                            }
                                         }
                                     }
                                     // Ephemeral key exchange for forward secrecy

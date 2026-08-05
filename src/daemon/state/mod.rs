@@ -363,6 +363,22 @@ pub struct SharedState {
     /// Loopback is excluded because the dashboard's own browser connection
     /// would otherwise satisfy it without proving anything about the LAN.
     pub observed_inbound_connection: std::sync::atomic::AtomicBool,
+    /// When the most recent health ping went out, and with which nonce.
+    ///
+    /// The health ping/pong runs every 30s to every peer and already carries a
+    /// nonce, so the round trip is a live latency measurement — and it was
+    /// being discarded. `PeerInfo.latency_ms` was written from ONE other place:
+    /// an occasional rr_ping/PEX exchange. So the figure the dashboard and
+    /// `/api/admin/peers` present as a peer's latency was an artefact of
+    /// whenever that last happened, `None` for peers it never happened to, and
+    /// never refreshed. Observed 2026-08-05: two of three connected peers
+    /// showed `lat=None` after 47 minutes of healthy two-way traffic.
+    ///
+    /// It is not only cosmetic — `inference.tp_max_latency_ms` admits peers to
+    /// a tensor-parallel group on this number.
+    ///
+    /// One nonce covers every peer because the ping is a single broadcast.
+    pub last_health_ping: parking_lot::Mutex<Option<(u64, std::time::Instant)>>,
     /// Runtime mirror of `config.api.dashboard_trust_lan` — whether a browser
     /// on a private/LAN address is handed the dashboard's API key.
     ///
@@ -816,6 +832,7 @@ impl SharedState {
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
             listen_multiaddrs: arc_swap::ArcSwap::from_pointee(Vec::new()),
             observed_inbound_connection: std::sync::atomic::AtomicBool::new(false),
+            last_health_ping: parking_lot::Mutex::new(None),
             dashboard_trust_lan: std::sync::atomic::AtomicBool::new(config.api.dashboard_trust_lan),
             publicly_reachable: std::sync::atomic::AtomicBool::new(false),
             hole_punch_successes: AtomicU64::new(0),
