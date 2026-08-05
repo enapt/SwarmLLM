@@ -132,9 +132,42 @@ pub(super) fn tokenize(template: &str) -> Option<Vec<Token>> {
                     }
                 }
             } else if rest.starts_with("{#") {
-                // Comment: {# ... #}
+                // Comment: {# ... #}. The body is dropped, but the surrounding
+                // whitespace is NOT automatically dropped with it — a comment
+                // obeys the same trim markers and the same lstrip_blocks /
+                // trim_blocks defaults as a tag. Skipping only the body left the
+                // newlines on either side in the prompt, so a template that
+                // documents itself between sections emitted a blank line into
+                // the model's input at each one.
                 let end = rest.find("#}")?;
+                let inner = &rest[2..end];
+                let trim_left = inner.starts_with('-');
+                let trim_right = inner.ends_with('-');
+
+                if let Some(Token::Text(ref mut t)) = tokens.last_mut() {
+                    if trim_left {
+                        *t = t.trim_end().to_string();
+                    } else if let Some(nl_pos) = t.rfind('\n') {
+                        // lstrip_blocks: drop indentation between the newline
+                        // and the comment.
+                        if t[nl_pos + 1..].chars().all(|c| c == ' ' || c == '\t') {
+                            t.truncate(nl_pos + 1);
+                        }
+                    } else if t.chars().all(|c| c == ' ' || c == '\t') {
+                        t.clear();
+                    }
+                }
+
                 rest = &rest[end + 2..];
+                if trim_right {
+                    // `-#}` drops ALL following whitespace, newlines included.
+                    rest = rest.trim_start();
+                } else if let Some(stripped) = rest.strip_prefix('\n') {
+                    // trim_blocks: exactly one newline directly after the comment.
+                    rest = stripped;
+                } else if let Some(stripped) = rest.strip_prefix("\r\n") {
+                    rest = stripped;
+                }
             } else {
                 // Lone '{' — treat as text
                 tokens.push(Token::Text("{".to_string()));

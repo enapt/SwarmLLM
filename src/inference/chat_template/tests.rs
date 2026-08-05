@@ -779,6 +779,55 @@ fn rebinding_messages_to_its_own_tail_is_honoured() {
     );
 }
 
+/// A comment's body is dropped, but the whitespace around it must go too.
+///
+/// Comments were skipped without honouring their trim markers or the
+/// lstrip_blocks / trim_blocks defaults, so every `{#- ... #}` a template used
+/// to document itself left a blank line behind in the model's prompt.
+#[test]
+fn a_comment_does_not_leave_its_whitespace_behind() {
+    // Expectations taken from jinja2 itself, with the trim_blocks and
+    // lstrip_blocks defaults HuggingFace renders chat templates under.
+    let msgs = test_messages();
+    for (tmpl, want) in [
+        ("A\n{#- a comment #}\nB", "AB"),
+        ("A\n    {#- a comment -#}\n    B", "AB"),
+        // No trim markers: lstrip_blocks removes the indent before the comment
+        // and trim_blocks the newline after it, but the newline BEFORE stays.
+        ("A\n{# a comment #}\nB", "A\nB"),
+        ("A\n  {# c #}\n  B", "A\n  B"),
+    ] {
+        assert_eq!(
+            apply_chat_template(tmpl, &msgs, "", "", true).unwrap(),
+            want,
+            "wrong whitespace around comment in {tmpl:?}"
+        );
+    }
+}
+
+/// Llama-3.x templates ask for `strftime_now` and fall back to a HARDCODED
+/// date when it is missing, so reporting it undefined told every Llama-3 model
+/// that today was 26 Jul 2024 forever.
+#[test]
+fn strftime_now_reports_todays_date_not_the_templates_fallback() {
+    let msgs = test_messages();
+    let tmpl = "{%- if strftime_now is defined %}\
+                {{- strftime_now(\"%Y\") }}\
+                {%- else %}FALLBACK{%- endif %}";
+    let out = apply_chat_template(tmpl, &msgs, "", "", true).unwrap();
+    assert_ne!(
+        out, "FALLBACK",
+        "the guard must report strftime_now present"
+    );
+    let year: i32 = out.parse().expect("a four-digit year");
+    assert!((2025..=2100).contains(&year), "implausible year {year}");
+
+    // A format we cannot render must not panic — chrono's Display panics on an
+    // unknown specifier, and the format string comes from model metadata.
+    let bad = "{{ strftime_now(\"%Q\") }}X";
+    assert_eq!(apply_chat_template(bad, &msgs, "", "", true).unwrap(), "X");
+}
+
 /// Indexing a single message must still evaluate to that message's field, not
 /// be mistaken for a binding to the whole list.
 #[test]

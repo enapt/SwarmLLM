@@ -407,6 +407,11 @@ fn eval_expr(expr: &str, state: &EvalState, ctx: &EvalCtx) -> Option<String> {
         return None;
     }
 
+    // strftime_now("<fmt>") — today's date, as HuggingFace provides it.
+    if let Some(rest) = expr.strip_prefix("strftime_now(") {
+        return eval_strftime_now(rest);
+    }
+
     // Handle string concatenation with +
     if contains_plus_outside_strings(expr) {
         let parts = split_on_plus(expr);
@@ -611,6 +616,16 @@ fn eval_condition(condition: &str, state: &EvalState, ctx: &EvalCtx) -> bool {
         return lv != rv;
     }
 
+    // `strftime_now is defined` — Llama-3.x templates ask for this before
+    // using it, and fall back to a HARDCODED date when it is missing. Reporting
+    // it as undefined meant every Llama-3 model was told the date was
+    // 26 Jul 2024, whatever today is. See `eval_strftime_now`.
+    if let Some(name) = condition.strip_suffix(" is defined") {
+        if name.trim() == "strftime_now" {
+            return true;
+        }
+    }
+
     // Special boolean names
     if condition == "add_generation_prompt" {
         return ctx.add_generation_prompt;
@@ -627,6 +642,34 @@ fn eval_condition(condition: &str, state: &EvalState, ctx: &EvalCtx) -> bool {
         Some(val) => !val.is_empty() && val != "false" && val != "0",
         None => false, // undefined → falsy
     }
+}
+
+/// Evaluate the body of a `strftime_now("<fmt>")` call — `rest` is everything
+/// after the opening paren.
+///
+/// Llama-3.x templates render today's date into the system block, guarded by
+/// `{% if strftime_now is defined %}` with a hardcoded date in the `else`. With
+/// no implementation the guard was false and every Llama-3 model on the network
+/// was told the date was 26 Jul 2024.
+///
+/// An unparseable format yields `None` rather than a panic: the format string
+/// arrives from model metadata, and `chrono`'s `Display` panics on a bad
+/// specifier instead of erroring.
+fn eval_strftime_now(rest: &str) -> Option<String> {
+    let inner = rest.strip_suffix(')')?.trim();
+    let fmt = inner
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| inner.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))?;
+
+    // Reject unknown specifiers up front — formatting them would panic.
+    if chrono::format::StrftimeItems::new(fmt)
+        .any(|item| matches!(item, chrono::format::Item::Error))
+    {
+        tracing::debug!(format = %fmt, "chat template: unsupported strftime format");
+        return None;
+    }
+    Some(chrono::Local::now().format(fmt).to_string())
 }
 
 /// Split a condition string on an operator, respecting strings and parentheses.

@@ -41,6 +41,21 @@ All notable changes to SwarmLLM are documented here.
   Beyond the wasted tokens, a model reading the same instruction twice in two
   different positions is being given a prompt no model was trained on.
 
+- **Llama 3 models were told the date was 26 July 2024.** Their prompt includes
+  today's date, taken from a clock the prompt builder is meant to supply.
+  SwarmLLM did not supply one, so the instructions fell back to the fixed date
+  written into them — the day the model was published. Ask one what year it is
+  and it answered 2024. It now gets the real date.
+
+- **A blank line was being inserted into the prompt at each section.** Notes
+  that model authors write between sections of their prompt instructions are
+  meant to disappear along with the blank space around them. The note itself was
+  removed but the blank line was left behind, so the model received a prompt
+  spaced differently from the one it was trained on.
+
+  With these fixed, the prompt SwarmLLM builds for Llama 3 is now identical,
+  character for character, to the one the reference implementation produces.
+
 - **Qwen models were given number tokens they were not trained on.** The rule
   used for Qwen grouped digits up to three at a time; Qwen models expect one
   digit at a time.
