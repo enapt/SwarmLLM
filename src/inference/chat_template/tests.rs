@@ -779,6 +779,85 @@ fn rebinding_messages_to_its_own_tail_is_honoured() {
     );
 }
 
+/// The REAL Llama-3.x template, shipped verbatim in every Llama-3.1/3.2 GGUF,
+/// rendered against the exact output jinja2 produces for it.
+///
+/// This is the integration guard for the whole prompt builder: the pieces below
+/// are each unit-tested, but only rendering the real thing catches them
+/// interacting. Every one of these was wrong at once, and none produced an
+/// error — the system message came out twice, comments left blank lines
+/// scattered through the prompt, and the date fell back to the hardcoded
+/// 26 Jul 2024 written into the template.
+///
+/// Expected strings were taken from jinja2 (trim_blocks + lstrip_blocks, as
+/// HuggingFace renders chat templates), not derived by reading our evaluator.
+#[test]
+fn the_official_llama3_template_renders_exactly_as_jinja2_does() {
+    let tmpl = include_str!("fixtures/llama3_official.jinja");
+    let today = chrono::Local::now().format("%d %b %Y").to_string();
+    let header =
+        format!("<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: {today}\n\n");
+
+    let render = |msgs: &[ChatMessage]| {
+        apply_chat_template(tmpl, msgs, "<|begin_of_text|>", "<|eot_id|>", true).expect("renders")
+    };
+
+    let user = |c: &str| ChatMessage {
+        role: Role::User,
+        content: c.into(),
+        images: vec![],
+    };
+    let assistant = |c: &str| ChatMessage {
+        role: Role::Assistant,
+        content: c.into(),
+        images: vec![],
+    };
+    let system = |c: &str| ChatMessage {
+        role: Role::System,
+        content: c.into(),
+        images: vec![],
+    };
+
+    assert_eq!(
+        render(&[user("Hi there")]),
+        format!(
+            "{header}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nHi there<|eot_id|>\
+             <|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+    );
+
+    // The system message belongs in the header block and NOWHERE else.
+    let with_system = render(&[system("You are terse."), user("Hi there")]);
+    assert_eq!(
+        with_system,
+        format!(
+            "{header}You are terse.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n\
+             Hi there<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+    );
+    assert_eq!(
+        with_system.matches("You are terse.").count(),
+        1,
+        "the system message was rendered more than once"
+    );
+
+    assert_eq!(
+        render(&[user("a"), assistant("b"), user("c")]),
+        format!(
+            "{header}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\na<|eot_id|>\
+             <|start_header_id|>assistant<|end_header_id|>\n\nb<|eot_id|>\
+             <|start_header_id|>user<|end_header_id|>\n\nc<|eot_id|>\
+             <|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+    );
+
+    // The template's own hardcoded fallback date must never reach a model.
+    assert!(
+        !with_system.contains("26 Jul 2024") || today == "26 Jul 2024",
+        "rendered the template's fallback date instead of today's"
+    );
+}
+
 /// A comment's body is dropped, but the whitespace around it must go too.
 ///
 /// Comments were skipped without honouring their trim markers or the
