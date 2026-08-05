@@ -2,6 +2,25 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **You can now see which cloud providers a node has, and where each key came
+  from.** Reported by a tester whose node went from 102 cloud models to zero
+  with no error and nothing in the log: there was no way to inspect provider
+  configuration at all, so there was nothing to check. The settings API now
+  lists every provider, whether it is configured, and whether the key came from
+  the dashboard or the environment — never the key itself. That last detail is
+  the one that matters: a key supplied through the environment is lost when a
+  restart does not inherit it, and from the outside that looks exactly like one
+  that was never set.
+
+- **A node with no cloud providers now says so on startup**, instead of simply
+  having none. On a machine without a graphics card, cloud access can be the
+  only usable way to answer at all, so losing it quietly is the difference
+  between a working node and a useless one.
+
 ## [0.3.75-alpha] — 2026-08-05
 
 Follows 0.3.74. Mostly about the software explaining itself: several things it

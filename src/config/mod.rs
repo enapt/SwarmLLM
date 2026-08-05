@@ -1720,6 +1720,40 @@ mod config_default_hygiene {
         );
     }
 
+    /// **A config write must not discard provider settings.**
+    ///
+    /// Reported 2026-08-05: a node's `config.toml` shrank from ~3,992 bytes to
+    /// 392 after a settings change, losing its `[providers]` section among
+    /// others, and its cloud models went to zero. If the writer dropped
+    /// non-default provider values that would be silent data loss, so this
+    /// pins it: anything the operator actually set has to survive the round
+    /// trip.
+    #[test]
+    fn a_config_write_preserves_provider_settings() {
+        let mut config = super::Config::default();
+        config.providers.key_source = crate::config::providers::ProviderKeySource::Dashboard;
+        config.providers.custom = vec![crate::config::providers::CustomProvider {
+            name: "my-endpoint".into(),
+            base_url: "https://example.invalid/v1".into(),
+            api_key: String::new(),
+            default_model: Some("some-model".into()),
+        }];
+
+        let written = super::to_minimal_toml(&config).expect("serialize");
+        assert!(
+            written.contains("providers"),
+            "the providers section vanished from a write:\n{written}"
+        );
+
+        let reloaded: super::Config = toml::from_str(&written).expect("reparse");
+        assert_eq!(
+            reloaded.providers.key_source,
+            crate::config::providers::ProviderKeySource::Dashboard
+        );
+        assert_eq!(reloaded.providers.custom.len(), 1);
+        assert_eq!(reloaded.providers.custom[0].name, "my-endpoint");
+    }
+
     #[test]
     fn empty_toml_parses_to_full_default() {
         let parsed: crate::config::Config = toml::from_str("")

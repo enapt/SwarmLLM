@@ -133,6 +133,38 @@ impl ProvidersConfig {
         ("MOONSHOT_API_KEY", "moonshot"),
     ];
 
+    /// Which providers are configured, and where each key came from — never
+    /// the key itself.
+    ///
+    /// Reported 2026-08-05: a node's cloud models went from 102 to zero with no
+    /// error, no log line and no way to inspect provider state. `/api/admin/config`
+    /// exposed nothing provider-adjacent, and `/api/admin/provider-health` lists
+    /// only providers that ARE configured — so at zero it returns an empty array,
+    /// which is the same non-information as `cloud_models: []`. The operator had
+    /// "no diagnostic and no lever".
+    ///
+    /// `source` is the part that actually diagnoses it: a key that arrived from
+    /// the environment disappears when a restart does not inherit it, which
+    /// looks identical from outside to one that was never set.
+    pub fn configured_summary(&self) -> Vec<(String, bool, &'static str)> {
+        // `keyed_entries` is the canonical iteration over keyed providers —
+        // see its doc comment; do not re-derive the name list here.
+        self.keyed_entries()
+            .into_iter()
+            .map(|(name, entry)| {
+                let configured = entry.is_some();
+                let source = if !configured {
+                    "none"
+                } else if self.env_sourced.contains(name) {
+                    "environment"
+                } else {
+                    "dashboard"
+                };
+                (name.to_string(), configured, source)
+            })
+            .collect()
+    }
+
     /// Apply environment variable keys according to `key_source` mode.
     /// - `Auto`: env fills gaps (only where no key is set)
     /// - `Env`: env always overwrites existing keys

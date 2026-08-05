@@ -932,7 +932,38 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
     #[cfg(not(feature = "claude-subscription"))]
     let claude_sub: Option<serde_json::Value> = None;
 
+    // Provider configuration, so a node whose cloud access disappears has
+    // something to look at. NEVER the key — name, whether it is configured, and
+    // where it came from.
+    //
+    // Reported 2026-08-05: a node went from 102 cloud models to zero with no
+    // error and no log line, and this endpoint exposed nothing provider-adjacent
+    // at all. `provider-health` lists only providers that ARE configured, so at
+    // zero it returns an empty array — the same non-information as
+    // `cloud_models: []`. `source` is what actually diagnoses it: a key that
+    // came from the environment vanishes when a restart does not inherit it,
+    // which from outside looks identical to one that was never set.
+    let providers_summary: Vec<serde_json::Value> = state
+        .shared_state
+        .metrics
+        .providers_config
+        .try_read()
+        .map(|p| {
+            p.configured_summary()
+                .into_iter()
+                .map(|(name, configured, source)| {
+                    serde_json::json!({
+                        "name": name,
+                        "configured": configured,
+                        "key_source": source,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut result = serde_json::json!({
+        "providers": providers_summary,
         "contribution": contribution,
         "contribution_auto": config.node.contribution_auto,
         "max_concurrent_requests": config.inference.max_concurrent_requests,

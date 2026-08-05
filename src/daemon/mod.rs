@@ -227,6 +227,54 @@ impl Daemon {
         // discovery without exposing any inference surface. See `--anchor`.
         let anchor = self.config.node.anchor_mode;
 
+        // Say how many cloud providers this node actually ends up with, and
+        // say it loudly when the answer is none.
+        //
+        // Reported 2026-08-05: a node's cloud models went from 102 to zero with
+        // "no error surfaced, and no log line indicating providers were
+        // dropped. It simply stopped." On a CPU-only box where local inference
+        // runs at 1.7 tok/s that is not a convenience — it is the only usable
+        // path — so losing it silently makes the node useless with no clue why.
+        //
+        // Read from `metrics.providers_config`, NOT `config.providers`: the
+        // resolved set is the DB's stored keys (decrypted) merged with the file
+        // and then filled from the environment, and it is only assembled inside
+        // `SharedState::new`. The first version of this logged before any of
+        // that ran and warned "no cloud providers" on a node that had one — and
+        // it would never have seen a dashboard-entered key at all, which is the
+        // likely shape of the report above.
+        //
+        // Naming the source is the actual diagnostic: a key supplied through
+        // the environment disappears when a restart does not inherit it, and
+        // from outside that is indistinguishable from one never set.
+        if let Ok(pc) = shared_state.metrics.providers_config.try_read() {
+            let summary = pc.configured_summary();
+            let configured: Vec<&str> = summary
+                .iter()
+                .filter(|(_, ok, _)| *ok)
+                .map(|(n, _, _)| n.as_str())
+                .collect();
+            let from_env = summary
+                .iter()
+                .filter(|(_, ok, src)| *ok && *src == "environment")
+                .count();
+            if configured.is_empty() {
+                tracing::warn!(
+                    "No cloud providers are configured — this node can only answer with models \
+                     it holds locally. If it had cloud access before, check the key is still \
+                     present: one supplied through the environment is lost when a restart does \
+                     not inherit it."
+                );
+            } else {
+                tracing::info!(
+                    providers = ?configured,
+                    count = configured.len(),
+                    from_environment = from_env,
+                    "Cloud providers configured"
+                );
+            }
+        }
+
         *shared_state.loaded_model_info.write().await = cached_info;
 
         // Not set in shard/split mode — those nodes use split_models instead.
