@@ -134,6 +134,29 @@ fn describe_arguments(schema: &str) -> Option<String> {
     Some(out)
 }
 
+/// Whether `tool_choice` forbids the model from calling a tool at all.
+///
+/// A cloud provider enforces this itself. A local model only knows about its
+/// tools because [`format_tool_prompt`] puts them in the prompt, so honouring
+/// "none" means not describing them in the first place — otherwise the model
+/// is told "here are your tools" and told nothing about being forbidden, and
+/// calls one. Measured on llama-3.2-3b: `tool_choice: "none"` produced a tool
+/// call every time, because neither API layer read the field.
+///
+/// Accepts both spellings, since both layers store the raw JSON: OpenAI sends
+/// the string `"none"`, Anthropic an object `{"type": "none"}`.
+///
+/// Anything else — `"auto"`, `"required"`, a named function, or absent — leaves
+/// the tools described. "required" is not enforced here: a local model cannot be
+/// compelled, and refusing the request would be worse than letting it answer.
+pub fn tool_choice_forbids_tools(tool_choice: &Option<serde_json::Value>) -> bool {
+    match tool_choice {
+        Some(Value::String(s)) => s == "none",
+        Some(Value::Object(o)) => o.get("type").and_then(|t| t.as_str()) == Some("none"),
+        _ => false,
+    }
+}
+
 /// One tool call recovered from model output, in the shape both API layers need.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedToolCall {
@@ -1012,5 +1035,43 @@ mod bare_call_tests {
         ] {
             assert!(parse_tool_calls(s).is_none(), "false positive on: {s}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_choice_tests {
+    use super::tool_choice_forbids_tools;
+    use serde_json::json;
+
+    /// A local model only learns about its tools from the prompt, so "none"
+    /// has to mean "do not describe them" — there is nowhere else to enforce
+    /// it. Neither API layer read the field, and measured on llama-3.2-3b,
+    /// `tool_choice: "none"` produced a tool call every time.
+    #[test]
+    fn none_forbids_tools_in_both_spellings() {
+        assert!(tool_choice_forbids_tools(&Some(json!("none"))));
+        assert!(tool_choice_forbids_tools(&Some(json!({"type": "none"}))));
+    }
+
+    /// Everything else leaves the tools described. "required" in particular is
+    /// NOT treated as forbidding them — an easy thing to invert by accident.
+    #[test]
+    fn every_other_choice_leaves_tools_available() {
+        for tc in [
+            json!("auto"),
+            json!("required"),
+            json!({"type": "auto"}),
+            json!({"type": "any"}),
+            json!({"type": "tool", "name": "get_weather"}),
+            json!({"type": "function", "function": {"name": "get_weather"}}),
+            json!("nonsense"),
+            json!(42),
+        ] {
+            assert!(
+                !tool_choice_forbids_tools(&Some(tc.clone())),
+                "{tc} must not disable tools"
+            );
+        }
+        assert!(!tool_choice_forbids_tools(&None));
     }
 }

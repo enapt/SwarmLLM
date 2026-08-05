@@ -301,9 +301,14 @@ impl ChatCompletionRequest {
             }
         }
 
-        // Inject tool definitions as a system message prefix
+        // Inject tool definitions as a system message prefix — unless the
+        // caller asked for no tool use. A local model only knows its tools
+        // because they are described here, so "none" has to mean not
+        // describing them; there is nowhere else to enforce it.
         if let Some(ref tools) = self.tools {
-            if !tools.is_empty() {
+            if !tools.is_empty()
+                && !crate::api::tool_parse::tool_choice_forbids_tools(&self.tool_choice)
+            {
                 let tool_desc = format_tool_system_prompt(tools);
                 messages.insert(
                     0,

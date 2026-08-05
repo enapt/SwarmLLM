@@ -47,8 +47,12 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
     // 2026-07-25). A cloud model gets tools natively via the proxy and is
     // unaffected by this — the prompt injection only matters when we are the
     // one running the model.
+    //
+    // `tool_choice: {"type": "none"}` means the model must not call a tool, and
+    // the only way to hold a local model to that is to not describe them.
     if let Some(ref tools) = req.tools {
-        if !tools.is_empty() {
+        if !tools.is_empty() && !crate::api::tool_parse::tool_choice_forbids_tools(&req.tool_choice)
+        {
             let specs: Vec<(String, Option<String>, Option<String>)> = tools
                 .iter()
                 .filter_map(|t| {

@@ -104,6 +104,13 @@ All notable changes to SwarmLLM are documented here.
   every supported language, using the wording each language already used for
   the same ideas elsewhere in that panel.
 
+- **Telling a model not to use its tools now works.** A request can supply
+  tools and separately say the model must not call one this turn — used to ask
+  for a plain answer after a tool has already run. Neither the OpenAI nor the
+  Anthropic path read that setting for a model on your own machine, so the model
+  was still handed its tool list and still called a tool. It now is not told
+  about them at all, which is the only way to hold a local model to it.
+
 - **Qwen models were given number tokens they were not trained on.** The rule
   used for Qwen grouped digits up to three at a time; Qwen models expect one
   digit at a time.
