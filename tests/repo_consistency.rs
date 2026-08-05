@@ -172,3 +172,123 @@ fn cli_commands_explain_a_rejected_key() {
          message about models, downloads or the transport."
     );
 }
+
+/// Remove `{placeholder}` names so they are not mistaken for words.
+fn strip_placeholders(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0usize;
+    for c in s.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// English strings that are meant to read identically in every language, so a
+/// locale repeating them verbatim is correct rather than untranslated.
+///
+/// Keep this list SHORT and specific. Every entry is a promise that the string
+/// carries no translatable words; adding one to silence the check below is how
+/// the panel this test exists for came to ship in English.
+fn identical_by_nature(english: &str) -> bool {
+    // A string with no run of three or more letters is punctuation, digits,
+    // units or symbols: "≤ 25%", "#", "{n}k ctx", "A–Z".
+    let has_word = english
+        .split(|c: char| !c.is_alphabetic())
+        .any(|w| w.chars().count() >= 3);
+    if !has_word {
+        return true;
+    }
+    // Acronyms and proper nouns that every locale keeps.
+    const KEEP: &[&str] = &[
+        "LAN",
+        "CPU",
+        "GPU",
+        "RAM",
+        "VRAM",
+        "API",
+        "ID",
+        "HuggingFace",
+        "SwarmLLM",
+        "AI",
+        "Ping",
+        "tok/s",
+        "Offline",
+        "ctx",
+        "KB",
+        "MB",
+        "GB",
+    ];
+    english
+        .split(|c: char| !c.is_alphanumeric() && c != '/')
+        .filter(|w| w.chars().any(char::is_alphabetic))
+        .all(|w| KEEP.iter().any(|k| k.eq_ignore_ascii_case(w)))
+}
+
+/// A locale must carry its own words, not English ones.
+///
+/// Key parity — which `every_locale_has_the_same_key_set` already checks — says
+/// nothing about VALUES, and that gap shipped: the whole network-status panel,
+/// the first thing a user reads when something looks wrong, was extended with
+/// 25 new strings that were added to all 21 files with their ENGLISH text. Every
+/// key was present, so every existing check passed, and 20 languages showed
+/// sentences like "Just your computer — share your peer address to invite
+/// others" untranslated.
+///
+/// The rule is enforced against a whole phrase rather than a single word,
+/// because a one-word label genuinely does coincide across languages often
+/// enough that flagging it would train people to ignore this test.
+#[test]
+fn locales_do_not_fall_back_to_english_prose() {
+    let root = repo_root().join("frontend/i18n");
+    let en_raw = std::fs::read_to_string(root.join("en.json")).expect("read en.json");
+    let en: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&en_raw).expect("en.json is a JSON object");
+
+    let mut offenders: Vec<String> = Vec::new();
+    for path in locale_files() {
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        if name == "en" {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).expect("read locale");
+        let loc: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&raw).expect("locale is a JSON object");
+
+        for (key, value) in &en {
+            if key.starts_with('_') {
+                continue;
+            }
+            let Some(english) = value.as_str() else {
+                continue;
+            };
+            // Only judge real sentences. `{placeholder}` names are code, not
+            // words — counting them made "{size} VRAM" look like a phrase.
+            let prose = strip_placeholders(english);
+            let words = prose
+                .split_whitespace()
+                .filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 3)
+                .count();
+            if words < 2 || identical_by_nature(&prose) {
+                continue;
+            }
+            if loc.get(key).and_then(|v| v.as_str()) == Some(english) {
+                offenders.push(format!("  {name}: {key} = {english:?}"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "{} strings are still in English in a non-English locale.\n\
+         Translate them in `frontend/i18n/<lang>.json` — see `.claude/rules/i18n.md`.\n\
+         If a string genuinely reads the same in every language, say so in \
+         `identical_by_nature` rather than leaving it to look untranslated:\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}

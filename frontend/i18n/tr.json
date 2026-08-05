@@ -622,7 +622,7 @@
   "models.meta_model_params": "Model Parametreleri",
   "models.meta_padding_id": "Dolgu Token ID",
   "models.meta_pre_tokenizer": "Ön tokenizer",
-  "models.meta_rms_epsilon": "RMS Norm Epsilon",
+  "models.meta_rms_epsilon": "RMS norm epsilon",
   "models.meta_rope_dim": "RoPE Boyutu",
   "models.meta_rope_freq": "RoPE Frekans Tabanı",
   "models.meta_tensor_info": "{count} tensör, veri ofseti: {offset}",

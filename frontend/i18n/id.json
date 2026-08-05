@@ -395,7 +395,7 @@
   "dashboard.peer_col_latency": "Latensi",
   "dashboard.peer_col_name": "Peer",
   "dashboard.peer_col_trust": "Kepercayaan",
-  "dashboard.peer_count_one": "{count} peer hosting",
+  "dashboard.peer_count_one": "{count} node ikut menyimpan",
   "dashboard.peer_count_other": "{count} peer hosting",
   "dashboard.peer_cpu_only_tip": "Node ini menjawab memakai prosesor alih-alih kartu grafis, jadi lebih lambat tetapi tetap berkontribusi.",
   "dashboard.peer_degraded": "Terdegradasi",
