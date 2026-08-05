@@ -6109,13 +6109,37 @@ The machinery for the fast half already exists and is documented in
 surface an error in ~10-20s instead of at `FIRST_TOKEN_TIMEOUT`. Tensor forwards
 go through `pending_tensor_outbound` instead and do not take part in it.
 
-**Before building this**, check three things, because this is the most
-latency-critical path in the system and the failure modes are asymmetric:
+**CHECKED 2026-08-05 — point 1 below fails, so the design above does not work
+as written.** For a tensor forward the request_response Response **IS** the
+`LayerResult`. The receiving node deliberately does not acknowledge on arrival:
+it parks the `ResponseChannel` in `pending_tensor_channels` and sends the
+computed result back on that same channel ("When a LayerForward arrives, we
+store the channel here instead of ACK-ing immediately … single substream per
+token", `network/manager/mod.rs`). So the only inbound signal is the very thing
+we are waiting for, and there is nothing to distinguish "peer has the work" from
+"peer has finished the work".
 
-1. Whether an ACK is actually observable for a tensor forward, or whether
-   libp2p's request_response only surfaces the full response. If the former is
-   not distinguishable, this design does not work and needs rethinking rather
-   than forcing.
+The 10s `RR_ACK_TIMEOUT_SECS` sweep does not fill the gap either. It fires when
+NO event of any kind arrives, which is right for the remote-generate fast path —
+there the peer answers immediately and streams tokens separately — but a tensor
+forward legitimately produces no event for as long as the segment takes. Reusing
+it here would abandon healthy slow peers, which is the failure this entry exists
+to avoid.
+
+**What would work is an explicit acceptance notification**, and the hook already
+exists: `handle_forward` registers an abort handle the moment it accepts a
+forward (added for peer-side cancellation). Emitting a small
+`ForwardAccepted { request_id }` at that point gives the coordinator exactly the
+liveness signal it needs. It must be additive and feature-gated per
+`.claude/rules/architecture.md` § "Additive Protocol Evolution" — a new
+`SwarmMessage` variant behind a `features` bit, so a peer that does not send it
+simply keeps today's behaviour rather than being treated as dead. That last part
+matters: absence of the signal from an OLDER peer must not mean "fail over".
+
+The remaining two checks below still apply to any implementation:
+
+1. ~~Whether an ACK is observable for a tensor forward~~ — answered above: it is
+   not, without adding one.
 2. That failing over does not leave the original forward outstanding in a way
    that lets its late error consume the standby's waiter — that is gotcha #229,
    which cost a request 181s in exactly this area. `resolve_pending_layer_result`
