@@ -736,14 +736,59 @@ fn unrelated_set_does_not_alias_messages() {
     assert_eq!(out, "BODY;", "must not repeat per message");
 }
 
-/// A slice or filter on the iterable still drives the message loop, as it did
-/// before iterable parsing was introduced.
+/// A `[N:]` slice on the iterable is honoured, and a filter still drives the
+/// loop over everything.
+///
+/// The offset used to be discarded — the loop always walked every message. That
+/// is not a harmless approximation: templates slice precisely to drop a message
+/// they have already placed by hand, so ignoring it emitted that message TWICE.
+/// Every Llama-3 system prompt was duplicated for exactly this reason.
 #[test]
-fn sliced_message_loop_still_iterates() {
-    let tmpl = "{% for message in messages[1:] %}{{ message['content'] }};{% endfor %}";
+fn a_sliced_message_loop_skips_what_the_slice_drops() {
+    let msgs = test_messages(); // system, then user
+    let sliced = "{% for message in messages[1:] %}{{ message['content'] }};{% endfor %}";
+    assert_eq!(
+        apply_chat_template(sliced, &msgs, "", "", true).unwrap(),
+        "Hello;",
+        "messages[1:] must skip the first message"
+    );
+
+    // A filter we do not implement is applied as identity — recognising the
+    // loop and walking everything beats not recognising it and emitting nothing.
+    let filtered = "{% for message in messages | reverse %}{{ message['content'] }};{% endfor %}";
+    assert_eq!(
+        apply_chat_template(filtered, &msgs, "", "", true).unwrap(),
+        "You are helpful.;Hello;"
+    );
+}
+
+/// Rebinding `messages` to a slice of itself — what every official Llama-3.x
+/// template does — must take effect for the loop that follows.
+#[test]
+fn rebinding_messages_to_its_own_tail_is_honoured() {
+    let tmpl = "{%- if messages[0]['role'] == 'system' %}\
+                {%- set system_message = messages[0]['content'] %}\
+                {%- set messages = messages[1:] %}{%- endif %}\
+                SYS:{{ system_message }};\
+                {%- for message in messages %}{{ message['content'] }};{%- endfor %}";
     let msgs = test_messages();
-    let out = apply_chat_template(tmpl, &msgs, "", "", true).unwrap();
-    assert_eq!(out, "You are helpful.;Hello;");
+    assert_eq!(
+        apply_chat_template(tmpl, &msgs, "", "", true).unwrap(),
+        "SYS:You are helpful.;Hello;",
+        "the system message belongs in the header only, not again in the loop"
+    );
+}
+
+/// Indexing a single message must still evaluate to that message's field, not
+/// be mistaken for a binding to the whole list.
+#[test]
+fn indexing_one_message_is_not_a_list_binding() {
+    let tmpl = "{%- set first = messages[0]['content'] %}{{ first }}";
+    let msgs = test_messages();
+    assert_eq!(
+        apply_chat_template(tmpl, &msgs, "", "", true).unwrap(),
+        "You are helpful."
+    );
 }
 
 /// Mistral's official template uses `namespace()`, `selectattr`, and slicing
@@ -818,11 +863,13 @@ fn mistral_fallback_multi_turn_alternates() {
 /// OpenAI, Anthropic, streaming and router paths collapsed to ChatML.
 #[test]
 fn real_mistral_template_failure_degrades_to_mistral_not_chatml() {
-    // The construct our evaluator does not implement, taken from the official
-    // Mistral-7B-Instruct-v0.3 template: bind a SLICE of messages, then loop it.
-    let tmpl = "{%- if messages[0][\"role\"] == \"system\" %}\
-                {%- set loop_messages = messages[1:] %}{%- endif %}\
-                {%- for message in loop_messages %}{{ message['content'] }}{%- endfor %}";
+    // A construct our evaluator does not implement, taken from the official
+    // Mistral-7B-Instruct-v0.3 template: bind the message list inside a
+    // `namespace()` and loop it through the namespace. (Plain slicing USED to
+    // be the example here; it is supported now, so this reaches for one of the
+    // constructs that still is not.)
+    let tmpl = "{%- set ns = namespace(loop_messages = messages[1:]) %}\
+                {%- for message in ns.loop_messages %}{{ message['content'] }}{%- endfor %}";
     let msgs = test_messages();
 
     // Confirm the premise: this really does fail to render.

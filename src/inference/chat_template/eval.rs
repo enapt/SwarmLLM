@@ -62,10 +62,13 @@ pub(super) struct EvalState<'a> {
     ///
     /// These can't live in `vars`, which holds strings — the message list has
     /// no string value, so `eval_expr("messages")` returns `None` and the
-    /// binding would simply be dropped. Tracking the NAME is enough: every
-    /// use is `{% for message in <name> %}`, which needs to know the name
-    /// refers to the message list, not what it evaluates to.
-    msg_aliases: std::collections::HashSet<String>,
+    /// binding would simply be dropped.
+    ///
+    /// The value is the index the list starts at, so
+    /// `{% set messages = messages[1:] %}` records 1 and a later loop skips the
+    /// message the template already emitted itself. Dropping that offset is how
+    /// every Llama-3 system prompt came to be rendered TWICE.
+    msg_aliases: std::collections::HashMap<String, usize>,
 }
 
 impl<'a> EvalState<'a> {
@@ -74,7 +77,7 @@ impl<'a> EvalState<'a> {
             messages,
             loop_index: None,
             vars: std::collections::HashMap::new(),
-            msg_aliases: std::collections::HashSet::new(),
+            msg_aliases: std::collections::HashMap::new(),
         }
     }
 
@@ -83,14 +86,27 @@ impl<'a> EvalState<'a> {
             messages,
             loop_index: Some(index),
             vars: std::collections::HashMap::new(),
-            msg_aliases: std::collections::HashSet::new(),
+            msg_aliases: std::collections::HashMap::new(),
         }
     }
 
-    /// Whether `name` refers to the message list — either literally, or via
-    /// an alias bound by `{% set %}`.
-    fn iterates_messages(&self, name: &str) -> bool {
-        name == "messages" || self.msg_aliases.contains(name)
+    /// Resolve an expression to a message-list slice, returning the index the
+    /// slice starts at. `None` means the expression is not the message list.
+    ///
+    /// Handles the literal name, any alias bound by `{% set %}`, and a trailing
+    /// `[N:]` on either — offsets compose, so binding `x = messages[1:]` and
+    /// then looping `x[1:]` starts at 2.
+    fn messages_offset(&self, expr: &str) -> Option<usize> {
+        let (base, skip) = split_message_ref(expr)?;
+        // The alias map wins over the literal name: Llama-3's template rebinds
+        // `messages` to `messages[1:]`, so consulting the literal first would
+        // hand back offset 0 and undo the slice.
+        let base_offset = match self.msg_aliases.get(base) {
+            Some(offset) => *offset,
+            None if base == "messages" => 0,
+            None => return None,
+        };
+        Some(base_offset + skip)
     }
 
     fn current_msg(&self) -> Option<&'a ChatMessage> {
@@ -145,12 +161,18 @@ pub(super) fn eval_block(
             tok if tok.tag_content().is_some() => {
                 let content = tok.tag_content().unwrap();
 
-                if parse_for_iterable(content).is_some_and(|it| state.iterates_messages(it)) {
+                if let Some(offset) =
+                    parse_for_iterable(content).and_then(|it| state.messages_offset(it))
+                {
                     let body_start = i + 1;
                     let end = find_endfor(ctx.tokens, body_start)?;
 
-                    for (idx, _msg) in ctx.messages.iter().enumerate() {
-                        let mut loop_state = EvalState::for_loop(ctx.messages, idx);
+                    // Iterate the SLICE, and give the body a state scoped to it
+                    // so `loop.first` / `loop.last` are relative to what is
+                    // actually being walked.
+                    let slice = ctx.messages.get(offset..).unwrap_or(&[]);
+                    for idx in 0..slice.len() {
+                        let mut loop_state = EvalState::for_loop(slice, idx);
                         eval_block(ctx, body_start, output, &mut loop_state)?;
                     }
                     i = end + 1;
@@ -160,9 +182,9 @@ pub(super) fn eval_block(
                         // `{% set x = messages %}` binds a name to the message
                         // list, which has no string value — record the alias so
                         // a later `{% for message in x %}` is recognised as a
-                        // message loop.
-                        if state.iterates_messages(val_expr) {
-                            state.msg_aliases.insert(var.to_string());
+                        // message loop, along with where that list starts.
+                        if let Some(offset) = state.messages_offset(val_expr) {
+                            state.msg_aliases.insert(var.to_string(), offset);
                         } else if let Some(val) = eval_expr(val_expr, state, ctx) {
                             state.vars.insert(var.to_string(), val);
                         }
@@ -215,10 +237,45 @@ fn parse_for_iterable(content: &str) -> Option<&str> {
     let rest = content.strip_prefix("for ")?;
     let (_var, iterable) = rest.split_once(" in ")?;
     let iterable = iterable.trim();
-    let base = iterable
+    (!iterable.is_empty()).then_some(iterable)
+}
+
+/// Split a message-list reference into its base name and how many leading
+/// messages a `[N:]` slice drops.
+///
+/// `messages` → `("messages", 0)`, `messages[1:]` → `("messages", 1)`,
+/// `loop_messages | reverse` → `("loop_messages", 0)`.
+///
+/// Anything other than a plain `[N:]` suffix yields an offset of 0: a filter we
+/// do not implement is better applied as identity than not recognised at all,
+/// since failing to recognise the loop drops every message (the ChatML fallback
+/// this parser exists to prevent). `[N:]` specifically must be honoured because
+/// templates use it to remove a message they have already placed by hand —
+/// ignoring it renders that message twice.
+fn split_message_ref(expr: &str) -> Option<(&str, usize)> {
+    let expr = expr.trim();
+    let end = expr
         .find(|c: char| !c.is_alphanumeric() && c != '_')
-        .map_or(iterable, |end| &iterable[..end]);
-    (!base.is_empty()).then_some(base)
+        .unwrap_or(expr.len());
+    let base = &expr[..end];
+    if base.is_empty() {
+        return None;
+    }
+    let mut rest = expr[end..].trim();
+    let mut skip = 0usize;
+    if let Some(after) = rest.strip_prefix('[') {
+        // Only a whole-tail `[N:]`. `messages[0]['content']` indexes a single
+        // message and must NOT be mistaken for the list, or the expression is
+        // bound as an alias instead of being evaluated to its string value.
+        let (start, tail) = after.split_once(':')?;
+        rest = tail.trim_start().strip_prefix(']')?.trim();
+        skip = start.trim().parse::<usize>().ok()?;
+    }
+    // Only a filter chain may follow the name or slice.
+    if !rest.is_empty() && !rest.starts_with('|') {
+        return None;
+    }
+    Some((base, skip))
 }
 
 /// Parse `set var = expr` from a {% set %} tag.

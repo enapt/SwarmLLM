@@ -30,6 +30,17 @@ All notable changes to SwarmLLM are documented here.
   an invented hyphen, which is what reading standalone space tokens looks like
   from the other side. It now returns the text unchanged.
 
+- **Llama 3 models were shown your system prompt twice.** Their prompt format
+  places the system message in a header block of its own, and the instructions
+  for building that prompt then remove it from the list of messages so it is not
+  repeated. SwarmLLM carried out the removal but ignored which messages it
+  applied to, so the system message was written into the header AND again as a
+  second system turn. Any request carrying a system prompt was affected — which
+  is most of them, including everything sent by Claude Code.
+
+  Beyond the wasted tokens, a model reading the same instruction twice in two
+  different positions is being given a prompt no model was trained on.
+
 - **Qwen models were given number tokens they were not trained on.** The rule
   used for Qwen grouped digits up to three at a time; Qwen models expect one
   digit at a time.
