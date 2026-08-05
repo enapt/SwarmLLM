@@ -4,8 +4,23 @@ All notable changes to SwarmLLM are documented here.
 
 ## [0.3.73-alpha] — 2026-08-05
 
-Follows 0.3.72, which is the release you want the details of — this one finishes
-a single fix from it that a six-hour measurement showed was only half applied.
+Follows 0.3.72. Fixes tool calls failing about a third of the time on local
+models, and finishes a fix from 0.3.72 that a six-hour measurement showed was
+only half applied.
+
+### Fixed
+
+- **Tools no longer fail about one time in three on local models.** When a local
+  model asked to use a tool, it would sometimes end its reply with the wrong kind
+  of closing bracket — a single wrong character in otherwise perfect output. That
+  made the whole thing unreadable, so instead of the tool being used, the raw
+  text was shown to you as the model's answer. Measured on llama-3.2-3b: one run
+  in three.
+
+  A mismatched closing bracket is now repaired. Only brackets are ever added —
+  nothing about the tool's name or its arguments is guessed at, so a garbled
+  reply still shows as text rather than turning into a tool call that looks fine
+  but does the wrong thing. Genuinely cut-off replies are still left as text.
 
 ### Fixed
 

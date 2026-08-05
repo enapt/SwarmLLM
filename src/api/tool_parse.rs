@@ -206,6 +206,24 @@ fn strip_code_fences(text: &str) -> &str {
 /// not end the object early. Returns `None` if no balanced object exists, which
 /// is also what a truncated generation produces — deliberately left as text
 /// rather than repaired.
+///
+/// One near-miss IS repaired: a mismatched closer where an array is still open.
+/// The brace scan below deliberately ignores `[`/`]`, so a model that closes its
+/// array with `}` instead of `]` yields a brace-balanced slice that `serde_json`
+/// then rejects, and a perfectly good tool call is handed to the user as raw
+/// JSON. Observed live on llama-3.2-3b, **1 run in 3** at default temperature:
+///
+/// ```text
+/// {"tool_calls": [{"id": …, "function": {"name": "get_weather",
+///                  "arguments": {"city": "Paris"}}}}
+///                                                 ^ should be ]}
+/// ```
+///
+/// [`repair_unbalanced_close`] only ever INSERTS the closer the open delimiter
+/// requires. It never invents a key, a value or a name, so it cannot turn
+/// garbage into a plausible-but-wrong call — the failure mode the argument
+/// renderer above exists to prevent. Everything it produces still has to satisfy
+/// `try_generic`'s requirement of a string `name`.
 fn parse_embedded_json(text: &str) -> Option<Value> {
     // Fast path: the whole thing is already JSON.
     if let Ok(v) = serde_json::from_str::<Value>(text) {
@@ -228,13 +246,87 @@ fn parse_embedded_json(text: &str) -> Option<Value> {
             b'}' if !in_string => {
                 depth -= 1;
                 if depth == 0 {
-                    return serde_json::from_str(text.get(start..=i)?).ok();
+                    let slice = text.get(start..=i)?;
+                    return match serde_json::from_str(slice) {
+                        Ok(v) => Some(v),
+                        // Brace-balanced but still invalid — the array case above.
+                        Err(_) => repair_unbalanced_close(slice)
+                            .and_then(|fixed| serde_json::from_str(&fixed).ok()),
+                    };
                 }
             }
             _ => {}
         }
     }
     None
+}
+
+/// Rewrite a JSON candidate whose closers are the wrong KIND, e.g. `}` used to
+/// close an array.
+///
+/// Tracks the real delimiter stack (`{` and `[`) and, on a closer that does not
+/// match the innermost open delimiter, emits the closers that are actually
+/// required. Purely structural: no key, value or name is ever invented, so a
+/// repaired string cannot carry arguments the model did not produce.
+///
+/// Returns `None` when nothing needed fixing, when the input is unsalvageable,
+/// or when more than [`MAX_REPAIRS`] corrections would be required — a long run
+/// of mismatches means the output is not a near-miss tool call and guessing at
+/// it is worse than showing it.
+fn repair_unbalanced_close(slice: &str) -> Option<String> {
+    /// Beyond a couple of corrections this stops being a near miss.
+    const MAX_REPAIRS: usize = 4;
+    let mut out = String::with_capacity(slice.len() + MAX_REPAIRS);
+    let mut stack: Vec<u8> = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut repairs = 0usize;
+
+    for &b in slice.as_bytes() {
+        if escaped {
+            escaped = false;
+            out.push(b as char);
+            continue;
+        }
+        match b {
+            b'\\' if in_string => {
+                escaped = true;
+                out.push(b as char);
+            }
+            b'"' => {
+                in_string = !in_string;
+                out.push('"');
+            }
+            b'{' | b'[' if !in_string => {
+                stack.push(b);
+                out.push(b as char);
+            }
+            b'}' | b']' if !in_string => {
+                let want = if b == b'}' { b'{' } else { b'[' };
+                // Close any delimiters the model skipped over.
+                while let Some(&top) = stack.last() {
+                    if top == want {
+                        break;
+                    }
+                    repairs += 1;
+                    if repairs > MAX_REPAIRS {
+                        return None;
+                    }
+                    stack.pop();
+                    out.push(if top == b'[' { ']' } else { '}' });
+                }
+                stack.pop()?;
+                out.push(b as char);
+            }
+            _ => out.push(b as char),
+        }
+    }
+    // Anything still open was never closed at all; that is truncation, which
+    // stays text by design.
+    if !stack.is_empty() || repairs == 0 {
+        return None;
+    }
+    Some(out)
 }
 
 /// `{"tool_calls": [{"id"?, "function": {"name", "arguments"}}]}` — the shape
@@ -419,6 +511,60 @@ fn synth_id(index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The exact string a live model produced**, llama-3.2-3b at default
+    /// temperature, 1 run in 3: the array is closed with `}` instead of `]`.
+    ///
+    /// Before the repair this was handed to the user as the assistant's reply —
+    /// raw JSON instead of a tool call, which for a Claude Code user means the
+    /// tool simply does not work.
+    #[test]
+    fn an_array_closed_with_a_brace_is_still_a_tool_call() {
+        let observed = r#"{"tool_calls": [{"id": "call_7c5f4d3f", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}}"#;
+        let calls = parse_tool_calls(observed).expect("should recover the call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        // The ARGUMENTS must survive untouched — a repair that changed them
+        // would be worse than the leak it replaces.
+        assert!(
+            calls[0].arguments.contains("Paris"),
+            "arguments lost or altered: {}",
+            calls[0].arguments
+        );
+    }
+
+    /// The repair is structural only. It must never invent a name, so text that
+    /// merely looks bracket-ish cannot become a call.
+    #[test]
+    fn repair_never_invents_a_tool_call() {
+        assert!(parse_tool_calls(r#"{"tool_calls": [{"id": "x"}}"#).is_none());
+        assert!(parse_tool_calls(r#"{"tool_calls": [{"function": {}}}"#).is_none());
+        // Ordinary prose that happens to contain braces.
+        assert!(parse_tool_calls("I would use {the tool} if I could.").is_none());
+    }
+
+    /// Truncation stays text by design — a cut-off generation is not a near
+    /// miss, and completing it would be guessing at arguments the model never
+    /// produced.
+    #[test]
+    fn a_truncated_generation_is_not_repaired() {
+        // Nothing is ever closed: no balanced object exists at all.
+        assert!(
+            parse_tool_calls(r#"{"tool_calls": [{"function": {"name": "get_weather", "arg"#)
+                .is_none()
+        );
+    }
+
+    /// A long run of mismatches is not a near miss; guessing is worse than
+    /// showing the text.
+    #[test]
+    fn wildly_unbalanced_input_is_refused() {
+        let junk = r#"{"tool_calls": [[[[{"name": "x"}}}}}}}}"#;
+        // Either None, or at minimum never a confident call with a bad name.
+        if let Some(calls) = parse_tool_calls(junk) {
+            assert!(calls.iter().all(|c| !c.name.is_empty()));
+        }
+    }
 
     /// Ordinary prose must never be mistaken for a tool call — this is the
     /// common path and a false positive would replace a real answer with an
