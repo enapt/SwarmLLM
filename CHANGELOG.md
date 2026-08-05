@@ -94,6 +94,16 @@ All notable changes to SwarmLLM are documented here.
   in under a second. It now prefers a model already loaded, then one on this
   machine, then the smallest.
 
+- **The network status panel was in English in all 20 other languages.** The
+  panel that tells you whether your node is connected, who it is talking to and
+  why — the first thing anyone looks at when something seems wrong — had been
+  extended without translating the new text. Every sentence in it, including
+  "Looking for peers", "Just your computer — share your peer address to invite
+  others" and "No peers, providers, or local models", appeared in English
+  regardless of the chosen language. All 25 strings are now translated into
+  every supported language, using the wording each language already used for
+  the same ideas elsewhere in that panel.
+
 - **Qwen models were given number tokens they were not trained on.** The rule
   used for Qwen grouped digits up to three at a time; Qwen models expect one
   digit at a time.
