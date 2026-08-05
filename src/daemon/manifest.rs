@@ -225,10 +225,13 @@ pub fn generate_and_register_local_manifest(
         // Verify file exists on disk before registering
         let shard_path = shard_store_check.shard_path(&model_id, shard_info.index);
         if !shard_path.exists() {
-            tracing::warn!(
+            // Same reasoning as the sibling check in `daemon::startup` — a node
+            // is only ever expected to hold some of a model's shards, so this
+            // is the normal case and not a warning.
+            tracing::debug!(
                 model = %model_id,
                 shard = shard_info.index,
-                "Shard file missing on disk — skipping registration"
+                "Shard not held by this node — skipping registration"
             );
             continue;
         }

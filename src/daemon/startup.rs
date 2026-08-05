@@ -63,11 +63,27 @@ pub(super) async fn restore_persistent_state(
                     if in_range {
                         let shard_path = shard_store_reg.shard_path(&model_id, shard_info.index);
                         if !shard_path.exists() {
-                            tracing::warn!(
+                            // Not a problem, and not worth a warning: this loop
+                            // walks every shard of every manifest the node KNOWS
+                            // about, and a node is only ever expected to hold
+                            // some of them. Not holding a piece another machine
+                            // holds is the normal state of a node in a swarm.
+                            //
+                            // It was logged at WARN, which made it the loudest
+                            // line at every startup — a dozen alarming "missing
+                            // on disk" warnings about models the user had
+                            // deliberately removed, or never had. Noise at WARN
+                            // is worse than silence: it is what a real problem
+                            // has to be spotted among.
+                            //
+                            // A shard that IS held but has gone bad is caught
+                            // just below by the size check, which quarantines it
+                            // so the ordinary acquisition path repairs it.
+                            tracing::debug!(
                                 model = %model_id,
                                 shard = shard_info.index,
                                 path = %shard_path.display(),
-                                "Shard file missing on disk — skipping registration"
+                                "Shard not held by this node — skipping registration"
                             );
                             continue;
                         }
