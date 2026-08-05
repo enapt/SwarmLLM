@@ -551,7 +551,37 @@ pub fn build_router(state: AppState) -> Router {
         ))
         .layer(middleware::cors_layer(state.config.node.listen_port))
         .layer(axum::middleware::from_fn(middleware::security_headers))
+        .fallback(unknown_route)
         .with_state(state)
+}
+
+/// Answer an unrouted path with the same error envelope every other failure
+/// uses, instead of a bare 404 with an empty body.
+///
+/// An OpenAI-compatible client that hits a path this server does not implement
+/// got a 404 and nothing to read — no type, no message, nothing to show a user.
+/// `/v1/completions` is the one that matters in practice: OpenAI deprecated it
+/// but a great deal of older tooling still calls it, and "404, empty" gives no
+/// clue that `/v1/chat/completions` is right there.
+async fn unknown_route(uri: axum::http::Uri) -> impl IntoResponse {
+    let path = uri.path();
+    let message = match path {
+        // Name the replacement rather than making them search for it.
+        "/v1/completions" => "The legacy completions endpoint is not implemented. Use /v1/chat/completions, which this server does support."
+            .to_string(),
+        _ => format!("No endpoint at {path}"),
+    };
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": {
+                "message": message,
+                "type": "not_found_error",
+                "param": null,
+                "code": "not_found_error",
+            }
+        })),
+    )
 }
 
 async fn health() -> Json<serde_json::Value> {

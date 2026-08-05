@@ -6,6 +6,11 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Requests to an address this server does not have now explain themselves.**
+  They returned an empty response with no explanation at all. Anything asking for
+  the older-style completions address — which a lot of existing software still
+  does — now gets told which address to use instead.
+
 - **Failed dashboard actions now say why.** Most settings, model and device-pool
   actions returned their error as plain text, which the dashboard could not read
   — so instead of "the pool needs a name" you got a generic "action failed" with
