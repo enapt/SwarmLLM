@@ -1,3 +1,4 @@
+use crate::api::server::JsonBody;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
@@ -468,7 +469,7 @@ pub struct ShardLockUpdate {
 pub async fn lock_shard(
     State(state): State<AppState>,
     Path((model_id, index)): Path<(String, u32)>,
-    Json(body): Json<ShardLockUpdate>,
+    JsonBody(body): JsonBody<ShardLockUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // validate_shard_params (not validate_model_id) so the mmproj sentinel
     // index (u32::MAX) is rejected — locked_shards iterators downstream

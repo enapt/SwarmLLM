@@ -1,3 +1,4 @@
+use crate::api::server::JsonBody;
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
@@ -15,7 +16,7 @@ pub struct HfDownloadRequest {
 
 pub async fn hf_download(
     State(state): State<AppState>,
-    Json(body): Json<HfDownloadRequest>,
+    JsonBody(body): JsonBody<HfDownloadRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let repo_id = body.repo_id;
     let filename = body.filename;

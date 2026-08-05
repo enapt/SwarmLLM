@@ -6,6 +6,12 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Failed dashboard actions now say why.** Most settings, model and device-pool
+  actions returned their error as plain text, which the dashboard could not read
+  — so instead of "the pool needs a name" you got a generic "action failed" with
+  the real reason discarded. 27 endpoints now return the same readable format the
+  chat API already used.
+
 - **Deleting a model while it is answering no longer destroys the reply.** The
   safeguard that is supposed to refuse this only recognised replies being
   assembled across several machines. A reply your own machine was producing —

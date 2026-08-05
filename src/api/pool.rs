@@ -1,3 +1,4 @@
+use crate::api::server::JsonBody;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
@@ -73,7 +74,7 @@ pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value
 /// POST /api/pool/create — Create a new device pool (this node becomes owner).
 pub async fn pool_create(
     State(state): State<AppState>,
-    Json(body): Json<PoolCreateRequest>,
+    JsonBody(body): JsonBody<PoolCreateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     tracing::debug!(name = %body.name, "DIAG: pool_create request");
     // Validate pool name length. Pool names are ASCII-only (enforced
@@ -108,7 +109,7 @@ pub async fn pool_create(
 /// POST /api/pool/invite — Invite a node to the pool.
 pub async fn pool_invite(
     State(state): State<AppState>,
-    Json(body): Json<PoolInviteRequest>,
+    JsonBody(body): JsonBody<PoolInviteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let node_id = parse_node_id(&body.node_id)?;
     tracing::debug!(invitee = %node_id, "DIAG: pool_invite request");
@@ -134,7 +135,7 @@ pub async fn pool_invite(
 /// POST /api/pool/accept — Accept a pool invitation.
 pub async fn pool_accept(
     State(state): State<AppState>,
-    Json(body): Json<PoolAcceptRequest>,
+    JsonBody(body): JsonBody<PoolAcceptRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let invitation_id = uuid::Uuid::parse_str(&body.invitation_id).map_err(|_| {
         ApiError(crate::error::SwarmError::Validation(
@@ -182,7 +183,7 @@ pub async fn pool_accept(
 /// POST /api/pool/remove — Remove a member from the pool (owner only).
 pub async fn pool_remove(
     State(state): State<AppState>,
-    Json(body): Json<PoolRemoveRequest>,
+    JsonBody(body): JsonBody<PoolRemoveRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let node_id = parse_node_id(&body.node_id)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -258,7 +259,7 @@ pub async fn pool_leaderboard(
 /// POST /api/pool/device-name — Set this device's nickname within the pool.
 pub async fn pool_set_device_name(
     State(state): State<AppState>,
-    Json(body): Json<PoolDeviceNameRequest>,
+    JsonBody(body): JsonBody<PoolDeviceNameRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let name = body.name.trim().to_string();
     if name.is_empty() {
@@ -284,7 +285,7 @@ pub async fn pool_set_device_name(
 /// PUT /api/pool/credit-split — Set credit split percentage (owner only).
 pub async fn pool_set_credit_split(
     State(state): State<AppState>,
-    Json(body): Json<PoolCreditSplitRequest>,
+    JsonBody(body): JsonBody<PoolCreditSplitRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if body.pct > 100 {
         return Err(ApiError(crate::error::SwarmError::Validation(
@@ -307,7 +308,7 @@ pub async fn pool_set_credit_split(
 /// PUT /api/pool/contribution — Set contribution level for a member device (owner only).
 pub async fn pool_set_contribution(
     State(state): State<AppState>,
-    Json(body): Json<PoolContributionRequest>,
+    JsonBody(body): JsonBody<PoolContributionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let node_id = parse_node_id(&body.node_id)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -359,7 +360,7 @@ const POOL_INVITE_CODE_MAX_LEN: usize = 4096;
 ///   already on a shared swarm (LAN mDNS, DHT-bootstrapped, etc.).
 pub async fn pool_join(
     State(state): State<AppState>,
-    Json(body): Json<PoolJoinRequest>,
+    JsonBody(body): JsonBody<PoolJoinRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let raw = body.code.trim();
     if raw.is_empty() {
@@ -528,7 +529,7 @@ pub async fn pool_rates_get(
 pub async fn pool_rates_set(
     State(state): State<AppState>,
     Path(pool_id_hex): Path<String>,
-    Json(body): Json<PoolRatesRequest>,
+    JsonBody(body): JsonBody<PoolRatesRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let pool_id = parse_node_id(&pool_id_hex)?;
     // SEC: any authenticated Bearer holder COULD address this endpoint with
@@ -664,7 +665,7 @@ pub struct SetPrivateModeRequest {
 /// PUT /api/pool/private-mode — Toggle private mode and/or offline mode.
 pub async fn set_private_mode(
     State(state): State<AppState>,
-    Json(body): Json<SetPrivateModeRequest>,
+    JsonBody(body): JsonBody<SetPrivateModeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Must be in a pool to enable private mode
     if body.enabled {
@@ -787,7 +788,7 @@ pub struct PinRequest {
 /// POST /api/pool/pin — Pin a model/shards to a specific device (owner only).
 pub async fn pool_add_pin(
     State(state): State<AppState>,
-    Json(body): Json<PinRequest>,
+    JsonBody(body): JsonBody<PinRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let target = parse_node_id(&body.target_node_id)?;
     let PinRequest {
@@ -844,7 +845,7 @@ pub async fn pool_add_pin(
 /// DELETE /api/pool/pin — Remove a shard pin (owner only).
 pub async fn pool_remove_pin(
     State(state): State<AppState>,
-    Json(body): Json<PinRequest>,
+    JsonBody(body): JsonBody<PinRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let target = parse_node_id(&body.target_node_id)?;
     let PinRequest { model_id, .. } = body;

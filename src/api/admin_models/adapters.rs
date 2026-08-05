@@ -1,3 +1,4 @@
+use crate::api::server::JsonBody;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
@@ -19,7 +20,7 @@ pub struct RegisterAdapterRequest {
 /// POST /api/admin/adapters — Register a LoRA adapter.
 pub async fn register_adapter(
     State(state): State<AppState>,
-    Json(body): Json<RegisterAdapterRequest>,
+    JsonBody(body): JsonBody<RegisterAdapterRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let adapter_id = body.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 

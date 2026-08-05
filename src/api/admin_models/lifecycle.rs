@@ -1,3 +1,4 @@
+use crate::api::server::JsonBody;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
@@ -297,7 +298,7 @@ pub struct ModelAutoManageUpdate {
 pub async fn set_model_auto_manage(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
-    Json(body): Json<ModelAutoManageUpdate>,
+    JsonBody(body): JsonBody<ModelAutoManageUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());
@@ -451,7 +452,7 @@ pub async fn enable_model_privacy(
 
     let resp = crate::api::admin_hf::hf_download_shards(
         State(state.clone()),
-        Json(crate::api::admin_hf::HfShardDownloadRequest {
+        JsonBody(crate::api::admin_hf::HfShardDownloadRequest {
             repo_id: source.repo_id.clone(),
             filename: source.filename.clone(),
             shards: needed.clone(),
@@ -554,7 +555,7 @@ pub struct EncryptedPipelineUpdate {
 pub async fn set_model_encrypted_pipeline(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
-    Json(body): Json<EncryptedPipelineUpdate>,
+    JsonBody(body): JsonBody<EncryptedPipelineUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());

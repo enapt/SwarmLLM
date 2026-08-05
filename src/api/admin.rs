@@ -1,3 +1,4 @@
+use crate::api::server::JsonBody;
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
@@ -973,7 +974,7 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
 /// PUT /api/admin/config — Update configuration at runtime.
 pub async fn update_config(
     State(state): State<AppState>,
-    Json(body): Json<ConfigUpdate>,
+    JsonBody(body): JsonBody<ConfigUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Persist the updated config to the config TOML file.
     // Note: most config changes take effect after daemon restart.
@@ -1708,7 +1709,7 @@ pub async fn network_code(State(state): State<AppState>) -> Json<serde_json::Val
 /// Accepts a network invite code (swarm://...) or raw multiaddr and dials the peer.
 pub async fn join_network(
     State(state): State<AppState>,
-    Json(body): Json<JoinNetworkRequest>,
+    JsonBody(body): JsonBody<JoinNetworkRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if body.code.len() > MAX_INVITE_CODE_LEN {
         return Err(ApiError(crate::error::SwarmError::Validation(format!(
@@ -1790,7 +1791,7 @@ pub struct ScheduleUpdate {
 /// PUT /api/admin/schedule — Update resource schedule at runtime (persisted to redb).
 pub async fn update_schedule(
     State(state): State<AppState>,
-    Json(body): Json<ScheduleUpdate>,
+    JsonBody(body): JsonBody<ScheduleUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Clone current schedule, validate + apply updates without holding the write lock
     let mut new_schedule = state

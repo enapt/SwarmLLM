@@ -1,3 +1,4 @@
+use crate::api::server::JsonBody;
 use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
@@ -36,7 +37,7 @@ pub struct SetNicknameRequest {
 /// PUT /api/identity/nickname — set/update nickname (signs + gossips).
 pub async fn set_nickname(
     State(state): State<AppState>,
-    Json(body): Json<SetNicknameRequest>,
+    JsonBody(body): JsonBody<SetNicknameRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let record = NicknameRecord::new_signed(&state.shared_state.identity, body.nickname.clone())
         .map_err(ApiError::from)?;

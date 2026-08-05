@@ -1,3 +1,4 @@
+use crate::api::server::JsonBody;
 use std::path::PathBuf;
 
 use axum::extract::State;
@@ -69,7 +70,7 @@ pub struct PermissionRequest {
 /// POST /api/claude-code/session — Create a new Claude Code session.
 pub async fn create_session_handler(
     State(state): State<AppState>,
-    Json(req): Json<CreateSessionRequest>,
+    JsonBody(req): JsonBody<CreateSessionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let config = state.shared_state.metrics.providers_config.read().await;
     let sub_config = config
@@ -358,7 +359,7 @@ pub async fn create_session_handler(
 pub async fn send_message_handler(
     State(_state): State<AppState>,
     axum::extract::Path(session_id): axum::extract::Path<String>,
-    Json(req): Json<SendMessageRequest>,
+    JsonBody(req): JsonBody<SendMessageRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     // Per-field size cap — the global 32 MiB body limit exists for VLM image
     // payloads and is far too generous for a text message written to the
@@ -456,7 +457,7 @@ pub async fn send_message_handler(
 /// must write to stdin concurrently.
 pub async fn permission_handler(
     axum::extract::Path(session_id): axum::extract::Path<String>,
-    Json(req): Json<PermissionRequest>,
+    JsonBody(req): JsonBody<PermissionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Get the stdin handle directly — no session lock needed.
     // This avoids a deadlock: the SSE stream loop holds the session lock

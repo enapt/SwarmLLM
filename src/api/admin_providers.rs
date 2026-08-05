@@ -1,3 +1,4 @@
+use crate::api::server::JsonBody;
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
@@ -161,7 +162,7 @@ impl ProvidersUpdate {
 /// PUT /api/admin/providers — Update provider API keys. Empty string = remove key.
 pub async fn update_providers(
     State(state): State<AppState>,
-    Json(body): Json<ProvidersUpdate>,
+    JsonBody(body): JsonBody<ProvidersUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Reject a request that would change nothing, rather than reporting success.
     //
@@ -826,7 +827,7 @@ pub struct ModelStatusRequest {
 
 pub async fn provider_model_status(
     State(state): State<AppState>,
-    Json(body): Json<ModelStatusRequest>,
+    JsonBody(body): JsonBody<ModelStatusRequest>,
 ) -> Json<serde_json::Value> {
     let config = state.shared_state.metrics.providers_config.read().await;
     let models: Vec<String> = body.models.into_iter().take(20).collect();
