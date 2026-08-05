@@ -22,7 +22,13 @@ All notable changes to SwarmLLM are documented here.
 
   Checked against the reference tokenizer on fifteen varied samples: previously
   fourteen of them were split differently, using 43% more tokens overall. All
-  fifteen now match it exactly.
+  fifteen now match it exactly. Measured on a running node, a sentence of
+  ordinary prose went from 20 tokens to 10.
+
+  The effect on answers is visible too. Asked to repeat `日本語 🎉 café` back
+  exactly, the model previously returned `日本語  🎉 -café` — a doubled space and
+  an invented hyphen, which is what reading standalone space tokens looks like
+  from the other side. It now returns the text unchanged.
 
 - **Qwen models were given number tokens they were not trained on.** The rule
   used for Qwen grouped digits up to three at a time; Qwen models expect one
