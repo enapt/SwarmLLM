@@ -2,6 +2,23 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Streamed replies from your own machine were missing from the statistics.**
+  A reply streamed by the local model — which is what the chat page, Claude Code
+  and most apps use — was not counted anywhere: the request total did not move,
+  it did not appear in diagnostics, and the "time to first word" and
+  "words per second" graphs stayed empty no matter how much the machine did.
+  A single-node install could therefore look idle while working continuously.
+  Now recorded, on both the OpenAI and Anthropic endpoints.
+
+  Time-to-first-word is worth having on its own: of a 26 second reply measured
+  during the fix, 25 seconds were spent before the first word appeared and only
+  1.5 seconds producing the rest — which tells you where to look in a way the
+  total never could.
+
 ## [0.3.73-alpha] — 2026-08-05
 
 Follows 0.3.72. Fixes tool calls failing about a third of the time on local

@@ -453,6 +453,17 @@ pub(super) async fn anthropic_split_stream(
     ));
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
 
+    // Same reason as the OpenAI split stream: this path bypasses the router, so
+    // without its own trace a locally-streamed request is invisible to the
+    // metrics and to `/api/admin/diagnostics`. This is the endpoint Claude Code
+    // talks to, so it is the one most likely to be carrying real traffic.
+    let stream_rid = crate::api::request_uuid(&request_id);
+    let stream_trace = std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+        stream_rid,
+        model.clone(),
+        "messages",
+    ));
+
     let state = state.clone();
     let rid = request_id.clone();
     let model_for_lookup = model.clone();
@@ -462,12 +473,19 @@ pub(super) async fn anthropic_split_stream(
         send_sse_preamble(&sse_tx, &rid, &model).await;
 
         let requested_mid = crate::types::ModelId(model_for_lookup);
+        let _trace_guard = crate::api::openai::TraceGuard::register(
+            &state.shared_state,
+            stream_rid,
+            stream_trace.clone(),
+        );
+        stream_trace.mark_dequeued();
         let (mut token_rx, failure, _usage) = match crate::api::openai::spawn_split_stream(
             &state,
             &requested_mid,
             &messages,
             params,
             &rid,
+            Some(stream_trace.clone()),
         ) {
             Some(pair) => pair,
             None => {
@@ -574,6 +592,19 @@ pub(super) async fn anthropic_split_stream(
                 stop_reason = "error".to_string();
             }
         }
+
+        // Publish before the terminal frames: a client that has already walked
+        // away must not cost us the record of work the node actually did.
+        stream_trace.mark_finished(
+            if stop_reason == "error" {
+                crate::inference::trace::Outcome::Error("SplitStreamError".into())
+            } else {
+                crate::inference::trace::Outcome::Ok
+            },
+            0,
+            total_output_tokens,
+        );
+        state.shared_state.publish_request_trace(&stream_trace);
 
         send_sse_epilogue_with_stop(
             &sse_tx,

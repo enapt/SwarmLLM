@@ -17,6 +17,7 @@ pub use resolver::{
     resolve_loaded_model_registry_id, resolve_model_for_inference, resolve_model_name,
     SplitModelMeta,
 };
+pub(crate) use streaming::TraceGuard;
 pub use streaming::{run_split_generate, spawn_split_stream, submit_stream_to_router};
 pub use types::*;
 

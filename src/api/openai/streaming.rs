@@ -144,13 +144,13 @@ pub type SplitStream = (
 /// removal because the streaming task has two exits — generation finishing and
 /// the client disconnecting — and a leaked entry would keep a stale request
 /// showing as "in progress" on every surface forever.
-struct TraceGuard {
+pub(crate) struct TraceGuard {
     state: std::sync::Arc<crate::daemon::SharedState>,
     request_id: uuid::Uuid,
 }
 
 impl TraceGuard {
-    fn register(
+    pub(crate) fn register(
         state: &std::sync::Arc<crate::daemon::SharedState>,
         request_id: uuid::Uuid,
         trace: std::sync::Arc<crate::inference::trace::RequestTrace>,
@@ -175,6 +175,11 @@ pub fn spawn_split_stream(
     messages: &[crate::types::ChatMessage],
     params: crate::types::SamplingParams,
     request_id: &str,
+    // Required rather than defaulted: a path that silently passes nothing
+    // produces a request the metrics never see, which is the bug this
+    // parameter was added to fix. `None` is legitimate only where no trace
+    // exists at all.
+    trace: Option<std::sync::Arc<crate::inference::trace::RequestTrace>>,
 ) -> Option<SplitStream> {
     let meta = get_split_model_meta(&state.shared_state, model_id)?;
     let prompt = crate::inference::chat_template::build_prompt(
@@ -201,6 +206,15 @@ pub fn spawn_split_stream(
     let params = with_template_stops(params, meta.chat_template.as_deref());
     let rid = crate::api::request_uuid(request_id);
     let (token_tx, token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
+    // Attach the caller's trace so TTFT is stamped on the first token that
+    // carries text. `StreamingTokenTx` exists precisely so no emit site has to
+    // remember this — but the sender still has to be TOLD which trace it
+    // belongs to, and this path never did, so every locally-streamed request
+    // reported no first-token time.
+    let token_tx = match trace {
+        Some(t) => token_tx.with_trace(t),
+        None => token_tx,
+    };
     // Records why generation stopped when it produced nothing. Without this the
     // channel simply closes and the client sees an empty-but-successful stream,
     // so the dashboard had to *guess* a reason ("the model might still be
@@ -914,8 +928,28 @@ pub(super) async fn split_stream_response(
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
     let request_id_inner = request_id.clone();
 
+    // Like `split_non_stream_response`, this path bypasses the router and so
+    // must build its own trace. It had none at all, so a locally-streamed
+    // request was invisible: `swarmllm_inference_requests_total` did not move,
+    // no route was recorded, and the OTel first-token and per-output-token
+    // histograms stayed empty however much the node served. Verified live
+    // 2026-08-05 — 11 before a streaming request, 11 after. Streaming is the
+    // path every interactive client uses, so on a single-node install the
+    // shipped Grafana dashboards could read near-zero while the machine worked
+    // continuously.
+    let stream_rid = crate::api::request_uuid(&request_id);
+    let stream_trace = std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+        stream_rid,
+        model_id.0.clone(),
+        "chat",
+    ));
+
     tokio::spawn(async move {
         let request_id = request_id_inner;
+        // Visible as in-flight while it runs, so worker progress lands on it.
+        let _trace_guard =
+            TraceGuard::register(&state.shared_state, stream_rid, stream_trace.clone());
+        stream_trace.mark_dequeued();
         // Send initial role delta
         let stream_start = std::time::Instant::now();
         let mut token_count: u64 = 0;
@@ -926,15 +960,21 @@ pub(super) async fn split_stream_response(
         }
 
         // Spawn split-model generation and get token receiver
-        let (mut token_rx, failure, usage_slot) =
-            match spawn_split_stream(&state, &model_id, &messages, params, &request_id) {
-                Some(pair) => pair,
-                None => {
-                    tracing::debug!(model_id = %model_id, "DIAG: split stream model not found");
-                    let _ = tx.send(StreamEvent::Done).await;
-                    return;
-                }
-            };
+        let (mut token_rx, failure, usage_slot) = match spawn_split_stream(
+            &state,
+            &model_id,
+            &messages,
+            params,
+            &request_id,
+            Some(stream_trace.clone()),
+        ) {
+            Some(pair) => pair,
+            None => {
+                tracing::debug!(model_id = %model_id, "DIAG: split stream model not found");
+                let _ = tx.send(StreamEvent::Done).await;
+                return;
+            }
+        };
 
         // Forward streaming tokens from the worker to SSE events.
         // Default to "stop"; the worker will override with "length" if the
@@ -1058,6 +1098,24 @@ pub(super) async fn split_stream_response(
             finish = %finish,
             "DIAG: split stream decode loop complete (subprocess)"
         );
+
+        // Publish before the terminal SSE frames: a client that has already
+        // walked away must not cost us the record of work we actually did.
+        let (p_tok, c_tok) = usage_slot
+            .lock()
+            .ok()
+            .and_then(|s| *s)
+            .unwrap_or((0, token_count as u32));
+        stream_trace.mark_finished(
+            if finish == "error" {
+                crate::inference::trace::Outcome::Error("SplitStreamError".into())
+            } else {
+                crate::inference::trace::Outcome::Ok
+            },
+            p_tok,
+            c_tok,
+        );
+        state.shared_state.publish_request_trace(&stream_trace);
 
         // Send finish (guarded so a stalled consumer can't hang this task after
         // the worker has already finished).
