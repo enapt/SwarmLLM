@@ -85,6 +85,15 @@ All notable changes to SwarmLLM are documented here.
   program expecting them found nothing and could not tell why. Such a request is
   now refused with an explanation. Cloud models still return them.
 
+- **Asking for the fastest model no longer picks one that has to be loaded
+  first.** SwarmLLM can be asked to pick a model itself, preferring speed, cost
+  or capability. The speed option took whichever model happened to be listed
+  first, ignoring the one thing that dominates how long you wait: whether a
+  model is already in memory. Observed picking a larger model that was not
+  loaded and taking 57 seconds, when one already in memory would have answered
+  in under a second. It now prefers a model already loaded, then one on this
+  machine, then the smallest.
+
 - **Qwen models were given number tokens they were not trained on.** The rule
   used for Qwen grouped digits up to three at a time; Qwen models expect one
   digit at a time.

@@ -641,6 +641,32 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
 
 /// Delegate tool: auto-select a model by tier and run inference.
 /// Tiers: fast (lowest latency local), cheap (smallest/free), smart (most capable).
+/// Sort key for the `fast` delegation tier: lower is preferred.
+///
+/// Time to an answer is dominated by whether the model is ALREADY IN MEMORY.
+/// Loading a cold one costs tens of seconds — measured 57s when a cold 3.8B
+/// model was picked while a 3B sat loaded and would have answered in under a
+/// second. So that comes first, then local over network, then smallest.
+///
+/// A size of 0 means "unknown" (network models carry no size hint) and sorts
+/// last rather than first, so an unmeasured model never beats a known small one.
+fn fast_tier_rank(source: &str, size_bytes: u64, loaded: bool) -> (u8, u8, u64) {
+    let source_rank = match source {
+        "local" => 0,
+        "network" => 1,
+        _ => 2,
+    };
+    (
+        u8::from(!loaded),
+        source_rank,
+        if size_bytes == 0 {
+            u64::MAX
+        } else {
+            size_bytes
+        },
+    )
+}
+
 async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
     let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
         Some(p) if p.len() <= MCP_MAX_PROMPT_BYTES => p.to_string(),
@@ -712,12 +738,25 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
     // Select based on tier
     let selected = match tier.as_str() {
         "fast" => {
-            // Prefer local, then network (smallest = fastest)
+            // Lowest time to an answer, which is dominated by whether the model
+            // is ALREADY IN MEMORY. Loading a cold one costs tens of seconds —
+            // measured 57s picking a cold 3.8B model while a 3B sat loaded and
+            // would have answered in under a second. Size only breaks ties among
+            // models in the same state.
+            //
+            // This used to take the first local candidate in registry order,
+            // under a comment claiming "smallest = fastest" that the code never
+            // implemented; `cheap` below is the one that actually sorts by size.
+            let pool = &state.shared_state.model_process_pool;
             candidates
                 .iter()
-                .find(|(_, src, _)| *src == "local")
-                .or_else(|| candidates.iter().find(|(_, src, _)| *src == "network"))
-                .or(candidates.first())
+                .min_by_key(|(id, src, size)| {
+                    fast_tier_rank(
+                        src,
+                        *size,
+                        pool.is_loaded(&crate::types::ModelId(id.clone())),
+                    )
+                })
                 .cloned()
         }
         "cheap" => {
@@ -890,4 +929,52 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
             ]
         }),
     )
+}
+
+#[cfg(test)]
+mod fast_tier_tests {
+    use super::fast_tier_rank;
+
+    /// The `fast` tier used to take the first local model in registry order,
+    /// under a comment claiming "smallest = fastest" that the code never
+    /// implemented. Measured live: it chose a cold 3.8B model and took 57
+    /// seconds while an already-loaded 3B would have answered in under one.
+    #[test]
+    fn an_already_loaded_model_wins_however_big_it_is() {
+        let loaded_big = fast_tier_rank("local", 8_000_000_000, true);
+        let cold_tiny = fast_tier_rank("local", 500_000_000, false);
+        assert!(
+            loaded_big < cold_tiny,
+            "loading a model costs far more than its size saves"
+        );
+    }
+
+    #[test]
+    fn among_equals_local_beats_network_and_smaller_beats_bigger() {
+        assert!(
+            fast_tier_rank("local", 2_000_000_000, false)
+                < fast_tier_rank("network", 2_000_000_000, false),
+            "a model on this machine avoids a network hop"
+        );
+        assert!(
+            fast_tier_rank("local", 1_000_000_000, false)
+                < fast_tier_rank("local", 4_000_000_000, false),
+            "with both cold, the smaller one loads sooner"
+        );
+        assert!(
+            fast_tier_rank("local", 500_000_000, true)
+                < fast_tier_rank("local", 1_000_000_000, true),
+            "with both loaded, the smaller one decodes faster"
+        );
+    }
+
+    /// Network candidates carry no size hint. Treating 0 as "smallest" would
+    /// make every unmeasured model beat every measured one.
+    #[test]
+    fn an_unknown_size_does_not_masquerade_as_the_smallest() {
+        assert!(
+            fast_tier_rank("network", 4_000_000_000, false) < fast_tier_rank("network", 0, false),
+            "unknown size must sort last, not first"
+        );
+    }
 }
