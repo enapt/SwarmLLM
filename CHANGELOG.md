@@ -68,6 +68,16 @@ All notable changes to SwarmLLM are documented here.
   the start if that does not match. Re-reading costs a moment; resuming in the
   wrong place produces a wrong answer.
 
+- **Tool calls were labelled with an identifier the model made up.** When a
+  local model asks to use a tool, the reply carries an identifier the program
+  uses to match the result back to the request. That identifier was whatever the
+  model wrote — and models do not invent unique ones. Llama 3.2 produces
+  `call_1`, `call_2`, `call_3` for every tool-using reply it gives, so several
+  rounds of tool use in one conversation all claim the same identifiers, and
+  nothing stopped a model repeating one twice in a single reply.
+
+  Identifiers are now assigned by SwarmLLM and are unique.
+
 - **Qwen models were given number tokens they were not trained on.** The rule
   used for Qwen grouped digits up to three at a time; Qwen models expect one
   digit at a time.

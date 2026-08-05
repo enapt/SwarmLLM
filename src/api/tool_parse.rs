@@ -137,8 +137,16 @@ fn describe_arguments(schema: &str) -> Option<String> {
 /// One tool call recovered from model output, in the shape both API layers need.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedToolCall {
-    /// Call id. Taken from the model when it supplies one, else synthesised —
-    /// clients use it to correlate a result, so it only has to be unique.
+    /// Call id, always assigned here — never the one the model wrote.
+    ///
+    /// A client correlates a tool result back to its call by this id, so it has
+    /// to be unique across everything the client is tracking, which is a whole
+    /// conversation and not one response. Models do not do that: llama-3.2-3b
+    /// at temperature 0 emits `call_1`, `call_2`, `call_3` in that order for
+    /// EVERY tool-calling response it produces, so a conversation with three
+    /// such turns contains three different calls all claiming to be `call_1`.
+    /// Nothing stops a model reusing one id twice inside a single response
+    /// either, which breaks correlation outright.
     pub id: String,
     pub name: String,
     /// Arguments as a JSON **string**, which is what the OpenAI wire format
@@ -172,6 +180,22 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
         .or_else(|| try_mistral(trimmed))
         .or_else(|| try_llama3(trimmed))
         .filter(|calls| !calls.is_empty())
+        .map(assign_unique_ids)
+}
+
+/// Replace whatever id the model wrote with one that is actually unique.
+///
+/// Done here rather than in each parser or each API layer because this is the
+/// single point every tool call crosses on its way out — all four callers
+/// (Anthropic streaming and not, OpenAI streaming and not) go through
+/// `parse_tool_calls`, so a new caller inherits this instead of having to
+/// remember it. See [`ParsedToolCall::id`] for why the model's own id will not
+/// do.
+fn assign_unique_ids(mut calls: Vec<ParsedToolCall>) -> Vec<ParsedToolCall> {
+    for call in &mut calls {
+        call.id = format!("call_{}", uuid::Uuid::new_v4().simple());
+    }
+    calls
 }
 
 /// Strip a markdown code fence, with or without a language tag.
@@ -673,6 +697,43 @@ mod tests {
         }
     }
 
+    /// A client matches a tool result back to its call by id, across a whole
+    /// conversation. The model's own id cannot carry that: llama-3.2-3b at
+    /// temperature 0 emits `call_1`, `call_2`, `call_3` for EVERY tool-calling
+    /// response, so three such turns leave three distinct calls all claiming to
+    /// be `call_1` (measured live 2026-08-06, 4 runs of 4).
+    #[test]
+    fn a_models_own_call_id_is_never_used() {
+        // Two responses a model could plausibly produce back to back, the
+        // second reusing an id inside one response.
+        let first = r#"{"tool_calls": [
+            {"id": "call_1", "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}},
+            {"id": "call_2", "function": {"name": "get_weather", "arguments": "{\"city\":\"Tokyo\"}"}}]}"#;
+        let second = r#"{"tool_calls": [
+            {"id": "call_1", "function": {"name": "get_weather", "arguments": "{\"city\":\"Cairo\"}"}},
+            {"id": "call_1", "function": {"name": "get_weather", "arguments": "{\"city\":\"Lima\"}"}}]}"#;
+
+        let a = parse_tool_calls(first).expect("parses");
+        let b = parse_tool_calls(second).expect("parses");
+
+        let mut ids: Vec<&str> = a.iter().chain(b.iter()).map(|c| c.id.as_str()).collect();
+        assert_eq!(ids.len(), 4);
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            4,
+            "ids must be unique across responses, and within one even when the \
+             model repeats itself"
+        );
+        for c in a.iter().chain(b.iter()) {
+            assert!(!matches!(c.id.as_str(), "call_1" | "call_2"));
+        }
+        // The arguments still belong to the right call.
+        assert!(a[0].arguments.contains("Paris"));
+        assert!(b[1].arguments.contains("Lima"));
+    }
+
     /// The format our own system prompt requests.
     #[test]
     fn parses_the_generic_format_we_prompt_for() {
@@ -680,7 +741,9 @@ mod tests {
             "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}]}"#;
         let calls = parse_tool_calls(text).expect("should parse");
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].id, "call_abc");
+        // The model's own id is deliberately discarded — see
+        // `ParsedToolCall::id` and `a_models_own_call_id_is_never_used`.
+        assert_ne!(calls[0].id, "call_abc");
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
     }
@@ -912,7 +975,10 @@ mod bare_call_tests {
         let text = r#"{"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":{"city":"Paris"}}}"#;
         let calls = parse_tool_calls(text).expect("bare call should parse");
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].id, "call_weather");
+        assert_ne!(
+            calls[0].id, "call_weather",
+            "the model's id must be replaced"
+        );
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
     }
