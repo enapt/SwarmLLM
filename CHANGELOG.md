@@ -23,8 +23,6 @@ only half applied.
   that was genuinely cut off part-way through a value still shows as text rather
   than becoming a tool call that looks fine and does the wrong thing.
 
-### Fixed
-
 - **Log flooding from a bad link is now actually stopped.** The previous release
   collapsed repeated warnings from one failing connection, but only one of the
   two lines each failure produced — so a six-hour measurement on a live node
