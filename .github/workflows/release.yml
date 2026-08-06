@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  # Re-run a tag's release by hand. A tag push is a one-shot trigger: when a job
+  # fails for a reason that has nothing to do with the code — on 2026-08-06 the
+  # runner could not resolve action downloads, "Internal Server Error" — GitHub
+  # will not re-run the workflow, and the only other way back is to delete and
+  # re-push the tag, which rewrites history in front of users for an
+  # infrastructure blip. Dispatching against the tag ref rebuilds it cleanly.
+  #
+  # `github.ref_name` is the tag name under both triggers, so every step that
+  # derives the version from it works unchanged.
+  workflow_dispatch:
 
 permissions:
   contents: write
