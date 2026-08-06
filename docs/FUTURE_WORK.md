@@ -6215,56 +6215,68 @@ cause for the flat curve has been established. Anyone picking this up:
   Concurrent requests diverge in `index_pos` as soon as they start at different
   times or carry different prompt lengths, which is the normal case.
 
-  **MEASURED 2026-08-06, and this IS the main cause after all.** Under real
-  concurrent load on the Proxmox node (4 concurrent requests, distinct prompts,
-  llama-3.2-1b Q8_0), the counter reports:
+  **MEASURED 2026-08-06 — and batching turns out not to be the lever at all on
+  CPU.** This entry was revised three times in one day. The first two revisions
+  chased *why batching fails to engage*; the measurement that mattered was what
+  it is worth *when it does*.
 
-      calls=256  batched=16  fell_back=240  batched_pct=6
-      calls=512  batched=28  fell_back=484  batched_pct=5
+  **1. Engagement is real but erratic.** The v0.3.79 counter under 4-way
+  concurrent load gives `batched_pct=5` on the Proxmox node (llama-3.2-1b Q8_0),
+  but on an 8-core CPU-only node running llama-3.2-3b Q4_K_M one run batched
+  **54 of 57** calls at `batch_size=4` and the very next run batched **6 of
+  148**. Whether four slots land on the same tick is a race, not a property.
 
-  **Batching engages about 5% of the time. 95% of multi-request calls run their
-  items one at a time.** So the answer to "does batching engage and not help,
-  or never engage" is: it never engages.
+  **2. When it engages, it buys nothing.** Timing the batched path directly
+  (the sibling DIAG line added alongside the existing per-item one — the batched
+  path had never been timed at all, so its cost could only be assumed):
 
-  **The mechanism, measured directly.** Turning on `[logging] level = "debug"`
-  makes every sequential-fallback forward log its `request_id` and `index_pos`,
-  so the slot trajectories can be reconstructed. Four requests with IDENTICAL
-  20-token prompts, fired simultaneously:
+      single decode forward, 1 request alone : 119.5 ms   (n=40)
+      batch_size=3                           : 336  ms  vs 3 x 119.5 = 358  -> 1.07x
+      batch_size=4                           : 465  ms  vs 4 x 119.5 = 478  -> 1.03x
 
-      all four enter decode at index_pos=20
-      they then coexist at (112, 113, 114, 115) -- four consecutive positions
-      spread stays 1-4 for the whole run; it never returns to 0
+  **3. The ceiling, measured independently.** Prefill batches over the sequence
+  dimension inside one genuine matmul, so it bounds what *any* batching can
+  achieve here regardless of implementation:
 
-  So the slots sit permanently one token apart. **Prompt length and arrival
-  time are not the cause** — these four were identical in both. The offset is
-  created once, when each slot finishes prefill on a different tick, and Phase B
-  then advances *every* decoding slot by exactly 1 per tick, which makes the
-  relative offsets invariant. Nothing re-converges them, so a batch that misses
-  alignment at admission misses it forever.
+      prefill seq_len=43 : 96.7 ms/token   vs decode 119.0 ms/token  -> 1.23x
 
-  **This corrects the paragraph that used to sit here** twice over. The original
-  concluded the homogeneity requirement was "probably NOT the main cause", from a
-  benchmark that started every request at the same instant with the same prompt
-  length and saw only ~20% difference. The first correction kept that benchmark's
-  framing and blamed staggered arrival and differing prompt lengths. Both were
-  wrong for the same reason: **that benchmark does not produce the lockstep it
-  appears to produce.** Re-running it while reading the counter gives
-  `batched_pct=3` — lower than the staggered case, not higher. The ~20% it
-  measured was never batching.
+  Batching 43 rows into one matmul returns 1.23x. So 3-4 rows returning
+  1.03-1.07x is exactly on trend, and neither the `index_pos` requirement nor
+  candle's quantized matmul is responsible.
 
-  **The fix is cheaper than it looks, because the spread is tiny.** Slots sit
-  1-4 positions apart out of ~115, so a batched decode that pads every slot's KV
-  to the batch maximum and masks the padding wastes under 4% of the attention
-  work while converting ~95% of these calls from sequential to batched. Per-slot
-  RoPE offsets are the other half. Decode is the tractable case — the mask is
-  already `None` for `seq_len == 1`; prefill can keep falling back.
+  **The reason is that batching amortizes weight reads, and on CPU the weight
+  read is not the bottleneck.** Decode here is compute-bound: the work scales
+  with the number of rows, so N rows cost N times as much whether or not they
+  share a call. This also explains the throughput curve that opened this entry —
+  4 concurrent requests measured **4.48 tok/s aggregate against 5.32 tok/s for a
+  single request**, i.e. concurrency is slightly *negative* on CPU.
 
-  Which is the sharper question: on the batched path's best case, four streams
-  deliver what one does. Decode should be latency-bound here — 31.6 tok/s over a
-  ~2 GB model is ~63 GB/s against the card's ~448 GB/s, so there is bandwidth
-  headroom and batching should convert it into throughput. It does not. Look for
-  per-item work inside the "batched" forward (attention in particular) before
-  assuming the matmuls are shared.
+  **Do not implement ragged-`index_pos` batching for CPU nodes.** It would
+  convert ~95% of fallbacks into batches worth 1.05x, which the added masking
+  and per-slot RoPE bookkeeping would likely consume outright.
+
+  **This does NOT transfer to GPU, and that is where the work belongs.** GPU
+  decode was measured at 31.6 tok/s over a ~2 GB model = ~63 GB/s against the
+  card's ~448 GB/s — **14% of roofline**, i.e. bandwidth-bound with 7x of
+  headroom, the exact regime where batching pays. The three numbers above are
+  cheap to re-take on a GPU node (`[logging] level = "debug"`, read `batch_ms`
+  against `forward_ms`) and should be taken **before** any decode-path surgery.
+  They were not taken here because the only GPU available is the user's desktop,
+  and a previous concurrent-GPU benchmark drove VRAM to 7824/8192 MiB and locked
+  their machine.
+
+  **Why engagement is a race** (kept because it is the part that generalises).
+  Reconstructing slot trajectories from the debug logs: four requests with
+  identical 20-token prompts, fired simultaneously, all enter decode at
+  `index_pos=20` and then sit at **(112, 113, 114, 115)** — four consecutive
+  positions — for the rest of the run. Slots are knocked out of alignment once,
+  by finishing prefill on different ticks, and decode advances *every* slot by
+  exactly 1 per tick, so the offsets are invariant and never re-converge. A
+  batch that misses alignment at admission misses it forever. Note this also
+  means a benchmark that fires N requests at the same instant does **not**
+  produce the lockstep it appears to — verify with the counter, not the
+  request side.
+
 - The router's own `max_batch_size` defaults to 1 ("no batching, sequential,
   backward-compatible"); the worker's slot table is the live mechanism. Two
   batching layers with different defaults is itself worth a look.

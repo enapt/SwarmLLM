@@ -869,6 +869,11 @@ impl SplitModel {
 
         self.note_batch_attempt(!homogeneous);
 
+        // Timed so the batched path is comparable against the per-item
+        // `forward()` line below it ("SplitModel forward pass complete").
+        // Without both, the only way to price batching was to assume it.
+        let batch_started = std::time::Instant::now();
+
         if !homogeneous {
             // Mixed seq_lens or differing index_pos: fall back to sequential.
             let mut results = Vec::with_capacity(items.len());
@@ -1231,6 +1236,15 @@ impl SplitModel {
                 results.push(per_req);
             }
         }
+
+        tracing::debug!(
+            model_key = %model_key,
+            batch_size,
+            seq_len,
+            index_pos = first_index_pos,
+            batch_ms = batch_started.elapsed().as_millis() as u64,
+            "DIAG: SplitModel batched forward complete"
+        );
 
         Ok(results)
     }
