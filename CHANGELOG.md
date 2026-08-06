@@ -26,7 +26,8 @@ All notable changes to SwarmLLM are documented here.
 
 ### Added
 
-- **A faster build for machines without a graphics card.** Inference done by the
+- **Every download is now the fast build, and a fallback exists for old
+  machines.** Inference done by the
   processor was running a slow fallback: the maths library keeps hand-written
   routines for instructions almost every processor made since 2013 supports, but
   they are switched on when the program is compiled and our builds targeted a
@@ -34,9 +35,14 @@ All notable changes to SwarmLLM are documented here.
   measured about **three times faster** on processor-side work, which narrows a
   graphics card's lead from roughly 18x to under 6x.
 
-  Nodes pick it up automatically on the next update, and only when the processor
-  reports it can run those instructions; anything older stays on the existing
-  build. The two are otherwise identical.
+  This applies to every download for Windows and Linux, with and without a
+  graphics card, and to the Debian and Red Hat packages. Machines running Apple
+  silicon were never affected.
+
+  Processors made before roughly 2013 cannot run those instructions, so two
+  extra downloads are published for them and nodes with such a processor are
+  sent there automatically. If one is ever missing, those nodes stay on the
+  version they have rather than being given something that will not start.
 
 ### Changed
 

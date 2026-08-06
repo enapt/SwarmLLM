@@ -6279,28 +6279,53 @@ silently measures nothing.
 On the same box and model, the GPU advantage falls from **18.1x to 5.8x**.
 Projected for the Proxmox test node (i5-10500T, 6 threads): 2.90 → ~9 tok/s.
 
-### SHIPPED (option 1, 2026-08-06)
+### SHIPPED (2026-08-06): fast by default, baseline as the fallback
 
-`swarmllm-linux-x86_64-avx2` is now built alongside the baseline from the same
-source, with `-C target-cpu=x86-64-v3`. `update.rs::preferred_cpu_asset_name`
-selects it when `is_x86_feature_detected!("avx2")` reports the processor can run
-it AND the release carries one, falling back to the baseline otherwise. The
-publish guard warns rather than blocks when the asset is absent, because a node
-CAN fall back — which is the guard's own stated criterion.
+**Every x86-64 asset is now built with `-C target-cpu=x86-64-v3`** — Linux CPU,
+Linux CUDA, Windows CPU, Windows GPU, and the `.deb` / `.rpm` (which package the
+Linux CPU job's binary). macOS aarch64 is untouched and always was fine: NEON is
+in the aarch64 default target, so candle's NEON kernels were never compiled out.
 
-Not yet done: the same treatment for the Windows CPU asset, and an AVX2 `.deb` /
-`.rpm` (packaging currently comes from the baseline Linux job, so package
-installs reach the fast build via auto-update rather than at install time).
+**Two new assets exist for processors older than AVX2** (pre-Haswell 2013 /
+pre-Excavator 2015), built with no raised target:
+`swarmllm-linux-x86_64-baseline` and `swarmllm-windows-x86_64-baseline.exe`.
+`update.rs::host_asset_name` sends such a host there, keyed on
+`is_x86_feature_detected!("avx2")`.
 
-**Greedy output is NOT bit-identical between the two builds, and that is
-expected.** Vectorised and scalar dot products sum in different orders, so a
-near-tie between two tokens can land either way. Measured over five prompts at
-temperature 0: four byte-identical, one flipping `"Ok."` to `"OK"` — both
-correct answers to "Say exactly: ok". Prompt token counts matched on all five,
-so the tokenizer path is unaffected. This is the same property that already
-holds between CPU and GPU builds and inside llama.cpp's own SIMD paths; do not
-treat a small text difference between the two assets as a bug without first
-checking whether the two answers are simply tied.
+**If a baseline asset is missing the update is SKIPPED, not substituted.** The
+resolved name simply does not match anything and the existing "no matching
+asset" path declines. That direction is deliberate: staying on a working older
+binary beats installing one that dies on its first instruction, which for a
+self-updating node is unrecoverable. The two baseline archives are therefore in
+the publish guard's blocking `EXPECTED` list — they qualify under its own test
+("its users are exactly those who cannot fall back") more strongly than anything
+else, because for those machines there is no second choice at all.
+
+**No `-cuda-baseline` / `-gpu-baseline` is published.** A pre-2013 processor
+paired with a modern GPU is vanishingly rare; such a host stops updating with a
+message rather than being handed something it cannot run.
+
+**The effective support floor for the default download is now Haswell (2013).**
+Fresh installs on older hardware need the baseline asset chosen by hand — the
+auto-updater handles it, a first-time download does not.
+
+### Still open
+
+- **Runtime dispatch would be strictly better** and remove the floor entirely:
+  one binary, fast where AVX2 exists, correct where it does not. It needs
+  candle's quantized kernels patched to `is_x86_feature_detected!` +
+  `#[target_feature(enable = "avx2")]` instead of the module-level `cfg`.
+  Upstream knows and has not fixed it (huggingface/candle#1818, still open), and
+  this repo already vendors `candle-core` via `[patch.crates-io]`, so the patch
+  is available: ~21 functions in `quantized/avx.rs` need the attribute (they use
+  intrinsics directly and currently rely on the whole crate being built with
+  AVX2), plus 8 `cfg` call sites in `k_quants.rs` become runtime checks. The
+  failure mode is a compile error rather than silent wrongness, and it is
+  verifiable by diffing greedy output against a `x86-64-v3` build. The cost is
+  carrying a substantial patch to hand-written SIMD maths across every candle
+  upgrade — which is why it was not done alongside the asset split.
+- The `.deb` / `.rpm` are built from the v3 job, so package installs are fast;
+  there is no baseline package for old processors.
 
 ### Options as originally assessed, in increasing order of risk
 

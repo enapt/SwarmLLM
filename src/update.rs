@@ -225,20 +225,18 @@ impl UpdateChecker {
 
         // Find the binary asset matching this platform AND build variant.
         //
-        // On a CPU build whose processor supports AVX2, prefer the `-avx2`
-        // asset and fall back to the baseline when the release does not carry
-        // one. That fallback is safe in a way the GPU one is not: see
-        // `preferred_cpu_asset_name`.
-        let baseline_asset = update_asset_name();
-        let asset_name = preferred_cpu_asset_name(&baseline_asset, |n| {
-            release.assets.iter().any(|a| a.name == n)
-        });
-        if asset_name != baseline_asset {
-            tracing::info!(
+        // Assets are built for x86-64-v3 (AVX2). A processor older than that
+        // is redirected to the `-baseline` asset — see `host_asset_name`.
+        let default_asset = update_asset_name();
+        let asset_name = host_asset_name(&default_asset);
+        if asset_name != default_asset {
+            tracing::warn!(
                 asset = %asset_name,
-                "This processor supports AVX2 — taking the faster build. It runs the \
-                 same code with the vectorised maths kernels compiled in, worth about \
-                 3x on inference done by the processor rather than a graphics card"
+                "This processor does not support AVX2, so it needs the baseline build. \
+                 The ordinary download is compiled for processors from 2013 onwards and \
+                 would not start here. If no baseline build is published for this \
+                 platform the update is skipped, which leaves this node on its current \
+                 working version"
             );
         }
 
@@ -1118,39 +1116,48 @@ fn host_has_avx2() -> bool {
     }
 }
 
-/// Upgrade a baseline CPU asset name to its `-avx2` sibling when this processor
-/// can run it and the release actually carries one.
+/// Redirect a pre-AVX2 processor to the `-baseline` asset.
 ///
-/// **Why this may switch variant when the GPU logic deliberately may not.**
-/// Refusing to move between CPU and GPU builds protects a capability: a GPU
-/// build swapped for a CPU one loses the only thing that made the machine worth
-/// running, and a GPU being visible is not proof its driver stack works. AVX2
-/// has neither property. It is a fact about the processor that
-/// `is_x86_feature_detected!` answers definitively, both binaries have identical
-/// capabilities, and the difference is speed alone — measured at about 3x for
-/// processor-side inference, because the maths library compiles its vectorised
-/// kernels out at the default target baseline.
+/// **Every x86-64 asset is built for the `x86-64-v3` baseline**, which requires
+/// AVX2 (Intel Haswell 2013, AMD Excavator 2015). That is what makes the default
+/// download fast: candle gates its hand-written quantized kernels on
+/// `#[cfg(target_feature = "avx2")]`, so at the old default target they were
+/// compiled out and every processor ran a scalar fallback — measured 3.09x
+/// slower. Upstream candle knows (huggingface/candle#1818) and has not fixed it.
 ///
-/// So the failure modes are not symmetric. Choosing `-avx2` on a processor that
-/// has AVX2 cannot produce a binary that will not start. Falling back to the
-/// baseline when a release predates these assets costs speed and nothing else.
+/// A processor older than that cannot execute those binaries at all, so it gets
+/// a `-baseline` asset built with no raised target.
 ///
-/// GPU builds are left alone: their asset already carries a `-cuda`/`-gpu`
-/// suffix and they do their inference on the card.
-fn preferred_cpu_asset_name(baseline: &str, release_has: impl Fn(&str) -> bool) -> String {
-    // Only the plain CPU asset has an AVX2 sibling; `-cuda` / `-gpu` do not.
-    if !build_variant_suffix().is_empty() || !host_has_avx2() {
-        return baseline.to_string();
+/// **When no baseline asset exists the returned name will not resolve and the
+/// caller skips the update.** That is deliberate and is the safe direction:
+/// staying on a working older binary beats installing one that dies on its first
+/// instruction, which for a node that updates itself is unrecoverable (gotcha
+/// #246 — a node was once left with no working binary at all). It is why this
+/// asks `is_x86_feature_detected!` rather than inferring anything.
+///
+/// GPU builds get the same treatment. No `-cuda-baseline` is published — a
+/// pre-2013 processor with a modern GPU is vanishingly rare — so such a host
+/// stops updating and says so, rather than being handed something broken.
+fn host_asset_name(default_name: &str) -> String {
+    if host_has_avx2() {
+        return default_name.to_string();
     }
-    // Insert before any extension, so `...x86_64.exe` becomes `...x86_64-avx2.exe`.
-    let candidate = match baseline.rsplit_once('.') {
-        Some((stem, ext)) => format!("{stem}-avx2.{ext}"),
-        None => format!("{baseline}-avx2"),
-    };
-    if release_has(&candidate) {
-        candidate
-    } else {
-        baseline.to_string()
+    baseline_asset_name(default_name)
+}
+
+/// The `-baseline` sibling of an asset name.
+///
+/// Split out from [`host_asset_name`] so it can be tested on any machine: the
+/// redirect only fires on a processor without AVX2, which is exactly the
+/// hardware a developer or CI runner is least likely to have — a test routed
+/// through the host check silently asserts nothing on almost every machine that
+/// runs it. This is the safety-critical half: a wrong name here means an old
+/// processor asks for an asset nobody publishes and stops updating.
+fn baseline_asset_name(default_name: &str) -> String {
+    // Insert before any extension: `...x86_64.exe` -> `...x86_64-baseline.exe`.
+    match default_name.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}-baseline.{ext}"),
+        None => format!("{default_name}-baseline"),
     }
 }
 
@@ -1652,66 +1659,52 @@ mod atomic_replace_tests {
 }
 
 #[cfg(test)]
-mod avx2_asset_tests {
+mod cpu_baseline_asset_tests {
     use super::*;
 
-    /// The AVX2 asset is an accelerator, not a capability change, so unlike the
-    /// GPU/CPU split it is safe both to switch INTO and to fall back FROM.
-    #[test]
-    fn falls_back_to_baseline_when_the_release_has_no_avx2_asset() {
-        // Releases published before these assets existed carry only the
-        // baseline. Falling back costs speed and nothing else — refusing to
-        // update, as the GPU path does, would strand the node on an old version.
-        let picked = preferred_cpu_asset_name("swarmllm-linux-x86_64", |_| false);
-        assert_eq!(picked, "swarmllm-linux-x86_64");
-    }
-
-    /// A processor without AVX2 must never be handed the AVX2 build: it would
-    /// fail on the first instruction, and a node that updates itself has no way
-    /// back from a binary that will not start (cf. gotcha #246).
-    #[test]
-    fn a_processor_without_avx2_never_gets_the_avx2_asset() {
-        // `preferred_cpu_asset_name` consults the real CPU, so assert the
-        // property that must hold on whichever machine runs this test.
-        let picked = preferred_cpu_asset_name("swarmllm-linux-x86_64", |_| true);
-        if host_has_avx2() {
-            assert_eq!(picked, "swarmllm-linux-x86_64-avx2");
-        } else {
-            assert_eq!(picked, "swarmllm-linux-x86_64");
-        }
-    }
-
-    /// The suffix goes before the extension, or Windows would ask for
-    /// `swarmllm-windows-x86_64.exe-avx2`, which is not a file anyone publishes.
+    /// The safety-critical half, asserted against the REAL function rather than
+    /// a copy of it. The suffix must land before the extension, or Windows asks
+    /// for `swarmllm-windows-x86_64.exe-baseline`, which nobody publishes — and
+    /// the update is skipped on exactly the machines that most need one that
+    /// runs. These are the names `release.yml` publishes.
     #[test]
     fn the_suffix_lands_before_a_file_extension() {
-        // Exercise the naming directly — this half is independent of the host.
-        let with_ext = |n: &str| match n.rsplit_once('.') {
-            Some((stem, ext)) => format!("{stem}-avx2.{ext}"),
-            None => format!("{n}-avx2"),
-        };
         assert_eq!(
-            with_ext("swarmllm-linux-x86_64"),
-            "swarmllm-linux-x86_64-avx2"
+            baseline_asset_name("swarmllm-linux-x86_64"),
+            "swarmllm-linux-x86_64-baseline"
         );
         assert_eq!(
-            with_ext("swarmllm-windows-x86_64.exe"),
-            "swarmllm-windows-x86_64-avx2.exe"
+            baseline_asset_name("swarmllm-windows-x86_64.exe"),
+            "swarmllm-windows-x86_64-baseline.exe"
         );
     }
 
-    /// GPU builds do their work on the card and have no AVX2 sibling published;
-    /// asking for one would resolve nothing and skip the update entirely.
+    /// Every x86-64 asset is built for x86-64-v3, so a processor without AVX2
+    /// cannot run any of them and must be sent to `-baseline`.
     #[test]
-    fn gpu_builds_are_left_on_their_own_asset() {
-        if build_variant_suffix().is_empty() {
-            return; // this test binary is a CPU build; nothing to assert
+    fn the_host_check_picks_the_right_side() {
+        let picked = host_asset_name("swarmllm-linux-x86_64");
+        if host_has_avx2() {
+            assert_eq!(picked, "swarmllm-linux-x86_64");
+        } else {
+            assert_eq!(picked, "swarmllm-linux-x86_64-baseline");
         }
-        let baseline = update_asset_name();
-        assert_eq!(
-            preferred_cpu_asset_name(&baseline, |_| true),
-            baseline,
-            "a GPU build must not be redirected to an AVX2 asset"
-        );
+    }
+
+    /// A modern processor must never be diverted to the slow asset — that would
+    /// silently undo a measured 3x on every processor-side inference.
+    #[test]
+    fn an_avx2_processor_is_never_diverted_to_baseline() {
+        if !host_has_avx2() {
+            return;
+        }
+        for name in [
+            "swarmllm-linux-x86_64",
+            "swarmllm-linux-x86_64-cuda",
+            "swarmllm-windows-x86_64.exe",
+            "swarmllm-windows-x86_64-gpu.exe",
+        ] {
+            assert_eq!(host_asset_name(name), name);
+        }
     }
 }
