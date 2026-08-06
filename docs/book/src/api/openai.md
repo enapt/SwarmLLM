@@ -36,9 +36,9 @@ curl http://localhost:8800/v1/chat/completions \
 | `frequency_penalty` | float | no | `0.0` | Frequency penalty (-2.0 to 2.0) |
 | `presence_penalty` | float | no | `0.0` | Presence penalty (-2.0 to 2.0) |
 | `tools` | array | no | — | Tool/function definitions for function calling |
-| `tool_choice` | string or object | no | — | `"none"`, `"auto"`, `"required"`, or `{"type":"function","function":{"name":"..."}}` |
-| `logprobs` | boolean | no | `false` | Return log probabilities for output tokens. Supported on split model (candle) inference paths |
-| `top_logprobs` | integer | no | — | Number of top log probabilities per token (0-20, requires `logprobs: true`). Computed from pre-sampling (raw) logits per OpenAI spec |
+| `tool_choice` | string or object | no | — | `"none"`, `"auto"`, `"required"`, or `{"type":"function","function":{"name":"..."}}`. `"none"` is honoured for a local model by not describing its tools at all — the only place it can be enforced. Any other value leaves them available: a local model cannot be compelled to call one |
+| `logprobs` | boolean | no | `false` | Log probabilities per output token. **Cloud models only** — a request for these against a model running locally is refused with a 400 explaining why, rather than answered without them |
+| `top_logprobs` | integer | no | — | Number of top log probabilities per token (0-20, requires `logprobs: true`). Cloud models only, as above |
 | `session_id` | string | no | — | Reuse KV-cache from a previous request |
 | `lora_adapter` | string | no | — | LoRA adapter ID for fine-tuned inference |
 
