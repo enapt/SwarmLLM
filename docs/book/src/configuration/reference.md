@@ -153,7 +153,6 @@ Every configuration option, organized by section.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `open_browser_on_start` | boolean | `true` | Open dashboard on launch |
-| `theme` | string | `"dark"` | Color theme: `"dark"` or `"light"` |
 
 ## `[api]` — API Authentication
 

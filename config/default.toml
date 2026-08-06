@@ -90,7 +90,6 @@ format = "pretty"              # "pretty" or "json"
 
 [ui]
 open_browser_on_start = true   # Open browser to dashboard/setup on launch
-theme = "dark"                 # "dark" or "light"
 
 [updates]
 auto_update = "stable"         # "disabled", "stable", or "all"

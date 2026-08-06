@@ -16,6 +16,14 @@ All notable changes to SwarmLLM are documented here.
   now also distinguishes it from `enable_relay`, which is the opposite role:
   relaying on behalf of others.
 
+### Removed
+
+- **A dashboard colour setting that never did anything.** `[ui] theme` was in
+  the example configuration and the reference, and nothing read it — the theme
+  is chosen in the dashboard itself and remembered per browser, which is where
+  it stays. Anyone who set it will now see a note that the key is unrecognised,
+  which is the truth; it was never applied.
+
 ### Changed
 
 - **Batching now reports how often it actually happens.** Requests are combined

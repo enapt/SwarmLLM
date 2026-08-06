@@ -1,6 +1,6 @@
 //! Operational config: logging, UI, update, and HTTP API surfaces.
 //!
-//! Hosts `LoggingConfig` (level/format/file), `UiConfig` (browser/theme),
+//! Hosts `LoggingConfig` (level/format/file), `UiConfig` (browser),
 //! `UpdateConfig` + `AutoUpdateMode`, and `ApiConfig` (api_key + rate
 //! limits). UpdateConfig has its own Default impl since AutoUpdateMode
 //! is non-trivial; LoggingConfig's Default lives here too rather than in
@@ -23,15 +23,12 @@ pub struct LoggingConfig {
 pub struct UiConfig {
     #[serde(default = "default_true")]
     pub open_browser_on_start: bool,
-    #[serde(default = "default_theme")]
-    pub theme: String,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
             open_browser_on_start: true,
-            theme: default_theme(),
         }
     }
 }
@@ -223,10 +220,6 @@ impl Default for ApiConfig {
             dashboard_trust_lan: false,
         }
     }
-}
-
-fn default_theme() -> String {
-    "dark".into()
 }
 
 fn default_log_level() -> String {
