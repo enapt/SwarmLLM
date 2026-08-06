@@ -6215,6 +6215,14 @@ cause for the flat curve has been established. Anyone picking this up:
   Concurrent requests diverge in `index_pos` as soon as they start at different
   times or carry different prompt lengths, which is the normal case.
 
+  **There is now a counter for this.** `SplitModel::note_batch_attempt` records
+  every `forward_batch` call and how many fell back, and reports the ratio at
+  INFO every 256 calls (`DIAG: forward_batch — share of multi-request calls that
+  actually batched`). Read that off a node under real concurrent load BEFORE
+  doing anything else here: it distinguishes "batching engages and does not
+  help" from "batching never engages", and those want completely different
+  fixes. `SplitModel::batch_stats()` exposes the raw pair.
+
   **This was tested behaviourally and is probably NOT the main cause.** Four
   concurrent requests with identical prompt lengths started together (so
   `index_pos` matches throughout decode, and the batched path definitely runs)

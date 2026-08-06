@@ -867,6 +867,8 @@ impl SplitModel {
         let all_same_pos = items.iter().all(|i| i.index_pos == first_index_pos);
         let homogeneous = first_seq_len > 0 && all_same_seq && all_same_pos;
 
+        self.note_batch_attempt(!homogeneous);
+
         if !homogeneous {
             // Mixed seq_lens or differing index_pos: fall back to sequential.
             let mut results = Vec::with_capacity(items.len());

@@ -154,6 +154,8 @@ fn make_test_split_model_impl(
         max_seq_len,
         kv_model_key: format!("0-{num_layers}-{}", num_layers + 2),
         final_logit_softcap: None,
+        batch_calls: 0,
+        batch_fellback: 0,
     }
 }
 
@@ -235,6 +237,8 @@ pub(super) fn make_gqa_test_model(
         max_seq_len,
         kv_model_key: format!("0-{num_layers}-{}", num_layers + 2),
         final_logit_softcap: None,
+        batch_calls: 0,
+        batch_fellback: 0,
     }
 }
 
@@ -367,5 +371,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         max_seq_len,
         kv_model_key: String::from("0-2-4"),
         final_logit_softcap: None,
+        batch_calls: 0,
+        batch_fellback: 0,
     }
 }

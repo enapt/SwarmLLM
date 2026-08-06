@@ -323,6 +323,8 @@ fn test_llama4_moe_layer_forward() {
         max_seq_len,
         kv_model_key: String::from("0-4-8"),
         final_logit_softcap: None,
+        batch_calls: 0,
+        batch_fellback: 0,
     };
 
     let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));

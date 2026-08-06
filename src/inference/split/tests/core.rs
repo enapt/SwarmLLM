@@ -702,6 +702,89 @@ fn forward_batch_mixed_index_pos_falls_back() {
     assert_eq!(out[1].dims(), &[1, 4, hidden_dim]);
 }
 
+/// The fallback inside `forward_batch` is silent, and its condition — every
+/// request sitting at the same position — stops holding as soon as concurrent
+/// requests drift out of lockstep. Without a count there is no way to tell a
+/// node that is batching from one that has been running sequentially all along;
+/// throughput does not distinguish them either, since batching four streams was
+/// worth only ~20% here (`docs/FUTURE_WORK.md`).
+#[test]
+fn forward_batch_counts_how_often_it_actually_batched() {
+    let hidden_dim = 128;
+    let mut model = make_test_split_model(2, hidden_dim);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    assert_eq!(model.batch_stats(), (0, 0), "starts unrecorded");
+
+    let a = Tensor::randn(0f32, 1.0, (1, 4, hidden_dim), &Device::Cpu).unwrap();
+    let b = Tensor::randn(0f32, 1.0, (1, 4, hidden_dim), &Device::Cpu).unwrap();
+
+    // Same position: this one really batches.
+    model
+        .forward_batch(
+            &[
+                BatchItem {
+                    input: &a,
+                    index_pos: 0,
+                    request_id: "same-a",
+                },
+                BatchItem {
+                    input: &b,
+                    index_pos: 0,
+                    request_id: "same-b",
+                },
+            ],
+            &kv_store,
+        )
+        .unwrap();
+    assert_eq!(
+        model.batch_stats(),
+        (1, 0),
+        "a homogeneous batch is not a fallback"
+    );
+
+    // Different positions: silently runs its items one at a time.
+    model
+        .forward_batch(
+            &[
+                BatchItem {
+                    input: &a,
+                    index_pos: 0,
+                    request_id: "drift-a",
+                },
+                BatchItem {
+                    input: &b,
+                    index_pos: 3,
+                    request_id: "drift-b",
+                },
+            ],
+            &kv_store,
+        )
+        .unwrap();
+    assert_eq!(
+        model.batch_stats(),
+        (2, 1),
+        "a mixed-position batch must be counted as a fallback"
+    );
+
+    // A single item takes the fast path above the counter and is not a batch
+    // attempt at all — counting it would understate the fallback rate.
+    model
+        .forward_batch(
+            &[BatchItem {
+                input: &a,
+                index_pos: 0,
+                request_id: "solo",
+            }],
+            &kv_store,
+        )
+        .unwrap();
+    assert_eq!(
+        model.batch_stats(),
+        (2, 1),
+        "a one-item call is not a batch attempt"
+    );
+}
+
 // ── Flash-attention CPU verification ──
 
 #[test]

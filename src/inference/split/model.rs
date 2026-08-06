@@ -52,6 +52,19 @@ pub struct SplitModel {
     pub(super) kv_model_key: String,
     /// Gemma 2 final logit soft-capping value (e.g. 30.0).
     pub(super) final_logit_softcap: Option<f32>,
+    /// How often `forward_batch` actually batched, versus fell back to running
+    /// its items one at a time.
+    ///
+    /// The fallback is silent and its conditions are easy to meet by accident —
+    /// requests only share an `index_pos` while they stay in lockstep, which
+    /// concurrent requests stop doing as soon as one starts a token earlier
+    /// than another. Without a count there is no way to tell a node that is
+    /// batching from one that has been running sequentially all along, and
+    /// measured throughput does not distinguish them either: batching four
+    /// streams was worth about 20% here, which is well inside the noise of a
+    /// single benchmark (`docs/FUTURE_WORK.md`).
+    pub(super) batch_calls: u64,
+    pub(super) batch_fellback: u64,
 }
 
 impl SplitModel {
@@ -78,6 +91,42 @@ impl SplitModel {
     /// Return the device this model is loaded on.
     pub fn device(&self) -> &Device {
         &self.device
+    }
+
+    /// Record one `forward_batch` call and periodically report how much of the
+    /// batching is real.
+    ///
+    /// Reported at INFO, not debug: nodes run at info, and a metric nobody sees
+    /// is the same as no metric — the whole reason this fallback went unnoticed
+    /// is that it is silent. Rate-limited to one line per
+    /// `BATCH_STATS_EVERY` calls so a busy node does not drown in it.
+    pub(super) fn note_batch_attempt(&mut self, fell_back: bool) {
+        /// Roughly one line per few seconds of steady decoding.
+        const BATCH_STATS_EVERY: u64 = 256;
+
+        self.batch_calls += 1;
+        if fell_back {
+            self.batch_fellback += 1;
+        }
+        if self.batch_calls % BATCH_STATS_EVERY != 0 {
+            return;
+        }
+        let batched = self.batch_calls - self.batch_fellback;
+        tracing::info!(
+            model_key = %self.kv_model_key,
+            calls = self.batch_calls,
+            batched,
+            fell_back = self.batch_fellback,
+            batched_pct = (batched as f64 * 100.0 / self.batch_calls as f64).round() as u32,
+            "DIAG: forward_batch — share of multi-request calls that actually batched \
+             (the rest ran their items one at a time because the requests were not at \
+             the same position)"
+        );
+    }
+
+    /// `(calls, fell_back)` for `forward_batch` since this model was loaded.
+    pub fn batch_stats(&self) -> (u64, u64) {
+        (self.batch_calls, self.batch_fellback)
     }
 
     /// Return the KV cache model key (used for cache cleanup).

@@ -1909,6 +1909,8 @@ impl SplitModel {
             max_seq_len: context_length,
             kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
             final_logit_softcap,
+            batch_calls: 0,
+            batch_fellback: 0,
         })
     }
 }
