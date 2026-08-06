@@ -199,7 +199,7 @@ All 20 build phases complete. All subsystems wired — no stubs. **1717 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.80-alpha (2026-08-06): CPU inference, measured instead of guessed
+### Latest — v0.3.81-alpha (2026-08-07): CPU inference, measured instead of guessed
 
 **Prompt processing up to 2.3x, long-context generation 5.5x. Every fix came from
 measurement; every guess made beforehand was wrong.** Detail in
@@ -229,10 +229,17 @@ after a short one — the normal case in a chat, invisible in any short benchmar
 
 | | before | after |
 |---|---|---|
-| prompt processing, 417 tok | 12.3 tok/s | **21.4** |
-| prompt processing, 1536 tok | 6.1 tok/s | **13.8** |
+| prompt processing, 417 tok | 12.3 tok/s | **23.0** |
+| prompt processing, 1536 tok | 6.1 tok/s | **18.6** |
 | generation @ ~1150 KV | 1368 ms/token | **249** |
 | 4 concurrent | 4.88 tok/s | 6.33 |
+
+**Two more, same area:** the tiled matmul's result transpose ran on ONE core
+(~25% of a large call) → parallelized, 26.7 → 19.1 ms at m=128; and candle's
+batched matmul ran each attention head's gemm sequentially while giving each all
+the threads → one gemm per head, ~1.8x. **Measure at the worker's
+`RAYON_NUM_THREADS`, not the core count** — doing the latter overstated that one
+by 4x (#256).
 
 **Headroom measured, don't re-derive:** decode is **bandwidth-bound at ~69% of the
 memory roofline**; threads pull the phases apart (decode peaks at 4, **2.2x worse
