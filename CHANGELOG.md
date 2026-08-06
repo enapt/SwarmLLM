@@ -2,7 +2,27 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.79-alpha] — 2026-08-06
+
+Follows 0.3.78. Inference done by the processor is about **three times faster**.
+The maths library keeps hand-written routines for instruction sets processors
+have had since 2013, switches them on when the program is compiled, and our
+builds targeted a much older baseline — so they were compiled out and every
+machine ran a slow fallback. This applies to work a graphics card hands back to
+the processor too, which happens whenever a model does not fit in graphics
+memory.
+
+> **Processors older than about 2013 need a different download.** Everything
+> except Apple silicon is now built for processors with AVX2 (Intel from 2013,
+> AMD from 2015). If yours is older, use `swarmllm-linux-x86_64-baseline` or
+> `swarmllm-windows-x86_64-baseline.exe` — the same release, built to run
+> anywhere.
+>
+> **Updating from 0.3.78 on such a processor: download the baseline build by
+> hand first.** Earlier versions do not know to pick it for you, and SwarmLLM
+> will not start after updating. From this version onwards it is chosen
+> automatically. To check on Linux: `grep -o -m1 avx2 /proc/cpuinfo` prints
+> `avx2` if you are fine, and nothing if you need the baseline build.
 
 ### Fixed
 
