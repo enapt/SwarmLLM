@@ -6462,6 +6462,35 @@ ships at `contribution = "minimal"` = **half** its cores. Measured on that box,
 partially bandwidth-bound workload, but a real 1.6x that users may not know they
 have opted out of.
 
+## KV-cache memory is bounded by session COUNT and AGE, never by bytes (2026-08-07) — MEASURED
+
+A 20-minute soak (123 completed requests + 39 mid-stream cancellations, prompts
+of 100-500 words, llama-3.2-3b Q4_K_M) left the **worker process at 6992 MB** —
+3.5x the 2.0 GB model — while the daemon itself grew only 141 -> 156 MB. No
+panics, no errors, every request accounted for; the memory is live KV cache.
+
+`KvCacheStore` evicts on two axes: `MAX_MULTI_TURN_SESSIONS` (a COUNT) and a
+10-minute TTL. Neither bounds bytes, and bytes are what runs out. One session's
+cache is `layers x 2 x kv_len x kv_heads x head_dim x 4`, which for this model at
+600 tokens is ~137 MB — so the count cap permits wildly different totals
+depending on how long the conversations are. Fifty short sessions and fifty long
+ones are the same number and two orders of magnitude apart in memory.
+
+**Why this matters now**: the attention fix earlier today makes long-context
+generation practical (5.5x at ~1150 KV), so users will keep longer conversations
+alive than they used to, in exactly the dimension that is unbounded. The
+Proxmox test node has 8 GB total.
+
+**What to do**: give the store a byte budget, evict least-recently-used until it
+fits, and account it alongside the model-memory admission that already exists
+(`SlotTable::can_admit` bounds slots by count and layer range, not bytes either).
+Not attempted here: eviction policy changes are easy to get subtly wrong under
+concurrency, and the correct budget interacts with the VRAM/RAM admission path.
+
+**Not yet established**: whether the 6992 MB is steady-state or still climbing —
+the soak was one window, and TTL eviction should reclaim it 10 minutes after load
+stops. Re-run with a longer tail and sample RSS over time before sizing anything.
+
 ## The next prompt-processing target is masked_fill, not the matmuls (2026-08-07) — MEASURED, NOT DONE
 
 After the tiled quantized matmul and both attention-kernel fixes, the attention

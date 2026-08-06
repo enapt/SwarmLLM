@@ -74,6 +74,11 @@ round of work started.
 
 ### Fixed
 - Generation slowing down roughly tenfold per token as a conversation grows.
+- One misbehaving client could bury every other warning in the log. A rejected
+  request logged a warning every time, so a client retrying in a loop produced
+  them without limit — a browser tab holding an out-of-date key managed 1046 in
+  23 minutes. Rejections are now logged at most once a minute per address, and
+  say how many were suppressed.
 
 ## [0.3.79-alpha] — 2026-08-06
 
