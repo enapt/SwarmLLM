@@ -6241,3 +6241,120 @@ cause for the flat curve has been established. Anyone picking this up:
 - The router's own `max_batch_size` defaults to 1 ("no batching, sequential,
   backward-compatible"); the worker's slot table is the live mechanism. Two
   batching layers with different defaults is itself worth a look.
+
+## CPU nodes ship with the fast quantized kernels compiled out (2026-08-06) — MEASURED
+
+**Release binaries run scalar quantized dot products on CPUs that all support
+AVX2.** Enabling AVX2 is a measured **3.09x** on CPU decode, same machine, same
+model, same source — the only difference is the compiler flag.
+
+| build | flag | CPU decode (llama-3.2-3b Q4, gpu_layers=0) |
+|---|---|---|
+| as shipped | `RUSTFLAGS=""` | **1.39 tok/s** (1.38, 1.39 across runs) |
+| AVX2 | `-C target-cpu=x86-64-v3` | **4.28 tok/s** (4.19, 4.37) |
+
+### Why
+
+`candle-core` gates its hand-written AVX2 quantized kernels on
+`#[cfg(target_feature = "avx2")]` (`quantized/mod.rs`: `#[cfg(target_feature =
+"avx2")] pub mod avx;`) — a **compile-time** check, not runtime detection. The
+default `x86_64-unknown-linux-gnu` target enables only `fxsr`, `sse`, `sse2`, so
+the module is compiled out entirely and `k_quants.rs` falls back to its scalar
+path.
+
+`release.yml` sets `RUSTFLAGS: ""` deliberately, to override
+`.cargo/config.toml`'s `target-cpu=native` — which is correct, because `native`
+on a CI runner produces binaries that SIGILL elsewhere. The bug is not that
+override; it is that the resulting baseline is **2003-era x86-64** when every
+machine plausibly running local inference has AVX2 (Intel Haswell 2013, AMD
+Excavator 2015).
+
+Verify with `rustc --print cfg | grep avx2` (0 lines) versus
+`rustc --print cfg -C target-cpu=x86-64-v3` (1 line). Note `rustc` does NOT read
+`RUSTFLAGS` — that is a cargo variable — so probing this with `RUSTFLAGS=... rustc`
+silently measures nothing.
+
+### What it changes
+
+On the same box and model, the GPU advantage falls from **18.1x to 5.8x**.
+Projected for the Proxmox test node (i5-10500T, 6 threads): 2.90 → ~9 tok/s.
+
+### Options, in increasing order of risk
+
+1. **Ship an additional `-avx2` asset** beside the existing portable one and let
+   the installer/launcher pick on CPU detection. Zero risk to existing users;
+   the release already ships per-platform and CPU/GPU variants, so this fits the
+   pattern. Costs one more build matrix entry.
+2. **Make `x86-64-v3` the default and keep a `-baseline` asset.** Simpler, and
+   the fast path becomes the one people get by default.
+3. **Default to `x86-64-v3` with no fallback.** Do NOT do this without deciding
+   the support floor: **auto-update would push a v3 binary onto a pre-2013 CPU
+   and it would SIGILL on first run**, which is an unrecoverable failure for a
+   node that updates itself.
+
+A runtime-dispatched build is the textbook answer but needs candle patched to
+use `is_x86_feature_detected!` instead of `cfg`, which is upstream work.
+
+### Related, not the same
+
+`inference.max_cpu_threads` / `node.contribution` also matter: the Proxmox node
+ships at `contribution = "minimal"` = **half** its cores. Measured on that box,
+1.81 tok/s at 3 threads versus 2.90 at 6 — sublinear, as expected for a
+partially bandwidth-bound workload, but a real 1.6x that users may not know they
+have opted out of.
+
+## Can CPU nodes ever match GPU nodes by splitting shards finer? (2026-08-06) — ANSWERED: no
+
+Asked directly, and worth writing down because the intuition is reasonable and
+the answer is arithmetic rather than opinion.
+
+**The intuition**: split a model across more CPU nodes, each holds fewer layers,
+so each has less to do.
+
+**Why it does not follow**: the per-node work does fall, but the nodes run in
+SEQUENCE for any one token. A token must pass through every layer in order, so
+
+    time_per_token = Σ(compute on each node) + (N-1) x hop_latency
+
+The sum is invariant — the same layers are read either way, just on different
+machines. Splitting only adds hops. Measured, using 4.28 tok/s CPU decode and
+the 9 ms LAN hop between the two test machines:
+
+| nodes | compute | hops | total | tok/s |
+|---|---|---|---|---|
+| 1 | 234 ms | 0 | 234 ms | 4.28 |
+| 2 | 234 ms | 9 ms | 243 ms | 4.12 |
+| 4 | 234 ms | 27 ms | 261 ms | 3.84 |
+| 8 | 234 ms | 63 ms | 297 ms | 3.37 |
+
+**Making the nodes work concurrently on one token means tensor parallelism**,
+not pipeline — splitting within each layer rather than between layers. That
+inserts an all-reduce after attention AND after the MLP, per layer, per token.
+For a 16-layer model at a 9 ms LAN round trip that is 2 x 16 x 9 = **288 ms per
+token of pure communication**, a 3.5 tok/s ceiling before any arithmetic — worse
+than the 4.28 tok/s one node already achieves alone. Over the internet it is
+hopeless. This is why the literature is unanimous that TP wants NVLink or
+InfiniBand, and why `inference.tp_max_latency_ms` exists to keep slow peers out
+of TP groups.
+
+**Where splitting genuinely pays, and it is not latency:**
+
+1. **Aggregate throughput.** N pipeline stages can hold N DIFFERENT requests
+   simultaneously. Each request is no faster; the swarm serves ~N times as many.
+   This is what pipelining is for, and it is the honest pitch for CPU nodes.
+2. **Running a model at all.** A 70B model does not fit one 8 GB machine. Ten
+   CPU nodes holding a slice each run it slowly, versus not running it. This is
+   Petals' entire thesis and the strongest argument for the CPU tier.
+3. **MoE architectures** activate a fraction of their experts per token, so
+   per-token weight traffic is far below the model size — a much better fit for
+   RAM-rich, bandwidth-poor CPU nodes than a dense model is.
+
+**The lever that actually closes the CPU/GPU gap is not topology, it is the
+kernels** — see the AVX2 entry above: 3.09x measured, taking the gap from 18x
+to 5.8x. Do that before any protocol work on shard granularity.
+
+**And per the adaptive-shard-sizing entry above, finer shards are blocked on
+contiguity-aware acquisition anyway** — nothing in `auto_manage/scoring.rs`
+prefers contiguous ranges, so a node can hold 0, 1, 4, 5, which becomes two
+segments and an extra hop. Finer shards multiply exactly the cost this analysis
+says dominates.
