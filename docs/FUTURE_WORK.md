@@ -6282,12 +6282,40 @@ cause for the flat curve has been established. Anyone picking this up:
   already vendored here for an unrelated reason, so the patch has somewhere to
   live.
 
-  **Revised recommendation.** Ragged-`index_pos` batching is still not worth
-  building *on its own* — it would convert fallbacks into batches worth 1.05x.
-  The order is: tile the quantized matmul first, re-measure, and only then decide
-  whether the alignment work is worth it. On GPU the picture is different again
-  (decode measured at 14% of roofline); those numbers should be taken on a GPU
-  node that is not the user's desktop.
+  **FIXED 2026-08-06 — the matmul is now tiled.** `k_quants::matmul` makes the
+  weight column the outer loop for `m > 1`, so each column is read once and
+  applied to every row while it is still in cache; the activation-quantize loop
+  (which becomes the serial fraction once the dots speed up) is parallelized too.
+  `m == 1` keeps the original path, so decode is untouched by construction.
+  Min-of-5 on an idle machine — the same unchanged code path measured 0.42 ms and
+  0.97 ms across runs on this WSL2 laptop, so single-shot timings are worthless
+  here:
+
+      3072x3072   m=4   3.00 -> 1.06 ms   (2.8x)      m=128  101.4 -> 11.4 ms  (8.9x)
+      3072x8192   m=4   2.29 -> 1.51 ms   (1.5x)      m=128   86.1 -> 26.7 ms  (3.2x)
+
+  End to end (llama-3.2-3b Q4_K_M, CPU, unique prompts so the prefix cache does
+  not serve a repeat):
+
+      decode, 1 request        5.33 -> 5.66 tok/s   unchanged, as designed
+      prefill  412 tokens     12.3  -> 15.3  tok/s  1.24x
+      prefill 1537 tokens      6.1  ->  7.0  tok/s  1.15x
+      4 concurrent             4.88 ->  6.50 tok/s  1.33x
+
+  **Concurrency is now positive on CPU** — 4 concurrent (6.50) beats a single
+  request (5.66), where before it was slower (4.48 vs 5.32).
+
+  **The remaining gap is Amdahl, and it is the next thing to measure.** A 3-9x
+  kernel produced only 1.15-1.24x on prefill, which puts quantized matmul at
+  roughly **25-30% of prefill wall time**. The other ~70% is f32 elementwise work
+  on large tensors (RMSNorm, SiLU, the gate*up product), KV-cache copies, RoPE,
+  `.contiguous()` copies, and this patch's own transpose. None of that was ever
+  profiled; there is no `perf` on this box, so the practical route is timing
+  instrumentation around the block stages rather than sampling.
+
+  **Ragged-`index_pos` batching is now worth reconsidering** — it was pointless
+  when a batch was worth 1.05x, but batches are worth real time now, and the
+  concurrent path still falls back to sequential most of the time.
 
   **Why engagement is a race** (kept because it is the part that generalises).
   Reconstructing slot trajectories from the debug logs: four requests with
@@ -6426,12 +6454,12 @@ have made up ground.
 
 A GPU processes a prompt one to two ORDERS of magnitude faster per token than it
 generates, because prefill turns one weight read into hundreds of rows of work
-and a GPU has the bandwidth headroom to exploit it. This CPU gets **1.23x** —
-**but that is an implementation limit, not a hardware one.** candle's quantized
-`matmul` iterates batch/sequence rows in an outer sequential loop and re-streams
-the whole weight matrix per row (see the continuous-batching entry). Decode runs
-at ~52% of this box's measured memory bandwidth, so a tiled matmul should
-recover roughly **1.5-1.6x on prefill**. Prefill throughput also degrades with
+and a GPU has the bandwidth headroom to exploit it. This CPU got **1.23x** —
+**an implementation limit, not a hardware one, and it has since been fixed.**
+candle's quantized `matmul` iterated batch/sequence rows in an outer sequential
+loop and re-streamed the whole weight matrix per row; it is now tiled (see the
+continuous-batching entry), which measured **1.15-1.24x on prompt processing**
+end to end and up to 8.9x on the kernel itself. Prefill throughput also degrades with
 prompt length as attention goes quadratic (llama-3.2-1b Q8_0, 3 threads,
 Proxmox):
 
