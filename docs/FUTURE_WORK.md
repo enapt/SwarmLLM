@@ -6392,6 +6392,33 @@ have opted out of.
 
 ## Can CPU nodes ever match GPU nodes by splitting shards finer? (2026-08-06) — ANSWERED: no
 
+**Reinforced 2026-08-06 by a second, independent measurement: on CPU, prefill is
+barely cheaper per token than decode**, which removes the one place a CPU could
+have made up ground.
+
+    llama-3.2-3b Q4_K_M, 8-core CPU node, gpu_layers=0
+      decode (1 token/forward)          119.0 ms/token
+      prefill (43 tokens in ONE matmul)  96.7 ms/token   -> 1.23x
+
+A GPU processes a prompt one to two ORDERS of magnitude faster per token than it
+generates, because prefill turns one weight read into hundreds of rows of work
+and a GPU has the bandwidth headroom to exploit it. This CPU gets **1.23x**.
+Prefill throughput also degrades with prompt length as attention goes quadratic
+(llama-3.2-1b Q8_0, 3 threads, Proxmox):
+
+| prompt tokens | prefill tok/s |
+|---|---|
+| 40 | 16.0 |
+| 169 | 15.8 |
+| 663 | 12.1 |
+| 1518 | 9.0 |
+
+So a CPU node is not merely slower than a GPU by a constant — it is slower in
+the regime (long prompts) where real workloads spend most of their time, and it
+cannot recover any of it through batching or parallelism within a node. See the
+continuous-batching entry: batching 3-4 requests returns ~1.05x for the same
+reason. **The CPU node's role is capacity and redundancy, not latency.**
+
 Asked directly, and worth writing down because the intuition is reasonable and
 the answer is arithmetic rather than opinion.
 
