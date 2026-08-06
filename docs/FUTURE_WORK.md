@@ -6292,6 +6292,16 @@ Not yet done: the same treatment for the Windows CPU asset, and an AVX2 `.deb` /
 `.rpm` (packaging currently comes from the baseline Linux job, so package
 installs reach the fast build via auto-update rather than at install time).
 
+**Greedy output is NOT bit-identical between the two builds, and that is
+expected.** Vectorised and scalar dot products sum in different orders, so a
+near-tie between two tokens can land either way. Measured over five prompts at
+temperature 0: four byte-identical, one flipping `"Ok."` to `"OK"` — both
+correct answers to "Say exactly: ok". Prompt token counts matched on all five,
+so the tokenizer path is unaffected. This is the same property that already
+holds between CPU and GPU builds and inside llama.cpp's own SIMD paths; do not
+treat a small text difference between the two assets as a bug without first
+checking whether the two answers are simply tied.
+
 ### Options as originally assessed, in increasing order of risk
 
 1. **Ship an additional `-avx2` asset** beside the existing portable one and let
