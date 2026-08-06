@@ -1246,20 +1246,29 @@ pub(crate) fn run_attention(
             // * MHA (n_head == n_kv_head): standard_attention is 7-20×
             //   faster than fused flash at every KV length — repeat_kv is
             //   a no-op so fused's BHSD→BSHD transposes are pure overhead.
-            // * GQA (n_head != n_kv_head): standard is faster up to ~1024
-            //   KV, then repeat_kv's expansion-to-n_head cost dominates
-            //   and fused wins. Crossover ~2048 on Qwen2.5-7B (28/4 GQA)
-            //   and Llama-70B-style (32/8 GQA); at 4096 KV fused is 4-5×
-            //   faster.
+            // * GQA (n_head != n_kv_head): fused, at EVERY KV length. This
+            //   replaces a ~2048 crossover that made decode collapse on long
+            //   contexts. Profiled 2026-08-06 on llama-3.2-3b Q4_K_M (24/8 GQA),
+            //   ms per generated token, standard -> fused:
+            //       kv ~82     141.2 -> 129.2   (attention  16.8 ->  14.7)
+            //       kv ~1150  1368.1 -> 249.2   (attention 1242  -> 136 )  5.5x
+            //   At ~1150 KV attention was 91% of decode under standard: repeat_kv
+            //   materializes the cache expanded to n_head EVERY token EVERY layer,
+            //   so cost grows with context and swamps everything else. Generating
+            //   after a long prompt was ~10x slower per token than after a short
+            //   one, which is the normal case in a chat.
+            //
+            //   The old crossover was measured on Qwen2.5-7B (28/4) and a 32/8
+            //   model, not re-measured here. Those have HIGHER expansion ratios
+            //   than 24/8, and repeat_kv's cost scales with the ratio, so fused
+            //   should win at least as early for them — 3:1 is the least
+            //   favourable GQA case for fused and it already wins at kv=82.
             //
             // SWIFT / spec sessions force standard regardless so prefill +
             // draft + verify share identical numerics (tiny softmax drift
             // breaks accept rate even at skip_ratio=0).
-            const CPU_FUSED_DECODE_GQA_MIN_KV: usize = 2048;
             let is_gqa = n_head != n_kv_head;
-            let kv_len = k.dim(2)?;
-            let use_standard_for_decode =
-                seq_len == 1 && (!is_gqa || kv_len < CPU_FUSED_DECODE_GQA_MIN_KV);
+            let use_standard_for_decode = seq_len == 1 && !is_gqa;
             // PREFILL also takes the standard path — measured 2026-08-06, and the
             // opposite of what the decode routing above might suggest.
             //
