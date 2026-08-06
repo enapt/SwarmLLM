@@ -6226,22 +6226,38 @@ cause for the flat curve has been established. Anyone picking this up:
   items one at a time.** So the answer to "does batching engage and not help,
   or never engage" is: it never engages.
 
-  **This corrects the paragraph that used to sit here**, which concluded the
-  homogeneity requirement was "probably NOT the main cause" from a behavioural
-  test: four requests with identical prompt lengths started *together* reached
-  32.5 tok/s against 27.0 for mixed lengths, only ~20% apart. That test was
-  wrong about the real world in a specific way — starting every request at the
-  same instant with the same prompt length keeps them in lockstep, which is the
-  one condition under which `index_pos` stays equal. Real traffic arrives
-  staggered and with different prompt lengths, so slots diverge within the first
-  token and never re-converge. **A benchmark that holds requests in lockstep
-  measures the best case and reports it as the typical one.**
+  **The mechanism, measured directly.** Turning on `[logging] level = "debug"`
+  makes every sequential-fallback forward log its `request_id` and `index_pos`,
+  so the slot trajectories can be reconstructed. Four requests with IDENTICAL
+  20-token prompts, fired simultaneously:
 
-  The fix is therefore worth real effort: a batched decode that handles ragged
-  `index_pos` would convert ~95% of these calls from sequential to batched. That
-  needs per-slot RoPE offsets and attention over per-slot KV lengths (padding +
-  masking, or a varlen kernel) — the mask is already `None` for `seq_len == 1`,
-  so decode is the tractable case; prefill can keep falling back.
+      all four enter decode at index_pos=20
+      they then coexist at (112, 113, 114, 115) -- four consecutive positions
+      spread stays 1-4 for the whole run; it never returns to 0
+
+  So the slots sit permanently one token apart. **Prompt length and arrival
+  time are not the cause** — these four were identical in both. The offset is
+  created once, when each slot finishes prefill on a different tick, and Phase B
+  then advances *every* decoding slot by exactly 1 per tick, which makes the
+  relative offsets invariant. Nothing re-converges them, so a batch that misses
+  alignment at admission misses it forever.
+
+  **This corrects the paragraph that used to sit here** twice over. The original
+  concluded the homogeneity requirement was "probably NOT the main cause", from a
+  benchmark that started every request at the same instant with the same prompt
+  length and saw only ~20% difference. The first correction kept that benchmark's
+  framing and blamed staggered arrival and differing prompt lengths. Both were
+  wrong for the same reason: **that benchmark does not produce the lockstep it
+  appears to produce.** Re-running it while reading the counter gives
+  `batched_pct=3` — lower than the staggered case, not higher. The ~20% it
+  measured was never batching.
+
+  **The fix is cheaper than it looks, because the spread is tiny.** Slots sit
+  1-4 positions apart out of ~115, so a batched decode that pads every slot's KV
+  to the batch maximum and masks the padding wastes under 4% of the attention
+  work while converting ~95% of these calls from sequential to batched. Per-slot
+  RoPE offsets are the other half. Decode is the tractable case — the mask is
+  already `None` for `seq_len == 1`; prefill can keep falling back.
 
   Which is the sharper question: on the batched path's best case, four streams
   deliver what one does. Decode should be latency-bound here — 31.6 tok/s over a
