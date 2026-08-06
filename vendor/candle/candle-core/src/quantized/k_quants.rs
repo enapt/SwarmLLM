@@ -2357,11 +2357,14 @@ pub fn matmul<T: GgmlType>(
                 }
             }
         });
-    for (col_idx, col) in dst_t.chunks_exact(m).enumerate() {
-        for (row_idx, v) in col.iter().enumerate() {
-            dst[row_idx * n + col_idx] = *v;
+    // Parallel over output rows. The reads from dst_t are strided either way;
+    // splitting by row keeps each thread's writes contiguous and lets the
+    // transpose scale with the cores already reserved for this matmul.
+    dst.par_chunks_mut(n).enumerate().for_each(|(row_idx, row)| {
+        for (col_idx, out) in row.iter_mut().enumerate() {
+            *out = dst_t[col_idx * m + row_idx];
         }
-    }
+    });
     Ok(())
 }
 
