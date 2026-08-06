@@ -2289,20 +2289,48 @@ pub fn matmul<T: GgmlType>(
     // f32, f16, and bf16 support direct copy
     if T::DIRECT_COPY {
         T::VecDotType::direct_copy(lhs, &mut lhs_b);
+    } else if m == 1 {
+        T::VecDotType::from_float(lhs, &mut lhs_b);
     } else {
-        for row_idx in 0..m {
-            let lhs_b_mut = &mut lhs_b[row_idx * k_in_blocks..(row_idx + 1) * k_in_blocks];
-            let lhs = &lhs[row_idx * k..(row_idx + 1) * k];
-            T::VecDotType::from_float(lhs, lhs_b_mut)
-        }
+        // SWARMLLM PATCH — quantizing the activations was a SEQUENTIAL loop over
+        // batch rows. It costs nothing next to an untiled dot loop, but once the
+        // dots are tiled (below) it is a serial fraction big enough to cap the
+        // whole speedup by Amdahl. m == 1 stays on the direct call so decode
+        // never pays rayon's fork/join.
+        lhs_b
+            .par_chunks_mut(k_in_blocks)
+            .enumerate()
+            .for_each(|(row_idx, lhs_b_mut)| {
+                T::VecDotType::from_float(&lhs[row_idx * k..(row_idx + 1) * k], lhs_b_mut)
+            });
     }
 
-    for row_idx in 0..m {
-        let lhs_row = &lhs_b[row_idx * k_in_blocks..(row_idx + 1) * k_in_blocks];
-        let dst_row = &mut dst[row_idx * n..(row_idx + 1) * n];
-
-        dst_row
-            .into_par_iter()
+    // SWARMLLM PATCH — tiled batch dimension.
+    //
+    // Upstream makes the batch row the outer loop, so the entire weight matrix
+    // is re-streamed for every row and batching amortizes nothing: measured
+    // ms/row was FLAT from m=1 to m=128 (0.756 -> 0.815 on a 3072x3072 Q4_K).
+    // That is what made continuous batching worth ~1.05x and prefill only 1.23x
+    // per token over decode.
+    //
+    // Here the weight column is the outer loop instead: each one is read once
+    // and applied to every row while it sits in L1. This is the shape llama.cpp
+    // uses (`llamafile_sgemm`/tinyBLAS for batched cases, per-row dots only for
+    // m == 1). Results are produced column-major and transposed back; the
+    // transpose is m*n f32 and negligible beside the dots.
+    //
+    // Verified bit-identical to the original ordering by `examples/qmatmul_bench.rs`,
+    // which reimplements the upstream loop and asserts exact equality — every dst
+    // element is one `vec_dot` over the same operands either way, so there is no
+    // reduction reordering to change results.
+    //
+    // NOTE: the sibling `matmul_f16` still has the untiled shape. It is only
+    // reachable through `QMatMul::TensorF16`, which requires the DEQUANTIZE_ALL_F16
+    // thread-local that this project never sets, so it is currently dead here.
+    // Anyone enabling that path should tile it the same way first.
+    if m == 1 {
+        let lhs_row = &lhs_b[..k_in_blocks];
+        dst.into_par_iter()
             .enumerate()
             .with_min_len(128)
             .with_max_len(512)
@@ -2310,6 +2338,29 @@ pub fn matmul<T: GgmlType>(
                 let rhs_col = &rhs_t[col_idx * k_in_blocks..(col_idx + 1) * k_in_blocks];
                 *dst = T::vec_dot(k, rhs_col, lhs_row);
             });
+        return Ok(());
+    }
+
+    const COL_BLOCK: usize = 64;
+    let mut dst_t = vec![0f32; n * m];
+    dst_t
+        .par_chunks_mut(m * COL_BLOCK)
+        .enumerate()
+        .for_each(|(blk, chunk)| {
+            let col_base = blk * COL_BLOCK;
+            for (j, slot) in chunk.chunks_mut(m).enumerate() {
+                let col_idx = col_base + j;
+                let rhs_col = &rhs_t[col_idx * k_in_blocks..(col_idx + 1) * k_in_blocks];
+                for (row_idx, out) in slot.iter_mut().enumerate() {
+                    let lhs_row = &lhs_b[row_idx * k_in_blocks..(row_idx + 1) * k_in_blocks];
+                    *out = T::vec_dot(k, rhs_col, lhs_row);
+                }
+            }
+        });
+    for (col_idx, col) in dst_t.chunks_exact(m).enumerate() {
+        for (row_idx, v) in col.iter().enumerate() {
+            dst[row_idx * n + col_idx] = *v;
+        }
     }
     Ok(())
 }
