@@ -6477,9 +6477,14 @@ llama-3.2-3b shapes: 24 heads, 128 queries, 896 KV, head_dim 128):
     scores / sqrt(head_dim)            1.0 ms
     k.t() (view)                       0.0 ms
 
-**`masked_fill` costs more than both matmuls and the softmax combined.** It is
-`mask.where_cond(...)` over a stride-0 broadcast of a `[q_len, kv_len]` u8 mask
-across the 4D score tensor. The same masking expressed additively —
+**`masked_fill` costs more than both matmuls and the softmax combined**, and the
+cause is NOT the mask — it is the FILL VALUE. `masked_fill` broadcasts a scalar
+`-inf` to the whole score shape (stride 0) and hands that to `where_cond`. With
+both operands contiguous the same call takes **1.8 ms**; with a contiguous mask
+but the broadcast fill it is still 16.9. Materializing the fill inside the call
+does not help either — `broadcast_as(...).contiguous()` on a scalar measured
+**38 ms**, worse than leaving it, because expanding one value to 2.75M elements
+through the strided path costs more than the masking does. The same masking expressed additively —
 `att.broadcast_add(&float_mask)` with a 0 / -inf f32 mask — measures **4.8 ms**,
 a 3.6x saving, and the CPU flash path already builds exactly such a float mask
 before calling into its kernel.

@@ -77,6 +77,30 @@ fn main() {
         m.where_cond(&on_true, &scores)
     });
 
+    // Is where_cond slow, or is the stride-0 broadcast slow? Materialize the
+    // mask to a contiguous 4D tensor first and re-measure.
+    let mask4 = u8mask
+        .broadcast_as(scores.shape())
+        .unwrap()
+        .contiguous()
+        .unwrap();
+    bench("masked_fill (contiguous 4D mask)", 0.0, || {
+        let on_true = neg_inf.broadcast_as(scores.shape())?;
+        mask4.where_cond(&on_true, &scores)
+    });
+    let neg4 = neg_inf
+        .broadcast_as(scores.shape())
+        .unwrap()
+        .contiguous()
+        .unwrap();
+    bench("masked_fill (contiguous mask AND fill)", 0.0, || {
+        mask4.where_cond(&neg4, &scores)
+    });
+    let fmask = Tensor::zeros((q_len, kv), DType::F32, &dev).unwrap();
+    bench("additive float mask (broadcast_add)", 0.0, || {
+        scores.broadcast_add(&fmask)
+    });
+
     // Reference: a plain 2D f32 gemm of similar total work, to see whether the
     // batched-3D path is the problem or f32 gemm is simply this fast here.
     let a = Tensor::randn(0f32, 1., (q_len * h, d), &dev).unwrap();
