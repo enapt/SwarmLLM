@@ -113,6 +113,27 @@ jobs:
             bare_asset: swarmllm-linux-x86_64
             features: ""
 
+          # Same source as "Linux x86_64", built for the x86-64-v3 baseline so
+          # candle's hand-written AVX2 quantized kernels are actually compiled
+          # in. They are gated on `#[cfg(target_feature = "avx2")]`, and the
+          # default target enables only sse2, so the shipped CPU binary has been
+          # running scalar fallbacks. Measured 3.09x on processor-side decode
+          # (docs/FUTURE_WORK.md).
+          #
+          # Shipped ALONGSIDE the baseline, never instead of it: x86-64-v3 needs
+          # Haswell (2013) / Excavator (2015), and a self-updating node handed a
+          # binary its processor cannot execute dies on first start with no way
+          # back. `update.rs::preferred_cpu_asset_name` picks this one only when
+          # the running machine reports AVX2, and falls back otherwise.
+          - name: Linux x86_64 AVX2
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary: swarmllm
+            archive: swarmllm-linux-x86_64-avx2.tar.gz
+            bare_asset: swarmllm-linux-x86_64-avx2
+            features: ""
+            rustflags: "-C target-cpu=x86-64-v3"
+
           - name: Linux x86_64 CUDA
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -170,6 +191,9 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release ${{ matrix.features }}
         env:
+          # Overrides the workflow-level RUSTFLAGS: "" for the AVX2 variant
+          # only. Everything else keeps the portable baseline.
+          RUSTFLAGS: ${{ matrix.rustflags || '' }}
           # candle floor. candle-kernels emits PTX for `compute_NN`; the driver
           # JIT-compiles it to the user's actual GPU at runtime, so this is a
           # *minimum* arch, and every GPU at or above it is covered — including
@@ -418,7 +442,20 @@ jobs:
             swarmllm-windows-x86_64-cpu.zip
             swarmllm-windows-x86_64-gpu.zip
           )
+          # Deliberately NOT in EXPECTED: the AVX2 build is an accelerator, and
+          # a node whose release lacks it falls back to the baseline asset
+          # (update.rs::preferred_cpu_asset_name). By this guard's own test —
+          # "its users are exactly those who cannot fall back" — it must not
+          # block a release. But a silent absence would leave every processor
+          # node on the slow binary with nothing to notice, so warn loudly.
+          OPTIONAL=(
+            swarmllm-linux-x86_64-avx2
+            swarmllm-linux-x86_64-avx2.tar.gz
+          )
           NAMES=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+          for want in "${OPTIONAL[@]}"; do
+            grep -qxF "$want" <<<"$NAMES" || echo "::warning::$TAG is missing $want — processor-only nodes will fall back to the baseline build, which is roughly 3x slower on inference"
+          done
           MISSING=()
           for want in "${EXPECTED[@]}"; do
             grep -qxF "$want" <<<"$NAMES" || MISSING+=("$want")

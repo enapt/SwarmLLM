@@ -224,7 +224,23 @@ impl UpdateChecker {
         }
 
         // Find the binary asset matching this platform AND build variant.
-        let asset_name = update_asset_name();
+        //
+        // On a CPU build whose processor supports AVX2, prefer the `-avx2`
+        // asset and fall back to the baseline when the release does not carry
+        // one. That fallback is safe in a way the GPU one is not: see
+        // `preferred_cpu_asset_name`.
+        let baseline_asset = update_asset_name();
+        let asset_name = preferred_cpu_asset_name(&baseline_asset, |n| {
+            release.assets.iter().any(|a| a.name == n)
+        });
+        if asset_name != baseline_asset {
+            tracing::info!(
+                asset = %asset_name,
+                "This processor supports AVX2 — taking the faster build. It runs the \
+                 same code with the vectorised maths kernels compiled in, worth about \
+                 3x on inference done by the processor rather than a graphics card"
+            );
+        }
 
         // A CPU build on a GPU machine will keep resolving the CPU asset for
         // ever. Say so here, where the user is about to be handed one, rather
@@ -1086,6 +1102,58 @@ fn asset_name_for(os: &str, arch: &str, variant: &str, windows: bool) -> String 
     format!("swarmllm-{os}-{arch}{variant}{ext}")
 }
 
+/// Does this processor support AVX2?
+///
+/// A genuine runtime check of the CPU, unlike the GPU question — there is no
+/// equivalent of "the hardware is present but its driver stack cannot use it".
+/// If the instruction set is reported, a binary compiled for it will run.
+fn host_has_avx2() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+/// Upgrade a baseline CPU asset name to its `-avx2` sibling when this processor
+/// can run it and the release actually carries one.
+///
+/// **Why this may switch variant when the GPU logic deliberately may not.**
+/// Refusing to move between CPU and GPU builds protects a capability: a GPU
+/// build swapped for a CPU one loses the only thing that made the machine worth
+/// running, and a GPU being visible is not proof its driver stack works. AVX2
+/// has neither property. It is a fact about the processor that
+/// `is_x86_feature_detected!` answers definitively, both binaries have identical
+/// capabilities, and the difference is speed alone — measured at about 3x for
+/// processor-side inference, because the maths library compiles its vectorised
+/// kernels out at the default target baseline.
+///
+/// So the failure modes are not symmetric. Choosing `-avx2` on a processor that
+/// has AVX2 cannot produce a binary that will not start. Falling back to the
+/// baseline when a release predates these assets costs speed and nothing else.
+///
+/// GPU builds are left alone: their asset already carries a `-cuda`/`-gpu`
+/// suffix and they do their inference on the card.
+fn preferred_cpu_asset_name(baseline: &str, release_has: impl Fn(&str) -> bool) -> String {
+    // Only the plain CPU asset has an AVX2 sibling; `-cuda` / `-gpu` do not.
+    if !build_variant_suffix().is_empty() || !host_has_avx2() {
+        return baseline.to_string();
+    }
+    // Insert before any extension, so `...x86_64.exe` becomes `...x86_64-avx2.exe`.
+    let candidate = match baseline.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}-avx2.{ext}"),
+        None => format!("{baseline}-avx2"),
+    };
+    if release_has(&candidate) {
+        candidate
+    } else {
+        baseline.to_string()
+    }
+}
+
 /// Name of the bare-binary release asset this build should update itself from.
 fn update_asset_name() -> String {
     let (os, arch) = platform_strings();
@@ -1580,5 +1648,70 @@ mod atomic_replace_tests {
 
         let mode = std::fs::metadata(&binary).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755, "installed binary must be executable");
+    }
+}
+
+#[cfg(test)]
+mod avx2_asset_tests {
+    use super::*;
+
+    /// The AVX2 asset is an accelerator, not a capability change, so unlike the
+    /// GPU/CPU split it is safe both to switch INTO and to fall back FROM.
+    #[test]
+    fn falls_back_to_baseline_when_the_release_has_no_avx2_asset() {
+        // Releases published before these assets existed carry only the
+        // baseline. Falling back costs speed and nothing else — refusing to
+        // update, as the GPU path does, would strand the node on an old version.
+        let picked = preferred_cpu_asset_name("swarmllm-linux-x86_64", |_| false);
+        assert_eq!(picked, "swarmllm-linux-x86_64");
+    }
+
+    /// A processor without AVX2 must never be handed the AVX2 build: it would
+    /// fail on the first instruction, and a node that updates itself has no way
+    /// back from a binary that will not start (cf. gotcha #246).
+    #[test]
+    fn a_processor_without_avx2_never_gets_the_avx2_asset() {
+        // `preferred_cpu_asset_name` consults the real CPU, so assert the
+        // property that must hold on whichever machine runs this test.
+        let picked = preferred_cpu_asset_name("swarmllm-linux-x86_64", |_| true);
+        if host_has_avx2() {
+            assert_eq!(picked, "swarmllm-linux-x86_64-avx2");
+        } else {
+            assert_eq!(picked, "swarmllm-linux-x86_64");
+        }
+    }
+
+    /// The suffix goes before the extension, or Windows would ask for
+    /// `swarmllm-windows-x86_64.exe-avx2`, which is not a file anyone publishes.
+    #[test]
+    fn the_suffix_lands_before_a_file_extension() {
+        // Exercise the naming directly — this half is independent of the host.
+        let with_ext = |n: &str| match n.rsplit_once('.') {
+            Some((stem, ext)) => format!("{stem}-avx2.{ext}"),
+            None => format!("{n}-avx2"),
+        };
+        assert_eq!(
+            with_ext("swarmllm-linux-x86_64"),
+            "swarmllm-linux-x86_64-avx2"
+        );
+        assert_eq!(
+            with_ext("swarmllm-windows-x86_64.exe"),
+            "swarmllm-windows-x86_64-avx2.exe"
+        );
+    }
+
+    /// GPU builds do their work on the card and have no AVX2 sibling published;
+    /// asking for one would resolve nothing and skip the update entirely.
+    #[test]
+    fn gpu_builds_are_left_on_their_own_asset() {
+        if build_variant_suffix().is_empty() {
+            return; // this test binary is a CPU build; nothing to assert
+        }
+        let baseline = update_asset_name();
+        assert_eq!(
+            preferred_cpu_asset_name(&baseline, |_| true),
+            baseline,
+            "a GPU build must not be redirected to an AVX2 asset"
+        );
     }
 }

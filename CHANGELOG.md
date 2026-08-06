@@ -24,6 +24,20 @@ All notable changes to SwarmLLM are documented here.
   it stays. Anyone who set it will now see a note that the key is unrecognised,
   which is the truth; it was never applied.
 
+### Added
+
+- **A faster build for machines without a graphics card.** Inference done by the
+  processor was running a slow fallback: the maths library keeps hand-written
+  routines for instructions almost every processor made since 2013 supports, but
+  they are switched on when the program is compiled and our builds targeted a
+  much older baseline. A second build is now published with them switched on —
+  measured about **three times faster** on processor-side work, which narrows a
+  graphics card's lead from roughly 18x to under 6x.
+
+  Nodes pick it up automatically on the next update, and only when the processor
+  reports it can run those instructions; anything older stays on the existing
+  build. The two are otherwise identical.
+
 ### Changed
 
 - **Batching now reports how often it actually happens.** Requests are combined

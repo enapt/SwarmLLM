@@ -6279,7 +6279,20 @@ silently measures nothing.
 On the same box and model, the GPU advantage falls from **18.1x to 5.8x**.
 Projected for the Proxmox test node (i5-10500T, 6 threads): 2.90 → ~9 tok/s.
 
-### Options, in increasing order of risk
+### SHIPPED (option 1, 2026-08-06)
+
+`swarmllm-linux-x86_64-avx2` is now built alongside the baseline from the same
+source, with `-C target-cpu=x86-64-v3`. `update.rs::preferred_cpu_asset_name`
+selects it when `is_x86_feature_detected!("avx2")` reports the processor can run
+it AND the release carries one, falling back to the baseline otherwise. The
+publish guard warns rather than blocks when the asset is absent, because a node
+CAN fall back — which is the guard's own stated criterion.
+
+Not yet done: the same treatment for the Windows CPU asset, and an AVX2 `.deb` /
+`.rpm` (packaging currently comes from the baseline Linux job, so package
+installs reach the fast build via auto-update rather than at install time).
+
+### Options as originally assessed, in increasing order of risk
 
 1. **Ship an additional `-avx2` asset** beside the existing portable one and let
    the installer/launcher pick on CPU detection. Zero risk to existing users;
