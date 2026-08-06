@@ -2,6 +2,60 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.80-alpha] — 2026-08-06
+
+Follows 0.3.79. **Processing a prompt is up to 2.3x faster, and replying inside a
+long conversation is up to 5.5x faster.** Nothing about the model changed — this
+is entirely about how the work was being handed to the processor.
+
+The one most people will notice: **replies used to get dramatically slower as a
+conversation grew.** After about 1,500 words of context each word of the reply
+took roughly ten times as long to produce as it did at the start of the chat. The
+program was choosing a method of paying attention to earlier text that rebuilds a
+copy of the entire conversation for every single word it writes, so the cost grew
+with the conversation. It now uses the method that does not, and that cost is
+largely gone.
+
+Two other changes in the same area:
+
+- **Reading your prompt** used a routine intended for long texts that turned out
+  to be much slower here, splitting the work into pieces far too small to be
+  worth the coordination. Prompt processing went from 12.3 to 21.4 words per
+  second on a short prompt, and 6.1 to 13.8 on a long one, on the test machine.
+- **The maths library was re-reading the model's weights once for every item**
+  when handling several pieces of text at once, so doing more at a time saved
+  nothing. It now reads each part once and applies it to everything waiting. This
+  is a patch to a bundled copy of that library, and its output is verified to be
+  identical, value for value, to what it produced before.
+
+Handling four conversations at once is now faster than handling one, which was
+not previously true on a processor.
+
+Generation speed on a short conversation is essentially unchanged, and that is
+expected: it is limited by how fast the machine can read the model out of memory,
+and it already runs at about 70% of that limit. Measurements of what is and is
+not worth trying next — including two approaches that were tested and made things
+slower — are recorded in the project's engineering notes.
+
+### Added
+- `SWARMLLM_PROFILE=1` prints a per-stage breakdown of each forward pass, plus
+  what the stages do not account for (`src/inference/prof.rs`,
+  `docs/DIAGNOSTICS.md`). This is what located the attention cost.
+- `examples/qmatmul_bench.rs` prices the quantized matmul against batch size and
+  rayon pool size, and asserts the tiled path is bit-identical to the upstream
+  ordering.
+
+### Changed
+- Attention now picks its kernel per phase: prompt processing uses the standard
+  path, grouped-query generation always uses the fused one. Multi-head generation
+  is unaffected.
+- `vendor/candle` carries a second patch: the quantized matmul is tiled over the
+  batch dimension, with the activation-quantize loop parallelized. Single-row
+  generation keeps the original code path untouched.
+
+### Fixed
+- Generation slowing down roughly tenfold per token as a conversation grows.
+
 ## [0.3.79-alpha] — 2026-08-06
 
 Follows 0.3.78. Inference done by the processor is about **three times faster**.
