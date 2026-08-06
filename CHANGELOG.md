@@ -2,9 +2,9 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [0.3.80-alpha] — 2026-08-06
+## [0.3.81-alpha] — 2026-08-07
 
-Follows 0.3.79. **Processing a prompt is up to 2.3x faster, and replying inside a
+Follows 0.3.79. **Processing a prompt is up to 3x faster, and replying inside a
 long conversation is up to 5.5x faster.** Nothing about the model changed — this
 is entirely about how the work was being handed to the processor.
 
@@ -37,6 +37,21 @@ and it already runs at about 70% of that limit. Measurements of what is and is
 not worth trying next — including two approaches that were tested and made things
 slower — are recorded in the project's engineering notes.
 
+Two further speed-ups, both in the same area:
+
+- **The maths library was transposing its results on a single core.** The tiled
+  matmul produces results in the wrong orientation and flips them back at the
+  end; that flip was about a quarter of the work for a large batch. Spreading it
+  across cores took a 3072x8192 batch of 128 from 26.7 to 19.1 milliseconds.
+- **Attention was running each attention head's matrix multiply one after
+  another**, handing every one of them all the cores. Each head is far too small
+  for that to pay off. Running one head per core instead is about 1.8x on those
+  multiplications.
+
+Together with the changes above, processing a long prompt went from 6.1 to 18.6
+words per second on the test machine — about three times faster than before this
+round of work started.
+
 ### Added
 - `SWARMLLM_PROFILE=1` prints a per-stage breakdown of each forward pass, plus
   what the stages do not account for (`src/inference/prof.rs`,
@@ -49,9 +64,13 @@ slower — are recorded in the project's engineering notes.
 - Attention now picks its kernel per phase: prompt processing uses the standard
   path, grouped-query generation always uses the fused one. Multi-head generation
   is unaffected.
-- `vendor/candle` carries a second patch: the quantized matmul is tiled over the
-  batch dimension, with the activation-quantize loop parallelized. Single-row
-  generation keeps the original code path untouched.
+- `vendor/candle` carries further patches: the quantized matmul is tiled over the
+  batch dimension with the activation-quantize loop and the result transpose both
+  parallelized, and batched matmuls now run one gemm per batch element instead of
+  one at a time. Single-row generation keeps the original code path untouched.
+- The release workflow can now be re-run by hand (`workflow_dispatch`). A tag
+  push is a one-shot trigger, so an infrastructure failure during a release build
+  previously left no way forward except deleting and re-pushing the tag.
 
 ### Fixed
 - Generation slowing down roughly tenfold per token as a conversation grows.
