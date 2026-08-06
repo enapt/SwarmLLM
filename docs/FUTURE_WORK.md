@@ -6462,6 +6462,48 @@ ships at `contribution = "minimal"` = **half** its cores. Measured on that box,
 partially bandwidth-bound workload, but a real 1.6x that users may not know they
 have opted out of.
 
+## The next prompt-processing target is masked_fill, not the matmuls (2026-08-07) — MEASURED, NOT DONE
+
+After the tiled quantized matmul and both attention-kernel fixes, the attention
+stage is still ~28% of a prompt-processing chunk. Pricing every op in it
+individually (`examples/attn_bench.rs`, at the 4 threads the worker runs with,
+llama-3.2-3b shapes: 24 heads, 128 queries, 896 KV, head_dim 128):
+
+    masked_fill (broadcast u8 mask)   17.4 ms   <-- the single largest op
+    softmax                            4.1 ms
+    q @ k^T                            4.0 ms
+    scores @ v                         3.3 ms
+    repeat_kv (8 kv heads -> 24)       1.1 ms
+    scores / sqrt(head_dim)            1.0 ms
+    k.t() (view)                       0.0 ms
+
+**`masked_fill` costs more than both matmuls and the softmax combined.** It is
+`mask.where_cond(...)` over a stride-0 broadcast of a `[q_len, kv_len]` u8 mask
+across the 4D score tensor. The same masking expressed additively —
+`att.broadcast_add(&float_mask)` with a 0 / -inf f32 mask — measures **4.8 ms**,
+a 3.6x saving, and the CPU flash path already builds exactly such a float mask
+before calling into its kernel.
+
+**The change**: make `mask_with_offset` and the cached causal mask produce f32
+(0 visible, -inf masked) instead of u8, swap `masked_fill` for `broadcast_add` in
+`attention_scores_block`, and delete the u8->float conversion in the flash arm of
+`run_attention`. One mask representation instead of two.
+
+**Worth ~5% of prompt processing** (17.4 -> 4.8 ms x 28 layers = ~350 ms of a
+~7000 ms chunk). Not done because it changes attention masking, which is
+correctness-critical and where a mistake produces plausible-looking garbage
+rather than a failure. `blocked_attention_tests` would likely catch an error, and
+adding -inf to a finite score is equivalent to setting it, but this deserves its
+own careful pass rather than being tacked onto a performance round.
+
+**The larger version of the same observation**: the score tensor
+`[1, heads, q_len, kv_len]` is materialized and re-read about five times per
+layer (matmul output, scale, mask, softmax, then the second matmul). At these
+shapes that is ~11 MB written and read four more times, per layer, per chunk.
+Fusing the scale and mask into the softmax pass would save more than the mask
+change alone, and is the reason the flash kernel exists at all — it just happens
+to be a bad implementation of it on this CPU (see the entry below).
+
 ## How much CPU headroom is actually left (2026-08-06) — MEASURED
 
 Taken after the tiled matmul and the two attention fixes, to answer "can it go
