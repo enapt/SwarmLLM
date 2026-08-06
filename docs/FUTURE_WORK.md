@@ -6305,13 +6305,33 @@ cause for the flat curve has been established. Anyone picking this up:
   **Concurrency is now positive on CPU** — 4 concurrent (6.50) beats a single
   request (5.66), where before it was slower (4.48 vs 5.32).
 
-  **The remaining gap is Amdahl, and it is the next thing to measure.** A 3-9x
-  kernel produced only 1.15-1.24x on prefill, which puts quantized matmul at
-  roughly **25-30% of prefill wall time**. The other ~70% is f32 elementwise work
-  on large tensors (RMSNorm, SiLU, the gate*up product), KV-cache copies, RoPE,
-  `.contiguous()` copies, and this patch's own transpose. None of that was ever
-  profiled; there is no `perf` on this box, so the practical route is timing
-  instrumentation around the block stages rather than sampling.
+  **The remaining gap was PROFILED, and it was attention** — not the elementwise
+  work guessed at here. `SWARMLLM_PROFILE=1` (`src/inference/prof.rs`, see
+  `docs/DIAGNOSTICS.md`) breaks a forward pass into non-overlapping stages. For a
+  128-token chunk against 384 KV:
+
+      attention scores + softmax + AV   4571.7 ms   45.5%
+      ffn up + gate    (quantized mm)   2558.2 ms   25.5%
+      ffn down         (quantized mm)   1330.7 ms   13.2%
+      qkv projections  (quantized mm)    848.0 ms    8.4%
+      output proj      (quantized mm)    497.6 ms    5.0%
+      activation * gate                  120.5 ms    1.2%
+      rope / transpose / q-k norm         48.3 ms    0.5%
+      rms norms                           24.7 ms    0.2%
+      residual adds                       15.0 ms    0.1%
+      unattributed                        30.4 ms    0.3%
+
+  Attention was **2.3% of the arithmetic and 45% of the time — 37x slower per MAC**
+  than the quantized matmul beside it, with its share rising from 5% at 37 tokens
+  to 53% at 421. Every guess in the paragraph this replaces (RMSNorm, SiLU, the
+  gate*up product, RoPE, copies) came to **under 2.5% combined**. Cause and fix
+  are in the CPU-flash-attention entry below; prompt processing is now
+  12.3 -> 21.4 tok/s at 417 tokens and 6.1 -> 13.8 at 1536.
+
+  **The lesson, since this round produced it twice**: two consecutive rounds
+  optimised something that turned out to be a minority of the cost, because the
+  cost was never measured — first the batching path (worth 1.05x), then the
+  matmul (a quarter of prefill). Profile the stage before optimising it.
 
   **Ragged-`index_pos` batching is now worth reconsidering** — it was pointless
   when a batch was worth 1.05x, but batches are worth real time now, and the
