@@ -175,7 +175,7 @@ Private mode is one-way: your data stays private, but your nodes still serve the
 
 ### APIs
 
-- **OpenAI-compatible** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings.
+- **OpenAI-compatible** — `POST /v1/chat/completions` with streaming, tool calling, stop sequences and JSON mode. Options a model on your own machine cannot honour — `logprobs`, `n` above 1, `logit_bias` — are refused with an explanation rather than accepted and quietly ignored.
 - **Tool calling with local models** — not just cloud ones. A locally-run GGUF is told about your tools and its reply is parsed back into proper `tool_calls` / `tool_use` blocks, covering the formats different model families emit natively (Hermes/Qwen, Mistral, Llama 3.x) as well as the generic one. Works streaming and non-streaming on both API surfaces. Output cut off mid-call is reported as text rather than guessed at.
 - **Anthropic Messages API** — `POST /v1/messages` with full Claude Code compatibility (tools, `tool_choice`, thinking blocks, `cache_control`, streaming SSE). Non-Claude models auto-translated and routed to cloud providers.
 - **MCP server** — native Model Context Protocol with 7 tools.
