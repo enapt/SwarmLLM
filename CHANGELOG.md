@@ -2,7 +2,17 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.78-alpha] — 2026-08-06
+
+Follows 0.3.77. Twelve fixes, almost all in how a question is prepared before a
+model ever sees it — the part of the system that had no error to report when it
+was wrong. Llama 3 models, the most widely used family on the network, were
+being sent prompts that cost about twice what they should and were shaped
+differently from anything the models were trained on.
+
+Nothing here needed a bug report to find. The tokeniser and the prompt builder
+were checked against the reference implementations everyone else uses, from the
+same model files, and made to agree with them exactly.
 
 ### Fixed
 
