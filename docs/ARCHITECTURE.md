@@ -501,11 +501,75 @@ Text Pipeline (unchanged): embeddings travel with LayerForward
 
 ### BPE Tokenizer
 
-A full GPT-2/Qwen2 BPE tokenizer is built from GGUF metadata at model load time:
+A full byte-level BPE tokenizer is built from GGUF metadata at model load time:
 - Vocabulary from `tokenizer.ggml.tokens`
 - Merge rules from `tokenizer.ggml.merges`
-- Pre-tokenization regex from `tokenizer.ggml.pre` (model-specific: qwen2, gpt2, default)
+- Pre-tokenization patterns selected by `tokenizer.ggml.pre` — see below
 - GPT-2 byte encoding/decoding for proper UTF-8 handling
+
+**Pre-tokenization is where a byte-level BPE tokenizer is easiest to get
+silently wrong**, so `pre_tokenizer_patterns` in `inference/tokenizer.rs`
+mirrors llama.cpp's `regex_exprs` table (`src/llama-vocab.cpp`) and its
+`tokenizer.ggml.pre` string → enum mapping, including every alias:
+
+- **Llama-3** (`llama-bpe`, `llama3`, `llama-v3`, `falcon3`, `pixtral`, `dbrx`,
+  `smaug-bpe`, `glm4`, …) — the pattern most GGUFs in circulation want.
+- **Qwen2** (`qwen2`, `deepseek-r1-qwen`, `stablelm2`, …) — as Llama-3 but
+  digits split one at a time (`\p{N}`, not `\p{N}{1,3}`).
+- **Qwen3.5**, **GPT-4o/Llama-4**, **GPT-2**, and the sequential-list types
+  (`default`, `falcon`, `starcoder`, `deepseek-coder`) whose patterns are
+  applied **in order**, each pass re-splitting the previous pass's fragments.
+
+Two properties are load-bearing and pinned by tests:
+
+1. **An unrecognised name warns and falls back to the GPT-2 splitter**, never a
+   whitespace split. `llama-bpe` was absent from the table for a long time and
+   hit a whitespace fallback, which strands every leading space as its own token
+   instead of attaching it to the following word. That is what a byte-level BPE
+   model is trained on, so the effect was ~2x the tokens AND input in a shape
+   the model had never seen — with no error anywhere (gotcha #247).
+2. **Text a pattern does not match is kept, not dropped.** Several patterns
+   cover only part of their input by design (the GPT-2 one does not match
+   interior whitespace runs), so discarding the gaps deletes characters from the
+   prompt outright.
+
+Correctness is judged against a reference `tokenizers` BPE built from the SAME
+vocab and merges — self-consistency (encode→decode round-trips) cannot detect
+this class and passed throughout.
+
+### Chat Template Evaluator
+
+`inference/chat_template/` renders the Jinja template a GGUF carries in
+`tokenizer.chat_template`, producing the exact text handed to the model.
+`parser.rs` tokenizes, `eval.rs` evaluates, `fallbacks.rs` supplies a
+family-appropriate format for a model whose template we cannot run.
+
+It implements the subset real templates use, not Jinja. What it does NOT
+implement must FAIL — `apply_chat_template` returns `None` and the caller falls
+back by model name — rather than render approximately, because a prompt that is
+nearly right is simply a wrong prompt with no error attached:
+
+- **`{% set x = messages[1:] %}` binds a slice, and the offset is honoured.**
+  Templates slice precisely to drop a message they have already placed by hand;
+  ignoring the offset renders that message TWICE. Every Llama-3 system prompt
+  was duplicated for exactly this reason (gotcha #248). A FILTER we do not
+  implement (`| reverse`) is applied as identity, which is a harmless superset —
+  the distinction between ignoring a refinement and ignoring a removal is the
+  whole point.
+- **`messages[0]['content']` indexes one message** and must not be mistaken for
+  a binding to the list, or the expression is aliased instead of evaluated.
+- **Comments obey trim markers.** `{#- … #}` drops its surrounding whitespace;
+  skipping only the body leaves a blank line in the model's input.
+- **`strftime_now` is provided.** Llama-3.x templates guard on it and fall back
+  to a date hardcoded when the model shipped, so reporting it undefined told
+  every Llama-3 model it was 26 July 2024.
+- Output is capped (`MAX_TEMPLATE_OUTPUT`) and recursion bounded
+  (`MAX_TEMPLATE_DEPTH`): the template is peer-supplied GGUF metadata.
+
+The integration guard is
+`the_official_llama3_template_renders_exactly_as_jinja2_does`, which renders the
+real shipped template against the exact text jinja2 produces for it. Expected
+strings are taken FROM jinja2 rather than derived from this evaluator.
 
 ### Tensor Wire Format
 
@@ -601,7 +665,14 @@ Empty stop sequences are rejected at the API validation layer (must be 1–256 c
 - KvCacheManager tracks sessions and wired to inference router for cache reuse
 - Causal masks cached with LRU eviction (max 16 entries) to prevent GPU memory leak
 - Abandoned cache entries cleaned up after 10 minutes
-- Sessions persisted across node restarts via redb
+- Sessions persisted across node restarts via redb, **stamped with the build
+  that wrote them and discarded on a mismatch.** `cached_tokens` is a token
+  COUNT used directly as the position to resume from, and nothing can check it
+  against the saved prompt text without re-running the tokenizer that produced
+  it — so a release that changes tokenization or prompt construction makes every
+  persisted count wrong, and an auto-update restart inside the session TTL is
+  exactly when they get read back. Re-reading a prompt costs a moment; resuming
+  at the wrong position corrupts the answer.
 
 ### Chunked Prefill
 
@@ -1521,9 +1592,33 @@ Full Anthropic Messages API compatibility for use as a Claude Code backend:
 - **Total prompt cap:** 4MB (raised from 64KB for Claude Code compatibility — tool results and long-context prompts can exceed the old limit)
 - **Claude Code usage:** `ANTHROPIC_BASE_URL=http://localhost:8800 claude --model qwen2.5-coder-7b`
 
+### Tool calling on a LOCAL model
+
+A cloud provider handles tools natively. A local GGUF only emits text, so tool
+support is three pieces, shared by the OpenAI and Anthropic layers:
+
+1. **`tool_parse::format_tool_prompt`** describes the tools in a system message.
+   This is the ONLY way a local model learns they exist — which makes it the
+   only place `tool_choice` can be enforced. `tool_choice_forbids_tools` (the
+   OpenAI string `"none"` and the Anthropic `{"type":"none"}`) suppresses the
+   injection entirely; every other value, `"required"` included, still describes
+   them, because a local model cannot be compelled and refusing would be worse.
+2. **`tool_parse::parse_tool_calls`** recovers calls from the model's text,
+   trying the generic shape we prompt for, then Hermes/Qwen, Mistral and
+   Llama-3 native formats. It does NOT repair truncated JSON: a generation cut
+   off at `max_tokens` is reported as text rather than as a call carrying
+   invented arguments.
+3. **Call ids are assigned here, never taken from the model.** The id is how a
+   client matches a result back to a request, so it must be unique across a
+   conversation; models do not do that (llama-3.2-3b emits `call_1`, `call_2`,
+   `call_3` for every tool-using reply it gives).
+
 ### MCP Server (Protocol v2025-11-05)
 - `POST /mcp` — JSON-RPC 2.0 MCP endpoint for AI agent frameworks (Claude Code, VS Code Copilot, Cursor, etc.)
 - Tools: `chat`, `models`, `compare`, `research`, `batch_prompts`, `delegate`, `node_info`
+- `delegate` picks a model for you by tier. `fast` ranks **already loaded** above
+  local above smallest — loading a cold model costs tens of seconds, which
+  dominates every other difference (`fast_tier_rank`).
 - Resources: `swarmllm://status` (node status)
 - All tools include [tool annotations](https://modelcontextprotocol.io/specification/2025-11-25) (`readOnlyHint`, `destructiveHint`, etc.)
 - **`compare`:** sends the same prompt to up to 10 models concurrently, returns side-by-side results

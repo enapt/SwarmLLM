@@ -67,7 +67,7 @@ swarmllm/
 │   │   ├── pipeline/     (mod, distributed, dsd, local, prompt, remote_generate, speculative, tensor_parallel, vision)
 │   │   ├── split/        (mod, model, loader, executor, kv_cache, entry, gguf_meta, shard_reader, rope, prefix_cache, tests/)
 │   │   │   └── tests/    (mod, common, core, gqa, gemma2, moe_mla, llama4_glm4)
-│   │   ├── chat_template/ (mod, parser, eval, fallbacks, tests)
+│   │   ├── chat_template/ (mod, parser, eval, fallbacks, tests, fixtures/llama3_official.jinja)
 │   │   └── layers/       (mod, qwen35)
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
 │   ├── identity/  (keypair, nickname)
@@ -199,86 +199,69 @@ All 20 build phases complete. All subsystems wired — no stubs. **1711 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.66/.67 released + 14 UNRELEASED commits (2026-08-03)
+### Latest — v0.3.78-alpha (2026-08-06): the prompt pipeline was wrong end to end
 
-**Released.** **v0.3.67** — key rotation stopped losing work: both ends rotate on
-independent 10-min timers and each replaced its key outright, so a forward
-crossing the window was discarded (and crossed rotations left each side on a key
-from a different exchange). Now keeps the previous key 3 min with **its own
-replay window** — sharing one would let the same message be accepted twice
-(WireGuard does the same, for the same reason). Same release: `establish_session`
-made idempotent — Identify fires constantly (**172x for one peer in one log**)
-and each call reinstalled the STATIC key, so **forward secrecy lasted about a
-minute** before reverting. **v0.3.66** — eviction freed the GPU budget before the
-OS freed the memory (`start_kill` only signals), so the next admission passed
-against memory still occupied; dead peers disconnected in ~2 min not never; a
-missing model reports 404 not 500.
+**Twelve fixes, all in how a prompt is built before the model sees it. Every one
+was invisible: valid output, no warning, no failing test.** Full detail in
+`memory/round_log_0805_prompt_pipeline.md`.
 
-**Unreleased (14 commits).** Peer-side cancellation (`handle_forward` registers
-an abort handle — a coordinator's `CancelInference` was received and ignored);
-MoE feed-forward token blocking; `swarmllm remove-model`; dead-peer detection
-paired with elapsed silence (~10 min → ~2); diagnostics reporting the RUNTIME
-auto-manage value; a non-lossy `DIAG: shard announce ingested` line.
+**Llama-3 used ~2x the tokens it should.** Every Llama-3/3.1/3.2 GGUF declares
+`tokenizer.ggml.pre = "llama-bpe"`, which was absent from the match in
+`inference/tokenizer.rs` and fell to a whitespace-split fallback — stranding
+every space as its own token instead of attaching it to the following word, the
+form byte-level BPE models are trained on. *"The quick brown fox jumps over the
+lazy dog"* = **19 tokens vs 9**. Prefill is ~99% of a long request. Same file:
+the `qwen2` arm actually held the *Llama-3* pattern, and `pre_tokenize` **dropped
+text between matches** (patterns need not cover their input).
 
-**Overnight 08-03→04 — 10 more unreleased commits** (`memory/round_log_0803_night.md`).
-Update **re-downloaded the same release every hour forever** (~980 MB CUDA) in
-`download` mode, because nothing consulted what was already staged — the reuse
-check must sit ABOVE the writability probe, which uses `File::create` and
-truncates. The CLI **never explained a rejected API key**: `exit_api_key_rejected`
-existed and **2 of 8** commands called it, so `chat` said "No models available",
-`pool status` said "Not in a device pool", `bench` printed reqwest's raw 401 —
-now enforced by `cli_commands_explain_a_rejected_key`. `bench` **scored a refused
-request as 0.0 tok/s success** (`run_one_blocking` never checked the status).
-A **stranded abort handle** per fast-failing inbound forward. Blank replies now
-WARN with what was removed. Both parallax router arms raised `debug!`→`info!`.
-Negative results worth keeping: a second daemon **cannot** clobber `api_key`
-(redb lock precedes key resolution — tested), and the shard-verification-penalty
-entry was already fixed in v0.3.51.
+**The system prompt was rendered TWICE** on every Llama-3 request — most
+requests, including everything Claude Code sends. The template slices it off
+with `{% set messages = messages[1:] %}`; the evaluator recognised the binding
+and discarded the offset. Also: **every Llama-3 model was told the date was
+26 Jul 2024** (`strftime_now` reported undefined → the template's hardcoded
+`else`), and `{#- … #}` comments left a blank line in the prompt.
 
-**REVERTED, and read `.claude/rules/diagnosis.md` before retrying it:**
-headroom-aware routing. It never routed away (verified 3x). `would_fit_on_gpu`
-was kept. **The "estimator is 2.3x pessimistic" reason given here previously was
-WRONG and is corrected in `docs/FUTURE_WORK.md`** — `estimated_mb=5863` is
-steady state, `vram_after_load_mb=2579` is sampled before candle allocates the
-KV cache, and comparing them is invalid. Re-measured live: 1737→7316 MiB across
-one phi-3.5 request = 5579 MB actual vs 5863 estimated, **5.1% high, erring
-safe**, and already pinned by `matches_measured_steady_state_on_phi35`. **Do not
-calibrate the estimator down** — it would under-charge by ~3.3 GB and bring back
-the OOM v0.3.66 fixed. The real precondition for a retry is why a priced
-distributed assignment still returns `route=local`.
+**Found by diffing against references** built with `tokenizers` + `jinja2` (both
+installed locally) from the model's OWN vocab/merges/template. Now **15/15 exact**
+and the rendered prompt is **byte-identical to jinja2**; measured live
+**20.0 → 10.0 tokens/sentence**. Encode→decode round-trips passed the whole time
+— **self-consistency cannot detect this class.**
 
-**MEASURED 2026-08-04 — did not reproduce.** This said the scheduler assigns a
-whole model to ONE full-coverage remote peer rather than splitting local+LAN.
-Tested on exactly that topology (llama-3.2-3b: local holds shards 0-2, the LAN
-peer holds shard 3 at 3ms, and a remote peer holds ALL FOUR at 601ms) it chose
-the **split**, three runs out of three: `parallax routing selected chain
-segments=2`, segment 0 local layers 0-21, segment 1 on the LAN peer layers
-21-28. **4s warm** (43s on the first, cold-load run). The announce path and
-candidate gathering were already proven not at fault; the preference itself is
-now unreproduced. What was NOT measured is whether whole-to-one-peer would have
-been faster — that alternative cannot be forced from outside the scheduler.
+**Also fixed:** a conversation resumed after an update restarted from a stale
+token COUNT (found by asking what my own change could break — persisted sessions
+now carry `built_by`); tool-call ids were **model-invented** (`call_1/2/3` every
+response); `logprobs:true` returned 200 with the field absent; `tool_choice:
+"none"` was ignored on BOTH surfaces; MCP `delegate` "fast" picked a **cold**
+model over a loaded one (57s vs <1s); 12 startup warnings → 0; and **the whole
+network-status panel shipped in English to 20 languages** — key parity passed
+throughout because it checks KEYS not VALUES, now enforced by
+`locales_do_not_fall_back_to_english_prose`. Gotchas **#247**, **#248**, **#249**.
 
-**Process — the reason `.claude/rules/diagnosis.md` and `.claude/agents/root-cause.md`
-now exist.** Four wrong causal claims in one session, three reaching commits
-before correction. Always the same shape: blaming the most recent change or most
-obvious component before showing the symptom does not happen without it. Rule 0
-is **look the failure mode up first** — WireGuard's per-keypair replay counter
-and vLLM's Head-Room Admission each changed an implementation that day. Then:
-baseline before blaming; an absence proves nothing from a lossy source (ring
-buffers, `debug!` at `info`); measurements need steady state (this system
-converges over minutes after a restart); assert the mechanism fired, not just
-that the outcome changed; and toggle a fix off to watch its test go red
-(`git stash` removes the test too — "0 tests ran" is not a failure).
-
-**Local test environment:** both nodes have **auto-manage OFF** and holdings
-frozen deliberately, so shard sets stop moving mid-test. Re-enable via
-`PUT /api/admin/config {"auto_manage_shards": true}` when done.
-
+**MEASURED, cause NOT established — do not re-derive:** continuous batching gives
+**no aggregate throughput gain** (1 request 31.6 tok/s, 4 concurrent 23.5, 8 at
+22.3) while VRAM reaches 96%. An apparent "collapse at 6 concurrent" was an
+artifact of measuring while builds ran and **did not survive controlled
+re-measurement**; capping slots also failed to reduce peak VRAM, which the
+memory explanation predicts it should. Written up in `docs/FUTURE_WORK.md` with
+what to instrument next. Probed and found CORRECT (don't re-investigate):
+`response_format`, `max_completion_tokens`, streaming event order on both
+surfaces, client-disconnect cancellation, fd/memory leaks, MCP, admin auth.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
+- **v0.3.60-.77** (08-02→05): **v0.3.72** our API key was being sent to strangers
+  — `forward_to_peer` forwarded the caller's `Authorization` header verbatim and
+  that key also guards `/api/admin/*`; **nothing in that code changed, its
+  PREMISE did** (#238). **.73/.74** concurrent requests failed OUTRIGHT on
+  CPU-only nodes — `forward_batch` lacked the f32 widening and a single item
+  returns early, so it was **invisible on GPU and total on CPU** (#241);
+  `max_tokens` gave one token too many (#240); emoji decoded to `���` (#239);
+  deleting a model mid-reply destroyed it (#243). **.77** peer latency was
+  measured and then discarded, and wiped by every Identify (#246 sibling).
+  Logs: `round_log_0805_security.md`, `round_log_releases_0802_0803.md`,
+  `round_log_lan_peering_0802.md`, `round_log_0803*.md`.
 - **v0.3.49-.59** (07-29→08-01): **SPM tokenizer CLOSED** — stale merge-queue
   entries mis-tokenised **64.9% of inputs** on Phi-3.5's vocab, now 0 vs
   reference (`spm_merge_tests`). A hash cannot tell "wrong bytes" from "not all
@@ -301,18 +284,14 @@ Read the named round log before re-deriving any of these.
   check. `current_exe()` returns `"...(deleted)"` once the binary is replaced,
   and replacing it IS updating (#188). **Timeouts must bound what actually
   varies** (#189, #190).
-- **v0.3.15-.38** (07-23→28): **read gotcha #179 before touching connection
-  selection** — a relay carrying an INBOUND connection is a bare `/p2p/<peer>`
-  with no transport component, so it counted as direct and won every send; and
-  **retraction alone is futile, the blacklist is REQUIRED** since the DHT
-  re-advertises a retracted holder. We published an inbound connection's
-  ephemeral source port as dialable — **poisoned caches need a node RESTART**
-  (#165). `max_established_per_peer = 1` structurally disabled DCUtR (#163).
-  The control-token leak chased across four releases was a **prompt** bug
-  (#169) — `grep "chat template failed" node.log`. **"tok/s per node per shard"
-  is NOT measurable in a pipeline** — use each segment's share of inter-token
-  latency. Idle VRAM was never reclaimed; the demand-EMA gate exists because
-  `record_request` is called ONLY from the outbound router path.
+- **v0.3.15-.38** (07-23→28, `round_log_networking_audit.md`): **read gotcha #179
+  before touching connection selection** — a relay carrying an INBOUND connection
+  is a bare `/p2p/<peer>` and counted as direct, winning every send; and
+  **retraction alone is futile, the blacklist is REQUIRED**. Publishing an
+  inbound connection's ephemeral port poisoned caches, which need a node
+  RESTART (#165). `max_established_per_peer = 1` structurally disabled DCUtR
+  (#163). The control-token leak chased across four releases was a **prompt**
+  bug (#169). **"tok/s per node per shard" is NOT measurable in a pipeline.**
 - **R136-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT
   v1→v2, `--anchor`), request cancellation, `gpu_layers` plumbing, per-shard
   download backoff (#150-160); SWARM-SPEC v0.1 cascade (L0 Q8_0, L1 n-gram, L2
