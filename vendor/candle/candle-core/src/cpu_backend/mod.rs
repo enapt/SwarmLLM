@@ -1406,6 +1406,56 @@ impl Map2 for MatMul {
         } else {
             (b, m, n, k)
         };
+        // SWARMLLM PATCH — parallelize ACROSS the batch, not inside each gemm.
+        //
+        // Upstream runs the batch dimension as a sequential loop and hands each
+        // individual gemm the full thread count. For attention that batch is the
+        // head count, and each per-head gemm is too small to amortize gemm's own
+        // threading. Measured on llama-3.2-3b prefill shapes (24 heads, 128
+        // queries, 896 KV, head_dim 128), upstream -> this, at the 4 threads the
+        // worker actually runs with: `q @ k^T` 7.4 -> 4.0 ms and `scores @ v`
+        // 6.0 -> 3.3 ms, about 1.8x each. The gain grows sharply with thread
+        // count (~6x at 16) because more threads make each gemm's fork/join more
+        // wasteful — so measure this at the worker's RAYON_NUM_THREADS, not at
+        // the machine's core count. Measuring it at 16 overstated it by ~4x.
+        //
+        // Running one single-threaded gemm per batch element instead gives each
+        // thread a whole head and removes the per-gemm fork/join entirely. Only
+        // taken when there is a real batch left after the broadcast-folding
+        // above — when that folds `b` to 1 the single big gemm already wants all
+        // the threads.
+        if b > 1 && num_threads > 1 {
+            dst.par_chunks_mut(c_skip)
+                .enumerate()
+                .for_each(|(step, dst_p)| {
+                    let lhs_p = &lhs[step * a_skip..];
+                    let rhs_p = &rhs[step * b_skip..];
+                    unsafe {
+                        gemm(
+                            /* m: usize = */ m,
+                            /* n: usize = */ n,
+                            /* k: usize = */ k,
+                            /* dst: *mut T = */ dst_p.as_mut_ptr(),
+                            /* dst_cs: isize = */ dst_cs as isize,
+                            /* dst_rs: isize = */ dst_rs as isize,
+                            /* read_dst: bool = */ false,
+                            /* lhs: *const T = */ lhs_p.as_ptr(),
+                            /* lhs_cs: isize = */ lhs_cs as isize,
+                            /* lhs_rs: isize = */ lhs_rs as isize,
+                            /* rhs: *const T = */ rhs_p.as_ptr(),
+                            /* rhs_cs: isize = */ rhs_cs as isize,
+                            /* rhs_rs: isize = */ rhs_rs as isize,
+                            /* alpha: T = */ T::zero(),
+                            /* beta: T = */ T::one(),
+                            /* conj_dst: bool = */ false,
+                            /* conj_lhs: bool = */ false,
+                            /* conj_rhs: bool = */ false,
+                            Parallelism::None,
+                        )
+                    }
+                });
+            return Ok(dst);
+        }
         for step in 0..b {
             let lhs_p = &lhs[step * a_skip..];
             let rhs_p = &rhs[step * b_skip..];
