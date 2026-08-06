@@ -61,7 +61,7 @@ swarmllm/
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, huggingface/, auto_manage/, lora)
 │   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist)
 │   │   └── huggingface/  (mod, download, private_types, probe, search, shards, watcher, tests)
-│   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, local_embedder, model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), hedging (R136 L2), prefetch (R136 L3), trace (per-request route + timing record))
+│   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, local_embedder, model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), hedging (R136 L2), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler))
 │   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
 │   │   ├── scheduler/    (mod, parallax, parallax_allocator, tests)
 │   │   ├── pipeline/     (mod, distributed, dsd, local, prompt, remote_generate, speculative, tensor_parallel, vision)
@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1717 lib tests passing + 11 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 5 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 9 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1717 lib tests passing + 11 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 5 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 9 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Quantized-matmul bench: `cargo run --release --no-default-features --features dev --example qmatmul_bench` — prices the kernel against batch size AND asserts the tiled path is bit-identical to the upstream ordering; it also sweeps rayon pool size. **Use min-of-N on an idle machine**: the same unchanged code path measured 0.42 ms and 0.97 ms across runs on the WSL2 test box. Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -199,103 +199,102 @@ All 20 build phases complete. All subsystems wired — no stubs. **1717 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.78-alpha (2026-08-06): the prompt pipeline was wrong end to end
+### Latest — v0.3.80-alpha (2026-08-06): CPU inference, measured instead of guessed
 
-**Twelve fixes, all in how a prompt is built before the model sees it. Every one
-was invisible: valid output, no warning, no failing test.** Full detail in
-`memory/round_log_0805_prompt_pipeline.md`.
+**Prompt processing up to 2.3x, long-context generation 5.5x. Every fix came from
+measurement; every guess made beforehand was wrong.** Detail in
+`memory/round_log_0806_batching.md`.
 
-**Llama-3 used ~2x the tokens it should.** Every Llama-3/3.1/3.2 GGUF declares
-`tokenizer.ggml.pre = "llama-bpe"`, which was absent from the match in
-`inference/tokenizer.rs` and fell to a whitespace-split fallback — stranding
-every space as its own token instead of attaching it to the following word, the
-form byte-level BPE models are trained on. *"The quick brown fox jumps over the
-lazy dog"* = **19 tokens vs 9**. Prefill is ~99% of a long request. Same file:
-the `qwen2` arm actually held the *Llama-3* pattern, and `pre_tokenize` **dropped
-text between matches** (patterns need not cover their input).
+**Continuous batching was worth ~1.05x**, so three rounds spent asking *why it
+rarely engages* were beside the point — nobody had asked *what it is worth when it
+does*. Cause: candle's `k_quants::matmul` made the batch row the OUTER SEQUENTIAL
+loop, re-streaming the whole weight matrix per row, so batching amortized nothing.
+**Tiled it** (weight column outer, activation-quantize parallelized): 3.00 → 1.06 ms
+at m=4, 101.4 → 11.4 at m=128, **bit-identical** output (asserted against a
+reimplementation of the upstream loop in `examples/qmatmul_bench.rs`). `m == 1`
+untouched, so decode is unchanged by construction.
 
-**The system prompt was rendered TWICE** on every Llama-3 request — most
-requests, including everything Claude Code sends. The template slices it off
-with `{% set messages = messages[1:] %}`; the evaluator recognised the binding
-and discarded the offset. Also: **every Llama-3 model was told the date was
-26 Jul 2024** (`strftime_now` reported undefined → the template's hardcoded
-`else`), and `{#- … #}` comments left a blank line in the prompt.
+**That only moved prompt processing 1.2x, so I built a stage profiler**
+(`SWARMLLM_PROFILE=1`, `src/inference/prof.rs`). Everything I had guessed the rest
+was — RMSNorm, SiLU, gate*up, RoPE, copies — came to **under 2.5% combined.**
+It was **attention: 2.3% of the arithmetic, 45% of the time, 37x slower per MAC.**
 
-**Found by diffing against references** built with `tokenizers` + `jinja2` (both
-installed locally) from the model's OWN vocab/merges/template. Now **15/15 exact**
-and the rendered prompt is **byte-identical to jinja2**; measured live
-**20.0 → 10.0 tokens/sentence**. Encode→decode round-trips passed the whole time
-— **self-consistency cannot detect this class.**
+**The attention kernel was wrong in BOTH phases, in opposite directions** (#255).
+Prefill used the CPU flash kernel (KV tiles of 16 inside a per-query-row loop,
+scratch allocation per tile) → standard, **4571 → 640 ms**. Decode used standard
+below a 2048 crossover, and standard **materializes the KV cache expanded to
+n_head every token every layer** → fused always for GQA, **1368 → 249 ms/token at
+1150 KV**. Generating after a long prompt cost **~10x per token** what it cost
+after a short one — the normal case in a chat, invisible in any short benchmark.
 
-**Also fixed:** a conversation resumed after an update restarted from a stale
-token COUNT (found by asking what my own change could break — persisted sessions
-now carry `built_by`); tool-call ids were **model-invented** (`call_1/2/3` every
-response); `logprobs:true` returned 200 with the field absent; `tool_choice:
-"none"` was ignored on BOTH surfaces; MCP `delegate` "fast" picked a **cold**
-model over a loaded one (57s vs <1s); 12 startup warnings → 0; and **the whole
-network-status panel shipped in English to 20 languages** — key parity passed
-throughout because it checks KEYS not VALUES, now enforced by
-`locales_do_not_fall_back_to_english_prose`. Gotchas **#247**, **#248**, **#249**.
+| | before | after |
+|---|---|---|
+| prompt processing, 417 tok | 12.3 tok/s | **21.4** |
+| prompt processing, 1536 tok | 6.1 tok/s | **13.8** |
+| generation @ ~1150 KV | 1368 ms/token | **249** |
+| 4 concurrent | 4.88 tok/s | 6.33 |
 
-**MEASURED, cause NOT established — do not re-derive:** continuous batching gives
-**no aggregate throughput gain** (1 request 31.6 tok/s, 4 concurrent 23.5, 8 at
-22.3) while VRAM reaches 96%. An apparent "collapse at 6 concurrent" was an
-artifact of measuring while builds ran and **did not survive controlled
-re-measurement**; capping slots also failed to reduce peak VRAM, which the
-memory explanation predicts it should. Written up in `docs/FUTURE_WORK.md` with
-what to instrument next. Probed and found CORRECT (don't re-investigate):
-`response_format`, `max_completion_tokens`, streaming event order on both
-surfaces, client-disconnect cancellation, fd/memory leaks, MCP, admin auth.
+**Headroom measured, don't re-derive:** decode is **bandwidth-bound at ~69% of the
+memory roofline**; threads pull the phases apart (decode peaks at 4, **2.2x worse
+at 16**; prompt processing keeps climbing past 6) so a per-phase pool is worth
+~1.18x and is written up as open. **Dead ends, measured:** self-speculative decoding
+(SWIFT) is **3.3x SLOWER**; raising the global thread count hurts. Gotchas
+**#254**, **#255**.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
-- **v0.3.60-.77** (08-02→05): **v0.3.72** our API key was being sent to strangers
-  — `forward_to_peer` forwarded the caller's `Authorization` header verbatim and
-  that key also guards `/api/admin/*`; **nothing in that code changed, its
-  PREMISE did** (#238). **.73/.74** concurrent requests failed OUTRIGHT on
-  CPU-only nodes — `forward_batch` lacked the f32 widening and a single item
-  returns early, so it was **invisible on GPU and total on CPU** (#241);
-  `max_tokens` gave one token too many (#240); emoji decoded to `���` (#239);
-  deleting a model mid-reply destroyed it (#243). **.77** peer latency was
-  measured and then discarded, and wiped by every Identify (#246 sibling).
-  Logs: `round_log_0805_security.md`, `round_log_releases_0802_0803.md`,
+- **v0.3.78/.79** (08-06): **the whole prompt pipeline was wrong** — Llama-3
+  tokenised at **~2x** (`pre="llama-bpe"` absent from the match → whitespace-split
+  fallback), the **system prompt rendered TWICE**, every Llama-3 model **told the
+  date was 26 Jul 2024**. All invisible; found by diffing against `tokenizers` +
+  `jinja2` references built from the model's OWN vocab/template — **encode→decode
+  round-trips passed the whole time**. Also tool-call ids were model-invented, and
+  a **network-status panel shipped in English to 20 languages** (key parity checks
+  KEYS not VALUES). **.79** shipped AVX2: release binaries had candle's quantized
+  kernels **compiled out** (`#[cfg(target_feature)]` is compile-time), **3.09x**;
+  x86-64 assets now `-C target-cpu=x86-64-v3` with blocking `-baseline` assets for
+  pre-2013 CPUs. Gotchas #246-#253. Log: `round_log_0805_prompt_pipeline.md`.
+- **v0.3.60-.77** (08-02→05): **v0.3.72 our API key was being sent to strangers** —
+  `forward_to_peer` forwarded the caller's `Authorization` header verbatim and that
+  key also guards `/api/admin/*`; **nothing in that code changed, its PREMISE did**
+  (#238). **.73/.74** concurrent requests failed OUTRIGHT on CPU-only nodes —
+  `forward_batch` lacked the f32 widening and a single item returns early, so it was
+  **invisible on GPU and total on CPU** (#241); `max_tokens` off by one (#240); emoji
+  → `���` (#239); deleting a model mid-reply destroyed it (#243). **.77** peer latency
+  was measured then discarded, wiped by every Identify. Logs:
+  `round_log_0805_security.md`, `round_log_releases_0802_0803.md`,
   `round_log_lan_peering_0802.md`, `round_log_0803*.md`.
-- **v0.3.49-.59** (07-29→08-01): **SPM tokenizer CLOSED** — stale merge-queue
-  entries mis-tokenised **64.9% of inputs** on Phi-3.5's vocab, now 0 vs
-  reference (`spm_merge_tests`). A hash cannot tell "wrong bytes" from "not all
-  the bytes" — check `size_bytes` FIRST (#203). One abandoned request froze a
-  model for everyone. Memory admission reclaims from idle-but-resident models;
-  a model could be freed *while answering* because `active_pipelines` is
+- **v0.3.49-.59** (07-29→08-01): **SPM tokenizer CLOSED** — stale merge-queue entries
+  mis-tokenised **64.9% of inputs** on Phi-3.5's vocab, now 0 vs reference. **A hash
+  cannot tell "wrong bytes" from "not all the bytes" — check `size_bytes` FIRST**
+  (#203). A model could be freed *while answering* because `active_pipelines` is
   coordinator-only and `serving_models` peer-served-only (#194). `cargo test`
   overwrote a running node's API key (#226).
-- **v0.3.39-.46** (07-27→29, `round_log_overnight_0728.md`): `CachedDecoder`
-  built `is_sentencepiece:false` under a stale comment, so local replies took a
-  **GPT-2 byte fallback** — `▁` for every space, and the same defect produced the
-  unexplained `<0x0A>` (#200). **Peer-served work is decoded on the SERVING
-  side, so cross-node checks looked clean.** Overlay trust was satisfiable by
-  coincidence (`100.64.0.0/10` is shared CGNAT) → Tailscale `whois`, where
-  **`Unavailable` must never read as yes** (#199). A default living only in
+- **v0.3.39-.46** (07-27→29, `round_log_overnight_0728.md`): `CachedDecoder` built
+  `is_sentencepiece:false` under a stale comment, so local replies took a **GPT-2
+  byte fallback** (#200) — **peer-served work is decoded on the SERVING side, so
+  cross-node checks looked clean**. Overlay trust was satisfiable by coincidence
+  (`100.64.0.0/10` is shared CGNAT) (#199). A default living only in
   `#[serde(default)]` never reaches a config the daemon already wrote (#198).
-  `is_loopback()` is wrong BOTH ways (#195). `prefill_chunk_tokens` bounded
-  decode interruption in TOKENS not time (#191) — **the first fix made GPUs
-  WORSE**; the pacer self-disables if a shrink did not help, do not remove that
-  check. `current_exe()` returns `"...(deleted)"` once the binary is replaced,
-  and replacing it IS updating (#188). **Timeouts must bound what actually
-  varies** (#189, #190).
+  `is_loopback()` is wrong BOTH ways (#195). `prefill_chunk_tokens` bounded decode
+  interruption in TOKENS not time (#191) — **the first fix made GPUs WORSE**; the
+  pacer self-disables if a shrink did not help, do not remove that check.
+  `current_exe()` returns `"...(deleted)"` once the binary is replaced, and
+  replacing it IS updating (#188). **Timeouts must bound what actually varies**
+  (#189, #190).
 - **v0.3.15-.38** (07-23→28, `round_log_networking_audit.md`): **read gotcha #179
-  before touching connection selection** — a relay carrying an INBOUND connection
-  is a bare `/p2p/<peer>` and counted as direct, winning every send; and
-  **retraction alone is futile, the blacklist is REQUIRED**. Publishing an
-  inbound connection's ephemeral port poisoned caches, which need a node
-  RESTART (#165). `max_established_per_peer = 1` structurally disabled DCUtR
-  (#163). The control-token leak chased across four releases was a **prompt**
-  bug (#169). **"tok/s per node per shard" is NOT measurable in a pipeline.**
-- **R136-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT
-  v1→v2, `--anchor`), request cancellation, `gpu_layers` plumbing, per-shard
-  download backoff (#150-160); SWARM-SPEC v0.1 cascade (L0 Q8_0, L1 n-gram, L2
-  hedge, L3 prefetch); `swarmpool://` invites v2; cross-pool gossip/routing.
+  before touching connection selection** — a relay carrying an INBOUND connection is
+  a bare `/p2p/<peer>` and counted as direct, winning every send; and **retraction
+  alone is futile, the blacklist is REQUIRED**. Publishing an inbound connection's
+  ephemeral port poisoned caches, which need a node RESTART (#165).
+  `max_established_per_peer = 1` structurally disabled DCUtR (#163). The
+  control-token leak chased across four releases was a **prompt** bug (#169).
+  **"tok/s per node per shard" is NOT measurable in a pipeline.**
+- **R136-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT v1→v2,
+  `--anchor`), request cancellation, `gpu_layers` plumbing, per-shard download backoff
+  (#150-160); SWARM-SPEC v0.1 cascade; `swarmpool://` invites v2; cross-pool routing.
 - **Pre-R136**: the 20 build phases. `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)

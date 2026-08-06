@@ -1791,6 +1791,63 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
 
+## CPU Inference Performance
+
+Three defects found on 2026-08-06, all invisible without measurement, all in how
+work reaches the CPU rather than in what work is done.
+
+### The quantized matmul is tiled over the batch dimension
+
+`vendor/candle/candle-core/src/quantized/k_quants.rs::matmul` is patched. Upstream
+makes the batch row the OUTER loop, so the full weight matrix is re-streamed for
+every row and batching amortizes nothing — measured `ms/row` was flat from `m=1`
+to `m=128`. The patch makes the weight column the outer loop for `m > 1`, so each
+column is read once and applied to every row while it is still in cache, and
+parallelizes the activation-quantize loop that then becomes the serial fraction.
+`m == 1` keeps the original path, so decode is untouched by construction.
+
+Measured on a 3072x3072 Q4_K shape: `3.00 -> 1.06 ms` at `m=4`,
+`101.4 -> 11.4 ms` at `m=128`. Verified **bit-identical** to the original
+ordering by `examples/qmatmul_bench.rs`, which reimplements the upstream loop and
+asserts exact equality — each output element is one `vec_dot` over the same
+operands either way, so there is no reduction reordering.
+
+This is why `vendor/candle` exists as a patched copy; the pre-existing reason was
+a `cudarc` linking hardcode (see `Cargo.toml` `[patch.crates-io]`).
+
+### The right attention kernel is OPPOSITE for prefill and decode
+
+`run_attention` (`src/inference/layers/mod.rs`) picks between a fused/flash CPU
+kernel and `standard_attention`. Both choices were wrong, in opposite directions:
+
+| phase | was | now | why |
+|---|---|---|---|
+| prefill (`seq_len > 1`) | fused | **standard** | fused parallelizes over KV tiles of 16 inside a per-query-row loop with a scratch allocation per tile; standard batches into two matmuls per head |
+| GQA decode (`seq_len == 1`) | standard below a 2048 crossover | **fused always** | standard materializes the KV cache expanded to `n_head` every token every layer, so cost grows with the conversation |
+
+Multi-head (non-GQA) decode keeps standard, where the expansion is a no-op.
+SWIFT/spec sessions still force standard so draft and verify share numerics.
+
+Prefill has many query rows and wants batched matmuls; decode has one row against
+a long cache and wants the kernel that never materializes the expansion. **There
+is no single "faster kernel" — ask per phase.**
+
+### Stage profiler
+
+`SWARMLLM_PROFILE=1` (`src/inference/prof.rs`) prints a non-overlapping per-stage
+breakdown of each forward pass, including what the stages do NOT account for. It
+is what found the attention defects: attention was 2.3% of the arithmetic and 45%
+of prompt-processing time. See `docs/DIAGNOSTICS.md`.
+
+### Where the remaining headroom is
+
+Decode is **bandwidth-bound at ~69% of the memory roofline** (72% of its time is
+the quantized matmul moving the weights), so faster arithmetic will not help much.
+Threads pull the phases apart — decode peaks at 4 and is 2.2x worse at 16, while
+prompt processing keeps improving past 6. Full numbers, plus two measured dead
+ends (self-speculative decoding is 3.3x slower; raising the global thread count
+hurts), in `docs/FUTURE_WORK.md`.
+
 ## Request Tracing & Performance Observability
 
 Every inference request carries one `RequestTrace` (`src/inference/trace.rs`),
