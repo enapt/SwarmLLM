@@ -6244,26 +6244,50 @@ cause for the flat curve has been established. Anyone picking this up:
   1.03-1.07x is exactly on trend, and neither the `index_pos` requirement nor
   candle's quantized matmul is responsible.
 
-  **The reason is that batching amortizes weight reads, and on CPU the weight
-  read is not the bottleneck.** Decode here is compute-bound: the work scales
-  with the number of rows, so N rows cost N times as much whether or not they
-  share a call. This also explains the throughput curve that opened this entry —
-  4 concurrent requests measured **4.48 tok/s aggregate against 5.32 tok/s for a
-  single request**, i.e. concurrency is slightly *negative* on CPU.
+  **CORRECTED same day — the cause is candle's quantized matmul, and it is
+  fixable.** An earlier version of this entry concluded "CPU decode is
+  compute-bound, so batching has nothing to amortize", treating prefill as an
+  implementation-independent control. **That reasoning was wrong**: prefill runs
+  the *same* function with `m = seq_len`, so it shares whatever defect batching
+  has and was never independent. Reading the vendored source settles it —
+  `vendor/candle/candle-core/src/quantized/k_quants.rs::matmul`:
 
-  **Do not implement ragged-`index_pos` batching for CPU nodes.** It would
-  convert ~95% of fallbacks into batches worth 1.05x, which the added masking
-  and per-slot RoPE bookkeeping would likely consume outright.
+      for row_idx in 0..m {                 // batch rows: OUTER, SEQUENTIAL
+          dst_row.into_par_iter()           // parallelism is over OUTPUT COLUMNS only
+              .for_each(|(col_idx, dst)| {
+                  let rhs_col = &rhs_t[col_idx * k_in_blocks..];   // full weight matrix
+                  *dst = T::vec_dot(k, rhs_col, lhs_row);
+              });
+      }
 
-  **This does NOT transfer to GPU, and that is where the work belongs.** GPU
-  decode was measured at 31.6 tok/s over a ~2 GB model = ~63 GB/s against the
-  card's ~448 GB/s — **14% of roofline**, i.e. bandwidth-bound with 7x of
-  headroom, the exact regime where batching pays. The three numbers above are
-  cheap to re-take on a GPU node (`[logging] level = "debug"`, read `batch_ms`
-  against `forward_ms`) and should be taken **before** any decode-path surgery.
-  They were not taken here because the only GPU available is the user's desktop,
-  and a previous concurrent-GPU benchmark drove VRAM to 7824/8192 MiB and locked
-  their machine.
+  The batch dimension is the outer sequential loop and the weight matrix is
+  re-streamed for every row. There is no tiling and no reuse across rows, and
+  `matmul_t` dispatches here unconditionally — no large-`m` GEMM path.
+  **Structurally, batching M rows costs M times a single row**, which is exactly
+  the 1.03-1.07x measured. The 1.23x prefill gain is `lhs` being quantized once
+  plus cache locality, not weight reuse.
+
+  **How much is on the table.** Decode reads ~1.9 GB of weights in 119 ms =
+  **16 GB/s**, against **~31 GB/s** measured achievable on this box at the same
+  4 threads (simple OpenMP read benchmark). So decode sits at ~52% of the
+  bandwidth ceiling — roughly half bandwidth, half compute. A tiled matmul that
+  loads a weight block once and applies it to all M rows would pay the bandwidth
+  half once instead of M times: for M=4 that is ~(60 + 4x60) vs 4x119 ms, i.e.
+  **~1.5-1.6x**, on concurrent batching *and* on prefill. Real, though well
+  short of the 3.09x AVX2 delivered.
+
+  **Prior art before attempting it**: llama.cpp hit exactly this and added
+  `llamafile_sgemm` (tinyBLAS) as a tiled path for the batched case, keeping the
+  per-row `vec_dot` only for M=1. That is the shape to copy, and candle is
+  already vendored here for an unrelated reason, so the patch has somewhere to
+  live.
+
+  **Revised recommendation.** Ragged-`index_pos` batching is still not worth
+  building *on its own* — it would convert fallbacks into batches worth 1.05x.
+  The order is: tile the quantized matmul first, re-measure, and only then decide
+  whether the alignment work is worth it. On GPU the picture is different again
+  (decode measured at 14% of roofline); those numbers should be taken on a GPU
+  node that is not the user's desktop.
 
   **Why engagement is a race** (kept because it is the part that generalises).
   Reconstructing slot trajectories from the debug logs: four requests with
@@ -6402,9 +6426,14 @@ have made up ground.
 
 A GPU processes a prompt one to two ORDERS of magnitude faster per token than it
 generates, because prefill turns one weight read into hundreds of rows of work
-and a GPU has the bandwidth headroom to exploit it. This CPU gets **1.23x**.
-Prefill throughput also degrades with prompt length as attention goes quadratic
-(llama-3.2-1b Q8_0, 3 threads, Proxmox):
+and a GPU has the bandwidth headroom to exploit it. This CPU gets **1.23x** —
+**but that is an implementation limit, not a hardware one.** candle's quantized
+`matmul` iterates batch/sequence rows in an outer sequential loop and re-streams
+the whole weight matrix per row (see the continuous-batching entry). Decode runs
+at ~52% of this box's measured memory bandwidth, so a tiled matmul should
+recover roughly **1.5-1.6x on prefill**. Prefill throughput also degrades with
+prompt length as attention goes quadratic (llama-3.2-1b Q8_0, 3 threads,
+Proxmox):
 
 | prompt tokens | prefill tok/s |
 |---|---|
@@ -6413,11 +6442,12 @@ Prefill throughput also degrades with prompt length as attention goes quadratic
 | 663 | 12.1 |
 | 1518 | 9.0 |
 
-So a CPU node is not merely slower than a GPU by a constant — it is slower in
-the regime (long prompts) where real workloads spend most of their time, and it
-cannot recover any of it through batching or parallelism within a node. See the
-continuous-batching entry: batching 3-4 requests returns ~1.05x for the same
-reason. **The CPU node's role is capacity and redundancy, not latency.**
+So the conclusion of this entry is unchanged — **splitting shards finer still
+cannot make CPU nodes competitive**, because the sequential-pipeline arithmetic
+above is independent of any of this. But the accompanying claim that a CPU
+"cannot recover any of it inside a node" was too strong: a tiled quantized
+matmul is worth ~1.5x on the prefill path, which is where long prompts spend
+their time. **The CPU node's role is capacity and redundancy, not latency.**
 
 Asked directly, and worth writing down because the intuition is reasonable and
 the answer is arithmetic rather than opinion.
