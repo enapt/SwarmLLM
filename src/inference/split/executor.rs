@@ -388,10 +388,11 @@ impl SplitModel {
                 LayerVariant::Dense(lw) => {
                     let x = layer_in;
                     let residual = &x;
-                    let x = lw
-                        .attention_norm
-                        .forward(&x)
-                        .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
+                    let x = crate::inference::prof::timed!(
+                        crate::inference::prof::Stage::Norms,
+                        lw.attention_norm.forward(&x)
+                    )
+                    .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
                     let mut attn = lw
                         .forward_attn(
                             &x,
@@ -408,13 +409,18 @@ impl SplitModel {
                             .forward(&attn)
                             .map_err(|e| SwarmError::Internal(format!("post_attn_norm: {e}")))?;
                     }
-                    let x = (attn + residual).map_err(SwarmError::internal)?;
+                    let x = crate::inference::prof::timed!(
+                        crate::inference::prof::Stage::Residual,
+                        attn + residual
+                    )
+                    .map_err(SwarmError::internal)?;
 
                     let residual = &x;
-                    let x = lw
-                        .ffn_norm
-                        .forward(&x)
-                        .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
+                    let x = crate::inference::prof::timed!(
+                        crate::inference::prof::Stage::Norms,
+                        lw.ffn_norm.forward(&x)
+                    )
+                    .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
                     let mut x = match &lw.ffn {
                         FfnVariant::Dense(mlp) => mlp
                             .forward(&x, lora_param)
@@ -429,7 +435,11 @@ impl SplitModel {
                             .forward(&x)
                             .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
                     }
-                    layer_in = (x + residual).map_err(SwarmError::internal)?;
+                    layer_in = crate::inference::prof::timed!(
+                        crate::inference::prof::Stage::Residual,
+                        x + residual
+                    )
+                    .map_err(SwarmError::internal)?;
                 }
                 LayerVariant::DeepSeek {
                     attention,
@@ -603,6 +613,12 @@ impl SplitModel {
                 forward_ms,
                 "DIAG: SplitModel forward pass complete"
             );
+            if crate::inference::prof::enabled() {
+                crate::inference::prof::dump_and_reset(
+                    &format!("seq_len={seq_len} index_pos={index_pos} layers={num_layers}"),
+                    start.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
         }
 
         result.map(|t| (t, captured))

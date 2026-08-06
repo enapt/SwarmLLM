@@ -749,3 +749,33 @@ All 61 files containing runtime decision/timing/error logic are instrumented. Th
 | Identity (keypair, keystore, nickname) | 3 | ~3 | Key generation, keystore save/load, nickname records |
 | Health (monitor, rebalancer) | 2 | ~4 | Rebalance events, health monitoring |
 
+
+## Stage profiler — where a forward pass actually spends its time
+
+`SWARMLLM_PROFILE=1` makes every forward pass print a per-stage breakdown to
+stderr and reset. Stages are wall-clock and non-overlapping, so they sum to
+roughly the block time; the report also prints what they do NOT account for,
+which is as informative as the stages.
+
+```
+SWARMLLM_PROFILE=1 swarmllm run -p 8899
+...
+PROF seq_len=128 index_pos=384 layers=28 — total 10045 ms
+   4571.7 ms   45.5%  attention scores + softmax + AV
+   2558.2 ms   25.5%  ffn up + gate        (quantized matmul)
+   1330.7 ms   13.2%  ffn down             (quantized matmul)
+    848.0 ms    8.4%  qkv projections      (quantized matmul)
+    ...
+     30.4 ms    0.3%  unattributed (allocation, copies, dispatch)
+```
+
+Accumulation is unconditional — `Instant::now` is ~25 ns against stages that run
+for milliseconds — so only the dump is gated. Implementation in
+`src/inference/prof.rs`; add a stage by extending the `stages!` macro and wrapping
+the call site in `timed!`.
+
+**This is what found the CPU attention kernel** (2026-08-06): attention was 2.3%
+of the arithmetic but 45% of prompt-processing time, i.e. running 37x slower per
+MAC than the quantized matmul beside it. Reach for it before optimising anything
+in the forward path — the previous round tuned a matmul that turned out to be a
+quarter of the cost.

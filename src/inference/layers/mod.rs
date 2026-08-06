@@ -2,6 +2,7 @@
 //!
 //! Includes Qwen 3.5 hybrid SSM+attention (Gated Delta Networks) layer types.
 
+use crate::inference::prof::Stage as P;
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Result as CandleResult, Tensor};
 use candle_nn::kv_cache::KvCache;
@@ -210,13 +211,12 @@ impl Mlp {
         // over-block (needless launches). One single-token projection against a
         // prefill of hundreds is negligible, and it is never run for decode.
         let probe = xs.narrow(token_dim, 0, 1)?;
-        let intermediate = self
-            .ffn_up
-            .forward(&probe)?
-            .dims()
-            .last()
-            .copied()
-            .unwrap_or(0);
+        let intermediate =
+            crate::inference::prof::timed!(P::FfnProbe, self.ffn_up.forward(&probe))?
+                .dims()
+                .last()
+                .copied()
+                .unwrap_or(0);
         let block = budget_elems
             .checked_div(intermediate)
             .map_or(tokens, |b| b.clamp(1, tokens));
@@ -244,7 +244,7 @@ impl Mlp {
         xs: &Tensor,
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
-        let mut up = self.ffn_up.forward(xs)?;
+        let mut up = crate::inference::prof::timed!(P::FfnUpGate, self.ffn_up.forward(xs))?;
 
         if let Some((adapter, abs_layer)) = lora {
             let key_up = format!("blk.{abs_layer}.ffn_up");
@@ -263,7 +263,7 @@ impl Mlp {
         // GLU-style (gate present): act(gate(x)) * up(x)
         // Simple MLP (no gate): act(up(x))
         let combined = if let Some(ref ffn_gate) = self.ffn_gate {
-            let mut gate = ffn_gate.forward(xs)?;
+            let mut gate = crate::inference::prof::timed!(P::FfnUpGate, ffn_gate.forward(xs))?;
             if let Some((adapter, abs_layer)) = lora {
                 let key_gate = format!("blk.{abs_layer}.ffn_gate");
                 if let Some(lw) = adapter.weights.get(&key_gate) {
@@ -277,11 +277,14 @@ impl Mlp {
                     .map_err(|e| candle_core::Error::Msg(format!("LoRA ffn_gate: {e}")))?;
                 }
             }
+            let __act_t = std::time::Instant::now();
             let activated = match self.activation {
                 Activation::SiLU => candle_nn::ops::silu(&gate)?,
                 Activation::Gelu => gate.gelu()?,
             };
-            (activated * up)?
+            let __prod = (activated * up)?;
+            crate::inference::prof::add(P::FfnAct, __act_t.elapsed().as_nanos() as u64);
+            __prod
         } else {
             // No gate — simple activation on up projection
             match self.activation {
@@ -290,7 +293,8 @@ impl Mlp {
             }
         };
 
-        let mut down = self.ffn_down.forward(&combined)?;
+        let mut down =
+            crate::inference::prof::timed!(P::FfnDown, self.ffn_down.forward(&combined))?;
         if let Some((adapter, abs_layer)) = lora {
             let key_down = format!("blk.{abs_layer}.ffn_down");
             if let Some(lw) = adapter.weights.get(&key_down) {
@@ -418,6 +422,7 @@ impl MlaWeights {
         let v = v.transpose(1, 2)?.contiguous()?; // [b, n_head, s, value_length]
 
         // ── KV cache ──
+        let __kv_t = std::time::Instant::now();
         let (k, v) = match kv_cache {
             None => {
                 let mut cache = KvCache::new(2, max_seq_len);
@@ -432,6 +437,7 @@ impl MlaWeights {
                 cache.append(&k, &v)?
             }
         };
+        crate::inference::prof::add(P::KvCache, __kv_t.elapsed().as_nanos() as u64);
 
         // ── Attention ──
         // MLA has asymmetric K/V dimensions (key_length != value_length), so
@@ -1254,7 +1260,28 @@ pub(crate) fn run_attention(
             let kv_len = k.dim(2)?;
             let use_standard_for_decode =
                 seq_len == 1 && (!is_gqa || kv_len < CPU_FUSED_DECODE_GQA_MIN_KV);
-            if use_standard_for_decode || force_standard {
+            // PREFILL also takes the standard path — measured 2026-08-06, and the
+            // opposite of what the decode routing above might suggest.
+            //
+            // `run_flash_attn_cpu` parallelizes over KV TILES OF 16 inside a
+            // per-query-row loop and heap-allocates a scratch vec per tile, so a
+            // 128-token chunk against 384 KV issues ~2M allocations across 28
+            // layers at a parallel granularity far too fine to pay for itself. It
+            // also runs on its own rayon pool sized to every logical core, ignoring
+            // `inference_cpu_threads`. Standard attention batches the same work
+            // into two real matmuls per head.
+            //
+            // Stage profile, seq_len=128 against kv_len=384, llama-3.2-3b Q4_K_M:
+            //   attention core   4571 ms (45.5% of the chunk) -> 640 ms (10.4%)  7.1x
+            // End to end, prompt processing:
+            //    412 tokens  15.3 -> 20.7 tok/s   (1.35x)
+            //   1537 tokens   7.0 -> 14.5 tok/s   (2.07x)
+            // The gain grows with context because the flash kernel's overhead
+            // scales with kv_len. Measured up to ~1550 KV; beyond that the
+            // crossover is unmeasured, but `standard_attention` blocks its score
+            // matrix (ATTN_SCORE_BUDGET_ELEMS) so memory stays bounded either way.
+            let use_standard_for_prefill = seq_len > 1;
+            if use_standard_for_decode || use_standard_for_prefill || force_standard {
                 return standard_attention(
                     q,
                     k,
@@ -1410,9 +1437,9 @@ impl LayerWeights {
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _n_embd) = x.dims3()?;
-        let mut q = self.attention_wq.forward(x)?;
-        let mut k = self.attention_wk.forward(x)?;
-        let mut v = self.attention_wv.forward(x)?;
+        let mut q = crate::inference::prof::timed!(P::QkvProj, self.attention_wq.forward(x))?;
+        let mut k = crate::inference::prof::timed!(P::QkvProj, self.attention_wk.forward(x))?;
+        let mut v = crate::inference::prof::timed!(P::QkvProj, self.attention_wv.forward(x))?;
 
         // Apply LoRA deltas to Q/K/V projections if adapter is active
         if let Some((adapter, abs_layer)) = lora {
@@ -1462,6 +1489,7 @@ impl LayerWeights {
             v = v.broadcast_add(bv)?;
         }
 
+        let __shape_t = std::time::Instant::now();
         let mut q = q.reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
         let mut k = k.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
         let v = v
@@ -1482,6 +1510,7 @@ impl LayerWeights {
 
         let q = self.apply_rotary_emb(&q, index_pos)?;
         let k = self.apply_rotary_emb(&k, index_pos)?;
+        crate::inference::prof::add(P::AttnShape, __shape_t.elapsed().as_nanos() as u64);
 
         // KV-cache: use pre-allocated KvCache buffers (avoids Tensor::cat per step)
         let (k, v) = match kv_cache {
@@ -1501,21 +1530,27 @@ impl LayerWeights {
 
         // Unified attention dispatch: flash (CPU/GPU) or standard matmul fallback.
         // All backends return BHSD (b, n_head, seq, head_dim).
-        let y = run_attention(
-            &q,
-            &k,
-            &v,
-            mask,
-            self.n_head,
-            self.n_kv_head,
-            self.head_dim,
-            &self.neg_inf,
-            self.attn_logit_softcap,
+        let y = crate::inference::prof::timed!(
+            P::AttnCore,
+            run_attention(
+                &q,
+                &k,
+                &v,
+                mask,
+                self.n_head,
+                self.n_kv_head,
+                self.head_dim,
+                &self.neg_inf,
+                self.attn_logit_softcap,
+            )
         )?;
 
         let attn_out_dim = self.n_head * self.head_dim;
-        let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, attn_out_dim])?;
-        let mut wo_out = self.attention_wo.forward(&y)?;
+        let y = crate::inference::prof::timed!(
+            P::AttnShape,
+            y.transpose(1, 2)?.reshape(&[b_sz, seq_len, attn_out_dim])
+        )?;
+        let mut wo_out = crate::inference::prof::timed!(P::AttnOut, self.attention_wo.forward(&y))?;
 
         // Apply LoRA delta to O projection
         if let Some((adapter, abs_layer)) = lora {

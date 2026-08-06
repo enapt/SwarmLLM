@@ -14,6 +14,7 @@ pub mod pipeline;
 pub mod prefetch;
 pub mod prefill_pacer;
 pub mod process_pool;
+pub(crate) mod prof;
 pub mod quant;
 pub mod router;
 pub mod sampling;
