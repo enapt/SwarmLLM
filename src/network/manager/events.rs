@@ -857,6 +857,25 @@ impl NetworkManager {
         if self.relay_activated || !self.shared_state.config.network.auto_relay {
             return;
         }
+        // `network.enable_relay_client` is documented as "use relays when behind
+        // a firewall" and was read NOWHERE — a node set to false relayed anyway.
+        // Honour it here, which is the only place relaying is turned on, and say
+        // what it costs: relaying is what makes a node behind a home router
+        // reachable at all, so switching it off can leave this node able to dial
+        // out but impossible to dial in to.
+        if !self.shared_state.config.network.enable_relay_client {
+            if !self.relay_disabled_explained {
+                self.relay_disabled_explained = true;
+                tracing::warn!(
+                    reason,
+                    "Not using a relay because network.enable_relay_client is off. \
+                     This node can still reach others, but others may not be able to \
+                     reach it — relaying is what makes a machine behind a home router \
+                     reachable. Set enable_relay_client = true to allow it."
+                );
+            }
+            return;
+        }
         let now = std::time::Instant::now();
         if let Some(last) = self.last_relay_attempt {
             if now.duration_since(last).as_secs() < RELAY_RETRY_MIN_SECS {

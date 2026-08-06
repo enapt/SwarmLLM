@@ -304,6 +304,10 @@ pub struct NetworkManager {
     buffered_gossip: Vec<(String, Vec<u8>)>,
     /// Whether relay listen has been activated for this session (at most once).
     relay_activated: bool,
+    /// Whether we have already explained that relaying is off by configuration.
+    /// `try_activate_relay` is called repeatedly, and the consequence is worth
+    /// stating once rather than every time.
+    relay_disabled_explained: bool,
     /// Last time we attempted relay activation, to rate-limit retries until one
     /// succeeds (AutoNAT-unreachable results + the startup fallback both trigger
     /// `try_activate_relay`).
@@ -640,6 +644,7 @@ impl NetworkManager {
             peer_to_node: DashMap::new(),
             buffered_gossip: Vec::new(),
             relay_activated: false,
+            relay_disabled_explained: false,
             last_relay_attempt: None,
             pending_tensor_outbound: HashMap::new(),
             pending_tensor_result_outbound: HashMap::new(),

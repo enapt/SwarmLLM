@@ -2,6 +2,28 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A setting that said it controlled relaying did nothing.** `enable_relay_client`
+  is described in the configuration reference as deciding whether this node
+  routes its own traffic through someone else's relay when it cannot be reached
+  directly. Nothing read it, so a node set to `false` relayed anyway. It is now
+  honoured, and says so in the log when it stops relaying — because relaying is
+  what makes a machine behind a home router reachable, so turning it off leaves
+  the node able to reach others while being unreachable itself. The reference
+  now also distinguishes it from `enable_relay`, which is the opposite role:
+  relaying on behalf of others.
+
+### Changed
+
+- **Batching now reports how often it actually happens.** Requests are combined
+  into one pass only while they sit at the same point in their answers, which
+  concurrent requests stop doing almost immediately; when that fails the batch
+  quietly runs one at a time. Nodes now log the proportion that really batched,
+  so this can be measured rather than assumed.
+
 ## [0.3.78-alpha] — 2026-08-06
 
 Follows 0.3.77. Twelve fixes, almost all in how a question is prepared before a

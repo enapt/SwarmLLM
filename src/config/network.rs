@@ -36,6 +36,18 @@ pub struct NetworkConfig {
     pub peer_exchange: bool,
     #[serde(default = "default_true")]
     pub enable_relay: bool,
+    /// Whether this node may route its OWN traffic through someone else's relay
+    /// when it is not directly reachable.
+    ///
+    /// Distinct from [`NetworkConfig::enable_relay`], which is the opposite
+    /// role: whether this node relays for OTHERS. Turning this off keeps the
+    /// node able to dial out while leaving it undialable from the internet,
+    /// because relaying is what makes a machine behind a home router reachable.
+    ///
+    /// Read by `try_activate_relay`, the one place relaying is turned on. It
+    /// was read nowhere for a long time, so a node configured `false` relayed
+    /// regardless — the setting existed in the reference documentation and did
+    /// nothing.
     #[serde(default = "default_true")]
     pub enable_relay_client: bool,
     /// Ceiling on simultaneously established peer connections.
@@ -538,5 +550,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(many.external_addresses.0.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod relay_client_setting_tests {
+    /// `network.enable_relay_client` is documented as controlling whether this
+    /// node uses a relay, and for a long time NOTHING read it — a node set to
+    /// `false` relayed anyway. That is the same shape as `max_peers`, which was
+    /// parsed, logged, documented and never enforced (gotcha #236).
+    ///
+    /// The guard lives in `NetworkManager::try_activate_relay`, which is the
+    /// one place relaying is turned on. This test pins the wiring by source, so
+    /// deleting the check fails here rather than silently reverting the setting
+    /// to decorative — there is no way to observe relay activation from a unit
+    /// test without standing up a swarm.
+    #[test]
+    fn enable_relay_client_is_actually_consulted() {
+        let src = include_str!("../network/manager/events.rs");
+        let guard = "if !self.shared_state.config.network.enable_relay_client {";
+        assert!(
+            src.contains(guard),
+            "network.enable_relay_client is no longer read in try_activate_relay — \
+             a documented setting that nothing consults is worse than no setting, \
+             because the user believes it took effect"
+        );
+        // And it must sit in the activation path, not somewhere inert.
+        let fn_start = src
+            .find("fn try_activate_relay")
+            .expect("try_activate_relay was renamed — move this check with it");
+        assert!(
+            src[fn_start..].contains(guard),
+            "the check moved out of try_activate_relay"
+        );
     }
 }

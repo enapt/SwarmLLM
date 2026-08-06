@@ -41,7 +41,7 @@ Every configuration option, organized by section.
 | `gossip_network_id` | string | none | Custom network ID for private networks |
 | `peer_exchange` | boolean | `true` | Share peer lists with connected nodes |
 | `enable_relay` | boolean | `true` | Act as relay for peers behind firewalls |
-| `enable_relay_client` | boolean | `true` | Use relays when behind a firewall |
+| `enable_relay_client` | boolean | `true` | Let THIS node route its own traffic through someone else's relay when it is not directly reachable. Turning it off leaves the node able to reach others but generally unreachable from the internet. The opposite role — relaying for others — is `enable_relay` |
 | `max_peers` | integer | *(from `contribution`)* | Max simultaneous peer connections. Unset it follows `[node] contribution` — minimal `150`, moderate `300`, maximum `500`. An explicit value wins in either direction. |
 | `auto_relay` | boolean | `true` | Auto-use relay when NAT detected |
 | `relay_max_circuit_duration_secs` | integer | `3600` | Max relay circuit duration |
