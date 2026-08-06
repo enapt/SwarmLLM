@@ -6462,6 +6462,55 @@ ships at `contribution = "minimal"` = **half** its cores. Measured on that box,
 partially bandwidth-bound workload, but a real 1.6x that users may not know they
 have opted out of.
 
+## How much CPU headroom is actually left (2026-08-06) — MEASURED
+
+Taken after the tiled matmul and the two attention fixes, to answer "can it go
+faster" with numbers instead of intuition. llama-3.2-3b Q4_K_M, 8 physical cores.
+
+**Decode is bandwidth-bound at ~69% of the roofline — compute tuning is nearly
+spent.** Of 119.7 ms/token at 4 threads, 85.9 ms (72%) is quantized matmul,
+moving ~1.9 GB of weights = **22.1 GB/s against 31-33 GB/s measured achievable**.
+The remaining lever is not faster arithmetic but *fewer bytes per token* or *more
+tokens per weight read*.
+
+**Threads: decode and prefill want opposite settings.**
+
+| threads | decode tok/s | prompt processing tok/s |
+|---|---|---|
+| 2 | 5.45 | 13.0 |
+| 3 | 5.84 | 17.6 |
+| **4** | **6.97** | 20.2 |
+| 6 | 6.30 | **23.8** |
+| 8 | 4.90 | — |
+| 16 | 3.17 | — |
+
+Decode peaks at 4 and falls off a cliff (2.2x worse at 16); prompt processing
+keeps climbing. The default `contribution = "minimal"` gives 4 on this box, which
+is decode-optimal by luck. Profiling 4 vs 8 shows every stage getting slower, led
+by qkv projections (+2x) and rope/transpose (+3.2x) — small ops where fork/join
+and bandwidth contention dominate. Note the *isolated kernel* disagrees: `m=1` is
+fastest at 8 threads in a microbenchmark with nothing else running, which is why
+this had to be measured end to end.
+
+Ruled out: candle-nn's flash-attention pool building its own all-cores pool —
+`process_pool.rs` already sets `RAYON_NUM_THREADS` on the worker.
+
+**Open, not done: a per-phase thread pool.** Running prefill inside a larger
+rayon pool while decode keeps the smaller global one should give ~23.8 and ~6.97
+simultaneously, worth **~1.18x on prompt processing at no decode cost**. Not
+attempted because it restructures the hottest path for a modest gain; the
+tradeoff is available to users today via `max_cpu_threads`.
+
+**Self-speculative decoding (SWIFT) is 3.3x SLOWER here — do not re-try blind.**
+`swift_self_speculative = true` measured **1.82 tok/s against 6.01 off**, median
+of 3 prompts. The layer-skipping draft (`skip_ratio = 0.45`, `gamma = 4`) costs
+~2.2 weight-reads drafting plus a full verify pass per cycle, so it only pays at
+a high accept rate, and the accept rate here is effectively zero. It is correctly
+off by default. This was worth re-testing because the tiled matmul made the
+verify pass (m = gamma+1) much cheaper than it used to be — that helped, and was
+nowhere near enough. An n-gram draft (`ngram_lookup`) is a different mechanism and
+remains untested.
+
 ## CPU attention was the real cost, in BOTH directions (2026-08-06) — FIXED
 
 Found with the stage profiler (`SWARMLLM_PROFILE=1`), not by reading code. Two

@@ -222,6 +222,9 @@ claude-subscription = []
 
 [dev-dependencies]
 tempfile = "3"
+# Used by examples/qmatmul_bench.rs to size a rayon pool explicitly when
+# measuring how the quantized matmul scales with thread count.
+rayon = "1"
 
 [[test]]
 name = "integration"

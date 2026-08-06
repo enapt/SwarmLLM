@@ -4727,6 +4727,7 @@ dependencies = [
  "num_cpus",
  "parking_lot",
  "rand 0.8.6",
+ "rayon",
  "redb",
  "reqwest",
  "safetensors 0.7.0",

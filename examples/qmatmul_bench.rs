@@ -94,9 +94,54 @@ fn bench(label: &str, k: usize, n: usize, ms: &[usize]) {
     }
 }
 
+fn pool_sweep() {
+    // Decode (m=1) and prefill (m=128) under different rayon pool sizes, to see
+    // whether the end-to-end thread curve comes from the matmul itself.
+    let (k, n) = (3072usize, 8192usize);
+    let k_in_blocks = k / BlockQ4K::BLCK_SIZE;
+    let mut rhs = vec![BlockQ4K::zeros(); n * k_in_blocks];
+    let src: Vec<f32> = (0..n * k)
+        .map(|i| ((i % 97) as f32 - 48.0) / 48.0)
+        .collect();
+    BlockQ4K::from_float(&src, &mut rhs);
+    println!("\n  rayon pool size sweep (k={k}, n={n})");
+    println!(
+        "      {:>6}  {:>12}  {:>12}",
+        "threads", "m=1 ms", "m=128 ms"
+    );
+    for threads in [2usize, 4, 6, 8, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let mut row = Vec::new();
+        for m in [1usize, 128] {
+            let lhs: Vec<f32> = (0..m * k)
+                .map(|i| ((i % 89) as f32 - 44.0) / 44.0)
+                .collect();
+            let mut dst = vec![0f32; m * n];
+            pool.install(|| matmul((m, k, n), &lhs, &rhs, &mut dst).unwrap());
+            let reps = if m == 1 { 30 } else { 5 };
+            let mut best = f64::INFINITY;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                pool.install(|| {
+                    for _ in 0..reps {
+                        matmul((m, k, n), &lhs, &rhs, &mut dst).unwrap();
+                    }
+                });
+                best = best.min(t.elapsed().as_secs_f64() * 1000.0 / reps as f64);
+            }
+            row.push(best);
+        }
+        println!("      {threads:>6}  {:>12.3}  {:>12.2}", row[0], row[1]);
+    }
+}
+
 fn main() {
     println!("candle quantized matmul (Q4_K)");
     // llama-3.2-3b shapes: attention projection and FFN up.
     bench("attn proj", 3072, 3072, &[1, 2, 3, 4, 8, 43, 128]);
     bench("ffn up", 3072, 8192, &[1, 2, 3, 4, 8, 43, 128]);
+    pool_sweep();
 }
