@@ -6215,22 +6215,33 @@ cause for the flat curve has been established. Anyone picking this up:
   Concurrent requests diverge in `index_pos` as soon as they start at different
   times or carry different prompt lengths, which is the normal case.
 
-  **There is now a counter for this.** `SplitModel::note_batch_attempt` records
-  every `forward_batch` call and how many fell back, and reports the ratio at
-  INFO every 256 calls (`DIAG: forward_batch — share of multi-request calls that
-  actually batched`). Read that off a node under real concurrent load BEFORE
-  doing anything else here: it distinguishes "batching engages and does not
-  help" from "batching never engages", and those want completely different
-  fixes. `SplitModel::batch_stats()` exposes the raw pair.
+  **MEASURED 2026-08-06, and this IS the main cause after all.** Under real
+  concurrent load on the Proxmox node (4 concurrent requests, distinct prompts,
+  llama-3.2-1b Q8_0), the counter reports:
 
-  **This was tested behaviourally and is probably NOT the main cause.** Four
-  concurrent requests with identical prompt lengths started together (so
-  `index_pos` matches throughout decode, and the batched path definitely runs)
-  reached 32.5 tok/s; the same four with prompt lengths 51/67/76/90 reached
-  27.0. So the homogeneity requirement costs ~20% — real, worth fixing with a
-  ragged-position batched forward, but it does not explain the flat curve,
-  because **32.5 tok/s across four requests is barely above the 31.6 one request
-  achieves alone.**
+      calls=256  batched=16  fell_back=240  batched_pct=6
+      calls=512  batched=28  fell_back=484  batched_pct=5
+
+  **Batching engages about 5% of the time. 95% of multi-request calls run their
+  items one at a time.** So the answer to "does batching engage and not help,
+  or never engage" is: it never engages.
+
+  **This corrects the paragraph that used to sit here**, which concluded the
+  homogeneity requirement was "probably NOT the main cause" from a behavioural
+  test: four requests with identical prompt lengths started *together* reached
+  32.5 tok/s against 27.0 for mixed lengths, only ~20% apart. That test was
+  wrong about the real world in a specific way — starting every request at the
+  same instant with the same prompt length keeps them in lockstep, which is the
+  one condition under which `index_pos` stays equal. Real traffic arrives
+  staggered and with different prompt lengths, so slots diverge within the first
+  token and never re-converge. **A benchmark that holds requests in lockstep
+  measures the best case and reports it as the typical one.**
+
+  The fix is therefore worth real effort: a batched decode that handles ragged
+  `index_pos` would convert ~95% of these calls from sequential to batched. That
+  needs per-slot RoPE offsets and attention over per-slot KV lengths (padding +
+  masking, or a varlen kernel) — the mask is already `None` for `seq_len == 1`,
+  so decode is the tractable case; prefill can keep falling back.
 
   Which is the sharper question: on the batched path's best case, four streams
   deliver what one does. Decode should be latency-bound here — 31.6 tok/s over a
