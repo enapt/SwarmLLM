@@ -155,6 +155,15 @@ const MAX_RATE_BUCKETS: usize = 50_000;
 pub struct RateLimiter {
     /// Map from (IP, bucket_kind) → (tokens_remaining, last_refill_time)
     buckets: Arc<DashMap<(IpAddr, BucketKind), (u64, Instant)>>,
+    /// Per-IP throttle for the rejection WARN: (last logged, suppressed since).
+    ///
+    /// A rejected client that retries in a loop otherwise emits one WARN per
+    /// request, indefinitely. Measured 2026-08-07: a single dashboard tab
+    /// holding a stale API key produced **1046 rate-limit warnings in 23
+    /// minutes**, 96% of all warnings on the node, which is exactly how a real
+    /// problem gets buried (cf. the departed-peer log flood, gotcha #220).
+    /// Bounded by the same IP cap and swept by the same `cleanup`.
+    rejection_log: Arc<DashMap<IpAddr, (Option<Instant>, u64)>>,
     /// Requests per minute for normal endpoints (`/v1/`, `/api/chat`)
     pub rpm: u64,
     /// Requests per minute for admin endpoints (`/api/admin/`)
@@ -166,6 +175,7 @@ impl RateLimiter {
     pub fn new(rpm: u64, admin_rpm: u64) -> Self {
         Self {
             buckets: Arc::new(DashMap::new()),
+            rejection_log: Arc::new(DashMap::new()),
             rpm,
             admin_rpm,
         }
@@ -178,6 +188,35 @@ impl RateLimiter {
         let now = Instant::now();
         self.buckets
             .retain(|_key, (_, last_refill)| now.duration_since(*last_refill) < max_idle);
+        self.rejection_log
+            .retain(|_ip, (last, _)| last.is_some_and(|t| now.duration_since(t) < max_idle));
+    }
+
+    /// Whether this rejection should be logged, and how many were suppressed
+    /// since the last one that was. Returns `None` to stay quiet.
+    ///
+    /// See [`Self::rejection_log`] for why this exists.
+    fn take_rejection_log(&self, ip: IpAddr) -> Option<u64> {
+        const LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+        let now = Instant::now();
+        // Same len()-before-entry() ordering as `try_acquire`, and for the same
+        // deadlock reason. At capacity, log rather than go silent: a flood is
+        // then exactly what an operator needs to see.
+        if !self.rejection_log.contains_key(&ip) && self.rejection_log.len() >= MAX_RATE_BUCKETS {
+            return Some(0);
+        }
+        let mut entry = self.rejection_log.entry(ip).or_insert((None, 0));
+        let (last, suppressed) = *entry;
+        match last {
+            Some(t) if now.duration_since(t) < LOG_EVERY => {
+                *entry = (last, suppressed.saturating_add(1));
+                None
+            }
+            _ => {
+                *entry = (Some(now), 0);
+                Some(suppressed)
+            }
+        }
     }
 
     /// Try to consume one token for the given IP, path, and HTTP method.
@@ -311,11 +350,14 @@ pub async fn rate_limit_middleware(
     }
 
     if !limiter.try_acquire(addr.ip(), &path, is_mutating) {
-        tracing::warn!(
-            ip = %addr.ip(),
-            path = %path,
-            "Rate limit exceeded"
-        );
+        if let Some(suppressed) = limiter.take_rejection_log(addr.ip()) {
+            tracing::warn!(
+                ip = %addr.ip(),
+                path = %path,
+                suppressed_since_last = suppressed,
+                "Rate limit exceeded"
+            );
+        }
         let body = serde_json::json!({
             "error": {
                 "message": "Rate limit exceeded. Please slow down.",
@@ -581,6 +623,30 @@ pub async fn auth_middleware(
 
 #[cfg(test)]
 mod tests {
+    /// A client that keeps hitting the limit must not produce one warning per
+    /// request. Regression for the 1046-warnings-in-23-minutes flood measured
+    /// 2026-08-07.
+    #[test]
+    fn rejection_logging_is_throttled_per_ip() {
+        let limiter = RateLimiter::new(60, 60);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        // First rejection logs, and reports nothing suppressed yet.
+        assert_eq!(limiter.take_rejection_log(ip), Some(0));
+        // Everything inside the window stays quiet...
+        for _ in 0..500 {
+            assert_eq!(limiter.take_rejection_log(ip), None);
+        }
+        // ...but is counted, so the next line that does escape says how many.
+        let entry = *limiter.rejection_log.get(&ip).unwrap();
+        assert_eq!(
+            entry.1, 500,
+            "suppressed rejections must be counted, not dropped"
+        );
+        // A different client is throttled independently.
+        let other: IpAddr = "10.0.0.7".parse().unwrap();
+        assert_eq!(limiter.take_rejection_log(other), Some(0));
+    }
+
     use super::*;
 
     #[test]
