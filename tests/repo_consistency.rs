@@ -292,3 +292,83 @@ fn locales_do_not_fall_back_to_english_prose() {
         offenders.join("\n")
     );
 }
+
+/// Every setting a user can write must be read by something.
+///
+/// Three have shipped that were not, each declared, defaulted, documented in
+/// the configuration reference, and consulted nowhere: `max_peers` (gotcha
+/// #236), `network.enable_relay_client`, and `[ui] theme`. A setting that does
+/// nothing is worse than a missing one — the user believes it took effect and
+/// configures around a behaviour they never changed.
+///
+/// The check is deliberately crude: a field name must appear in some source
+/// file OTHER than the one declaring it. That catches "nothing reads this at
+/// all", which is the failure that keeps happening, without pretending to know
+/// whether a read is meaningful. A field consumed only inside its own module
+/// (none today) would need an entry here explaining why.
+#[test]
+fn every_config_setting_is_read_somewhere() {
+    let root = repo_root();
+    let cfg_dir = root.join("src/config");
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+    let mut stack = vec![root.join("src"), root.join("crates")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                if let Ok(t) = std::fs::read_to_string(&p) {
+                    sources.push((p, t));
+                }
+            }
+        }
+    }
+
+    let mut dead: Vec<String> = Vec::new();
+    for (path, text) in sources.iter().filter(|(p, _)| p.starts_with(&cfg_dir)) {
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("pub ") else {
+                continue;
+            };
+            let Some((name, _)) = rest.split_once(':') else {
+                continue;
+            };
+            let name = name.trim();
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                continue; // types, generics, fn signatures
+            }
+            let used_elsewhere = sources.iter().any(|(p, t)| {
+                p != path
+                    && t.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .any(|w| w == name)
+            });
+            if !used_elsewhere {
+                dead.push(format!(
+                    "  {} (declared in {})",
+                    name,
+                    path.strip_prefix(&root).unwrap_or(path).display()
+                ));
+            }
+        }
+    }
+    dead.sort();
+    dead.dedup();
+
+    assert!(
+        dead.is_empty(),
+        "{} configuration setting(s) are read by nothing. Either wire them up or \
+         remove them — a setting that silently does nothing is worse than no \
+         setting, because the user believes it took effect:\n{}",
+        dead.len(),
+        dead.join("\n")
+    );
+}
