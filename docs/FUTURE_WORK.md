@@ -6462,6 +6462,45 @@ ships at `contribution = "minimal"` = **half** its cores. Measured on that box,
 partially bandwidth-bound workload, but a real 1.6x that users may not know they
 have opted out of.
 
+## CPU attention was the real cost, in BOTH directions (2026-08-06) — FIXED
+
+Found with the stage profiler (`SWARMLLM_PROFILE=1`), not by reading code. Two
+separate defects, opposite fixes, same root question: which attention kernel runs.
+
+**Prefill was using the CPU flash kernel, which is slower here.**
+`run_flash_attn_cpu` parallelizes over KV tiles of 16 inside a per-query-row loop
+and heap-allocates scratch per tile, on its own rayon pool sized to every logical
+core. A 128-token chunk against 384 KV was 45% attention for 2.3% of the
+arithmetic — 37x slower per MAC than the quantized matmul beside it. Standard
+attention batches the same work into two matmuls per head:
+
+    attention core, seq=128 kv=384    4571 ms -> 640 ms   7.1x
+    prompt processing,  417 tokens    15.3 -> 21.4 tok/s
+    prompt processing, 1536 tokens     7.0 -> 13.8 tok/s
+
+**Decode was using the standard path, which is catastrophically slower.** Below
+a 2048 crossover, GQA decode took standard attention, which materializes the KV
+cache expanded to n_head every token every layer. At ~1150 KV that was **91% of
+decode**:
+
+    ms/generated token, standard -> fused
+      kv ~82     141.2 -> 129.2
+      kv ~1150  1368.1 -> 249.2    5.5x
+
+So generating after a long prompt cost ~10x per token what it cost after a short
+one — the normal case in a chat, and invisible in any short benchmark.
+
+**The lesson**: the same two kernels, and the right choice is opposite for the two
+phases. Prefill has many query rows and wants batched matmuls; decode has one
+query row against a long cache and wants the fused kernel that never materializes
+the expansion. A single "which kernel is faster" answer does not exist.
+
+**Unmeasured, deliberately stated:** the prefill crossover above ~1550 KV (though
+`standard_attention` blocks its score matrix so memory stays bounded), and both
+routings on the other GQA shapes (28/4, 32/8) whose old crossover this replaces.
+The expansion-ratio argument predicts they benefit at least as much, since 24/8
+is the least favourable GQA shape and fused already wins there at kv=82.
+
 ## Can CPU nodes ever match GPU nodes by splitting shards finer? (2026-08-06) — ANSWERED: no
 
 **Reinforced 2026-08-06 by a second, independent measurement: on CPU, prefill is
