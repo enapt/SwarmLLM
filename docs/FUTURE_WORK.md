@@ -7208,9 +7208,28 @@ covers it; unmeasured. Options, in increasing cost:
    touching gated code. This is what is in place now, and it is a discipline
    rather than a mechanism.
 
-Not attempted here: changing CI autonomously affects every future push and the
-release path, and the measurement that would decide between (1) and (2) — how
-long a cache-warm `cargo check` actually takes — has not been taken. A local
-`cargo check --features flash-attn` with `nvcc` present and a cold target
-directory was still running after 15 minutes on the test box, which suggests (2)
-is too slow and (1) is the shape worth pricing.
+**Measured 2026-08-07, correcting a guess written here hours earlier.** The
+first version of this entry said a local check "was still running after 15
+minutes... which suggests (2) is too slow". That observation was worthless: the
+run it described had been killed and restarted from scratch, so it was timing a
+cold dependency graph, not the thing CI would do.
+
+Re-run properly on the test box (`nvcc` present, `CUDA_COMPUTE_CAP=80`,
+dependencies already built — which is exactly the state a restored cache-warm
+cache leaves CI in):
+
+    cargo check --features flash-attn      14m 10s
+      compiled: candle-flash-attn (19 kernels) + swarmllm, nothing else
+      of which nvcc/cicc:                  ~5-6 min
+
+So **(2), a full per-push CUDA check, costs about 14 minutes cold and roughly 9
+once the vendored flash-attn kernels are themselves cached** — they only rebuild
+when `vendor/candle-flash-attn` changes, which is rare. That is an ordinary CI
+job, not an hour-long one, and it makes (2) the better option rather than (1):
+no path filter to get wrong, and it catches gated code anywhere in the tree
+rather than only under `src/inference/**`.
+
+Still not attempted here, for a different reason than before: changing CI
+affects every future push and the release path, and that is a change to make
+deliberately rather than at the end of an autonomous session. The measurement
+that was blocking the decision now exists.
