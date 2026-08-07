@@ -592,13 +592,36 @@ Don't:
 
 ## Cross-feature compile checks
 
-`cargo check` with default features does NOT compile the `llama` cfg
-path. Visibility-tightening or cross-file refactors that touch
-`pipeline/dsd.rs` or any spec/llama-gated code in
-`pipeline/speculative.rs` MUST verify with
-`cargo check --features llama` before push. Pre-push hook only runs
-default-features `cargo check`. R91 caught a regression introduced
-in R90 that default-features had silently let through.
+`cargo check` with default features does NOT compile any `cfg`-gated
+path. Nothing local sees them: `cargo fmt`, `cargo clippy --all-targets`,
+the whole test suite and the pre-push hook are all default-features, and
+so is the per-push CI run. **The only signal for the GPU paths is the
+cache-warm workflow**, which does not run on every push.
+
+Two gates matter here:
+
+- **`llama`** — `pipeline/dsd.rs` and the spec/llama-gated code in
+  `pipeline/speculative.rs`. Verify with `cargo check --features llama`,
+  which is cheap. R91 caught a regression R90 had let through.
+- **`flash-attn` / `cuda`** — the CUDA arm of
+  `inference::layers::run_attention` and anything else under
+  `#[cfg(feature = "flash-attn")]`. `cargo check --features flash-attn`
+  works locally when `nvcc` is present (set `CUDA_COMPUTE_CAP=80` to match
+  the release build) but compiles the kernels, so budget tens of minutes.
+
+**The specific trap, which has now fired (gotcha #264): an import used only
+inside a `cfg`-gated arm is reported UNUSED by every local build.** Acting on
+that advice — which clippy gives confidently, and which is correct for the
+configuration being compiled — deletes a symbol the GPU build needs, and
+nothing local goes red. `DType` in `layers/mod.rs` is annotated
+`#[cfg_attr(not(feature = "flash-attn"), allow(unused_imports))]` for exactly
+this reason.
+
+So: **before removing anything an unused-warning points at, grep the file for
+`#[cfg(`.** If the file has gated arms, the warning is only telling you about
+one configuration. And after pushing a change that touches gated code, check
+the cache-warm run rather than assuming a green CI means the GPU builds work —
+`gh run list --workflow="Cache warm"`.
 
 ## One invariant, N paths — the recurring bug of this codebase
 
