@@ -4,6 +4,13 @@
 
 use crate::inference::prof::Stage as P;
 use candle_core::quantized::QTensor;
+// `DType` is used ONLY inside the `#[cfg(feature = "flash-attn")]` arm of
+// `run_attention`, so a default-feature build reports it unused — and removing
+// it on that advice breaks every GPU build while every local check stays green.
+// That is exactly what happened on 2026-08-07 (gotcha #264). Keep the import;
+// the `cfg` on the attribute is what tells the compiler the truth.
+#[cfg_attr(not(feature = "flash-attn"), allow(unused_imports))]
+use candle_core::DType;
 use candle_core::{Device, Result as CandleResult, Tensor};
 use candle_nn::kv_cache::KvCache;
 use candle_nn::Module;
