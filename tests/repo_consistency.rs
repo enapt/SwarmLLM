@@ -372,3 +372,134 @@ fn every_config_setting_is_read_somewhere() {
         dead.join("\n")
     );
 }
+
+/// Fields on a workflow matrix cell that feed the build cache key or the
+/// compiled output. `rustflags` is the one that actually bit: it is hashed into
+/// the `rust-cache` key AND into cargo's own fingerprint.
+const CACHE_KEY_FIELDS: &[&str] = &[
+    "runner",
+    "target",
+    "features",
+    "rustflags",
+    "cuda_linux",
+    "cuda_windows",
+    "vulkan",
+];
+
+/// Parse a GitHub Actions `matrix.include:` list into `name -> {field: value}`.
+///
+/// Deliberately a small hand parser rather than a YAML dependency: the two
+/// files have a fixed, flat shape, and a parse that stops matching is a loud
+/// test failure rather than a silent pass.
+fn workflow_matrix(file: &str) -> std::collections::BTreeMap<String, Vec<(String, String)>> {
+    let path = repo_root().join(".github/workflows").join(file);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {file}: {e}"));
+    let mut cells: std::collections::BTreeMap<String, Vec<(String, String)>> = Default::default();
+    let mut current: Option<String> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if let Some(rest) = line.strip_prefix("- name: ") {
+            let name = rest.trim().trim_matches('"').to_string();
+            // Only matrix cells, not job/step names: those sit at a shallower
+            // indent and carry no `runner:`/`target:` beneath them. Recording
+            // an extra key is harmless — it simply never matches the other file.
+            current = Some(name.clone());
+            cells.entry(name).or_default();
+            continue;
+        }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(name) = current.clone() else {
+            continue;
+        };
+        if let Some((k, v)) = line.split_once(": ") {
+            let k = k.trim();
+            if CACHE_KEY_FIELDS.contains(&k) {
+                let v = v.trim().trim_matches('"').to_string();
+                cells.entry(name).or_default().push((k.to_string(), v));
+            }
+        }
+    }
+    cells
+}
+
+/// An omitted matrix flag and an explicit `false` mean the same thing to
+/// `${{ matrix.x && ... }}`, so they must not read as divergence. Only values
+/// that actually change the build are compared.
+fn normalize(value: &str) -> &str {
+    match value {
+        "false" => "",
+        other => other,
+    }
+}
+
+/// Every cell `cache-warm.yml` warms must match `release.yml`'s cell of the same
+/// name on everything that feeds the cache key.
+///
+/// Adding `-C target-cpu=x86-64-v3` to release.yml in v0.3.79 without mirroring
+/// it here made every warmed cache unrestorable, and the CUDA release build went
+/// from 12 minutes to 78. It survived two releases because a cache miss still
+/// produces a correct binary — it is only slow. cache-warm.yml already carried a
+/// comment saying its cells must mirror release.yml; a comment is not a check.
+#[test]
+fn cache_warm_mirrors_the_release_matrix() {
+    let release = workflow_matrix("release.yml");
+    let warm = workflow_matrix("cache-warm.yml");
+
+    let warmed: Vec<_> = warm
+        .iter()
+        .filter(|(_, fields)| fields.iter().any(|(k, _)| k == "runner"))
+        .collect();
+    assert!(
+        !warmed.is_empty(),
+        "parsed no matrix cells out of cache-warm.yml — the parser has stopped \
+         matching the file's shape, so this test is no longer checking anything"
+    );
+
+    let mut problems = Vec::new();
+    for (name, warm_fields) in warmed {
+        let Some(release_fields) = release.get(name) else {
+            problems.push(format!(
+                "cache-warm warms `{name}`, which release.yml does not build — \
+                 warming a cell nothing restores is pure cost"
+            ));
+            continue;
+        };
+        for (key, warm_value) in warm_fields {
+            let release_value = release_fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("");
+            if normalize(release_value) != normalize(warm_value) {
+                problems.push(format!(
+                    "`{name}` differs on `{key}`: cache-warm has {warm_value:?}, \
+                     release.yml has {release_value:?}"
+                ));
+            }
+        }
+        // The reverse direction matters just as much: a field present only on
+        // the release cell (as `rustflags` was) still diverges the key.
+        for (key, release_value) in release_fields {
+            if !CACHE_KEY_FIELDS.contains(&key.as_str()) {
+                continue;
+            }
+            let warmed_value = warm_fields.iter().find(|(k, _)| k == key);
+            if warmed_value.is_none() && !normalize(release_value).is_empty() {
+                problems.push(format!(
+                    "`{name}` sets `{key}` = {release_value:?} in release.yml but \
+                     not in cache-warm.yml — the warmed cache will not restore"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "cache-warm.yml and release.yml disagree on {} cache-key input(s). Every \
+         release built by an affected cell recompiles from scratch:\n  {}",
+        problems.len(),
+        problems.join("\n  ")
+    );
+}
