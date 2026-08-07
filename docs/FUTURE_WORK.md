@@ -7169,3 +7169,48 @@ version of this whole entry: **calibrate the decode thread count on the machine
 it is running on**, timing real decode steps round-robin across candidates over
 the first seconds of a conversation. That measures the actual box with the
 actual model at no synthetic cost, and removes the one guess this fix contains.
+
+## Nothing on the push path compiles the GPU code (2026-08-07) — OPEN
+
+Found by breaking it. A change to `inference::layers` removed an import used
+only inside the `#[cfg(feature = "flash-attn")]` arm of `run_attention`, and
+**GPU builds were broken for five commits** while every signal stayed green:
+`cargo fmt`, `cargo clippy --all-targets` on three feature sets, 1746 lib +
+79 integration tests, the pre-push hook, and the per-push CI run. None of them
+compile a `cfg`-gated arm they are not configured for.
+
+**It was caught by luck.** The only workflow that compiles CUDA is
+`cache-warm.yml`, and it triggers on `Cargo.lock` / `Cargo.toml` /
+`.github/**` — the dependency graph, not the source. The offending commit
+happened to add a dependency (`rayon`), so it ran. The four commits after it
+touched only `.rs` files and would never have triggered it. Had the first commit
+not needed a new dependency, the break would have surfaced at the next weekly
+run, or — worse — at the next release, as missing CUDA assets. That is exactly
+how v0.3.80 became a permanent draft.
+
+**The gap**: a source change that breaks the GPU build has no signal until a
+weekly cron or a release tag.
+
+**What would close it**: a `cargo check --features flash-attn` job on every push
+to `main`, restoring the same cache `cache-warm.yml` populates. It is a *check*,
+not a build, so it does not need to produce artifacts — but it still compiles
+candle-flash-attn's kernels through `build.rs`, which is the long pole. Whether
+that lands inside a tolerable per-push budget depends on how well the warm cache
+covers it; unmeasured. Options, in increasing cost:
+
+1. Cheapest and narrowest: a `cargo check --features flash-attn` job gated to
+   run only when files under `src/inference/**` change. Catches this exact
+   class, skips most pushes.
+2. A full per-push CUDA check job. Correct but possibly an hour on every push.
+3. Leave it, and rely on the rule in `.claude/rules/architecture.md` §
+   "Cross-feature compile checks" — grep for `#[cfg(` before acting on an
+   unused warning, and check `gh run list --workflow="Cache warm"` after
+   touching gated code. This is what is in place now, and it is a discipline
+   rather than a mechanism.
+
+Not attempted here: changing CI autonomously affects every future push and the
+release path, and the measurement that would decide between (1) and (2) — how
+long a cache-warm `cargo check` actually takes — has not been taken. A local
+`cargo check --features flash-attn` with `nvcc` present and a cold target
+directory was still running after 15 minutes on the test box, which suggests (2)
+is too slow and (1) is the shape worth pricing.
