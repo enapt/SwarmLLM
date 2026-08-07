@@ -15,7 +15,7 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 >
 > **Recent work (July 2026) — inference across NAT.** Two machines behind ordinary home routers can now run a model together: a sealed application-level relay carries the tensor traffic when no direct path exists, and direct connections are established opportunistically on top. Verified end-to-end by an external tester — a real three-segment pipeline split across two home machines on different continents. Local models also gained working **tool calling** on both API surfaces, streaming included.
 >
-> **Benchmarks:** cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (measured 2026-04-20). Windows release binaries reach Linux parity on single-node and split inference (validated 2026-04-23).
+> **Benchmarks:** prompt processing is up to **3× faster** and replying inside a long conversation up to **5.5× faster** as of v0.3.81 (measured 2026-08-07, see [Benchmarks](#benchmarks)). Cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (measured 2026-04-20). Windows release binaries reach Linux parity on single-node and split inference (validated 2026-04-23).
 
 For long-form documentation see the [SwarmLLM book](https://enapt.github.io/SwarmLLM/).
 
@@ -228,14 +228,36 @@ Quantization: Q4_K_M, Q5_K_M, Q6_K, Q8_0, FP16. Context length, RoPE type, atten
 
 ## Benchmarks
 
-Single-node, `swarmllm bench`. Prompt: *"Explain the theory of relativity in simple terms."* 100 output tokens, average of 3 runs. **Hardware:** AMD Ryzen 7 5800H (8C/16T), NVIDIA RTX 3070 Laptop (8 GB VRAM), WSL2.
+Single-node, `swarmllm bench`, 100 output tokens, average of 5 runs after a
+warm-up. **Hardware:** AMD Ryzen 7 5800H (8C/16T), NVIDIA RTX 3070 Laptop (8 GB
+VRAM), WSL2. **Measured 2026-08-07 on v0.3.81-alpha.**
 
 | Model | Params | Quant | GPU (RTX 3070) | CPU only | GPU speedup |
 |-------|--------|-------|----------------|----------|-------------|
-| TinyLlama 1.1B | 1.1B | Q4_K_M | **27.2 tok/s** | 4.2 tok/s | 6.5× |
-| Gemma-2 2B IT | 2.5B | Q4_K_M | **20.6 tok/s** | 3.5 tok/s | 5.9× |
-| Phi-3.5 Mini | 3.8B | Q4_K_M | **46.4 tok/s** | 1.8 tok/s | 25.8× |
-| Qwen2.5-Coder 7B | 7.6B | Q4_K_M | **29.0 tok/s** | 2.4 tok/s | 12.1× |
+| Llama-3.2 3B Instruct | 3.2B | Q4_K_M | **29.9 tok/s** | 6.0 tok/s | 5.0× |
+| Phi-3.5 Mini | 3.8B | Q4_K_M | **34.5 tok/s** | 3.4 tok/s | 10.1× |
+
+Prompt processing (how fast your prompt is read before the first word appears),
+CPU only, Llama-3.2 3B Q4_K_M — this is where recent work landed:
+
+| Prompt length | Before | Now |
+|---|---|---|
+| ~420 tokens | 12.3 tok/s | **23.0 tok/s** |
+| ~1,540 tokens | 6.1 tok/s | **18.6 tok/s** |
+
+Generating inside a long conversation improved separately: at ~1,150 tokens of
+context a reply went from 1368 ms per word to **249 ms**.
+
+> **CPU figures from before v0.3.79 are not comparable.** Release binaries were
+> compiled without the vectorised quantized kernels, which cost roughly 3× on
+> every processor since 2013. Older numbers in this file's history measured that
+> defect, not the hardware.
+
+> **If a model is slower than you expect on a GPU, check your contribution
+> setting.** `contribution` (default `minimal`) caps the GPU budget at half your
+> VRAM, so on an 8 GB card a 3.8B model at Q4 does not fit and silently runs on
+> the CPU — 3.4 tok/s instead of 34.5 in the table above. Raise it to `moderate`
+> or `maximum` in Settings if the machine is yours to use.
 
 **Cross-node prefix-KV sharing** (measured 2026-04-20): two daemons on loopback, Qwen2.5-Coder-7B Q4, 672-token prompt. When the second node fetches the first's prefix-KV snapshot instead of re-prefilling locally, **iter-1 TTFT drops from 151.7 s → 11.8 s (12.9×)**. See [Performance chapter](https://enapt.github.io/SwarmLLM/operations/performance.html#cross-node-prefix-kv-sharing).
 
