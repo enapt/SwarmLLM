@@ -6512,7 +6512,7 @@ exit. There is no instrumentation for KV-cache or prefix-cache occupancy; a
 counter on each would make this directly measurable instead of inferred from
 process memory.
 
-## The next prompt-processing target is masked_fill, not the matmuls (2026-08-07) — MEASURED, NOT DONE
+## The next prompt-processing target is masked_fill, not the matmuls (2026-08-07) — DONE, see resolution at the end
 
 After the tiled quantized matmul and both attention-kernel fixes, the attention
 stage is still ~28% of a prompt-processing chunk. Pricing every op in it
@@ -6913,3 +6913,87 @@ as verification to whoever finds it next.
   has no CUDA equivalent, and handing an Ampere-only binary to a Turing card is
   gotcha #246's unrecoverable shape. Not built: the CPU fallback means nobody is
   stranded, only slower.
+
+## Attention's tail was four passes over an 11 MB tensor (2026-08-07) — FIXED
+
+Resolves the `masked_fill` entry above, and went further than it proposed.
+
+That entry suggested swapping `masked_fill` for `broadcast_add` with an f32
+mask, worth ~5%. Pricing the whole masked-softmax body rather than the one op
+said the mask was not really the problem — **allocation and memory traffic
+were**, and the mask was just the most expensive symptom. At llama-3.2-3b
+prefill shapes (24 heads, 128 queries, 896 KV) with `examples/attn_bench.rs` at
+the 4 threads the worker runs with:
+
+    BLOCK: scale + masked_fill + softmax        34.6 ms   as shipped
+    BLOCK: scale + broadcast_add + softmax      23.7 ms   what the entry proposed
+    BLOCK floor: matmul + softmax only          11.4 ms   no scale, no mask
+
+The floor is the tell. Individually the ops sum to about 11 ms (matmul 3.3,
+softmax 3.1, mask 4.5, scale 0.7) but the block costs 34.6, because each op
+materialises its own `[1, 24, 128, 896]` f32 temporary — 11 MB — and reads the
+previous one back. The tail of attention moved ~90 MB per layer per chunk to do
+~3 MB of arithmetic.
+
+**What shipped**: `src/inference/attn_softmax.rs`, a candle `CustomOp2` that
+does scale, optional Gemma-2 logit soft-cap, additive mask and softmax in ONE
+pass over each score row. The mask representation changed with it — one
+additive f32 mask (`0.0` visible, `-inf` masked) instead of a `u8` predicate
+for the standard path and a converted float copy rebuilt per call for the flash
+path. `neg_inf` disappeared from three weight structs and every attention
+signature along with `masked_fill` itself.
+
+**Measured end to end** with `examples/prefill_bench.rs` (new — loads a real
+model from its shard directory and drives `SplitModel::forward` directly, so
+there is no daemon, chunking policy or API in the way). llama-3.2-3b Q4_K_M,
+896-token prompt, 4 threads, min of 3:
+
+    prompt processing   22.04 -> 26.14 tok/s   1.19x
+    decode              155.6 -> 158.8 ms/token   unchanged (see below)
+
+`SWARMLLM_PROFILE=1` on the same run confirms the mechanism rather than
+inferring it — every stage except attention is within 1.6%:
+
+    stage                    before      after
+    attention core          9066.0 ms   3273.6 ms    2.77x
+    ffn up + gate          14356.2     14135.4       unchanged
+    ffn down                7944.8      7943.0       unchanged
+    qkv projections         4344.0      4413.1       unchanged
+    output projection       2599.4      2598.4       unchanged
+    TOTAL                  40464       34420         1.18x
+
+Attention fell from 22.4% of a prompt chunk to 9.5%.
+
+**Decode is untouched by construction, not by luck**: GQA decode takes the CPU
+flash kernel, where `seq_len == 1` means the caller passes no mask at all, so
+the fused path is never reached. The 2% either way across runs is this box's
+noise floor.
+
+**Three findings worth keeping**:
+
+1. **A strided mask costs 2.1x a contiguous one** (9.7 ms vs 4.5 for
+   `broadcast_add`), and the fused kernel declines strided operands outright.
+   The shipped mask cache held one big `[N, N]` mask and handed out `narrow()`
+   views, so keeping it would have silently eaten half the gain. It now caches
+   at the exact size — which also drops the up-front allocation from 16 MB to
+   64 KB at the chunk sizes actually used.
+2. **An equivalence test against a shared helper can be a tautology.**
+   `fused_matches_composed_reference` passes with the scale computed as
+   `sqrt(head_dim)` instead of `1/sqrt(head_dim)`, because both sides call the
+   same helper and are wrong together. `scale_matches_candle_division` compares
+   against candle's own `/ f64` and catches it. All three injected defects
+   (mask row indexing, dropped soft-cap, inverted scale) were confirmed to turn
+   the suite red before the change was kept.
+3. **`SWARMLLM_PROFILE=1` did nothing on its own.** The dump was gated on the
+   env var but the clock feeding it was started only when DEBUG logging was on,
+   so the documented way to profile printed nothing at the default log level.
+   Fixed in the same change.
+
+**What is left, and it is not attention.** After this, prompt processing is
+**84.5% quantized matmul** (ffn up+gate 41.1%, ffn down 23.1%, qkv 12.8%,
+output projection 7.5%) against attention's 9.5%. The tiled `k_quants::matmul`
+from 2026-08-06 is already the fast path there. The remaining levers are the
+ones the roofline entry above names — fewer bytes per token, or more tokens per
+weight read — not another elementwise fusion. **Do not spend another round on
+attention on CPU without re-profiling first**; two rounds have now gone into
+stages that turned out to be minorities of the total.

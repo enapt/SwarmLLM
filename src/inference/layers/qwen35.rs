@@ -103,7 +103,6 @@ impl Qwen35AttnWeights {
             self.n_head,
             self.n_kv_head,
             self.head_dim,
-            &self.neg_inf,
             None,
         )?;
 

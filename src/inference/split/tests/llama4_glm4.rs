@@ -36,7 +36,6 @@ fn test_partial_rope_glm4_style() {
     let max_seq_len = 32;
 
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     let norm_w = Tensor::ones((n_head * head_dim,), DType::F32, &device).unwrap();
 
@@ -69,7 +68,6 @@ fn test_partial_rope_glm4_style() {
         head_dim,
         cos,
         sin,
-        neg_inf,
         use_rope_contiguous: true,
         attn_logit_softcap: None,
         rope_dim,
@@ -107,7 +105,6 @@ fn test_nope_skip_rope() {
     let seq_len = 4;
 
     let (cos, sin) = precompute_freqs_cis(head_dim, 10000.0, 32, &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     let norm_w = Tensor::ones((n_head * head_dim,), DType::F32, &device).unwrap();
 
@@ -140,7 +137,6 @@ fn test_nope_skip_rope() {
         head_dim,
         cos,
         sin,
-        neg_inf,
         use_rope_contiguous: true,
         attn_logit_softcap: None,
         rope_dim: head_dim,
@@ -229,7 +225,6 @@ fn test_llama4_moe_layer_forward() {
     let rope_dim = head_dim;
 
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     let kv_dim = n_kv_head * head_dim;
 
@@ -294,7 +289,6 @@ fn test_llama4_moe_layer_forward() {
             head_dim,
             cos: cos.clone(),
             sin: sin.clone(),
-            neg_inf: neg_inf.clone(),
             use_rope_contiguous: true,
             attn_logit_softcap: None,
             rope_dim,

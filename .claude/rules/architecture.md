@@ -360,6 +360,31 @@ silently break at the wire if duplicated:
   `gpu_layers` and OOM CPU-pinning), with
   `worker_ipc::permanent_gpu_failure` as the backstop for when the probe
   returned unknown.
+- **`inference::attn_softmax::scaled_masked_softmax`** (2026-08-07) — the single
+  expression of attention's tail: scale, optional Gemma-2 logit soft-cap,
+  additive mask, softmax. Do NOT re-express those as separate candle ops in a
+  new attention path. Each one materialises a whole
+  `[batch, heads, q_len, kv_len]` score tensor — 11 MB at llama-3.2-3b prefill
+  shapes — so writing them out cost 34.6 ms where one fused pass costs 11.4,
+  and attention fell from 22.4% of a prompt chunk to 9.5% when they were folded
+  together. The fused CPU kernel declines anything it cannot index (non-CPU,
+  non-f32, strided, or a mask that is not a shared `[q_len, kv_len]` block) and
+  falls through to `composed`, which is the original expression and the
+  reference its tests compare against — so a new caller is always correct,
+  just possibly not fast.
+  **The mask is ADDITIVE f32 everywhere: `0.0` visible, `-inf` masked.** There
+  used to be two representations — a `u8` predicate for the standard path and a
+  float copy the flash arm rebuilt on every call — and a new attention backend
+  had to know which it was being handed. `SplitModel::causal_mask` is the only
+  producer. It also returns a CONTIGUOUS tensor deliberately: a `narrow()` view
+  costs 2.1x in `broadcast_add` and is refused by the fused kernel outright, so
+  any path that slices a mask (the query-blocking loop in `standard_attention`
+  does) must `.contiguous()` it before passing it on.
+  Changing the scale means changing `scale_from_head_dim`, which reproduces
+  candle's `tensor / f64` (an `affine(1/rhs)`, i.e. already a multiply) exactly.
+  `scale_matches_candle_division` pins that against candle itself rather than
+  against the helper — an equivalence test where both sides call the same
+  helper passes happily with the scale inverted.
 - **`inference::layers::cuda_decode_prefers_standard`** (2026-08-07) — the
   measured CUDA attention routing rule, extracted so it is testable without
   a GPU. **The right kernel is opposite for prefill and decode, and it turns

@@ -4,7 +4,7 @@
 
 use crate::inference::prof::Stage as P;
 use candle_core::quantized::QTensor;
-use candle_core::{DType, Device, Result as CandleResult, Tensor};
+use candle_core::{Device, Result as CandleResult, Tensor};
 use candle_nn::kv_cache::KvCache;
 use candle_nn::Module;
 use candle_transformers::quantized_nn::RmsNorm;
@@ -340,7 +340,6 @@ pub(crate) struct MlaWeights {
     pub(crate) rope_dim: usize, // how many dims of key_length are rotary
     pub(crate) cos: Tensor,
     pub(crate) sin: Tensor,
-    pub(crate) neg_inf: Tensor,
 }
 
 impl MlaWeights {
@@ -451,8 +450,7 @@ impl MlaWeights {
             self.key_length,
             self.n_head,
             self.n_head, // MLA: n_kv_head == n_head (full K/V per head)
-            &self.neg_inf,
-            None, // no softcap for DeepSeek
+            None,        // no softcap for DeepSeek
         )?;
 
         // y: [b, n_head, s, key_length] but we need [b, n_head, s, value_length]
@@ -849,7 +847,6 @@ pub(crate) struct Qwen35AttnWeights {
     pub(crate) head_dim: usize,
     pub(crate) cos: Tensor,
     pub(crate) sin: Tensor,
-    pub(crate) neg_inf: Tensor,
     /// Partial RoPE: only first `rope_dim` of head_dim get rotated
     pub(crate) rope_dim: usize,
 }
@@ -957,7 +954,6 @@ pub(crate) struct LayerWeights {
     pub(crate) head_dim: usize,
     pub(crate) cos: Tensor,
     pub(crate) sin: Tensor,
-    pub(crate) neg_inf: Tensor,
     /// If true, use contiguous RoPE (rope); if false, use interleaved (rope_i).
     pub(crate) use_rope_contiguous: bool,
     /// Gemma 2 attention logit soft-capping: `tanh(logits / cap) * cap` before softmax.
@@ -1075,15 +1071,6 @@ impl LayerWeights {
     }
 }
 
-pub(crate) fn masked_fill(
-    on_false: &Tensor,
-    mask: &Tensor,
-    on_true: &Tensor,
-) -> CandleResult<Tensor> {
-    let shape = mask.shape();
-    mask.where_cond(&on_true.broadcast_as(shape.dims())?, on_false)
-}
-
 /// Target size, in f32 elements, of ONE attention-score temporary.
 ///
 /// The score matrix is `[batch, n_head, q_len, k_len]`, so it grows with the
@@ -1117,6 +1104,15 @@ fn attention_query_block(q_len: usize, k_len: usize, heads: usize) -> usize {
 /// Input/output layout: BHSD `(b, n_head, seq, head_dim)`.
 /// Supports optional Gemma 2 attention logit soft-capping.
 ///
+/// `mask` is ADDITIVE and f32 — `0.0` where a query may attend, `-inf` where
+/// it may not — which is the representation `run_flash_attn_cpu` already
+/// wanted and the one every other engine uses. It used to be a `u8` predicate
+/// fed to `masked_fill`, which cost more per layer than both matmuls and the
+/// softmax combined: `where_cond` against a stride-0 scalar fill took 15.9 ms
+/// where adding the same information took 4.5 (measured with
+/// `examples/attn_bench.rs`). See [`crate::inference::attn_softmax`], which
+/// now folds the scale, the cap and the mask into the softmax's own pass.
+///
 /// Long prompts are processed in blocks of query positions to bound peak
 /// memory — see [`ATTN_SCORE_BUDGET_ELEMS`]. **This is exact, not an
 /// approximation**: the softmax runs over the KEY axis, so output row `i`
@@ -1133,7 +1129,6 @@ pub(crate) fn standard_attention(
     head_dim: usize,
     n_head: usize,
     n_kv_head: usize,
-    neg_inf: &Tensor,
     attn_logit_softcap: Option<f32>,
 ) -> CandleResult<Tensor> {
     let k = candle_transformers::utils::repeat_kv(k.clone(), n_head / n_kv_head)?;
@@ -1148,7 +1143,7 @@ pub(crate) fn standard_attention(
     let block = attention_query_block(q_len, k_len, n_head);
 
     if block >= q_len {
-        return attention_scores_block(q, &kt, &v, mask, head_dim, neg_inf, attn_logit_softcap);
+        return attention_scores_block(q, &kt, &v, mask, head_dim, attn_logit_softcap);
     }
 
     let mut parts: Vec<Tensor> = Vec::with_capacity(q_len.div_ceil(block));
@@ -1163,12 +1158,21 @@ pub(crate) fn standard_attention(
         let q_blk = q.narrow(2, start, len)?.contiguous()?;
         // The mask is [q_len, k_len] (2D, broadcast over batch/head) or already
         // 4D. Either way the query axis is the second-from-last.
+        //
+        // `.contiguous()` is not cosmetic. A narrowed view keeps the parent's
+        // row pitch, and every consumer downstream is slower on one: the fused
+        // kernel declines strided operands outright, and `broadcast_add`
+        // measured 9.7 ms against 4.5 for the same data contiguous. The copy is
+        // one block of mask — kilobytes — against a score tensor of megabytes.
         let mask_blk = match mask {
             None => None,
-            Some(m) => Some(match m.rank() {
-                2 => m.narrow(0, start, len)?,
-                r => m.narrow(r - 2, start, len)?,
-            }),
+            Some(m) => Some(
+                match m.rank() {
+                    2 => m.narrow(0, start, len)?,
+                    r => m.narrow(r - 2, start, len)?,
+                }
+                .contiguous()?,
+            ),
         };
         parts.push(attention_scores_block(
             &q_blk,
@@ -1176,7 +1180,6 @@ pub(crate) fn standard_attention(
             &v,
             mask_blk.as_ref(),
             head_dim,
-            neg_inf,
             attn_logit_softcap,
         )?);
         start += len;
@@ -1192,25 +1195,20 @@ fn attention_scores_block(
     v: &Tensor,
     mask: Option<&Tensor>,
     head_dim: usize,
-    neg_inf: &Tensor,
     attn_logit_softcap: Option<f32>,
 ) -> CandleResult<Tensor> {
-    let att = (q.matmul(kt)? / (head_dim as f64).sqrt())?;
-    // Gemma 2 attention logit soft-capping: tanh(logits / cap) * cap
-    let att = if let Some(cap) = attn_logit_softcap {
-        let cap_f64 = cap as f64;
-        ((att / cap_f64)?.tanh()? * cap_f64)?
-    } else {
-        att
-    };
-    let att = match mask {
-        None => att,
-        Some(mask) => {
-            let mask = mask.broadcast_as(att.shape())?;
-            masked_fill(&att, &mask, neg_inf)?
-        }
-    };
-    let att = candle_nn::ops::softmax_last_dim(&att)?;
+    // Scale, soft-cap, mask and softmax are one pass over the score tensor
+    // rather than four. Each of them used to materialise its own
+    // `[batch, heads, q_len, kv_len]` temporary — 11 MB at a llama-3.2-3b
+    // prompt chunk — so the tail of attention cost more in memory traffic than
+    // the two matmuls around it. See `crate::inference::attn_softmax`.
+    let att = q.matmul(kt)?;
+    let att = crate::inference::attn_softmax::scaled_masked_softmax(
+        &att,
+        mask,
+        crate::inference::attn_softmax::scale_from_head_dim(head_dim),
+        attn_logit_softcap,
+    )?;
     att.matmul(v)
 }
 
@@ -1271,7 +1269,6 @@ pub(crate) fn run_attention(
     n_head: usize,
     n_kv_head: usize,
     head_dim: usize,
-    neg_inf: &Tensor,
     attn_logit_softcap: Option<f32>,
 ) -> CandleResult<Tensor> {
     let force_standard = crate::inference::attn_kernel::is_force_standard_attn();
@@ -1338,7 +1335,6 @@ pub(crate) fn run_attention(
                     head_dim,
                     n_head,
                     n_kv_head,
-                    neg_inf,
                     attn_logit_softcap,
                 );
             }
@@ -1351,31 +1347,20 @@ pub(crate) fn run_attention(
 
             let softmax_scale = 1.0 / (head_dim as f32).sqrt();
 
-            // Build float additive mask for prefill (decode has seq_len==1, no mask needed)
-            let flash_mask = if seq_len > 1 {
-                if let Some(u8_mask) = mask {
-                    // Convert u8 causal mask (1=masked, 0=visible) to float (NEG_INF=masked, 0=visible)
-                    let zeros = u8_mask.zeros_like()?.to_dtype(DType::F32)?;
-                    let neg_inf_scalar = Tensor::new(f32::NEG_INFINITY, u8_mask.device())?;
-                    let float_mask = u8_mask.where_cond(
-                        &neg_inf_scalar.broadcast_as(u8_mask.shape().dims())?,
-                        &zeros,
-                    )?;
-                    Some(float_mask)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // run_flash_attn_cpu handles GQA natively — no repeat_kv needed
-            // Output shape: (b, n_head, seq, head_dim) — BHSD
+            // The mask is already the additive f32 form this kernel takes.
+            // It used to be built here by converting a u8 predicate, which was
+            // the second mask representation in the codebase and the reason the
+            // standard path could not share one; there is one now.
+            //
+            // Reached only for GQA decode, where `seq_len == 1` and the caller
+            // passes `None` — but pass it through rather than dropping it, so
+            // a future caller that does supply one gets it applied instead of
+            // silently ignored.
             let out = candle_nn::cpu_flash_attention::run_flash_attn_cpu::<f32>(
                 &q_bshd,
                 &k_bshd,
                 &v_bshd,
-                flash_mask.as_ref(),
+                mask,
                 softmax_scale,
                 None, // no ALiBi
                 attn_logit_softcap,
@@ -1435,7 +1420,6 @@ pub(crate) fn run_attention(
                     head_dim,
                     n_head,
                     n_kv_head,
-                    neg_inf,
                     attn_logit_softcap,
                 );
             }
@@ -1493,7 +1477,6 @@ pub(crate) fn run_attention(
                 head_dim,
                 n_head,
                 n_kv_head,
-                neg_inf,
                 attn_logit_softcap,
             )
         }
@@ -1645,7 +1628,6 @@ impl LayerWeights {
                 self.n_head,
                 self.n_kv_head,
                 self.head_dim,
-                &self.neg_inf,
                 self.attn_logit_softcap,
             )
         )?;
@@ -1709,22 +1691,17 @@ mod cpu_decode_bench {
             Tensor::randn(0f32, 1.0, (b, n_kv_head, kv_len, head_dim), &device).expect("k alloc");
         let v =
             Tensor::randn(0f32, 1.0, (b, n_kv_head, kv_len, head_dim), &device).expect("v alloc");
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).expect("neg_inf alloc");
 
         // --- warm up standard path ---
         for _ in 0..3 {
-            let _ = super::standard_attention(
-                &q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf, None,
-            )
-            .expect("std warm");
+            let _ = super::standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None)
+                .expect("std warm");
         }
 
         let t0 = std::time::Instant::now();
         for _ in 0..iters {
-            let _ = super::standard_attention(
-                &q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf, None,
-            )
-            .expect("std iter");
+            let _ = super::standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None)
+                .expect("std iter");
         }
         let std_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
@@ -1845,12 +1822,19 @@ mod blocked_attention_tests {
         let q = mk(1, n_head, q_len, head_dim, 0.0);
         let k = mk(1, n_kv_head, k_len, head_dim, 1.3);
         let v = mk(1, n_kv_head, k_len, head_dim, 2.9);
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, &dev).unwrap();
         // Causal mask over the query block, offset so the last query attends to
         // everything — the shape a prefill actually uses.
         let offset = k_len - q_len;
-        let m: Vec<u8> = (0..q_len)
-            .flat_map(|i| (0..k_len).map(move |j| u8::from(j > offset + i)))
+        let m: Vec<f32> = (0..q_len)
+            .flat_map(|i| {
+                (0..k_len).map(move |j| {
+                    if j > offset + i {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                })
+            })
             .collect();
         let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
         standard_attention(
@@ -1861,7 +1845,6 @@ mod blocked_attention_tests {
             head_dim,
             n_head,
             n_kv_head,
-            &neg_inf,
             softcap,
         )
         .unwrap()
@@ -1915,15 +1898,21 @@ mod blocked_attention_tests {
         let q = mk(1, heads, q_len, 16, 0.0);
         let k = mk(1, heads, k_len, 16, 1.3);
         let v = mk(1, heads, k_len, 16, 2.9).contiguous().unwrap();
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, &dev).unwrap();
         let offset = k_len - q_len;
-        let m: Vec<u8> = (0..q_len)
-            .flat_map(|i| (0..k_len).map(move |j| u8::from(j > offset + i)))
+        let m: Vec<f32> = (0..q_len)
+            .flat_map(|i| {
+                (0..k_len).map(move |j| {
+                    if j > offset + i {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                })
+            })
             .collect();
         let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
         let unblocked =
-            attention_scores_block(&q, &k.t().unwrap(), &v, Some(&mask), 16, &neg_inf, None)
-                .unwrap();
+            attention_scores_block(&q, &k.t().unwrap(), &v, Some(&mask), 16, None).unwrap();
 
         let d = max_abs_diff(&blocked, &unblocked);
         assert_eq!(d, 0.0, "query blocking must be exact, max abs diff = {d}");
@@ -1949,22 +1938,21 @@ mod blocked_attention_tests {
         let q = mk(1, heads, q_len, 16, 0.0);
         let k = mk(1, heads, k_len, 16, 1.3);
         let v = mk(1, heads, k_len, 16, 2.9).contiguous().unwrap();
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, &dev).unwrap();
         let offset = k_len - q_len;
-        let m: Vec<u8> = (0..q_len)
-            .flat_map(|i| (0..k_len).map(move |j| u8::from(j > offset + i)))
+        let m: Vec<f32> = (0..q_len)
+            .flat_map(|i| {
+                (0..k_len).map(move |j| {
+                    if j > offset + i {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                })
+            })
             .collect();
         let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
-        let unblocked = attention_scores_block(
-            &q,
-            &k.t().unwrap(),
-            &v,
-            Some(&mask),
-            16,
-            &neg_inf,
-            Some(50.0),
-        )
-        .unwrap();
+        let unblocked =
+            attention_scores_block(&q, &k.t().unwrap(), &v, Some(&mask), 16, Some(50.0)).unwrap();
 
         assert_eq!(max_abs_diff(&blocked, &unblocked), 0.0);
     }
@@ -2067,9 +2055,8 @@ mod cuda_attention_memory_probe {
         let q = mk(n, 0.0);
         let k = mk(n, 1.0);
         let v = mk(n, 2.0);
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, &dev).unwrap();
 
-        let out = standard_attention(&q, &k, &v, None, head_dim, heads, heads, &neg_inf, None)
+        let out = standard_attention(&q, &k, &v, None, head_dim, heads, heads, None)
             .expect("attention must complete without exhausting device memory");
         assert_eq!(out.dims(), &[1, heads, n, head_dim]);
         // Force the result to be realised before we claim success.
@@ -2505,8 +2492,8 @@ mod flash_vs_standard {
     /// Aligned q/k only: position i attends to keys 0..=i.
     fn causal_mask(q_len: usize, k_len: usize, dev: &Device) -> Tensor {
         assert_eq!(q_len, k_len, "this mask assumes aligned q/k");
-        let data: Vec<u8> = (0..q_len)
-            .flat_map(|i| (0..k_len).map(move |j| u8::from(j > i)))
+        let data: Vec<f32> = (0..q_len)
+            .flat_map(|i| (0..k_len).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0 }))
             .collect();
         Tensor::from_vec(data, (q_len, k_len), dev).unwrap()
     }
@@ -2549,7 +2536,6 @@ mod flash_vs_standard {
                 return;
             }
         };
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, &dev).unwrap();
 
         // (label, n_head, n_kv_head, head_dim) — the two models the README
         // benchmarks quote. Phi-3.5 is MHA, Llama-3.2 is 3:1 GQA, and the
@@ -2616,7 +2602,6 @@ mod flash_vs_standard {
                         *n_head,
                         *n_kv_head,
                         *head_dim,
-                        &neg_inf,
                         None,
                     )
                     .unwrap();
@@ -2666,15 +2651,9 @@ mod flash_vs_standard {
         let mask = Some(&m);
         let std_out = {
             let _g = ForceStandardAttnGuard::new(true);
-            run_attention(
-                &q, &k, &v, mask, n_head, n_kv_head, head_dim, &neg_inf, None,
-            )
-            .unwrap()
+            run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, None).unwrap()
         };
-        let flash_out = run_attention(
-            &q, &k, &v, mask, n_head, n_kv_head, head_dim, &neg_inf, None,
-        )
-        .unwrap();
+        let flash_out = run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, None).unwrap();
         assert_eq!(std_out.dims(), flash_out.dims(), "layout must match");
 
         let diff = (&std_out - &flash_out)
@@ -2717,31 +2696,10 @@ mod flash_vs_standard {
         let softcap = 2.0f32;
         let capped_std = {
             let _g = ForceStandardAttnGuard::new(true);
-            run_attention(
-                &q,
-                &k,
-                &v,
-                mask,
-                n_head,
-                n_kv_head,
-                head_dim,
-                &neg_inf,
-                Some(softcap),
-            )
-            .unwrap()
+            run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, Some(softcap)).unwrap()
         };
-        let capped_flash = run_attention(
-            &q,
-            &k,
-            &v,
-            mask,
-            n_head,
-            n_kv_head,
-            head_dim,
-            &neg_inf,
-            Some(softcap),
-        )
-        .unwrap();
+        let capped_flash =
+            run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, Some(softcap)).unwrap();
         let cap_diff = (&capped_std - &capped_flash)
             .unwrap()
             .abs()

@@ -95,7 +95,6 @@ fn make_test_split_model_impl(
     let freqs = idx_t.matmul(&theta_t).unwrap();
     let cos = freqs.cos().unwrap();
     let sin = freqs.sin().unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     let mut layers = Vec::new();
     for _ in 0..num_layers {
@@ -125,7 +124,6 @@ fn make_test_split_model_impl(
             head_dim,
             cos: cos.clone(),
             sin: sin.clone(),
-            neg_inf: neg_inf.clone(),
             use_rope_contiguous: true,
             attn_logit_softcap: None,
             rope_dim,
@@ -177,7 +175,6 @@ pub(super) fn make_gqa_test_model(
     let max_seq_len = 128;
     let rope_dim = head_dim;
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     let kv_dim = n_kv_head * head_dim;
     let mut layers = Vec::new();
@@ -208,7 +205,6 @@ pub(super) fn make_gqa_test_model(
             head_dim,
             cos: cos.clone(),
             sin: sin.clone(),
-            neg_inf: neg_inf.clone(),
             use_rope_contiguous,
             attn_logit_softcap,
             rope_dim,
@@ -272,7 +268,6 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
     let nope_dim = key_length - rope_dim;
     let max_seq_len = 128;
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     // Layer 0: Dense (like first few DeepSeek layers)
     let head_dim = hidden_dim / n_head;
@@ -303,7 +298,6 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         head_dim,
         cos: dense_cos,
         sin: dense_sin,
-        neg_inf: neg_inf.clone(),
         use_rope_contiguous: true,
         attn_logit_softcap: None,
         rope_dim: head_dim,
@@ -326,7 +320,6 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         rope_dim,
         cos: cos.clone(),
         sin: sin.clone(),
-        neg_inf: neg_inf.clone(),
     };
 
     let moe = MoeFfn {

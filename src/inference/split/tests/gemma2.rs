@@ -44,27 +44,14 @@ fn gemma2_attn_logit_softcap() {
     let q = Tensor::randn(0f32, 1.0, (b, n_head, seq_len, head_dim), &device).unwrap();
     let k = Tensor::randn(0f32, 1.0, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
     let v = Tensor::randn(0f32, 1.0, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     // Without soft-capping
-    let out_no_cap = standard_attention(
-        &q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf, None,
-    )
-    .unwrap();
+    let out_no_cap =
+        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None).unwrap();
 
     // With soft-capping (cap=50.0 like Gemma 2)
-    let out_capped = standard_attention(
-        &q,
-        &k,
-        &v,
-        None,
-        head_dim,
-        n_head,
-        n_kv_head,
-        &neg_inf,
-        Some(50.0),
-    )
-    .unwrap();
+    let out_capped =
+        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, Some(50.0)).unwrap();
 
     // Both should produce valid output
     assert_eq!(out_no_cap.shape(), out_capped.shape());

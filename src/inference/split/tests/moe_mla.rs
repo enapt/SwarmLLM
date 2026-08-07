@@ -301,7 +301,6 @@ fn test_mla_q_decompress() {
 
     let nope_dim = key_length - rope_dim;
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, 128, &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     let mla = MlaWeights {
         q_a: make_qmatmul(hidden, q_lora_rank),
@@ -318,7 +317,6 @@ fn test_mla_q_decompress() {
         rope_dim,
         cos,
         sin,
-        neg_inf,
     };
 
     // Test that forward_mla runs without error and returns correct shape
@@ -356,7 +354,6 @@ fn test_mla_kv_decompress() {
 
     let nope_dim = key_length - rope_dim;
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, 128, &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     let mla = MlaWeights {
         q_a: make_qmatmul(hidden, q_lora_rank),
@@ -373,7 +370,6 @@ fn test_mla_kv_decompress() {
         rope_dim,
         cos,
         sin,
-        neg_inf,
     };
 
     // Prefill with seq_len=3
@@ -416,7 +412,6 @@ fn test_mla_rope_split() {
 
     let nope_dim = key_length - rope_dim;
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, 128, &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     let mla = MlaWeights {
         q_a: make_qmatmul(hidden, q_lora_rank),
@@ -433,7 +428,6 @@ fn test_mla_rope_split() {
         rope_dim,
         cos,
         sin,
-        neg_inf,
     };
 
     // Prefill + decode: verify output stays finite

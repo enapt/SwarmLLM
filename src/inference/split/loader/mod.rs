@@ -10,7 +10,7 @@ use std::path::Path;
 
 use candle_core::quantized::gguf_file;
 use candle_core::quantized::QTensor;
-use candle_core::{Device, Tensor};
+use candle_core::Device;
 use candle_nn::Embedding;
 use candle_transformers::quantized_nn::RmsNorm;
 
@@ -456,7 +456,6 @@ impl SplitModel {
             precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
                 .map_err(SwarmError::internal)?
         };
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).map_err(SwarmError::internal)?;
         // Helper: create RmsNorm from GGUF weight tensor.
         // Note: GGUF norm weights for Gemma models already include the +1 offset
         // (added by convert_hf_to_gguf.py's modify_tensors), so we use them as-is.
@@ -628,7 +627,6 @@ impl SplitModel {
                         rope_dim: mla_rope_dim,
                         cos: mla_cos.clone(),
                         sin: mla_sin.clone(),
-                        neg_inf: neg_inf.clone(),
                     };
 
                     // FFN: MoE or dense
@@ -820,7 +818,6 @@ impl SplitModel {
                         head_dim,
                         cos: cos.clone(),
                         sin: sin.clone(),
-                        neg_inf: neg_inf.clone(),
                         use_rope_contiguous,
                         attn_logit_softcap,
                         rope_dim,
@@ -1020,7 +1017,6 @@ impl SplitModel {
                     head_dim,
                     cos: cos.clone(),
                     sin: sin.clone(),
-                    neg_inf: neg_inf.clone(),
                     use_rope_contiguous,
                     attn_logit_softcap,
                     rope_dim,
@@ -1319,7 +1315,6 @@ impl SplitModel {
                             head_dim,
                             cos: q35_cos.clone(),
                             sin: q35_sin.clone(),
-                            neg_inf: neg_inf.clone(),
                             rope_dim: qwen35_rope_dim,
                         },
                         ffn,
@@ -1341,7 +1336,6 @@ impl SplitModel {
                             .map(|layer_idx| {
                                 let cos = cos.clone();
                                 let sin = sin.clone();
-                                let neg_inf = neg_inf.clone();
                                 s.spawn(move || -> Result<LayerVariant, SwarmError> {
                                     let mut cursor = std::io::Cursor::new(mmap_ref);
                                     let prefix = format!("blk.{layer_idx}");
@@ -1637,7 +1631,6 @@ impl SplitModel {
                                         head_dim,
                                         cos: cos.clone(),
                                         sin: sin.clone(),
-                                        neg_inf: neg_inf.clone(),
                                         use_rope_contiguous,
                                         attn_logit_softcap,
                                         rope_dim,
@@ -1810,7 +1803,6 @@ impl SplitModel {
                         head_dim,
                         cos: cos.clone(),
                         sin: sin.clone(),
-                        neg_inf: neg_inf.clone(),
                         use_rope_contiguous,
                         attn_logit_softcap,
                         rope_dim,

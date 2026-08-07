@@ -20,8 +20,9 @@ pub struct SplitModel {
     pub(super) norm: Option<RmsNorm>,
     /// LM head / output projection (only loaded by the last segment).
     pub(super) output: Option<QMatMul>,
-    /// Causal attention mask: pre-allocated at a ceiling size, narrowed for smaller sequences.
-    /// Tuple is (allocated_size, mask_tensor). `None` means no mask allocated yet.
+    /// Additive causal mask for the no-prefix case, cached at its EXACT size.
+    /// Tuple is `(query_len, mask)`; `None` means nothing cached yet. See
+    /// `SplitModel::mask` for why this is not a narrowed view of a bigger one.
     pub(super) masks: Option<(usize, Tensor)>,
     /// Layer range this model covers: [start, end) out of total_layers.
     pub layer_start: usize,

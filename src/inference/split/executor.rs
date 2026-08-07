@@ -19,58 +19,76 @@ use super::model::SplitModel;
 use super::{FfnVariant, LayerVariant, SsmState};
 
 impl SplitModel {
-    /// Build a causal mask for the given sequence length.
+    /// Build an ADDITIVE causal mask: `0.0` where a query may attend, `-inf`
+    /// where it may not.
     ///
-    /// Pre-allocates a single mask at a ceiling size (min of max_seq_len and 4096),
-    /// then uses `narrow()` to slice views for smaller sequences — zero-copy.
-    /// Only re-allocates if `t` exceeds the current ceiling.
-    fn mask(&mut self, t: usize) -> CandleResult<Tensor> {
-        // Fast path: existing mask is large enough — narrow-slice a view (no copy)
-        if let Some((cached_size, ref mask)) = self.masks {
-            if t <= cached_size {
-                return mask.narrow(0, 0, t)?.narrow(1, 0, t);
-            }
-        }
-        // Allocate at a reasonable ceiling to amortize future requests.
-        // Cap at 4096 to avoid excessive memory (4096^2 = 16MB for u8).
-        let alloc_size = t.max(self.max_seq_len.min(4096));
-        let mask_data: Vec<_> = (0..alloc_size)
-            .flat_map(|i| (0..alloc_size).map(move |j| u8::from(j > i)))
-            .collect();
-        let mask = Tensor::from_slice(&mask_data, (alloc_size, alloc_size), &self.device)?;
-        self.masks = Some((alloc_size, mask.clone()));
-        if t < alloc_size {
-            mask.narrow(0, 0, t)?.narrow(1, 0, t)
-        } else {
-            Ok(mask)
-        }
-    }
-
-    /// Build a causal mask with KV offset for prefix-cached inference.
+    /// One representation, used by every attention backend — the standard
+    /// path adds it to the logits inside
+    /// [`crate::inference::attn_softmax::scaled_masked_softmax`], and
+    /// `run_flash_attn_cpu` takes exactly this form. It used to be a `u8`
+    /// predicate that each consumer converted or applied its own way, which
+    /// cost 15.9 ms per layer against 4.5 for the additive form and forced the
+    /// flash arm to rebuild the float version on every call.
     ///
-    /// When the KV cache has been pre-populated with prefix tokens,
-    /// query tokens (suffix) attend to all prefix positions plus earlier suffix
-    /// positions with proper causal ordering.
-    ///
-    /// `query_len`: number of new (suffix) tokens being processed.
-    /// `kv_len`: total KV length (prefix_len + query_len).
-    fn mask_with_offset(&self, query_len: usize, kv_len: usize) -> CandleResult<Tensor> {
+    /// `kv_len` is the total key length; `query_len` of it are the new
+    /// positions, so the first `kv_len - query_len` columns are prefix that
+    /// every query attends to.
+    fn causal_mask(&self, query_len: usize, kv_len: usize) -> CandleResult<Tensor> {
         // Caller contract: kv_len = prefix_len + query_len, so kv_len >= query_len.
-        // Both call sites are guarded by kv_offset > 0 plus the construction
-        // kv_offset + seq_len, but assert defensively in case a future edit
-        // changes the math — bare usize subtraction would silently wrap in
-        // release mode.
+        // The call sites derive kv_len as kv_offset + seq_len, but assert
+        // defensively in case a future edit changes the math — bare usize
+        // subtraction would silently wrap in release mode.
         debug_assert!(
             kv_len >= query_len,
-            "mask_with_offset contract: kv_len ({}) must be >= query_len ({})",
+            "causal_mask contract: kv_len ({}) must be >= query_len ({})",
             kv_len,
             query_len
         );
         let offset = kv_len - query_len;
-        let mask: Vec<_> = (0..query_len)
-            .flat_map(|i| (0..kv_len).map(move |j| u8::from(j > offset + i)))
+        let mask: Vec<f32> = (0..query_len)
+            .flat_map(|i| {
+                (0..kv_len).map(move |j| {
+                    if j > offset + i {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                })
+            })
             .collect();
         Tensor::from_slice(&mask, (query_len, kv_len), &self.device)
+    }
+
+    /// Causal mask for a prefill with no cached prefix, cached across calls.
+    ///
+    /// Prompt chunking makes `t` essentially constant for a given workload, so
+    /// an exact-size cache hits nearly always and rebuilding on a miss is a
+    /// `t * t` fill — microseconds at the chunk sizes actually used.
+    ///
+    /// This deliberately does NOT pre-allocate a `max_seq_len`-sized mask and
+    /// hand out `narrow()` views of it, which is what it used to do. Views are
+    /// strided, and every consumer is materially slower on a strided mask: the
+    /// fused softmax kernel declines them outright and falls back, and
+    /// `broadcast_add` measured 9.7 ms against 4.5 for the same data
+    /// contiguous. The old scheme also allocated 16 MB up front to serve
+    /// 128-token chunks that need 64 KB.
+    fn mask(&mut self, t: usize) -> CandleResult<Tensor> {
+        if let Some((cached_t, ref mask)) = self.masks {
+            if cached_t == t {
+                return Ok(mask.clone());
+            }
+        }
+        let mask = self.causal_mask(t, t)?;
+        self.masks = Some((t, mask.clone()));
+        Ok(mask)
+    }
+
+    /// Causal mask with a KV offset, for prefix-cached inference.
+    ///
+    /// Not cached: `kv_len` grows with every chunk, so a cache keyed on it
+    /// would miss every time and only hold memory.
+    fn mask_with_offset(&self, query_len: usize, kv_len: usize) -> CandleResult<Tensor> {
+        self.causal_mask(query_len, kv_len)
     }
 
     /// Run the forward pass for this segment's layer range.
@@ -278,7 +296,14 @@ impl SplitModel {
         // Skip the clock_gettime syscall when DEBUG tracing is off — fires per
         // token per layer-forward, and the elapsed time is consumed only by
         // the debug! at the end of this fn.
-        let forward_start = tracing::enabled!(tracing::Level::DEBUG).then(std::time::Instant::now);
+        // `SWARMLLM_PROFILE=1` must be sufficient on its own. It used to only
+        // gate the *dump*, while the clock that feeds it was started solely
+        // when DEBUG logging was on — so the documented way to profile printed
+        // nothing at the default log level, which is how anyone reaching for it
+        // would first try it.
+        let forward_start = (tracing::enabled!(tracing::Level::DEBUG)
+            || crate::inference::prof::enabled())
+        .then(std::time::Instant::now);
         // Use component presence rather than layer indices for shard-aware is_first/is_last
         let is_first = self.tok_embeddings.is_some();
         let is_last = self.output.is_some();

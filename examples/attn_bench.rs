@@ -101,6 +101,61 @@ fn main() {
         scores.broadcast_add(&fmask)
     });
 
+    // Does the mask have to be CONTIGUOUS to get that price? The shipped cache
+    // holds one big [N, N] mask and hands out `narrow()` views of it, which are
+    // strided (row pitch N, only q_len/kv columns live). If the strided view
+    // costs materially more, the cache must return contiguous slices instead —
+    // and if it does not, the ceiling-and-narrow scheme can stay.
+    let big = Tensor::zeros((q_len * 2, kv * 2), DType::F32, &dev).unwrap();
+    let fmask_strided = big.narrow(0, 0, q_len).unwrap().narrow(1, 0, kv).unwrap();
+    bench("additive float mask (STRIDED narrow view)", 0.0, || {
+        scores.broadcast_add(&fmask_strided)
+    });
+
+    // Is the broadcast itself the cost, or the add? Expand the mask to the full
+    // score shape once and add it contiguously.
+    let fmask4 = fmask
+        .broadcast_as(scores.shape())
+        .unwrap()
+        .contiguous()
+        .unwrap();
+    bench(
+        "additive float mask (contiguous 4D, plain add)",
+        0.0,
+        || scores.add(&fmask4),
+    );
+    bench("expand mask [q,kv] -> contiguous [1,h,q,kv]", 0.0, || {
+        fmask.broadcast_as(scores.shape())?.contiguous()
+    });
+
+    // The whole masked-softmax body, as the caller experiences it: fresh
+    // allocations every call, not a warm preallocated `scores`. The gap between
+    // this and the sum of the individual ops above IS the allocation traffic.
+    bench("BLOCK: scale + masked_fill + softmax", 0.0, || {
+        let att = (q.matmul(&kt_view)? / 11.3137f64)?;
+        let m = u8mask.broadcast_as(att.shape())?;
+        let att = m.where_cond(&neg_inf.broadcast_as(att.shape())?, &att)?;
+        candle_nn::ops::softmax_last_dim(&att)
+    });
+    bench("BLOCK: scale + broadcast_add + softmax", 0.0, || {
+        let att = (q.matmul(&kt_view)? / 11.3137f64)?;
+        let att = att.broadcast_add(&fmask)?;
+        candle_nn::ops::softmax_last_dim(&att)
+    });
+    // Same arithmetic with the scale folded into `q` before the matmul: `q` is
+    // head_dim wide where the scores are kv_len wide, so it is 7x fewer
+    // elements to touch and removes one whole score-sized temporary.
+    let q_scaled = (&q / 11.3137f64).unwrap();
+    bench("BLOCK: prescaled q + broadcast_add + softmax", 0.0, || {
+        let att = q_scaled.matmul(&kt_view)?;
+        let att = att.broadcast_add(&fmask)?;
+        candle_nn::ops::softmax_last_dim(&att)
+    });
+    bench("BLOCK floor: matmul + softmax, no scale/mask", 0.0, || {
+        let att = q.matmul(&kt_view)?;
+        candle_nn::ops::softmax_last_dim(&att)
+    });
+
     // Reference: a plain 2D f32 gemm of similar total work, to see whether the
     // batched-3D path is the problem or f32 gemm is simply this fast here.
     let a = Tensor::randn(0f32, 1., (q_len * h, d), &dev).unwrap();

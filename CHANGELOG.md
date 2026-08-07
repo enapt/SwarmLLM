@@ -28,6 +28,13 @@ models — it cannot keep the card busy with only one word in flight. SwarmLLM n
 picks per model and per conversation length, from measurements recorded in the
 engineering notes.
 
+**Reading a prompt on a processor is about 1.2x faster too**, on any machine
+with or without a graphics card. The step where SwarmLLM decides how much each
+word of your prompt should pay attention to every other word was writing an
+11-megabyte scratch tensor to memory four separate times, and reading it back
+between each. It now does the whole thing in one pass. That step used to be
+22% of the time spent reading a prompt and is now 9.5%.
+
 Also in this release:
 
 - **Fixed: Gemma-2 models produced subtly wrong output on a graphics card.** The

@@ -1,5 +1,6 @@
 pub mod allreduce;
 pub mod attn_kernel;
+pub(crate) mod attn_softmax;
 pub mod chat_template;
 pub mod dsd_controller;
 pub mod executor;

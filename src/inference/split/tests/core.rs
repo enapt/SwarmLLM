@@ -800,41 +800,20 @@ fn flash_attn_cpu_vs_standard_attention() {
     let q = Tensor::randn(0f32, 0.1, (b, n_head, seq_len, head_dim), &device).unwrap();
     let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
     let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     // Build causal mask (u8: 1=masked, 0=visible)
-    let mask_data: Vec<u8> = (0..seq_len)
-        .flat_map(|i| (0..seq_len).map(move |j| u8::from(j > i)))
+    let mask_data: Vec<f32> = (0..seq_len)
+        .flat_map(|i| (0..seq_len).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0 }))
         .collect();
     let mask = Tensor::from_slice(&mask_data, (seq_len, seq_len), &device).unwrap();
 
     // Standard path
-    let out_std = standard_attention(
-        &q,
-        &k,
-        &v,
-        Some(&mask),
-        head_dim,
-        n_head,
-        n_kv_head,
-        &neg_inf,
-        None,
-    )
-    .unwrap();
+    let out_std =
+        standard_attention(&q, &k, &v, Some(&mask), head_dim, n_head, n_kv_head, None).unwrap();
 
     // Flash path (run_attention dispatches to CPU flash on CPU device)
-    let out_flash = run_attention(
-        &q,
-        &k,
-        &v,
-        Some(&mask),
-        n_head,
-        n_kv_head,
-        head_dim,
-        &neg_inf,
-        None,
-    )
-    .unwrap();
+    let out_flash =
+        run_attention(&q, &k, &v, Some(&mask), n_head, n_kv_head, head_dim, None).unwrap();
 
     assert_eq!(out_std.shape(), out_flash.shape());
 
@@ -865,19 +844,12 @@ fn flash_attn_cpu_decode_no_mask() {
     let q = Tensor::randn(0f32, 0.1, (b, n_head, 1, head_dim), &device).unwrap();
     let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
     let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
-    let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
     // Standard path (no mask for decode)
-    let out_std = standard_attention(
-        &q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf, None,
-    )
-    .unwrap();
+    let out_std = standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None).unwrap();
 
     // Flash path
-    let out_flash = run_attention(
-        &q, &k, &v, None, n_head, n_kv_head, head_dim, &neg_inf, None,
-    )
-    .unwrap();
+    let out_flash = run_attention(&q, &k, &v, None, n_head, n_kv_head, head_dim, None).unwrap();
 
     assert_eq!(out_std.shape(), out_flash.shape());
 

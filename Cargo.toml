@@ -107,6 +107,10 @@ cudarc = { version = "0.19", features = ["dynamic-loading"], optional = true }
 candle-core = { version = "0.10", default-features = false }
 candle-nn = { version = "0.10", default-features = false }
 candle-transformers = { version = "0.10", default-features = false }
+# The fused attention softmax (`inference::attn_softmax`) parallelises over
+# score rows on the SAME global pool candle's own CPU kernels use, so the
+# worker's `RAYON_NUM_THREADS` still governs the whole forward pass.
+rayon = "1"
 # Vendored: two patches, both annotated in the files themselves.
 #   1. Links the CUDA runtime STATICALLY. Upstream's `dylib=cudart` puts a hard
 #      libcudart dependency on the binary, which is exactly what the
@@ -250,9 +254,6 @@ claude-subscription = []
 
 [dev-dependencies]
 tempfile = "3"
-# Used by examples/qmatmul_bench.rs to size a rayon pool explicitly when
-# measuring how the quantized matmul scales with thread count.
-rayon = "1"
 
 [[test]]
 name = "integration"
