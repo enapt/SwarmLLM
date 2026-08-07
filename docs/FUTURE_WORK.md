@@ -6592,6 +6592,8 @@ this had to be measured end to end.
 Ruled out: candle-nn's flash-attention pool building its own all-cores pool —
 `process_pool.rs` already sets `RAYON_NUM_THREADS` on the worker.
 
+**A per-phase thread pool SHIPPED 2026-08-07** — and the table above is now stale; see the resolution at the end of this file, which re-measured it after the attention fixes and found a bigger gap AND a perverse effect on the contribution setting. Original note follows.
+
 **Open, not done: a per-phase thread pool.** Running prefill inside a larger
 rayon pool while decode keeps the smaller global one should give ~23.8 and ~6.97
 simultaneously, worth **~1.18x on prompt processing at no decode cost**. Not
@@ -7083,3 +7085,87 @@ process RSS.**
   refused request to a peer, and evicting a live request's cache cannot be made
   safe without an in-use marker the store does not have. The occupancy counter
   is the input such a policy needs, and it did not exist before this.
+
+## Contributing more of your machine made replies SLOWER (2026-08-07) — FIXED
+
+Resolves "Open, not done: a per-phase thread pool" in the CPU-headroom entry
+above. **Re-measuring first was the whole value of this item**: that table was
+taken before the attention fixes, and both its numbers and its conclusion had
+moved.
+
+Re-measured after the fused attention tail, same box (Ryzen 7 5800H, 8 physical
+/ 16 logical), llama-3.2-3b Q4_K_M, 896-token prompt,
+`examples/prefill_bench.rs`:
+
+| threads | prompt processing tok/s | decode tok/s |
+|---|---|---|
+| 2  | 12.98 | 3.92 |
+| 3  | 18.53 | 4.54 |
+| **4**  | 23.64 | **5.26** |
+| 6  | 30.78 | 5.11 |
+| 8  | 35.59 | 4.56 |
+| 12 | 41.78 | 3.54 |
+| **14** | **43.25** | 2.94 |
+| 16 | 43.09 | 2.64 |
+
+The old table put prefill's gain at ~1.18x. With attention no longer dominating,
+prompt processing is 84.5% quantized matmul — which scales — so it now runs to
+**1.83x** past decode's optimum, while decode gets **2.0x worse** at 14 threads.
+
+**The finding that was not in the old entry**: this makes the `contribution`
+setting perverse. Raising it from Minimal to Maximum sped prompt reading up by
+1.5x and slowed replies by 13% — and further, for anyone setting
+`max_cpu_threads` high. A setting that exists to ask people to donate compute
+made the thing they most notice get worse.
+
+**What shipped**: `src/inference/cpu_pools.rs`. Decode runs in a pool capped at
+`min(offered, max(4, physical/2))`; prefill keeps the global pool untouched.
+Bound at ONE choke point — `SplitModel::forward_inner_impl` and
+`forward_batch` — so every entry point (LoRA, spec verify, pre-embedded segment,
+SWIFT skip-mask) inherits it and a new one cannot forget.
+
+A/B inside a single binary via `SWARMLLM_DECODE_THREADS=0`, min of 3, 512-token
+prompt:
+
+| offered | prompt off -> on | decode off -> on |
+|---|---|---|
+| 8  | 38.22 -> 38.26 | 5.16 -> **7.35**  (1.42x) |
+| 14 | 46.33 -> 46.33 | 2.80 -> **4.27**  (1.53x) |
+
+Prompt processing is *identical*, which is the proof that prefill is untouched
+rather than an assertion that it is.
+
+**At the default `contribution = "minimal"` nothing changes at all**: the
+ceiling already equals decode's optimum, `decode_threads` returns the offered
+count, and no second pool is built. This is strictly an improvement for nodes
+that were told to give more.
+
+### The cap is a cap, and deliberately so
+
+The thread count that saturates memory bandwidth is a property of the machine
+and this was measured on exactly one. So `decode_threads` only ever reduces
+below what the owner offered, never raises, and never goes below 4 — a rule
+derived from an 8-core box must not slow a 4-core one (2 threads measured 3.92
+tok/s against 5.26 at 4). On a very wide server it is probably still too
+generous, which leaves that machine no worse off than before.
+
+### Open: the residual, and its likely cause
+
+The cap does not fully close the gap, and the shortfall scales with the size of
+the pool it is capping. Same 4-thread decode pool, 512-token prompt:
+
+    offered  6 + cap   7.58 tok/s
+    offered  8 + cap   7.35
+    offered 14 + cap   4.27
+
+Consistent with rayon's idle workers spinning before they park — 14 parked
+global threads burn more CPU alongside the 4 doing work than 6 do. **That
+mechanism is NOT confirmed here**, only consistent with the shape; it was not
+chased because the measured win was already banked and the alternative
+explanations (scheduler placement, WSL2 noise) were not excluded.
+
+Worth revisiting as either a rayon configuration question or the principled
+version of this whole entry: **calibrate the decode thread count on the machine
+it is running on**, timing real decode steps round-robin across candidates over
+the first seconds of a conversation. That measures the actual box with the
+actual model at no synthetic cost, and removes the one guess this fix contains.

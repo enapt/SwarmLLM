@@ -360,6 +360,24 @@ silently break at the wire if duplicated:
   `gpu_layers` and OOM CPU-pinning), with
   `worker_ipc::permanent_gpu_failure` as the backstop for when the probe
   returned unknown.
+- **`inference::cpu_pools::in_phase_pool`** (2026-08-07) — binds a forward pass
+  to the CPU thread pool that suits its phase, at ONE choke point:
+  `SplitModel::forward_inner_impl` and `forward_batch`. Every entry point —
+  LoRA, speculative verify, pre-embedded segment, SWIFT skip-mask, batched
+  prefill — funnels through those, so a new one inherits it and cannot forget.
+  Do NOT call `install` at a call site instead.
+  **Reading a prompt and writing a reply want opposite thread counts**: measured
+  on 8 physical cores, prompt processing scales to 1.83x past decode's optimum
+  while decode gets 2.0x WORSE at the same setting, because decode is
+  bandwidth-bound (69% of roofline at 4 threads) and extra threads contend
+  without adding bandwidth. One pool for both made the `contribution` setting
+  perverse — donating more of your machine slowed replies down. Prefill keeps
+  the global pool untouched; only decode is capped, only ever downward, never
+  below `DECODE_THREAD_FLOOR`, and not at all when the ceiling already equals
+  the optimum (the default), so the common path builds no pool and pays nothing.
+  `SWARMLLM_DECODE_THREADS` overrides, and `=0` restores the single-pool
+  behaviour for A/B measurement inside one binary — the same discipline as
+  `SWARMLLM_FORCE_STANDARD_ATTN`.
 - **`inference::layers::new_kv_cache`** (2026-08-07) — the only way to construct
   a KV cache. **Never call `KvCache::new(2, max_seq_len)`**, which is what every
   site did and which reads as obviously correct — the parameter is even called

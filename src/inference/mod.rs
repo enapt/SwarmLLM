@@ -2,6 +2,7 @@ pub mod allreduce;
 pub mod attn_kernel;
 pub(crate) mod attn_softmax;
 pub mod chat_template;
+pub(crate) mod cpu_pools;
 pub mod dsd_controller;
 pub mod executor;
 pub mod hedging;

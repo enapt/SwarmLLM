@@ -281,7 +281,47 @@ impl SplitModel {
     /// is true are skipped entirely (identity pass-through, no KV write) — the
     /// SWIFT self-speculative draft path.
     #[allow(clippy::too_many_arguments)]
+    /// Phase-dispatching wrapper around [`Self::forward_inner_body`].
+    ///
+    /// **The single place a forward pass is bound to a CPU thread pool.**
+    /// Every public entry point — plain forward, LoRA, speculative verify,
+    /// pre-embedded segment, SWIFT skip-mask — funnels through here, so none of
+    /// them has to remember to do it and a new one inherits it. Reading a
+    /// prompt and writing a reply want opposite thread counts; see
+    /// [`crate::inference::cpu_pools`] for the measurements.
+    #[allow(clippy::too_many_arguments)]
     fn forward_inner_impl(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        lora_adapter: Option<&LoraAdapter>,
+        capture_layers: Option<&std::collections::HashSet<usize>>,
+        skip_embedding: bool,
+        all_positions: bool,
+        skip_mask: Option<&[bool]>,
+    ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
+        // Query positions, i.e. which phase this is. Dim 1 is `seq_len` for
+        // both token ids [1, seq] and pre-embedded hidden states [1, seq, d].
+        let seq_len = input.dim(1).unwrap_or(1);
+        crate::inference::cpu_pools::in_phase_pool(seq_len, || {
+            self.forward_inner_body(
+                input,
+                index_pos,
+                kv_cache_store,
+                request_id,
+                lora_adapter,
+                capture_layers,
+                skip_embedding,
+                all_positions,
+                skip_mask,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_inner_body(
         &mut self,
         input: &Tensor,
         index_pos: usize,
@@ -872,13 +912,33 @@ impl SplitModel {
             return Ok(Vec::new());
         }
 
-        // Single-item fast path: no stacking benefit.
+        // Single-item fast path: no stacking benefit. Goes via `forward`, so it
+        // picks up the phase pool at the usual choke point.
         if items.len() == 1 {
             let item = &items[0];
             let out = self.forward(item.input, item.index_pos, kv_cache_store, item.request_id)?;
             return Ok(vec![out]);
         }
 
+        // A batch is a decode step only when EVERY item contributes one query
+        // position — batched prefill chunks come through here too, and they
+        // want the wide pool. `max` rather than `any`: one prefill item in the
+        // batch makes the whole call prefill-shaped work.
+        let seq_len = items
+            .iter()
+            .map(|i| i.input.dim(1).unwrap_or(1))
+            .max()
+            .unwrap_or(1);
+        crate::inference::cpu_pools::in_phase_pool(seq_len, || {
+            self.forward_batch_body(items, kv_cache_store)
+        })
+    }
+
+    fn forward_batch_body(
+        &mut self,
+        items: &[BatchItem<'_>],
+        kv_cache_store: &KvCacheStore,
+    ) -> Result<Vec<Tensor>, SwarmError> {
         let is_first = self.tok_embeddings.is_some();
         let is_last = self.output.is_some();
 
