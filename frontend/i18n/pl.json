@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "Odrzucono {model} od {node}: wygląda na lokalną kopię zapasową, a nie prawdziwy model",
   "activity.model_acquisition_failed": "Pobieranie {model} nie powiodło się: {detail}",
   "activity.model_cpu_fallback": "Modelowi {model} zabrakło pamięci GPU — przełączono na CPU (wolniej, ale działa)",
+  "activity.model_cpu_fallback_gpu_too_old": "Ta karta graficzna jest zbyt stara, aby obsłużyć GPU — {model} przełączono na CPU (wolniej, ale działa)",
   "activity.model_discovered": "Odkryto nowy model: {model}",
   "activity.model_download_complete": "Wszystkie shardy modelu {model} gotowe",
   "activity.model_load_skipped": "Pominięto ładowanie {model}",

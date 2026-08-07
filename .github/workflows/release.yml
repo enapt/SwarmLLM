@@ -217,15 +217,26 @@ jobs:
           # JIT-compiles it to the user's actual GPU at runtime, so this is a
           # *minimum* arch, and every GPU at or above it is covered — including
           # newer ones (Ada, Hopper, Blackwell/RTX 50) via forward-compatible
-          # JIT. 75 (Turing) is the floor: it brings in RTX 20-series + GTX 16
-          # that 80 (Ampere) silently excluded — a large slice of the home/gamer
-          # audience. candle-kernels disables its bf16-WMMA kernels below sm_80,
-          # which costs nothing for SwarmLLM's quantized GGUF path (that uses the
-          # quantized kernels, not bf16 WMMA); recovering that for Ampere+ would
-          # need a second compute_80 variant + runtime compute-cap selection —
-          # tracked in docs/FUTURE_WORK.md. Must be set for any CUDA build —
-          # empty panics bindgen_cuda with `ParseIntError { kind: Empty }`.
-          CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '75' || '' }}
+          # JIT.
+          #
+          # 80 (Ampere) is the floor, raised back from 75 (Turing) when
+          # flash-attention-2 was re-enabled in the `cuda` feature: every
+          # candle-flash-attn kernel source is `_sm80` and uses Ampere async
+          # copy, so 8.0 is FlashAttention's own hard requirement, not a
+          # preference. That is a deliberate trade — GTX 16-series and RTX
+          # 20-series lose the candle GPU path — taken because attention
+          # dominates both prefill and long-context decode.
+          #
+          # It is not a silent trade: a pre-Ampere card would otherwise start
+          # up, report "GPU detected", and then fail every request with a CUDA
+          # "no kernel image is available" error, because creating a context
+          # succeeds and only module load fails. `daemon::gpu_support` probes
+          # the capability at startup and routes those cards to the CPU with an
+          # explicit message instead.
+          #
+          # Must be set for any CUDA build — empty panics bindgen_cuda with
+          # `ParseIntError { kind: Empty }`.
+          CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '80' || '' }}
           # llama.cpp CUDA backend (Linux `cuda` feature only — Windows GPU uses
           # the Vulkan backend). Native SASS for Pascal→Blackwell + compute_120
           # PTX so a future post-Blackwell card still runs via driver JIT. Native

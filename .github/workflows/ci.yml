@@ -246,8 +246,23 @@ jobs:
           # routes instead of testing the GPU code path.
           - features: "candle-cuda"
             flags: "--features candle-cuda"
-          - features: "windows-gpu"
-            flags: "--features windows-gpu"
+          # windows-gpu MINUS flash-attn, deliberately.
+          #
+          # `windows-gpu = ["llama-vulkan", "candle-cuda", "flash-attn"]`, and
+          # a `cargo check` still RUNS build scripts — so checking the real
+          # feature here would compile candle-flash-attn's 19 CUTLASS kernels
+          # on every push. That build asks for half the runner's threads
+          # (`thread_percentage(0.5)`, not overridable), which on a 4-vCPU
+          # runner is ~2.5 h. This job exists to catch cfg and missing-symbol
+          # errors in minutes, not to build kernels.
+          #
+          # These two features are every line of Rust that `windows-gpu`
+          # compiles except the `#[cfg(feature = "flash-attn")]` arm in
+          # `run_attention`. That arm is compiled by cache-warm.yml on every
+          # push to main, and by the release build, both of which cache the
+          # kernels — so it is covered before any tag, just not within minutes.
+          - features: "windows-gpu-no-flash"
+            flags: "--features llama-vulkan,candle-cuda"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -270,10 +285,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cuda-nvcc-12-8
           echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
-      # windows-gpu = ["llama-vulkan", "candle-cuda"]; the llama-vulkan
-      # half builds llama-cpp-sys-2's CMake project with -DGGML_VULKAN=ON,
-      # which needs Vulkan_LIBRARY, Vulkan_INCLUDE_DIR, and glslc on the
-      # builder. Install only when the matrix is windows-gpu.
+      # windows-gpu = ["llama-vulkan", "candle-cuda", "flash-attn"]; this
+      # matrix cell checks the first two (see the cell's comment for why
+      # flash-attn is excluded here). The llama-vulkan half builds
+      # llama-cpp-sys-2's CMake project with -DGGML_VULKAN=ON, which needs
+      # Vulkan_LIBRARY, Vulkan_INCLUDE_DIR, and glslc on the builder. Install
+      # only for that cell — the condition must track the cell's `features`
+      # name, or llama-vulkan builds with no SDK and fails on
+      # `find_package(Vulkan)`.
       #
       # We use Ubuntu's apt-shipped Vulkan packages instead of
       # jakoch/install-vulkan-sdk-action because that action's Linux
@@ -290,7 +309,7 @@ jobs:
       # in /usr/{lib,include,bin} where CMake's FindVulkan module
       # canonically looks.
       - name: Install Vulkan SDK (windows-gpu feature only)
-        if: matrix.features == 'windows-gpu'
+        if: matrix.features == 'windows-gpu-no-flash'
         run: |
           sudo apt-get update
           sudo apt-get install -y libvulkan-dev glslang-tools glslc
@@ -312,10 +331,10 @@ jobs:
       # candle-kernels' build.rs runs `nvidia-smi` to auto-detect the
       # compute capability when CUDA_COMPUTE_CAP is unset. Stock GH
       # runners have no GPU and no nvidia-smi, so we pin the compile
-      # target manually. 75 (Turing) is the shipped floor (see
-      # release.yml) and validates that candle-kernels still compiles
-      # with its bf16-WMMA kernels disabled below sm_80. `cargo check`
+      # target manually. 80 (Ampere) is the shipped floor (see
+      # release.yml — it is FlashAttention's hard requirement, every
+      # candle-flash-attn kernel source is `_sm80`). `cargo check`
       # only verifies it compiles; the real arch is chosen at runtime.
       - run: cargo check --locked ${{ matrix.flags }} --all-targets
         env:
-          CUDA_COMPUTE_CAP: "75"
+          CUDA_COMPUTE_CAP: "80"

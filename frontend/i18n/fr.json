@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "{model} de {node} rejeté : ressemble à une copie de sauvegarde locale, pas à un vrai modèle",
   "activity.model_acquisition_failed": "Acquisition de {model} échouée : {detail}",
   "activity.model_cpu_fallback": "{model} a manqué de mémoire GPU — bascule sur le CPU (plus lent, mais fonctionnel)",
+  "activity.model_cpu_fallback_gpu_too_old": "Cette carte graphique est trop ancienne pour l'accélération GPU — {model} est passé sur le CPU (plus lent, mais fonctionnel)",
   "activity.model_discovered": "Nouveau modèle découvert : {model}",
   "activity.model_download_complete": "Tous les fragments de {model} prêts",
   "activity.model_load_skipped": "Chargement de {model} ignoré",

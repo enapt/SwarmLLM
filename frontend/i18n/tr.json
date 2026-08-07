@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "{node} kaynaklı {model} reddedildi: gerçek bir model değil, yerel bir yedek kopya gibi görünüyor",
   "activity.model_acquisition_failed": "{model} edinme başarısız: {detail}",
   "activity.model_cpu_fallback": "{model} için GPU belleği yetmedi — CPU'ya geçildi (daha yavaş ama çalışıyor)",
+  "activity.model_cpu_fallback_gpu_too_old": "Bu ekran kartı GPU desteği için çok eski — {model} CPU'ya geçirildi (daha yavaş ama çalışıyor)",
   "activity.model_discovered": "Yeni model keşfedildi: {model}",
   "activity.model_download_complete": "{model} modelinin tüm parçaları hazır",
   "activity.model_load_skipped": "{model} yüklenmesi atlandı",

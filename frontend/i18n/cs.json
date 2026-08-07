@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "Odmítnuto {model} od {node}: vypadá jako místní záložní kopie, ne skutečný model",
   "activity.model_acquisition_failed": "Získání {model} selhalo: {detail}",
   "activity.model_cpu_fallback": "Modelu {model} došla paměť GPU — přepnuto na CPU (pomalejší, ale funkční)",
+  "activity.model_cpu_fallback_gpu_too_old": "Tato grafická karta je příliš stará pro podporu GPU — {model} přepnut na CPU (pomalejší, ale funguje)",
   "activity.model_discovered": "Nový model objeven: {model}",
   "activity.model_download_complete": "Všechny fragmenty modelu {model} jsou připraveny",
   "activity.model_load_skipped": "Načítání modelu {model} přeskočeno",

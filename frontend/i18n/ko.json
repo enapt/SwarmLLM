@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "{node}의 {model} 거부됨: 실제 모델이 아닌 로컬 백업 사본으로 보입니다",
   "activity.model_acquisition_failed": "{model} 획득 실패: {detail}",
   "activity.model_cpu_fallback": "{model}의 GPU 메모리가 부족하여 CPU로 전환했습니다(느리지만 작동합니다)",
+  "activity.model_cpu_fallback_gpu_too_old": "이 그래픽 카드는 너무 오래되어 GPU를 지원하지 않습니다 — {model}을(를) CPU로 전환했습니다(느리지만 작동합니다)",
   "activity.model_discovered": "새 모델 발견됨: {model}",
   "activity.model_download_complete": "{model}의 모든 샤드 준비 완료",
   "activity.model_load_skipped": "{model} 로딩 건너뜀",

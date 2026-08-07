@@ -16,6 +16,7 @@ use crate::types::{AuthenticatedMessage, NetworkCommand, RebalanceEvent};
 
 mod background;
 pub(crate) mod dispatch;
+pub mod gpu_support;
 mod helpers;
 pub mod manifest;
 pub mod shard_loader;
@@ -162,9 +163,16 @@ impl Daemon {
             let llama_gpu = crate::inference::executor::detect_gpu();
             #[cfg(feature = "candle-cuda")]
             let gpu_info = llama_gpu.or_else(|| {
-                let cuda_ok = candle_core::Device::cuda_if_available(0)
-                    .map(|d| d.is_cuda())
-                    .unwrap_or(false);
+                // Ask whether the card can run OUR kernels before asking
+                // whether a CUDA device exists — `cuda_if_available` succeeds on
+                // a pre-Ampere card and only module load fails, so without this
+                // the node would advertise a GPU it cannot use. Probed here so
+                // the explanation lands in the startup log next to the rest of
+                // the hardware detection, rather than at the first request.
+                let cuda_ok = crate::daemon::gpu_support::local_gpu_is_supported()
+                    && candle_core::Device::cuda_if_available(0)
+                        .map(|d| d.is_cuda())
+                        .unwrap_or(false);
                 if cuda_ok {
                     let (name, vram_mb) = crate::api::admin::detect_gpu_nvidia_smi();
                     Some(crate::inference::executor::GpuInfo {

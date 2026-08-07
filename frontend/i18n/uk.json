@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "{model} від {node} відхилено: схоже на локальну резервну копію, а не справжню модель",
   "activity.model_acquisition_failed": "Отримання {model} не вдалося: {detail}",
   "activity.model_cpu_fallback": "{model}: забракло пам'яті GPU — перемкнено на CPU (повільніше, але працює)",
+  "activity.model_cpu_fallback_gpu_too_old": "Ця відеокарта застара для підтримки GPU — {model} перемкнено на CPU (повільніше, але працює)",
   "activity.model_discovered": "Виявлено нову модель: {model}",
   "activity.model_download_complete": "Усі шарди моделі {model} готові",
   "activity.model_load_skipped": "Завантаження {model} пропущено",

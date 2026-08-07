@@ -6736,7 +6736,17 @@ prefers contiguous ranges, so a node can hold 0, 1, 4, 5, which becomes two
 segments and an extra hop. Finer shards multiply exactly the cost this analysis
 says dominates.
 
-## FlashAttention on CUDA: why the README's old GPU number is unreachable (2026-08-07) — RESEARCHED
+## FlashAttention on CUDA: why the README's old GPU number is unreachable (2026-08-07) — TAKEN, see resolution at the end
+
+> **Resolved the same day.** The trade below was taken deliberately: `cuda` and
+> `windows-gpu` now include `flash-attn` and both CUDA builds target compute
+> capability 8.0. Pre-Ampere NVIDIA cards lose the candle GPU path. What
+> actually changed, what it measured, and what is left open are recorded in
+> **"FlashAttention re-enabled — what the trade actually bought"** at the end of
+> this section. One correction to the analysis below, established from git while
+> implementing it: **PagedAttention was never wired into the forward path at
+> all**, so it contributed nothing to the 46.4 figure and there is nothing to
+> restore.
 
 The README advertised **46.4 tok/s** for Phi-3.5 on an RTX 3070. Re-measured on
 v0.3.81 the same model gives **34.5 tok/s** — 26% lower. Not a regression in
@@ -6786,13 +6796,107 @@ cap-75 build. Notes for whoever does it:
 - Mirror the cell into `cache-warm.yml` or it rebuilds cold every release — now
   enforced by `cache_warm_mirrors_the_release_matrix`.
 
-**PagedAttention is not similarly recoverable**: it was removed from the code
-entirely, not just from the default feature. `vendor/candle-paged-attention` is
-still present but nothing references it. Re-adding it is real work, not a flag.
+**PagedAttention never ran at all** — a stronger statement than the "not
+similarly recoverable" first written here, and established from git afterwards:
 
-**Unmeasured**: how much of the 26% is flash-attn specifically. The 46.4 was taken
-in March on a materially different codebase, so attributing the whole gap to one
-feature is the likely reading, not a proven one. Building
-`--features cuda,flash-attn` at cap 80 and benchmarking it against the shipped
-binary on the same machine would settle it, and should be done before shipping a
-second asset on the strength of it.
+- The commit that added it (`ad50066a`, 2026-03-02) set `paged_kv_pool` and
+  `paged_kv_store` to `None` in `SharedState::new` and added **no call site in
+  the attention path**. `git grep paged_kv ad50066a -- src/` returns the module,
+  the two `Option` fields, and their `None` initialisers. Nothing else.
+- The commit that deleted it (`8fcf7515`, 2026-03-26) says so in as many words:
+  *"Remove dead paged_kv module + SharedState fields (**never wired**)"*.
+- The README's 46.4 tok/s was measured on 2026-03-08, i.e. **between** those two
+  dates — with the feature compiled in and inert.
+
+So PagedAttention contributed exactly nothing to the figure this whole section
+exists to explain, and "restoring" it is not a restoration: it is implementing
+it for the first time. `vendor/candle-paged-attention` is the kernels only; the
+block manager, the slot mapping and the attention-path integration would all be
+new. Worth doing for concurrent-decode memory efficiency — it is what lets vLLM
+run many sessions on one card — but it is weeks, and it is not on the path back
+to any number this project has previously published.
+
+**The lesson worth keeping**: a feature flag being present in a build is not
+evidence the feature ran. Both halves of "FlashAttention + PagedAttention" were
+cited as the cause of the old benchmark; only one of them had a call site.
+
+## FlashAttention re-enabled — what the trade actually bought (2026-08-07) — DONE
+
+`cuda` and `windows-gpu` now include `flash-attn`; both CUDA builds target
+compute capability 8.0. Pre-Ampere NVIDIA cards (GTX 16-series, RTX 20-series)
+lose the candle GPU path and are routed to the CPU with an explicit message.
+
+**The measurement that shaped the implementation.** Priced with
+`flash_vs_standard_attention_on_cuda` (bottom of `src/inference/layers/mod.rs`),
+RTX 3070 sm_86, min-of-20 on an idle GPU, ms per call:
+
+| shape | phi-3.5 MHA 32/32 d96 | llama-3.2 GQA 24/8 d128 |
+|---|---|---|
+| prefill q=512  | 7.26 → 2.56  **2.8x** | 5.14 → 0.69  **7.4x** |
+| prefill q=1536 | 26.0 → 6.50  **4.0x** | 22.3 → 4.61  **4.8x** |
+| decode kv=512  | 0.12 → 0.51  *0.24x* | 0.22 → 0.33  *0.66x* |
+| decode kv=1024 | 0.16 → 3.01  *0.05x* | 2.50 → 0.72  **3.5x** |
+| decode kv=4096 | 0.40 → 9.62  *0.04x* | 5.90 → 2.83  **2.1x** |
+| decode kv=8192 | 0.70 → 12.5  *0.06x* | 9.42 → 4.79  **2.0x** |
+
+**Flash unconditionally would have made generation far slower** — up to 25x per
+attention call on MHA decode, which is most of a token's cost. That is gotcha
+#255 again on a different device: *the right kernel is opposite for prefill and
+decode, and it turns on GQA*.
+
+- **MHA decode**: candle-flash-attn ships no split-KV kernels, so one query row
+  launches a grid of `(1 × n_head × batch)` blocks and leaves the card idle,
+  while standard decode is two GEMVs with `repeat_kv` a no-op.
+- **GQA decode**: reverses above ~1k of context, because `repeat_kv` is not a
+  no-op — standard materializes the cache expanded to `n_head` every token, and
+  its cost climbs with KV (0.22 → 9.42 ms) while flash's stays roughly flat.
+
+Shipped rule, in `cuda_decode_prefers_standard`: prefill always flash; decode
+flash only when GQA and `k_len >= 1024`. Pinned by unit tests that need no GPU,
+and by an assertion in the GPU benchmark that the dispatch is never materially
+slower than always-standard.
+
+**Two things the re-enable turned up that had nothing to do with speed:**
+
+1. **The GPU flash path silently dropped `attn_logit_softcap`** —
+   `candle_flash_attn::flash_attn` hardcodes `softcap: None`, so Gemma-2 would
+   have computed a different distribution on GPU than on CPU, with no error.
+   Now routed through `flash_attn_alibi_windowed_softcap`. Gotcha #258.
+2. **Upstream links the CUDA runtime dynamically** (`dylib=cudart`), which would
+   have put a hard `libcudart.so` dependency on the release binary. The shipped
+   v0.3.81 Linux CUDA binary's only CUDA link is `libcuda.so.1`, the display
+   driver — that is deliberate (see the `cudarc` rationale in Cargo.toml), and
+   dynamic linking would have turned "no CUDA runtime → fall back" into "binary
+   will not exec". It also emits no link-search path, so the build failed
+   outright on any image where the toolkit is not on the default linker path —
+   **CI included**.
+
+Hence `vendor/candle-flash-attn`, with two annotated patches: static
+`cudart_static`, and the 18 bf16 kernels removed (dead — `run_attention` casts
+to f16 before every call). The second halves the kernel matrix, 37 → 19.
+
+**Build cost, measured**: the full 37 kernels took ~45 min at 8-way parallelism
+on 16 cores. candle-flash-attn's build script requests only half the machine's
+threads (`thread_percentage(0.5)`, not overridable through the API), so on a
+4-vCPU runner that projects to ~2.5 h — which is exactly the "~3 h" that got the
+feature dropped in 2026-04. `cache-warm.yml`'s `timeout-minutes` was 120 and is
+now 330; leaving it would have failed the warm silently and made every release
+rebuild cold anyway.
+
+**Still open:**
+
+- **The GQA decode crossover is measured on one card (sm_86) and two models.**
+  1024 is where llama-3.2's 3:1 GQA flips. A higher expansion ratio (Qwen2.5's
+  7:1, Llama-3.1-8B's 4:1) makes `repeat_kv` more expensive and should flip
+  *earlier*, so the constant is conservative for them — but that is reasoning,
+  not measurement. Re-run the benchmark on any new card before trusting it.
+- **Split-KV (FlashDecoding) kernels would remove the MHA-decode cliff**
+  entirely and are the real fix; they are absent from candle-flash-attn 0.10.1.
+  Upstream flash-attention has them (`flash_fwd_splitkv_*`). Adding them to the
+  vendored crate is the highest-value follow-on here.
+- **A pre-Ampere CUDA asset** remains possible if Turing owners ask for it, on
+  the v0.3.79 AVX2-baseline pattern. It would need a compute-capability probe in
+  `update.rs` before being wired into auto-update — `is_x86_feature_detected!`
+  has no CUDA equivalent, and handing an Ampere-only binary to a Turing card is
+  gotcha #246's unrecoverable shape. Not built: the CPU fallback means nobody is
+  stranded, only slower.

@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "{node} からの {model} を拒否しました：実際のモデルではなくローカルのバックアップコピーのようです",
   "activity.model_acquisition_failed": "{model} の取得に失敗しました: {detail}",
   "activity.model_cpu_fallback": "{model} のGPUメモリが不足したため、CPUに切り替えました（低速ですが動作します）",
+  "activity.model_cpu_fallback_gpu_too_old": "このグラフィックカードは古すぎて GPU に対応していません — {model} は CPU に切り替えました（低速ですが動作します）",
   "activity.model_discovered": "新しいモデルを発見：{model}",
   "activity.model_download_complete": "{model}のすべてのシャードが準備完了",
   "activity.model_load_skipped": "{model}の読み込みをスキップしました",

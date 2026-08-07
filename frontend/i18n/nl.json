@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "{model} van {node} geweigerd: lijkt een lokale back-upkopie, geen echt model",
   "activity.model_acquisition_failed": "Acquisitie van {model} mislukt: {detail}",
   "activity.model_cpu_fallback": "{model} had onvoldoende GPU-geheugen — overgeschakeld naar CPU (trager, maar werkend)",
+  "activity.model_cpu_fallback_gpu_too_old": "Deze videokaart is te oud voor GPU-ondersteuning — {model} is overgeschakeld naar de CPU (trager, maar werkend)",
   "activity.model_discovered": "Nieuw model ontdekt: {model}",
   "activity.model_download_complete": "Alle shards van {model} klaar",
   "activity.model_load_skipped": "Laden van {model} overgeslagen",

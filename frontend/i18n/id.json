@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "Menolak {model} dari {node}: tampak seperti salinan cadangan lokal, bukan model asli",
   "activity.model_acquisition_failed": "Akuisisi {model} gagal: {detail}",
   "activity.model_cpu_fallback": "{model} kehabisan memori GPU — beralih ke CPU (lebih lambat, tetapi berfungsi)",
+  "activity.model_cpu_fallback_gpu_too_old": "Kartu grafis ini terlalu lama untuk dukungan GPU — {model} beralih ke CPU (lebih lambat, tetapi tetap bekerja)",
   "activity.model_discovered": "Model baru ditemukan: {model}",
   "activity.model_download_complete": "Semua shard dari {model} siap",
   "activity.model_load_skipped": "Pemuatan {model} dilewati",

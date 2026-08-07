@@ -1214,6 +1214,45 @@ fn attention_scores_block(
     att.matmul(v)
 }
 
+// Compiled only where it is reachable: the CUDA dispatch (which needs
+// `flash-attn`) and the tests that pin the rule. Without a gate this is dead
+// code in every CPU build, and `#[allow(dead_code)]` would just hide that the
+// policy has no consumer if the dispatch ever stops calling it.
+#[cfg(any(feature = "flash-attn", test))]
+/// Minimum KV length at which flash-attention beats `standard_attention` for a
+/// single-token GQA decode step on CUDA.
+///
+/// Measured, not chosen — see the table in [`run_attention`]'s CUDA branch and
+/// the `flash_vs_standard_attention_on_cuda` benchmark at the bottom of this
+/// file. At 512 flash still loses (0.66x); at 1024 it wins (3.5x).
+pub(crate) const GQA_FLASH_DECODE_MIN_KV: usize = 1024;
+
+// Compiled only where it is reachable: the CUDA dispatch (which needs
+// `flash-attn`) and the tests that pin the rule. Without a gate this is dead
+// code in every CPU build, and `#[allow(dead_code)]` would just hide that the
+// policy has no consumer if the dispatch ever stops calling it.
+#[cfg(any(feature = "flash-attn", test))]
+/// Should a CUDA attention call take `standard_attention` rather than flash,
+/// on grounds of shape alone?
+///
+/// Extracted from the dispatch so the measured routing rule is pinned by tests
+/// that need no GPU. Getting this wrong is not a crash, it is a silent 4x-25x
+/// slowdown in generation — the failure mode that made the CPU crossover worth
+/// a gotcha entry (#255), reproduced on a different device.
+///
+/// Only answers the decode question; prefill (`q_len > 1`) always prefers
+/// flash, and the caller separately handles the offset-causal-mask fallback
+/// and the SWIFT/spec force-standard override.
+pub(crate) fn cuda_decode_prefers_standard(
+    q_len: usize,
+    k_len: usize,
+    n_head: usize,
+    n_kv_head: usize,
+) -> bool {
+    let is_gqa = n_head != n_kv_head;
+    q_len == 1 && !(is_gqa && k_len >= GQA_FLASH_DECODE_MIN_KV)
+}
+
 /// Unified attention dispatch: selects the best backend for the device.
 ///
 /// - **CPU**: Uses `candle_nn::cpu_flash_attention::run_flash_attn_cpu::<f32>()` which
@@ -1354,7 +1393,40 @@ pub(crate) fn run_attention(
             // flag. Fall back to standard matmul attention with the explicit mask.
             // Also taken when SWIFT/spec sessions force standard attention so
             // baseline + draft + verify share identical numerics.
-            if (k_len > q_len && q_len > 1) || force_standard {
+            //
+            // DECODE ROUTING — measured 2026-08-07 on an RTX 3070 (sm_86) with
+            // `flash_vs_standard_attention_on_cuda` at the bottom of this file.
+            // This is the same lesson as the CPU crossover above (gotcha #255):
+            // the right kernel is OPPOSITE for prefill and decode, and it turns
+            // on GQA. Shipping flash for everything, which is what the plain
+            // `q_len > 1` causal flag invites, makes generation far slower.
+            //
+            // ms per call, standard -> flash (min of 20, idle GPU):
+            //
+            //   phi-3.5  MHA 32/32 d96      llama-3.2  GQA 24/8 d128
+            //   kv  512  0.121 ->  0.511    kv  512  0.217 -> 0.326   0.66x
+            //   kv 1024  0.162 ->  3.012    kv 1024  2.501 -> 0.715   3.50x
+            //   kv 2048  0.235 ->  4.802    kv 2048  4.145 -> 2.935   1.41x
+            //   kv 4096  0.397 ->  9.622    kv 4096  5.895 -> 2.833   2.08x
+            //   kv 8192  0.702 -> 12.461    kv 8192  9.416 -> 4.791   1.97x
+            //
+            // * MHA: flash is 4x-25x SLOWER at every KV length, and the gap
+            //   widens with context. candle-flash-attn ships no split-KV
+            //   kernels, so a single query row launches a grid of only
+            //   (1 x n_head x batch) blocks and leaves most of the card idle,
+            //   while standard decode is two efficient GEMVs with `repeat_kv`
+            //   a no-op (n_head == n_kv_head).
+            // * GQA: the reverse above ~1k of context, because `repeat_kv` is
+            //   NOT a no-op there — standard materializes the cache expanded to
+            //   n_head every token, and its cost climbs with KV (0.217 -> 9.416)
+            //   while flash's stays roughly flat. Same mechanism as #255.
+            //
+            // 1024 is the measured crossover: at 512 flash still loses (0.66x),
+            // at 1024 it wins. Prefill is unconditional — flash won every
+            // prefill shape measured, 2.4x-7.8x.
+            let decode_prefers_standard =
+                cuda_decode_prefers_standard(q_len, k_len, n_head, n_kv_head);
+            if (k_len > q_len && q_len > 1) || decode_prefers_standard || force_standard {
                 return standard_attention(
                     q,
                     k,
@@ -1380,9 +1452,33 @@ pub(crate) fn run_attention(
 
             let softmax_scale = 1.0 / (head_dim as f32).sqrt();
 
-            // flash_attn handles GQA and causal masking natively
-            let out =
-                candle_flash_attn::flash_attn(&q_f16, &k_f16, &v_f16, softmax_scale, q_len > 1)?;
+            // flash_attn handles GQA and causal masking natively.
+            //
+            // Softcap must be threaded through explicitly: the plain
+            // `flash_attn` entry point hardcodes `softcap: None`, so a model
+            // that softcaps its attention logits — Gemma-2 caps at 50.0 —
+            // would get a DIFFERENT, silently wrong distribution here than on
+            // the CPU and standard paths, which both honour it. No error, no
+            // warning, just worse answers on one device. The windowed entry
+            // point takes it; `window_size_right = Some(0)` with
+            // `window_size_left = None` is exactly how `flash_attn` itself
+            // expresses `causal`, so the two arms differ only in the cap.
+            let causal_right = if q_len > 1 { Some(0) } else { None };
+            let out = match attn_logit_softcap {
+                Some(cap) => candle_flash_attn::flash_attn_alibi_windowed_softcap(
+                    &q_f16,
+                    &k_f16,
+                    &v_f16,
+                    None, // no ALiBi — RoPE models only
+                    softmax_scale,
+                    None, // unlimited left context
+                    causal_right,
+                    cap,
+                )?,
+                None => {
+                    candle_flash_attn::flash_attn(&q_f16, &k_f16, &v_f16, softmax_scale, q_len > 1)?
+                }
+            };
 
             // Output is BSHD — transpose to BHSD and cast back to F32
             out.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()
@@ -2294,5 +2390,412 @@ mod cuda_mlp_memory_probe {
         let v0 = probe.to_vec1::<f32>().unwrap()[0];
         assert!(v0.is_finite(), "output must be finite, got {v0}");
         eprintln!("OK — completed, first output element {v0:.6}");
+    }
+}
+
+/// The CUDA attention routing rule, pinned. Runs anywhere — no GPU needed.
+#[cfg(test)]
+mod cuda_attention_routing {
+    use super::*;
+
+    // phi-3.5-mini: MHA, 32 query heads and 32 KV heads.
+    const MHA: (usize, usize) = (32, 32);
+    // llama-3.2-3b: GQA, 24 query heads over 8 KV heads.
+    const GQA: (usize, usize) = (24, 8);
+
+    #[test]
+    fn mha_decode_always_takes_standard() {
+        // Measured 4x-25x faster than flash at EVERY KV length, because
+        // candle-flash-attn has no split-KV kernel and one query row cannot
+        // fill the card. There is no crossover to look for here.
+        for kv in [128, 512, 1024, 2048, 4096, 8192, 32768] {
+            assert!(
+                cuda_decode_prefers_standard(1, kv, MHA.0, MHA.1),
+                "MHA decode at kv={kv} must take standard"
+            );
+        }
+    }
+
+    #[test]
+    fn gqa_decode_switches_to_flash_at_the_measured_crossover() {
+        // Below the crossover standard still wins (0.66x at kv=512)...
+        for kv in [1, 128, 512, GQA_FLASH_DECODE_MIN_KV - 1] {
+            assert!(
+                cuda_decode_prefers_standard(1, kv, GQA.0, GQA.1),
+                "GQA decode at kv={kv} is below the crossover and must take standard"
+            );
+        }
+        // ...and above it flash wins, by more as context grows, because
+        // standard's repeat_kv expansion is rebuilt every token.
+        for kv in [GQA_FLASH_DECODE_MIN_KV, 2048, 4096, 8192, 32768] {
+            assert!(
+                !cuda_decode_prefers_standard(1, kv, GQA.0, GQA.1),
+                "GQA decode at kv={kv} is at/above the crossover and must take flash"
+            );
+        }
+    }
+
+    #[test]
+    fn prefill_is_never_routed_to_standard_by_this_rule() {
+        // Flash won every prefill shape measured, 2.4x-7.8x, for both
+        // attention layouts. The offset-causal-mask fallback is a SEPARATE
+        // condition in the caller and is not this function's business.
+        for (n_head, n_kv_head) in [MHA, GQA] {
+            for q in [2, 128, 512, 1536, 4096] {
+                assert!(
+                    !cuda_decode_prefers_standard(q, q, n_head, n_kv_head),
+                    "prefill q={q} must not be sent to standard by shape"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_crossover_is_a_gqa_only_concept() {
+        // The whole reason GQA crosses over is repeat_kv materialisation,
+        // which does not exist when n_head == n_kv_head. If a refactor ever
+        // makes MHA follow the same branch as GQA, this fails.
+        let kv = GQA_FLASH_DECODE_MIN_KV * 4;
+        assert!(cuda_decode_prefers_standard(1, kv, 32, 32), "MHA");
+        assert!(!cuda_decode_prefers_standard(1, kv, 32, 8), "GQA 4:1");
+        assert!(!cuda_decode_prefers_standard(1, kv, 32, 1), "MQA 32:1");
+    }
+}
+
+/// CUDA-only A/B of the two attention kernels, used to price flash-attention-2.
+///
+/// Ignored by default — needs a real GPU and the `flash-attn` feature. Run with:
+/// ```text
+/// CUDA_COMPUTE_CAP=86 cargo test --release \
+///   --no-default-features --features dev,claude-subscription,flash-attn \
+///   flash_vs_standard -- --ignored --nocapture
+/// ```
+///
+/// **Why a microbenchmark and not an end-to-end run.** Two separately-built
+/// binaries differ in more than the kernel, so an end-to-end delta between them
+/// is not attributable to attention (diagnosis rule 4: prove the mechanism
+/// fired). Here the same process runs both branches over identical tensors, and
+/// the only difference is `ForceStandardAttnGuard` — which is exactly the switch
+/// `SWARMLLM_FORCE_STANDARD_ATTN=1` exposes for whole-daemon measurement.
+///
+/// It also keeps the measurement off the user's desktop-driving GPU at any real
+/// scale: these shapes allocate tens of MB, not gigabytes (gotcha #251).
+///
+/// `Device::synchronize` around each timed region is not optional. CUDA launches
+/// are asynchronous, so timing without it measures how fast the queue accepts
+/// work — which would show any kernel as instantaneous.
+#[cfg(all(test, feature = "flash-attn"))]
+mod flash_vs_standard {
+    use super::*;
+    use crate::inference::attn_kernel::ForceStandardAttnGuard;
+    use candle_core::{Device, Tensor};
+
+    /// Upper-triangular causal mask, `[q_len, k_len]`, u8, 1 = masked.
+    ///
+    /// **Not optional, and getting it wrong invalidates everything.** The flash
+    /// branch passes `causal = q_len > 1` to the kernel, which applies the mask
+    /// internally; `standard_attention` applies only the mask it is handed. Run
+    /// the comparison with `mask: None` and the two sides compute *different
+    /// functions* — flash does causal attention, standard does full attention —
+    /// so the timings compare unequal work and the outputs disagree entirely.
+    /// The first version of this benchmark did exactly that; the numerics
+    /// assertion at the end is what caught it (relative diff 3.1, against an
+    /// F16 rounding budget of 0.05).
+    ///
+    /// Aligned q/k only: position i attends to keys 0..=i.
+    fn causal_mask(q_len: usize, k_len: usize, dev: &Device) -> Tensor {
+        assert_eq!(q_len, k_len, "this mask assumes aligned q/k");
+        let data: Vec<u8> = (0..q_len)
+            .flat_map(|i| (0..k_len).map(move |j| u8::from(j > i)))
+            .collect();
+        Tensor::from_vec(data, (q_len, k_len), dev).unwrap()
+    }
+
+    /// Fastest of `iters` runs, after `warmup` untimed runs.
+    ///
+    /// **Min, not median or mean** — the project's standing rule for this
+    /// machine (CLAUDE.md: "use min-of-N on an idle machine"). Every source of
+    /// error here is additive: a scheduler preemption, the desktop compositor
+    /// taking the GPU, a first-touch allocation. None of them can make a kernel
+    /// run faster than it can run, so the minimum is the least contaminated
+    /// estimate of the thing being compared.
+    ///
+    /// A median at 9 samples was NOT enough: the same llama prefill shape
+    /// measured 3.08 ms and 191 ms in two consecutive runs of this benchmark,
+    /// which would have been reported as a 62x difference in the kernel rather
+    /// than as the sampling artefact it was.
+    fn time_ms(warmup: usize, iters: usize, dev: &Device, mut f: impl FnMut()) -> f64 {
+        for _ in 0..warmup {
+            f();
+        }
+        dev.synchronize().unwrap();
+        let mut best = f64::INFINITY;
+        for _ in 0..iters {
+            let t = std::time::Instant::now();
+            f();
+            dev.synchronize().unwrap();
+            best = best.min(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        best
+    }
+
+    #[test]
+    #[ignore]
+    fn flash_vs_standard_attention_on_cuda() {
+        let dev = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("no CUDA device ({e}) — skipping");
+                return;
+            }
+        };
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &dev).unwrap();
+
+        // (label, n_head, n_kv_head, head_dim) — the two models the README
+        // benchmarks quote. Phi-3.5 is MHA, Llama-3.2 is 3:1 GQA, and the
+        // repeat_kv cost that dominates the CPU side only exists for GQA, so
+        // both shapes are needed before generalising.
+        let models: &[(&str, usize, usize, usize)] = &[
+            ("phi-3.5-mini  MHA 32/32 d96", 32, 32, 96),
+            ("llama-3.2-3b  GQA 24/8  d128", 24, 8, 128),
+        ];
+        // (label, q_len, kv_len). Prefill sends the whole prompt in one
+        // forward on a pipeline segment; decode is one query against a cache
+        // that grows with the conversation.
+        let shapes: &[(&str, usize, usize)] = &[
+            ("prefill  q=512  kv=512", 512, 512),
+            ("prefill  q=1536 kv=1536", 1536, 1536),
+            ("decode   q=1    kv=512", 1, 512),
+            ("decode   q=1    kv=1024", 1, 1024),
+            ("decode   q=1    kv=2048", 1, 2048),
+            ("decode   q=1    kv=3072", 1, 3072),
+            ("decode   q=1    kv=4096", 1, 4096),
+            ("decode   q=1    kv=8192", 1, 8192),
+        ];
+
+        // The right column is the SHIPPED dispatch, not "flash": since the
+        // routing rule landed, `run_attention` sends MHA decode and short-KV
+        // GQA decode to standard on purpose. A row at ~1.00x therefore means
+        // the router chose standard there, which is the intended outcome, not
+        // a null result. To re-derive the crossover itself, widen
+        // `GQA_FLASH_DECODE_MIN_KV` temporarily so flash is taken everywhere.
+        println!(
+            "\n{:<30} {:<24} {:>10} {:>10} {:>9}",
+            "model", "shape", "standard", "dispatch", "speedup"
+        );
+        println!("{}", "-".repeat(88));
+
+        for (mlabel, n_head, n_kv_head, head_dim) in models {
+            for (slabel, q_len, kv_len) in shapes {
+                let q = Tensor::randn(0f32, 1.0, (1, *n_head, *q_len, *head_dim), &dev).unwrap();
+                let k =
+                    Tensor::randn(0f32, 1.0, (1, *n_kv_head, *kv_len, *head_dim), &dev).unwrap();
+                let v =
+                    Tensor::randn(0f32, 1.0, (1, *n_kv_head, *kv_len, *head_dim), &dev).unwrap();
+
+                // The dispatch only reaches flash when q_len == kv_len or
+                // q_len == 1 — an offset causal mask (a warm prefix cache)
+                // cannot be expressed through flash_attn's boolean causal flag
+                // and falls back by design. Measuring those shapes would
+                // compare standard against itself and report a meaningless 1.0x.
+                assert!(
+                    q_len == kv_len || *q_len == 1,
+                    "{slabel} would fall back to standard on both sides"
+                );
+
+                // Decode (q_len == 1) needs no mask and flash is told
+                // `causal = false`, so both sides already agree there.
+                let mask = (*q_len > 1).then(|| causal_mask(*q_len, *kv_len, &dev));
+                let run = |force_standard: bool| {
+                    let _g = ForceStandardAttnGuard::new(force_standard);
+                    let out = run_attention(
+                        &q,
+                        &k,
+                        &v,
+                        mask.as_ref(),
+                        *n_head,
+                        *n_kv_head,
+                        *head_dim,
+                        &neg_inf,
+                        None,
+                    )
+                    .unwrap();
+                    // Force realisation — candle is lazy enough that dropping
+                    // an unread result can skip work.
+                    out.narrow(2, 0, 1).unwrap().sum_all().unwrap();
+                };
+
+                let std_ms = time_ms(5, 20, &dev, || run(true));
+                let dispatch_ms = time_ms(5, 20, &dev, || run(false));
+
+                println!(
+                    "{mlabel:<30} {slabel:<24} {std_ms:>9.3}ms {dispatch_ms:>9.3}ms {:>8.2}x",
+                    std_ms / dispatch_ms
+                );
+
+                // The routing rule, checked against the machine rather than
+                // against the comment describing it. Whatever the dispatch
+                // picks must not be materially worse than simply always using
+                // standard — otherwise the kernel choice is costing time, which
+                // is exactly the regression that shipping flash unconditionally
+                // would have caused (25x on MHA decode).
+                //
+                // 1.35x of headroom: these are sub-millisecond calls at the
+                // small shapes, where fixed launch overhead is a large fraction
+                // and run-to-run spread is real even at min-of-20.
+                assert!(
+                    dispatch_ms < std_ms * 1.35,
+                    "{mlabel} / {slabel}: the dispatch chose a kernel {:.2}x SLOWER than \
+                     standard ({dispatch_ms:.3} ms vs {std_ms:.3} ms). Check \
+                     `cuda_decode_prefers_standard` against the measured table above it.",
+                    dispatch_ms / std_ms
+                );
+            }
+        }
+
+        // Numerics, not just speed: flash runs in F16 while standard runs in
+        // F32, so the two must be checked to agree before any speed figure
+        // means anything. A fast wrong answer is not an optimisation.
+        let (n_head, n_kv_head, head_dim, q_len) = (24usize, 8usize, 128usize, 256usize);
+        let q = Tensor::randn(0f32, 1.0, (1, n_head, q_len, head_dim), &dev).unwrap();
+        let k = Tensor::randn(0f32, 1.0, (1, n_kv_head, q_len, head_dim), &dev).unwrap();
+        let v = Tensor::randn(0f32, 1.0, (1, n_kv_head, q_len, head_dim), &dev).unwrap();
+        // Causal on BOTH sides — see `causal_mask`. Flash applies it from the
+        // `causal` flag, standard only from this tensor.
+        let m = causal_mask(q_len, q_len, &dev);
+        let mask = Some(&m);
+        let std_out = {
+            let _g = ForceStandardAttnGuard::new(true);
+            run_attention(
+                &q, &k, &v, mask, n_head, n_kv_head, head_dim, &neg_inf, None,
+            )
+            .unwrap()
+        };
+        let flash_out = run_attention(
+            &q, &k, &v, mask, n_head, n_kv_head, head_dim, &neg_inf, None,
+        )
+        .unwrap();
+        assert_eq!(std_out.dims(), flash_out.dims(), "layout must match");
+
+        let diff = (&std_out - &flash_out)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let scale = std_out
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let rel = diff / scale.max(f32::MIN_POSITIVE);
+        println!(
+            "\nnumerics: max abs diff {diff:.3e} vs max |value| {scale:.3e} (relative {rel:.3e})"
+        );
+        // F16 carries ~3 decimal digits, and the flash path casts to it, so
+        // this cannot be tightened to the 1e-6 an F32-vs-F32 check would use.
+        assert!(
+            rel < 5e-2,
+            "flash and standard attention disagree by {rel:.3e} — beyond F16 rounding"
+        );
+
+        // Gemma-2 softcaps its attention logits at 50.0. `candle_flash_attn`'s
+        // plain entry point silently drops the cap, so before this was routed
+        // to the windowed+softcap entry point the GPU produced a different
+        // distribution from the CPU for that model — no error, just worse
+        // answers on one device. A cap small enough to bite (2.0) is used here
+        // so that dropping it would visibly change the result: at Gemma's own
+        // 50.0 most logits are already below the cap and the bug hides.
+        let softcap = 2.0f32;
+        let capped_std = {
+            let _g = ForceStandardAttnGuard::new(true);
+            run_attention(
+                &q,
+                &k,
+                &v,
+                mask,
+                n_head,
+                n_kv_head,
+                head_dim,
+                &neg_inf,
+                Some(softcap),
+            )
+            .unwrap()
+        };
+        let capped_flash = run_attention(
+            &q,
+            &k,
+            &v,
+            mask,
+            n_head,
+            n_kv_head,
+            head_dim,
+            &neg_inf,
+            Some(softcap),
+        )
+        .unwrap();
+        let cap_diff = (&capped_std - &capped_flash)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let cap_scale = capped_std
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let cap_rel = cap_diff / cap_scale.max(f32::MIN_POSITIVE);
+        println!("softcap={softcap}: relative diff {cap_rel:.3e}");
+        assert!(
+            cap_rel < 5e-2,
+            "flash ignores attn_logit_softcap — relative diff {cap_rel:.3e}. This is the \
+             Gemma-2 correctness bug: flash_attn() hardcodes softcap: None, so the cap must \
+             go through flash_attn_alibi_windowed_softcap instead."
+        );
+
+        // And the guard against a vacuous check: the cap must actually change
+        // the standard-path result at this magnitude, or the assertion above
+        // would pass whether or not flash honoured it (diagnosis rule 5).
+        //
+        // Compared ELEMENT-WISE against the uncapped output, not by max
+        // |value|. The first version of this guard used the latter and fired
+        // with an effect of exactly 0: attention output is a convex
+        // combination of V rows (softmax weights sum to 1), so its magnitude
+        // is bounded by max |V| whether or not the logits were capped. The cap
+        // changes which rows get weight, not how big the answer can be.
+        let cap_effect = (&capped_std - &std_out)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+            / cap_scale.max(f32::MIN_POSITIVE);
+        assert!(
+            cap_effect > 1e-2,
+            "softcap={softcap} barely changed the standard result ({cap_effect:.3e}), so the \
+             check above proves nothing — raise the logit magnitude or lower the cap"
+        );
+        println!("softcap changed the standard result by {cap_effect:.3e} (guard: check is live)");
     }
 }

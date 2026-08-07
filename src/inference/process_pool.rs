@@ -1140,6 +1140,16 @@ impl ModelProcessPool {
         if self.cpu_pinned_models.contains(model_id) {
             return 0;
         }
+        // A GPU older than this build's kernel floor cannot run a single
+        // forward, so sending a worker there produces a fatal CUDA error, a
+        // killed worker and a spawn-backoff loop — for every model, forever.
+        // Placing it on the CPU up front costs speed and keeps the node
+        // answering. `local_gpu_is_supported` is cached, so this stays a plain
+        // atomic load after the first call.
+        #[cfg(feature = "candle-cuda")]
+        if !crate::daemon::gpu_support::local_gpu_is_supported() {
+            return 0;
+        }
         self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -2697,28 +2707,57 @@ impl ModelProcessPool {
                 "Fatal worker error — killing worker to reclaim its device memory"
             );
 
-            // An OOM will repeat verbatim on the respawn — same model, same
-            // device, same allocation — so retrying on the GPU just burns
+            // Some GPU failures repeat verbatim on the respawn — same model,
+            // same device, same outcome — so retrying on the GPU just burns
             // another load. Pin the model to the CPU: slower, but it answers.
             let was_on_gpu = self.effective_gpu_layers(model_id) != 0;
-            if was_on_gpu && message.to_ascii_lowercase().contains("out of memory") {
+            let permanent = crate::inference::worker_ipc::permanent_gpu_failure(&message);
+            if let (true, Some(kind)) = (was_on_gpu, permanent) {
+                use crate::inference::worker_ipc::PermanentGpuFailure;
                 self.cpu_pinned_models.insert(model_id.clone());
+                let reason = match kind {
+                    PermanentGpuFailure::OutOfMemory => "GPU out of memory",
+                    PermanentGpuFailure::ArchitectureTooOld => {
+                        "GPU is older than this build's kernels"
+                    }
+                };
                 tracing::warn!(
                     model = %model_id,
-                    "GPU out of memory — pinning this model to CPU for the rest of this run"
+                    reason,
+                    "Pinning this model to CPU for the rest of this run"
                 );
                 if let Some(tx) = self.activity_tx.get() {
-                    let _ = tx.send(
-                        crate::daemon::state::ActivityEvent::new(
-                            "inference",
+                    // Distinct `kind` per cause, NOT one kind with two
+                    // messages: the frontend translates by kind
+                    // (`I18n.t('activity.' + kind)`) and only falls back to
+                    // this English text when the key is missing. Reusing
+                    // `model_cpu_fallback` would have told everyone outside
+                    // English that they had run out of GPU memory — sending
+                    // them to free VRAM that was never the problem.
+                    let (event_kind, text) = match kind {
+                        PermanentGpuFailure::OutOfMemory => (
                             "model_cpu_fallback",
                             format!(
                                 "{} ran out of GPU memory — switched to CPU (slower, but working)",
                                 model_id.0
                             ),
-                        )
-                        .with_model(model_id.0.clone())
-                        .with_toast("warning", 8000),
+                        ),
+                        // Phrased for someone who will not know what a compute
+                        // capability is, and who needs to know the node is
+                        // still working rather than what CUDA reported.
+                        PermanentGpuFailure::ArchitectureTooOld => (
+                            "model_cpu_fallback_gpu_too_old",
+                            format!(
+                                "This graphics card is too old for this version's GPU \
+                                 support — {} switched to CPU (slower, but working)",
+                                model_id.0
+                            ),
+                        ),
+                    };
+                    let _ = tx.send(
+                        crate::daemon::state::ActivityEvent::new("inference", event_kind, text)
+                            .with_model(model_id.0.clone())
+                            .with_toast("warning", 8000),
                     );
                 }
             }

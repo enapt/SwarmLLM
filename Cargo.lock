@@ -543,8 +543,6 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e759a688c81c784daf7557fae0dab7226010fa4f0c2bc2e44a220b1d1106af7f"
 dependencies = [
  "anyhow",
  "candle-core",

@@ -2,6 +2,41 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+**Prompts are read 2.8x to 7.4x faster on an NVIDIA graphics card, and replies
+inside a long conversation are up to 2x faster.** FlashAttention is back in the
+GPU builds, which is what the speed comes from.
+
+**This drops support for older NVIDIA cards.** GPU acceleration now needs an RTX
+30-series or newer (also RTX 40, RTX 50, and the data-centre A and H cards).
+The RTX 20-series and GTX 16-series are below what these kernels require. If you
+have one of those, **nothing breaks and there is nothing to do**: SwarmLLM checks
+your card when it starts, says plainly that it is using the processor instead,
+and carries on. On Windows, running a model on your own machine goes through
+Vulkan and is unaffected on any graphics card — it is inference split across
+several machines that needs CUDA.
+
+Without the check, those cards would have started up, reported "GPU detected",
+and then failed every single request with a CUDA error, because creating a
+graphics context succeeds on an old card and only loading the code fails.
+
+The speed-up is not uniform, and applying it everywhere would have made things
+worse. Producing each word of a reply uses a different shape of work than reading
+your prompt, and for that shape the fused method is up to 25x *slower* on some
+models — it cannot keep the card busy with only one word in flight. SwarmLLM now
+picks per model and per conversation length, from measurements recorded in the
+engineering notes.
+
+Also in this release:
+
+- **Fixed: Gemma-2 models produced subtly wrong output on a graphics card.** The
+  fused attention path discarded the attention-logit cap that Gemma-2 requires,
+  so the GPU computed a different result from the processor for the same input.
+  There was no error message; the answers were just worse.
+- Older cards that somehow get past the startup check now fall back to the
+  processor on the first failure instead of retrying forever.
+
 ## [0.3.81-alpha] — 2026-08-07
 
 Follows 0.3.79. **Processing a prompt is up to 3x faster, and replying inside a

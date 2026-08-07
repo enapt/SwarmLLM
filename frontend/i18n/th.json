@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "ปฏิเสธ {model} จาก {node}: ดูเหมือนสำเนาสำรองในเครื่อง ไม่ใช่โมเดลจริง",
   "activity.model_acquisition_failed": "การรับ {model} ล้มเหลว: {detail}",
   "activity.model_cpu_fallback": "{model} หน่วยความจำ GPU ไม่พอ — สลับไปใช้ CPU (ช้ากว่าแต่ยังทำงานได้)",
+  "activity.model_cpu_fallback_gpu_too_old": "การ์ดจอนี้เก่าเกินไปสำหรับการรองรับ GPU — {model} เปลี่ยนไปใช้ CPU (ช้ากว่า แต่ยังทำงานได้)",
   "activity.model_discovered": "ค้นพบโมเดลใหม่: {model}",
   "activity.model_download_complete": "shards ทั้งหมดของ {model} พร้อมแล้ว",
   "activity.model_load_skipped": "ข้ามการโหลด {model}",

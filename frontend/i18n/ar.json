@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "تم رفض {model} من {node}: يبدو أنه نسخة احتياطية محلية وليس نموذجًا حقيقيًا",
   "activity.model_acquisition_failed": "فشل الحصول على {model}: {detail}",
   "activity.model_cpu_fallback": "نفدت ذاكرة معالج الرسوميات لدى {model} — تم التبديل إلى المعالج المركزي (أبطأ، لكنه يعمل)",
+  "activity.model_cpu_fallback_gpu_too_old": "بطاقة الرسوميات هذه قديمة جدًا لدعم المعالج الرسومي — تم تحويل {model} إلى المعالج المركزي (أبطأ، لكنه يعمل)",
   "activity.model_discovered": "تم اكتشاف نموذج جديد: {model}",
   "activity.model_download_complete": "جميع شظايا {model} جاهزة",
   "activity.model_load_skipped": "تم تخطي تحميل {model}",

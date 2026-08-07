@@ -779,3 +779,40 @@ of the arithmetic but 45% of prompt-processing time, i.e. running 37x slower per
 MAC than the quantized matmul beside it. Reach for it before optimising anything
 in the forward path — the previous round tuned a matmul that turned out to be a
 quarter of the cost.
+
+## Attention-kernel A/B — `SWARMLLM_FORCE_STANDARD_ATTN=1`
+
+Forces every attention call in the process onto `standard_attention`, so the
+whole daemon runs without the fused kernel and nothing else changes. Pair a run
+with it against a run without it to price the fused path end to end:
+
+```
+SWARMLLM_FORCE_STANDARD_ATTN=1 swarmllm run -p 8899   # A: standard everywhere
+swarmllm run -p 8899                                  # B: normal dispatch
+```
+
+It sets the *initial* value of the per-thread override that
+`ForceStandardAttnGuard` manipulates, so the speculative-decoding paths that
+deliberately nest a `false` guard still behave correctly — a debug switch that
+changed the guard's semantics would be its own bug.
+
+**Why this exists rather than two builds.** Two separately-built binaries differ
+in link order, inlining and codegen, so a difference between them is not
+attributable to the kernel (diagnosis rule 4 — prove the mechanism fired, not
+just that the number moved). One binary, one branch, identical weights is the
+only comparison that isolates it. This is how the CPU prefill/decode crossovers
+in `run_attention` were measured, and how flash-attention-2 was priced on CUDA
+when it was re-enabled.
+
+For the kernel in isolation, without a daemon or a model, there is a microbench
+at the bottom of `src/inference/layers/mod.rs`:
+
+```
+CUDA_COMPUTE_CAP=86 cargo test --release \
+  --no-default-features --features dev,claude-subscription,flash-attn \
+  flash_vs_standard -- --ignored --nocapture
+```
+
+It sweeps prefill and decode shapes for an MHA and a GQA model, and asserts the
+two kernels agree numerically before reporting any speed figure — flash runs in
+F16 where standard runs in F32, and a fast wrong answer is not an optimisation.

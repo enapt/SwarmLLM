@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "已拒绝来自 {node} 的 {model}：看起来是本地备份副本，而非真实模型",
   "activity.model_acquisition_failed": "获取 {model} 失败:{detail}",
   "activity.model_cpu_fallback": "{model} 显存不足，已切换到 CPU（速度较慢，但可正常运行）",
+  "activity.model_cpu_fallback_gpu_too_old": "此显卡太旧，不支持 GPU 加速 — {model} 已切换到 CPU（较慢，但可正常运行）",
   "activity.model_discovered": "发现新模型：{model}",
   "activity.model_download_complete": "{model} 的所有分片已就绪",
   "activity.model_load_skipped": "跳过加载 {model}",

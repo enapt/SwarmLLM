@@ -2,6 +2,7 @@
 resolver = "2"
 members = [".", "crates/swarmllm-frontend", "crates/swarmllm-types"]
 exclude = [
+    "vendor/candle-flash-attn",
     "vendor/candle-paged-attention",
     "vendor/libp2p-request-response",
     "vendor/candle",
@@ -106,7 +107,14 @@ cudarc = { version = "0.19", features = ["dynamic-loading"], optional = true }
 candle-core = { version = "0.10", default-features = false }
 candle-nn = { version = "0.10", default-features = false }
 candle-transformers = { version = "0.10", default-features = false }
-candle-flash-attn = { version = "0.10", optional = true }
+# Vendored: two patches, both annotated in the files themselves.
+#   1. Links the CUDA runtime STATICALLY. Upstream's `dylib=cudart` puts a hard
+#      libcudart dependency on the binary, which is exactly what the
+#      `dynamic-loading` choice above exists to avoid — a release binary must
+#      need only the NVIDIA display driver.
+#   2. Drops the 18 bf16 kernels. `run_attention` casts to f16 before every
+#      call, so they had no reachable caller and were half the kernel compile.
+candle-flash-attn = { path = "vendor/candle-flash-attn", optional = true }
 
 # Database
 redb = "4"
@@ -189,13 +197,27 @@ candle-cuda = [
 ]
 flash-attn = ["candle-cuda", "dep:candle-flash-attn"]
 
-# Linux/macOS: full CUDA (llama.cpp CUDA + candle CUDA).
-# flash-attn is NOT included by default — its build.rs compiles a large
-# matrix of CUDA kernels (head-dim × softcap × causal × splitkv) which
-# added ~60 min to CI builds and pushed Linux CUDA past 3h. Testers who
-# want flash-attention-2 kernels opt in explicitly with
-# `--features cuda,flash-attn`.
-cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda"]
+# Linux/macOS: full CUDA (llama.cpp CUDA + candle CUDA + flash-attention-2).
+#
+# flash-attn was dropped from this list in 2026-04 for two reasons, BOTH of
+# which have since expired:
+#
+#   * "it adds ~60 min to CI and pushed Linux CUDA past 3h" — fixed three
+#     months later by `cache-warm.yml`, not by dropping the feature. The
+#     kernels land in `target/`, which rust-cache caches, so it is a one-time
+#     cost per cache key rather than a per-release one.
+#   * "mostly an A100/H100 win" — backwards. FlashAttention's advantage comes
+#     from not round-tripping the attention matrix through HBM, so the SLOWER
+#     the memory the bigger the win; consumer Ampere benefits more than a
+#     data-centre card, not less.
+#
+# The real cost is the one this re-enable is paying deliberately: every
+# candle-flash-attn kernel is `_sm80`, so the CUDA builds now target compute
+# capability 8.0 (Ampere) and pre-Ampere NVIDIA cards — GTX 16-series and
+# RTX 20-series — no longer get the candle GPU path. They fall back to CPU
+# with an explicit message rather than a CUDA error; see
+# `daemon::gpu_support::compute_cap_supported`.
+cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda", "flash-attn"]
 
 # llama.cpp with Vulkan backend — works on NVIDIA, AMD, and Intel GPUs without CUDA install.
 # Runtime requirement: vulkan-1.dll (bundled with standard GPU drivers — no user action needed).
@@ -206,7 +228,13 @@ llama-vulkan = ["llama", "llama-cpp-2/vulkan"]
 # candle via CUDA dynamic-loading (NVIDIA split/distributed inference).
 # Installer bundles NVIDIA redist DLLs next to swarmllm-gpu.exe so end users
 # need only the GeForce driver installed (no CUDA Toolkit).
-windows-gpu = ["llama-vulkan", "candle-cuda"]
+#
+# flash-attn is included here for the same reason as `cuda` above, and it is
+# only the candle half that it affects: local inference on this build goes
+# through llama.cpp/Vulkan, which is unchanged and still runs on every GPU
+# vendor including pre-Ampere NVIDIA. What a Turing owner loses on Windows is
+# the candle split/distributed path, not the ability to run a model locally.
+windows-gpu = ["llama-vulkan", "candle-cuda", "flash-attn"]
 
 # Future — wgpu/WebGPU backend for candle (cross-platform GPU for split/distributed inference).
 # Would enable NVIDIA, AMD, and Intel GPU acceleration for distributed inference on all platforms

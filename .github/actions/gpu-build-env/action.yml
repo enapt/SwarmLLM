@@ -59,8 +59,16 @@ runs:
   - name: Rust cache
     uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
     with:
+      # `gpuarchN` is bumped whenever the GPU build's *meaning* changes without
+      # its cache-key inputs changing. That is the case here: `--features cuda`
+      # is the same string but now pulls in candle-flash-attn, and
+      # CUDA_COMPUTE_CAP moved 75 -> 80, neither of which appears in the key.
+      # cargo would rebuild what it must (both build scripts declare
+      # `rerun-if-env-changed=CUDA_COMPUTE_CAP`), so this is not a correctness
+      # fix — it stops the cache carrying a target/ full of dead sm_75 objects
+      # forward for the rest of the project's life.
       shared-key: >-
-        release-${{ inputs.target }}-${{ inputs.features }}-gpuarch3${{
+        release-${{ inputs.target }}-${{ inputs.features }}-gpuarch4${{
         inputs.vulkan == 'true' && format('-vk{0}', inputs.vulkan-sdk-version) || '' }}
   - name: Install system dependencies (Linux)
     if: runner.os == 'Linux'

@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "Rejected {model} from {node}: looks like a local backup copy, not a real model",
   "activity.model_acquisition_failed": "Acquisition of {model} failed: {detail}",
   "activity.model_cpu_fallback": "{model} ran out of GPU memory — switched to CPU (slower, but working)",
+  "activity.model_cpu_fallback_gpu_too_old": "This graphics card is too old for GPU support — {model} switched to CPU (slower, but working)",
   "activity.model_discovered": "New model discovered: {model}",
   "activity.model_download_complete": "All shards of {model} ready",
   "activity.model_load_skipped": "Skipped loading {model}",

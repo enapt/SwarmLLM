@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "{model} från {node} avvisades: ser ut som en lokal säkerhetskopia, inte en riktig modell",
   "activity.model_acquisition_failed": "Hämtning av {model} misslyckades: {detail}",
   "activity.model_cpu_fallback": "{model} fick slut på GPU-minne — växlade till CPU (långsammare, men fungerar)",
+  "activity.model_cpu_fallback_gpu_too_old": "Det här grafikkortet är för gammalt för GPU-stöd — {model} växlade till CPU (långsammare, men fungerar)",
   "activity.model_discovered": "Ny modell hittad: {model}",
   "activity.model_download_complete": "Alla shards av {model} klara",
   "activity.model_load_skipped": "Hoppade över att ladda {model}",

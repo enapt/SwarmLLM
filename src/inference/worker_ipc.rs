@@ -503,6 +503,54 @@ pub fn worker_error_is_fatal(message: &str) -> bool {
     FATAL_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
+/// Why a GPU failure will repeat verbatim if the same model is retried on the
+/// same device — i.e. why the model should be moved to the CPU instead.
+///
+/// Distinct from [`worker_error_is_fatal`], which asks only whether the WORKER
+/// must be recycled. A transient fatal error (an illegal access from a race)
+/// deserves a respawn on the GPU; these two do not, because nothing about the
+/// retry differs from the attempt that just failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermanentGpuFailure {
+    /// The allocation does not fit, and the retry would request the same bytes.
+    OutOfMemory,
+    /// The card is older than the architecture this build's kernels target, so
+    /// the driver has no binary it can load. Reachable when the startup probe
+    /// in `daemon::gpu_support` could not read the capability (no nvidia-smi,
+    /// NVML mismatch) and so left the GPU enabled.
+    ArchitectureTooOld,
+}
+
+/// Classify a fatal worker error as permanently-GPU-fatal, if it is one.
+///
+/// `None` means "retry on the GPU is still reasonable" — the caller respawns
+/// the worker as before rather than degrading the model to the CPU.
+pub fn permanent_gpu_failure(message: &str) -> Option<PermanentGpuFailure> {
+    let lower = message.to_ascii_lowercase();
+    // The arch check runs first: CUDA_ERROR_NO_BINARY_FOR_GPU never co-occurs
+    // with an OOM, but if a chained error mentioned both, the architecture is
+    // the one that no amount of freed memory will fix.
+    const ARCH_PATTERNS: &[&str] = &[
+        // Driver API, as candle surfaces it.
+        "no_binary_for_gpu",
+        "no binary for gpu",
+        // Runtime API wording for the same condition.
+        "no kernel image is available",
+        "invalid_ptx",
+        "invalid ptx",
+        "unsupported ptx version",
+        "invalid device function",
+    ];
+    if ARCH_PATTERNS.iter().any(|p| lower.contains(p)) {
+        return Some(PermanentGpuFailure::ArchitectureTooOld);
+    }
+    const OOM_PATTERNS: &[&str] = &["out of memory", "out_of_memory", "outofmemory"];
+    if OOM_PATTERNS.iter().any(|p| lower.contains(p)) {
+        return Some(PermanentGpuFailure::OutOfMemory);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,6 +574,62 @@ mod tests {
         assert!(worker_error_is_fatal(
             "Failed to allocate 4096 MB on device 0"
         ));
+    }
+
+    #[test]
+    fn an_architecture_mismatch_is_fatal_and_permanent() {
+        // What a pre-Ampere card produces once the build targets sm_80: the
+        // context is created fine and module load is what fails. The worker
+        // must be recycled AND the model moved off the GPU — respawning it
+        // there reproduces this exactly, for every model, forever.
+        let driver = "Forward: Cuda(DriverError(CUDA_ERROR_NO_BINARY_FOR_GPU, \
+                      \"no kernel image is available for execution on the device\"))";
+        assert!(worker_error_is_fatal(driver));
+        assert_eq!(
+            permanent_gpu_failure(driver),
+            Some(PermanentGpuFailure::ArchitectureTooOld)
+        );
+
+        for msg in [
+            "CUDA_ERROR_INVALID_PTX",
+            "the provided PTX was compiled with an unsupported PTX version",
+            "cudaErrorInvalidDeviceFunction: invalid device function",
+            "no kernel image is available for execution on the device",
+        ] {
+            assert_eq!(
+                permanent_gpu_failure(msg),
+                Some(PermanentGpuFailure::ArchitectureTooOld),
+                "input {msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oom_is_permanent_but_classified_separately_from_arch() {
+        // The two get different user-facing copy, so the classifier must not
+        // collapse them — telling someone with a 2060 that they ran out of
+        // memory would send them to free VRAM that was never the problem.
+        assert_eq!(
+            permanent_gpu_failure(
+                "Forward: Cuda(DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\"))"
+            ),
+            Some(PermanentGpuFailure::OutOfMemory)
+        );
+    }
+
+    #[test]
+    fn a_transient_fatal_error_still_retries_on_the_gpu() {
+        // Fatal (recycle the worker) but NOT permanent (the respawn may well
+        // succeed). Pinning these to the CPU would silently halve throughput
+        // for the rest of the run over a one-off fault.
+        for msg in [
+            "cuda error: an illegal memory access was encountered",
+            "misaligned address",
+            "device-side assert triggered",
+        ] {
+            assert!(worker_error_is_fatal(msg), "input {msg:?}");
+            assert_eq!(permanent_gpu_failure(msg), None, "input {msg:?}");
+        }
     }
 
     #[test]

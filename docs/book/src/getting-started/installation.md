@@ -16,6 +16,21 @@ Download the right file for your system from the [GitHub Releases page](https://
 
 > **Not sure which Mac?** Apple menu > "About This Mac." If it says "Apple M1" (or M2/M3/etc.), pick Apple Silicon. If it says "Intel," pick Intel.
 
+> **Which NVIDIA cards get GPU acceleration?** RTX 30-series and newer (also
+> RTX 40, RTX 50, and the A/H data-centre cards). The RTX 20-series, GTX
+> 16-series and anything older are below the requirement of the FlashAttention
+> kernels SwarmLLM ships, which is what makes attention fast.
+>
+> **An older card is not a problem** — nothing breaks and there is nothing to
+> configure. SwarmLLM checks the card when it starts, tells you in the log and
+> on the dashboard that it is using the processor instead, and carries on. On
+> Windows, running a model locally goes through Vulkan and works on any GPU
+> regardless; the CUDA requirement applies to inference split across several
+> machines.
+>
+> To check your card: `nvidia-smi --query-gpu=name,compute_cap --format=csv`.
+> A number of 8.0 or higher gets GPU acceleration.
+
 ## Install & Run
 
 ### Windows

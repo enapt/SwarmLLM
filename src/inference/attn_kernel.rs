@@ -13,10 +13,40 @@
 //! and verify all share the matmul path. The guard restores the previous
 //! flag value on drop, composing safely with nested calls.
 
+//! ## `SWARMLLM_FORCE_STANDARD_ATTN=1`
+//!
+//! Sets the *initial* value of the override on every thread, which makes the
+//! whole process take `standard_attention` and nothing else change. That is the
+//! only honest way to price an attention kernel: two separately-built binaries
+//! differ in more than the kernel (link order, inlining, codegen), so a
+//! difference between them is not attributable. Same binary, same weights, one
+//! branch — the comparison the CPU-side crossovers in
+//! [`crate::inference::layers::run_attention`] were measured with, and the one
+//! that priced flash-attention-2 on CUDA when it was re-enabled.
+//!
+//! It sets the initial value rather than OR-ing into the result so that
+//! [`ForceStandardAttnGuard`]'s nested `false` still works — a debugging switch
+//! that quietly changed the guard's semantics would be its own bug.
+
 use std::cell::Cell;
 
+/// Whether `SWARMLLM_FORCE_STANDARD_ATTN` asks every thread to start forced.
+///
+/// Read once per process: the environment cannot change under a running daemon,
+/// and this is consulted once per attention call.
+fn env_forces_standard() -> bool {
+    use std::sync::OnceLock;
+    static FORCED: OnceLock<bool> = OnceLock::new();
+    *FORCED.get_or_init(|| {
+        matches!(
+            std::env::var("SWARMLLM_FORCE_STANDARD_ATTN").as_deref(),
+            Ok("1") | Ok("true")
+        )
+    })
+}
+
 thread_local! {
-    static FORCE_STANDARD_ATTN: Cell<bool> = const { Cell::new(false) };
+    static FORCE_STANDARD_ATTN: Cell<bool> = Cell::new(env_forces_standard());
 }
 
 /// Returns `true` if the current thread has the standard-attention override

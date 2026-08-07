@@ -405,6 +405,34 @@ pub(crate) fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
     }
 }
 
+/// Detect the GPU's CUDA compute capability via nvidia-smi.
+///
+/// Separate from [`detect_gpu_nvidia_smi`] because it is asked exactly once, at
+/// startup, and only by CUDA builds — folding it into the VRAM query would make
+/// every caller of that pay for a field they do not use.
+///
+/// `None` means "could not tell", never "too old": nvidia-smi missing, an NVML
+/// version mismatch, or an unrecognised format all land here, and
+/// [`crate::daemon::gpu_support`]'s callers must leave the GPU alone in that
+/// case. A working card sent to the CPU because a subprocess misbehaved would
+/// be a worse bug than the one the probe exists to prevent.
+///
+/// Only compiled for CUDA builds: a build with no CUDA kernels has no
+/// capability floor to compare against, so asking would be meaningless work.
+#[cfg(feature = "candle-cuda")]
+pub(crate) fn detect_gpu_compute_cap() -> Option<(u32, u32)> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Multi-GPU hosts print one line per card. We only ever bind device 0.
+    crate::daemon::gpu_support::parse_compute_cap(text.lines().next()?)
+}
+
 /// Query live GPU VRAM usage in MB via nvidia-smi.
 ///
 /// Called on each auto-manage tick (~5 min) for accurate VRAM pressure.

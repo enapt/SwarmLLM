@@ -639,6 +639,63 @@ assembly.
 8. Identify standby nodes per segment
 9. Send PipelineAssignment → all nodes ACK → begin forwarding
 
+### GPU Capability Floor
+
+CUDA builds compile kernels for **compute capability 8.0** (Ampere: RTX 30-series
+and newer). This is FlashAttention's own requirement — every `candle-flash-attn`
+kernel source is `_sm80` and uses Ampere async-copy — and `flash-attn` is part of
+both the `cuda` and `windows-gpu` features.
+
+The floor is stated in four places that must agree, enforced by
+`compute_cap_matches_release_workflow` in `tests/repo_consistency.rs`:
+`daemon::gpu_support::MIN_COMPUTE_CAP` (runtime) and `CUDA_COMPUTE_CAP` in
+`release.yml`, `cache-warm.yml`, `ci.yml` (build). A second test,
+`flash_attn_and_the_compute_cap_floor_agree`, ties the floor to the feature in
+both directions — the floor is only worth paying for *because* of flash-attn.
+
+**Detection, not failure.** `Device::cuda_if_available` succeeds on a pre-Ampere
+card; only module load fails, and it fails per-request with
+`CUDA_ERROR_NO_BINARY_FOR_GPU`. Without a probe such a node starts cleanly,
+logs "GPU detected", advertises itself to the swarm as a GPU node, and then
+fails everything. So:
+
+- `daemon::gpu_support::local_gpu_is_supported()` probes the capability once at
+  startup via `nvidia-smi --query-gpu=compute_cap` and caches it. An unreadable
+  capability means *unknown*, never *unsupported* — a working card must never be
+  demoted because a subprocess misbehaved.
+- `ModelProcessPool::effective_gpu_layers` returns 0 for an unsupported card, so
+  workers spawn on the CPU. This is the same choke point that handles the
+  `gpu_layers` config and OOM CPU-pinning.
+- `worker_ipc::permanent_gpu_failure` classifies an architecture-mismatch error
+  as permanently GPU-fatal (distinct from OOM, which gets different user-facing
+  copy), so a card that slips past the probe falls back on first failure rather
+  than crash-looping. The two causes use **different ActivityEvent kinds** —
+  `model_cpu_fallback` and `model_cpu_fallback_gpu_too_old` — because the
+  frontend translates by kind, and one message must not be shown for the other.
+
+`vendor/candle-flash-attn` carries two patches: static `cudart_static` (upstream
+links it dynamically, which would put a hard `libcudart` dependency on a binary
+that today needs only the display driver), and the 18 bf16 kernels removed
+(`run_attention` casts to f16 before every call).
+
+### Attention Kernel Selection
+
+`inference::layers::run_attention` picks per device AND per shape. The rule is
+measured, and it is **opposite for prefill and decode on both devices**:
+
+| | prefill (`q_len > 1`) | decode (`q_len == 1`) |
+|---|---|---|
+| CPU | standard | fused if GQA, standard if MHA |
+| CUDA | flash | flash if GQA **and** `k_len >= 1024`, else standard |
+
+The CUDA decode rule lives in `cuda_decode_prefers_standard` and is pinned by
+unit tests that need no GPU. Shipping flash unconditionally would have cost up to
+**25x per attention call** on MHA decode: candle-flash-attn has no split-KV
+kernel, so a single query row cannot fill the card. The GQA exception exists
+because `standard_attention` materializes the `repeat_kv` expansion every token,
+a cost that grows with context. See `docs/FUTURE_WORK.md` for the full table and
+`SWARMLLM_FORCE_STANDARD_ATTN=1` in `docs/DIAGNOSTICS.md` for the A/B switch.
+
 ### Inference Correctness
 
 **Stop sequence handling**: User-provided stop sequences (`stop` in OpenAI, `stop_sequences` in Anthropic) are enforced in all three inference execution paths:
@@ -1787,7 +1844,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1274 translation keys (1276 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1275 translation keys (1277 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
 

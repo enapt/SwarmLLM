@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "{node} से {model} अस्वीकृत: यह असली मॉडल नहीं, स्थानीय बैकअप प्रति लगती है",
   "activity.model_acquisition_failed": "{model} प्राप्त करना विफल: {detail}",
   "activity.model_cpu_fallback": "{model} की GPU मेमोरी समाप्त हो गई — CPU पर स्विच किया गया (धीमा, लेकिन काम कर रहा है)",
+  "activity.model_cpu_fallback_gpu_too_old": "यह ग्राफ़िक्स कार्ड GPU समर्थन के लिए बहुत पुराना है — {model} CPU पर स्विच हो गया (धीमा, लेकिन काम कर रहा है)",
   "activity.model_discovered": "नया मॉडल मिला: {model}",
   "activity.model_download_complete": "{model} के सभी शार्ड तैयार",
   "activity.model_load_skipped": "{model} लोड करना छोड़ा गया",

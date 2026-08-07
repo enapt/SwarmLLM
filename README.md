@@ -62,11 +62,19 @@ Your browser opens to `localhost:8800`. The setup wizard auto-detects your hardw
 | Platform | File | Notes |
 |----------|------|-------|
 | **Windows x86_64** | **`SwarmLLM-Setup.exe`** | **Recommended** — installer auto-detects GPU (NVIDIA / AMD / Intel) |
-| Linux x86_64 + CUDA | `swarmllm-linux-x86_64-cuda.tar.gz` | NVIDIA GPU acceleration |
+| Linux x86_64 + CUDA | `swarmllm-linux-x86_64-cuda.tar.gz` | NVIDIA GPU acceleration — **RTX 30-series or newer** |
 | Linux x86_64 | `swarmllm-linux-x86_64.tar.gz` | CPU inference |
 | Windows x86_64 (GPU) | `swarmllm-windows-x86_64-gpu.zip` | Raw binary: Vulkan + CUDA static |
 | Windows x86_64 (CPU) | `swarmllm-windows-x86_64-cpu.zip` | Raw binary: CPU-only fallback |
 | macOS Apple Silicon | `swarmllm-macos-aarch64.tar.gz` | CPU inference (Metal planned) |
+
+> **NVIDIA GPU acceleration needs an RTX 30-series or newer** (compute
+> capability 8.0+ — Ampere, Ada, Blackwell; the RTX 20-series and GTX 16-series
+> are below it). This is FlashAttention's own requirement, and it is what makes
+> attention fast enough to be worth shipping. **Older cards are not left
+> broken**: SwarmLLM detects them at startup, says so in plain language, and
+> runs on the processor instead. On Windows, local inference goes through Vulkan
+> and is unaffected on any GPU — it is the distributed path that needs CUDA.
 
 See the [Getting Started Guide](https://enapt.github.io/SwarmLLM/getting-started.html) for platform-specific instructions, or [Installation](#installation) below for package managers, Docker, and source builds.
 
@@ -247,6 +255,15 @@ CPU only, Llama-3.2 3B Q4_K_M — this is where recent work landed:
 
 Generating inside a long conversation improved separately: at ~1,150 tokens of
 context a reply went from 1368 ms per word to **249 ms**.
+
+**On an NVIDIA card, FlashAttention makes reading your prompt 2.8–7.4× faster**
+(RTX 3070, measured per attention call, min of 20). Producing each word of the
+reply is a different shape of work: it speeds up 1.4–2.0× on models that share
+key/value heads across queries — Llama-3.2, Qwen2.5 — and is deliberately left
+on the previous method for models that do not, such as Phi-3.5, where the fused
+kernel is slower. The GPU figures in the table above are generation speed on a
+short conversation and are therefore roughly unchanged for Phi-3.5; end-to-end
+GPU numbers across models have not yet been re-measured on this build.
 
 > **CPU figures from before v0.3.79 are not comparable.** Release binaries were
 > compiled without the vectorised quantized kernels, which cost roughly 3× on

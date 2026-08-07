@@ -503,3 +503,112 @@ fn cache_warm_mirrors_the_release_matrix() {
         problems.join("\n  ")
     );
 }
+
+/// Every `CUDA_COMPUTE_CAP: ... '<NN>' ...` value a workflow pins, in file order.
+///
+/// The workflows set it inside a GitHub expression rather than as a bare value
+/// (`${{ (matrix.cuda_linux || matrix.cuda_windows) && '80' || '' }}`), so the
+/// digits are pulled out of the quoted branch. An empty result is a hard
+/// failure: a check that silently stops finding anything is worse than no check.
+fn pinned_compute_caps(file: &str) -> Vec<String> {
+    let path = repo_root().join(".github/workflows").join(file);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {file}: {e}"));
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("CUDA_COMPUTE_CAP:") else {
+            continue;
+        };
+        // Either `"80"` / `'80'` directly, or the first quoted run of digits
+        // inside the expression. Both reduce to "first quoted number".
+        let digits: String = rest
+            .split(['\'', '"'])
+            .find(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !digits.is_empty(),
+            "{file}: found a CUDA_COMPUTE_CAP line with no quoted number in it \
+             ({line:?}) — the shape changed, so this test has stopped checking"
+        );
+        found.push(digits);
+    }
+    assert!(
+        !found.is_empty(),
+        "{file}: no CUDA_COMPUTE_CAP pin found at all — either the key was \
+         renamed or the build has stopped pinning it, and candle-kernels then \
+         auto-detects the BUILDER's GPU (or panics with `ParseIntError` on a \
+         runner that has none)"
+    );
+    found
+}
+
+/// The compute-capability floor is stated in four places that cannot disagree.
+///
+/// `MIN_COMPUTE_CAP` decides at RUNTIME whether to route a card to the CPU;
+/// `CUDA_COMPUTE_CAP` decides at BUILD time which kernels exist. If the
+/// constant is lower than the build, cards that cannot run a single forward are
+/// sent to the GPU anyway and every request fails with
+/// `CUDA_ERROR_NO_BINARY_FOR_GPU`. If it is higher, working cards are silently
+/// demoted to the CPU and nobody finds out except by wondering why it is slow.
+///
+/// cache-warm.yml matters for a third reason: it shares one rust-cache key with
+/// release.yml, so a divergent value there means the release restores a cache
+/// built for a different architecture.
+#[test]
+fn compute_cap_matches_release_workflow() {
+    let expected = format!(
+        "{}{}",
+        swarmllm::daemon::gpu_support::MIN_COMPUTE_CAP.0,
+        swarmllm::daemon::gpu_support::MIN_COMPUTE_CAP.1
+    );
+
+    let mut problems = Vec::new();
+    for file in ["release.yml", "cache-warm.yml", "ci.yml"] {
+        for pinned in pinned_compute_caps(file) {
+            if pinned != expected {
+                problems.push(format!(
+                    "{file} builds kernels for compute capability {pinned}, but \
+                     daemon::gpu_support::MIN_COMPUTE_CAP is {expected}"
+                ));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "the compute-capability floor disagrees across {} place(s):\n  {}\n\
+         Both must move together — see src/daemon/gpu_support.rs.",
+        problems.len(),
+        problems.join("\n  ")
+    );
+}
+
+/// FlashAttention is the whole reason the floor is 8.0, so the two must not
+/// drift apart in either direction.
+///
+/// Dropping `flash-attn` from `cuda` while leaving the floor at 80 would keep
+/// pre-Ampere cards excluded for nothing — the exact trade this change accepted
+/// only because it bought something. Adding it back to a build below 8.0 does
+/// not compile: every `candle-flash-attn` kernel source is `_sm80`.
+#[test]
+fn flash_attn_and_the_compute_cap_floor_agree() {
+    let manifest =
+        std::fs::read_to_string(repo_root().join("Cargo.toml")).expect("read Cargo.toml");
+    let cuda_line = manifest
+        .lines()
+        .find(|l| l.trim_start().starts_with("cuda = ["))
+        .expect("no `cuda = [...]` feature in Cargo.toml — was it renamed?");
+
+    let floor_is_ampere = swarmllm::daemon::gpu_support::MIN_COMPUTE_CAP >= (8, 0);
+    let has_flash = cuda_line.contains("flash-attn");
+
+    assert_eq!(
+        has_flash,
+        floor_is_ampere,
+        "the `cuda` feature {} flash-attn but MIN_COMPUTE_CAP is {:?}.\n\
+         flash-attn REQUIRES 8.0 (its kernels are all `_sm80`), and a floor of \
+         8.0 is only worth paying for BECAUSE of flash-attn. Change both or \
+         neither.\n  cuda = {cuda_line}",
+        if has_flash { "includes" } else { "omits" },
+        swarmllm::daemon::gpu_support::MIN_COMPUTE_CAP,
+    );
+}

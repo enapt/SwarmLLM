@@ -41,6 +41,7 @@
   "activity.manifest_rejected_backup": "{model} von {node} abgelehnt: sieht aus wie eine lokale Sicherungskopie, kein echtes Modell",
   "activity.model_acquisition_failed": "Beschaffung von {model} fehlgeschlagen: {detail}",
   "activity.model_cpu_fallback": "{model} hatte zu wenig GPU-Speicher — auf CPU umgestellt (langsamer, aber funktionsfähig)",
+  "activity.model_cpu_fallback_gpu_too_old": "Diese Grafikkarte ist zu alt für GPU-Unterstützung — {model} wurde auf die CPU umgestellt (langsamer, aber funktionsfähig)",
   "activity.model_discovered": "Neues Modell entdeckt: {model}",
   "activity.model_download_complete": "Alle Shards von {model} bereit",
   "activity.model_load_skipped": "Laden von {model} übersprungen",
