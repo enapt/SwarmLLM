@@ -6735,3 +6735,64 @@ contiguity-aware acquisition anyway** — nothing in `auto_manage/scoring.rs`
 prefers contiguous ranges, so a node can hold 0, 1, 4, 5, which becomes two
 segments and an extra hop. Finer shards multiply exactly the cost this analysis
 says dominates.
+
+## FlashAttention on CUDA: why the README's old GPU number is unreachable (2026-08-07) — RESEARCHED
+
+The README advertised **46.4 tok/s** for Phi-3.5 on an RTX 3070. Re-measured on
+v0.3.81 the same model gives **34.5 tok/s** — 26% lower. Not a regression in
+shared code; the old figure was measured on a build configuration that is no
+longer shipped, and getting it back is a real tradeoff rather than a fix.
+
+**Timeline, from git:**
+
+| date | change |
+|---|---|
+| 2026-03-02 | FlashAttention + PagedAttention added |
+| 2026-03-08 | README benchmark taken — `cuda = [..., "flash-attn", "paged-attn"]`, `CUDA_COMPUTE_CAP=80` |
+| 2026-04-22 | flash-attn dropped from `cuda`: its kernel matrix took ~60 min and CUDA builds hit ~3 h |
+| 2026-07-22 | `cache-warm.yml` added — "stop throwing away the CUDA build cache on every release" |
+| 2026-07-23 | `CUDA_COMPUTE_CAP` lowered 80 → 75: "run on many more NVIDIA GPUs — RTX 20-series and up" |
+
+**Both stated reasons for the removal no longer hold:**
+
+- **Build time was fixed three months later by caching, not by dropping the
+  feature.** With a working cache, CUDA releases run **16-23 min** (v0.3.67
+  through v0.3.78). The kernel compile lands in `target/`, which `rust-cache`
+  caches, so it is a one-time cost per cache key rather than per release.
+- **"Mostly a perf win for A100/H100 with head-dim 64/128; general alpha testers
+  don't need it"** is the opposite of what the literature reports. FlashAttention
+  measures **2.5-4.5x on an RTX 3090** *because* consumer memory bandwidth is
+  lower than an A100's — the slower the memory, the bigger the win. Ampere, Ada
+  and Hopper are all supported.
+
+**But there is now a real blocker the 2026-04 decision did not have.**
+FlashAttention requires **compute capability 8.0+**. The build targets **7.5**
+since 2026-07-23 so that RTX 20-series and GTX 16-series cards work at all.
+Enabling flash-attn in the default `cuda` feature would drop every pre-Ampere
+GPU. That is a straight trade: ~26% for Ampere-and-newer owners against working
+at all for Turing owners.
+
+**The resolution that keeps both** is the one v0.3.79 already used for AVX2: ship
+a second asset. A `swarmllm-linux-x86_64-cuda-flash` built with
+`--features cuda,flash-attn` and `CUDA_COMPUTE_CAP=80`, alongside the existing
+cap-75 build. Notes for whoever does it:
+
+- Keep it **out** of the blocking `EXPECTED` list at first, so a flash-attn build
+  failure cannot block a release the way the Windows-baseline outage did.
+- Do **not** wire it into `update.rs` asset selection without a compute-capability
+  probe. The AVX2 case could use `is_x86_feature_detected!`; there is no
+  equivalent one-liner for CUDA, and guessing wrong hands an Ampere-only binary
+  to a Turing card, which is the unrecoverable failure mode of gotcha #246.
+- Mirror the cell into `cache-warm.yml` or it rebuilds cold every release — now
+  enforced by `cache_warm_mirrors_the_release_matrix`.
+
+**PagedAttention is not similarly recoverable**: it was removed from the code
+entirely, not just from the default feature. `vendor/candle-paged-attention` is
+still present but nothing references it. Re-adding it is real work, not a flag.
+
+**Unmeasured**: how much of the 26% is flash-attn specifically. The 46.4 was taken
+in March on a materially different codebase, so attributing the whole gap to one
+feature is the likely reading, not a proven one. Building
+`--features cuda,flash-attn` at cap 80 and benchmarking it against the shipped
+binary on the same machine would settle it, and should be done before shipping a
+second asset on the strength of it.
