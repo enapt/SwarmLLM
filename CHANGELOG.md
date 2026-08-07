@@ -44,6 +44,16 @@ prompt from 940 MB to 235 MB, with no change in speed. This matters most on a
 graphics card, where reserved memory is genuinely unavailable to anything else —
 it is the difference between a second model fitting and not.
 
+**Sharing more of your processor no longer makes replies slower.** Reading your
+prompt and writing the reply want opposite amounts of parallelism — reading keeps
+getting faster with more processor cores, while writing peaks early and then gets
+worse, because it is limited by memory speed rather than arithmetic. SwarmLLM
+used one setting for both, so turning the contribution setting up made prompts
+read faster and replies come out slower. Replies now get their own, narrower
+share while prompt reading keeps the full allowance: measured 1.4x to 1.5x faster
+replies on nodes set to contribute more than the default, with prompt reading
+unchanged. Nothing changes at the default setting.
+
 Also in this release:
 
 - **Fixed: Gemma-2 models produced subtly wrong output on a graphics card.** The
