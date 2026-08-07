@@ -131,8 +131,17 @@ fn estimate_model_resident_bytes(i: &VramFootprintInputs) -> u64 {
         );
     }
 
-    // KV cache: candle allocates the whole [B, H, ctx, D] buffer per layer on
-    // the first append, for K and V, as f32.
+    // KV cache: the WORST CASE, which is one conversation grown to the full
+    // effective context — [B, H, ctx, D] per layer, for K and V, as f32.
+    //
+    // Since 2026-08-07 a cache no longer reserves that on its first append; it
+    // grows in quanta (`layers::new_kv_cache`), so a typical conversation holds
+    // a fraction of this. **Do NOT reduce this figure to match.** It is an
+    // ADMISSION decision: over-estimating costs a model that would have fitted,
+    // under-estimating costs a hard OOM part-way through a long conversation —
+    // and growth makes that failure LATER and less obvious, not less likely.
+    // The estimator was re-measured on 2026-08-03 at 5.1% high, erring safe,
+    // after an earlier claim that it was 2.3x pessimistic proved wrong.
     bytes = bytes.saturating_add(
         i.segment_layers
             .saturating_mul(2)

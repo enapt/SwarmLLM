@@ -23,7 +23,9 @@ pub struct KvCacheStore {
 
 pub(crate) struct KvCacheEntry {
     /// Per-layer KV cache. Index corresponds to layer index within the model segment.
-    /// Each `KvCache` pre-allocates a buffer and appends new K/V without `Tensor::cat`.
+    /// Each `KvCache` holds a buffer sized in `KV_CACHE_GROWTH_TOKENS` quanta
+    /// and appends into it in place, concatenating only when a conversation
+    /// outgrows the current quantum.
     pub(crate) layers: Vec<Option<KvCache>>,
     /// Per-layer SSM state for Qwen 3.5 hybrid models (delta net recurrent state + conv state).
     /// None for non-SSM layers. Only populated for Qwen35Ssm layer variants.
@@ -35,11 +37,13 @@ pub(crate) struct KvCacheEntry {
 /// What a [`KvCacheStore`] is currently holding.
 ///
 /// `allocated_bytes` is the figure that matters, and it is NOT `token_count`
-/// times a per-token cost. candle's `Cache::append` allocates the whole
-/// `max_seq_len` buffer on the FIRST append and grows in `max_seq_len`
-/// increments after that, so a twenty-token conversation reserves exactly as
-/// much as a full-context one. Anything reasoning about KV memory from token
-/// counts is reasoning about a quantity the allocator does not use.
+/// times a per-token cost. candle's `Cache::append` allocates its whole
+/// capacity on the FIRST append and grows in whole increments after that, so
+/// the reservation moves in steps of `KV_CACHE_GROWTH_TOKENS` and a
+/// twenty-token conversation costs the same as a five-hundred-token one.
+/// Anything reasoning about KV memory from token counts alone is reasoning
+/// about a quantity the allocator does not use — which is how a careful,
+/// quantified estimate of this cache came to be wrong by 7x (gotcha #261).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct KvOccupancy {
     /// Number of live cache entries — one per (model, request).

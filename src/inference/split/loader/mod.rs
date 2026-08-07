@@ -344,22 +344,29 @@ impl SplitModel {
             // No explicit override. Two independent reductions apply, in order.
             //
             // 1. A default target, the way llama.cpp's `-c` defaults to 4096
-            //    rather than to whatever the model advertises. candle
-            //    allocates the whole `max_seq_len` buffer up front, so a 128K
-            //    declaration is a 128K *allocation* even for a conversation of
-            //    twenty tokens. Measured on an RTX 3070 with
-            //    llama-3.2-1b-instruct-q8-0: serving the full declared context
-            //    costs 7138 MiB and serving 4096 costs 3110 MiB, at an
-            //    identical 46-53 tok/s. The extra 4 GB buys nothing and is the
-            //    difference between a second model fitting and a hard OOM.
+            //    rather than to whatever the model advertises. This bounds how
+            //    far a conversation may grow, and with it how large the KV
+            //    cache can get: a 128K declaration lets one conversation grow
+            //    to a 128K cache.
+            //
+            //    Until 2026-08-07 it was worse than that — the cache allocated
+            //    `max_seq_len` on its first append, so a 128K declaration was a
+            //    128K *allocation* for a twenty-token chat. `new_kv_cache` now
+            //    grows on demand, so this is a ceiling rather than a
+            //    reservation. It still matters: growth is only bounded because
+            //    this number is.
+            //
+            //    Measured on an RTX 3070 with llama-3.2-1b-instruct-q8-0:
+            //    serving the full declared context cost 7138 MiB and serving
+            //    4096 cost 3110 MiB, at an identical 46-53 tok/s.
             if context_length > DEFAULT_MAX_SEQ_LEN {
                 tracing::info!(
                     gguf_context_length = context_length,
                     default_context = DEFAULT_MAX_SEQ_LEN,
-                    "Using the default {DEFAULT_MAX_SEQ_LEN}-token context — the KV cache is \
-                     allocated in full up front, so serving this model's full \
-                     {context_length} tokens would reserve several GB for no gain at typical \
-                     conversation lengths. Raise it with inference.max_seq_len_override",
+                    "Using the default {DEFAULT_MAX_SEQ_LEN}-token context — this model declares \
+                     {context_length}, and letting one conversation grow that far would claim \
+                     several GB of KV cache for no gain at typical conversation lengths. Raise \
+                     it with inference.max_seq_len_override",
                 );
                 context_length = DEFAULT_MAX_SEQ_LEN;
             }

@@ -354,12 +354,13 @@ pub struct InferenceConfig {
     /// (useful for fair-comparison benchmarking). Default false.
     #[serde(default)]
     pub force_standard_attn: bool,
-    /// Override the GGUF-reported `context_length` when constructing the KV
-    /// cache. candle pre-allocates `[B, H, max_seq_len, D]` zeros tensors per
-    /// layer at first forward, so models with a 128K context (Phi-3.5) OOM
-    /// instantly on small VRAM. Set this to e.g. 4096 to make those models
-    /// fit at the cost of rejecting prompts longer than the override. None
-    /// = use the GGUF value.
+    /// Override the GGUF-reported `context_length`. This is the ceiling on how
+    /// far one conversation may run, and so on how large its KV cache can
+    /// grow — a model declaring 128K (Phi-3.5) can grow a cache that will not
+    /// fit a small card. Set this to e.g. 4096 to make those models fit, at the
+    /// cost of rejecting prompts longer than the override. `None` = use the
+    /// GGUF value, which the loader then caps to what actually fits (see
+    /// `inference::split::kv_budget`).
     #[serde(default)]
     pub max_seq_len_override: Option<u32>,
     /// Enable Decentralized Speculative Decoding (DSD, arxiv 2511.11733) for

@@ -1889,6 +1889,34 @@ Prefill has many query rows and wants batched matmuls; decode has one row agains
 a long cache and wants the kernel that never materializes the expansion. **There
 is no single "faster kernel" — ask per phase.**
 
+### Attention's tail is one fused pass, and the mask is additive f32
+
+`inference::attn_softmax::scaled_masked_softmax` does the scale, the optional
+Gemma-2 logit soft-cap, the causal mask and the softmax in ONE pass over each
+score row. Expressed as separate candle ops, each materialised its own
+`[batch, heads, q_len, kv_len]` temporary — 11 MB at llama-3.2-3b prefill
+shapes — so the tail moved ~90 MB per layer per chunk to do ~3 MB of
+arithmetic: 34.6 ms against a matmul-plus-softmax floor of 11.4.
+
+The mask is **additive f32** everywhere (`0.0` visible, `-inf` masked), produced
+only by `SplitModel::causal_mask`. It used to be a `u8` predicate for the
+standard path plus a float copy the CPU flash arm rebuilt per call. Masks handed
+onward must be contiguous — a `narrow()` view costs 2.1x in `broadcast_add` and
+the fused kernel declines it outright.
+
+Measured: attention 22.4% of a prompt chunk -> 9.5%, prompt processing
+1.19x end to end, decode unchanged. Prompt processing is now **84.5% quantized
+matmul**.
+
+### Prefill and decode run in different CPU thread pools
+
+`inference::cpu_pools::in_phase_pool`, bound at `SplitModel::forward_inner_impl`
+and `forward_batch` so every entry point inherits it. Prompt processing scales
+to 1.83x past decode's optimum; decode is bandwidth-bound and gets 2.0x worse at
+the same setting. One pool for both made `contribution` perverse — donating more
+of the machine slowed replies down. Only decode is capped, only downward, and
+not at all at the default contribution.
+
 ### Stage profiler
 
 `SWARMLLM_PROFILE=1` (`src/inference/prof.rs`) prints a non-overlapping per-stage
@@ -1900,10 +1928,16 @@ of prompt-processing time. See `docs/DIAGNOSTICS.md`.
 
 Decode is **bandwidth-bound at ~69% of the memory roofline** (72% of its time is
 the quantized matmul moving the weights), so faster arithmetic will not help much.
-Threads pull the phases apart — decode peaks at 4 and is 2.2x worse at 16, while
-prompt processing keeps improving past 6. Full numbers, plus two measured dead
-ends (self-speculative decoding is 3.3x slower; raising the global thread count
-hurts), in `docs/FUTURE_WORK.md`.
+Threads pull the phases apart — decode peaks at 4 and is 2.0x worse at 14, while
+prompt processing keeps improving to 14. That split is now handled by
+`inference::cpu_pools` rather than being a tradeoff the operator has to pick.
+
+**Prompt processing is 84.5% quantized matmul** after the attention work, so the
+next lever is fewer bytes per token or more tokens per weight read, NOT another
+elementwise fusion. Full numbers, plus two measured dead ends (self-speculative
+decoding is 3.3x slower; raising the global thread count hurts DECODE), in
+`docs/FUTURE_WORK.md`. **Re-profile before optimising any stage** — three rounds
+have now begun with a stage that turned out to be a minority of the total.
 
 ## Request Tracing & Performance Observability
 

@@ -1,9 +1,19 @@
 //! VRAM-aware sizing of the KV cache and RoPE tables.
 //!
-//! candle's `KvCache` allocates its whole `[B, H, max_seq_len, D]` buffer on
-//! the first append — it does not grow with the conversation. So `max_seq_len`
-//! is not a limit, it is an *allocation*, and sizing it from the GGUF's
-//! declared `context_length` charges every user the worst case up front.
+//! `max_seq_len` bounds how large a KV cache can GROW, and the conversation
+//! guard in `forward_inner_impl` is what holds it there. So sizing it from the
+//! GGUF's declared `context_length` lets a long conversation grow until it
+//! exhausts the card.
+//!
+//! **This module's premise changed on 2026-08-07 and its conclusion did not.**
+//! Until then a cache allocated its whole `[B, H, max_seq_len, D]` buffer on
+//! the first append, so `max_seq_len` was not a limit but an immediate
+//! *allocation* — every user charged the worst case from token one.
+//! `layers::new_kv_cache` now passes a growth quantum instead, so the
+//! allocation tracks the conversation. That makes the numbers below a *ceiling*
+//! rather than a reservation, and makes this module MORE load-bearing, not
+//! less: it is now the only thing standing between on-demand growth and an OOM
+//! part-way through a long conversation.
 //!
 //! That is ruinous on modern long-context models. Measured on an RTX 3070
 //! (8 GB) against `llama-3.2-1b-instruct-q8-0` — 1.3 GB of weights, but
