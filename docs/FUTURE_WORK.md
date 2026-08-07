@@ -6487,9 +6487,30 @@ fits, and account it alongside the model-memory admission that already exists
 Not attempted here: eviction policy changes are easy to get subtly wrong under
 concurrency, and the correct budget interacts with the VRAM/RAM admission path.
 
-**Not yet established**: whether the 6992 MB is steady-state or still climbing —
-the soak was one window, and TTL eviction should reclaim it 10 minutes after load
-stops. Re-run with a longer tail and sample RSS over time before sizing anything.
+**Established 2026-08-07: this is a high-water mark, NOT a leak.** An 8-minute
+load followed by 15 minutes idle gives: 5487-7065 MB oscillating under load, flat
+at 6453 MB once load stops, then **0** — at ~200s idle the worker process exits
+entirely (`Idle unload — freed model (shards kept on disk)`,
+`model::auto_manage::prune`) and every byte returns. Exactly one worker spawn for
+the whole run; no respawns under load.
+
+So **neither cache's eviction policy is what reclaims memory** — a third
+mechanism does, by killing the worker. Two predictions were recorded before the
+result and both were wrong: that the prefix cache retains it (it has no TTL), and
+the qualified version that session TTL drops it to ~2 GB. Both reasoned about the
+caches when the answer was outside them.
+
+**What remains worth fixing**, at lower severity than first written: the exposure
+is OOM during sustained concurrent long-context use, where idle unload cannot
+help because load keeps arriving — not growth over time. A byte budget on both
+stores still fixes it.
+
+**Measurement caveat**: RSS is confounded by the allocator — memory freed to
+`malloc` need not return to the OS, so a flat RSS would NOT have proved "no
+eviction". This reading was only decisive because it went to zero via process
+exit. There is no instrumentation for KV-cache or prefix-cache occupancy; a
+counter on each would make this directly measurable instead of inferred from
+process memory.
 
 ## The next prompt-processing target is masked_fill, not the matmuls (2026-08-07) — MEASURED, NOT DONE
 
