@@ -76,6 +76,7 @@ jobs:
         include:
           # The long pole, and the whole reason this workflow exists.
           - name: Linux x86_64 CUDA
+            rustflags: "-C target-cpu=x86-64-v3"
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             features: "--features cuda"
@@ -86,6 +87,7 @@ jobs:
           # 22.04 release build can never restore (and 22.04 is what makes the
           # CPU binary run on Debian 12 — see the release.yml comment).
           - name: Linux x86_64
+            rustflags: "-C target-cpu=x86-64-v3"
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             features: ""
@@ -99,6 +101,7 @@ jobs:
           # Windows-GPU cell byte-for-byte, or the key diverges and the release
           # gets no hit. Runner image (windows-2022) is part of the key too.
           - name: Windows x86_64 GPU
+            rustflags: "-C target-cpu=x86-64-v3"
             runner: windows-2022
             target: x86_64-pc-windows-msvc
             features: "--features windows-gpu"
@@ -128,3 +131,11 @@ jobs:
           # uses the Vulkan backend, so it stays empty there).
           CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '75' || '' }}
           CMAKE_CUDA_ARCHITECTURES: ${{ matrix.cuda_linux && '61-real;75-real;80-real;86-real;89-real;90-real;120-real;120-virtual' || '' }}
+          # Must equal the release matrix's rustflags for the SAME cell.
+          # RUSTFLAGS is part of both the rust-cache key (Swatinem hashes RUST*)
+          # and cargo's own fingerprint, so warming with a different value
+          # produces a cache the release can never restore AND a rebuild cargo
+          # would redo anyway. Adding `-C target-cpu=x86-64-v3` to release.yml
+          # in v0.3.79 without mirroring it here took the CUDA release build
+          # from 12 minutes to 78.
+          RUSTFLAGS: ${{ matrix.rustflags || '' }}
