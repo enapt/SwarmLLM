@@ -281,15 +281,19 @@ impl InferenceRouter {
                     if tensor_expired > 0 {
                         tracing::debug!(tensor_expired, "Cleaned up expired per-request KV-caches");
                     }
-                    // KV occupancy, in bytes, after the sweep.
+                    // KV occupancy of the DISTRIBUTED path's store, in bytes.
                     //
-                    // This is the ONLY direct reading of it. Process RSS cannot
-                    // substitute: the reservation is zeroed pages the OS backs
-                    // lazily, so a 4x change in reserved bytes moved RSS by
-                    // ~5% when measured (see `docs/FUTURE_WORK.md`), and two
-                    // earlier conclusions drawn from RSS about this cache were
-                    // both wrong. Skipped entirely when nothing is cached, so
-                    // an idle node logs nothing.
+                    // This store holds caches for tensor forwards this node
+                    // serves on behalf of peers. Local inference runs in a
+                    // worker subprocess with its OWN store, reported separately
+                    // as `DIAG: worker KV-cache occupancy` — a single node
+                    // answering its own requests leaves THIS one empty.
+                    //
+                    // Process RSS cannot substitute for either: the reservation
+                    // is zeroed pages the OS backs lazily, so a 4x change in
+                    // reserved bytes moved RSS ~5% when measured, and in both
+                    // directions (see `docs/FUTURE_WORK.md`). Skipped entirely
+                    // when nothing is cached, so an idle node logs nothing.
                     let occ = self.shared_state.kv_cache_store.occupancy();
                     if occ.entries > 0 {
                         tracing::debug!(
@@ -298,7 +302,7 @@ impl InferenceRouter {
                             used_mb = occ.used_bytes / 1_000_000,
                             utilisation_pct = (occ.utilisation() * 100.0).round() as u64,
                             tokens = occ.tokens,
-                            "DIAG: KV-cache occupancy"
+                            "DIAG: distributed-path KV-cache occupancy"
                         );
                     }
                 }

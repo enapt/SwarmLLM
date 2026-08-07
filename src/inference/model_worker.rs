@@ -39,6 +39,16 @@ type CancelledSet = Arc<DashMap<Uuid, std::time::Instant>>;
 /// cancel overtakes its own request on the IPC channel; well beyond that a
 /// lingering entry is just an unmatched cancel for a finished request.
 const CANCEL_RETENTION_SECS: u64 = 60;
+
+/// How often the worker reports what its KV cache is holding.
+///
+/// **This is where the KV cache actually lives for local inference.** The
+/// daemon has a `KvCacheStore` too, but that one serves the distributed
+/// tensor-forward path; a single node answering its own requests fills the
+/// worker's and leaves the daemon's empty, so occupancy logged only in the
+/// daemon reports zero on the most common path — which is exactly what the
+/// first version of this instrumentation did.
+const KV_OCCUPANCY_REPORT_SECS: u64 = 30;
 use crate::error::SwarmError;
 use crate::inference::slot_table::{Slot, SlotTable};
 use crate::inference::split::{self, BatchItem, KvCacheStore, PrefixCache, SplitModel};
@@ -256,6 +266,7 @@ pub async fn run_worker(
     // so a long prompt cannot starve a co-scheduled request on a slow machine
     // (gotcha #191). One pacer per worker: the cost of a prompt token is a
     // property of this machine and this loaded model.
+    let mut last_kv_report = std::time::Instant::now();
     let mut prefill_pacer = crate::inference::prefill_pacer::PrefillPacer::new(
         prefill_chunk_tokens.max(1) as usize,
         prefill_target_ms,
@@ -420,6 +431,28 @@ pub async fn run_worker(
             // Sweep cancels that never matched a request (the request had
             // already finished when the cancel arrived).
             cancelled.retain(|_, at| at.elapsed().as_secs() < CANCEL_RETENTION_SECS);
+        }
+
+        // What the KV cache is holding, in bytes.
+        //
+        // Process RSS cannot answer this: the reservation is zeroed pages the
+        // OS backs lazily, so a 4x change in reserved bytes moved RSS ~5% when
+        // measured, and in both directions. See `KvCacheStore::occupancy`.
+        // Cheap enough at this cadence — it walks live entries only, and an
+        // idle worker blocks on IPC so it does not run at all.
+        if last_kv_report.elapsed().as_secs() >= KV_OCCUPANCY_REPORT_SECS {
+            last_kv_report = std::time::Instant::now();
+            let occ = kv_store.occupancy();
+            if occ.entries > 0 {
+                tracing::debug!(
+                    entries = occ.entries,
+                    allocated_mb = occ.allocated_bytes / 1_000_000,
+                    used_mb = occ.used_bytes / 1_000_000,
+                    utilisation_pct = (occ.utilisation() * 100.0).round() as u64,
+                    tokens = occ.tokens,
+                    "DIAG: worker KV-cache occupancy"
+                );
+            }
         }
 
         // Decode tick: per-slot prefill chunk (Phase A) + one batched forward
