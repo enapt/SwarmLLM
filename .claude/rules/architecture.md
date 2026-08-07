@@ -342,6 +342,37 @@ silently break at the wire if duplicated:
   sharded model. Partial offload is not expressible (see
   `docs/FUTURE_WORK.md`); a fractional value logs a warning rather than
   being quietly rounded.
+- **`daemon::gpu_support::MIN_COMPUTE_CAP` + `local_gpu_is_supported`**
+  (2026-08-07) — the single answer to "can this card run OUR kernels?".
+  `MIN_COMPUTE_CAP` is a property of the BUILD and MUST equal
+  `CUDA_COMPUTE_CAP` in `release.yml` / `cache-warm.yml` / `ci.yml`;
+  `compute_cap_matches_release_workflow` fails the build if they drift, and
+  `flash_attn_and_the_compute_cap_floor_agree` ties the floor to the feature
+  in BOTH directions (8.0 is only worth paying for because of flash-attn).
+  Do NOT ask `Device::cuda_if_available` whether the GPU is usable — it
+  SUCCEEDS on a pre-Ampere card and only module load fails, per request, so
+  the node starts cleanly, logs "GPU detected", advertises itself to the
+  swarm as a GPU node, and then fails everything with
+  `CUDA_ERROR_NO_BINARY_FOR_GPU`. An unreadable capability is **unknown,
+  never unsupported**: sending a working card to the CPU because nvidia-smi
+  misbehaved is a worse bug than the one this prevents. Enforcement is at
+  `ModelProcessPool::effective_gpu_layers` (the same choke point as
+  `gpu_layers` and OOM CPU-pinning), with
+  `worker_ipc::permanent_gpu_failure` as the backstop for when the probe
+  returned unknown.
+- **`inference::layers::cuda_decode_prefers_standard`** (2026-08-07) — the
+  measured CUDA attention routing rule, extracted so it is testable without
+  a GPU. **The right kernel is opposite for prefill and decode, and it turns
+  on GQA** — the same lesson as the CPU crossover above it (gotcha #255) on
+  a different device. Flash unconditionally costs up to **25x per attention
+  call** on MHA decode, because candle-flash-attn ships no split-KV kernel
+  and one query row cannot fill the card; GQA reverses above ~1k context
+  because `standard_attention` rebuilds the `repeat_kv` expansion every
+  token. Changing the constant means re-running
+  `flash_vs_standard_attention_on_cuda` — the measured table lives in the
+  dispatch's comment and in `docs/FUTURE_WORK.md`, and the benchmark
+  asserts the dispatch never picks a kernel materially slower than
+  always-standard.
 - **`inference::router::distributed_exec::failure_is_penalty_worthy`**
   (R146) — gates `penalty_serve_failure` on (a) the assignment actually
   having had a remote segment and (b) the error not being locally

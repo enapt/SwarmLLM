@@ -81,6 +81,13 @@ swarmllm/
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
 ├── docs/book/     (mdBook documentation site)
+├── vendor/        (patched upstream crates, all workspace-`exclude`d; every patch marked `SwarmLLM patch:`)
+│   ├── candle/                (k_quants::matmul tiled; cudarc dynamic-linking hardcode removed)
+│   ├── candle-flash-attn/     (cudart linked STATICALLY so the binary needs only the display driver;
+│   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19)
+│   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257)
+│   ├── libp2p-request-response/ (9 tests, `--lib`)
+│   └── float8/
 └── tests/         (integration tests)
 ```
 
@@ -199,59 +206,55 @@ All 20 build phases complete. All subsystems wired — no stubs. **1730 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.81-alpha (2026-08-07): CPU inference, measured instead of guessed
+### Latest — UNRELEASED on main (2026-08-07): FlashAttention on CUDA, compute cap 75 → 80
 
-**Prompt processing up to 2.3x, long-context generation 5.5x. Every fix came from
-measurement; every guess made beforehand was wrong.** Detail in
-`memory/round_log_0806_batching.md`.
+**Prompt processing 2.4-7.8x on an NVIDIA card; long-context GQA generation
+1.4-4.9x. Pre-Ampere cards (RTX 20-series / GTX 16-series) lose the candle GPU
+path** and fall back to CPU with an explicit message — `cuda_if_available`
+SUCCEEDS on those cards and only module load fails, so without the probe a node
+starts clean, logs "GPU detected", and then fails every request. Detail in
+`memory/round_log_0807_flash_attn.md`.
 
-**Continuous batching was worth ~1.05x**, so three rounds spent asking *why it
-rarely engages* were beside the point — nobody had asked *what it is worth when it
-does*. Cause: candle's `k_quants::matmul` made the batch row the OUTER SEQUENTIAL
-loop, re-streaming the whole weight matrix per row, so batching amortized nothing.
-**Tiled it** (weight column outer, activation-quantize parallelized): 3.00 → 1.06 ms
-at m=4, 101.4 → 11.4 at m=128, **bit-identical** output (asserted against a
-reimplementation of the upstream loop in `examples/qmatmul_bench.rs`). `m == 1`
-untouched, so decode is unchanged by construction.
+**Turning flash-attn on the obvious way would have made generation MUCH slower.**
+candle-flash-attn ships **no split-KV kernels**, so one query row leaves the card
+idle: **4x-25x slower on MHA decode**, widening with context. GQA reverses above
+~1k because `standard_attention` rebuilds the `repeat_kv` expansion every token.
+**Gotcha #255 again on a different device** — right kernel OPPOSITE for prefill vs
+decode, turning on GQA. Shipped rule `cuda_decode_prefers_standard`: prefill
+always flash; decode flash only when GQA AND `k_len >= 1024`.
 
-**That only moved prompt processing 1.2x, so I built a stage profiler**
-(`SWARMLLM_PROFILE=1`, `src/inference/prof.rs`). Everything I had guessed the rest
-was — RMSNorm, SiLU, gate*up, RoPE, copies — came to **under 2.5% combined.**
-It was **attention: 2.3% of the arithmetic, 45% of the time, 37x slower per MAC.**
-
-**The attention kernel was wrong in BOTH phases, in opposite directions** (#255).
-Prefill used the CPU flash kernel (KV tiles of 16 inside a per-query-row loop,
-scratch allocation per tile) → standard, **4571 → 640 ms**. Decode used standard
-below a 2048 crossover, and standard **materializes the KV cache expanded to
-n_head every token every layer** → fused always for GQA, **1368 → 249 ms/token at
-1150 KV**. Generating after a long prompt cost **~10x per token** what it cost
-after a short one — the normal case in a chat, invisible in any short benchmark.
-
-| | before | after |
+| | prefill | decode |
 |---|---|---|
-| prompt processing, 417 tok | 12.3 tok/s | **23.0** |
-| prompt processing, 1536 tok | 6.1 tok/s | **18.6** |
-| generation @ ~1150 KV | 1368 ms/token | **249** |
-| 4 concurrent | 4.88 tok/s | 6.33 |
+| phi-3.5 (MHA) | 2.4-4.0x | unchanged — router keeps standard |
+| llama-3.2 (GQA) | 4.2-7.8x | 1.4-4.9x past ~1k context |
 
-**Two more, same area:** the tiled matmul's result transpose ran on ONE core
-(~25% of a large call) → parallelized, 26.7 → 19.1 ms at m=128; and candle's
-batched matmul ran each attention head's gemm sequentially while giving each all
-the threads → one gemm per head, ~1.8x. **Measure at the worker's
-`RAYON_NUM_THREADS`, not the core count** — doing the latter overstated that one
-by 4x (#256).
+**PagedAttention was NOT restored — it never ran** (#257): `None` at its own
+introducing commit, no call site, deleted three weeks later as "never wired", and
+the 46.4 tok/s figure it was credited for was measured *between* those dates.
 
-**Headroom measured, don't re-derive:** decode is **bandwidth-bound at ~69% of the
-memory roofline**; threads pull the phases apart (decode peaks at 4, **2.2x worse
-at 16**; prompt processing keeps climbing past 6) so a per-phase pool is worth
-~1.18x and is written up as open. **Dead ends, measured:** self-speculative decoding
-(SWIFT) is **3.3x SLOWER**; raising the global thread count hurts. Gotchas
-**#254**, **#255**.
+**Two non-performance findings.** The CUDA flash path **silently dropped
+`attn_logit_softcap`** (the plain entry point hardcodes it off) → **Gemma-2
+quietly wrong on GPU only**, right shapes and plausible output (#258). And
+flash-attn's `dylib=cudart` would have broken the **driver-only install model**
+AND failed the CI link outright → `vendor/candle-flash-attn` with `cudart_static`
++ the 18 unreachable bf16 kernels dropped (37 → 19, halving the kernel build).
+
+**Measurement discipline paid three times, all against my own claims:** the
+numerics assertion caught the benchmark comparing **causal against full
+attention** (relative 3.15 vs an F16 budget of 0.05); median-of-9 gave **3.08 ms
+and 191 ms for the same shape** → min-of-20; and a build-time *estimate* stated as
+fact (~2.5 h) measured **76 min / 66 min**. `SWARMLLM_FORCE_STANDARD_ATTN=1` A/Bs
+the kernel inside ONE binary — two builds differ in more than the kernel.
+
+**Before tagging**: end-to-end GPU tok/s NOT re-measured (README says so rather
+than quoting numbers). CI 13/13 green; cache-warm green on all three cells, both
+GPU builds verified in-log as compiling `19 of 19 kernels`.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
+- **v0.3.81** (08-06/07): **CPU inference, measured instead of guessed** — batching was worth ~1.05x (candle's `k_quants::matmul` made the batch row the OUTER SEQUENTIAL loop → **tiled it**, bit-identical); that moved prefill only 1.2x, so a stage profiler (`SWARMLLM_PROFILE=1`) was built and **every guess about the rest was under 2.5% COMBINED — it was attention**, wrong in BOTH phases in opposite directions. Prefill 4571→640 ms, decode 1368→249 ms/token at 1150 KV. Gotchas #254-#256. Log: `round_log_0806_batching.md`.
 - **v0.3.78/.79** (08-06): **the whole prompt pipeline was wrong** — Llama-3
   tokenised at **~2x** (`pre="llama-bpe"` absent from the match → whitespace-split
   fallback), the **system prompt rendered TWICE**, every Llama-3 model **told the
