@@ -69,22 +69,25 @@ jobs:
     # is `ubuntu2204`, whose nsight-systems dependency (libtinfo5) is not
     # installable on 24.04 at all.
     runs-on: ${{ matrix.runner }}
-    # 120 was enough until flash-attention-2 entered the `cuda` and
-    # `windows-gpu` features. candle-flash-attn compiles 37 CUTLASS kernels and
-    # asks for only HALF the runner's threads (`thread_percentage(0.5)` in its
-    # build.rs, not something we can pass through), so on a 4-vCPU runner that
-    # is 2 concurrent nvcc processes. Measured locally at 8-way parallelism on
-    # 16 cores: ~45 min of kernel compile alone, i.e. roughly 300 thread-minutes
-    # of work — about 2.5 h at CI's parallelism, on top of the ~50 min the rest
-    # of a cold CUDA build already takes.
+    # Raised from 120 when flash-attention-2 entered the `cuda` and
+    # `windows-gpu` features. candle-flash-attn's build script asks for only
+    # HALF the runner's threads (`thread_percentage(0.5)`, not passable through
+    # its API), which the run log confirms as "Using 2 threads" on a 4-vCPU
+    # runner.
     #
-    # That is precisely the "~3 h" figure the 2026-04 removal cited, and this is
-    # the job that exists so it is paid ONCE on main rather than on every
-    # release. Timing out here would be the worst outcome available: no cache
-    # gets saved, so every release then rebuilds cold anyway — the failure would
-    # be silent in the sense that releases still succeed, just three hours
-    # slower, which is exactly the kind of thing nobody attributes correctly
-    # months later.
+    # MEASURED on the first cold run after the change (run 31150878312,
+    # 2026-08-07), both cells compiling all 19 kernels from scratch:
+    #   Linux x86_64 CUDA   76 min
+    #   Windows x86_64 GPU  66 min
+    #
+    # So 120 would in fact still have been enough for the SHIPPED kernel set —
+    # the pre-push estimate of ~2.5 h was extrapolated from the full 37-kernel
+    # matrix and is wrong for the 19 we vendor (see vendor/candle-flash-attn).
+    # The headroom is kept deliberately anyway, because the cost of being wrong
+    # is asymmetric: a too-low timeout saves NO cache, so every later release
+    # rebuilds cold and still succeeds — slower by an hour, with nothing failing
+    # to draw attention to it. Cheap insurance against a silent regression, not
+    # a prediction that the job needs 5.5 hours.
     timeout-minutes: 330
     strategy:
       fail-fast: false

@@ -6875,13 +6875,26 @@ Hence `vendor/candle-flash-attn`, with two annotated patches: static
 `cudart_static`, and the 18 bf16 kernels removed (dead — `run_attention` casts
 to f16 before every call). The second halves the kernel matrix, 37 → 19.
 
-**Build cost, measured**: the full 37 kernels took ~45 min at 8-way parallelism
-on 16 cores. candle-flash-attn's build script requests only half the machine's
-threads (`thread_percentage(0.5)`, not overridable through the API), so on a
-4-vCPU runner that projects to ~2.5 h — which is exactly the "~3 h" that got the
-feature dropped in 2026-04. `cache-warm.yml`'s `timeout-minutes` was 120 and is
-now 330; leaving it would have failed the warm silently and made every release
-rebuild cold anyway.
+**Build cost — projected, then measured, and the projection was wrong.**
+
+Locally, the full 37 kernels took ~45 min at 8-way parallelism on 16 cores.
+candle-flash-attn's build script requests only half the machine's threads
+(`thread_percentage(0.5)`, not overridable through its API), which CI's run log
+confirms as "Using 2 threads" on a 4-vCPU runner. Extrapolating gave ~2.5 h, so
+`cache-warm.yml`'s `timeout-minutes` was raised 120 → 330 on the reasoning that
+the old value would fail the warm silently.
+
+**The first cold CI run says otherwise** (run 31150878312, both cells compiling
+all 19 kernels from scratch): **Linux CUDA 76 min, Windows GPU 66 min.** Both
+inside the old 120. The extrapolation was taken from the 37-kernel matrix and
+does not describe the 19 that are actually vendored; dropping bf16 brought the
+build back inside the original limit on its own.
+
+The headroom is kept regardless, because the failure is asymmetric and silent: a
+timeout saves NO cache, so later releases rebuild cold and still SUCCEED, just an
+hour slower, with nothing failing to draw attention. But the number is insurance,
+not a prediction — recorded here because a stale estimate left in a comment reads
+as verification to whoever finds it next.
 
 **Still open:**
 
