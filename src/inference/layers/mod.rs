@@ -424,7 +424,7 @@ impl MlaWeights {
         let __kv_t = std::time::Instant::now();
         let (k, v) = match kv_cache {
             None => {
-                let mut cache = KvCache::new(2, max_seq_len);
+                let mut cache = new_kv_cache(max_seq_len);
                 let kv = cache.append(&k, &v)?;
                 *kv_cache = Some(cache);
                 kv
@@ -1071,6 +1071,53 @@ impl LayerWeights {
     }
 }
 
+/// How many sequence positions a KV cache reserves at a time.
+///
+/// **This is a growth quantum, not a limit.** candle's `Cache::append`
+/// allocates a buffer of `max_seq_len` positions on the FIRST append and, when
+/// that fills, grows by `grow_by` — and `Cache::new(dim, n)` sets *both* to
+/// `n`. Passing the model's whole context length therefore reserved the entire
+/// context window from the very first token: measured on llama-3.2-3b Q4_K_M,
+/// one 904-token request held **940 MB allocated for 207 MB of real tokens,
+/// 22% utilisation**, and a twenty-token chat would have held the same 940 MB.
+/// The conversation's real ceiling is enforced separately, by the
+/// `total_seq > max_seq_len` guard in `forward_inner_impl`, so shrinking this
+/// value does not shorten any conversation.
+///
+/// llama.cpp has the same defect for the same reason — it pre-allocates
+/// `n_ctx` at startup — and its proposed fix is a paged KV cache with a block
+/// table (ggml-org/llama.cpp#21961), which candle's `grow_by` lets us skip.
+///
+/// **Why 512 rather than something smaller.** Growth is a `Tensor::cat`, so it
+/// copies. The copy is per layer and per K/V separately, not over the whole
+/// cache, so the transient is ~2x ONE layer's single buffer (about 34 MB on
+/// this model) rather than 2x the 940 MB total. Reaching 4096 positions costs
+/// seven grows totalling ~3.3 GB of copying spread across the whole
+/// conversation — around 110 ms against the minutes such a conversation spends
+/// decoding. 512 keeps that negligible while cutting the reservation for a
+/// typical chat by 8x.
+pub(crate) const KV_CACHE_GROWTH_TOKENS: usize = 512;
+
+/// Build the KV cache for one layer, reserving space incrementally.
+///
+/// **Every KV cache must be created here.** Calling `KvCache::new` with a
+/// model's `max_seq_len` directly is the bug this exists to prevent, and it
+/// looks completely reasonable at the call site — the parameter is even named
+/// `max_seq_len`, so passing it reads as correct.
+pub(crate) fn new_kv_cache(max_seq_len: usize) -> KvCache {
+    KvCache::new(2, KV_CACHE_GROWTH_TOKENS.min(max_seq_len.max(1)))
+}
+
+/// Reservation for a cache that must hold `positions` tokens the moment it is
+/// created — a prefix-cache snapshot being hydrated, rather than a
+/// conversation growing a token at a time.
+///
+/// Rounds up to whole [`KV_CACHE_GROWTH_TOKENS`] quanta so the result is one
+/// allocation followed by the same growth behaviour as any other cache.
+pub(crate) fn kv_cache_reservation(positions: usize) -> usize {
+    positions.max(1).div_ceil(KV_CACHE_GROWTH_TOKENS) * KV_CACHE_GROWTH_TOKENS
+}
+
 /// Target size, in f32 elements, of ONE attention-score temporary.
 ///
 /// The score matrix is `[batch, n_head, q_len, k_len]`, so it grows with the
@@ -1603,7 +1650,7 @@ impl LayerWeights {
         // KV-cache: use pre-allocated KvCache buffers (avoids Tensor::cat per step)
         let (k, v) = match kv_cache {
             None => {
-                let mut cache = KvCache::new(2, max_seq_len);
+                let mut cache = new_kv_cache(max_seq_len);
                 let kv = cache.append(&k, &v)?;
                 *kv_cache = Some(cache);
                 kv

@@ -81,7 +81,7 @@ impl Qwen35AttnWeights {
         // KV-cache
         let (k, v) = match kv_cache {
             None => {
-                let mut cache = KvCache::new(2, max_seq_len);
+                let mut cache = super::new_kv_cache(max_seq_len);
                 let kv = cache.append(&k, &v)?;
                 *kv_cache = Some(cache);
                 kv

@@ -42,7 +42,7 @@ pub use self::gguf_meta::{
     ensure_gguf_header, gguf_arch_str, save_gguf_header, GgufTensorMeta, GgufTokenizerMeta,
     TensorLocation, TIED_OUTPUT_FILENAME,
 };
-pub use self::kv_cache::KvCacheStore;
+pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub use self::model::SplitModel;
 pub use self::prefix_cache::{
     compute_block_hashes, deserialize_snapshot, deserialize_snapshot_full,

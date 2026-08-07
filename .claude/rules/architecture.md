@@ -360,6 +360,24 @@ silently break at the wire if duplicated:
   `gpu_layers` and OOM CPU-pinning), with
   `worker_ipc::permanent_gpu_failure` as the backstop for when the probe
   returned unknown.
+- **`inference::layers::new_kv_cache`** (2026-08-07) — the only way to construct
+  a KV cache. **Never call `KvCache::new(2, max_seq_len)`**, which is what every
+  site did and which reads as obviously correct — the parameter is even called
+  `max_seq_len`. candle's `Cache::new(dim, n)` sets `grow_by` AND `max_seq_len`
+  to `n`, and `append` allocates the full buffer on the FIRST append, so passing
+  a model's context length reserved the whole context window from token one: a
+  100-token chat held 940 MB at 3% utilisation on llama-3.2-3b. The helper
+  passes `KV_CACHE_GROWTH_TOKENS` instead and lets `append` grow on demand; the
+  conversation's real ceiling is enforced separately by the
+  `total_seq > max_seq_len` guard in `forward_inner_impl`, so this value cannot
+  shorten a conversation. `kv_cache_reservation(positions)` is the sibling for a
+  cache that must hold N tokens immediately — prefix-cache hydration — and it
+  deliberately ignores the snapshot's recorded `max_seq_len`, because snapshots
+  cross the network and a peer on an older build recorded a whole-context value.
+  **Reason about KV memory from `KvCacheStore::occupancy()`, never from process
+  RSS**: the reservation is lazily-faulted zero pages, so a 4-8x change in
+  reserved bytes moved RSS ~5% and in both directions. Two conclusions drawn
+  from RSS about this cache were wrong before the counter existed.
 - **`inference::attn_softmax::scaled_masked_softmax`** (2026-08-07) — the single
   expression of attention's tail: scale, optional Gemma-2 logit soft-cap,
   additive mask, softmax. Do NOT re-express those as separate candle ops in a

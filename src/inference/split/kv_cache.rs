@@ -32,7 +32,74 @@ pub(crate) struct KvCacheEntry {
     pub(crate) last_accessed: std::time::Instant,
 }
 
+/// What a [`KvCacheStore`] is currently holding.
+///
+/// `allocated_bytes` is the figure that matters, and it is NOT `token_count`
+/// times a per-token cost. candle's `Cache::append` allocates the whole
+/// `max_seq_len` buffer on the FIRST append and grows in `max_seq_len`
+/// increments after that, so a twenty-token conversation reserves exactly as
+/// much as a full-context one. Anything reasoning about KV memory from token
+/// counts is reasoning about a quantity the allocator does not use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KvOccupancy {
+    /// Number of live cache entries — one per (model, request).
+    pub entries: usize,
+    /// Bytes actually reserved by the K/V tensors, including unused headroom.
+    pub allocated_bytes: u64,
+    /// Bytes covering positions that have really been written.
+    pub used_bytes: u64,
+    /// Sequence positions written across every entry and layer.
+    pub tokens: usize,
+}
+
+impl KvOccupancy {
+    /// Fraction of the reservation that holds real tokens, 0.0 when nothing is
+    /// allocated. A persistently low value means the growth quantum is too
+    /// coarse for the conversations this node actually serves.
+    pub fn utilisation(&self) -> f64 {
+        if self.allocated_bytes == 0 {
+            return 0.0;
+        }
+        self.used_bytes as f64 / self.allocated_bytes as f64
+    }
+}
+
 impl KvCacheEntry {
+    /// Bytes this entry reserves, and how many of them hold real tokens.
+    ///
+    /// Reads the ALLOCATED buffer (`Cache::all_data`), not the used window
+    /// (`Cache::current_data`), because the allocated buffer is what the
+    /// process is holding — see [`KvOccupancy`].
+    pub(crate) fn occupancy(&self) -> (u64, u64, usize) {
+        let mut allocated = 0u64;
+        let mut used = 0u64;
+        let mut tokens = 0usize;
+        for kv in self.layers.iter().flatten() {
+            for cache in [kv.k_cache(), kv.v_cache()] {
+                let Some(data) = cache.all_data().as_ref() else {
+                    continue;
+                };
+                let elem = data.dtype().size_in_bytes() as u64;
+                let total = data.elem_count() as u64 * elem;
+                allocated += total;
+                let cap = cache.max_seq_len().max(1);
+                let live = cache.current_seq_len();
+                used += total / cap as u64 * live as u64;
+            }
+            tokens += kv.current_seq_len();
+        }
+        // SSM state is per-layer and fixed-size, so it does not scale with the
+        // conversation, but it is real memory and belongs in the total.
+        for ssm in self.ssm_states.iter().flatten() {
+            for t in [&ssm.recurrent_state, &ssm.conv_state] {
+                let bytes = t.elem_count() as u64 * t.dtype().size_in_bytes() as u64;
+                allocated += bytes;
+                used += bytes;
+            }
+        }
+        (allocated, used, tokens)
+    }
+
     /// Truncate every layer's KV cache to exactly `target_len` sequence
     /// positions. No-op for layers whose current length is already ≤ target.
     /// Used by speculative decoding after partial acceptance — the remote
@@ -202,5 +269,131 @@ impl KvCacheStore {
     #[cfg(test)]
     pub fn active_entries(&self) -> usize {
         self.caches.len()
+    }
+
+    /// What this store is holding right now.
+    ///
+    /// Walks every entry, so call it on a housekeeping tick rather than per
+    /// token. It exists because KV memory was previously only observable as
+    /// process RSS, which is confounded by the allocator: memory freed to
+    /// `malloc` need not return to the OS, so a flat RSS reading cannot
+    /// distinguish "nothing was evicted" from "everything was evicted and the
+    /// arena was kept". Two predictions about this cache made from RSS alone
+    /// were wrong (see `docs/FUTURE_WORK.md`).
+    pub fn occupancy(&self) -> KvOccupancy {
+        let mut out = KvOccupancy::default();
+        for entry in self.caches.iter() {
+            let (allocated, used, tokens) = entry.value().occupancy();
+            out.entries += 1;
+            out.allocated_bytes += allocated;
+            out.used_bytes += used;
+            out.tokens += tokens;
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::layers::{kv_cache_reservation, new_kv_cache, KV_CACHE_GROWTH_TOKENS};
+    use candle_core::{DType, Device, Tensor};
+
+    /// Fill one layer of a request's cache with `n` positions, the way a
+    /// forward pass does.
+    fn append(store: &KvCacheStore, n: usize, max_seq_len: usize) {
+        let mut entry = store.get_or_create("m", "r", 1);
+        let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
+        let mut kv = new_kv_cache(max_seq_len);
+        kv.append(&k, &k.clone()).unwrap();
+        entry.layers[0] = Some(kv);
+    }
+
+    /// The whole point of the growth quantum: a short conversation must not
+    /// reserve a long one's memory.
+    ///
+    /// Fails if `new_kv_cache` goes back to passing `max_seq_len` through —
+    /// candle allocates that many positions on the first append, so a 4-token
+    /// request would hold a 4096-token buffer.
+    #[test]
+    fn a_short_conversation_does_not_reserve_the_whole_context() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        append(&store, 4, 4096);
+        let occ = store.occupancy();
+        assert_eq!(occ.entries, 1);
+        assert_eq!(occ.tokens, 4);
+        // 2 caches (K and V) x quantum positions x 2 heads x 4 dim x 4 bytes.
+        let expected = 2 * KV_CACHE_GROWTH_TOKENS as u64 * 2 * 4 * 4;
+        assert_eq!(
+            occ.allocated_bytes, expected,
+            "a 4-token request reserved {} bytes; the growth quantum is {} positions",
+            occ.allocated_bytes, KV_CACHE_GROWTH_TOKENS
+        );
+    }
+
+    /// Occupancy has to count the ALLOCATED buffer, not the used window —
+    /// reporting the used window would show 100% utilisation forever and hide
+    /// exactly the over-reservation this instrumentation exists to expose.
+    #[test]
+    fn occupancy_separates_reserved_bytes_from_used_bytes() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        append(&store, 4, 4096);
+        let occ = store.occupancy();
+        assert!(
+            occ.used_bytes < occ.allocated_bytes,
+            "used {} vs allocated {} — occupancy is reading the wrong buffer",
+            occ.used_bytes,
+            occ.allocated_bytes
+        );
+        // 4 of `KV_CACHE_GROWTH_TOKENS` positions are live.
+        let expect_ratio = 4.0 / KV_CACHE_GROWTH_TOKENS as f64;
+        assert!(
+            (occ.utilisation() - expect_ratio).abs() < 1e-6,
+            "utilisation {} vs expected {expect_ratio}",
+            occ.utilisation()
+        );
+    }
+
+    /// A conversation past one quantum grows rather than failing or
+    /// over-reserving, and the reservation stays proportional to its length.
+    #[test]
+    fn a_long_conversation_grows_past_one_quantum() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let n = KV_CACHE_GROWTH_TOKENS + 10;
+        append(&store, n, 4096);
+        let occ = store.occupancy();
+        assert_eq!(occ.tokens, n);
+        let per_pos = 2u64 * 2 * 4 * 4;
+        assert_eq!(
+            occ.allocated_bytes,
+            2 * KV_CACHE_GROWTH_TOKENS as u64 * per_pos
+        );
+        assert!(occ.utilisation() > 0.5);
+    }
+
+    /// An empty store reports nothing rather than dividing by zero.
+    #[test]
+    fn an_empty_store_reports_zero_and_does_not_divide_by_zero() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let occ = store.occupancy();
+        assert_eq!(occ, KvOccupancy::default());
+        assert_eq!(occ.utilisation(), 0.0);
+    }
+
+    /// Hydrating a prefix snapshot must reserve from its token count, so a
+    /// snapshot minted by a peer that recorded a whole-context `max_seq_len`
+    /// cannot re-inflate the reservation.
+    #[test]
+    fn hydration_reservation_rounds_up_to_a_whole_quantum() {
+        assert_eq!(kv_cache_reservation(0), KV_CACHE_GROWTH_TOKENS);
+        assert_eq!(kv_cache_reservation(1), KV_CACHE_GROWTH_TOKENS);
+        assert_eq!(
+            kv_cache_reservation(KV_CACHE_GROWTH_TOKENS),
+            KV_CACHE_GROWTH_TOKENS
+        );
+        assert_eq!(
+            kv_cache_reservation(KV_CACHE_GROWTH_TOKENS + 1),
+            2 * KV_CACHE_GROWTH_TOKENS
+        );
     }
 }

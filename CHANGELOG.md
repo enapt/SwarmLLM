@@ -35,6 +35,15 @@ word of your prompt should pay attention to every other word was writing an
 between each. It now does the whole thing in one pass. That step used to be
 22% of the time spent reading a prompt and is now 9.5%.
 
+**A short conversation no longer reserves as much memory as a long one.** Every
+conversation was setting aside enough memory for the model's entire context
+window the moment it started — 940 MB on Llama-3.2-3B, whether the conversation
+was twenty words or four thousand. It now reserves what it is actually using and
+asks for more as it goes: a short chat went from 940 MB to 117 MB, and a long
+prompt from 940 MB to 235 MB, with no change in speed. This matters most on a
+graphics card, where reserved memory is genuinely unavailable to anything else —
+it is the difference between a second model fitting and not.
+
 Also in this release:
 
 - **Fixed: Gemma-2 models produced subtly wrong output on a graphics card.** The

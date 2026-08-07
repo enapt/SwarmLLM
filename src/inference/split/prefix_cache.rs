@@ -546,8 +546,16 @@ impl PrefixCache {
                 continue;
             };
             let kv_slot = &mut entry.layers[i];
-            // Create a fresh KvCache with the same dim/max_seq_len and append.
-            let mut kv = KvCache::new(snapshot.dim, snapshot.max_seq_len);
+            // Reserve from the snapshot's TOKEN COUNT, not its recorded
+            // `max_seq_len`. Snapshots cross the network between peers
+            // (`export_snapshot_bytes`), so that field may have been written by
+            // a build that reserved a model's whole context window up front —
+            // honouring it would re-inflate the reservation this node just
+            // stopped making. See `KV_CACHE_GROWTH_TOKENS`.
+            let mut kv = KvCache::new(
+                snapshot.dim,
+                crate::inference::layers::kv_cache_reservation(snapshot.token_count),
+            );
             kv.append(k_src, v_src).map_err(|e| {
                 SwarmError::Internal(format!(
                     "prefix-cache hydrate layer {i}: append failed: {e}"

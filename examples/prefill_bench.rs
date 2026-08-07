@@ -137,11 +137,24 @@ fn main() -> anyhow::Result<()> {
         let decode = t.elapsed().as_secs_f64() / decode_tokens as f64;
         best_decode = best_decode.min(decode);
 
+        let occ = store.occupancy();
         println!(
             "  rep {rep}: prefill {:.2}s ({:.1} tok/s)   decode {:.1} ms/token",
             prefill,
             prompt_tokens as f64 / prefill,
             decode * 1000.0
+        );
+        // ONE request's KV cache. The interesting number is how far
+        // `allocated` sits above `used`: candle reserves the whole context
+        // window on the first append, so a short conversation costs the same
+        // as a full-length one.
+        println!(
+            "          KV cache: {} entries, {:.0} MB allocated, {:.0} MB used ({:.0}% utilisation), {} positions",
+            occ.entries,
+            occ.allocated_bytes as f64 / 1e6,
+            occ.used_bytes as f64 / 1e6,
+            occ.utilisation() * 100.0,
+            occ.tokens,
         );
     }
 

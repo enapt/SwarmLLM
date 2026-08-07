@@ -6462,7 +6462,7 @@ ships at `contribution = "minimal"` = **half** its cores. Measured on that box,
 partially bandwidth-bound workload, but a real 1.6x that users may not know they
 have opted out of.
 
-## KV-cache memory is bounded by session COUNT and AGE, never by bytes (2026-08-07) — MEASURED
+## KV-cache memory is bounded by session COUNT and AGE, never by bytes (2026-08-07) — SUPERSEDED, see the resolution at the end
 
 A 20-minute soak (123 completed requests + 39 mid-stream cancellations, prompts
 of 100-500 words, llama-3.2-3b Q4_K_M) left the **worker process at 6992 MB** —
@@ -6997,3 +6997,89 @@ ones the roofline entry above names — fewer bytes per token, or more tokens pe
 weight read — not another elementwise fusion. **Do not spend another round on
 attention on CPU without re-profiling first**; two rounds have now gone into
 stages that turned out to be minorities of the total.
+
+## KV memory: the cost model in the entry above was wrong (2026-08-07) — FIXED
+
+Resolves "KV-cache memory is bounded by session COUNT and AGE". Its *conclusion*
+— the store has no byte bound — was right. Its *cost model* was wrong, and the
+fix that follows from the real one is different and much simpler.
+
+That entry reasoned "one session's cache is `layers x 2 x kv_len x kv_heads x
+head_dim x 4`, ~137 MB at 600 tokens", i.e. that a cache grows with the
+conversation. It does not. candle's `Cache::append` allocates a buffer of
+`max_seq_len` positions on the FIRST append, and `Cache::new(dim, n)` sets both
+`max_seq_len` AND `grow_by` to `n` — so passing a model's context length
+reserved the whole context window from token one:
+
+    llama-3.2-3b Q4_K_M, ONE request, measured with the new occupancy counter
+      100-token chat    940 MB reserved,  25 MB used    3% utilisation
+      896-token prompt  940 MB reserved, 207 MB used   22% utilisation
+
+A twenty-token chat cost exactly what a full-length one cost. So the fix is not
+an eviction policy — it is **not over-reserving**, which also avoids the hazard
+the old entry flagged (evicting a cache belonging to an in-flight request is a
+correctness bug, and the store has no in-use marker).
+
+**What shipped**: `KV_CACHE_GROWTH_TOKENS = 512` and `layers::new_kv_cache`,
+the single constructor every KV cache now goes through. `Cache::append` grows on
+demand, and the conversation's real ceiling was never this value anyway — it is
+enforced by the `total_seq > max_seq_len` guard in `forward_inner_impl`, so
+nothing got shorter.
+
+    100-token chat    940 -> 117 MB reserved   (8.0x)
+    896-token prompt  940 -> 235 MB reserved   (4.0x), utilisation 22% -> 88%
+    prompt processing 26.14 -> 26.09 tok/s, decode unchanged — within noise
+
+llama.cpp has the identical defect for the identical reason (it pre-allocates
+`n_ctx` at startup) and its proposed fix is a paged KV cache with a block table
+(ggml-org/llama.cpp#21961). candle's `grow_by` lets us get on-demand allocation
+without one.
+
+**The growth copy is cheap because it is per layer, per K/V.** `Tensor::cat`
+doubles the buffer being grown, but that buffer is one layer's K or V — ~17 MB
+here, not the 940 MB total — so the transient is ~34 MB. Reaching 4096
+positions is seven grows totalling ~3.3 GB of copying spread across a
+conversation that spends minutes decoding.
+
+### The part that matters more than the fix: RSS could not have shown any of this
+
+Peak process RSS across the same A/B:
+
+    100-token chat   2913 -> 2960 MB
+    896-token prompt 3500 -> 3325 MB
+
+A **4x to 8x change in reserved bytes moved RSS by about 5%, and in both
+directions.** `Tensor::zeros` gets lazily-faulted zero pages from the OS, so
+Linux was only ever backing the part actually written — RSS tracked *usage*
+while the bug was in *reservation*. The old entry's measurement caveat
+predicted exactly this ("RSS is confounded by the allocator... a flat RSS would
+NOT have proved 'no eviction'") and asked for a counter. It was right, and this
+is the demonstration: the same reading that made two earlier predictions about
+this cache come out wrong.
+
+`KvCacheStore::occupancy()` now reports entries, allocated bytes, used bytes and
+token count directly, and the router logs it on the cache-cleanup tick
+(`DIAG: KV-cache occupancy`). **Reason about KV memory from that, never from
+process RSS.**
+
+### Still open
+
+- **On CUDA this is a direct VRAM saving, and that is reasoned, not measured.**
+  Device allocations are eager — there is no demand paging on the card — so the
+  reserved figure IS the resident figure there, unlike on the host. It was not
+  measured because GPU benchmarking on the test box locks the user's desktop
+  (gotcha #251) and a CUDA build is ~76 minutes.
+- **The CUDA `max_seq_len` shrink heuristic is now over-conservative.** The
+  loader clamps a model's usable context so the up-front KV reservation fits
+  beside the weights on a small card. With on-demand growth that reservation is
+  no longer up front, so the clamp is cutting users' context for memory that
+  will usually never be touched. **Not relaxed here on purpose**: doing so
+  introduces overcommit, where a long conversation OOMs at token 2000 instead
+  of the request failing immediately. That trade needs its own decision.
+- **A byte budget is still the right backstop** for sustained concurrent
+  long-context load, since growth is unbounded below the context ceiling. It
+  should be admission control (vLLM's Head-Room Admission, already cited in
+  `.claude/rules/diagnosis.md`) rather than eviction: a swarm can route a
+  refused request to a peer, and evicting a live request's cache cannot be made
+  safe without an in-use marker the store does not have. The occupancy counter
+  is the input such a policy needs, and it did not exist before this.
