@@ -91,43 +91,44 @@ pub(crate) fn kv_headroom_bytes(weight_bytes: u64, free_vram_bytes: u64) -> u64 
     (free_vram_bytes / 100 * VRAM_HEADROOM_PCT).saturating_sub(weight_bytes)
 }
 
-/// Whether this forward will claim another growth quantum of KV cache.
+/// Sequence positions this forward will NEWLY reserve, or 0 if it fits inside
+/// what the cache already has.
 ///
 /// A cache grows only when a conversation crosses a quantum boundary, so this
-/// is the ONLY moment a headroom check can matter — and checking on every
-/// token instead would walk the whole cache store per generated token for an
-/// answer that is almost always "no".
+/// is 0 for almost every decode step — which is what keeps the headroom check
+/// off the per-token path.
 ///
-/// `index_pos == 0` counts as growth: a request with nothing cached claims its
-/// first quantum.
-pub(crate) fn forward_claims_new_quantum(
-    index_pos: usize,
-    total_seq: usize,
-    quantum: usize,
-) -> bool {
+/// **It returns positions, not "one quantum".** A prefill jumps many quanta at
+/// once: 0 -> 5000 tokens at a 512 quantum reserves ten of them in a single
+/// forward. Charging one would under-count the largest claim any request
+/// makes by an order of magnitude, which is precisely the case the budget
+/// exists to catch.
+pub(crate) fn positions_claimed(index_pos: usize, total_seq: usize, quantum: usize) -> usize {
     let q = quantum.max(1);
-    total_seq.div_ceil(q) > index_pos.div_ceil(q)
+    total_seq
+        .div_ceil(q)
+        .saturating_sub(index_pos.div_ceil(q))
+        .saturating_mul(q)
 }
 
-/// Would claiming another quantum push total KV occupancy past the budget?
+/// Would reserving `positions` more push total KV occupancy past the budget?
 ///
 /// `in_use_bytes` is what the whole store already holds — every request on
 /// this worker, not just the one asking. That is the point: the load-time
 /// clamp this replaces sized for ONE conversation at full length and so did
-/// not bound concurrency at all, while a growth quantum claimed by the fourth
-/// concurrent request is exactly as real as one claimed by the first.
+/// not bound concurrency at all.
 ///
 /// This is Head-Room Admission (vLLM). The difference here is what happens on
 /// refusal: vLLM must preempt and recompute because it has nowhere else to
 /// send the work, whereas a refused request in a swarm can be served by a
 /// peer — so refusing early is cheap and correct.
-pub(crate) fn quantum_exceeds_headroom(
+pub(crate) fn claim_exceeds_headroom(
     budget_bytes: u64,
     in_use_bytes: u64,
     kv_bytes_per_token: u64,
-    quantum: usize,
+    positions: usize,
 ) -> bool {
-    let claim = kv_bytes_per_token.saturating_mul(quantum as u64);
+    let claim = kv_bytes_per_token.saturating_mul(positions as u64);
     in_use_bytes.saturating_add(claim) > budget_bytes
 }
 
@@ -177,30 +178,64 @@ mod tests {
         assert_eq!(kv_headroom_bytes(8 << 30, 4 << 30), 0);
     }
 
-    /// The check must fire exactly when a conversation crosses a quantum
-    /// boundary, and not otherwise — that is what keeps it off the per-token
-    /// path.
+    /// Growth is claimed exactly at quantum boundaries and nowhere else —
+    /// that is what keeps the check off the per-token path.
     #[test]
-    fn growth_is_detected_only_at_quantum_boundaries() {
+    fn growth_is_claimed_only_at_quantum_boundaries() {
         let q = 512;
-        // A fresh request claims its first quantum.
-        assert!(forward_claims_new_quantum(0, 1, q));
-        assert!(forward_claims_new_quantum(0, 512, q));
-        // Decoding inside the first quantum claims nothing more.
-        assert!(!forward_claims_new_quantum(1, 2, q));
-        assert!(!forward_claims_new_quantum(510, 511, q));
-        assert!(!forward_claims_new_quantum(511, 512, q));
-        // Crossing into the second does.
-        assert!(forward_claims_new_quantum(512, 513, q));
-        assert!(!forward_claims_new_quantum(513, 514, q));
-        // A prefill spanning several quanta counts as growth.
-        assert!(forward_claims_new_quantum(0, 2000, q));
+        assert_eq!(
+            positions_claimed(0, 1, q),
+            512,
+            "a fresh request claims one"
+        );
+        assert_eq!(positions_claimed(0, 512, q), 512);
+        // Decoding inside the current quantum claims nothing.
+        assert_eq!(positions_claimed(1, 2, q), 0);
+        assert_eq!(positions_claimed(510, 511, q), 0);
+        assert_eq!(positions_claimed(511, 512, q), 0);
+        // Crossing into the next claims one.
+        assert_eq!(positions_claimed(512, 513, q), 512);
+        assert_eq!(positions_claimed(513, 514, q), 0);
+    }
+
+    /// **A prefill claims MANY quanta in one forward.** Charging it one — which
+    /// the first version of this did — under-counts the single largest claim a
+    /// request ever makes, letting exactly the allocation the budget exists to
+    /// refuse go straight through.
+    #[test]
+    fn a_large_prefill_claims_every_quantum_it_spans() {
+        let q = 512;
+        assert_eq!(positions_claimed(0, 5000, q), 5120, "10 quanta, not 1");
+        assert_eq!(positions_claimed(0, 2000, q), 2048);
+        // Continuing a conversation charges only the new span.
+        assert_eq!(positions_claimed(1000, 5000, q), 5120 - 1024);
+    }
+
+    /// And the budget must see that full claim, not a single quantum's worth.
+    #[test]
+    fn a_large_prefill_is_refused_when_it_does_not_fit() {
+        let per_token = 1_000u64;
+        let q = 512usize;
+        // Room for two quanta only.
+        let budget = per_token * (2 * q) as u64;
+        // One quantum fits...
+        assert!(!claim_exceeds_headroom(
+            budget,
+            0,
+            per_token,
+            positions_claimed(0, 1, q)
+        ));
+        // ...but a ten-quantum prefill must not.
+        assert!(
+            claim_exceeds_headroom(budget, 0, per_token, positions_claimed(0, 5000, q)),
+            "a prefill spanning 10 quanta must be refused against a 2-quantum budget"
+        );
     }
 
     /// A zero quantum must not divide by zero.
     #[test]
     fn a_zero_quantum_is_treated_as_one() {
-        assert!(forward_claims_new_quantum(0, 1, 0));
+        assert!(positions_claimed(0, 1, 0) > 0);
     }
 
     /// The budget is against the WHOLE store, not one request — the case the
@@ -213,20 +248,20 @@ mod tests {
         let budget = claim * 4; // room for four quanta in total
 
         // Nothing in use: fine.
-        assert!(!quantum_exceeds_headroom(budget, 0, per_token, q));
+        assert!(!claim_exceeds_headroom(budget, 0, per_token, q));
         // Three already held: the fourth still fits.
-        assert!(!quantum_exceeds_headroom(budget, claim * 3, per_token, q));
+        assert!(!claim_exceeds_headroom(budget, claim * 3, per_token, q));
         // Four already held — by any mix of requests — and the fifth does not.
-        assert!(quantum_exceeds_headroom(budget, claim * 4, per_token, q));
+        assert!(claim_exceeds_headroom(budget, claim * 4, per_token, q));
     }
 
     /// Arithmetic near the limits must saturate rather than wrap: wrapping
     /// would turn "no memory" into "unlimited memory".
     #[test]
     fn headroom_arithmetic_saturates() {
-        assert!(quantum_exceeds_headroom(0, u64::MAX, 1, 1));
-        assert!(quantum_exceeds_headroom(10, u64::MAX, u64::MAX, usize::MAX));
+        assert!(claim_exceeds_headroom(0, u64::MAX, 1, 1));
+        assert!(claim_exceeds_headroom(10, u64::MAX, u64::MAX, usize::MAX));
         // A zero per-token cost cannot claim anything, so it never refuses.
-        assert!(!quantum_exceeds_headroom(0, 0, 0, 512));
+        assert!(!claim_exceeds_headroom(0, 0, 0, 512));
     }
 }

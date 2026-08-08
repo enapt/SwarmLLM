@@ -7446,3 +7446,46 @@ one machine" next to a default is not the same as being safe — the honest note
 did not prevent the harm. Where a constant cannot be derived from mechanism,
 prefer the conservative rule that cannot hurt anyone over the aggressive one
 that helps the machine you happen to own.
+
+## Head-room admission: two things the live test found (2026-08-08)
+
+Attempted the obvious validation — load a model on an 8 GB card with a context
+too large for it and watch a long conversation get refused cleanly. It did not
+get that far, and both reasons are worth recording.
+
+**1. A large prefill was charged one quantum instead of ten.** `positions_claimed`
+now returns the positions a forward newly reserves; it previously answered "one
+quantum" for any forward that grew the cache at all. A prefill from 0 to 5000
+tokens reserves ten quanta in a single forward, so the budget saw a tenth of the
+largest claim any request ever makes — the exact allocation it exists to refuse
+would have gone straight through. Fixed, with tests confirmed to go red against
+the original arithmetic.
+
+Found by reasoning about how to construct the test, not by running it. Worth
+noting for its own sake: designing the adversarial case exposed the defect
+before the case could be built.
+
+**2. The load-time VRAM estimator refuses first, so the runtime guard is a
+backstop, not the primary defence.** Loading phi-3.5 with a 32768-token override
+was refused at load: *"needs about 27313 MB of memory but this node's budget
+allows 7509 MB"*. That is `model::auto_manage::vram`, sizing the worst case
+(32768 x ~768 KB/token of MHA KV = ~25 GB) and correctly declining.
+
+So in the single-model case a model only loads if its worst case already fits,
+and the runtime head-room check cannot fire. It matters where free VRAM at load
+is not the whole story: a second model loaded later, another process taking VRAM,
+or several long conversations at once — which is the axis the old context clamp
+could not see at all and the reason the guard was written. **The CHANGELOG's
+framing is accurate but the situation is narrower than it reads.**
+
+The two also disagree on their base: the estimator budgets against the
+contribution-derived VRAM allowance, while the head-room check uses free VRAM at
+load. Reconciling them onto one number is worth doing and was not attempted.
+
+**Not measured, and it is the honest gap**: a real refusal under genuine memory
+pressure. Constructing it needs a model whose worst case passes the load
+estimator while the runtime budget still binds — achievable by occupying VRAM
+before load, but it was not built here. The guard's behaviour is proven by a
+test that drives a real `SplitModel::forward` with an exhausted budget, and that
+test is confirmed to fail if the guard is disconnected; what is unproven is the
+end-to-end path on a genuinely full card.

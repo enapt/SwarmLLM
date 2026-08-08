@@ -390,21 +390,25 @@ impl SplitModel {
         // what lets a coordinator route it to a peer that can — the reason a
         // swarm can refuse where vLLM has to preempt and recompute.
         if let Some(budget) = self.kv_budget_bytes {
-            if super::kv_budget::forward_claims_new_quantum(
+            // Positions this forward newly reserves — zero for almost every
+            // decode step, and a whole prompt's worth on a prefill.
+            let claiming = super::kv_budget::positions_claimed(
                 index_pos,
                 total_seq,
                 crate::inference::layers::KV_CACHE_GROWTH_TOKENS,
-            ) {
+            );
+            if claiming > 0 {
                 let in_use = kv_cache_store.occupancy().allocated_bytes;
-                if super::kv_budget::quantum_exceeds_headroom(
+                if super::kv_budget::claim_exceeds_headroom(
                     budget,
                     in_use,
                     self.kv_bytes_per_token,
-                    crate::inference::layers::KV_CACHE_GROWTH_TOKENS,
+                    claiming,
                 ) {
                     tracing::warn!(
                         request_id,
                         total_seq,
+                        claiming_positions = claiming,
                         in_use_mb = in_use / (1024 * 1024),
                         budget_mb = budget / (1024 * 1024),
                         "DIAG: refusing to grow the KV cache past the GPU budget"

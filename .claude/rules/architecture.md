@@ -367,10 +367,12 @@ silently break at the wire if duplicated:
   so a coordinator re-routes to a peer). **Do NOT re-introduce a load-time
   context clamp** — one existed, it shrank every user's context so a single
   full-length conversation would fit, and it did not bound concurrency at all.
-  Two invariants a new caller must preserve: the check runs ONLY when
-  `forward_claims_new_quantum` says the forward grows the cache (otherwise it
-  walks the whole store per generated token for an answer that is almost always
-  "no"), and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
+  Three invariants a new caller must preserve: the check runs ONLY when
+  `positions_claimed` is non-zero (otherwise it walks the whole store per
+  generated token for an answer that is almost always "no"); it charges the
+  POSITIONS claimed, not one quantum, because a prefill jumps many quanta in a
+  single forward and charging one under-counted the largest claim a request
+  ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
   and any GPU node whose free VRAM could not be read records `None`, and reading
   that as a zero budget refuses everything.
 - **`inference::cpu_pools::in_phase_pool`** (2026-08-07) — binds a forward pass
