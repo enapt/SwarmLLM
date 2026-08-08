@@ -4,6 +4,19 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.82-alpha] — 2026-08-08
+
+**This release is about speed on the hardware you already have, and about not
+using more memory than it needs to.** Reading a prompt is faster on both a
+graphics card and a plain processor, a conversation no longer sets aside memory
+for a length it will probably never reach, and a graphics card no longer
+shortens your conversations pre-emptively to make that reservation fit.
+
+It also drops support for pre-2020 NVIDIA cards, which is the one thing to read
+before updating if you have one — nothing breaks, but those machines will use
+the processor instead.
+
+
 **On an NVIDIA graphics card, reading your prompt is 1.3x to 2.0x faster and
 replies inside a long conversation are 2.1x to 2.4x faster.** FlashAttention is
 back in the GPU builds, which is what the speed comes from. The gain grows with
