@@ -79,6 +79,9 @@ pub struct SplitModel {
     /// single benchmark (`docs/FUTURE_WORK.md`).
     pub(super) batch_calls: u64,
     pub(super) batch_fellback: u64,
+    /// When the counters above were last reported. `None` until the first
+    /// multi-request call, so an idle model never reports.
+    pub(super) batch_stats_reported_at: Option<std::time::Instant>,
 }
 
 impl SplitModel {
@@ -112,19 +115,42 @@ impl SplitModel {
     ///
     /// Reported at INFO, not debug: nodes run at info, and a metric nobody sees
     /// is the same as no metric — the whole reason this fallback went unnoticed
-    /// is that it is silent. Rate-limited to one line per
-    /// `BATCH_STATS_EVERY` calls so a busy node does not drown in it.
+    /// is that it is silent.
+    ///
+    /// **Paced by time, not only by call count.** It used to report every 256
+    /// calls, and a realistic session never gets there: four people asking one
+    /// question each is around 96, so the counter reset with the worker and the
+    /// line never appeared. Verifying the batching fix on a real node found
+    /// exactly that — the answers were right, and the one diagnostic that could
+    /// have said whether the batched path ran at all printed nothing.
+    ///
+    /// A diagnostic that cannot fire during normal use is not a diagnostic. It
+    /// now reports on whichever comes first, so a short burst is visible and a
+    /// busy node still gets at most one line per `BATCH_STATS_MIN_GAP`.
     pub(super) fn note_batch_attempt(&mut self, fell_back: bool) {
         /// Roughly one line per few seconds of steady decoding.
         const BATCH_STATS_EVERY: u64 = 256;
+        /// Floor on spacing, so a busy node cannot be flooded.
+        const BATCH_STATS_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(20);
 
         self.batch_calls += 1;
         if fell_back {
             self.batch_fellback += 1;
         }
-        if !self.batch_calls.is_multiple_of(BATCH_STATS_EVERY) {
+        let now = std::time::Instant::now();
+        let due_by_time = match self.batch_stats_reported_at {
+            // First multi-request call since load: start the clock rather than
+            // reporting a single sample, which says nothing.
+            None => {
+                self.batch_stats_reported_at = Some(now);
+                false
+            }
+            Some(last) => now.duration_since(last) >= BATCH_STATS_MIN_GAP,
+        };
+        if !due_by_time && !self.batch_calls.is_multiple_of(BATCH_STATS_EVERY) {
             return;
         }
+        self.batch_stats_reported_at = Some(now);
         let batched = self.batch_calls - self.batch_fellback;
         tracing::info!(
             model_key = %self.kv_model_key,

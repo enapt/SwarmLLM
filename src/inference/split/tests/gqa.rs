@@ -240,6 +240,7 @@ fn qwen2_forward_with_biases() {
         final_logit_softcap: None,
         batch_calls: 0,
         batch_fellback: 0,
+        batch_stats_reported_at: None,
     };
 
     let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));

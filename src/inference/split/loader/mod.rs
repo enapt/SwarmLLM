@@ -1943,6 +1943,7 @@ impl SplitModel {
             final_logit_softcap,
             batch_calls: 0,
             batch_fellback: 0,
+            batch_stats_reported_at: None,
         })
     }
 }

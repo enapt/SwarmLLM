@@ -702,12 +702,21 @@ fn forward_batch_mixed_index_pos_falls_back() {
     assert_eq!(out[1].dims(), &[1, 4, hidden_dim]);
 }
 
-/// The fallback inside `forward_batch` is silent, and its condition — every
-/// request sitting at the same position — stops holding as soon as concurrent
-/// requests drift out of lockstep. Without a count there is no way to tell a
-/// node that is batching from one that has been running sequentially all along;
-/// throughput does not distinguish them either, since batching four streams was
-/// worth only ~20% here (`docs/FUTURE_WORK.md`).
+/// The fallback inside `forward_batch` is silent, and without a count there is
+/// no way to tell a node that is batching from one that has been running
+/// sequentially all along.
+///
+/// It was worth having: the counters are what showed the batched path being
+/// taken **0 times out of 156** on a live node, because the gate required every
+/// request to sit at the same position with the same history. Decode no longer
+/// asks for either (it has no shared mask, and each slot attends to its own
+/// cache), so a batch of ONE-token steps now fuses whatever positions the
+/// requests are at — measured at 1.99x on a graphics card and 1.27x on a
+/// processor, not the ~20% once recorded in `docs/FUTURE_WORK.md`.
+///
+/// Prompt processing still requires alignment, and that is what this test
+/// drives: its inputs are four positions long, so a mismatched `index_pos`
+/// must still fall back.
 #[test]
 fn forward_batch_counts_how_often_it_actually_batched() {
     let hidden_dim = 128;

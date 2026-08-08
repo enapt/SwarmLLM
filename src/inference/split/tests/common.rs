@@ -156,6 +156,7 @@ fn make_test_split_model_impl(
         final_logit_softcap: None,
         batch_calls: 0,
         batch_fellback: 0,
+        batch_stats_reported_at: None,
     }
 }
 
@@ -239,6 +240,7 @@ pub(super) fn make_gqa_test_model(
         final_logit_softcap: None,
         batch_calls: 0,
         batch_fellback: 0,
+        batch_stats_reported_at: None,
     }
 }
 
@@ -372,5 +374,6 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         final_logit_softcap: None,
         batch_calls: 0,
         batch_fellback: 0,
+        batch_stats_reported_at: None,
     }
 }
