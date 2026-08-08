@@ -173,30 +173,63 @@ fn main() -> anyhow::Result<()> {
         // admission and IPC all sit between a real request and this call.
         let batch = env_usize("SWARM_BENCH_BATCH", 1).max(1);
         let reqs: Vec<String> = (0..batch).map(|b| format!("{req}-slot{b}")).collect();
+        // Each slot gets a DIFFERENT prompt length, because that is what
+        // concurrent users have: four people mid-chat are at four different
+        // positions with four different histories, and they drift further apart
+        // with every word. An equal-length batch is the one shape real traffic
+        // never takes, and benchmarking it is how a batched path that never
+        // engaged in production still looked fine here — measured on a live
+        // node as 0 batched forwards against 156 sequential.
+        //
+        // `SWARM_BENCH_EQUAL_LEN=1` restores the old equal-length batch, which
+        // is the control: it is the shape that fused before as well as after,
+        // so a change that only helps the ragged case must leave it alone.
+        let ragged = std::env::var("SWARM_BENCH_EQUAL_LEN").as_deref() != Ok("1");
+        // Stagger by a decent fraction of the prompt so the histories are
+        // genuinely unequal rather than differing by a token or two.
+        let slot_len = |b: usize| -> usize {
+            if ragged && batch > 1 {
+                prompt_tokens - (b * prompt_tokens) / (2 * batch)
+            } else {
+                prompt_tokens
+            }
+        };
         if batch > 1 {
-            // Give every slot the same prefix so their KV lengths match, the
-            // shape `forward_batch` can actually fuse.
-            for r in &reqs {
+            for (b, r) in reqs.iter().enumerate() {
+                let n = slot_len(b);
+                let slot_input = Tensor::from_vec(ids[..n].to_vec(), &[1, n], &Device::Cpu)?;
                 model
-                    .forward(&input, 0, &store, r)
+                    .forward(&slot_input, 0, &store, r)
                     .map_err(|e| anyhow::anyhow!("batch prefill: {e}"))?;
             }
             sync(&device);
+            println!(
+                "  batch={batch} slot prompt lengths {:?}{}",
+                (0..batch).map(slot_len).collect::<Vec<_>>(),
+                if ragged {
+                    " (ragged — as real traffic is)"
+                } else {
+                    " (equal — control)"
+                }
+            );
         }
         let t = Instant::now();
-        for pos in (prompt_tokens..).take(decode_tokens) {
+        for step_i in 0..decode_tokens {
             let step = Tensor::from_vec(vec![7i64], &[1, 1], &Device::Cpu)?;
             if batch == 1 {
                 let logits = model
-                    .forward(&step, pos, &store, &req)
+                    .forward(&step, prompt_tokens + step_i, &store, &req)
                     .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
                 drop(logits);
             } else {
+                // Every slot advances from its OWN prompt length, so positions
+                // and cache lengths both differ across the batch.
                 let items: Vec<swarmllm::inference::split::BatchItem<'_>> = reqs
                     .iter()
-                    .map(|r| swarmllm::inference::split::BatchItem {
+                    .enumerate()
+                    .map(|(b, r)| swarmllm::inference::split::BatchItem {
                         input: &step,
-                        index_pos: pos,
+                        index_pos: slot_len(b) + step_i,
                         request_id: r,
                     })
                     .collect();

@@ -2091,6 +2091,91 @@ mod batched_attention_tests {
         );
     }
 
+    /// **The shape production actually has, and the one the tests above miss.**
+    ///
+    /// Every other batched test starts each slot from an empty cache, so all
+    /// of them share a KV length of 0 — which is the one thing concurrent
+    /// conversations never do. Four people mid-chat have four different
+    /// histories, and `forward_batch` gates on exactly that (`kv_offset_
+    /// homogeneous`). That gate was the binding one: relaxing the position
+    /// gate alone changed nothing measurable, because every concurrent decode
+    /// still fell out here.
+    ///
+    /// So this fills each slot to a DIFFERENT length first, then takes one
+    /// batched decode step. Attention has no mask at `seq_len == 1` and each
+    /// slot attends to its own cache, which is why differing lengths are safe
+    /// — this asserts that rather than assuming it.
+    #[test]
+    fn batched_decode_matches_per_request_with_different_history_lengths() {
+        let dev = Device::Cpu;
+        let (n_head, n_kv_head, head_dim) = (4usize, 2, 8);
+        let hidden = n_head * head_dim;
+        let lw = test_layer_weights(n_head, n_kv_head, head_dim, &dev);
+        // Four conversations of genuinely different lengths.
+        let histories = [3usize, 11, 1, 19];
+        let batch = histories.len();
+        let max_seq = 64;
+
+        // Warm each slot to its own length, one token at a time, exactly as a
+        // real conversation arrives. Both sides are fed the SAME draw at each
+        // step, so the only difference under test is batched-vs-sequential.
+        let mut batched_caches: Vec<Option<KvCache>> = (0..batch).map(|_| None).collect();
+        let mut solo_caches: Vec<Option<KvCache>> = (0..batch).map(|_| None).collect();
+        for (i, &len) in histories.iter().enumerate() {
+            for pos in 0..len {
+                let t = Tensor::randn(0f32, 1., (1usize, 1usize, hidden), &dev).unwrap();
+                lw.forward_attn(&t, None, pos, &mut batched_caches[i], max_seq, None)
+                    .expect("warm batched side");
+                lw.forward_attn(&t, None, pos, &mut solo_caches[i], max_seq, None)
+                    .expect("warm solo side");
+            }
+        }
+
+        // Sanity: the caches really are at different lengths, or this test is
+        // silently re-testing the homogeneous case.
+        let lens: Vec<usize> = batched_caches
+            .iter()
+            .map(|c| c.as_ref().map(|c| c.current_seq_len()).unwrap_or(0))
+            .collect();
+        assert_eq!(
+            lens,
+            histories.to_vec(),
+            "cache lengths must actually differ"
+        );
+
+        // One decode step: each slot at its own next position.
+        let positions: Vec<usize> = histories.to_vec();
+        let x = Tensor::randn(0f32, 1., (batch, 1usize, hidden), &dev).unwrap();
+
+        let mut refs: Vec<&mut Option<KvCache>> = batched_caches.iter_mut().collect();
+        let got = lw
+            .forward_attn_batched(&x, None, &positions, &mut refs, max_seq, None)
+            .expect("batched decode over unequal histories");
+
+        let mut rows = Vec::with_capacity(batch);
+        for (i, pos) in positions.iter().enumerate() {
+            let xi = x.narrow(0, i, 1).unwrap().contiguous().unwrap();
+            rows.push(
+                lw.forward_attn(&xi, None, *pos, &mut solo_caches[i], max_seq, None)
+                    .expect("solo decode"),
+            );
+        }
+        let want = Tensor::cat(&rows, 0).unwrap();
+
+        let a = got.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let b = want.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let worst = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-5,
+            "histories {histories:?}: max abs diff {worst} — batching people with \
+             different conversation lengths changed their answers"
+        );
+    }
+
     /// A position count that does not match the batch must be refused rather
     /// than applying another request's rotation.
     #[test]
