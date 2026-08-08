@@ -49,12 +49,6 @@
 /// the rest of the daemon's run.
 pub(crate) const VRAM_HEADROOM_PCT: u64 = 85;
 
-/// Never auto-cap below this many tokens. A model that cannot hold even this
-/// is not usefully loadable, and a tiny context produces confusing truncation
-/// errors rather than an honest failure — better to let the load OOM and fall
-/// back to CPU, which the caller already handles.
-pub(crate) const MIN_AUTO_CONTEXT: usize = 512;
-
 /// KV-cache bytes one sequence position costs across a whole segment.
 ///
 /// K and V are cached *before* the GQA repeat (see `LayerWeights::forward`,
@@ -87,127 +81,63 @@ pub(crate) fn mla_kv_elems(
     )
 }
 
-/// The largest context length whose KV cache fits alongside `weight_bytes` in
-/// `free_vram_bytes`, or `None` when the declared context already fits.
+/// Bytes available for KV cache once the weights are resident.
 ///
-/// `None` means "change nothing" — the caller keeps the GGUF value. Returning
-/// `Some` always indicates a reduction, so callers can log unconditionally on
-/// `Some` without re-comparing.
-pub(crate) fn fit_context_to_budget(
-    declared_context: usize,
+/// The same headroom arithmetic [`fit_context_to_budget`] uses, exposed on its
+/// own because it is now the RUNTIME budget rather than only a load-time
+/// sizing input: the loader records it on the model and every forward checks
+/// against it before claiming another growth quantum.
+pub(crate) fn kv_headroom_bytes(weight_bytes: u64, free_vram_bytes: u64) -> u64 {
+    (free_vram_bytes / 100 * VRAM_HEADROOM_PCT).saturating_sub(weight_bytes)
+}
+
+/// Whether this forward will claim another growth quantum of KV cache.
+///
+/// A cache grows only when a conversation crosses a quantum boundary, so this
+/// is the ONLY moment a headroom check can matter — and checking on every
+/// token instead would walk the whole cache store per generated token for an
+/// answer that is almost always "no".
+///
+/// `index_pos == 0` counts as growth: a request with nothing cached claims its
+/// first quantum.
+pub(crate) fn forward_claims_new_quantum(
+    index_pos: usize,
+    total_seq: usize,
+    quantum: usize,
+) -> bool {
+    let q = quantum.max(1);
+    total_seq.div_ceil(q) > index_pos.div_ceil(q)
+}
+
+/// Would claiming another quantum push total KV occupancy past the budget?
+///
+/// `in_use_bytes` is what the whole store already holds — every request on
+/// this worker, not just the one asking. That is the point: the load-time
+/// clamp this replaces sized for ONE conversation at full length and so did
+/// not bound concurrency at all, while a growth quantum claimed by the fourth
+/// concurrent request is exactly as real as one claimed by the first.
+///
+/// This is Head-Room Admission (vLLM). The difference here is what happens on
+/// refusal: vLLM must preempt and recompute because it has nowhere else to
+/// send the work, whereas a refused request in a swarm can be served by a
+/// peer — so refusing early is cheap and correct.
+pub(crate) fn quantum_exceeds_headroom(
+    budget_bytes: u64,
+    in_use_bytes: u64,
     kv_bytes_per_token: u64,
-    weight_bytes: u64,
-    free_vram_bytes: u64,
-) -> Option<usize> {
-    if declared_context == 0 || kv_bytes_per_token == 0 {
-        return None;
-    }
-
-    let usable = free_vram_bytes / 100 * VRAM_HEADROOM_PCT;
-
-    // Weights alone overflow the budget. Capping context cannot rescue this
-    // load — it will OOM and the caller falls back to CPU — but shrink anyway
-    // so the KV cache is not what tips an otherwise-recoverable margin over.
-    let kv_budget = usable.saturating_sub(weight_bytes);
-
-    let fits = (kv_budget / kv_bytes_per_token) as usize;
-    // The floor can never exceed the ceiling: a model declaring a context
-    // below MIN_AUTO_CONTEXT would otherwise make `clamp` panic, and this runs
-    // inside the model worker where a panic takes the whole subprocess down.
-    let floor = MIN_AUTO_CONTEXT.min(declared_context);
-    let capped = fits.clamp(floor, declared_context);
-
-    (capped < declared_context).then_some(capped)
+    quantum: usize,
+) -> bool {
+    let claim = kv_bytes_per_token.saturating_mul(quantum as u64);
+    in_use_bytes.saturating_add(claim) > budget_bytes
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The real geometry behind the 2026-07-29 report: 8 GB card, a 1.3 GB
-    /// model whose GGUF declares a 128K context. Sizing the KV cache to the
-    /// declared value asks for 8 GiB on top of the weights.
-    #[test]
-    fn long_context_model_on_a_small_card_is_capped() {
-        // llama-3.2-1b-instruct-q8-0: 16 layers, 8 KV heads, head_dim 64.
-        let (k, v) = standard_kv_elems(8, 64);
-        let per_token = kv_bytes_per_token(16, k, v);
-        assert_eq!(per_token, 16 * (512 + 512) * 4);
-
-        let free = 7_000u64 * 1024 * 1024; // ~7 GiB free on an 8 GiB card
-        let weights = 1_300u64 * 1024 * 1024;
-        let capped = fit_context_to_budget(131_072, per_token, weights, free)
-            .expect("128K must not fit beside 1.3 GB of weights on a 7 GiB budget");
-
-        assert!(capped < 131_072);
-        // Whatever we pick must actually fit inside the headroom.
-        assert!(weights + per_token * capped as u64 <= free / 100 * VRAM_HEADROOM_PCT);
-    }
-
-    /// The control from the same investigation: tinyllama-1.1b declares 2048,
-    /// so its KV cache is 88 MiB and nothing should change. A cap here would
-    /// be a regression for every short-context model.
-    #[test]
-    fn short_context_model_is_left_alone() {
-        let (k, v) = standard_kv_elems(4, 64);
-        let per_token = kv_bytes_per_token(22, k, v);
-        let free = 7_000u64 * 1024 * 1024;
-        let weights = 700u64 * 1024 * 1024;
-        assert_eq!(fit_context_to_budget(2048, per_token, weights, free), None);
-    }
-
-    /// A big card should serve the full declared context untouched — the cap
-    /// exists for constrained hardware, not as a blanket ceiling.
-    #[test]
-    fn large_card_keeps_full_declared_context() {
-        let (k, v) = standard_kv_elems(8, 128);
-        let per_token = kv_bytes_per_token(28, k, v);
-        let free = 80_000u64 * 1024 * 1024; // 80 GiB
-        let weights = 2_000u64 * 1024 * 1024;
-        assert_eq!(
-            fit_context_to_budget(131_072, per_token, weights, free),
-            None
-        );
-    }
-
-    /// Never hand back something unusable, even when the weights have already
-    /// eaten the entire budget.
-    #[test]
-    fn floors_at_min_rather_than_zero() {
-        let (k, v) = standard_kv_elems(8, 128);
-        let per_token = kv_bytes_per_token(28, k, v);
-        let free = 2_000u64 * 1024 * 1024;
-        let weights = 4_000u64 * 1024 * 1024; // weights alone exceed the card
-        assert_eq!(
-            fit_context_to_budget(131_072, per_token, weights, free),
-            Some(MIN_AUTO_CONTEXT)
-        );
-    }
-
-    /// The cap is a reduction or nothing: it must never raise a model's
-    /// context above what its GGUF declares, however much VRAM is free.
-    ///
-    /// The `declared < MIN_AUTO_CONTEXT` rows are not hypothetical padding —
-    /// they panicked `clamp` (min > max) before the floor was itself clamped,
-    /// which inside the model worker means the subprocess dies on load.
-    #[test]
-    fn never_raises_above_declared() {
-        let (k, v) = standard_kv_elems(2, 64);
-        let per_token = kv_bytes_per_token(4, k, v);
-        for free in [0u64, 1 << 20, 80_000u64 * 1024 * 1024] {
-            for declared in [1usize, 128, 511, 512, 2048, 8192] {
-                match fit_context_to_budget(declared, per_token, 0, free) {
-                    None => {}
-                    Some(c) => assert!(c <= declared, "raised {declared} to {c}"),
-                }
-            }
-        }
-    }
-
     /// MLA caches decompressed K/V at full head count with asymmetric widths,
     /// so it is far more expensive per token than GQA at the same head_dim.
-    /// Getting this wrong would under-estimate DeepSeek's cache and re-create
-    /// the exact bug on those models.
+    /// Getting this wrong would under-estimate DeepSeek's cache.
     #[test]
     fn mla_costs_more_per_token_than_gqa() {
         let (gk, gv) = standard_kv_elems(8, 128);
@@ -218,16 +148,85 @@ mod tests {
         );
     }
 
-    /// Degenerate inputs must not panic or divide by zero.
+    /// The real geometry behind the 2026-07-29 report: an 8 GB card and a
+    /// 1.3 GB model declaring a 128K context. The budget must come out well
+    /// short of that context — which is now a warning at load and a refusal
+    /// only if a conversation actually gets that long, where it used to be a
+    /// permanent cut to everyone's context.
     #[test]
-    fn zero_inputs_are_inert() {
-        assert_eq!(fit_context_to_budget(0, 1024, 0, 1 << 30), None);
-        assert_eq!(fit_context_to_budget(4096, 0, 0, 1 << 30), None);
-        // No GPU information at all → caller passes 0 free; we still must not
-        // panic, and must not silently claim the full context fits.
-        assert_eq!(
-            fit_context_to_budget(131_072, 4096, 0, 0),
-            Some(MIN_AUTO_CONTEXT)
+    fn a_long_context_model_on_a_small_card_gets_a_short_budget() {
+        let (k, v) = standard_kv_elems(8, 64);
+        let per_token = kv_bytes_per_token(16, k, v);
+        let free = 7_000u64 * 1024 * 1024;
+        let weights = 1_300u64 * 1024 * 1024;
+        let budget = kv_headroom_bytes(weights, free);
+        let affordable = budget / per_token;
+        assert!(affordable > 0, "the card must afford SOME conversation");
+        assert!(
+            affordable < 131_072,
+            "a 128K conversation must not fit: affordable {affordable}"
         );
+        // And the budget must respect the headroom margin.
+        assert!(budget + weights <= free / 100 * VRAM_HEADROOM_PCT + weights);
+    }
+
+    /// Weights that already exceed the headroom leave a zero budget rather
+    /// than wrapping around to an enormous one.
+    #[test]
+    fn weights_larger_than_the_card_give_a_zero_budget() {
+        assert_eq!(kv_headroom_bytes(8 << 30, 4 << 30), 0);
+    }
+
+    /// The check must fire exactly when a conversation crosses a quantum
+    /// boundary, and not otherwise — that is what keeps it off the per-token
+    /// path.
+    #[test]
+    fn growth_is_detected_only_at_quantum_boundaries() {
+        let q = 512;
+        // A fresh request claims its first quantum.
+        assert!(forward_claims_new_quantum(0, 1, q));
+        assert!(forward_claims_new_quantum(0, 512, q));
+        // Decoding inside the first quantum claims nothing more.
+        assert!(!forward_claims_new_quantum(1, 2, q));
+        assert!(!forward_claims_new_quantum(510, 511, q));
+        assert!(!forward_claims_new_quantum(511, 512, q));
+        // Crossing into the second does.
+        assert!(forward_claims_new_quantum(512, 513, q));
+        assert!(!forward_claims_new_quantum(513, 514, q));
+        // A prefill spanning several quanta counts as growth.
+        assert!(forward_claims_new_quantum(0, 2000, q));
+    }
+
+    /// A zero quantum must not divide by zero.
+    #[test]
+    fn a_zero_quantum_is_treated_as_one() {
+        assert!(forward_claims_new_quantum(0, 1, 0));
+    }
+
+    /// The budget is against the WHOLE store, not one request — the case the
+    /// load-time clamp it replaces could not see at all.
+    #[test]
+    fn headroom_counts_every_request_not_just_this_one() {
+        let per_token = 1_000u64;
+        let q = 512usize;
+        let claim = per_token * q as u64; // 512 KB per quantum
+        let budget = claim * 4; // room for four quanta in total
+
+        // Nothing in use: fine.
+        assert!(!quantum_exceeds_headroom(budget, 0, per_token, q));
+        // Three already held: the fourth still fits.
+        assert!(!quantum_exceeds_headroom(budget, claim * 3, per_token, q));
+        // Four already held — by any mix of requests — and the fifth does not.
+        assert!(quantum_exceeds_headroom(budget, claim * 4, per_token, q));
+    }
+
+    /// Arithmetic near the limits must saturate rather than wrap: wrapping
+    /// would turn "no memory" into "unlimited memory".
+    #[test]
+    fn headroom_arithmetic_saturates() {
+        assert!(quantum_exceeds_headroom(0, u64::MAX, 1, 1));
+        assert!(quantum_exceeds_headroom(10, u64::MAX, u64::MAX, usize::MAX));
+        // A zero per-token cost cannot claim anything, so it never refuses.
+        assert!(!quantum_exceeds_headroom(0, 0, 0, 512));
     }
 }

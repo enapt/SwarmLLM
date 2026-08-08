@@ -360,6 +360,19 @@ silently break at the wire if duplicated:
   `gpu_layers` and OOM CPU-pinning), with
   `worker_ipc::permanent_gpu_failure` as the backstop for when the probe
   returned unknown.
+- **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
+  admission check against it. The loader records `kv_headroom_bytes` on the
+  model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward
+  claims another growth quantum, and refuses with `ServiceUnavailable` (503,
+  so a coordinator re-routes to a peer). **Do NOT re-introduce a load-time
+  context clamp** — one existed, it shrank every user's context so a single
+  full-length conversation would fit, and it did not bound concurrency at all.
+  Two invariants a new caller must preserve: the check runs ONLY when
+  `forward_claims_new_quantum` says the forward grows the cache (otherwise it
+  walks the whole store per generated token for an answer that is almost always
+  "no"), and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
+  and any GPU node whose free VRAM could not be read records `None`, and reading
+  that as a zero budget refuses everything.
 - **`inference::cpu_pools::in_phase_pool`** (2026-08-07) — binds a forward pass
   to the CPU thread pool that suits its phase, at ONE choke point:
   `SplitModel::forward_inner_impl` and `forward_batch`. Every entry point —

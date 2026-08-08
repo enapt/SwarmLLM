@@ -54,6 +54,15 @@ share while prompt reading keeps the full allowance: measured 1.4x to 1.5x faste
 replies on nodes set to contribute more than the default, with prompt reading
 unchanged. Nothing changes at the default setting.
 
+**Your graphics card no longer cuts a model's conversation length just in case.**
+SwarmLLM used to shorten how long a conversation could run, at the moment a model
+loaded, so that a single maximum-length conversation would definitely fit in
+memory. Short conversations paid for long ones, permanently, and it did not
+account for several conversations at once anyway. Now the full length is
+available, and SwarmLLM only steps in at the moment memory actually runs short —
+declining that one request with a clear explanation, and, if you are part of a
+swarm, handing it to another machine that can take it.
+
 Also in this release:
 
 - **Fixed: Gemma-2 models produced subtly wrong output on a graphics card.** The

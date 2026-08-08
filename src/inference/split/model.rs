@@ -48,6 +48,19 @@ pub struct SplitModel {
     pub(super) eos_token: String,
     /// Maximum sequence length for KV cache pre-allocation.
     pub(super) max_seq_len: usize,
+    /// Bytes of GPU memory this segment's KV cache may occupy in total,
+    /// across every concurrent request. `None` on CPU, and on CUDA when free
+    /// VRAM could not be read — an unknown budget must not become a zero one.
+    ///
+    /// Checked before a forward claims another growth quantum. This replaced a
+    /// load-time clamp that shrank the model's usable context so ONE
+    /// conversation at full length would fit: that made every user's context
+    /// shorter to guard against a case most never reach, and did not bound
+    /// concurrency at all.
+    pub(super) kv_budget_bytes: Option<u64>,
+    /// KV bytes one sequence position costs across this segment's layers.
+    /// Paired with `kv_budget_bytes`; 0 when unknown.
+    pub(super) kv_bytes_per_token: u64,
     /// Pre-computed KV cache store key: "{layer_start}-{layer_end}-{total_layers}".
     /// Avoids a `format!` allocation on every forward pass.
     pub(super) kv_model_key: String,

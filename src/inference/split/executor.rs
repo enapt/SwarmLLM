@@ -376,6 +376,50 @@ impl SplitModel {
             )));
         }
 
+        // Head-Room Admission: refuse before claiming GPU memory we do not
+        // have, rather than letting `Tensor::cat` OOM part-way through a
+        // conversation.
+        //
+        // Only runs on the forwards that actually grow the cache — a
+        // conversation claims memory when it crosses a quantum boundary and at
+        // no other time — so the store walk below costs nothing on the
+        // per-token path.
+        //
+        // `ServiceUnavailable`, not `Validation`: the request is well-formed
+        // and THIS server cannot serve it right now. That is a 503, which is
+        // what lets a coordinator route it to a peer that can — the reason a
+        // swarm can refuse where vLLM has to preempt and recompute.
+        if let Some(budget) = self.kv_budget_bytes {
+            if super::kv_budget::forward_claims_new_quantum(
+                index_pos,
+                total_seq,
+                crate::inference::layers::KV_CACHE_GROWTH_TOKENS,
+            ) {
+                let in_use = kv_cache_store.occupancy().allocated_bytes;
+                if super::kv_budget::quantum_exceeds_headroom(
+                    budget,
+                    in_use,
+                    self.kv_bytes_per_token,
+                    crate::inference::layers::KV_CACHE_GROWTH_TOKENS,
+                ) {
+                    tracing::warn!(
+                        request_id,
+                        total_seq,
+                        in_use_mb = in_use / (1024 * 1024),
+                        budget_mb = budget / (1024 * 1024),
+                        "DIAG: refusing to grow the KV cache past the GPU budget"
+                    );
+                    return Err(SwarmError::ServiceUnavailable(format!(
+                        "Not enough free GPU memory to continue this conversation \
+                         ({} MB of KV cache already in use, budget {} MB). Shorter \
+                         conversations still work; close other GPU programs to raise this.",
+                        in_use / (1024 * 1024),
+                        budget / (1024 * 1024),
+                    )));
+                }
+            }
+        }
+
         let num_layers = self.layers.len();
         // Build the cache key once — reused for both take and writeback (zero alloc on hot path).
         let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);

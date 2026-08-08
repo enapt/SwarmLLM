@@ -221,6 +221,8 @@ fn qwen2_forward_with_biases() {
         norm: None,
         output: None,
         masks: None,
+        kv_budget_bytes: None,
+        kv_bytes_per_token: 0,
         layer_start: 0,
         layer_end: 1,
         total_layers: 3,

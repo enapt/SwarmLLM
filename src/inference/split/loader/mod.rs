@@ -372,11 +372,26 @@ impl SplitModel {
             }
         }
 
-        // 2. Even the default target may not fit on a small card beside the
-        //    weights. Shrink further rather than let the allocation spill into
-        //    host memory, which costs ~14x throughput and reports no error at
-        //    all. Skipped when the operator named a value: an explicit setting
-        //    wins, and the load-time OOM fallback to CPU still backstops it.
+        // 2. Record how much GPU memory this segment's KV cache may occupy in
+        //    total. This USED to shrink `context_length` so that one
+        //    conversation at its full length would fit, because the cache
+        //    reserved its whole ceiling on the first append. It no longer
+        //    does (`layers::new_kv_cache` grows in quanta), so clamping here
+        //    would shorten every user's context to guard a case most never
+        //    reach — and it never bounded concurrency anyway, since it sized
+        //    for ONE conversation.
+        //
+        //    What replaces it is a budget checked at runtime, before a forward
+        //    claims another quantum, against what the WHOLE store holds. See
+        //    `kv_budget::quantum_exceeds_headroom`. The failure mode improves
+        //    too: instead of a context silently cut at load and kept for the
+        //    daemon's life, a request is refused with 503 at the moment memory
+        //    is actually short — which in a swarm routes it to a peer.
+        //
+        //    Still skipped when the operator named a value: an explicit
+        //    setting wins, and the load-time OOM fallback to CPU backstops it.
+        let mut kv_budget_bytes: Option<u64> = None;
+        let mut kv_bytes_per_token: u64 = 0;
         if device.is_cuda() && super::max_seq_len_override().is_none() {
             let seg_layers = layer_end.min(block_count).saturating_sub(layer_start);
             let (k_elems, v_elems) = if matches!(model_arch, ModelArch::DeepSeek2) {
@@ -395,32 +410,41 @@ impl SplitModel {
             let per_token = super::kv_budget::kv_bytes_per_token(seg_layers, k_elems, v_elems);
             let weight_bytes = segment_weight_bytes(&ct, layer_start, layer_end, is_first, is_last);
 
-            // A missing nvidia-smi means "unknown", never "zero" — capping on
-            // a guess would shrink context on machines that had no problem.
+            // A missing nvidia-smi means "unknown", never "zero" — a budget
+            // of zero would refuse every request, which is far worse than the
+            // no-budget behaviour that preceded this.
             if let Some(free_mb) = crate::model::auto_manage::vram::query_gpu_vram_free_mb() {
                 let free_bytes = free_mb.saturating_mul(1024 * 1024);
-                if let Some(fitted) = super::kv_budget::fit_context_to_budget(
-                    context_length,
-                    per_token,
-                    weight_bytes,
-                    free_bytes,
-                ) {
-                    // Reaching here means even the default target does not
-                    // fit, so this is always a reduction below what the user
-                    // would otherwise get — always worth saying out loud.
+                let budget = super::kv_budget::kv_headroom_bytes(weight_bytes, free_bytes);
+                kv_budget_bytes = Some(budget);
+                kv_bytes_per_token = per_token;
+                // How far the budget stretches, stated in the units a user
+                // thinks in. Logged at INFO when the whole declared context
+                // fits and WARN when it does not, because the second case is
+                // one where a long conversation can be refused mid-way.
+                let affordable = budget
+                    .checked_div(per_token)
+                    .map_or(context_length, |t| t as usize);
+                if affordable >= context_length {
+                    tracing::info!(
+                        context = context_length,
+                        affordable_tokens = affordable,
+                        free_vram_mb = free_mb,
+                        "GPU KV-cache budget comfortably covers this model's context"
+                    );
+                } else {
                     tracing::warn!(
-                        requested_context = context_length,
-                        fitted_context = fitted,
+                        context = context_length,
+                        affordable_tokens = affordable,
                         free_vram_mb = free_mb,
                         weight_mb = weight_bytes / (1024 * 1024),
                         kv_bytes_per_token = per_token,
-                        "Not enough free GPU memory for a {context_length}-token context — \
-                         limiting this model to {fitted} tokens so it still runs on the GPU. \
-                         Longer prompts will be refused. Close other GPU programs or use a \
-                         smaller model to raise this; inference.max_seq_len_override sets it \
-                         manually",
+                        "Free GPU memory covers about {affordable} tokens of conversation, \
+                         short of this model's {context_length}-token context. Shorter \
+                         conversations are unaffected; a long one may be refused once memory \
+                         runs out. Close other GPU programs or use a smaller model to raise \
+                         this",
                     );
-                    context_length = fitted;
                 }
             }
         }
@@ -1893,6 +1917,8 @@ impl SplitModel {
             norm,
             output,
             masks: None,
+            kv_budget_bytes,
+            kv_bytes_per_token,
             layer_start,
             layer_end,
             total_layers: block_count,

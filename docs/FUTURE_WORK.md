@@ -7071,7 +7071,7 @@ process RSS.**
   reserved figure IS the resident figure there, unlike on the host. It was not
   measured because GPU benchmarking on the test box locks the user's desktop
   (gotcha #251) and a CUDA build is ~76 minutes.
-- **The CUDA `max_seq_len` shrink heuristic is now over-conservative.** The
+- **The CUDA `max_seq_len` shrink heuristic is now over-conservative.** RESOLVED 2026-08-08 — see the head-room entry at the end of this file. The
   loader clamps a model's usable context so the up-front KV reservation fits
   beside the weights on a small card. With on-demand growth that reservation is
   no longer up front, so the clamp is cutting users' context for memory that
@@ -7276,3 +7276,66 @@ covered before any tag."* The first half is false — cache-warm triggers on
 source. The gap was **documented as covered**, which is why nobody re-derived
 it. Corrected in place, and the job's own older NOTE about a misleading job name
 makes the identical point about a different failure.
+
+## The context clamp is gone; head-room admission replaces it (2026-08-08) — FIXED
+
+Closes two items above: "the CUDA `max_seq_len` shrink heuristic is now
+over-conservative" and "a byte budget is still the right backstop".
+
+The loader used to shrink a model's usable context at load so that ONE
+conversation at its full length would fit beside the weights. That made sense
+when a cache reserved its whole ceiling on the first append. It no longer does,
+so the clamp was cutting every user's context to guard a case most never reach
+— and it never bounded concurrency at all, because it sized for a single
+conversation while four can run at once.
+
+**What replaces it**: the loader records a KV budget
+(`kv_budget::kv_headroom_bytes`) on the model, and every forward checks it
+before claiming another growth quantum. That is Head-Room Admission, as vLLM
+names it. Two details make it cheap and correct:
+
+- **It only runs when a forward actually grows the cache.**
+  `forward_claims_new_quantum` compares quantum counts either side of the
+  forward, so the per-token decode path does no work at all — a conversation
+  claims memory at a quantum boundary and at no other time.
+- **It counts the WHOLE store, not the asking request.** That is the axis the
+  old clamp could not see.
+
+**The refusal is a 503, deliberately.** `ServiceUnavailable` means "this server
+cannot serve", which is exactly true, and it is what lets a coordinator route
+the request to a peer. This is where a swarm differs from vLLM: vLLM must
+preempt and recompute because it has nowhere else to send the work.
+
+### What a user sees, before and after
+
+Before: a 6 GB card silently capped the model's context at load — permanently,
+for the daemon's life, with a warning most people never read. Short
+conversations paid for long ones.
+
+After: the full context is available. If memory is genuinely short the load
+warns with the number of tokens the card can actually afford, and only a
+conversation that reaches that point is refused, with a message naming the
+figures. Nothing is taken from the common case to insure the rare one.
+
+### Verified, not assumed
+
+`kv_budget`'s own tests cover the arithmetic, including saturation (wrapping
+would turn "no memory" into "unlimited memory") and the quantum-boundary
+predicate. Separately, `a_forward_is_refused_when_the_kv_budget_is_exhausted`
+drives a real `SplitModel::forward` and asserts the 503 — and was confirmed to
+go RED when the guard is disconnected while leaving the arithmetic intact. That
+is the failure this codebase produced twice in one week: a correct computation
+nothing reads.
+
+`no_recorded_budget_means_no_refusal` pins the other direction. Every CPU node,
+and any GPU node where free VRAM could not be read, records `None` — and an
+unknown budget must never be treated as a zero one, which would refuse
+everything.
+
+### Still open
+
+The budget is fixed at load from free VRAM at that moment. If another process
+later claims VRAM, the budget does not shrink to match, so the guard can admit
+work the card can no longer hold. Re-reading free VRAM costs an `nvidia-smi`
+fork, far too slow for the forward path; a periodic refresh on the health tick
+would fix it and was not attempted here.

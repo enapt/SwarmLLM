@@ -1270,3 +1270,51 @@ fn tail_segment_loads_without_shard_zero() {
     );
     eprintln!("OK — output head loaded without shard 0");
 }
+
+/// The head-room guard must actually refuse a forward, not just compute a
+/// verdict nobody reads. Sets a budget of zero so the very first quantum is
+/// over it, and checks the error a caller would see.
+///
+/// This is the wiring test: `kv_budget`'s own tests prove the arithmetic, and
+/// would keep passing if the guard were never called (which is how a
+/// correctly-computed occupancy counter came to be read in the wrong process
+/// earlier the same week).
+#[test]
+fn a_forward_is_refused_when_the_kv_budget_is_exhausted() {
+    let hidden_dim = 128;
+    let mut model = make_test_split_model(1, hidden_dim);
+    model.kv_budget_bytes = Some(0);
+    model.kv_bytes_per_token = 1_000_000;
+
+    let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let input = Tensor::randn(0f32, 1.0, (1, 3, hidden_dim), &Device::Cpu).unwrap();
+    let err = model
+        .forward(&input, 0, &store, "over-budget")
+        .expect_err("a zero budget must refuse the first quantum");
+
+    assert!(
+        matches!(err, crate::error::SwarmError::ServiceUnavailable(_)),
+        "must be 503 so a coordinator re-routes to a peer, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("GPU memory"),
+        "the message must say what ran out: {err}"
+    );
+}
+
+/// The same model with no budget recorded — every CPU node, and any GPU node
+/// where free VRAM could not be read — must be completely unaffected.
+#[test]
+fn no_recorded_budget_means_no_refusal() {
+    let hidden_dim = 128;
+    let mut model = make_test_split_model(1, hidden_dim);
+    model.kv_budget_bytes = None;
+    model.kv_bytes_per_token = u64::MAX;
+
+    let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let input = Tensor::randn(0f32, 1.0, (1, 3, hidden_dim), &Device::Cpu).unwrap();
+    assert!(
+        model.forward(&input, 0, &store, "unbudgeted").is_ok(),
+        "an unknown budget must never be read as a zero one"
+    );
+}
