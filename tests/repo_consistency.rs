@@ -835,3 +835,131 @@ fn every_api_route_is_in_the_architecture_doc() {
          concludes they do not exist: {missing:#?}"
     );
 }
+
+/// Every translation key the frontend asks for must exist in `en.json`.
+///
+/// The two i18n checks above compare locales against each other and catch a
+/// key that is missing from *some* languages. Neither notices a key that is
+/// missing from **all** of them, which is what a typo produces — and the
+/// failure mode is visible to exactly the people this project is aimed at: a
+/// missing key renders as its own raw name, so a non-technical user reads
+/// `dashboard.peer_cont` where a sentence should be.
+///
+/// Three shapes are deliberately not treated as references:
+///
+/// - **Concatenation.** `I18n.t('reference.tier_' + m.tier)` builds the key at
+///   runtime; the literal is a prefix, not a key. Detected by the `+` that
+///   follows the closing quote.
+/// - **`i18n.js` itself**, whose header comment documents usage as
+///   `I18n.t('key')`. Scanning the implementation for calls finds its own
+///   documentation.
+/// - **Plurals.** `I18n.t('dashboard.peer_count', {count: n})` resolves through
+///   `pluralKey` to `_one` / `_other`, so the bare name is correct precisely
+///   when the two suffixed forms exist.
+#[test]
+fn every_translation_key_the_frontend_uses_exists() {
+    let root = repo_root();
+    let en: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("frontend/i18n/en.json")).expect("read en.json"),
+    )
+    .expect("en.json is not JSON");
+    let defined: BTreeSet<String> = en
+        .as_object()
+        .expect("en.json is not an object")
+        .keys()
+        .cloned()
+        .collect();
+
+    /// Pull `I18n.t('...')` keys, skipping any whose literal is concatenated.
+    fn js_keys(src: &str, out: &mut BTreeSet<String>) {
+        const CALL: &str = "I18n.t(";
+        let mut rest = src;
+        while let Some(i) = rest.find(CALL) {
+            rest = &rest[i + CALL.len()..];
+            let after_ws = rest.trim_start();
+            let Some(quote) = after_ws.chars().next() else {
+                continue;
+            };
+            if quote != '\'' && quote != '"' {
+                continue; // a variable, nothing literal to check
+            }
+            let body = &after_ws[1..];
+            let Some(end) = body.find(quote) else {
+                continue;
+            };
+            let key = &body[..end];
+            // A `+` after the closing quote means the literal is a prefix.
+            if body[end + 1..].trim_start().starts_with('+') {
+                continue;
+            }
+            out.insert(key.to_string());
+        }
+    }
+
+    /// Pull `data-i18n`, `data-i18n-placeholder`, `data-i18n-title`, … values.
+    fn html_keys(src: &str, out: &mut BTreeSet<String>) {
+        let mut rest = src;
+        while let Some(i) = rest.find("data-i18n") {
+            rest = &rest[i + "data-i18n".len()..];
+            let Some(eq) = rest.find('=') else { break };
+            // Only an attribute-name suffix may sit between; a space means this
+            // was a different attribute entirely.
+            if rest[..eq].contains(' ') {
+                continue;
+            }
+            let after = rest[eq + 1..].trim_start();
+            if !after.starts_with('"') {
+                continue;
+            }
+            let body = &after[1..];
+            let Some(end) = body.find('"') else { continue };
+            out.insert(body[..end].to_string());
+        }
+    }
+
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut walk = |dir: &str, ext: &str, f: &dyn Fn(&str, &mut BTreeSet<String>)| {
+        let mut stack = vec![root.join(dir)];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().and_then(|s| s.to_str()) == Some(ext) {
+                    // The implementation's own usage comment is not a call.
+                    if p.file_name().and_then(|s| s.to_str()) == Some("i18n.js") {
+                        continue;
+                    }
+                    if let Ok(t) = std::fs::read_to_string(&p) {
+                        f(&t, &mut used);
+                    }
+                }
+            }
+        }
+    };
+    walk("frontend/js", "js", &js_keys);
+    walk("frontend", "html", &html_keys);
+
+    assert!(
+        used.len() > 500,
+        "only found {} referenced keys — the scan broke, not the translations",
+        used.len()
+    );
+
+    let missing: Vec<&String> = used
+        .iter()
+        .filter(|k| {
+            !defined.contains(*k)
+                // Plural form: correct when both suffixed variants exist.
+                && !(defined.contains(&format!("{k}_one")) && defined.contains(&format!("{k}_other")))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the frontend asks for translation keys that do not exist in en.json, so these \
+         render to the user as their own raw names: {missing:#?}"
+    );
+}
