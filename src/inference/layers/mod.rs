@@ -1477,7 +1477,25 @@ pub(crate) fn run_attention(
                 );
             }
 
-            // GPU flash attention: input BSHD, output BSHD → transpose to BHSD
+            // GPU flash attention: input BSHD, output BSHD -> transpose to BHSD.
+            //
+            // The cache is BHSD f32 and flash wants BSHD f16, so this reshapes
+            // and converts the WHOLE cache every token — O(history) work to add
+            // one position, and the dominant term in long-context decode.
+            //
+            // **Fusing the two into `transpose().to_dtype()` was measured and
+            // REJECTED.** It is numerically exact and one pass instead of two,
+            // and `examples/gpu_decode_bench.rs` prices it 2.9 ms/token cheaper
+            // at 912 KV — but in the forward pass it is not faster. Four
+            // alternations at 528 KV, min of 3 each, one binary:
+            //
+            //   separate  39.55  33.52  35.83  41.61   (mean 37.6)
+            //   fused     32.81  35.22  34.95  37.67   (mean 35.2)
+            //
+            // The spread WITHIN each arm (24%) dwarfs the gap between them, so
+            // there is nothing to prefer. See `docs/FUTURE_WORK.md` — the cost
+            // only goes away by storing the cache as f16, not by reordering
+            // these two calls.
             let q_bshd = q.transpose(1, 2)?.contiguous()?;
             let k_bshd = k.transpose(1, 2)?.contiguous()?;
             let v_bshd = v.transpose(1, 2)?.contiguous()?;

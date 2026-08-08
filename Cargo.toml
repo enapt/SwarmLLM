@@ -255,6 +255,15 @@ claude-subscription = []
 [dev-dependencies]
 tempfile = "3"
 
+# Prices the CUDA attention path's per-token reshape/cast. Needs the GPU
+# feature to compile at all, so it must be gated — `cargo clippy --all-targets`
+# (which CI runs without GPU features) would otherwise fail on the unresolved
+# `candle_flash_attn`. Same trap as gotcha #264, caught here by the pre-push
+# hook rather than by a broken release.
+[[example]]
+name = "gpu_decode_bench"
+required-features = ["flash-attn"]
+
 [[test]]
 name = "integration"
 path = "tests/integration/api_test.rs"

@@ -7489,3 +7489,76 @@ before load, but it was not built here. The guard's behaviour is proven by a
 test that drives a real `SplitModel::forward` with an exhausted budget, and that
 test is confirmed to fail if the guard is disconnected; what is unproven is the
 end-to-end path on a genuinely full card.
+
+## GPU decode after the routing fix: where it goes, and what this box can measure (2026-08-08)
+
+Follow-up to the CUDA decode routing correction. Two results, one actionable and
+one a limit on further work here.
+
+### The dominant remaining cost is preparing the KV cache, and it is O(history)
+
+`run_attention`'s CUDA arm reshapes and converts the WHOLE cache every token,
+because the cache is stored **f32 in BHSD** and flash-attn wants **f16 in BSHD**:
+
+    let k_bshd = k.transpose(1, 2)?.contiguous()?;   // full copy
+    let k_f16  = k_bshd.to_dtype(DType::F16)?;       // full pass again
+
+That is O(history) work to add ONE position, so it grows with the conversation.
+Priced with `examples/gpu_decode_bench.rs` (new), per token across 28 layers:
+
+    kv    transpose+contig   to_dtype   flash itself   whole arm   if f16+BSHD
+    272        2.85 ms        1.71 ms      3.98 ms       7.62 ms      5.37 ms
+    528        4.04           2.23         4.87          9.68         6.53
+    912        5.62           2.58         6.34         13.04         6.96
+
+**Confirmed independently by end-to-end scaling**, which is what makes it
+credible: from 924 to 3084 KV the conversion should add ~14.2 ms/token, and
+measured decode went 25.2 -> 39.9 ms, i.e. +14.7. Two unrelated methods agreeing
+to 4%.
+
+So **storing the KV cache as f16 (ideally BSHD) is worth roughly 1.3x at short
+context and ~2x at long context** on this card, and halves GPU KV memory as a
+side effect. That is the real fix and it is not small: the dtype crosses the
+prefix cache, the KV snapshots peers exchange (`export_snapshot_bytes`), the
+speculative-decode truncation path, and the standard-attention arm which wants
+f32. A contained alternative is an f16 BSHD shadow maintained incrementally
+inside `KvCacheEntry` — appending one position per token instead of converting
+the history — at the cost of ~50% more KV memory unless the f32 copy is dropped.
+
+### Rejected: fusing the transpose and the cast
+
+`transpose().to_dtype()` reads the strided f32 source and writes contiguous f16
+in ONE pass. It is numerically exact and the microbenchmark prices it 2.9
+ms/token cheaper at 912 KV.
+
+**In the forward pass it is not faster.** Four alternations at 528 KV, min of 3
+each, one binary via a temporary toggle:
+
+    separate  39.55  33.52  35.83  41.61   mean 37.6
+    fused     32.81  35.22  34.95  37.67   mean 35.2
+
+Not shipped. **Fourth time today an isolated measurement mispredicted the
+forward** (gotcha #266) — and the first time the forward said "no difference"
+rather than "opposite", which is its own kind of answer.
+
+### The measurement floor on this box: ~25% on GPU
+
+The spread WITHIN a single arm above is 24%, larger than most effects worth
+chasing. GPU temperature moved 64 -> 80 C and the SM clock 270 -> 1740 MHz across
+one alternation set: a laptop 3070 under sustained load is thermally and
+clock-unstable, and min-of-N does not remove a drift that persists across a
+whole arm.
+
+**Consequences for future work here:**
+
+1. **A GPU change worth less than ~1.3x cannot be demonstrated on this
+   machine.** Interleaving arms helps but does not fix a drift slower than one
+   arm's duration.
+2. **Null controls are what make a GPU result believable, not the effect size.**
+   The routing fix was trusted because a context above the old threshold came
+   out identical and an MHA model came out identical *to the decimal* — noise of
+   this magnitude could not have produced that. A result with no null control
+   and a 1.2x effect, like the fusion, is indistinguishable from drift.
+3. Prefer changes with a mechanism that predicts a LARGE effect, or that can be
+   verified by something other than wall time (bytes moved, allocation counts,
+   a null control).
