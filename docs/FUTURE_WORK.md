@@ -7742,3 +7742,72 @@ many rows) and implausible for decode batching (m <= 8).
 **So the batching curve is now close to what this kernel can give.** Further
 aggregate throughput on CPU needs either that GEMM or fewer bytes per token,
 not more plumbing.
+
+## Continuous batching never engaged at all (2026-08-09) — FIXED, 1.27x aggregate
+
+The flat aggregate-throughput curve recorded on 2026-08-06 had a simpler cause
+than any of the explanations offered for it, including mine from earlier the
+same night. **The batched path was essentially never taken.**
+
+Measured on a real node, four concurrent requests with DIFFERENT prompt lengths
+— i.e. what actual users look like:
+
+    batched forwards:     0
+    sequential forwards:  156
+
+Every generated token went through `forward_batch`'s one-item fallback. The
+projection batching fixed earlier that day was real, but it improved a path
+production almost never reached.
+
+### Two gates, both requiring an alignment that never happens
+
+1. **`all_same_pos`** — every request had to sit at the same `index_pos`.
+   Concurrent conversations start at different prompt lengths and drift further
+   apart with every token.
+2. **`kv_offset_homogeneous`** — every request had to have the same KV cache
+   length. Same problem, and it is the *stronger* of the two: relaxing only the
+   first changed nothing measurable, because every decode still fell out here.
+
+Both exist to protect things that only apply to PREFILL. The position gate
+protects the shared RoPE call; the cache-length gate protects the shared causal
+mask — and a decode step has no mask at all (`seq_len == 1` sets it to `None`).
+
+### What changed
+
+`forward_attn_batched` now takes a position per row: when they agree it uses one
+RoPE call for the stack (~7x cheaper), and when they differ it applies RoPE per
+row while the qkv projections, the FFN and the output projection stay batched.
+Both gates are relaxed for `seq_len == 1` only; prefill still requires alignment,
+because there the mask genuinely differs per row.
+
+Same node, same workload, alternating passes in ONE binary via
+`SWARMLLM_BATCH_DECODE`:
+
+| pass | off | on |
+|---|---|---|
+| 1 | 5.39 | **6.91** tok/s |
+| 2 | 4.90 | **6.46** |
+| 3 | 5.32 | **6.53** |
+
+Mean **5.20 -> 6.63 tok/s aggregate, 1.27x**, and every "on" run beats every
+"off" run — the two groups do not overlap, which is what makes it attributable
+rather than a hopeful reading of a noisy box. Batched forwards went from 0 to 40
+out of 44 on the same workload.
+
+`SWARMLLM_BATCH_DECODE=0` restores the old behaviour: the A/B switch, and a kill
+switch for a change to the hottest path.
+
+### Why this took so long to find
+
+The telemetry to spot it already existed — `note_batch_attempt` logs the share
+of multi-request calls that actually batched — but it only prints every 256
+calls, and a realistic test session never reaches that. **A diagnostic that
+cannot fire within a normal run is not a diagnostic.** What actually found it
+was a per-tick slot census at debug level, added while chasing this and kept.
+
+The other lesson is the sequence: an equivalence unit test proved
+`forward_attn_batched` correct, and a benchmark proved it faster, and both were
+true while the code was **unreachable in production**. Neither could have caught
+that. Only running a real node with realistic, *differing* prompts did — the
+same shape as the occupancy counter that was reading the wrong process two days
+earlier.

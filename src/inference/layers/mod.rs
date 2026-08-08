@@ -1764,12 +1764,18 @@ impl LayerWeights {
         &self,
         x: &Tensor,
         mask: Option<&Tensor>,
-        index_pos: usize,
+        index_positions: &[usize],
         caches: &mut [&mut Option<KvCache>],
         max_seq_len: usize,
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _n_embd) = x.dims3()?;
+        if b_sz != index_positions.len() {
+            return Err(candle_core::Error::Msg(format!(
+                "forward_attn_batched: {b_sz} rows but {} positions",
+                index_positions.len()
+            )));
+        }
         if b_sz != caches.len() {
             return Err(candle_core::Error::Msg(format!(
                 "forward_attn_batched: {b_sz} rows but {} caches",
@@ -1822,9 +1828,22 @@ impl LayerWeights {
         }
         let q = q.transpose(1, 2)?.contiguous()?;
         let k = k.transpose(1, 2)?.contiguous()?;
-        // Shared `index_pos` is what makes one RoPE call correct for the stack.
-        let q = self.apply_rotary_emb(&q, index_pos)?;
-        let k = self.apply_rotary_emb(&k, index_pos)?;
+        // RoPE is the ONE step here that depends on where each request is in
+        // its own conversation. When every row happens to sit at the same
+        // position — a batch of prefills, or aligned decodes — one call covers
+        // the stack and is ~7x cheaper than eight. When they differ, which is
+        // the normal case for concurrent chats, it is applied per row inside
+        // the loop below. Everything else in this function is position-
+        // independent and stays batched either way.
+        let uniform_pos = index_positions.iter().all(|p| *p == index_positions[0]);
+        let (q, k) = if uniform_pos {
+            (
+                self.apply_rotary_emb(&q, index_positions[0])?,
+                self.apply_rotary_emb(&k, index_positions[0])?,
+            )
+        } else {
+            (q, k)
+        };
         crate::inference::prof::add(P::AttnShape, __shape_t.elapsed().as_nanos() as u64);
 
         // ── Per request: KV cache append and attention ──
@@ -1834,6 +1853,18 @@ impl LayerWeights {
             let qi = q.narrow(0, i, 1)?.contiguous()?;
             let ki = k.narrow(0, i, 1)?.contiguous()?;
             let vi = v.narrow(0, i, 1)?.contiguous()?;
+            let index_pos = index_positions[i];
+            let (qi, ki) = if uniform_pos {
+                (qi, ki)
+            } else {
+                let __t = std::time::Instant::now();
+                let r = (
+                    self.apply_rotary_emb(&qi, index_pos)?,
+                    self.apply_rotary_emb(&ki, index_pos)?,
+                );
+                crate::inference::prof::add(P::AttnShape, __t.elapsed().as_nanos() as u64);
+                r
+            };
             let (ki, vi) = match cache_slot {
                 None => {
                     let mut cache = new_kv_cache(max_seq_len);
@@ -1972,7 +2003,14 @@ mod batched_attention_tests {
             let mut owned: Vec<Option<KvCache>> = (0..batch).map(|_| None).collect();
             let mut caches: Vec<&mut Option<KvCache>> = owned.iter_mut().collect();
             let got = lw
-                .forward_attn_batched(&x, None, index_pos, &mut caches, max_seq, None)
+                .forward_attn_batched(
+                    &x,
+                    None,
+                    &vec![index_pos; batch],
+                    &mut caches,
+                    max_seq,
+                    None,
+                )
                 .expect("batched attention");
 
             // One request at a time, each with its own cache.
@@ -2003,6 +2041,70 @@ mod batched_attention_tests {
         }
     }
 
+    /// **The case that makes batching reachable at all.** Concurrent chats sit
+    /// at different positions in their own conversations, and requiring a
+    /// common position meant the batched path was essentially never taken —
+    /// measured on a real node as 0 batched forwards against 156 sequential.
+    ///
+    /// With mixed positions, RoPE is applied per row while everything else
+    /// stays batched. The result must still equal running each request on its
+    /// own, or concurrent users get different answers from solitary ones.
+    #[test]
+    fn batched_attention_matches_per_request_at_mixed_positions() {
+        let dev = Device::Cpu;
+        let (n_head, n_kv_head, head_dim) = (4usize, 2, 8);
+        let hidden = n_head * head_dim;
+        let lw = test_layer_weights(n_head, n_kv_head, head_dim, &dev);
+        let positions = vec![0usize, 7, 23, 4];
+        let batch = positions.len();
+        let x = Tensor::randn(0f32, 1., (batch, 1usize, hidden), &dev).unwrap();
+        let max_seq = 64;
+
+        let mut owned: Vec<Option<KvCache>> = (0..batch).map(|_| None).collect();
+        let mut caches: Vec<&mut Option<KvCache>> = owned.iter_mut().collect();
+        let got = lw
+            .forward_attn_batched(&x, None, &positions, &mut caches, max_seq, None)
+            .expect("mixed-position batched attention");
+
+        let mut rows = Vec::with_capacity(batch);
+        for (i, pos) in positions.iter().enumerate() {
+            let xi = x.narrow(0, i, 1).unwrap().contiguous().unwrap();
+            let mut c: Option<KvCache> = None;
+            rows.push(
+                lw.forward_attn(&xi, None, *pos, &mut c, max_seq, None)
+                    .expect("per-request attention"),
+            );
+        }
+        let want = Tensor::cat(&rows, 0).unwrap();
+
+        let a = got.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let b = want.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let worst = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-5,
+            "mixed positions {positions:?}: max abs diff {worst} between batched and \
+             per-request attention — concurrent users would get different answers"
+        );
+    }
+
+    /// A position count that does not match the batch must be refused rather
+    /// than applying another request's rotation.
+    #[test]
+    fn a_mismatched_position_count_is_refused() {
+        let dev = Device::Cpu;
+        let lw = test_layer_weights(4, 2, 8, &dev);
+        let x = Tensor::randn(0f32, 1., (3usize, 1usize, 32usize), &dev).unwrap();
+        let mut owned: Vec<Option<KvCache>> = vec![None, None, None];
+        let mut caches: Vec<&mut Option<KvCache>> = owned.iter_mut().collect();
+        assert!(lw
+            .forward_attn_batched(&x, None, &[0, 1], &mut caches, 64, None)
+            .is_err());
+    }
+
     /// A cache count that does not match the batch is a caller bug, and must
     /// be refused rather than silently attending with the wrong conversation's
     /// history.
@@ -2014,7 +2116,7 @@ mod batched_attention_tests {
         let mut owned: Vec<Option<KvCache>> = vec![None, None]; // 2 for 3 rows
         let mut caches: Vec<&mut Option<KvCache>> = owned.iter_mut().collect();
         assert!(lw
-            .forward_attn_batched(&x, None, 0, &mut caches, 64, None)
+            .forward_attn_batched(&x, None, &[0, 0, 0], &mut caches, 64, None)
             .is_err());
     }
 }

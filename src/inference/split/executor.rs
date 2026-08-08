@@ -1022,7 +1022,34 @@ impl SplitModel {
             .iter()
             .all(|t| t.dim(1).unwrap_or(0) == first_seq_len);
         let all_same_pos = items.iter().all(|i| i.index_pos == first_index_pos);
-        let homogeneous = first_seq_len > 0 && all_same_seq && all_same_pos;
+        // **Decode does NOT require a common position.** Only two things in the
+        // batched path depend on where a request sits in its conversation: the
+        // causal mask, which is `None` when `seq_len == 1`, and RoPE, which
+        // `forward_attn_batched` applies per row when the positions differ.
+        // Everything else — the qkv projections, the FFN, the output
+        // projection — is position-independent and shares its weights.
+        //
+        // Requiring a common position made batching essentially unreachable in
+        // production: concurrent conversations start at different prompt
+        // lengths and drift further apart with every token. Measured on a real
+        // node with four requests of DIFFERENT prompt lengths (2026-08-09):
+        // **0 batched forwards against 156 sequential ones.** With identical
+        // prompts it managed 2 batched decode steps out of ~540. That is the
+        // root of the flat aggregate-throughput curve — not the cost of the
+        // batched path, which was rarely being taken at all.
+        //
+        // Prefill still requires it: there the mask depends on `kv_offset`,
+        // which is derived from `index_pos`, so a mixed batch would need a
+        // different mask per row.
+        // `SWARMLLM_BATCH_DECODE=0` restores the pre-2026-08-09 behaviour, in
+        // which a decode step batched only when every request sat at the same
+        // position with the same cache length — i.e. essentially never. Kept
+        // for two reasons: it is the A/B switch the gain was measured with
+        // (two builds differ in more than these gates), and it is a kill
+        // switch for a change to the hottest path if a node ever misbehaves.
+        let decode_batching = std::env::var("SWARMLLM_BATCH_DECODE").as_deref() != Ok("0");
+        let positions_ok = all_same_pos || (first_seq_len == 1 && decode_batching);
+        let homogeneous = first_seq_len > 0 && all_same_seq && positions_ok;
 
         self.note_batch_attempt(!homogeneous);
 
@@ -1097,7 +1124,17 @@ impl SplitModel {
         let kv_offset_homogeneous = all_kv_caches
             .iter()
             .all(|s| kv_offset_for(s) == first_kv_offset);
-        if !kv_offset_homogeneous {
+        // The gate above protects the SHARED MASK, and a decode step has no
+        // mask — `seq_len == 1` sets it to `None` a few lines below, and each
+        // slot attends to its own cache inside `forward_attn_batched`. So
+        // differing cache lengths are not merely tolerable at decode, they are
+        // the normal case: concurrent conversations have different histories by
+        // definition.
+        //
+        // This was the SECOND of two gates keeping batched decode unreachable
+        // in production. Relaxing only the index_pos gate changed nothing
+        // measurable, because every concurrent decode still fell out here.
+        if !kv_offset_homogeneous && (seq_len > 1 || !decode_batching) {
             // Restore the moved-out KV caches before the sequential fallback
             // so each item's per-request entry is intact when forward() loads it.
             //
@@ -1167,11 +1204,12 @@ impl SplitModel {
                         .iter_mut()
                         .map(|per_req| &mut per_req[layer_idx])
                         .collect();
+                    let item_positions: Vec<usize> = items.iter().map(|i| i.index_pos).collect();
                     let mut attn_batched = lw
                         .forward_attn_batched(
                             &normed,
                             mask.as_ref(),
-                            first_index_pos,
+                            &item_positions,
                             &mut layer_caches,
                             max_seq_len,
                             None,

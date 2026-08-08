@@ -3000,6 +3000,11 @@ async fn step_decode_pool(
         .filter(|(_, s)| s.is_decoding() && !s.is_finished())
         .map(|(i, _)| i)
         .collect();
+    tracing::debug!(
+        total_slots = active.len(),
+        decoding = still_active_indices.len(),
+        "DIAG: decode tick slot census"
+    );
     if still_active_indices.is_empty() {
         return Ok(());
     }
