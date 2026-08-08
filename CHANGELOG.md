@@ -4,6 +4,23 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.84-alpha] — 2026-08-08
+
+**Restores the Docker images, which v0.3.83 shipped without.** That release built
+every binary correctly but no container images: a line added to the build
+manifest for a benchmark meant cargo could not read the manifest at all inside
+the container build, which copies only part of the source tree. Everything else
+— the compiler, the linter, the full test suite, all thirteen CI jobs, every
+released binary — was green, and container images are only built when a release
+is tagged, so it appeared at the worst moment.
+
+If you use SwarmLLM through Docker, this is the release to take; v0.3.83's
+images were never published. If you use the binaries or the packages, v0.3.83
+was complete and this changes nothing for you.
+
+A repo check now refuses any manifest entry that could repeat it.
+
+
 ## [0.3.83-alpha] — 2026-08-08
 
 **A speed release for NVIDIA graphics cards, plus one memory fix.** Replies come
