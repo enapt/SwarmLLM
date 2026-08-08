@@ -378,35 +378,84 @@ mod finalize_reply_text_tests {
     }
 
     /// Capture what this crate logs while `f` runs.
+    ///
+    /// **A permanent global subscriber, not a scoped one.** `tracing` caches
+    /// per-callsite "is anyone interested?" in a global, and in a test binary
+    /// with no global subscriber that answer is *no*. A scoped
+    /// `with_default` makes the answer yes only while it lives, so any other
+    /// test touching the same `warn!` could leave it cached as no — and the
+    /// capturing test then asserted on an empty string.
+    ///
+    /// This is the second attempt. Serialising the three capturing tests
+    /// against each other looked sufficient and was not: the tests that poison
+    /// the callsite are the ones that **do not capture at all**, and no lock
+    /// held by a capture can exclude them. Measured, not assumed — the mutex
+    /// version still failed on run 5 of 60 at `--test-threads=8`.
+    ///
+    /// Installing one subscriber for the lifetime of the binary removes the
+    /// question: the answer is permanently yes and nothing re-caches it.
+    /// Events are routed to whichever buffer the emitting thread has
+    /// registered, so a capture sees its own output and nothing else — which
+    /// matters because `an_ordinary_reply_logs_nothing` asserts on silence,
+    /// and a shared buffer would let an unrelated warning fail it.
+    ///
+    /// Original symptom: CI reported `got: ` with nothing after it, on a
+    /// commit that touched none of this. Reproduced locally at roughly one run
+    /// in ten with eight threads, never single-threaded — which is how it
+    /// survived five days of green runs before blaming an unrelated push.
     fn captured_logs(f: impl FnOnce()) -> String {
+        use std::cell::RefCell;
         use std::io::Write;
-        use std::sync::{Arc, Mutex};
+        use std::sync::{Arc, Mutex, OnceLock};
+
+        thread_local! {
+            /// Where this thread's captured output accumulates, if it is
+            /// capturing. `None` on every other thread, so their events are
+            /// written nowhere.
+            static SINK: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
+        }
 
         #[derive(Clone)]
-        struct Buf(Arc<Mutex<Vec<u8>>>);
-        impl Write for Buf {
+        struct ThreadSink;
+        impl Write for ThreadSink {
             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
+                SINK.with(|s| {
+                    if let Some(buf) = s.borrow().as_ref() {
+                        buf.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend_from_slice(b);
+                    }
+                });
                 Ok(b.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
         }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
-            type Writer = Buf;
-            fn make_writer(&'a self) -> Buf {
-                self.clone()
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadSink {
+            type Writer = ThreadSink;
+            fn make_writer(&'a self) -> ThreadSink {
+                ThreadSink
             }
         }
 
-        let buf = Buf(Arc::new(Mutex::new(Vec::new())));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(buf.clone())
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
-        let bytes = buf.0.lock().unwrap().clone();
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadSink)
+                .with_max_level(tracing::Level::WARN)
+                .finish();
+            // Ignore the error: another test binary component may have got
+            // there first, and any global subscriber keeps the callsite live,
+            // which is the property this needs.
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        SINK.with(|s| *s.borrow_mut() = Some(buf.clone()));
+        f();
+        SINK.with(|s| *s.borrow_mut() = None);
+        let bytes = buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
