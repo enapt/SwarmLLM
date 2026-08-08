@@ -23,50 +23,65 @@
 //! a setting that asks people to contribute more compute made the thing they
 //! notice most get worse. That is the defect this fixes.
 //!
-//! # Why decode falls off, and what that implies for the cap
+//! # Why decode falls off, and what the cap may therefore assume
 //!
 //! Decode is memory-bandwidth-bound, not compute-bound: one generated token
 //! streams the whole weight set through the CPU to do one row of arithmetic,
-//! measured at 22.1 GB/s against 31-33 GB/s achievable on this box (69% of
+//! measured at 22.1 GB/s against 31-33 GB/s achievable on the box above (69% of
 //! roofline — see `docs/FUTURE_WORK.md`). Threads beyond the number needed to
-//! saturate memory bandwidth add contention and cache pressure without adding
-//! bandwidth, so they cost rather than pay.
+//! saturate memory bandwidth add contention without adding bandwidth.
 //!
-//! **The count that saturates bandwidth is a property of the machine, and this
-//! was measured on exactly one.** [`decode_threads`] therefore only ever
-//! reduces below what the owner offered — never above — and never below
-//! [`DECODE_THREAD_FLOOR`], so it cannot hurt a small machine. On a very wide
-//! server it is likely still too generous, which leaves that machine no worse
-//! off than before. `SWARMLLM_DECODE_THREADS` overrides it outright.
+//! **The count that saturates bandwidth is a property of the machine, and a
+//! fraction of the core count does not predict it.** The first version of this
+//! module capped decode at `max(4, physical/2)`, which is right for the Ryzen
+//! above and WRONG for a second machine measured on 2026-08-08 — an Intel
+//! i5-10500T (6 physical / 12 logical, DDR4-2666, 35 W), where decode climbs
+//! monotonically to all six cores:
 //!
-//! Prefill is left on the global pool untouched, so the common case — a node on
-//! the default `contribution = "minimal"`, whose ceiling already equals decode's
-//! optimum — takes exactly the code path it did before, with no pool and no
-//! `install`.
+//! | threads | prompt processing tok/s | decode tok/s |
+//! |---|---|---|
+//! | 2 | 12.43 | 4.37 |
+//! | 3 | 16.82 | 5.36 |
+//! | 4 | 20.70 | 5.76 |
+//! | 5 | 22.62 | 6.24 |
+//! | **6** | **28.50** | **7.10** |
+//!
+//! Capping that machine at 4 would have made its replies **23% slower**. The
+//! mechanism explains both: a Zen 3 core pulls ~10-12 GB/s so three or four
+//! saturate the Ryzen's ~32 GB/s, while a 35 W Comet Lake core at 2.3 GHz pulls
+//! far less and six do not saturate its ~41 GB/s. Peak threads = bandwidth
+//! divided by per-core draw, which core count alone cannot tell you.
+//!
+//! So this now caps at what BOTH machines support and the mechanism predicts:
+//! **decode never uses more threads than there are physical cores.** SMT
+//! siblings share a core's load/store ports, so they add contention to a
+//! bandwidth-bound loop without adding a path to memory. Neither machine is
+//! harmed by that rule, and it recovers the large loss when someone sets
+//! `max_cpu_threads` to their logical count — a natural thing to do.
+//!
+//! What it deliberately does NOT do is guess the sub-physical optimum. On the
+//! Ryzen that leaves 4 threads' worth of decode speed on the table (5.26 vs
+//! 4.56 tok/s at 8). Recovering it needs calibration on the machine itself, not
+//! a better constant; see `docs/FUTURE_WORK.md`.
+//!
+//! Prefill is left on the global pool untouched, so a node on the default
+//! `contribution = "minimal"` takes exactly the code path it did before, with
+//! no pool and no `install`.
 
 use std::sync::OnceLock;
-
-/// Decode never gets fewer threads than this, whatever the arithmetic says.
-///
-/// The measured optimum here is 4, and a machine with 4 or fewer physical cores
-/// is measurably worse below that (3.92 tok/s at 2 threads against 5.26 at 4).
-/// A rule derived from one 8-core box must not make small machines slower.
-pub(crate) const DECODE_THREAD_FLOOR: usize = 4;
 
 /// How many threads decode should use, given what the owner offered and what
 /// the machine has.
 ///
 /// `offered` is the global rayon pool size — the contribution ceiling the
-/// daemon already applied. `physical` is physical cores, not logical: the
-/// bandwidth argument counts memory-attached cores, and SMT siblings share a
-/// port rather than adding one.
+/// daemon already applied. `physical` is physical cores, NOT logical: that is
+/// the whole rule. See the module docs for the two machines this is drawn
+/// from, and for why a fraction of the core count was wrong.
 ///
 /// Pure so the policy is testable without building pools or owning a CPU.
 pub(crate) fn decode_threads(offered: usize, physical: usize) -> usize {
-    let offered = offered.max(1);
-    // Half the physical cores, floored so small machines are untouched, and
-    // never more than was offered — this is a cap, not a request.
-    offered.min(DECODE_THREAD_FLOOR.max(physical.max(1) / 2))
+    // A cap, never a request: `offered` is what the owner agreed to give.
+    offered.max(1).min(physical.max(1))
 }
 
 /// Explicit override, read once. `0` disables the cap (decode uses the global
@@ -147,44 +162,57 @@ pub(crate) fn in_phase_pool<R: Send>(seq_len: usize, f: impl FnOnce() -> R + Sen
 mod tests {
     use super::*;
 
-    /// The measured case: 8 physical cores, all offered. Decode is capped at
-    /// its optimum instead of taking everything.
+    /// The rule, stated once: never more threads than physical cores, and
+    /// never more than the owner offered.
     #[test]
-    fn caps_decode_on_the_machine_this_was_measured_on() {
-        assert_eq!(decode_threads(8, 8), 4);
-        assert_eq!(decode_threads(16, 8), 4, "logical cores offered, still 4");
+    fn decode_never_uses_smt_siblings() {
+        // Ryzen 5800H, 8 physical / 16 logical.
+        assert_eq!(
+            decode_threads(16, 8),
+            8,
+            "logical count offered -> physical"
+        );
+        assert_eq!(decode_threads(14, 8), 8);
+        assert_eq!(decode_threads(8, 8), 8, "already at physical -> unchanged");
+        // Intel i5-10500T, 6 physical / 12 logical.
+        assert_eq!(decode_threads(12, 6), 6);
+        assert_eq!(decode_threads(6, 6), 6);
     }
 
-    /// The default contribution already lands on decode's optimum, so nothing
-    /// changes and no second pool is built.
+    /// **The regression this rule exists to avoid.** An earlier version capped
+    /// at `max(4, physical/2)`, which measured correctly on the Ryzen and would
+    /// have made the 6-core Intel 23% slower at generating (5.76 tok/s at four
+    /// threads against 7.10 at six). A fraction of the core count does not
+    /// predict where memory bandwidth saturates.
     #[test]
-    fn default_contribution_is_unchanged() {
-        // `contribution = "minimal"` gives half the physical cores.
-        assert_eq!(decode_threads(4, 8), 4);
+    fn a_six_core_machine_keeps_all_six_for_decode() {
+        assert_eq!(decode_threads(6, 6), 6);
+        assert_ne!(decode_threads(6, 6), 4, "the measured regression");
     }
 
-    /// A rule derived from one 8-core box must never make a small machine
-    /// slower — 2 threads measured 3.92 tok/s against 5.26 at 4.
+    /// Every contribution level is at or below physical cores, so none of them
+    /// changes behaviour — this only bites when someone sets `max_cpu_threads`
+    /// above the physical count.
     #[test]
-    fn never_reduces_below_the_floor_on_small_machines() {
-        for physical in 1..=8 {
-            let offered = physical;
-            let got = decode_threads(offered, physical);
-            assert!(
-                got >= offered.min(DECODE_THREAD_FLOOR),
-                "physical={physical} offered={offered} got={got}"
-            );
+    fn no_contribution_level_is_affected() {
+        for physical in [2usize, 4, 6, 8, 16, 64] {
+            for fraction in [0.5f64, 0.75, 1.0] {
+                let offered = ((physical as f64 * fraction).round() as usize).max(1);
+                assert_eq!(
+                    decode_threads(offered, physical),
+                    offered,
+                    "physical={physical} offered={offered} must be untouched"
+                );
+            }
         }
-        assert_eq!(decode_threads(2, 2), 2, "a 2-core box keeps both");
-        assert_eq!(decode_threads(4, 4), 4, "a 4-core box keeps all four");
     }
 
     /// It is a cap on what the owner offered, never a request for more. A node
-    /// set to contribute two threads must not quietly run four.
+    /// told to contribute two threads must not quietly run more.
     #[test]
     fn never_exceeds_what_was_offered() {
         for offered in 1..=64 {
-            for physical in [1usize, 2, 4, 8, 16, 64] {
+            for physical in [1usize, 2, 4, 6, 8, 16, 64] {
                 assert!(
                     decode_threads(offered, physical) <= offered,
                     "offered={offered} physical={physical}"
@@ -193,18 +221,12 @@ mod tests {
         }
     }
 
-    /// A wide machine gets a real reduction rather than the whole box.
-    #[test]
-    fn a_wide_machine_is_capped() {
-        assert_eq!(decode_threads(64, 64), 32);
-        assert_eq!(decode_threads(32, 16), 8);
-    }
-
-    /// Zero and one are not special-cased away into a panic or a 0-thread pool
-    /// (rayon reads 0 as "every core", the behaviour being fixed).
+    /// Zero and one must not produce a 0-thread pool — rayon reads 0 as "every
+    /// core", the behaviour being fixed.
     #[test]
     fn degenerate_inputs_stay_sane() {
         assert!(decode_threads(0, 0) >= 1);
         assert_eq!(decode_threads(1, 1), 1);
+        assert!(decode_threads(8, 0) >= 1);
     }
 }

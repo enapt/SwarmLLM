@@ -7382,3 +7382,67 @@ The tell was the implausibility, not a failing test: 23 TFLOPS from a card that
 peaks near 20 for dense FP16, on a dequantizing path. **Sanity-check a benchmark
 result against the hardware's roofline before believing it** — a number that
 good is a bug until proven otherwise.
+
+## A second machine broke the decode-thread rule (2026-08-08) — CORRECTED
+
+The per-phase thread pool shipped earlier the same day with a cap of
+`min(offered, max(4, physical/2))`, and the entry above said plainly that the
+count saturating memory bandwidth "is a property of the machine, and this was
+measured on exactly one". A second machine was then measured, and the rule was
+wrong on it.
+
+**Intel i5-10500T, 6 physical / 12 logical, DDR4-2666, 35 W** (Proxmox CT 110),
+llama-3.2-3b Q4_K_M via the installed v0.3.81 release binary, 916-token prompt:
+
+| threads | prompt processing tok/s | decode tok/s |
+|---|---|---|
+| 2 | 12.43 | 4.37 |
+| 3 | 16.82 | 5.36 |
+| 4 | 20.70 | 5.76 |
+| 5 | 22.62 | 6.24 |
+| **6** | **28.50** | **7.10** |
+
+Decode does not peak below the core count here — it climbs monotonically to all
+six. The shipped rule would have capped it at 4 and made this machine **23%
+slower at generating**.
+
+**The mechanism explains both machines, and rules out any fraction.** Peak
+threads is bandwidth divided by per-core draw. A Zen 3 core pulls ~10-12 GB/s so
+three or four saturate the Ryzen's ~32 GB/s; a 35 W Comet Lake core at 2.3 GHz
+pulls far less and six do not saturate its ~41 GB/s. Core count alone cannot
+predict it, so no constant fraction of core count can be right for both.
+
+**Corrected to what both machines and the mechanism support**: decode never uses
+more threads than there are PHYSICAL cores. SMT siblings share a core's
+load/store ports, so they add contention to a bandwidth-bound loop without
+adding a path to memory.
+
+Re-verified on the Ryzen at `RAYON_NUM_THREADS=16`, min of 2, 512-token prompt:
+
+    decode              2.10 -> 3.03 tok/s   (1.44x)
+    prompt processing  43.12 -> 42.90 tok/s  (unchanged)
+
+**Scope is narrower than first claimed, and the CHANGELOG was corrected.** All
+three contribution levels are at or below the physical core count, so none of
+them is affected — including `maximum`. This now bites only when someone sets
+`max_cpu_threads` above their physical count, which is an easy mistake to make
+when a machine advertises "16 CPUs" and has eight cores.
+
+### Still open: calibrate instead of guessing
+
+The Ryzen's true optimum is 4, and the physical-core cap leaves that on the
+table (5.26 tok/s at 4 against 4.56 at 8). Recovering it needs measurement on
+the machine, not a better constant. The cheap design, unchanged from the earlier
+sketch: over the first seconds of a conversation, time real decode steps
+round-robin across a small candidate set and keep the best. It measures the
+actual box with the actual model, costs only a few steps at a suboptimal thread
+count, and would have got BOTH machines right. Two data points now exist to
+validate any such tuner against.
+
+**And the general lesson, which is the expensive one**: a heuristic validated on
+one machine, with the limitation honestly written down, still shipped as a
+default and would still have regressed real users. Writing "measured on exactly
+one machine" next to a default is not the same as being safe — the honest note
+did not prevent the harm. Where a constant cannot be derived from mechanism,
+prefer the conservative rule that cannot hurt anyone over the aggressive one
+that helps the machine you happen to own.

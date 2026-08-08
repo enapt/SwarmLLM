@@ -379,15 +379,17 @@ silently break at the wire if duplicated:
   LoRA, speculative verify, pre-embedded segment, SWIFT skip-mask, batched
   prefill — funnels through those, so a new one inherits it and cannot forget.
   Do NOT call `install` at a call site instead.
-  **Reading a prompt and writing a reply want opposite thread counts**: measured
-  on 8 physical cores, prompt processing scales to 1.83x past decode's optimum
-  while decode gets 2.0x WORSE at the same setting, because decode is
-  bandwidth-bound (69% of roofline at 4 threads) and extra threads contend
-  without adding bandwidth. One pool for both made the `contribution` setting
-  perverse — donating more of your machine slowed replies down. Prefill keeps
-  the global pool untouched; only decode is capped, only ever downward, never
-  below `DECODE_THREAD_FLOOR`, and not at all when the ceiling already equals
-  the optimum (the default), so the common path builds no pool and pays nothing.
+  **Reading a prompt and writing a reply want different thread counts**: decode
+  is bandwidth-bound (69% of roofline), so past the point that saturates memory
+  the extra threads only contend. **The cap is PHYSICAL CORES and must not
+  become a fraction of them.** A fraction was tried — `max(4, physical/2)`,
+  measured correctly on an 8-core Ryzen — and a second machine (6-core Intel
+  i5-10500T) showed decode climbing monotonically to all six, where that rule
+  would have cost 23%. Peak threads is bandwidth divided by per-core draw, which
+  core count cannot predict; physical-vs-SMT is the only part both machines and
+  the mechanism agree on. Prefill keeps the global pool untouched; decode is
+  capped only ever downward, and every contribution level is already at or below
+  physical, so the common path builds no pool and pays nothing.
   `SWARMLLM_DECODE_THREADS` overrides, and `=0` restores the single-pool
   behaviour for A/B measurement inside one binary — the same discipline as
   `SWARMLLM_FORCE_STANDARD_ATTN`.

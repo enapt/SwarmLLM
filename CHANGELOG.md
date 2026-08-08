@@ -56,15 +56,19 @@ prompt from 940 MB to 235 MB, with no change in speed. This matters most on a
 graphics card, where reserved memory is genuinely unavailable to anything else —
 it is the difference between a second model fitting and not.
 
-**Sharing more of your processor no longer makes replies slower.** Reading your
-prompt and writing the reply want opposite amounts of parallelism — reading keeps
-getting faster with more processor cores, while writing peaks early and then gets
-worse, because it is limited by memory speed rather than arithmetic. SwarmLLM
-used one setting for both, so turning the contribution setting up made prompts
-read faster and replies come out slower. Replies now get their own, narrower
-share while prompt reading keeps the full allowance: measured 1.4x to 1.5x faster
-replies on nodes set to contribute more than the default, with prompt reading
-unchanged. Nothing changes at the default setting.
+**If you set `max_cpu_threads` by hand, replies are up to 1.4x faster.**
+Reading your prompt and writing the reply want different amounts of
+parallelism: reading keeps getting faster with more processor cores, while
+writing is limited by memory speed rather than arithmetic, so past a point extra
+threads only compete for the same memory. Writing the reply now runs on its own
+pool that never uses more threads than your machine has real cores — the
+hyper-threaded siblings share a core's path to memory, so they cost rather than
+help. Reading the prompt keeps the full allowance and is unchanged.
+
+This only affects you if you set the thread count above your physical core count
+by hand, which is easy to do — a machine reporting "16 CPUs" usually has eight
+real cores. **The three contribution levels are all at or below your core count,
+so none of them changes**, including the default.
 
 **Your graphics card no longer cuts a model's conversation length just in case.**
 SwarmLLM used to shorten how long a conversation could run, at the moment a model
