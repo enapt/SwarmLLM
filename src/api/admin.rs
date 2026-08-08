@@ -264,6 +264,24 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
     }
 
     let _ = writeln!(out, "anchor_mode: {}", ss.config.node.anchor_mode);
+    // In-flight request bookkeeping, side by side because the interesting case
+    // is when they disagree with an idle node.
+    //
+    // `active_traces` is the oracle behind `model_is_in_use` — the guard that
+    // decides whether a model's files may be deleted. It is removed by RAII on
+    // every completion path and has no cap and no sweep behind that, so a
+    // single leaked entry would refuse deletion **forever**, and the user would
+    // see a 503 saying the model is busy on a node serving nobody, with nothing
+    // anywhere to explain it. Nothing exposed the count until now, so that
+    // question had no answer.
+    //
+    // Expect both zero on an idle node. Non-zero with no traffic is the bug.
+    let _ = writeln!(
+        out,
+        "in_flight: {} traces, {} pipelines",
+        ss.active_traces.len(),
+        ss.active_pipelines.len()
+    );
     let _ = writeln!(
         out,
         "tensor_parallel: {}  gpu_layers: {}",

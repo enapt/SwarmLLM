@@ -50,6 +50,13 @@ last 50 completed requests, the failure ring, per-peer serving performance
 (round-trip time, ms/layer, EWMA latency, sample count, region) and what this
 node has served for others. One command instead of a log excerpt:
 
+**`in_flight: N traces, M pipelines`** — both should be `0` on an idle node.
+Non-zero with no traffic means bookkeeping has been left behind, and the trace
+count is the one that bites: it is the oracle behind `model_is_in_use`, so a
+stale entry makes deleting that model fail with "in use" **permanently**, on a
+node serving nobody. There is no sweep behind the RAII cleanup, so this number
+is the only way to see it.
+
 ```bash
 curl -s -H "Authorization: Bearer $(cat ~/.local/share/swarmllm/api_key)" \
   localhost:8800/api/admin/diagnostics

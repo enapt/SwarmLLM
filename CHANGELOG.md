@@ -52,6 +52,21 @@ about 44% of the log, for nine models that never changed.** Only genuine
 additions and changes are announced now; the repeats are still there at debug
 verbosity.
 
+**`swarmllm status` reads like an answer, and two documented commands now
+work.** The command printed a raw data structure, while `swarmllm peers` beside
+it printed a table — so the first thing most people run to check their node was
+also the least readable thing the tool produced. It now prints a summary, with
+`--json` for the exact previous output (and the "Querying..." line moved aside so
+it pipes cleanly into other tools).
+
+Two instructions in the documentation did not work. The testing guide asks anyone
+reporting a problem to include `swarmllm status --json`, and there was no such
+option, so the instruction for reporting a bug was itself an error. The
+networking guide tells anyone setting up a bootstrap node to read their peer id
+from `swarmllm status`, and the response did not contain one — on the one path
+where a wrong value means no other machine can find you. Both work now, and the
+response carries the node's own id and peer id.
+
 **Building from source states the right Rust version.** The project asked for
 Rust 1.80 in seven places, including the badge on the front page, while one of
 its dependencies has needed 1.89 for some time. Anyone on an older toolchain got
