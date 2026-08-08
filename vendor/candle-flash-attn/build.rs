@@ -72,6 +72,37 @@ fn main() -> Result<()> {
         }
     };
 
+    // SwarmLLM patch: type-check-only mode.
+    //
+    // `cargo check` RUNS build scripts, so checking any feature that pulls this
+    // crate compiles all 19 CUTLASS kernels — tens of minutes on a 4-vCPU CI
+    // runner, since `thread_percentage(0.5)` below leaves it two threads. That
+    // cost is why CI's feature-check matrix deliberately excluded the
+    // `flash-attn` arm of `run_attention`, and why a missing import in that arm
+    // broke every GPU build for five commits on 2026-08-07 with `cargo fmt`,
+    // `cargo clippy --all-targets`, 1746 unit tests and the whole CI run green
+    // (gotcha #264).
+    //
+    // With `CANDLE_FLASH_ATTN_CHECK_ONLY=1` the kernels are skipped and the
+    // link directives are still emitted. `cargo check` never links, so the
+    // type-check is complete and correct — it is exactly the Rust-side
+    // coverage that was missing, in about a minute.
+    //
+    // A real `cargo build` with this set fails LOUDLY at link time, on a
+    // missing `libflashattention.a`, rather than producing a binary with
+    // silently absent kernels. That asymmetry is the point: the worst outcome
+    // of a misuse is a failed build, not a shipped defect.
+    println!("cargo::rerun-if-env-changed=CANDLE_FLASH_ATTN_CHECK_ONLY");
+    let check_only = std::env::var("CANDLE_FLASH_ATTN_CHECK_ONLY").as_deref() == Ok("1");
+    if check_only {
+        println!(
+            "cargo::warning=CANDLE_FLASH_ATTN_CHECK_ONLY=1: CUTLASS kernels were NOT compiled. \
+             This tree is valid for `cargo check` only; a build will fail to link."
+        );
+        emit_link_directives(&build_dir, target_is_msvc());
+        return Ok(());
+    }
+
     let kernels: Vec<_> = KERNEL_FILES.iter().collect();
     let mut builder = KernelBuilder::new()
         .source_files(kernels)
@@ -121,6 +152,22 @@ fn main() -> Result<()> {
     //
     // CUDA_PATH is what the CI action exports and what the NVIDIA installers
     // set; /usr/local/cuda is the conventional symlink. `lib/x64` is Windows.
+    emit_link_directives(&build_dir, is_target_msvc);
+    Ok(())
+}
+
+/// Whether the build target is MSVC. Needed before the builder is constructed
+/// in the check-only path, which returns before `is_target_msvc` is computed.
+fn target_is_msvc() -> bool {
+    std::env::var("TARGET").is_ok_and(|t| t.contains("msvc"))
+}
+
+/// Tell rustc where the CUDA libraries live and what to link.
+///
+/// Shared by the normal path and the check-only path so the two cannot drift:
+/// a `cargo check` that emitted different link metadata than a build would be
+/// a check that does not check the thing being built.
+fn emit_link_directives(build_dir: &std::path::Path, is_target_msvc: bool) {
     println!("cargo::rerun-if-env-changed=CUDA_PATH");
     println!("cargo::rerun-if-env-changed=CUDA_HOME");
     for root in [
@@ -165,5 +212,4 @@ fn main() -> Result<()> {
     if !is_target_msvc {
         println!("cargo::rustc-link-lib=dylib=stdc++");
     }
-    Ok(())
 }

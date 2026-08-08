@@ -258,11 +258,39 @@ jobs:
           #
           # These two features are every line of Rust that `windows-gpu`
           # compiles except the `#[cfg(feature = "flash-attn")]` arm in
-          # `run_attention`. That arm is compiled by cache-warm.yml on every
-          # push to main, and by the release build, both of which cache the
-          # kernels — so it is covered before any tag, just not within minutes.
+          # `run_attention` — which the cell below now covers.
+          #
+          # This comment used to claim that arm "is compiled by cache-warm.yml
+          # on every push to main". IT IS NOT: cache-warm triggers on
+          # Cargo.lock / Cargo.toml / .github paths, i.e. the dependency graph,
+          # never on source. A source-only change to the arm reached nothing
+          # that compiles it. On 2026-08-07 a removed import broke every GPU
+          # build for five commits with this matrix, clippy on three feature
+          # sets, 1746 unit tests and the whole of CI green; it surfaced only
+          # because one commit happened to touch Cargo.toml. A comment
+          # asserting coverage that does not exist is worse than no comment,
+          # for the same reason a job named for a platform it does not run on
+          # is (see this job's own NOTE above).
           - features: "windows-gpu-no-flash"
             flags: "--features llama-vulkan,candle-cuda"
+          # The `#[cfg(feature = "flash-attn")]` arm itself — the one path no
+          # other per-push job compiles.
+          #
+          # `CANDLE_FLASH_ATTN_CHECK_ONLY=1` (a SwarmLLM patch in
+          # vendor/candle-flash-attn/build.rs) skips compiling the 19 CUTLASS
+          # kernels while still emitting the link directives. `cargo check`
+          # never links, so the type-check is complete — and it is the type
+          # check, not the kernels, that was missing. Measured on the test box:
+          # 22 SECONDS with the flag against 14m10s without, and the flag was
+          # verified to turn red when the original defect is re-introduced.
+          #
+          # The kernels themselves are still built by cache-warm.yml and the
+          # release build. This cell deliberately does not attempt them: a
+          # `cargo build` with the flag set fails loudly at link time, so the
+          # flag cannot leak into an artifact.
+          - features: "flash-attn"
+            flags: "--features flash-attn"
+            check_only: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -338,3 +366,8 @@ jobs:
       - run: cargo check --locked ${{ matrix.flags }} --all-targets
         env:
           CUDA_COMPUTE_CAP: "80"
+          # Set ONLY for the flash-attn cell (see its matrix comment): skips
+          # compiling the CUTLASS kernels so the Rust type-check runs in
+          # seconds instead of tens of minutes. Empty everywhere else, which
+          # the build script reads as off.
+          CANDLE_FLASH_ATTN_CHECK_ONLY: ${{ matrix.check_only && '1' || '' }}

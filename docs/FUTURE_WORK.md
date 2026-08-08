@@ -7170,7 +7170,7 @@ it is running on**, timing real decode steps round-robin across candidates over
 the first seconds of a conversation. That measures the actual box with the
 actual model at no synthetic cost, and removes the one guess this fix contains.
 
-## Nothing on the push path compiles the GPU code (2026-08-07) — OPEN
+## Nothing on the push path compiles the GPU code (2026-08-07) — FIXED, see the resolution at the end
 
 Found by breaking it. A change to `inference::layers` removed an import used
 only inside the `#[cfg(feature = "flash-attn")]` arm of `run_attention`, and
@@ -7233,3 +7233,46 @@ Still not attempted here, for a different reason than before: changing CI
 affects every future push and the release path, and that is a change to make
 deliberately rather than at the end of an autonomous session. The measurement
 that was blocking the decision now exists.
+
+## The GPU code is now compiled on every push, in 22 seconds (2026-08-08) — FIXED
+
+Closes "Nothing on the push path compiles the GPU code".
+
+The entry above priced two options and picked neither cleanly: a path-filtered
+`cargo check --features flash-attn` job, or a full one at ~14 minutes. Both
+accepted that the CUTLASS kernels had to be compiled to type-check the Rust
+that calls them. **They do not.**
+
+`vendor/candle-flash-attn/build.rs` now honours
+`CANDLE_FLASH_ATTN_CHECK_ONLY=1`: skip the 19 kernels, still emit the link
+directives. `cargo check` never links, so the type-check is complete — and the
+type check is exactly what was missing. Measured on the test box:
+
+    cargo check --features flash-attn                    14m 10s
+    cargo check --features flash-attn, CHECK_ONLY=1          22s
+    the same with --all-targets, as CI runs it              1m 32s
+
+**Verified against the original defect, not just asserted**: re-introducing the
+removed `DType` import leaves `cargo check --no-default-features --features dev`
+green — exactly as it was during the outage — and turns the new check red with
+`cannot find type DType in this scope`. That is the discriminating result.
+
+Shipped as a third cell in CI's existing `feature-check` matrix, so it inherits
+the nvcc install and cache already there. CI's wall-clock is set by a 7.8-minute
+test job and the new cell runs in parallel at ~1.5 min, so **the push path is
+not slower**.
+
+The kernels are still built by `cache-warm.yml` and the release build; this cell
+does not attempt them. A `cargo build` with the flag set fails loudly at link
+time on a missing `libflashattention.a`, so the flag cannot leak into a shipped
+artifact — the worst case of misuse is a failed build, not a silent defect.
+
+### The comment that said it was already covered
+
+The `windows-gpu-no-flash` cell carried: *"That arm is compiled by
+cache-warm.yml on every push to main, and by the release build ... so it is
+covered before any tag."* The first half is false — cache-warm triggers on
+`Cargo.lock` / `Cargo.toml` / `.github/**`, the dependency graph, never on
+source. The gap was **documented as covered**, which is why nobody re-derived
+it. Corrected in place, and the job's own older NOTE about a misleading job name
+makes the identical point about a different failure.
