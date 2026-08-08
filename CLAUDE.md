@@ -206,7 +206,21 @@ All 20 build phases complete. All subsystems wired — no stubs. **1749 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.83-alpha (2026-08-08): GPU decode routing, and a measurement floor
+### Latest — v0.3.84-alpha (2026-08-08): container images, broken by a manifest line
+
+**v0.3.83 shipped binaries and NO container images.** A `[[example]]` declared
+without an explicit `path` makes cargo resolve it by scanning `examples/` — and
+**fail to parse the whole manifest** when that directory is absent, which is
+exactly the Dockerfile's build context (it copies `src/`, `crates/`, `frontend/`,
+`config/` and nothing else). Green: compiler, clippy on 3 feature sets, 1749
+tests, all 13 CI jobs, the pre-push hook, every release binary. **Docker only
+builds on a tag, so it surfaced at release.** Gotcha **#268** — second time in
+two days that a construct correct in the repo was wrong in a REDUCED build
+context. Guarded by `every_declared_example_has_an_explicit_path`, confirmed to
+fail against the real bug. Reproduce cheaply: copy exactly what the Dockerfile
+copies into a temp dir and run `cargo build --release` there.
+
+### Prior — v0.3.83-alpha (2026-08-08): GPU decode routing, and a measurement floor
 
 **GQA decode on CUDA had a `k_len >= 1024` crossover below which it took
 `standard_attention`. That threshold came from timing the attention call in
