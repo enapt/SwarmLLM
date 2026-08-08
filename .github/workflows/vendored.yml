@@ -1,0 +1,48 @@
+name: Vendored patches
+
+# The crates under `vendor/` are workspace-`exclude`d, so nothing in CI compiles
+# them and their tests ran nowhere at all. `vendor/libp2p-request-response`
+# carries nine tests covering a patch this project depends on for pipeline
+# message delivery — a patch to someone else's crate is exactly the code most
+# likely to break silently when it is next re-synced with upstream.
+#
+# Not folded into the main CI job: an excluded crate has its own dependency tree
+# (185 crates) which shares nothing with the workspace cache, so running it on
+# every push would add minutes to every change for a crate that is touched a few
+# times a year. Path-triggered instead, so it costs nothing until it is relevant
+# and is guaranteed to run when it is.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'vendor/**'
+      - '.github/workflows/vendored.yml'
+  pull_request:
+    paths:
+      - 'vendor/**'
+      - '.github/workflows/vendored.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: vendored-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  request-response:
+    name: libp2p-request-response patch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: vendored-request-response-v1
+          workspaces: vendor/libp2p-request-response
+          cache-bin: false
+      # `--lib` deliberately: the crate's own integration tests need
+      # `libp2p-swarm-test`, which is not among its dependencies here.
+      - name: Run patch tests
+        run: cargo test --locked --manifest-path vendor/libp2p-request-response/Cargo.toml --lib

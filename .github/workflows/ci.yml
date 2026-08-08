@@ -188,6 +188,27 @@ jobs:
       - name: Run yamux substream tests
         run: cargo test --locked --test yamux_substream
 
+      # `--lib --bins` above excludes every integration target, and the three
+      # `--test` steps name targets individually — so these two ran NOWHERE in
+      # CI, and the pre-push hook only does fmt + clippy.
+      #
+      # That is the worst possible set to leave unrun: repo_consistency exists
+      # precisely to catch drift no compiler can see, and each of its checks was
+      # written after a real incident — the i18n key parity, the MSRV claim, the
+      # CUDA compute-cap agreeing with the release workflow, and the
+      # `[[example]]` path guard added because v0.3.83 shipped with no container
+      # images at all. A guard nobody runs is not a guard.
+      #
+      # Nearly free: both link the library this job has already built.
+      - name: Run repo-consistency and API-key side-effect tests
+        run: cargo test --locked --test repo_consistency --test api_key_side_effects
+
+      # A workspace member with its own tests, which `--lib --bins` does not
+      # reach. It holds the wire types every node shares, so a break here is a
+      # break in what peers say to each other.
+      - name: Run swarmllm-types tests
+        run: cargo test --locked -p swarmllm-types
+
   build:
     name: Build (${{ matrix.os }})
     needs: test
