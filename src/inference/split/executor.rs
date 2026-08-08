@@ -987,6 +987,14 @@ impl SplitModel {
         items: &[BatchItem<'_>],
         kv_cache_store: &KvCacheStore,
     ) -> Result<Vec<Tensor>, SwarmError> {
+        // The batched path had NO profiling, which is why a flat aggregate
+        // throughput curve sat in `docs/FUTURE_WORK.md` as "MEASURED, NOT
+        // DIAGNOSED" — every tool for looking inside a forward pass was wired
+        // to `forward_inner_impl`, and a node serving several users does not go
+        // through it. `SWARMLLM_PROFILE=1` now covers both.
+        let forward_start = (tracing::enabled!(tracing::Level::DEBUG)
+            || crate::inference::prof::enabled())
+        .then(std::time::Instant::now);
         let is_first = self.tok_embeddings.is_some();
         let is_last = self.output.is_some();
 
@@ -1394,6 +1402,14 @@ impl SplitModel {
             batch_ms = batch_started.elapsed().as_millis() as u64,
             "DIAG: SplitModel batched forward complete"
         );
+        if let Some(start) = forward_start {
+            if crate::inference::prof::enabled() {
+                crate::inference::prof::dump_and_reset(
+                    &format!("BATCH batch_size={batch_size} seq_len={seq_len} index_pos={first_index_pos}"),
+                    start.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+        }
 
         Ok(results)
     }

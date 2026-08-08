@@ -163,16 +163,52 @@ fn main() -> anyhow::Result<()> {
         best_prefill = best_prefill.min(prefill);
         drop(logits);
 
+        // `SWARM_BENCH_BATCH=N` decodes N independent slots per step through
+        // `forward_batch`, which is what a node serving N users does. Reported
+        // as AGGREGATE tokens per second, so perfect batching would keep it
+        // rising with N and no batching at all would leave it flat.
+        //
+        // Isolated from the daemon on purpose: a flat aggregate curve was
+        // recorded in FUTURE_WORK with no cause established, and the scheduler,
+        // admission and IPC all sit between a real request and this call.
+        let batch = env_usize("SWARM_BENCH_BATCH", 1).max(1);
+        let reqs: Vec<String> = (0..batch).map(|b| format!("{req}-slot{b}")).collect();
+        if batch > 1 {
+            // Give every slot the same prefix so their KV lengths match, the
+            // shape `forward_batch` can actually fuse.
+            for r in &reqs {
+                model
+                    .forward(&input, 0, &store, r)
+                    .map_err(|e| anyhow::anyhow!("batch prefill: {e}"))?;
+            }
+            sync(&device);
+        }
         let t = Instant::now();
         for pos in (prompt_tokens..).take(decode_tokens) {
             let step = Tensor::from_vec(vec![7i64], &[1, 1], &Device::Cpu)?;
-            let logits = model
-                .forward(&step, pos, &store, &req)
-                .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
-            drop(logits);
+            if batch == 1 {
+                let logits = model
+                    .forward(&step, pos, &store, &req)
+                    .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+                drop(logits);
+            } else {
+                let items: Vec<swarmllm::inference::split::BatchItem<'_>> = reqs
+                    .iter()
+                    .map(|r| swarmllm::inference::split::BatchItem {
+                        input: &step,
+                        index_pos: pos,
+                        request_id: r,
+                    })
+                    .collect();
+                let outs = model
+                    .forward_batch(&items, &store)
+                    .map_err(|e| anyhow::anyhow!("batched decode: {e}"))?;
+                drop(outs);
+            }
         }
         sync(&device);
-        let decode = t.elapsed().as_secs_f64() / decode_tokens as f64;
+        // Per-step wall time divided by the tokens produced in that step.
+        let decode = t.elapsed().as_secs_f64() / (decode_tokens * batch) as f64;
         best_decode = best_decode.min(decode);
 
         let occ = store.occupancy();

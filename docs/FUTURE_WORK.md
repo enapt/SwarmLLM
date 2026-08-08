@@ -6154,7 +6154,7 @@ bites new nodes and peers that advertise but never serve — which is also the
 population the routing ratchet (documented above) is about, and the two are
 probably worth designing together.
 
-## Continuous batching gives no aggregate throughput gain (2026-08-06) — MEASURED, NOT DIAGNOSED
+## Continuous batching gives no aggregate throughput gain (2026-08-06) — NOW DIAGNOSED, see the entry at the end
 
 On the RTX 3070 Laptop (8 GB, WSL2) with `llama-3.2-3b-instruct-q4-k-m`, running
 N concurrent chat completions (60 tokens each, identical prompt lengths):
@@ -7562,3 +7562,63 @@ whole arm.
 3. Prefer changes with a mechanism that predicts a LARGE effect, or that can be
    verified by something other than wall time (bytes moved, allocation counts,
    a null control).
+
+## Why batching barely helps: half the matmuls are never batched (2026-08-08) — DIAGNOSED
+
+Closes the "MEASURED, NOT DIAGNOSED" state of the flat aggregate-throughput
+curve above. **The reason nobody could diagnose it is that the batched path had
+no instrumentation**: every tool for looking inside a forward pass was wired to
+`forward_inner_impl`, and a node serving several users goes through
+`forward_batch_body`, which never dumped a profile. `SWARMLLM_PROFILE=1` now
+covers both, and `examples/prefill_bench.rs` takes `SWARM_BENCH_BATCH=N` to
+drive N slots through one batched step with no daemon, scheduler or IPC in the
+way.
+
+Measured, llama-3.2-3b Q4_K_M, CPU at 4 threads, 260 KV, per token:
+
+| stage | batch=1 | batch=8 (per token) | |
+|---|---|---|---|
+| ffn up + gate | 39.3 ms | 19.4 | **2.0x — amortised** |
+| ffn down | 22.9 | 10.9 | **2.1x — amortised** |
+| **qkv projections** | 18.7 | 20.3 | **1.0x — NOT amortised** |
+| **output projection** | 10.8 | 11.0 | **1.0x — NOT amortised** |
+| attention core | 32.5 | 32.2 | 1.0x (expected) |
+| rope / transpose | 6.0 | 6.2 | 1.0x |
+
+**Confirmed in the code, not inferred from the numbers.** `forward_batch_body`
+runs `attention_norm` and the whole FFN on the stacked `[batch, 1, hidden]`
+tensor, but loops per request through `forward_attn` — and `forward_attn`
+contains the qkv projections AND the output projection. So four matmuls per
+layer share weights across slots and only two of them see a batch.
+
+Attention itself cannot batch: each slot has its own KV cache, so 1.0x there is
+correct and expected. The projections have no such excuse.
+
+**The fix**: split `forward_attn` so the projections run on the batched tensor
+and only the attention core loops — qkv on `[batch, 1, hidden]`, then per-slot
+rope / KV append / attention, then restack and one batched output projection.
+That is a refactor of the hottest function in the codebase, so it wants its own
+careful pass.
+
+**Worth ~1.15x aggregate at batch 8** on these numbers (29.5 ms/token of
+unbatched projections, halving to ~14.8 if they amortise like the FFN does,
+against 113.8 ms/token total). Aggregate throughput at batch 8 is currently
+1.26x batch 1; this would take it to ~1.44x.
+
+### The bigger gap is the kernel, not the plumbing
+
+Even the batched matmuls only amortise **2x at batch 8**, where reading each
+weight once for eight rows should approach 8x. The tiled `k_quants::matmul` does
+scale with the batch dimension — separately measured at 2.8x for m=4 and 8.9x
+for m=128 — so m=8 landing at 2x is consistent with partial reuse, not with the
+batching failing outright.
+
+If every matmul amortised fully, the ceiling would be about **2.9x** at batch 8
+(matmuls 91.7 -> ~11.5 ms, attention unchanged at 32.5). We are at 1.26x. So of
+the available headroom, roughly a third is the unbatched projections above and
+two thirds is the kernel's reuse at small m. **Do not start on the projections
+believing it unlocks the whole curve.**
+
+Unmeasured: all of this is CPU. The original flat curve was measured on the GPU,
+where the matmul kernel is different and the ~25% measurement floor recorded
+elsewhere in this file applies.
