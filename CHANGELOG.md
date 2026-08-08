@@ -18,6 +18,19 @@ across a whole reply instead, the faster method wins at every length:
 Models that do not share key/value heads across queries — Phi-3.5, for instance
 — are deliberately unaffected, and were confirmed identical.
 
+Also in this release:
+
+- **Fixed: a long prompt was charged a tenth of the graphics memory it actually
+  claims.** The memory check added in v0.3.82 asks whether the next step will
+  reserve more than is available, but charged every step the same small amount —
+  where reading a long prompt reserves that ten or more times over at once. The
+  single largest request a user can make was measured at a tenth of its real
+  size, which is the request the check exists to refuse.
+- **The `.deb` and `.rpm` packages now ship a `.sha256` checksum**, as the raw
+  binaries always have. The package is the install route most Linux users take
+  and was the one with no published way to verify the download. The README shows
+  the one command that checks it.
+
 
 ## [0.3.82-alpha] — 2026-08-08
 

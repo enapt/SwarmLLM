@@ -263,15 +263,14 @@ single binary so nothing else differs:
 
 | Prompt length | Reading the prompt | Each word of the reply |
 |---|---|---|
-| ~900 tokens | 1576 → **2039 tok/s** (1.3×) | 27.5 → 27.7 tok/s (unchanged) |
-| ~2,048 tokens | 1212 → **2034 tok/s** (1.7×) | 15.3 → **32.3 tok/s** (2.1×) |
-| ~3,072 tokens | 947 → **1944 tok/s** (2.0×) | 10.9 → **25.6 tok/s** (2.4×) |
+| ~900 tokens | 1489 → **1906 tok/s** (1.3×) | 26.0 → **34.5 tok/s** (1.3×) |
+| ~2,048 tokens | 1125 → **1852 tok/s** (1.7×) | 14.4 → **29.1 tok/s** (2.0×) |
+| ~3,072 tokens | 823 → **1810 tok/s** (2.2×) | 10.1 → **23.4 tok/s** (2.3×) |
 
-Replies are unchanged on the shortest conversation by design: below ~1,024
-tokens of context the older method is faster for generation, so SwarmLLM keeps
-using it there and switches over above that. Models that do not share key/value
-heads across queries — Phi-3.5, for instance — stay on the older method for
-generation at every length, because the fused kernel is slower for them.
+Models that do not share key/value heads across queries — Phi-3.5, for instance
+— stay on the older method for generating, at every length, because the fused
+kernel is genuinely slower for them there. Both methods are kept and chosen per
+model and per phase.
 
 Per *attention call* in isolation the fused kernel is 2.8–7.4× faster, which is
 the figure earlier notes quoted. End to end it is the smaller numbers above:

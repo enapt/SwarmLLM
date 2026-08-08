@@ -686,15 +686,23 @@ measured, and it is **opposite for prefill and decode on both devices**:
 | | prefill (`q_len > 1`) | decode (`q_len == 1`) |
 |---|---|---|
 | CPU | standard | fused if GQA, standard if MHA |
-| CUDA | flash | flash if GQA **and** `k_len >= 1024`, else standard |
+| CUDA | flash | flash if GQA, standard if MHA |
 
-The CUDA decode rule lives in `cuda_decode_prefers_standard` and is pinned by
-unit tests that need no GPU. Shipping flash unconditionally would have cost up to
-**25x per attention call** on MHA decode: candle-flash-attn has no split-KV
-kernel, so a single query row cannot fill the card. The GQA exception exists
-because `standard_attention` materializes the `repeat_kv` expansion every token,
-a cost that grows with context. See `docs/FUTURE_WORK.md` for the full table and
-`SWARMLLM_FORCE_STANDARD_ATTN=1` in `docs/DIAGNOSTICS.md` for the A/B switch.
+**CPU and CUDA now use the same decode rule**, for the same reason:
+`standard_attention` materializes the `repeat_kv` expansion every token, which is
+free when `n_head == n_kv_head` and grows with context when it is not. Shipping
+flash unconditionally would still have cost up to **25x per attention call** on
+MHA decode — candle-flash-attn has no split-KV kernel, so a single query row
+cannot fill the card.
+
+**There is no context-length crossover, and re-introducing one needs a
+forward-pass measurement.** A `k_len >= 1024` threshold shipped on 2026-08-07,
+taken from timing the attention call in isolation; measured end to end the next
+day, flash won at every length (1.13x at kv~272, 1.42x at ~528, 1.61x at ~912).
+Third occurrence of the same error — see gotcha #266. The rule lives in
+`cuda_decode_prefers_standard`, pinned by unit tests needing no GPU. Full tables
+in `docs/FUTURE_WORK.md`; `SWARMLLM_FORCE_STANDARD_ATTN=1` (`docs/DIAGNOSTICS.md`)
+is the A/B switch.
 
 ### Inference Correctness
 
@@ -2158,7 +2166,7 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 
 ### Open
 
-- **Split-KV (FlashDecoding) kernels for CUDA decode** — `candle-flash-attn` 0.10.1 ships none, so a single-token decode launches a grid of only `(1 × n_head × batch)` blocks and cannot fill the card. Measured on an RTX 3070: flash is **4x-25x slower than `standard_attention` for MHA decode** at every KV length, which is why `cuda_decode_prefers_standard` routes MHA decode (and short-context GQA decode) away from it. With split-KV the crossover would disappear and decode would take the fused path unconditionally. Upstream flash-attention has the kernels (`flash_fwd_splitkv_*`); adding them to `vendor/candle-flash-attn` is the highest-value follow-on in this area. Full measurement table in `docs/FUTURE_WORK.md`.
+- **Split-KV (FlashDecoding) kernels for CUDA decode** — `candle-flash-attn` 0.10.1 ships none, so a single-token decode launches a grid of only `(1 × n_head × batch)` blocks and cannot fill the card. Measured on an RTX 3070: flash is **4x-25x slower than `standard_attention` for MHA decode** at every KV length, which is why `cuda_decode_prefers_standard` routes MHA decode away from it. (Short-context GQA decode was also routed away until 2026-08-08, when a forward-pass measurement showed flash winning at every length.) With split-KV, MHA decode could take the fused path too. Upstream flash-attention has the kernels (`flash_fwd_splitkv_*`); adding them to `vendor/candle-flash-attn` is the highest-value follow-on in this area. Full measurement table in `docs/FUTURE_WORK.md`.
 
 - **Binary signature on auto-update (audit_2026-04-29 C1)** — `src/update.rs` verifies the SHA256 sidecar fetched from the same GitHub release as the binary; a compromised maintainer account/CI token can publish a matching pair. Real fix: generate an offline signing keypair, embed the public key at compile time, publish a detached signature as a third release asset, and verify it before applying the rename. Deferred until a key-custody decision is made — see `memory/signing_options.md` for the three concrete options (raw Ed25519, minisign, or Sigstore/Cosign keyless), recommended approach (minisign), and step-by-step rollout plan. Until landed, defence-in-depth fixes keep the blast radius local: `update/check` + `update/apply` are loopback-only (`2e1c5b1`), `apply_update` re-checks `latest_version > running_version` at apply time (post-`cb2c688`), `info.downloaded` only flips true when the staging path is on the same filesystem as the binary, and auto-update is opt-in via `config.updates.auto_update` (default `Disabled`).
 
