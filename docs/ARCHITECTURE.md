@@ -1713,6 +1713,15 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - **Admin API:** `GET /api/admin/claude-subscription/status` — CLI detection, version, subscription type, rate limit tier
 - **Dashboard:** Settings → Cloud Providers → Claude Subscription card with step-by-step setup guide, status detection, enable/disable toggle
 
+**Long-lived sessions** (`src/api/claude_session.rs`) — a persistent `claude` subprocess driven with `--input-format stream-json`, for interactive use where re-sending the whole conversation per turn would be wasteful. All five routes exist ONLY under `--features claude-subscription`; without it the router serves none of them.
+
+- `GET    /api/claude-code/sessions` — List live sessions
+- `POST   /api/claude-code/session` — Start a session (spawns the subprocess)
+- `GET    /api/claude-code/session/{id}` — Session state
+- `DELETE /api/claude-code/session/{id}` — Close it and reap the subprocess
+- `POST   /api/claude-code/session/{id}/message` — Send a turn
+- `POST   /api/claude-code/session/{id}/permission` — Answer a tool-permission prompt the CLI raised
+
 ### Admin API (CORS-protected, no Bearer auth)
 - `GET/PUT /api/admin/config` — Configuration read/update
 - `GET     /api/admin/stats` — Node statistics + hardware info
@@ -1795,6 +1804,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `POST   /api/admin/models/{id}/shards/{index}/load` — Load a shard into memory (expands shard window, restarts worker)
 - `POST   /api/admin/models/{id}/shards/{index}/unload` — Unload a shard from memory (narrows shard window, restarts worker, frees RAM/VRAM)
 - `GET    /api/admin/models/{id}/pipeline-plan` — Pipeline assembly plan: ordered segments + holder candidates per shard window
+- `POST   /api/admin/models/{id}/enable-privacy` — Fetch the first and last shards of a model so the encrypted "boomerang" pipeline can engage; privacy then turns itself on
+- `GET    /api/admin/reference-models` — The pinned smoke/standard/stress models from `docs/REFERENCE_MODELS.md`, for cross-swarm comparison (opt-in via `swarmllm get-model`)
 - `GET/PUT /api/admin/schedule` — Resource schedule management
 - `GET    /api/admin/prune-history` — Recent auto-prune events
 - `GET/POST /api/admin/adapters` — List/register LoRA adapters

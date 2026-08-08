@@ -4,6 +4,33 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Serving several people at once is up to twice as fast, because it was never
+actually serving them together.** SwarmLLM can answer several conversations in
+one pass instead of one at a time, and that path required everyone in the batch
+to be at the same point with the same amount of history behind them. Concurrent
+conversations are never like that — people start at different prompt lengths and
+drift further apart with every word — so the fast path essentially never ran. On
+a live node with four concurrent requests it was taken **0 times out of 156**.
+
+Both conditions only protect work done while reading a prompt, not while writing
+a reply, so they now apply only where they are needed.
+
+Measured with the change switched on and off inside one build, four concurrent
+conversations of different lengths:
+
+| | before | after |
+|---|---|---|
+| NVIDIA graphics card | 40.3 | **80.0 tok/s** |
+| processor only | 5.2 | **6.6 tok/s** |
+
+The graphics-card figures come with a control: repeat the run with all four
+conversations the *same* length — the shape that always batched — and the
+setting does nothing, 78.2 against 77.0 tok/s. That 1.5% is what "no effect"
+looks like on this machine, against the 99% above.
+
+Single conversations are unchanged; this only affects a node serving more than
+one person at a time.
+
 **A node that the internet can reach no longer reports itself as unreachable.**
 SwarmLLM works out whether other people can reach you by asking peers to dial
 you back. Those checks also ran against addresses nothing outside your machine

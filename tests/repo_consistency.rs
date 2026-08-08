@@ -763,3 +763,75 @@ fn msrv_claim_matches_the_dependency_tree() {
         );
     }
 }
+
+/// Every HTTP route the server registers must appear in the architecture doc.
+///
+/// `docs/ARCHITECTURE.md` calls itself the canonical HTTP API reference, and a
+/// reference that silently omits endpoints is worse than one that admits a gap:
+/// people conclude the endpoint does not exist. Seven had drifted out of it —
+/// the five long-lived Claude-session routes, `enable-privacy`, and
+/// `reference-models` — none of which any check could have noticed, because a
+/// route works perfectly whether or not anyone wrote it down.
+///
+/// Matching is on the path with its parameter names normalised, since the doc
+/// writes `{model_id}` where the router writes `{id}` and both are correct for
+/// a reader. Only `/api/*` paths are covered: the OpenAI and Anthropic surfaces
+/// are specified by those vendors and documented as compatibility statements
+/// rather than route-by-route.
+#[test]
+fn every_api_route_is_in_the_architecture_doc() {
+    /// `/api/admin/models/{id}/shards/{index}` -> `/api/admin/models/{}/shards/{}`
+    fn normalise(path: &str) -> String {
+        let mut out = String::with_capacity(path.len());
+        let mut in_param = false;
+        for c in path.chars() {
+            match c {
+                '{' => {
+                    in_param = true;
+                    out.push_str("{}");
+                }
+                '}' => in_param = false,
+                _ if in_param => {}
+                _ => out.push(c),
+            }
+        }
+        out.trim_end_matches('/').to_string()
+    }
+
+    let server = std::fs::read_to_string(repo_root().join("src/api/server.rs"))
+        .expect("read src/api/server.rs");
+    let doc = std::fs::read_to_string(repo_root().join("docs/ARCHITECTURE.md"))
+        .expect("read docs/ARCHITECTURE.md");
+
+    // Every quoted "/api/..." literal in the router source.
+    let mut routes: BTreeSet<String> = BTreeSet::new();
+    for (i, _) in server.match_indices("\"/api/") {
+        let rest = &server[i + 1..];
+        if let Some(end) = rest.find('"') {
+            routes.insert(normalise(&rest[..end]));
+        }
+    }
+    assert!(
+        routes.len() > 40,
+        "only found {} routes — the extraction broke, not the docs",
+        routes.len()
+    );
+
+    // Every "/api/..." mention anywhere in the doc, normalised the same way.
+    let mut documented: BTreeSet<String> = BTreeSet::new();
+    for (i, _) in doc.match_indices("/api/") {
+        let rest = &doc[i..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || "/_{}-".contains(c)))
+            .unwrap_or(rest.len());
+        documented.insert(normalise(&rest[..end]));
+    }
+
+    let missing: Vec<&String> = routes.difference(&documented).collect();
+    assert!(
+        missing.is_empty(),
+        "these routes are served but absent from docs/ARCHITECTURE.md, which \
+         presents itself as the canonical HTTP API reference — a reader \
+         concludes they do not exist: {missing:#?}"
+    );
+}
