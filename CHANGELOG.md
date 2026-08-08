@@ -4,6 +4,13 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.83-alpha] — 2026-08-08
+
+**A speed release for NVIDIA graphics cards, plus one memory fix.** Replies come
+out faster at every conversation length, and the gain grows the longer you have
+been talking. Nothing changes for processor-only machines.
+
+
 **Replies are up to 1.6x faster on an NVIDIA graphics card**, and more so the
 longer the conversation. SwarmLLM was switching to a slower method for short
 conversations, based on a measurement of that one step in isolation. Measured
