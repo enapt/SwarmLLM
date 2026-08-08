@@ -774,6 +774,28 @@ pub async fn embeddings(
 }
 
 /// GET /v1/status — SwarmLLM extension endpoint
+/// Pull THIS node's peer id out of one of its own listen addresses.
+///
+/// Every entry in `listen_multiaddrs` is terminated with `/p2p/<local peer id>`
+/// (see `.claude/rules/architecture.md`), so the id is the last such segment —
+/// **not the first**. A relay-circuit address carries two:
+///
+/// ```text
+/// /ip4/1.2.3.4/tcp/8810/p2p/<RELAY>/p2p-circuit/p2p/<US>
+/// ```
+///
+/// Reading the first would report the relay's identity as our own, and hand an
+/// anchor operator a bootstrap address pointing at somebody else's node. Both
+/// forms appear on a real node at the same time, so this is not a rare case.
+///
+/// `None` rather than a guess when the address carries no peer id at all.
+fn local_peer_id_from_multiaddr(addr: &str) -> Option<String> {
+    let tail = addr.rsplit("/p2p/").next()?;
+    // `rsplit` yields the whole string when the separator is absent, and a
+    // trailing separator yields "". Neither is a peer id.
+    (!tail.is_empty() && !tail.contains('/')).then(|| tail.to_string())
+}
+
 pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let info = state.shared_state.loaded_model_info.read().await;
     let local_model = info.is_some();
@@ -819,6 +841,23 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     }
     models_downloading.sort_by(|a, b| a["model"].as_str().cmp(&b["model"].as_str()));
 
+    // `docs/NETWORKING.md` tells anyone setting up an anchor to read their peer
+    // id with `swarmllm status | grep -i "peer id"`, and this payload did not
+    // contain one, so that step silently produced nothing — on the one path
+    // where getting it wrong means no other node can bootstrap.
+    //
+    // Taken from `listen_multiaddrs`, whose entries are each terminated with
+    // `/p2p/<local peer id>` (see `.claude/rules/architecture.md`), rather than
+    // derived separately: two sources for one identity is how they come to
+    // disagree. Absent rather than wrong when the swarm has not finished
+    // binding and the list is still empty.
+    let peer_id = state
+        .shared_state
+        .listen_multiaddrs
+        .load()
+        .iter()
+        .find_map(|a| local_peer_id_from_multiaddr(a));
+
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
@@ -829,12 +868,69 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
         // ready to serve, regardless of `model_loaded`.
         "models_downloading": models_downloading,
         "peers": state.shared_state.peer_registry.len(),
+        "node_id": state.shared_state.identity.node_id().to_string(),
+        "peer_id": peer_id,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The case that matters.** A relay-circuit address carries two peer ids
+    /// — the relay's, then ours — and both forms are present on a real node at
+    /// the same moment. Reading the first would publish the relay's identity as
+    /// this node's, so an anchor operator following `docs/NETWORKING.md` would
+    /// hand out a bootstrap address pointing at somebody else.
+    ///
+    /// The real addresses below were taken from a live node on 2026-08-09; the
+    /// two shapes resolved to the same id, which is what makes the answer
+    /// trustworthy rather than merely plausible.
+    #[test]
+    fn peer_id_comes_from_the_last_p2p_segment_not_the_first() {
+        let us = "12D3KooWC8XYvY1DKRZcCNhvKDzEf69kjuGS19shCawgQrq12JMy";
+        let relay = "12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G";
+
+        // Direct: one peer id, ours.
+        assert_eq!(
+            local_peer_id_from_multiaddr(&format!("/ip4/10.255.255.254/tcp/8810/p2p/{us}")),
+            Some(us.to_string())
+        );
+        // Through a relay: two peer ids, and ours is the second.
+        let circuit =
+            format!("/dns4/swarmllm.duckdns.org/tcp/8810/p2p/{relay}/p2p-circuit/p2p/{us}");
+        assert_eq!(
+            local_peer_id_from_multiaddr(&circuit),
+            Some(us.to_string()),
+            "a relayed address must report OUR id, never the relay's"
+        );
+        assert_ne!(
+            local_peer_id_from_multiaddr(&circuit),
+            Some(relay.to_string())
+        );
+    }
+
+    /// Absent rather than wrong: a listen address with no peer id must not
+    /// produce a fragment of the address itself.
+    #[test]
+    fn an_address_without_a_peer_id_yields_none() {
+        assert_eq!(
+            local_peer_id_from_multiaddr("/ip4/192.168.1.53/tcp/8810"),
+            None
+        );
+        assert_eq!(local_peer_id_from_multiaddr(""), None);
+        // Trailing separator, nothing after it.
+        assert_eq!(
+            local_peer_id_from_multiaddr("/ip4/192.168.1.53/tcp/8810/p2p/"),
+            None
+        );
+        // A circuit that has not had our id appended yet.
+        assert_eq!(
+            local_peer_id_from_multiaddr("/ip4/1.2.3.4/tcp/8810/p2p/12D3KooWRelay/p2p-circuit"),
+            None,
+            "the segment after the last /p2p/ still contains a slash"
+        );
+    }
 
     #[test]
     fn tool_call_request_deserializes() {

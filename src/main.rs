@@ -74,7 +74,11 @@ enum Commands {
     /// Print version information
     Version,
     /// Show node status (queries running daemon)
-    Status,
+    Status {
+        /// Print the raw JSON response instead of a readable summary
+        #[arg(long)]
+        json: bool,
+    },
     /// Interactive terminal chat with a running daemon
     Chat {
         /// Model to use (auto-selects first available if omitted)
@@ -361,10 +365,10 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             println!("swarmllm {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Commands::Status => {
+        Commands::Status { json } => {
             let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
-            cli::status::query_status(port, &data_dir).await
+            cli::status::query_status(port, &data_dir, json).await
         }
         Commands::Chat {
             model,
