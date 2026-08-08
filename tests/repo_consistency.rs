@@ -963,3 +963,73 @@ fn every_translation_key_the_frontend_uses_exists() {
          render to the user as their own raw names: {missing:#?}"
     );
 }
+
+/// Every asset name the updater can ask for must be one the release actually
+/// publishes.
+///
+/// `update.rs` builds the name it downloads from the host's platform, the build
+/// variant, and — for a processor without AVX2 — a `-baseline` redirect.
+/// `.github/workflows/release.yml` declares the names it uploads in a matrix.
+/// These are two hand-maintained lists that must agree exactly, and **nothing
+/// compared them**: `update.rs` has unit tests, but they assert its output
+/// against constants written in the same file, so a rename in the workflow
+/// leaves them green.
+///
+/// The consequence is silent and permanent. A node asks for an asset that does
+/// not exist, finds nothing, and stops updating — with no error a user would
+/// see, because "no matching asset" is indistinguishable from "no new version".
+/// The `-baseline` names are the sharp end: they exist for pre-2013 processors,
+/// which are precisely the machines nobody is testing on.
+///
+/// Same shape as `compute_cap_matches_release_workflow` — a constant in the
+/// source pinned against the workflow that has to honour it.
+#[test]
+fn every_asset_the_updater_can_request_is_published_by_the_release_workflow() {
+    let workflow = std::fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("read release.yml");
+
+    // `bare_asset: swarmllm-linux-x86_64` — the un-archived binary the updater
+    // downloads. (The `.tar.gz` / `.zip` archives are for humans.)
+    let published: BTreeSet<String> = workflow
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("bare_asset:"))
+        .map(|v| v.trim().to_string())
+        .collect();
+    assert!(
+        published.len() >= 5,
+        "found only {} bare_asset entries in release.yml — the parse broke, not the workflow",
+        published.len()
+    );
+
+    // Every (os, arch, variant) combination `update.rs` can resolve to, and for
+    // x86-64 the `-baseline` sibling a pre-AVX2 host is redirected to.
+    let mut wanted: BTreeSet<String> = BTreeSet::new();
+    for (os, arch, variant, windows) in [
+        ("linux", "x86_64", "", false),
+        ("linux", "x86_64", "-cuda", false),
+        ("macos", "aarch64", "", false),
+        ("windows", "x86_64", "", true),
+        ("windows", "x86_64", "-gpu", true),
+    ] {
+        let ext = if windows { ".exe" } else { "" };
+        let name = format!("swarmllm-{os}-{arch}{variant}{ext}");
+        // Only the plain x86-64 builds have a baseline sibling: a GPU build
+        // already requires far newer hardware, and macOS aarch64 has AVX2's
+        // equivalent in its baseline.
+        if arch == "x86_64" && variant.is_empty() {
+            wanted.insert(match name.rsplit_once('.') {
+                Some((stem, e)) => format!("{stem}-baseline.{e}"),
+                None => format!("{name}-baseline"),
+            });
+        }
+        wanted.insert(name);
+    }
+
+    let missing: Vec<&String> = wanted.difference(&published).collect();
+    assert!(
+        missing.is_empty(),
+        "the updater can ask for these assets and the release workflow does not publish them, \
+         so a node on that platform would silently stop updating: {missing:#?}\n\
+         published: {published:#?}"
+    );
+}
