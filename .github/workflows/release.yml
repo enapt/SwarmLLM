@@ -387,9 +387,16 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           DEB="swarmllm_${VERSION}_amd64.deb"
           cp target/debian/*.deb "$DEB"
+          # Checksum sidecar, same form as the bare binaries'. Nothing in the
+          # updater consumes it — the .deb is installed by hand — but it is the
+          # install path for every Debian and Ubuntu user, and a package with no
+          # published digest cannot be verified by the person running it. It is
+          # one line to produce and its absence is only noticeable to someone who
+          # went looking, which is the wrong way round for a security control.
+          shasum -a 256 "$DEB" > "${DEB}.sha256"
           # See "Upload archive to release" for the retry rationale.
           for i in 1 2 3; do
-            if gh release upload "$GITHUB_REF_NAME" "$DEB" --clobber; then
+            if gh release upload "$GITHUB_REF_NAME" "$DEB" "${DEB}.sha256" --clobber; then
               break
             fi
             if [ "$i" -eq 3 ]; then exit 1; fi
@@ -427,9 +434,11 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           RPM="swarmllm_${VERSION}.x86_64.rpm"
           cp target/generate-rpm/*.rpm "$RPM"
+          # Checksum sidecar — see the .deb step for why.
+          shasum -a 256 "$RPM" > "${RPM}.sha256"
           # See "Upload archive to release" for the retry rationale.
           for i in 1 2 3; do
-            if gh release upload "$GITHUB_REF_NAME" "$RPM" --clobber; then
+            if gh release upload "$GITHUB_REF_NAME" "$RPM" "${RPM}.sha256" --clobber; then
               break
             fi
             if [ "$i" -eq 3 ]; then exit 1; fi
@@ -482,6 +491,13 @@ jobs:
             swarmllm-linux-x86_64-baseline.tar.gz
             swarmllm-windows-x86_64-baseline.zip
           )
+          # Deliberately NOT listed: the bare binaries, the .deb, the .rpm and
+          # every `.sha256` sidecar. This guard's question is "did every
+          # platform ship", and each of those is produced by a cell whose
+          # archive IS listed, in a step running `set -euo pipefail` — so their
+          # absence implies a failed cell, which the archive entry already
+          # catches. Listing them would blur what the guard is asserting
+          # without adding coverage.
           NAMES=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
           MISSING=()
           for want in "${EXPECTED[@]}"; do
