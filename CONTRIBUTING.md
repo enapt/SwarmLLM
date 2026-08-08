@@ -4,7 +4,7 @@ Thanks for your interest in SwarmLLM. This document covers the basics for gettin
 
 ## Building from Source
 
-Requires Rust 1.80+.
+Requires Rust 1.89+.
 
 ```bash
 git clone https://github.com/enapt/SwarmLLM.git

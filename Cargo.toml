@@ -23,7 +23,7 @@ repository = "https://github.com/enapt/SwarmLLM"
 homepage = "https://github.com/enapt/SwarmLLM"
 keywords = ["llm", "p2p", "inference", "distributed", "decentralized"]
 categories = ["network-programming", "command-line-utilities"]
-rust-version = "1.80"
+rust-version = "1.89"
 
 [[bin]]
 name = "swarmllm"

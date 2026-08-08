@@ -670,3 +670,96 @@ fn every_declared_example_has_an_explicit_path() {
          build (its context has no examples/ directory) while every other check passes: {offenders:?}"
     );
 }
+
+/// The advertised minimum Rust version must be the real one.
+///
+/// **This was wrong by nine minor versions and nothing noticed.** The repo
+/// promised Rust 1.80 in seven places — including a README badge, the first
+/// thing anyone evaluating the project sees — while `redb` in the locked
+/// dependency tree requires 1.89. CI only ever builds `stable`, so no job on
+/// the push path could have caught it: the claim was pure prose with no
+/// compiler behind it, which is the exact situation this file exists for.
+///
+/// A wrong floor is not harmless in either direction. Too low sends someone on
+/// a distro toolchain into a dependency error instead of a clear "upgrade
+/// Rust"; too high turns people away who could have built it fine.
+///
+/// Derived from `cargo metadata`, so it tracks reality rather than a second
+/// hand-maintained number. When a dependency bump raises the floor, this fails
+/// and names the crate responsible.
+#[test]
+fn msrv_claim_matches_the_dependency_tree() {
+    fn parse(v: &str) -> (u64, u64, u64) {
+        let mut it = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    }
+
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1"])
+        .current_dir(repo_root())
+        .output()
+        .expect("cargo metadata");
+    assert!(out.status.success(), "cargo metadata failed");
+    let meta: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("cargo metadata is not JSON");
+
+    // The floor is the highest `rust-version` anywhere in the resolved tree.
+    let mut floor = (0, 0, 0);
+    let mut blamed = String::new();
+    for pkg in meta["packages"].as_array().expect("packages") {
+        let Some(rv) = pkg["rust_version"].as_str() else {
+            continue;
+        };
+        let v = parse(rv);
+        if v > floor {
+            floor = v;
+            blamed = format!(
+                "{} {} needs {rv}",
+                pkg["name"].as_str().unwrap_or("?"),
+                pkg["version"].as_str().unwrap_or("?")
+            );
+        }
+    }
+    let declared = parse(env!("CARGO_PKG_RUST_VERSION"));
+    assert!(
+        declared >= floor,
+        "Cargo.toml declares rust-version {}.{}.{} but the dependency tree needs \
+         {}.{}.{} ({blamed}). Raise rust-version in Cargo.toml AND both crates/*/Cargo.toml, \
+         then update the README badge, README install note, CONTRIBUTING.md, \
+         docs/book/src/getting-started/installation.md and CLAUDE.md.",
+        declared.0,
+        declared.1,
+        declared.2,
+        floor.0,
+        floor.1,
+        floor.2,
+    );
+
+    // Every place the number is written by hand must agree with Cargo.toml.
+    let want = env!("CARGO_PKG_RUST_VERSION");
+    let claims: [(&str, String); 6] = [
+        ("README.md", format!("rust-{want}%2B")),
+        ("README.md", format!("# Requires Rust {want}+")),
+        ("CONTRIBUTING.md", format!("Requires Rust {want}+")),
+        (
+            "docs/book/src/getting-started/installation.md",
+            format!("Requires Rust {want}+"),
+        ),
+        ("CLAUDE.md", format!("Minimum Rust Version**: {want}+")),
+        ("crates/swarmllm-types/Cargo.toml", format!("\"{want}\"")),
+    ];
+    for (file, needle) in claims {
+        let text = std::fs::read_to_string(repo_root().join(file))
+            .unwrap_or_else(|e| panic!("read {file}: {e}"));
+        assert!(
+            text.contains(&needle),
+            "{file} does not state the MSRV as {want} (looked for {needle:?}). \
+             Cargo.toml and the docs must agree, or the badge lies to people \
+             deciding whether they can build this."
+        );
+    }
+}

@@ -6,7 +6,7 @@ description = "Embedded frontend assets for SwarmLLM"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/enapt/SwarmLLM"
 homepage = "https://github.com/enapt/SwarmLLM"
-rust-version = "1.80"
+rust-version = "1.89"
 
 [dependencies]
 axum = { version = "0.8" }
