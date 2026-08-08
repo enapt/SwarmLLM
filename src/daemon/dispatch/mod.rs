@@ -947,7 +947,15 @@ pub(crate) async fn dispatch_network_messages(
                                             }
                                             continue;
                                         }
-                                        tracing::info!(
+                                        // DEBUG, not INFO: `register_manifest` below is the
+                                        // choke point every adoption path funnels through, and
+                                        // it announces at INFO when the manifest is genuinely
+                                        // new or changed. Announcing here too meant a settled
+                                        // swarm logged both lines on every re-gossip of every
+                                        // unchanged manifest — together roughly half the volume
+                                        // of a real node's log. Keep this one for tracing the
+                                        // network path specifically.
+                                        tracing::debug!(
                                             model = %manifest.id,
                                             name = %manifest.name,
                                             shards = manifest.shard_count,
@@ -1407,7 +1415,7 @@ pub(crate) async fn dispatch_network_messages(
                                             use std::sync::atomic::{AtomicU64, Ordering};
                                             static DROP_COUNTER: AtomicU64 = AtomicU64::new(0);
                                             let prev = DROP_COUNTER.fetch_add(1, Ordering::Relaxed);
-                                            if prev == 0 || prev % 50 == 0 {
+                                            if prev == 0 || prev.is_multiple_of(50) {
                                                 shared_state.emit_activity(
                                                     crate::daemon::state::ActivityEvent::new(
                                                         "capacity",

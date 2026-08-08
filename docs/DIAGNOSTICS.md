@@ -474,7 +474,8 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: register_manifest` | `model_id`, `shard_count` |
+| INFO  | `DIAG: register_manifest` — **only when new or changed** (`manifest_hash` differs) | `model_id`, `shard_count`, `publisher` |
+| DEBUG | `DIAG: register_manifest (unchanged)` — a re-gossip of a manifest we already hold | `model_id` |
 | INFO  | `DIAG: load_from_db complete` | `manifests_loaded_count` |
 
 ### HuggingFace (huggingface.rs)

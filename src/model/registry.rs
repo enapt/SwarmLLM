@@ -88,12 +88,34 @@ impl ModelRegistry {
             );
             return;
         }
-        tracing::info!(
-            model = %manifest.id,
-            name = %manifest.name,
-            shard_count = manifest.shard_count,
-            "DIAG: register_manifest"
-        );
+        // Announce at INFO only when something actually changed.
+        //
+        // Every peer re-gossips its whole manifest set on a timer, so a settled
+        // swarm re-registers the same unchanged manifests forever. Logged
+        // unconditionally, that one line was **21% of a real node's log** —
+        // 96,850 of 453,591 lines over nine days, for nine models that never
+        // changed — and its dispatch-side twin roughly doubled it. A log where
+        // getting on for half the volume reports that nothing happened is a log
+        // nobody can read when something does.
+        //
+        // `manifest_hash` is the manifest's own content hash, so this compares
+        // what a peer sent against what we hold without a field-by-field walk.
+        // A genuine change (new shard, re-publish) still announces itself.
+        let changed = match self.manifests.get(&manifest.id) {
+            Some(prev) => prev.manifest_hash != manifest.manifest_hash,
+            None => true,
+        };
+        if changed {
+            tracing::info!(
+                model = %manifest.id,
+                name = %manifest.name,
+                shard_count = manifest.shard_count,
+                publisher = %manifest.publisher,
+                "DIAG: register_manifest"
+            );
+        } else {
+            tracing::debug!(model = %manifest.id, "DIAG: register_manifest (unchanged)");
+        }
         self.manifests.insert(manifest.id.clone(), manifest);
     }
 
