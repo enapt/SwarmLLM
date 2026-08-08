@@ -439,49 +439,34 @@ impl NetworkManager {
             SwarmEvent::Behaviour(SwarmBehaviourEvent::AutonatClient(event)) => {
                 let tested_addr = event.tested_addr;
                 let server = event.server;
-                match event.result {
-                    Ok(()) => {
-                        // A probe succeeded — but "reachable" is only "public" if
-                        // the address that was tested is routable from the open
-                        // internet.
-                        //
-                        // AutoNAT servers are ordinary peers, so a node on the same
-                        // LAN happily confirms our RFC1918 address, and we would
-                        // then declare ourselves Public and skip reserving a relay
-                        // — leaving us unreachable from the internet while the
-                        // dashboard says otherwise. Observed live 2026-08-05 on a
-                        // NAT'd node reporting `nat: Public` with confirmations for
-                        // `192.168.1.53`, `10.255.255.254` and even the link-local
-                        // `169.254.83.107`. This is the same false-Public that
-                        // AutoNAT v2 was adopted to fix, arriving by another route.
-                        let internet =
-                            crate::pool::invite::multiaddr_is_internet_reachable(&tested_addr);
-                        if internet {
-                            tracing::info!(%tested_addr, %server, "AutoNAT: address confirmed reachable (public)");
-                            if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write()
-                            {
-                                stats.nat_status = Some("Public".to_string());
-                            }
-                        } else {
-                            // Useful (it proves the LAN path works) but says
-                            // nothing about the internet, so it must not clear a
-                            // Private verdict or suppress the relay.
-                            tracing::debug!(
-                                %tested_addr, %server,
-                                "AutoNAT: probe succeeded for a non-internet address — \
-                                 proves LAN reachability only, NOT public"
-                            );
+                let reachable = event.result.is_ok();
+                match autonat_verdict(reachable, &tested_addr) {
+                    NatVerdict::Public => {
+                        tracing::info!(%tested_addr, %server, "AutoNAT: address confirmed reachable (public)");
+                        if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
+                            stats.nat_status = Some("Public".to_string());
                         }
                     }
-                    Err(e) => {
+                    NatVerdict::Private => {
                         // Address is NOT reachable — we're behind NAT/CGNAT for it.
                         // Reserve a relay so peers can still reach us. (v2 fixes
                         // v1's false-"Public" that silently skipped this.)
-                        tracing::info!(%tested_addr, %server, error = %e, "AutoNAT: address not reachable (private) — activating relay");
+                        let err = event.result.err();
+                        tracing::info!(
+                            %tested_addr, %server, error = ?err,
+                            "AutoNAT: address not reachable — activating relay"
+                        );
                         if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
                             stats.nat_status = Some("Private (relay)".to_string());
                         }
                         self.try_activate_relay("AutoNAT reported our address unreachable");
+                    }
+                    NatVerdict::Uninformative => {
+                        tracing::debug!(
+                            %tested_addr, %server, reachable,
+                            "AutoNAT: probed a non-internet address — the outcome was \
+                             settled before the probe ran, so it says nothing about NAT"
+                        );
                     }
                 }
             }
@@ -1068,6 +1053,57 @@ fn ensure_p2p_suffix(addr: Multiaddr, local_peer_id: libp2p::PeerId) -> Multiadd
     }
 }
 
+/// What one AutoNAT probe result actually tells us about NAT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NatVerdict {
+    /// Reachable at an address the open internet can route to.
+    Public,
+    /// Unreachable at an address the open internet could have routed to.
+    Private,
+    /// The probe tested an address that is not internet-routable, so its
+    /// outcome was determined before it ran and carries no information.
+    Uninformative,
+}
+
+/// Read an AutoNAT probe result, given the address it tested.
+///
+/// **The address decides whether the result means anything, in BOTH
+/// directions.** An AutoNAT server is an ordinary peer somewhere else on the
+/// internet, so:
+///
+/// - a *success* on `192.168.1.5` only proves that this particular server
+///   happens to share our LAN — it says nothing about the internet. Concluding
+///   "Public" from one is the false-Public observed live on 2026-08-05, where a
+///   NAT'd node reported `nat: Public` on the strength of confirmations for
+///   `192.168.1.53`, `10.255.255.254` and even the link-local `169.254.83.107`.
+/// - a *failure* on `127.0.0.1` proves nothing either, and for a stronger
+///   reason: no remote server could ever have dialled it. The probe was
+///   arithmetic, not a measurement.
+///
+/// Only the first half was guarded originally, and the asymmetry was the bug.
+/// This node's own log carried 84 failures on addresses that could not
+/// possibly succeed — 52 on `192.168.1.53`, 19 on `127.0.0.1`, 7 on
+/// `10.255.255.254`, 6 on link-local — each one setting a "Private" verdict and
+/// asking for a relay. On a NAT'd node that verdict is right by luck; on a
+/// genuinely reachable one (a port-forwarded home machine, a VPS, the anchor
+/// itself) it overwrites a correct "Public" and reserves a relay circuit that
+/// is not needed, out of a pool the anchor caps at 64 — crowding out the peers
+/// that have no other way in.
+///
+/// Returning a verdict rather than a bool is what keeps the two arms honest:
+/// "says nothing" is a distinct outcome from "says private", and a caller has
+/// to name which one it is handling.
+pub(crate) fn autonat_verdict(reachable: bool, tested_addr: &Multiaddr) -> NatVerdict {
+    if !crate::pool::invite::multiaddr_is_internet_reachable(tested_addr) {
+        return NatVerdict::Uninformative;
+    }
+    if reachable {
+        NatVerdict::Public
+    } else {
+        NatVerdict::Private
+    }
+}
+
 /// Decide whether an address is something a remote peer could plausibly dial.
 /// Excludes loopback, unspecified, IPv4 link-local, and the AWS/GCP IMDS
 /// address; keeps everything else (LAN, CGN/Tailscale, public).
@@ -1108,6 +1144,74 @@ mod listen_filter_tests {
 
     fn addr(s: &str) -> Multiaddr {
         s.parse().unwrap()
+    }
+
+    /// **The bug this closes.** Every one of these appeared as a *failed*
+    /// AutoNAT probe in a real node's log, and each one set a "Private" verdict
+    /// and asked for a relay circuit. None of them could ever have succeeded:
+    /// no remote server can dial this machine's loopback, its LAN address or
+    /// its link-local address.
+    #[test]
+    fn a_failed_probe_of_an_undialable_address_decides_nothing() {
+        for a in [
+            "/ip4/127.0.0.1/tcp/8810",              // 19 failures in the live log
+            "/ip4/192.168.1.53/udp/8800/quic-v1",   // 52
+            "/ip4/10.255.255.254/udp/8800/quic-v1", // 7
+            "/ip4/169.254.83.107/udp/8800/quic-v1", // 6
+            "/ip6/::1/tcp/8810",
+            "/ip6/fe80::1/tcp/8810",
+        ] {
+            assert_eq!(
+                autonat_verdict(false, &addr(a)),
+                NatVerdict::Uninformative,
+                "{a}: a probe that could not have succeeded must not prove NAT"
+            );
+        }
+    }
+
+    /// The half that was already guarded, kept here so the two directions are
+    /// stated together and neither can drift.
+    #[test]
+    fn a_successful_probe_of_a_lan_address_decides_nothing_either() {
+        for a in [
+            "/ip4/192.168.1.53/tcp/8810",
+            "/ip4/10.255.255.254/tcp/8810",
+            "/ip4/169.254.83.107/tcp/8810",
+            "/ip4/100.64.10.5/tcp/8810", // CGNAT/Tailscale: overlay, not internet
+        ] {
+            assert_eq!(
+                autonat_verdict(true, &addr(a)),
+                NatVerdict::Uninformative,
+                "{a}: reachable on the LAN is not reachable on the internet"
+            );
+        }
+    }
+
+    /// A probe of an address the internet *can* route to is the only kind that
+    /// decides anything — and then it decides in whichever direction it landed.
+    #[test]
+    fn only_an_internet_routable_address_settles_it() {
+        for a in [
+            "/ip4/203.0.113.5/udp/8800/quic-v1",
+            "/ip4/171.97.115.138/tcp/8810", // this node's real observed address
+            "/ip6/2001:db8::1/tcp/8810",
+            "/dns4/swarmllm.duckdns.org/tcp/8810",
+        ] {
+            assert_eq!(autonat_verdict(true, &addr(a)), NatVerdict::Public, "{a}");
+            assert_eq!(autonat_verdict(false, &addr(a)), NatVerdict::Private, "{a}");
+        }
+    }
+
+    /// A relay circuit is reachable from the internet by construction — that is
+    /// what a relay is for — so a probe of one is informative even though the
+    /// address embedded in it is private.
+    #[test]
+    fn a_relay_circuit_counts_as_internet_routable() {
+        let via_relay = addr(
+            "/ip4/192.168.1.53/tcp/8810/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G/p2p-circuit",
+        );
+        assert_eq!(autonat_verdict(true, &via_relay), NatVerdict::Public);
+        assert_eq!(autonat_verdict(false, &via_relay), NatVerdict::Private);
     }
 
     #[test]
