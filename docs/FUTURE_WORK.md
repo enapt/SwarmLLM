@@ -7681,3 +7681,64 @@ does scale with the batch dimension (2.8x at m=4, 8.9x at m=128 measured
 separately), so m=8 landing at 2.5x is partial reuse rather than a failure. If
 every matmul amortised fully the ceiling would be roughly 2.9x at batch 8; we
 are now at 1.63x. **The remaining headroom is in the kernel, not the plumbing.**
+
+## Why the quantized matmul plateaus at ~1.5x, and why the obvious fix is wrong (2026-08-09)
+
+After batching the attention projections, aggregate throughput at batch 8 is
+1.63x a single request against a ceiling near 2.9x. The rest is the kernel: even
+the batched matmuls amortise only ~2.5x. `examples/qmatmul_bench.rs`, 4 threads,
+Q4_K, per-row cost against the batch dimension:
+
+| m | attn proj 3072x3072 | ffn up 3072x8192 |
+|---|---|---|
+| 1 | 0.169 ms/row (1.00x) | 0.385 (1.00x) |
+| 2 | 0.187 (0.90x) | 0.404 (0.95x) |
+| 4 | 0.171 (0.99x) | 0.327 (1.18x) |
+| 8 | 0.120 (1.40x) | 0.315 (1.22x) |
+| 128 | 0.112 (1.51x) | 0.290 (1.33x) |
+
+**Batches of 2-4 — the common concurrency case — gain essentially nothing.**
+
+### The obvious explanation is wrong, and expensively so
+
+The tiled patch makes the weight column the outer loop so it is read once and
+applied to every row from L1. But `vec_dot` dequantizes that column *inside* the
+call, once per row. The natural conclusion is that the dequantization is the
+part failing to amortise, and that dequantizing a column once into f32 and doing
+m plain dots would fix it.
+
+Measured on one k=3072 column before writing any of it:
+
+    vec_dot: dequantize + multiply-add, fused      125 ns
+    to_float: dequantize alone                    1474 ns
+    naive f32 dot alone                           3064 ns
+
+**Dequantizing a column ONCE costs 11.8x an entire fused `vec_dot`.** The
+hand-written AVX2 path fuses unpacking into the multiply-add and never
+materialises the f32 column at all; `to_float` is a generic path that does.
+So "dequantize once, reuse across rows" cannot break even below roughly m=12
+*even if the subsequent GEMM were free*, and at the batch sizes decode actually
+uses it is a large regression, not a win.
+
+(The 3064 ns f32 dot is a scalar Rust iterator and is not what a real
+implementation would use — a SIMD dot would be far cheaper. That does not rescue
+the idea at small m, because `to_float` alone already exceeds 11 fused dots. It
+is why the same approach *can* pay at prefill sizes, below.)
+
+### What would actually help, and what it costs
+
+The work is inherently `m * n` independent `vec_dot` calls, each re-reading and
+re-unpacking the column. Amortising across rows needs a genuine quantized GEMM
+that unpacks a tile into registers and applies it to several rows before moving
+on — llama.cpp's `llamafile_sgemm`/tinyBLAS, which is hand-written SIMD per
+quantization format and per instruction set.
+
+That is a serious kernel project, not a Rust-level restructure, and it would
+**not** be bit-identical to the current ordering — unlike the existing tiling
+patch, which was. Anyone taking it on should note the split above: it is
+plausible for prefill (m >= 43, where a single dequantization is amortised over
+many rows) and implausible for decode batching (m <= 8).
+
+**So the batching curve is now close to what this kernel can give.** Further
+aggregate throughput on CPU needs either that GEMM or fewer bytes per token,
+not more plumbing.

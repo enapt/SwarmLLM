@@ -138,10 +138,65 @@ fn pool_sweep() {
     }
 }
 
+/// Is the plateau in ms/row the memory read, or the DEQUANTIZATION?
+///
+/// The tiled kernel keeps a weight column in L1 and applies it to every row, so
+/// the memory read amortises across the batch. But `vec_dot` dequantizes that
+/// column INSIDE the call — once per row — so that half of the work does not.
+/// If that is why ms/row stops falling around m=8, then dequantizing a column
+/// once into f32 and doing m plain dots must be materially cheaper.
+///
+/// Prices the two halves without touching the kernel, so the answer is
+/// available before anyone commits to rewriting it.
+fn dequant_split() {
+    let k = 3072usize;
+    let kb = k / BlockQ4K::BLCK_SIZE;
+    let mut col = vec![BlockQ4K::zeros(); kb];
+    let src: Vec<f32> = (0..k).map(|i| ((i % 17) as f32 - 8.0) / 8.0).collect();
+    BlockQ4K::from_float(&src, &mut col);
+    let lhs_f: Vec<f32> = (0..k).map(|i| ((i % 13) as f32 - 6.0) / 6.0).collect();
+    let mut lhs_q = vec![<BlockQ4K as GgmlType>::VecDotType::zeros(); kb];
+    <BlockQ4K as GgmlType>::VecDotType::from_float(&lhs_f, &mut lhs_q);
+
+    let mut acc = 0f32;
+    let t = std::time::Instant::now();
+    for _ in 0..20_000 {
+        acc += BlockQ4K::vec_dot(k, &col, &lhs_q);
+    }
+    let quant_ns = t.elapsed().as_nanos() as f64 / 20_000.0;
+
+    let mut col_f = vec![0f32; k];
+    BlockQ4K::to_float(&col, &mut col_f);
+    let mut acc2 = 0f32;
+    let t = std::time::Instant::now();
+    for _ in 0..20_000 {
+        acc2 += col_f.iter().zip(&lhs_f).map(|(a, b)| a * b).sum::<f32>();
+    }
+    let f32_ns = t.elapsed().as_nanos() as f64 / 20_000.0;
+
+    let t = std::time::Instant::now();
+    for _ in 0..20_000 {
+        BlockQ4K::to_float(&col, &mut col_f);
+    }
+    let deq_ns = t.elapsed().as_nanos() as f64 / 20_000.0;
+
+    println!("\n  one weight column, k={k}   (checksums {acc:.0} / {acc2:.0})");
+    println!("    vec_dot: dequantize + multiply-add   {quant_ns:8.0} ns");
+    println!("    dequantize alone                     {deq_ns:8.0} ns");
+    println!("    f32 dot alone (dequant already paid) {f32_ns:8.0} ns");
+    println!("    m     per column now   dequant-once   speedup");
+    for m in [2usize, 4, 8, 16, 128] {
+        let now = quant_ns * m as f64;
+        let then = deq_ns + f32_ns * m as f64;
+        println!("    {m:<4}{now:14.0}{then:15.0}   {:.2}x", now / then);
+    }
+}
+
 fn main() {
     println!("candle quantized matmul (Q4_K)");
     // llama-3.2-3b shapes: attention projection and FFN up.
     bench("attn proj", 3072, 3072, &[1, 2, 3, 4, 8, 43, 128]);
     bench("ffn up", 3072, 8192, &[1, 2, 3, 4, 8, 43, 128]);
     pool_sweep();
+    dequant_split();
 }
