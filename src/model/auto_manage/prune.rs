@@ -1232,7 +1232,7 @@ impl AutoShardManager {
                 .map(|s| s.last_served_at.elapsed().as_secs().min(i64::MAX as u64) as i64);
             let since_any =
                 effective_idle_secs(since_local, since_served, residency.get(&model_id).copied());
-            let idle = since_any.map_or(true, |s| s >= idle_unload_secs as i64);
+            let idle = since_any.is_none_or(|s| s >= idle_unload_secs as i64);
             if !idle {
                 continue;
             }
@@ -1248,8 +1248,7 @@ impl AutoShardManager {
             // last request, both with regional demand barely over the line
             // (0.107 and 0.126 against a 0.1 threshold), on a node that then hit
             // GPU-OOM.
-            let hard_idle =
-                since_any.map_or(true, |s| s >= idle_hard_unload_secs(idle_unload_secs));
+            let hard_idle = since_any.is_none_or(|s| s >= idle_hard_unload_secs(idle_unload_secs));
             // Low network demand: the region isn't asking for it either. Keep a
             // wanted model warm even when THIS node is momentarily quiet.
             let ema = self

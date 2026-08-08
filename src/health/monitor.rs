@@ -183,7 +183,7 @@ impl HealthMonitor {
                     // At ≤10 peers, every 30s (same as before).
                     // At 1K+ peers, every ~120s to reduce bandwidth.
                     let broadcast_every = self.gossip_broadcast_interval();
-                    if nonce % broadcast_every == 0 {
+                    if nonce.is_multiple_of(broadcast_every) {
                         self.broadcast_capabilities().await;
                         self.broadcast_manifests().await;
                         self.broadcast_region_summary().await;
@@ -575,7 +575,7 @@ impl HealthMonitor {
             self.shard_announce_counter += 1;
             // Full re-announce every 10 broadcast cycles so late-joining peers
             // eventually discover our shards even if nothing changed.
-            let periodic_reannounce = self.shard_announce_counter % 10 == 0;
+            let periodic_reannounce = self.shard_announce_counter.is_multiple_of(10);
 
             if shards_changed || periodic_reannounce {
                 let shard_count = hosted_shards.len();
@@ -1229,7 +1229,7 @@ impl HealthMonitor {
 
             match &status.state {
                 AcquisitionState::Complete | AcquisitionState::Failed { .. } => {
-                    if status.started_at.map_or(true, |s| s < cutoff) {
+                    if status.started_at.is_none_or(|s| s < cutoff) {
                         to_remove.push(key.clone());
                     }
                     self.acq_liveness.remove(key);
@@ -1273,7 +1273,7 @@ impl HealthMonitor {
                         let reason = format!("Stalled — no progress for {}s", secs);
                         to_fail.push((key.clone(), reason, all_local));
                         self.acq_liveness.remove(key);
-                    } else if prev.map_or(true, |(b, _)| b != bytes) {
+                    } else if prev.is_none_or(|(b, _)| b != bytes) {
                         self.acq_liveness.insert(key.clone(), (bytes, now));
                     }
                 }

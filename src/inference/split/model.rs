@@ -122,7 +122,7 @@ impl SplitModel {
         if fell_back {
             self.batch_fellback += 1;
         }
-        if self.batch_calls % BATCH_STATS_EVERY != 0 {
+        if !self.batch_calls.is_multiple_of(BATCH_STATS_EVERY) {
             return;
         }
         let batched = self.batch_calls - self.batch_fellback;

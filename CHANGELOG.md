@@ -4,6 +4,33 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A node that the internet can reach no longer reports itself as unreachable.**
+SwarmLLM works out whether other people can reach you by asking peers to dial
+you back. Those checks also ran against addresses nothing outside your machine
+could ever reach — your own loopback address, your home network address — and a
+failure there was being read as proof that you are behind a router. It was not:
+no peer on the internet can dial `127.0.0.1`, so the check was settled before it
+ran. One node's log held 84 such results.
+
+If you are behind a home router the conclusion happened to be right anyway. If
+you have forwarded a port, or run on a server with a public address, this told
+you the wrong thing and reserved a relay circuit you did not need — taking one
+from a pool the bootstrap node caps at 64, which the people who have no other
+way in are waiting for.
+
+**Your log no longer fills up with entries saying nothing has changed.** Peers
+re-share their model lists on a timer, and each unchanged repeat was written out
+twice at normal verbosity. On a real node that was **96,850 of 453,591 lines —
+about 44% of the log, for nine models that never changed.** Only genuine
+additions and changes are announced now; the repeats are still there at debug
+verbosity.
+
+**Building from source states the right Rust version.** The project asked for
+Rust 1.80 in seven places, including the badge on the front page, while one of
+its dependencies has needed 1.89 for some time. Anyone on an older toolchain got
+a confusing dependency error rather than a clear "upgrade Rust". A repo check now
+derives the real figure from the dependency tree, so it cannot drift again.
+
 ## [0.3.84-alpha] — 2026-08-08
 
 **Restores the Docker images, which v0.3.83 shipped without.** That release built

@@ -1258,7 +1258,7 @@ async fn handle_forward(
             // is shape-polymorphic in the seq_len dim and will write KV at
             // positions `[index_pos..index_pos+γ]`, so no other layer changes
             // are needed.
-            if activation_bytes.is_empty() || activation_bytes.len() % 8 != 0 {
+            if activation_bytes.is_empty() || !activation_bytes.len().is_multiple_of(8) {
                 return Err(SwarmError::Internal(format!(
                     "Decode step activation payload must be a non-empty multiple of 8 bytes (got {})",
                     activation_bytes.len()

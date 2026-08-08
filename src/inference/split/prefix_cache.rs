@@ -96,7 +96,7 @@ pub fn verify_token_hash_chain(
     if block_size == 0 || expected_token_count == 0 || expected_token_count > tokens.len() {
         return false;
     }
-    if expected_token_count % block_size != 0 {
+    if !expected_token_count.is_multiple_of(block_size) {
         // `token_count` must land on a block boundary — the chain hash is
         // only defined at complete-block positions.
         return false;
