@@ -1924,7 +1924,14 @@ impl SplitModel {
             total_layers: block_count,
             hidden_dim: embedding_length,
             arch: model_arch,
-            device,
+            device: {
+                // Stage timers block on this device when
+                // SWARMLLM_PROFILE_SYNC=1, so a GPU profile attributes time to
+                // the op that spent it rather than to whichever later op
+                // happened to block. No-op otherwise.
+                crate::inference::prof::set_sync_device(&device);
+                device
+            },
             vocabulary,
             tokenizer,
             eos_tokens,

@@ -438,7 +438,20 @@ silently break at the wire if duplicated:
   `scale_matches_candle_division` pins that against candle itself rather than
   against the helper — an equivalence test where both sides call the same
   helper passes happily with the scale inverted.
-- **`inference::layers::cuda_decode_prefers_standard`** (2026-08-07) — the
+- **`inference::layers::cuda_decode_prefers_standard`** (2026-08-08) — MHA
+  decode takes standard, GQA decode takes flash **at every context length**;
+  prefill always flash. Same rule as the CPU path, for the same reason:
+  `standard_attention` rebuilds the `repeat_kv` expansion every token, free when
+  `n_head == n_kv_head` and growing with context otherwise.
+  **There is no crossover, and re-introducing one needs a FORWARD measurement,
+  not a per-call one.** A 1024-token threshold shipped on 2026-08-07 from timing
+  the attention call in isolation; measured end to end the next day it was wrong
+  at every length (1.13x at kv~272, 1.42x at ~528, 1.61x at ~912 in flash's
+  favour). Isolated, `repeat_kv`'s allocation and bandwidth cost is amortised
+  against warm buffers and no competing traffic. **Third occurrence of gotcha
+  #255.** Controls that make the change attributable: at 2048 KV both arms were
+  identical (both already flash) and MHA identical to the decimal.
+- **`inference::layers::cuda_decode_prefers_standard` (superseded note, 2026-08-07)** — the
   measured CUDA attention routing rule, extracted so it is testable without
   a GPU. **The right kernel is opposite for prefill and decode, and it turns
   on GQA** — the same lesson as the CPU crossover above it (gotcha #255) on

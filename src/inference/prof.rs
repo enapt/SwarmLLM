@@ -50,15 +50,60 @@ pub(crate) fn add(stage: Stage, nanos: u64) {
 }
 
 /// Times an expression into a stage and returns its value.
+///
+/// On CUDA the timing is only meaningful with [`sync_point`] enabled — see
+/// its docs. Off by default, because synchronising per stage distorts the
+/// total it is measuring.
 macro_rules! timed {
     ($stage:expr, $e:expr) => {{
         let __t = std::time::Instant::now();
         let __r = $e;
+        $crate::inference::prof::sync_point();
         $crate::inference::prof::add($stage, __t.elapsed().as_nanos() as u64);
         __r
     }};
 }
 pub(crate) use timed;
+
+/// Device to block on at each stage boundary, when stage attribution is being
+/// measured on a GPU. `None` on CPU and whenever `SWARMLLM_PROFILE_SYNC` is off.
+static SYNC_DEVICE: std::sync::OnceLock<Option<candle_core::Device>> = std::sync::OnceLock::new();
+
+/// Record the device whose work the stage timers should wait for.
+///
+/// Called once per model load. A no-op unless `SWARMLLM_PROFILE_SYNC=1`, and
+/// on a CPU device, where every op has already run by the time it returns.
+pub(crate) fn set_sync_device(device: &candle_core::Device) {
+    let want = std::env::var("SWARMLLM_PROFILE_SYNC").as_deref() == Ok("1");
+    let _ = SYNC_DEVICE.set(if want && device.is_cuda() {
+        Some(device.clone())
+    } else {
+        None
+    });
+}
+
+/// Block until the device has finished, so the enclosing stage timer measures
+/// the work rather than the submission.
+///
+/// **Why this exists.** CUDA is asynchronous: an op returns as soon as it is
+/// queued. Without this, every stage timer measures enqueue cost, and the real
+/// execution time lands on whichever later op happens to block — so the stages
+/// sum to roughly the right total while attributing it to the wrong places.
+/// That is not a subtle error: a first reading of a decode step charged the
+/// qkv projections 6.0 ms for 9 MB of weights (4.5 GB/s) while the same token
+/// moved 2.0 GB at 70 GB/s. Both cannot be true, and the per-stage figure was
+/// the wrong one.
+///
+/// **It is off by default and must stay that way.** Synchronising 11 times per
+/// layer serialises the pipeline and inflates the total, so it answers "where
+/// does the time go" at the cost of "how long does it take". Run it alongside
+/// an unsynchronised run and trust each for its own question.
+#[inline]
+pub(crate) fn sync_point() {
+    if let Some(Some(dev)) = SYNC_DEVICE.get() {
+        let _ = dev.synchronize();
+    }
+}
 
 pub(crate) fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

@@ -4,6 +4,21 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Replies are up to 1.6x faster on an NVIDIA graphics card**, and more so the
+longer the conversation. SwarmLLM was switching to a slower method for short
+conversations, based on a measurement of that one step in isolation. Measured
+across a whole reply instead, the faster method wins at every length:
+
+| conversation so far | before | after |
+|---|---|---|
+| ~270 words | 32.6 | **36.8 tok/s** |
+| ~530 words | 33.7 | **47.8 tok/s** |
+| ~910 words | 25.6 | **41.1 tok/s** |
+
+Models that do not share key/value heads across queries — Phi-3.5, for instance
+— are deliberately unaffected, and were confirmed identical.
+
+
 ## [0.3.82-alpha] — 2026-08-08
 
 **This release is about speed on the hardware you already have, and about not

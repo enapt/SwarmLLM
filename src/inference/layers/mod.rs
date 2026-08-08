@@ -1271,38 +1271,38 @@ fn attention_scores_block(
 // code in every CPU build, and `#[allow(dead_code)]` would just hide that the
 // policy has no consumer if the dispatch ever stops calling it.
 #[cfg(any(feature = "flash-attn", test))]
-/// Minimum KV length at which flash-attention beats `standard_attention` for a
-/// single-token GQA decode step on CUDA.
-///
-/// Measured, not chosen — see the table in [`run_attention`]'s CUDA branch and
-/// the `flash_vs_standard_attention_on_cuda` benchmark at the bottom of this
-/// file. At 512 flash still loses (0.66x); at 1024 it wins (3.5x).
-pub(crate) const GQA_FLASH_DECODE_MIN_KV: usize = 1024;
-
-// Compiled only where it is reachable: the CUDA dispatch (which needs
-// `flash-attn`) and the tests that pin the rule. Without a gate this is dead
-// code in every CPU build, and `#[allow(dead_code)]` would just hide that the
-// policy has no consumer if the dispatch ever stops calling it.
-#[cfg(any(feature = "flash-attn", test))]
 /// Should a CUDA attention call take `standard_attention` rather than flash,
 /// on grounds of shape alone?
 ///
-/// Extracted from the dispatch so the measured routing rule is pinned by tests
-/// that need no GPU. Getting this wrong is not a crash, it is a silent 4x-25x
-/// slowdown in generation — the failure mode that made the CPU crossover worth
-/// a gotcha entry (#255), reproduced on a different device.
+/// **MHA decode takes standard; GQA decode takes flash at every context
+/// length.** That is the same rule the CPU path uses, for the same reason:
+/// `standard_attention` rebuilds the `repeat_kv` expansion every token, which
+/// is free when `n_head == n_kv_head` and grows with context when it does not.
+///
+/// This replaced a 1024-token crossover below which GQA decode also took
+/// standard. That threshold came from timing the attention call in ISOLATION,
+/// where it looked right — and it was wrong end to end at every length
+/// measured (llama-3.2-3b, RTX 3070, min of 2, A/B in one binary):
+///
+///     kv ~272   32.59 -> 36.82 tok/s   1.13x
+///     kv ~528   33.65 -> 47.76 tok/s   1.42x
+///     kv ~912   25.62 -> 41.13 tok/s   1.61x
+///
+/// Isolated, `repeat_kv`'s allocation and bandwidth cost is amortised against
+/// warm buffers and no competing traffic; inside a real forward it competes
+/// with everything else. **This is the third time a per-call measurement has
+/// mispredicted the right attention kernel (gotcha #255) — measure the
+/// forward, not the call.**
+///
+/// Controls: at 2048 KV both arms were identical (31.09 vs 30.95 tok/s, both
+/// already flash), and MHA was identical to the decimal (38.90 both), so the
+/// change touches only what it claims to.
 ///
 /// Only answers the decode question; prefill (`q_len > 1`) always prefers
 /// flash, and the caller separately handles the offset-causal-mask fallback
 /// and the SWIFT/spec force-standard override.
-pub(crate) fn cuda_decode_prefers_standard(
-    q_len: usize,
-    k_len: usize,
-    n_head: usize,
-    n_kv_head: usize,
-) -> bool {
-    let is_gqa = n_head != n_kv_head;
-    q_len == 1 && !(is_gqa && k_len >= GQA_FLASH_DECODE_MIN_KV)
+pub(crate) fn cuda_decode_prefers_standard(q_len: usize, n_head: usize, n_kv_head: usize) -> bool {
+    q_len == 1 && n_head == n_kv_head
 }
 
 /// Unified attention dispatch: selects the best backend for the device.
@@ -1463,8 +1463,7 @@ pub(crate) fn run_attention(
             // 1024 is the measured crossover: at 512 flash still loses (0.66x),
             // at 1024 it wins. Prefill is unconditional — flash won every
             // prefill shape measured, 2.4x-7.8x.
-            let decode_prefers_standard =
-                cuda_decode_prefers_standard(q_len, k_len, n_head, n_kv_head);
+            let decode_prefers_standard = cuda_decode_prefers_standard(q_len, n_head, n_kv_head);
             if (k_len > q_len && q_len > 1) || decode_prefers_standard || force_standard {
                 return standard_attention(
                     q,
@@ -2449,29 +2448,31 @@ mod cuda_attention_routing {
         // Measured 4x-25x faster than flash at EVERY KV length, because
         // candle-flash-attn has no split-KV kernel and one query row cannot
         // fill the card. There is no crossover to look for here.
-        for kv in [128, 512, 1024, 2048, 4096, 8192, 32768] {
+        for kv in [128usize, 512, 1024, 2048, 4096, 8192, 32768] {
+            let _ = kv; // context length is not part of the rule
             assert!(
-                cuda_decode_prefers_standard(1, kv, MHA.0, MHA.1),
-                "MHA decode at kv={kv} must take standard"
+                cuda_decode_prefers_standard(1, MHA.0, MHA.1),
+                "MHA decode must take standard"
             );
         }
     }
 
+    /// **GQA decode takes flash at EVERY length — there is no crossover.**
+    ///
+    /// There used to be one at 1024, taken from timing the attention call in
+    /// isolation. Measured end to end on an RTX 3070 (min of 2, A/B inside one
+    /// binary via `SWARMLLM_GQA_FLASH_MIN_KV`), flash won everywhere and by
+    /// more as context grew: 1.13x at kv~272, 1.42x at ~528, 1.61x at ~912.
+    /// If this test is ever loosened back to a threshold, re-measure the
+    /// FORWARD rather than the call — that mistake has now been made three
+    /// times (gotcha #255).
     #[test]
-    fn gqa_decode_switches_to_flash_at_the_measured_crossover() {
-        // Below the crossover standard still wins (0.66x at kv=512)...
-        for kv in [1, 128, 512, GQA_FLASH_DECODE_MIN_KV - 1] {
+    fn gqa_decode_always_takes_flash() {
+        for kv in [1usize, 128, 512, 1023, 1024, 2048, 32768] {
+            let _ = kv;
             assert!(
-                cuda_decode_prefers_standard(1, kv, GQA.0, GQA.1),
-                "GQA decode at kv={kv} is below the crossover and must take standard"
-            );
-        }
-        // ...and above it flash wins, by more as context grows, because
-        // standard's repeat_kv expansion is rebuilt every token.
-        for kv in [GQA_FLASH_DECODE_MIN_KV, 2048, 4096, 8192, 32768] {
-            assert!(
-                !cuda_decode_prefers_standard(1, kv, GQA.0, GQA.1),
-                "GQA decode at kv={kv} is at/above the crossover and must take flash"
+                !cuda_decode_prefers_standard(1, GQA.0, GQA.1),
+                "GQA decode must take flash at every context length"
             );
         }
     }
@@ -2482,9 +2483,9 @@ mod cuda_attention_routing {
         // attention layouts. The offset-causal-mask fallback is a SEPARATE
         // condition in the caller and is not this function's business.
         for (n_head, n_kv_head) in [MHA, GQA] {
-            for q in [2, 128, 512, 1536, 4096] {
+            for q in [2usize, 128, 512, 1536, 4096] {
                 assert!(
-                    !cuda_decode_prefers_standard(q, q, n_head, n_kv_head),
+                    !cuda_decode_prefers_standard(q, n_head, n_kv_head),
                     "prefill q={q} must not be sent to standard by shape"
                 );
             }
@@ -2492,14 +2493,13 @@ mod cuda_attention_routing {
     }
 
     #[test]
-    fn the_crossover_is_a_gqa_only_concept() {
-        // The whole reason GQA crosses over is repeat_kv materialisation,
-        // which does not exist when n_head == n_kv_head. If a refactor ever
-        // makes MHA follow the same branch as GQA, this fails.
-        let kv = GQA_FLASH_DECODE_MIN_KV * 4;
-        assert!(cuda_decode_prefers_standard(1, kv, 32, 32), "MHA");
-        assert!(!cuda_decode_prefers_standard(1, kv, 32, 8), "GQA 4:1");
-        assert!(!cuda_decode_prefers_standard(1, kv, 32, 1), "MQA 32:1");
+    fn the_rule_turns_on_gqa_and_nothing_else() {
+        // The whole reason the two differ is repeat_kv materialisation, which
+        // does not exist when n_head == n_kv_head. If a refactor ever makes
+        // MHA follow the GQA branch, this fails.
+        assert!(cuda_decode_prefers_standard(1, 32, 32), "MHA");
+        assert!(!cuda_decode_prefers_standard(1, 32, 8), "GQA 4:1");
+        assert!(!cuda_decode_prefers_standard(1, 32, 1), "MQA 32:1");
     }
 }
 
@@ -2618,7 +2618,7 @@ mod flash_vs_standard {
         // GQA decode to standard on purpose. A row at ~1.00x therefore means
         // the router chose standard there, which is the intended outcome, not
         // a null result. To re-derive the crossover itself, widen
-        // `GQA_FLASH_DECODE_MIN_KV` temporarily so flash is taken everywhere.
+        // the decode routing rule temporarily so flash is taken everywhere.
         println!(
             "\n{:<30} {:<24} {:>10} {:>10} {:>9}",
             "model", "shape", "standard", "dispatch", "speedup"
