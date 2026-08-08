@@ -105,14 +105,25 @@ fn main() -> anyhow::Result<()> {
     println!("loading {}", model_dir.display());
     let t = Instant::now();
     let mut model = load(&model_dir)?;
+    // Report the device the model ACTUALLY loaded onto, never the one that was
+    // asked for. A binary built without the CUDA features answers a `cuda`
+    // request by silently loading on the CPU, and a benchmark that echoes the
+    // request back reads as a GPU result while measuring a processor — which
+    // is exactly what happened here once, producing numbers 50x off before the
+    // mismatch with an earlier run gave it away.
+    let on_gpu = model.device().is_cuda();
     println!(
-        "device={}",
-        if std::env::var("SWARM_BENCH_DEVICE").as_deref() == Ok("cuda") {
-            "cuda (auto-detect)"
-        } else {
-            "cpu"
-        }
+        "device={} (requested {})",
+        if on_gpu { "CUDA" } else { "CPU" },
+        std::env::var("SWARM_BENCH_DEVICE").unwrap_or_else(|_| "cpu".into())
     );
+    if std::env::var("SWARM_BENCH_DEVICE").as_deref() == Ok("cuda") && !on_gpu {
+        anyhow::bail!(
+            "asked for CUDA and got CPU — this binary has no GPU support compiled in \
+             (build with `--features flash-attn`) or no device was available. Refusing to \
+             report processor timings as GPU ones."
+        );
+    }
     println!(
         "loaded {} layers in {:.1}s, threads={}\n",
         model.total_layers,
