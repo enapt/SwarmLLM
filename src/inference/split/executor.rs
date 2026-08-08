@@ -1156,27 +1156,27 @@ impl SplitModel {
                         .forward(&batched)
                         .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
 
-                    let mut attn_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
-                    for (req_idx, item) in items.iter().enumerate() {
-                        let x_i = normed
-                            .narrow(0, req_idx, 1)
-                            .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
-                        let attn_out = lw
-                            .forward_attn(
-                                &x_i,
-                                mask.as_ref(),
-                                item.index_pos,
-                                &mut all_kv_caches[req_idx][layer_idx],
-                                max_seq_len,
-                                None,
-                            )
-                            .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
-                        attn_outputs.push(attn_out);
-                    }
-
-                    let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
-                    let mut attn_batched = Tensor::cat(&attn_refs, 0)
-                        .map_err(|e| SwarmError::Internal(format!("attn restack: {e}")))?;
+                    // One call for the whole batch: the qkv projections, RoPE
+                    // and the output projection share their weights across
+                    // requests and are done ONCE, while the KV append and the
+                    // attention still loop per conversation. Every item here
+                    // shares `index_pos` (checked above — a mixed batch fell
+                    // back to sequential `forward` before reaching this loop),
+                    // which is what makes a single RoPE call correct.
+                    let mut layer_caches: Vec<&mut Option<KvCache>> = all_kv_caches
+                        .iter_mut()
+                        .map(|per_req| &mut per_req[layer_idx])
+                        .collect();
+                    let mut attn_batched = lw
+                        .forward_attn_batched(
+                            &normed,
+                            mask.as_ref(),
+                            first_index_pos,
+                            &mut layer_caches,
+                            max_seq_len,
+                            None,
+                        )
+                        .map_err(|e| SwarmError::Internal(format!("attn batched: {e}")))?;
                     if let Some(ref post_norm) = lw.post_attention_norm {
                         attn_batched = post_norm
                             .forward(&attn_batched)

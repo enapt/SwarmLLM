@@ -7563,7 +7563,7 @@ whole arm.
    verified by something other than wall time (bytes moved, allocation counts,
    a null control).
 
-## Why batching barely helps: half the matmuls are never batched (2026-08-08) — DIAGNOSED
+## Why batching barely helps: half the matmuls are never batched (2026-08-08) — FIXED, see the resolution at the end
 
 Closes the "MEASURED, NOT DIAGNOSED" state of the flat aggregate-throughput
 curve above. **The reason nobody could diagnose it is that the batched path had
@@ -7622,3 +7622,62 @@ believing it unlocks the whole curve.**
 Unmeasured: all of this is CPU. The original flat curve was measured on the GPU,
 where the matmul kernel is different and the ~25% measurement floor recorded
 elsewhere in this file applies.
+
+## Batching now actually batches: 1.39x -> 1.63x aggregate (2026-08-08) — FIXED
+
+Closes the entry above. The batched decode path looped per request through
+`forward_attn`, so the qkv projections, RoPE and the output projection each ran
+`batch` times at one row apiece — despite sharing their weights across every
+request in the batch. Only the KV-cache append and the attention itself are
+genuinely per-conversation.
+
+`LayerWeights::forward_attn_batched` does the shared work once and loops only
+where it must. Stage profile at batch 8, llama-3.2-3b Q4_K_M, CPU 4 threads,
+260 KV, before -> after:
+
+| stage | before | after | |
+|---|---|---|---|
+| qkv projections | 162.2 ms | **64.3** | 2.5x |
+| output projection | 88.1 | **35.2** | 2.5x |
+| rope / transpose | 49.3 | **6.9** | 7.1x |
+| ffn up + gate | 155.3 | 151.6 | unchanged |
+| ffn down | 86.9 | 87.3 | unchanged |
+| attention core | 257.5 | 238.6 | unchanged |
+| **whole step** | **910** | **693** | **1.31x** |
+
+**The unchanged rows are the control.** Only the three stages the change targets
+moved; the two already-batched matmuls and the genuinely per-request attention
+did not. That is what makes the improvement attributable.
+
+RoPE gained the most (7.1x) because at one row it is almost entirely per-call
+overhead, which is exactly what collapsing eight calls into one removes.
+
+End to end, aggregate tokens per second across all slots, min of 3:
+
+    batch   before   after
+      1      7.00     6.94    (unchanged, as expected)
+      4      7.77    10.14    1.31x
+      8      9.73    11.32    1.16x
+
+Aggregate scaling against a single request improves from **1.39x to 1.63x** at
+batch 8. A node serving four users is now genuinely faster than one serving a
+single user, which was the original complaint.
+
+**Correctness**: `batched_attention_matches_per_request` asserts the batched
+path is numerically identical to looping `forward_attn`, across three
+(batch, seq_len, index_pos) shapes, with each side given fresh caches. A
+mismatched cache count is refused rather than silently attending with another
+conversation's history.
+
+**Only the Llama/dense arm is converted.** The DeepSeek/MLA and Qwen3.5-SSM arms
+still loop per request; MLA's attention differs enough to need its own pass, and
+the SSM arm is per-request by nature. Both remain correct, just unimproved.
+
+### What is left, and it is the larger half
+
+Even the batched matmuls amortise only about **2.5x at batch 8**, where reading
+each weight once for eight rows should approach 8x. The tiled `k_quants::matmul`
+does scale with the batch dimension (2.8x at m=4, 8.9x at m=128 measured
+separately), so m=8 landing at 2.5x is partial reuse rather than a failure. If
+every matmul amortised fully the ceiling would be roughly 2.9x at batch 8; we
+are now at 1.63x. **The remaining headroom is in the kernel, not the plumbing.**

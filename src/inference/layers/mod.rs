@@ -1726,9 +1726,298 @@ impl LayerWeights {
         }
         Ok(wo_out)
     }
+
+    /// Attention for a whole batch of requests that share `index_pos` and
+    /// sequence length, with the weight-shared projections done ONCE.
+    ///
+    /// # Why this exists
+    ///
+    /// The batched decode path used to narrow the stacked hidden state to one
+    /// row and call [`Self::forward_attn`] per request, which meant the qkv
+    /// projections, RoPE and the output projection each ran `batch` times at
+    /// one row apiece. Those three share their weights across every request in
+    /// the batch and had no reason to be split. Measured per generated token on
+    /// llama-3.2-3b (CPU, 4 threads, 260 KV), batch 1 against batch 8:
+    ///
+    /// ```text
+    ///   ffn up + gate       39.3 -> 19.4 ms   amortised (already batched)
+    ///   ffn down            22.9 -> 10.9      amortised (already batched)
+    ///   qkv projections     18.7 -> 20.3      NOT amortised
+    ///   output projection   10.8 -> 11.0      NOT amortised
+    ///   rope / transpose     6.0 ->  6.2      NOT amortised
+    /// ```
+    ///
+    /// Only the KV-cache append and the attention itself are genuinely
+    /// per-request — each conversation has its own cache — so those still loop.
+    ///
+    /// # Contract
+    ///
+    /// `caches` has one entry per row of `x`, in the same order, and every
+    /// request must share `index_pos` (the caller checks this; a mixed batch
+    /// falls back to sequential `forward` before reaching here). RoPE depends
+    /// only on `index_pos`, which is what lets it be applied to the stack.
+    ///
+    /// Numerically identical to looping [`Self::forward_attn`], asserted by
+    /// `batched_attention_matches_per_request`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_attn_batched(
+        &self,
+        x: &Tensor,
+        mask: Option<&Tensor>,
+        index_pos: usize,
+        caches: &mut [&mut Option<KvCache>],
+        max_seq_len: usize,
+        lora: Option<(&LoraAdapter, usize)>,
+    ) -> CandleResult<Tensor> {
+        let (b_sz, seq_len, _n_embd) = x.dims3()?;
+        if b_sz != caches.len() {
+            return Err(candle_core::Error::Msg(format!(
+                "forward_attn_batched: {b_sz} rows but {} caches",
+                caches.len()
+            )));
+        }
+
+        // ── Batched: projections, biases, norms, RoPE ──
+        let mut q = crate::inference::prof::timed!(P::QkvProj, self.attention_wq.forward(x))?;
+        let mut k = crate::inference::prof::timed!(P::QkvProj, self.attention_wk.forward(x))?;
+        let mut v = crate::inference::prof::timed!(P::QkvProj, self.attention_wv.forward(x))?;
+
+        if let Some((adapter, abs_layer)) = lora {
+            for (name, t) in [("attn_q", &mut q), ("attn_k", &mut k), ("attn_v", &mut v)] {
+                if let Some(lw) = adapter.weights.get(&format!("blk.{abs_layer}.{name}")) {
+                    *t = crate::model::lora::apply_lora(
+                        t,
+                        x,
+                        lw,
+                        adapter.metadata.alpha,
+                        adapter.metadata.rank,
+                    )
+                    .map_err(|e| candle_core::Error::Msg(format!("LoRA {name}: {e}")))?;
+                }
+            }
+        }
+
+        if let Some(ref bq) = self.attention_bq {
+            q = q.broadcast_add(bq)?;
+        }
+        if let Some(ref bk) = self.attention_bk {
+            k = k.broadcast_add(bk)?;
+        }
+        if let Some(ref bv) = self.attention_bv {
+            v = v.broadcast_add(bv)?;
+        }
+
+        let __shape_t = std::time::Instant::now();
+        let mut q = q.reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
+        let mut k = k.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
+        let v = v
+            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        if let Some(ref qn) = self.attn_q_norm {
+            q = qn.forward(&q)?;
+        }
+        if let Some(ref kn) = self.attn_k_norm {
+            k = kn.forward(&k)?;
+        }
+        let q = q.transpose(1, 2)?.contiguous()?;
+        let k = k.transpose(1, 2)?.contiguous()?;
+        // Shared `index_pos` is what makes one RoPE call correct for the stack.
+        let q = self.apply_rotary_emb(&q, index_pos)?;
+        let k = self.apply_rotary_emb(&k, index_pos)?;
+        crate::inference::prof::add(P::AttnShape, __shape_t.elapsed().as_nanos() as u64);
+
+        // ── Per request: KV cache append and attention ──
+        let mut heads: Vec<Tensor> = Vec::with_capacity(b_sz);
+        for (i, cache_slot) in caches.iter_mut().enumerate() {
+            let cache_slot: &mut Option<KvCache> = cache_slot;
+            let qi = q.narrow(0, i, 1)?.contiguous()?;
+            let ki = k.narrow(0, i, 1)?.contiguous()?;
+            let vi = v.narrow(0, i, 1)?.contiguous()?;
+            let (ki, vi) = match cache_slot {
+                None => {
+                    let mut cache = new_kv_cache(max_seq_len);
+                    let kv = cache.append(&ki, &vi)?;
+                    *cache_slot = Some(cache);
+                    kv
+                }
+                Some(cache) => {
+                    if index_pos == 0 {
+                        cache.reset();
+                    }
+                    cache.append(&ki, &vi)?
+                }
+            };
+            heads.push(crate::inference::prof::timed!(
+                P::AttnCore,
+                run_attention(
+                    &qi,
+                    &ki,
+                    &vi,
+                    mask,
+                    self.n_head,
+                    self.n_kv_head,
+                    self.head_dim,
+                    self.attn_logit_softcap,
+                )
+            )?);
+        }
+        let y = Tensor::cat(&heads, 0)?;
+
+        // ── Batched again: output projection ──
+        let attn_out_dim = self.n_head * self.head_dim;
+        let y = crate::inference::prof::timed!(
+            P::AttnShape,
+            y.transpose(1, 2)?.reshape(&[b_sz, seq_len, attn_out_dim])
+        )?;
+        let mut wo_out = crate::inference::prof::timed!(P::AttnOut, self.attention_wo.forward(&y))?;
+        if let Some((adapter, abs_layer)) = lora {
+            if let Some(lw) = adapter.weights.get(&format!("blk.{abs_layer}.attn_output")) {
+                wo_out = crate::model::lora::apply_lora(
+                    &wo_out,
+                    &y,
+                    lw,
+                    adapter.metadata.alpha,
+                    adapter.metadata.rank,
+                )
+                .map_err(|e| candle_core::Error::Msg(format!("LoRA attn_output: {e}")))?;
+            }
+        }
+        Ok(wo_out)
+    }
 }
 
 mod qwen35;
+
+#[cfg(test)]
+mod batched_attention_tests {
+    //! `forward_attn_batched` must be numerically identical to looping
+    //! `forward_attn`, or a node serving several users quietly answers them
+    //! differently from a node serving one.
+
+    use super::*;
+    use candle_core::quantized::GgmlDType;
+
+    fn qmm(in_d: usize, out_d: usize, dev: &Device) -> QMatMul {
+        let w = Tensor::randn(0f32, 0.02, (out_d, in_d), dev).unwrap();
+        QMatMul::from_qtensor(QTensor::quantize(&w, GgmlDType::F32).unwrap()).unwrap()
+    }
+
+    fn rms(dim: usize, dev: &Device) -> RmsNorm {
+        let w = Tensor::ones((dim,), DType::F32, dev).unwrap();
+        RmsNorm::from_qtensor(QTensor::quantize(&w, GgmlDType::F32).unwrap(), 1e-6).unwrap()
+    }
+
+    /// Minimal dense layer, enough to exercise attention on both paths.
+    fn test_layer_weights(
+        n_head: usize,
+        n_kv_head: usize,
+        head_dim: usize,
+        dev: &Device,
+    ) -> LayerWeights {
+        let hidden = n_head * head_dim;
+        let kv_dim = n_kv_head * head_dim;
+        // Real RoPE tables are not needed for an equivalence test — both paths
+        // consume the same ones. Shapes must be right: `apply_rotary_emb`
+        // narrows dim 0 by index_pos and candle's rope wants (seq, dim/2).
+        let cos = Tensor::ones((128usize, head_dim / 2), DType::F32, dev).unwrap();
+        let sin = Tensor::zeros((128usize, head_dim / 2), DType::F32, dev).unwrap();
+        LayerWeights {
+            attention_wq: qmm(hidden, hidden, dev),
+            attention_wk: qmm(hidden, kv_dim, dev),
+            attention_wv: qmm(hidden, kv_dim, dev),
+            attention_wo: qmm(hidden, hidden, dev),
+            attention_bq: None,
+            attention_bk: None,
+            attention_bv: None,
+            attention_norm: rms(hidden, dev),
+            attn_q_norm: None,
+            attn_k_norm: None,
+            ffn: FfnVariant::Dense(Mlp {
+                ffn_gate: Some(qmm(hidden, hidden * 2, dev)),
+                ffn_down: qmm(hidden * 2, hidden, dev),
+                ffn_up: qmm(hidden, hidden * 2, dev),
+                activation: Activation::SiLU,
+            }),
+            ffn_norm: rms(hidden, dev),
+            post_attention_norm: None,
+            post_ffw_norm: None,
+            n_head,
+            n_kv_head,
+            head_dim,
+            cos,
+            sin,
+            use_rope_contiguous: true,
+            attn_logit_softcap: None,
+            rope_dim: head_dim,
+            skip_rope: false,
+        }
+    }
+
+    /// Batching the weight-shared projections must change speed and nothing
+    /// else. Compares a 3-request batch against three separate calls, with
+    /// each side given its own fresh caches.
+    #[test]
+    fn batched_attention_matches_per_request() {
+        let dev = Device::Cpu;
+        let (n_head, n_kv_head, head_dim) = (4usize, 2, 8);
+        let hidden = n_head * head_dim;
+        let lw = test_layer_weights(n_head, n_kv_head, head_dim, &dev);
+
+        for (batch, seq_len, index_pos) in [(3usize, 1usize, 0usize), (2, 1, 5), (3, 4, 0)] {
+            let x = Tensor::randn(0f32, 1., (batch, seq_len, hidden), &dev).unwrap();
+            let max_seq = 64;
+
+            // Batched.
+            let mut owned: Vec<Option<KvCache>> = (0..batch).map(|_| None).collect();
+            let mut caches: Vec<&mut Option<KvCache>> = owned.iter_mut().collect();
+            let got = lw
+                .forward_attn_batched(&x, None, index_pos, &mut caches, max_seq, None)
+                .expect("batched attention");
+
+            // One request at a time, each with its own cache.
+            let mut rows = Vec::with_capacity(batch);
+            for i in 0..batch {
+                let xi = x.narrow(0, i, 1).unwrap().contiguous().unwrap();
+                let mut c: Option<KvCache> = None;
+                rows.push(
+                    lw.forward_attn(&xi, None, index_pos, &mut c, max_seq, None)
+                        .expect("per-request attention"),
+                );
+            }
+            let want = Tensor::cat(&rows, 0).unwrap();
+
+            assert_eq!(got.dims(), want.dims(), "batch={batch} seq={seq_len}");
+            let a = got.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let b = want.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let worst = a
+                .iter()
+                .zip(&b)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                worst < 1e-5,
+                "batch={batch} seq={seq_len} pos={index_pos}: max abs diff {worst} between \
+                 batched and per-request attention"
+            );
+        }
+    }
+
+    /// A cache count that does not match the batch is a caller bug, and must
+    /// be refused rather than silently attending with the wrong conversation's
+    /// history.
+    #[test]
+    fn a_mismatched_cache_count_is_refused() {
+        let dev = Device::Cpu;
+        let lw = test_layer_weights(4, 2, 8, &dev);
+        let x = Tensor::randn(0f32, 1., (3usize, 1usize, 32usize), &dev).unwrap();
+        let mut owned: Vec<Option<KvCache>> = vec![None, None]; // 2 for 3 rows
+        let mut caches: Vec<&mut Option<KvCache>> = owned.iter_mut().collect();
+        assert!(lw
+            .forward_attn_batched(&x, None, 0, &mut caches, 64, None)
+            .is_err());
+    }
+}
 
 #[cfg(test)]
 mod cpu_decode_bench {
