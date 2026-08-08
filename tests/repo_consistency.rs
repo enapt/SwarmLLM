@@ -612,3 +612,61 @@ fn flash_attn_and_the_compute_cap_floor_agree() {
         swarmllm::daemon::gpu_support::MIN_COMPUTE_CAP,
     );
 }
+
+/// Every `[[example]]` in the root manifest must declare an explicit `path`.
+///
+/// Without one, cargo resolves the example by scanning `examples/` and **fails
+/// to parse the manifest entirely** when that directory is absent. The
+/// Dockerfile's build context is exactly that case: it copies `src/`,
+/// `crates/`, `frontend/` and `config/`, and nothing else. So an example
+/// declared without a path breaks the container image while `cargo build`,
+/// `cargo clippy --all-targets`, the whole test suite and every CI job stay
+/// green — the Docker workflow only runs on a tag, so it surfaces at release.
+///
+/// That happened on 2026-08-08 and cost v0.3.83-alpha its container images.
+/// Declaring the path defers the existence check to the point of building that
+/// target, which the image build never does.
+#[test]
+fn every_declared_example_has_an_explicit_path() {
+    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .expect("read root Cargo.toml");
+
+    let mut offenders = Vec::new();
+    let mut in_example = false;
+    let mut name = String::new();
+    let mut saw_path = false;
+    // Section-scanned rather than TOML-parsed so the test needs no new
+    // dependency; `[[example]]` blocks are flat and end at the next header.
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            if in_example && !saw_path {
+                offenders.push(name.clone());
+            }
+            in_example = line == "[[example]]";
+            name.clear();
+            saw_path = false;
+            continue;
+        }
+        if !in_example {
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("name") {
+            name = v
+                .trim_start_matches([' ', '='])
+                .trim()
+                .trim_matches('"')
+                .to_string();
+        } else if line.starts_with("path") {
+            saw_path = true;
+        }
+    }
+    if in_example && !saw_path {
+        offenders.push(name);
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these [[example]] entries have no explicit `path`, which breaks the Docker image \
+         build (its context has no examples/ directory) while every other check passes: {offenders:?}"
+    );
+}

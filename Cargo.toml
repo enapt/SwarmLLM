@@ -262,6 +262,15 @@ tempfile = "3"
 # hook rather than by a broken release.
 [[example]]
 name = "gpu_decode_bench"
+# `path` is NOT optional here even though it matches the default location.
+# Without it cargo resolves the example by scanning `examples/`, and FAILS TO
+# PARSE THE MANIFEST when that directory is absent — which is exactly the
+# Dockerfile's build context (it copies src/, crates/, frontend/, config/ and
+# nothing else). Declaring the path defers the existence check to the point of
+# actually building the example, which `cargo build --release` never does.
+# Every `[[example]]` entry here must carry one; pinned by
+# `every_declared_example_has_an_explicit_path`.
+path = "examples/gpu_decode_bench.rs"
 required-features = ["flash-attn"]
 
 [[test]]
