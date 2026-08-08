@@ -221,6 +221,13 @@ jobs:
   # ~3 GB, which we don't need for `check`. Catches compile errors in any
   # `cfg(feature = "candle-cuda")` or `cfg(feature = "windows-gpu")` code
   # path before a release tag.
+  # Between them, the three cells below compile EVERY `cfg`-gated Rust path the
+  # release builds: `llama` and `llama-vulkan` (via the windows-gpu cell, since
+  # `llama-vulkan = ["llama", ...]`), `candle-cuda`, and `flash-attn`. Keep that
+  # true when adding a feature — a gate no cell compiles is invisible to
+  # `cargo fmt`, `cargo clippy --all-targets`, the test suite and the rest of
+  # CI, which is exactly how the GPU builds broke for five commits on
+  # 2026-08-07 with everything green.
   feature-check:
     # NOTE the "(Linux)" — this job runs on ubuntu-latest and only checks that
     # the feature-gated Rust code COMPILES. It does not build on Windows and
