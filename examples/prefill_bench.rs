@@ -70,7 +70,17 @@ fn load(model_dir: &Path) -> anyhow::Result<SplitModel> {
         })
         .collect();
 
-    SplitModel::load_from_shards_cpu(
+    // `SWARM_BENCH_DEVICE=cuda` picks the auto-detecting loader, which is what
+    // a GPU node uses; anything else pins the CPU one. Explicit rather than
+    // auto-detected: a benchmark that silently changes device between runs is
+    // worse than one that refuses.
+    let want_gpu = std::env::var("SWARM_BENCH_DEVICE").as_deref() == Ok("cuda");
+    let load = if want_gpu {
+        SplitModel::load_from_shards
+    } else {
+        SplitModel::load_from_shards_cpu
+    };
+    load(
         model_dir,
         shard_files,
         &tensor_entries,
@@ -96,6 +106,14 @@ fn main() -> anyhow::Result<()> {
     let t = Instant::now();
     let mut model = load(&model_dir)?;
     println!(
+        "device={}",
+        if std::env::var("SWARM_BENCH_DEVICE").as_deref() == Ok("cuda") {
+            "cuda (auto-detect)"
+        } else {
+            "cpu"
+        }
+    );
+    println!(
         "loaded {} layers in {:.1}s, threads={}\n",
         model.total_layers,
         t.elapsed().as_secs_f64(),
@@ -110,6 +128,7 @@ fn main() -> anyhow::Result<()> {
         .collect();
     let input = Tensor::from_vec(ids.clone(), &[1, prompt_tokens], &Device::Cpu)?;
 
+    let device = model.device().clone();
     let mut best_prefill = f64::INFINITY;
     let mut best_decode = f64::INFINITY;
     for rep in 0..reps {
@@ -122,6 +141,13 @@ fn main() -> anyhow::Result<()> {
         let logits = model
             .forward(&input, 0, &store, &req)
             .map_err(|e| anyhow::anyhow!("prefill: {e}"))?;
+        // CUDA work is enqueued, not executed, by the time `forward` returns.
+        // Without this the timer measures how long it takes to SUBMIT the
+        // forward pass — which on a first attempt reported 3977 tok/s of
+        // prompt processing, about 23 TFLOPS on a laptop 3070, i.e. obvious
+        // nonsense that would have gone straight into a README. CPU timings
+        // never needed it because CPU ops are synchronous.
+        sync(&device);
         let prefill = t.elapsed().as_secs_f64();
         best_prefill = best_prefill.min(prefill);
         drop(logits);
@@ -134,6 +160,7 @@ fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
             drop(logits);
         }
+        sync(&device);
         let decode = t.elapsed().as_secs_f64() / decode_tokens as f64;
         best_decode = best_decode.min(decode);
 
@@ -170,6 +197,16 @@ fn main() -> anyhow::Result<()> {
         prompt_tokens + decode_tokens / 2
     );
     Ok(())
+}
+
+/// Block until the device has finished the work queued on it.
+///
+/// A no-op on CPU, where every op has already run. On CUDA it is the
+/// difference between timing the work and timing the submission of the work.
+fn sync(device: &Device) {
+    if let Err(e) = device.synchronize() {
+        eprintln!("WARNING: device synchronize failed ({e}) — timings are not trustworthy");
+    }
 }
 
 /// Expand a leading `~` so the documented invocation works from a shell that

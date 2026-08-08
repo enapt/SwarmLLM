@@ -256,14 +256,27 @@ CPU only, Llama-3.2 3B Q4_K_M — this is where recent work landed:
 Generating inside a long conversation improved separately: at ~1,150 tokens of
 context a reply went from 1368 ms per word to **249 ms**.
 
-**On an NVIDIA card, FlashAttention makes reading your prompt 2.8–7.4× faster**
-(RTX 3070, measured per attention call, min of 20). Producing each word of the
-reply is a different shape of work: it speeds up 1.4–2.0× on models that share
-key/value heads across queries — Llama-3.2, Qwen2.5 — and is deliberately left
-on the previous method for models that do not, such as Phi-3.5, where the fused
-kernel is slower. The GPU figures in the table above are generation speed on a
-short conversation and are therefore roughly unchanged for Phi-3.5; end-to-end
-GPU numbers across models have not yet been re-measured on this build.
+**On an NVIDIA card, FlashAttention speeds up both phases, and by more the
+longer your conversation gets.** Measured end to end on Llama-3.2 3B Q4_K_M
+(RTX 3070 Laptop, best of three), switching the method on and off inside a
+single binary so nothing else differs:
+
+| Prompt length | Reading the prompt | Each word of the reply |
+|---|---|---|
+| ~900 tokens | 1576 → **2039 tok/s** (1.3×) | 27.5 → 27.7 tok/s (unchanged) |
+| ~2,048 tokens | 1212 → **2034 tok/s** (1.7×) | 15.3 → **32.3 tok/s** (2.1×) |
+| ~3,072 tokens | 947 → **1944 tok/s** (2.0×) | 10.9 → **25.6 tok/s** (2.4×) |
+
+Replies are unchanged on the shortest conversation by design: below ~1,024
+tokens of context the older method is faster for generation, so SwarmLLM keeps
+using it there and switches over above that. Models that do not share key/value
+heads across queries — Phi-3.5, for instance — stay on the older method for
+generation at every length, because the fused kernel is slower for them.
+
+Per *attention call* in isolation the fused kernel is 2.8–7.4× faster, which is
+the figure earlier notes quoted. End to end it is the smaller numbers above:
+attention is only part of a forward pass, and the quantized matrix multiplies
+around it are unchanged. Both are true; the table is the one you feel.
 
 > **CPU figures from before v0.3.79 are not comparable.** Release binaries were
 > compiled without the vectorised quantized kernels, which cost roughly 3× on

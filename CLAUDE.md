@@ -264,8 +264,13 @@ Detail: `memory/round_log_0807_fused_attn.md`.
 
 ### Prior — UNRELEASED on main (2026-08-07): FlashAttention on CUDA, compute cap 75 → 80
 
-**Prompt processing 2.4-7.8x on an NVIDIA card; long-context GQA generation
-1.4-4.9x. Pre-Ampere cards (RTX 20-series / GTX 16-series) lose the candle GPU
+**Per attention call: prompt processing 2.4-7.8x on an NVIDIA card,
+long-context GQA generation 1.4-4.9x. END TO END (measured 2026-08-08, the
+number users feel): prompt processing 1.3x at ~900 tokens rising to 2.0x at
+~3072, decode unchanged below the 1024 crossover then 2.1-2.4x above it.** The
+per-call figure was quoted in the CHANGELOG as if it were the user-visible one;
+attention is only part of a forward pass and the quantized matmuls around it are
+unchanged. Pre-Ampere cards (RTX 20-series / GTX 16-series) lose the candle GPU
 path** and fall back to CPU with an explicit message — `cuda_if_available`
 SUCCEEDS on those cards and only module load fails, so without the probe a node
 starts clean, logs "GPU detected", and then fails every request. Detail in

@@ -4,9 +4,21 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-**Prompts are read 2.8x to 7.4x faster on an NVIDIA graphics card, and replies
-inside a long conversation are up to 2x faster.** FlashAttention is back in the
-GPU builds, which is what the speed comes from.
+**On an NVIDIA graphics card, reading your prompt is 1.3x to 2.0x faster and
+replies inside a long conversation are 2.1x to 2.4x faster.** FlashAttention is
+back in the GPU builds, which is what the speed comes from. The gain grows with
+how much you have already written — measured end to end on a Llama-3.2 3B, best
+of three, by switching the method on and off inside one binary:
+
+| your prompt | reading it | each word of the reply |
+|---|---|---|
+| ~900 words   | 1.3x | unchanged |
+| ~2,000 words | 1.7x | 2.1x |
+| ~3,000 words | 2.0x | 2.4x |
+
+Replies are unchanged on a short conversation because below roughly a thousand
+words the older method is genuinely faster there, and SwarmLLM picks per
+conversation length rather than using one setting throughout.
 
 **This drops support for older NVIDIA cards.** GPU acceleration now needs an RTX
 30-series or newer (also RTX 40, RTX 50, and the data-centre A and H cards).

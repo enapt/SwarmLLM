@@ -7339,3 +7339,46 @@ later claims VRAM, the budget does not shrink to match, so the guard can admit
 work the card can no longer hold. Re-reading free VRAM costs an `nvidia-smi`
 fork, far too slow for the forward path; a periodic refresh on the health tick
 would fix it and was not attempted here.
+
+## GPU end-to-end, finally measured (2026-08-08) — the per-call figure was 2-3x the real one
+
+The FlashAttention round shipped with "end-to-end GPU tok/s NOT re-measured"
+recorded as a pre-tag item, and the CHANGELOG meanwhile told users "prompts are
+read 2.8x to 7.4x faster on an NVIDIA graphics card". That range is per
+ATTENTION CALL. End to end it is 1.3x-2.0x, because attention is one part of a
+forward pass and the quantized matmuls around it did not change.
+
+llama-3.2-3b Q4_K_M, RTX 3070 Laptop (8 GB), min of 3, A/B inside ONE binary via
+`SWARMLLM_FORCE_STANDARD_ATTN=1` (which reproduces the pre-round GPU behaviour,
+since the GPU had no flash kernel at all before):
+
+| prompt | prompt processing | decode at that context |
+|---|---|---|
+| 896  | 1576 -> 2039 tok/s  (1.29x) | 27.5 -> 27.7 tok/s (1.01x) |
+| 2048 | 1212 -> 2034 tok/s  (1.68x) | 15.3 -> 32.3 tok/s (2.12x) |
+| 3072 |  947 -> 1944 tok/s  (2.05x) | 10.9 -> 25.6 tok/s (2.35x) |
+
+Both the gain and its growth with context match what the per-call table
+predicted. **Decode at 896 is unchanged because the routing rule is working**:
+at ~928 KV, below the measured 1024 crossover, GQA decode takes `standard` in
+BOTH arms. That is a free confirmation of `cuda_decode_prefers_standard`.
+
+README and CHANGELOG corrected. The README was already careful — it said "per
+attention call" and "end-to-end GPU numbers have not yet been re-measured" — so
+only the CHANGELOG was actually misleading, and it is the file users read to
+decide whether to upgrade.
+
+### The measurement error that nearly shipped
+
+The first GPU run reported **3977 tok/s** of prompt processing, which is ~23
+TFLOPS on a laptop 3070 — and it was very nearly written down. **CUDA work is
+enqueued, not executed, by the time `forward` returns**, so the timer was
+measuring submission. Every CPU number in this file is unaffected (CPU ops are
+synchronous), which is exactly why the bug did not surface until the first GPU
+run. `examples/prefill_bench.rs` now calls `Device::synchronize()` before
+stopping either clock.
+
+The tell was the implausibility, not a failing test: 23 TFLOPS from a card that
+peaks near 20 for dense FP16, on a dequantizing path. **Sanity-check a benchmark
+result against the hardware's roofline before believing it** — a number that
+good is a bug until proven otherwise.
