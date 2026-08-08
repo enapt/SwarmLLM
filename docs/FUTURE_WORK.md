@@ -6154,7 +6154,30 @@ bites new nodes and peers that advertise but never serve — which is also the
 population the routing ratchet (documented above) is about, and the two are
 probably worth designing together.
 
-## Continuous batching gives no aggregate throughput gain (2026-08-06) — NOW DIAGNOSED, see the entry at the end
+## Continuous batching gave no aggregate throughput gain (2026-08-06) — RESOLVED 2026-08-09
+
+> **Resolved.** The batched path was gated on every request sitting at the same
+> position *and* holding the same amount of cached history. Concurrent
+> conversations satisfy neither, so it ran **0 times out of 156** on a live
+> node. Both conditions only protect prompt processing — a generated token has
+> no shared mask, and each slot attends to its own cache — so they now apply
+> only to prompts. Measured A/B inside one build, four conversations of
+> different lengths: **40.3 → 80.0 tok/s on the RTX 3070 (1.99x)** and
+> **5.2 → 6.6 tok/s on the processor (1.27x)**, with a null control where the
+> four lengths are equal (the shape that always batched) moving 78.2 → 77.0,
+> i.e. 1.5%. The `batched_pct` counter reads 100% on a live node under four
+> concurrent requests.
+>
+> **The observation below is what identified it and is kept for that reason** —
+> particularly the note that slots knocked out of alignment never re-converge,
+> which is why the old gate could never engage in practice rather than merely
+> engaging rarely. What the entry did not do is name the gate as the cause; it
+> read the invariant offsets as a scheduling problem to be fixed by aligning
+> admission, when the alignment requirement was itself unnecessary for decode.
+>
+> Still open from this entry: the two batching layers with different defaults
+> (see the last bullet).
+
 
 On the RTX 3070 Laptop (8 GB, WSL2) with `llama-3.2-3b-instruct-q4-k-m`, running
 N concurrent chat completions (60 tokens each, identical prompt lengths):
@@ -6349,9 +6372,15 @@ cause for the flat curve has been established. Anyone picking this up:
   produce the lockstep it appears to — verify with the counter, not the
   request side.
 
-- The router's own `max_batch_size` defaults to 1 ("no batching, sequential,
-  backward-compatible"); the worker's slot table is the live mechanism. Two
-  batching layers with different defaults is itself worth a look.
+- **Still open.** The router's own `max_batch_size` defaults to 1 ("no batching,
+  sequential, backward-compatible"); the worker's slot table is the live
+  mechanism and is the one that was fixed. Two batching layers with different
+  defaults is worth a look — but note the worker layer now batches whatever
+  positions arrive, so the router layer's value is no longer "get them aligned",
+  it is "get them into the same tick at all". In the 2026-08-09 four-request
+  run only 4 decode ticks contained more than one request, because the four
+  prompts finished prefill 26-61 s apart; that, not alignment, is now the
+  limiting factor and is what a router-level batch window would address.
 
 ## CPU nodes ship with the fast quantized kernels compiled out (2026-08-06) — MEASURED
 
