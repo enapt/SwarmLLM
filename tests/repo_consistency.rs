@@ -1453,3 +1453,66 @@ fn frontend_components_bind_the_utils_alias_they_use() {
         offenders.join("\n  ")
     );
 }
+
+/// The frontend payload has a budget, and it is measured rather than hoped for.
+///
+/// `CLAUDE.md` carried "Total frontend size target: < 200KB" for a long time
+/// while the real figure was ~1044 KB — 5.6x out, and nothing ever compared the
+/// two. A number nobody checks stops being a budget and becomes decoration.
+///
+/// This is a regression budget with headroom, not a goal: it should fail when
+/// something large is added (a vendored library, an inlined asset), not on
+/// ordinary growth. Raise it deliberately, with the new figure in `CLAUDE.md`.
+#[test]
+fn frontend_payload_stays_within_budget() {
+    // What a browser fetches on first paint. Locales are excluded: exactly one
+    // is loaded at a time, so the other 20 are not payload.
+    const PAYLOAD_BUDGET_KB: u64 = 1400;
+    const LOCALE_BUDGET_KB: u64 = 120;
+
+    let root = repo_root().join("frontend");
+    let mut payload: u64 = 0;
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                // i18n is measured separately — one file is fetched, not all 21.
+                if p.file_name().is_some_and(|n| n == "i18n") {
+                    continue;
+                }
+                stack.push(p);
+                continue;
+            }
+            let is_payload = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| matches!(x, "js" | "css" | "html"));
+            if is_payload {
+                payload += std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    let payload_kb = payload / 1024;
+    assert!(
+        payload_kb > 200,
+        "measured only {payload_kb} KB — the layout moved and this checks nothing"
+    );
+    assert!(
+        payload_kb <= PAYLOAD_BUDGET_KB,
+        "frontend payload is {payload_kb} KB, over the {PAYLOAD_BUDGET_KB} KB budget.\n\
+         Something large was added — check for a vendored library or an inlined asset.\n\
+         If the growth is intended, raise the budget here AND update the figure in CLAUDE.md."
+    );
+
+    let en = root.join("i18n/en.json");
+    let locale_kb = std::fs::metadata(&en).map(|m| m.len()).unwrap_or(0) / 1024;
+    assert!(
+        locale_kb <= LOCALE_BUDGET_KB,
+        "en.json is {locale_kb} KB, over the {LOCALE_BUDGET_KB} KB budget — \
+         one locale is fetched per page load, so this is payload too."
+    );
+}
