@@ -1242,3 +1242,82 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
         offenders.join("\n")
     );
 }
+
+/// The three per-request maps are cleared together, in one place.
+///
+/// `active_pipelines`, `active_traces` and `request_holder_blacklist` are keyed
+/// by request id and share a lifetime. Five call sites used to remove all three
+/// by hand, with the invariant held only by three adjacent lines and a comment
+/// asserting it. Dropping one is silent and unbounded — `active_traces` is the
+/// oracle behind `model_is_in_use`, so a stranded entry refuses to delete that
+/// model for the daemon's lifetime.
+#[test]
+fn per_request_state_is_released_in_one_place() {
+    let root = repo_root();
+    let guarded = [
+        "active_pipelines",
+        "active_traces",
+        "request_holder_blacklist",
+    ];
+    let allowed = [
+        // Owns the helper.
+        "src/daemon/state/relay.rs",
+        // `TraceGuard` registers a trace for the split fast path, which bypasses
+        // the router and never creates a pipeline or a blacklist entry. Its
+        // insert and remove are a balanced pair on one map; calling the helper
+        // would have it clear state it never owned.
+        "src/api/openai/streaming.rs",
+    ];
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if allowed.contains(&rel.as_str()) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let mut in_tests = false;
+            for (i, line) in text.lines().enumerate() {
+                let l = line.trim();
+                if l.starts_with("#[cfg(test)]") {
+                    in_tests = true;
+                }
+                if in_tests || l.starts_with("//") || l.starts_with("///") {
+                    continue;
+                }
+                for name in guarded {
+                    if l.contains(&format!("{name}.remove(")) {
+                        offenders.push(format!("{rel}:{}: {l}", i + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "per-request state is removed outside `SharedState::release_request_state`.\n\
+         A path that owns a pipeline must clear all three together — clearing a \
+         subset strands the rest.\n{}",
+        offenders.join("\n")
+    );
+}

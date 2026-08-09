@@ -374,6 +374,21 @@ silently break at the wire if duplicated:
   ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
   and any GPU node whose free VRAM could not be read records `None`, and reading
   that as a zero budget refuses everything.
+- **`SharedState::release_request_state`** (2026-08-09) — clears the three maps a
+  finished request leaves behind: `active_pipelines`, `active_traces`,
+  `request_holder_blacklist`. They are keyed by request id and share one
+  lifetime. Five call sites removed all three by hand and the invariant was held
+  by three adjacent lines plus a comment asserting it — the shape this codebase
+  keeps getting caught by. Dropping one is silent and unbounded: `active_traces`
+  is the oracle behind `model_is_in_use`, so a stranded entry refuses to delete
+  that model for the rest of the daemon's life, and a stale blacklist entry keeps
+  barring a peer that was only meant to be skipped once.
+  It deliberately does NOT touch `active_count` or `queue_notify` — those belong
+  to the dispatch path that owns the slot, and must move together (§ Inference
+  Router Queue). `per_request_state_is_released_in_one_place` fails the build on
+  a new direct removal; `TraceGuard` is allowlisted because it registers a trace
+  for the split fast path and owns nothing else.
+
 - **`inference::pipeline::remote_generate::StreamReassembler`** (2026-08-09) — the
   single place a remote reply's token stream is put back in order. Each token is
   an independent `request_response` send, so the transport orders nothing between

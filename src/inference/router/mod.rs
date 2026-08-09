@@ -884,11 +884,7 @@ impl InferenceRouter {
             impl Drop for ActivePipelineGuard {
                 fn drop(&mut self) {
                     if self.armed {
-                        self.shared_state.active_pipelines.remove(&self.request_id);
-                        self.shared_state.active_traces.remove(&self.request_id);
-                        self.shared_state
-                            .request_holder_blacklist
-                            .remove(&self.request_id);
+                        self.shared_state.release_request_state(&self.request_id);
                         self.count
                             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         // Wake drain_queue so the next queued request can dispatch.
@@ -1188,9 +1184,7 @@ impl InferenceRouter {
             // Disarm the guard — normal completion does the same work below.
             active_guard.disarm();
             // Remove from active pipelines
-            shared_state.active_pipelines.remove(&request.id);
-            shared_state.active_traces.remove(&request.id);
-            shared_state.request_holder_blacklist.remove(&request.id);
+            shared_state.release_request_state(&request.id);
 
             // Decrement active count so new requests can be dispatched, then
             // wake drain_queue so the next queued request actually starts.

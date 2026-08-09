@@ -271,9 +271,7 @@ pub(super) async fn execute_distributed_batch(
                 shared_state.publish_request_trace(&trace);
 
                 finalize_request(&shared_state, &request, &output, None).await;
-                shared_state.active_pipelines.remove(&request.id);
-                shared_state.active_traces.remove(&request.id);
-                shared_state.request_holder_blacklist.remove(&request.id);
+                shared_state.release_request_state(&request.id);
                 // Decrement active_count and wake drain_queue so the next queued
                 // request can dispatch (without notify, the queue stalls until a
                 // new Submit arrives).
@@ -300,9 +298,7 @@ pub(super) async fn execute_distributed_batch(
                 // entry the panicked task would have removed on its
                 // normal-exit path. Without this, the entry stays
                 // forever and blocks shard pruning (gotcha #85).
-                shared_state.active_pipelines.remove(&request_id);
-                shared_state.active_traces.remove(&request_id);
-                shared_state.request_holder_blacklist.remove(&request_id);
+                shared_state.release_request_state(&request_id);
                 active_count.fetch_sub(1, Ordering::Relaxed);
                 queue_notify.notify_one();
             }

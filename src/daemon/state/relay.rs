@@ -82,6 +82,27 @@ impl super::SharedState {
         );
     }
 
+    /// Release every per-request entry a completed request leaves behind.
+    ///
+    /// `active_pipelines`, `active_traces` and `request_holder_blacklist` are
+    /// keyed by request id and share one lifetime, so they are cleared together
+    /// — five call sites removed all three by hand, and the invariant was held
+    /// only by three adjacent lines and a comment saying so. Missing one is
+    /// silent and unbounded: `active_traces` is the oracle behind
+    /// `model_is_in_use`, so a stranded entry would refuse to delete that model
+    /// for the daemon's lifetime, and the blacklist would keep barring a peer
+    /// that was only ever meant to be skipped for one request.
+    ///
+    /// Does NOT touch the concurrency counter or the queue notify: those belong
+    /// to the dispatch path that owns the slot, and the router requires the two
+    /// to happen together (see `.claude/rules/architecture.md` § Inference
+    /// Router Queue).
+    pub fn release_request_state(&self, request_id: &uuid::Uuid) {
+        self.active_pipelines.remove(request_id);
+        self.active_traces.remove(request_id);
+        self.request_holder_blacklist.remove(request_id);
+    }
+
     /// Record a failed inference for the diagnostics ring buffer.
     ///
     /// Oldest-first eviction at [`super::MAX_RECENT_FAILURES`]. Best-effort: a
