@@ -445,6 +445,11 @@ pub async fn create_response(
     // cloud-proxy paths don't forward attacker-sized strings to upstream
     // providers (where they'd land in our log lines or burn quota).
     validate_responses_ingress(&req)?;
+    // Counted here, alongside the chat and messages endpoints. The Responses
+    // API is a third way to send a message to a model and was the only one not
+    // counted, so a caller using it saw the dashboard's request total stay at
+    // zero.
+    crate::api::increment_requests_made(&state.shared_state);
 
     // ---- 1a. Cloud proxy passthrough (M5 / V3). ----
     // Serialize the request struct back to JSON so flatten-extras and any

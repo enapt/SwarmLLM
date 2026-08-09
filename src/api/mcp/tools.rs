@@ -17,6 +17,18 @@ pub(super) async fn handle_tools_call(
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
+    // Count the tools that actually send something to a model. The dashboard
+    // tile reads "messages you've sent to AI models", and MCP is a first-class
+    // way to do that — a user driving this node from Claude Code saw zero
+    // forever. Deliberately NOT a middleware over the `/mcp` route: that would
+    // also count the SSE channel opening and every `tools/list` handshake.
+    if matches!(
+        tool_name,
+        "chat" | "compare" | "research" | "batch_prompts" | "delegate"
+    ) {
+        crate::api::increment_requests_made(&state.shared_state);
+    }
+
     match tool_name {
         "chat" => tool_chat(state, id, arguments).await,
         "models" => tool_models(state, id).await,

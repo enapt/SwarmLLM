@@ -1687,3 +1687,41 @@ fn the_two_python_clients_wrap_the_same_endpoints() {
         only_async
     );
 }
+
+/// Every way of sending a message to a model counts it.
+///
+/// `requests_made` backs a dashboard tile reading "messages you've sent to AI
+/// models". It was incremented by the chat and Anthropic endpoints only, so the
+/// Responses API and MCP — both first-class ways in, and MCP is how the node is
+/// driven from Claude Code — left it at zero forever.
+///
+/// A middleware over the generation routes would be the obvious choke point and
+/// is wrong: `/mcp` also carries the SSE channel and `tools/list` handshakes,
+/// none of which is a message to a model. So the call belongs at each real
+/// entry, and this checks they all have it.
+#[test]
+fn every_model_facing_entry_point_counts_the_request() {
+    let root = repo_root();
+    let entries = [
+        ("src/api/openai/mod.rs", "chat completions"),
+        ("src/api/anthropic/mod.rs", "Anthropic messages"),
+        ("src/api/openai/responses/mod.rs", "Responses API"),
+        ("src/api/mcp/tools.rs", "MCP tools"),
+    ];
+    let mut missing: Vec<String> = Vec::new();
+    for (rel, what) in entries {
+        let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+            missing.push(format!("{rel} ({what}) — unreadable"));
+            continue;
+        };
+        if !text.contains("increment_requests_made") {
+            missing.push(format!("{rel} ({what})"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these send messages to a model without counting them, so the dashboard \
+         under-reports for anyone using them:\n  {}",
+        missing.join("\n  ")
+    );
+}
