@@ -4,6 +4,47 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Replies from a distant machine came back wrong.** If the node answering your
+question was far away — another country, a slow link — words could go missing or
+arrive in the wrong order. Asked to count, one peer replied "You counting going
+seven ten!! eight...'re Keep six nine": every word present, the order scrambled.
+That reads as a bad model rather than a delivery problem, which is why it went
+unnoticed.
+
+Each word of a reply is sent as its own network message and nothing kept them in
+order. On a home or office network the messages arrive so quickly that the
+problem effectively never appears, so it survived every test here. Words are now
+numbered, and the receiving side puts them back in order and waits for any it can
+see are missing.
+
+This one needs **both** machines updated: the numbering is done by the machine
+generating the words. A node running an older version still sends them
+unnumbered, and the receiver correctly falls back to the old behaviour.
+
+**A distant machine could be declared unreachable while it was answering.** A
+node waited a fixed ten seconds for confirmation that a request had arrived. That
+confirmation is itself a round trip, so a peer six seconds away had almost no
+margin, and one was dropped mid-answer. The wait is now based on the round trip
+actually measured to that peer.
+
+**A quiet node wrote three quarters of its log about nothing.** Three lines per
+network message, which during a reply means several per word — one answer could
+add over a thousand lines. Idle logging dropped from about 1540 to 340 lines an
+hour; the accumulated log on one machine had reached 90 MB. The detail is still
+available with `-v`.
+
+**Settings, continued.** Cross-pool sharing toggles and the session timeout now
+take effect without a restart like everything else — the session timeout was
+described as doing so and was connected to nothing. Reloading the config now
+reports which settings took effect and which need a restart, rather than
+presenting them as one list.
+
+**For contributors:** two new scripts — `examples/smoke_test.sh` checks any built
+binary starts, serves and applies a setting, and `examples/two_node_test.sh`
+exercises the cross-node path between two isolated nodes. The benchmark scripts
+no longer stop every node on the machine, which previously included production
+ones.
+
 ## [0.3.88-alpha] — 2026-08-09
 
 **Two things that reported success and did nothing.** Both were found by running
