@@ -227,6 +227,10 @@ pub struct InferenceConfig {
     pub draft_gpu_layers: Option<i32>,
     /// Optional shard range for split inference (e.g. "0-4").
     /// When set, the node only claims these shard indices instead of all shards.
+    ///
+    /// **Read it through [`InferenceConfig::claims_shard`], never directly.**
+    /// Five places asked this question with their own copy of the comparison and
+    /// three of them forgot to ask at all — see that method.
     #[serde(default)]
     pub shard_range: Option<(u32, u32)>,
     /// Maximum number of requests to batch together for inference.
@@ -856,6 +860,36 @@ fn default_streaming_chunk_assembly_ttl_secs() -> u64 {
     30 // 30s — matches existing pipeline timeouts; stuck assemblies evicted
 }
 
+impl InferenceConfig {
+    /// Does this node claim the shard at `index`?
+    ///
+    /// **The single answer, because five places asked it and three got it
+    /// wrong.** `shard_range` exists so one model can be split across machines:
+    /// each node claims a slice, serves those layers, and loads only that much
+    /// into memory. Startup applied it in two places, and the disk scan, the
+    /// periodic rescan, and one manifest path did not.
+    ///
+    /// The rescan was the one that mattered. A node came up correctly holding
+    /// shards 0-1 of a four-shard model — `ranges=[(0, 12)]` — and five minutes
+    /// later the rescan found the other files still on disk, re-registered
+    /// them, and the node served `layers=[0..28)` on its own. Observed end to
+    /// end on 2026-08-09; the log line landed 0.4 s before the request that
+    /// exposed it.
+    ///
+    /// So the feature failed twice over: the node stopped being half of a split
+    /// model, and it loaded the whole thing into memory — the saving being asked
+    /// for is exactly what did not happen, with no error and no warning.
+    ///
+    /// Inclusive at both ends, matching the documented `"0-4"` form. `None`
+    /// means unrestricted, which is the default and the common case.
+    pub fn claims_shard(&self, index: u32) -> bool {
+        match self.shard_range {
+            Some((start, end)) => index >= start && index <= end,
+            None => true,
+        }
+    }
+}
+
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
@@ -918,6 +952,74 @@ impl Default for InferenceConfig {
             parallax_routing: default_parallax_routing(),
             parallax_partial_ranges: false,
             encrypted_pipeline_auto: default_encrypted_pipeline_auto(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod claims_shard_tests {
+    use super::InferenceConfig;
+
+    fn with_range(range: Option<(u32, u32)>) -> InferenceConfig {
+        InferenceConfig {
+            shard_range: range,
+            ..Default::default()
+        }
+    }
+
+    /// Unset is the default and must claim everything.
+    #[test]
+    fn no_range_claims_every_shard() {
+        let c = with_range(None);
+        for i in 0..64 {
+            assert!(c.claims_shard(i));
+        }
+    }
+
+    /// Inclusive at both ends, matching the documented `"0-4"` form.
+    #[test]
+    fn the_range_includes_both_endpoints() {
+        let c = with_range(Some((0, 1)));
+        assert!(c.claims_shard(0));
+        assert!(c.claims_shard(1));
+        assert!(!c.claims_shard(2));
+    }
+
+    /// **The case that was broken.** Splitting one model across two machines is
+    /// what this setting exists for: four shards on disk, range 0-1, exactly two
+    /// claimed — and the two halves cover the model once, no gap, no overlap.
+    #[test]
+    fn a_four_shard_model_split_in_half_covers_it_exactly_once() {
+        let front = with_range(Some((0, 1)));
+        let back = with_range(Some((2, 3)));
+
+        let a: Vec<u32> = (0..4).filter(|i| front.claims_shard(*i)).collect();
+        let b: Vec<u32> = (0..4).filter(|i| back.claims_shard(*i)).collect();
+        assert_eq!(a, vec![0, 1]);
+        assert_eq!(b, vec![2, 3]);
+
+        let mut both = [a, b].concat();
+        both.sort_unstable();
+        assert_eq!(both, vec![0, 1, 2, 3], "no gap and no overlap");
+    }
+
+    /// A single-shard range is legitimate — one machine, one piece.
+    #[test]
+    fn a_single_shard_range_is_allowed() {
+        let c = with_range(Some((2, 2)));
+        assert!(c.claims_shard(2));
+        assert!(!c.claims_shard(1));
+        assert!(!c.claims_shard(3));
+    }
+
+    /// An inverted range claims nothing rather than claiming everything.
+    /// Refusing is the safe direction: the alternative is a node quietly
+    /// serving shards its operator tried to exclude.
+    #[test]
+    fn an_inverted_range_claims_nothing() {
+        let c = with_range(Some((3, 1)));
+        for i in 0..8 {
+            assert!(!c.claims_shard(i));
         }
     }
 }

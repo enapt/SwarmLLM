@@ -52,6 +52,22 @@ pub async fn rescan_local_shards(
 
         let mut new_shards = 0u32;
         for shard_info in &manifest.shards {
+            // `inference.shard_range` limits which shards this node claims, and
+            // this rescan is the path that quietly undoes it.
+            //
+            // Startup honours the setting, so a node comes up holding its slice
+            // correctly — and then this runs on a timer, finds the other shards
+            // still sitting on disk, and registers them all over again. Observed
+            // end to end: a node configured for shards 0-1 came up with
+            // `ranges=[(0, 12)]`, and five minutes later was serving
+            // `layers=[0..28)` on its own.
+            //
+            // That defeats the purpose twice over. The node stops being half of
+            // a split model, and it loads the whole thing into memory — the
+            // saving being asked for is exactly what silently does not happen.
+            if !shared.config.inference.claims_shard(shard_info.index) {
+                continue;
+            }
             let shard_id = ShardId {
                 model_id: model_id.clone(),
                 index: shard_info.index,

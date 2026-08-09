@@ -32,13 +32,10 @@ pub fn generate_and_register_local_manifest(
     if let Some(existing) = shared_state.model_registry.get_manifest(&model_id) {
         tracing::debug!(model = %model_id, "Manifest already registered, registering shard holders");
         let node_id = shared_state.identity.node_id().clone();
-        let shard_range = shared_state.config.inference.shard_range;
         for shard_info in &existing.shards {
-            let in_range = match shard_range {
-                Some((start, end)) => shard_info.index >= start && shard_info.index <= end,
-                None => true,
-            };
-            if in_range {
+            // Fourth site to ask this question, and the copies had already
+            // drifted — two applied the range, two did not. One predicate now.
+            if shared_state.config.inference.claims_shard(shard_info.index) {
                 let shard_id = crate::types::ShardId {
                     model_id: model_id.clone(),
                     index: shard_info.index,
@@ -215,11 +212,9 @@ pub fn generate_and_register_local_manifest(
     let shard_range = shared_state.config.inference.shard_range;
     let shard_store_check = shared_state.shard_store();
     for shard_info in &manifest.shards {
-        let in_range = match shard_range {
-            Some((start, end)) => shard_info.index >= start && shard_info.index <= end,
-            None => true,
-        };
-        if !in_range {
+        // Fifth site. See `InferenceConfig::claims_shard` for why they are all
+        // routed through one predicate now.
+        if !shared_state.config.inference.claims_shard(shard_info.index) {
             continue;
         }
         // Verify file exists on disk before registering

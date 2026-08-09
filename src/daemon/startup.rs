@@ -29,7 +29,6 @@ pub(super) async fn restore_persistent_state(
     // it and re-register ourselves as holder of our shard range.
     {
         let node_id = shared_state.identity.node_id().clone();
-        let shard_range = config.inference.shard_range;
         if let Ok(manifests) = db.iter_json::<crate::types::ModelManifest>("model_meta") {
             for manifest in manifests {
                 let model_id = manifest.id.clone();
@@ -56,10 +55,7 @@ pub(super) async fn restore_persistent_state(
                 }
                 let shard_store_reg = shared_state.shard_store();
                 for shard_info in &manifest.shards {
-                    let in_range = match shard_range {
-                        Some((start, end)) => shard_info.index >= start && shard_info.index <= end,
-                        None => true,
-                    };
+                    let in_range = config.inference.claims_shard(shard_info.index);
                     if in_range {
                         let shard_path = shard_store_reg.shard_path(&model_id, shard_info.index);
                         if !shard_path.exists() {
@@ -213,6 +209,29 @@ pub(super) async fn restore_persistent_state(
                 std::collections::HashMap::new();
 
             for (model_id, shard_info) in &shards {
+                // `inference.shard_range` says which shard indices this node
+                // claims. It was applied ONLY to the manifests restored from the
+                // database a few hundred lines above, and not here — where a
+                // node registers what it actually found on disk.
+                //
+                // So on any machine that has the files, the setting did nothing:
+                // it registered every shard, announced every shard, and kept
+                // serving the whole model. No error, no warning, and the config
+                // key parsed fine, so the only way to notice was to look at the
+                // registry and find four shards claimed after asking for two —
+                // which is how this was found (2026-08-09).
+                //
+                // That matters most for the thing the setting exists to do:
+                // deliberately splitting one model across two machines. Anyone
+                // setting it up had it silently not happen.
+                if !config.inference.claims_shard(shard_info.index) {
+                    tracing::debug!(
+                        model = %model_id,
+                        shard = shard_info.index,
+                        "Not claiming shard — outside inference.shard_range"
+                    );
+                    continue;
+                }
                 if registered_manifests.insert(model_id.clone()) {
                     let model_dir = shard_store.model_dir(model_id);
 
