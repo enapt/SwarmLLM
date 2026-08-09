@@ -1237,9 +1237,14 @@ pub async fn update_config(
 
 /// POST /api/admin/config/reload — Hot-reload operational parameters from config file.
 ///
-/// Re-reads the config.toml and applies hot-reloadable parameters
-/// (max_concurrent_requests, auto_manage interval, max_batch_size, max_peers,
-/// session_timeout_secs) without requiring a daemon restart.
+/// Re-reads config.toml and makes it the live config, so every setting the
+/// running node consults takes effect immediately, and pushes the few that a
+/// subsystem must be told about (concurrency limit, batch size and window,
+/// auto-manage interval, session timeout).
+///
+/// The response separates `applied` from `restart_required`. It used to list
+/// `max_peers` among the applied set; nothing consumed it, and nothing could —
+/// libp2p's connection limits are fixed when the swarm is built.
 pub async fn reload_config(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -1279,18 +1284,35 @@ pub async fn reload_config(
         tracing::info!(path = %config_path.display(), "Config reloaded via API — no changes detected");
     }
 
+    // Report what this call actually did, split from what it could not do.
+    // The previous response listed `max_peers` and the contribution/VRAM
+    // settings alongside the rest as though reloading had applied them; none of
+    // them was wired to anything, and `max_peers` cannot be — libp2p's
+    // connection limits are fixed when the swarm is built.
+    let live = state.shared_state.cfg();
     Ok(Json(serde_json::json!({
         "status": "ok",
         "changed": changed,
-        "params": {
+        // Re-read by whoever acts on them, or pushed to a subsystem that had to
+        // resize something. Either way: in force now.
+        "applied": {
             "max_concurrent_requests": params.max_concurrent_requests,
             "auto_manage_interval_minutes": params.auto_manage_interval_minutes,
             "max_batch_size": params.max_batch_size,
-            "max_peers": params.max_peers,
+            "batch_timeout_ms": params.batch_timeout_ms,
             "session_timeout_secs": params.session_timeout_secs,
-            "contribution": params.contribution,
-            "contribution_auto": params.contribution_auto,
-            "max_gpu_vram_mb": params.max_gpu_vram_mb,
+            "contribution": live.node.contribution,
+            "contribution_auto": live.node.contribution_auto,
+            "max_gpu_vram_mb": live.resources.max_gpu_vram_mb,
+            "max_disk_mb": live.resources.max_disk_mb,
+            "max_bandwidth_mbps": live.resources.max_bandwidth_mbps,
+        },
+        // Read once at startup. Saying so is the point: a caller that cannot
+        // tell these apart has no way to know the reload was partial.
+        "restart_required": {
+            "max_peers": live
+                .network
+                .effective_max_connections(live.node.contribution.clone()),
         }
     })))
 }

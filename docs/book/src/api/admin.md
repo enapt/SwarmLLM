@@ -57,7 +57,17 @@ Response:
 Read or update daemon configuration. PUT requires Bearer auth.
 
 ### POST /api/admin/config/reload
-Hot-reload operational parameters without restart. Bearer auth required.
+Re-read `config.toml` and apply it to the running node. Bearer auth required.
+
+The response separates what took effect from what did not:
+
+- `applied` — in force now. Most settings are simply re-read by whatever acts on
+  them; a few (concurrency limit, batch size and window, auto-manage interval,
+  session timeout) are pushed to the subsystem that has to resize or retime
+  something.
+- `restart_required` — read once at startup and unchanged by this call. Only
+  `max_peers` is in this group: connection limits are fixed when the
+  peer-to-peer network is built.
 
 ### POST /api/admin/shutdown
 Gracefully shut down the node. Localhost only, Bearer auth required.

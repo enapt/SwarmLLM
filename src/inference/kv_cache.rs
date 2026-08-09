@@ -72,6 +72,20 @@ impl KvCacheManager {
         }
     }
 
+    /// Change how long an idle session survives.
+    ///
+    /// Every expiry check reads `ttl` at the moment it runs, so this applies to
+    /// sessions that already exist as well as new ones — a shortened timeout
+    /// starts reclaiming immediately rather than at the next restart.
+    pub fn set_ttl(&mut self, ttl: Duration) {
+        self.ttl = ttl;
+    }
+
+    /// Current idle-session timeout.
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
     fn cache_holders(pipeline: &PipelineAssignment) -> Vec<NodeId> {
         pipeline
             .segments

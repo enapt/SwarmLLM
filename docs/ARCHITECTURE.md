@@ -1799,7 +1799,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 
 ### Utility
 - `POST   /api/admin/shutdown` — Gracefully shut down the node (localhost only)
-- `POST   /api/admin/config/reload` — Hot-reload operational config parameters
+- `POST   /api/admin/config/reload` — Re-read config.toml into the live config; response splits `applied` from `restart_required`
 - `POST   /api/admin/downloads/{model_id}/cancel` — Cancel in-progress HF download
 - `DELETE /api/admin/models/{model_id}` — Remove model (shards + manifest + state)
 - `POST   /api/admin/models/{id}/unload` — Unload model from VRAM (keep shards on disk)

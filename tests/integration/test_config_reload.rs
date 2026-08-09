@@ -38,7 +38,7 @@ max_peers = 50
     let params1 = reload_operational_params(&config_path).unwrap();
     assert_eq!(params1.max_concurrent_requests, 8);
     assert_eq!(params1.max_batch_size, 4);
-    assert_eq!(params1.max_peers, 50);
+    assert_eq!(params1.session_timeout_secs, 600);
 
     // Update the config file with new values
     let updated_toml = r#"
@@ -59,7 +59,6 @@ max_peers = 100
     let params2 = reload_operational_params(&config_path).unwrap();
     assert_eq!(params2.max_concurrent_requests, 16);
     assert_eq!(params2.max_batch_size, 8);
-    assert_eq!(params2.max_peers, 100);
     assert_eq!(params2.auto_manage_interval_minutes, 15);
     assert_eq!(params2.session_timeout_secs, 1200);
 
@@ -108,11 +107,7 @@ async fn test_config_reload_notifies_subscribers() {
         auto_manage_interval_minutes: 5,
         max_batch_size: 16,
         batch_timeout_ms: 75,
-        max_peers: 200,
         session_timeout_secs: 3600,
-        contribution: swarmllm::config::ContributionMode::Moderate,
-        contribution_auto: true,
-        max_gpu_vram_mb: 0,
     };
 
     shared_state.apply_config_reload(new_params.clone());
@@ -123,6 +118,6 @@ async fn test_config_reload_notifies_subscribers() {
     assert_eq!(received.max_concurrent_requests, 32);
     assert_eq!(received.max_batch_size, 16);
     assert_eq!(received.batch_timeout_ms, 75);
-    assert_eq!(received.max_peers, 200);
+    assert_eq!(received.session_timeout_secs, 3600);
     assert_ne!(received, initial);
 }

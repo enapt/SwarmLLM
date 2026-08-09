@@ -5,18 +5,27 @@ use crate::error::SwarmError;
 // Re-export ContributionMode from swarmllm-types crate
 pub use crate::types::ContributionMode;
 
-/// Hot-reloadable operational parameters that can be changed without restart.
+/// Settings a running subsystem must **react** to, not merely re-read.
+///
+/// Most settings need nothing but [`crate::daemon::SharedState::cfg`]: the code
+/// that acts on them reads the live config each time it runs. These are the
+/// exceptions — each one sizes something built once, so somebody has to be told
+/// to rebuild it (resize the concurrency limit, retime an interval, change a
+/// cache's expiry).
+///
+/// **Keep this list to things with a consumer.** It previously carried five
+/// fields that nothing anywhere read — `max_peers`, `contribution`,
+/// `contribution_auto`, `max_gpu_vram_mb`, `session_timeout_secs` — while its
+/// own doc comment said they "can be changed without restart". A struct that
+/// announces an invariant it does not keep reads as verification and stops
+/// anyone checking (gotcha #281).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OperationalParams {
     pub max_concurrent_requests: u32,
     pub auto_manage_interval_minutes: u32,
     pub max_batch_size: u32,
     pub batch_timeout_ms: u64,
-    pub max_peers: u32,
     pub session_timeout_secs: u64,
-    pub contribution: ContributionMode,
-    pub contribution_auto: bool,
-    pub max_gpu_vram_mb: u64,
 }
 
 impl OperationalParams {
@@ -27,17 +36,7 @@ impl OperationalParams {
             auto_manage_interval_minutes: config.auto_manage.interval_minutes,
             max_batch_size: config.inference.max_batch_size,
             batch_timeout_ms: config.inference.batch_timeout_ms,
-            // The RESOLVED ceiling, not the raw `Option`. This is what the
-            // dashboard and `GET /api/admin/config` report, and reporting the
-            // unresolved value would show `null` on the default path while the
-            // daemon was actually enforcing a contribution-derived figure.
-            max_peers: config
-                .network
-                .effective_max_connections(config.node.contribution.clone()),
             session_timeout_secs: config.inference.session_timeout_seconds,
-            contribution: config.node.contribution.clone(),
-            contribution_auto: config.node.contribution_auto,
-            max_gpu_vram_mb: config.resources.max_gpu_vram_mb,
         }
     }
 }
@@ -1126,17 +1125,38 @@ auto_relay = false
         assert_eq!(params.max_concurrent_requests, 10);
         assert_eq!(params.auto_manage_interval_minutes, 5);
         assert_eq!(params.max_batch_size, 1);
-        // Resolved from the default contribution mode (Minimal), not the raw
-        // `Option`. Params are what the daemon actually enforces.
-        assert_eq!(
-            params.max_peers,
-            config
-                .network
-                .effective_max_connections(ContributionMode::Minimal)
-        );
+        assert_eq!(params.batch_timeout_ms, 50);
         assert_eq!(params.session_timeout_secs, 600);
-        assert!(params.contribution_auto);
-        assert_eq!(params.max_gpu_vram_mb, 0);
+    }
+
+    /// This struct is for settings a subsystem has to be TOLD about, because
+    /// each sizes something built once. Anything a caller can simply re-read
+    /// belongs on the live config instead. Five fields once sat here with no
+    /// consumer at all while the struct advertised itself as hot-reloadable;
+    /// this pins the list so that cannot quietly come back.
+    #[test]
+    fn operational_params_carries_only_settings_with_a_consumer() {
+        let json = serde_json::to_value(OperationalParams::from_config(&Config::default()))
+            .expect("serializable");
+        let mut fields: Vec<&str> = json
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            vec![
+                "auto_manage_interval_minutes",
+                "batch_timeout_ms",
+                "max_batch_size",
+                "max_concurrent_requests",
+                "session_timeout_secs",
+            ],
+            "every field here must be consumed by a subsystem's reload arm — \
+             if a new one is only ever read, put it on the live config instead"
+        );
     }
 
     #[test]
@@ -1169,7 +1189,6 @@ max_peers = 100
         assert_eq!(params.max_batch_size, 4);
         assert_eq!(params.session_timeout_secs, 300);
         assert_eq!(params.auto_manage_interval_minutes, 10);
-        assert_eq!(params.max_peers, 100);
     }
 
     #[test]
@@ -1192,12 +1211,6 @@ max_concurrent_requests = 42
         assert_eq!(params.max_concurrent_requests, 42);
         // Defaults for others
         assert_eq!(params.max_batch_size, 1);
-        // A config that does not mention `max_peers` resolves it from the
-        // contribution mode, which defaults to Minimal.
-        assert_eq!(
-            params.max_peers,
-            NetworkConfig::default().effective_max_connections(ContributionMode::Minimal)
-        );
     }
 
     /// An explicit ceiling is the user's own decision and overrides the

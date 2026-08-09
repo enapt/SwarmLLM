@@ -262,6 +262,19 @@ impl InferenceRouter {
                     // Batching waits this long for a second request before
                     // giving up and running alone, so it is the setting a user
                     // reaches for when replies feel laggy — it has to move.
+                    // Idle-session lifetime. Every expiry check reads the value
+                    // live, so a shortened timeout starts reclaiming existing
+                    // sessions rather than only future ones.
+                    let new_session_ttl =
+                        std::time::Duration::from_secs(params.session_timeout_secs);
+                    if self.kv_cache.ttl() != new_session_ttl {
+                        tracing::info!(
+                            old_session_timeout_secs = self.kv_cache.ttl().as_secs(),
+                            new_session_timeout_secs = params.session_timeout_secs,
+                            "Hot-reloaded KV-cache session timeout"
+                        );
+                        self.kv_cache.set_ttl(new_session_ttl);
+                    }
                     let new_timeout = std::time::Duration::from_millis(params.batch_timeout_ms);
                     if new_timeout != self.batch_timeout {
                         tracing::info!(
