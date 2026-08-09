@@ -1396,3 +1396,60 @@ fn every_documented_diag_line_exists_in_the_source() {
         missing.join("\n  ")
     );
 }
+
+/// A frontend component that uses `U.` must bind `U` first.
+///
+/// `U` is the conventional local alias for `App.utils`, established by the
+/// boilerplate every component copies. Forgetting the binding is not caught by
+/// anything at load time — the file parses, registers, and throws
+/// `ReferenceError: U is not defined` the first time that code path renders.
+/// The R111 swarm tab shipped that way and only surfaced when a user opened the
+/// Capacity Plan view.
+#[test]
+fn frontend_components_bind_the_utils_alias_they_use() {
+    let dir = repo_root().join("frontend/js/components");
+    let rd = std::fs::read_dir(&dir).expect("components dir");
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut checked = 0;
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if !p.extension().is_some_and(|x| x == "js") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        checked += 1;
+
+        let declares = text.contains("var U = App.utils") || text.contains("const U = App.utils");
+        if declares {
+            continue;
+        }
+        // `U.` preceded by an identifier char is something else (e.g. `App.U.`).
+        let uses = text.match_indices("U.").any(|(i, _)| {
+            let prev = text[..i].chars().next_back();
+            !matches!(prev, Some(c) if c.is_alphanumeric() || c == '_' || c == '.')
+        });
+        if uses {
+            offenders.push(
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+
+    assert!(
+        checked >= 15,
+        "only {checked} components scanned — the directory moved and this checks nothing"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these components use `U.` without binding it, and will throw \
+         `ReferenceError: U is not defined` the first time that code renders:\n  {}\n\
+         Add `var U = App.utils;` inside the IIFE, as the sibling components do.",
+        offenders.join("\n  ")
+    );
+}
