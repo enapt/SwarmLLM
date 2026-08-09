@@ -445,11 +445,11 @@ pub async fn create_response(
     // cloud-proxy paths don't forward attacker-sized strings to upstream
     // providers (where they'd land in our log lines or burn quota).
     validate_responses_ingress(&req)?;
-    // Counted here, alongside the chat and messages endpoints. The Responses
-    // API is a third way to send a message to a model and was the only one not
-    // counted, so a caller using it saw the dashboard's request total stay at
-    // zero.
-    crate::api::increment_requests_made(&state.shared_state);
+    // NOT counted here. A local Responses request is translated and handed to
+    // `openai::chat_completions`, which counts it — adding a second increment
+    // made one request register as two (measured 2026-08-09, start=0 →
+    // requests_made=2 after a single call). The cloud-proxy branches below
+    // return before reaching that handler and are counted at their own exit.
 
     // ---- 1a. Cloud proxy passthrough (M5 / V3). ----
     // Serialize the request struct back to JSON so flatten-extras and any
@@ -464,6 +464,10 @@ pub async fn create_response(
     if let Some(response) =
         crate::api::providers::try_proxy_openai_responses(&state, &body_value, stream).await?
     {
+        // Counted here rather than at the top: this branch returns without ever
+        // reaching `chat_completions`, which is where a local request is
+        // counted. Counting at the top instead double-counts every local one.
+        crate::api::increment_requests_made(&state.shared_state);
         return Ok(response);
     }
 
@@ -476,6 +480,9 @@ pub async fn create_response(
     if let Some(response) =
         anthropic_bridge::try_proxy_anthropic_responses(&state, &headers, &req).await?
     {
+        // Same reasoning as the branch above: returns without reaching
+        // `chat_completions`.
+        crate::api::increment_requests_made(&state.shared_state);
         return Ok(response);
     }
 
