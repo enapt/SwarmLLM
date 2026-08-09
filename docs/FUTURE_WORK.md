@@ -955,6 +955,13 @@ test `cross_pool_extras_honors_runtime_flag_toggle` in
 `src/pool/scope.rs` verifies the runtime mirror takes precedence over
 the startup-frozen config. 999 lib tests pass._
 
+_**Superseded 2026-08-09.** Both mirrors were folded into the single live
+config (`SharedState::cfg()`), along with the other two that had grown the same
+way. Fixing each setting as it was noticed is what left the next one broken —
+see gotcha #281. The k-anonymity floor
+(`share_model_catalog_min_members`), parked above as an accepted restart pulse,
+is live too now: once the mechanism is general it costs nothing to include._
+
 **Original deferral note preserved below for context.**
 
 `pool.allow_cross_pool_inference` and `pool.share_model_catalog` were

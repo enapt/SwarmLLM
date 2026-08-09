@@ -1001,8 +1001,8 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "batch_timeout_ms": config.inference.batch_timeout_ms,
         // R137: surface the runtime values (not the startup-frozen config)
         // so the dashboard reflects post-PUT state immediately.
-        "allow_cross_pool_inference": state.shared_state.credits.allow_cross_pool_inference.load(std::sync::atomic::Ordering::Relaxed),
-        "share_model_catalog": state.shared_state.credits.share_model_catalog.load(std::sync::atomic::Ordering::Relaxed),
+        "allow_cross_pool_inference": state.shared_state.cfg().pool.allow_cross_pool_inference,
+        "share_model_catalog": state.shared_state.cfg().pool.share_model_catalog,
         // Runtime value, same reason. Paired with `dashboard_on_overlay` so the
         // settings panel can say whether the overlay path is actually in play
         // on this node rather than just offering an abstract switch.
@@ -1135,26 +1135,14 @@ pub async fn update_config(
         config.inference.batch_timeout_ms = timeout.clamp(1, MAX_BATCH_TIMEOUT_MS);
     }
     if let Some(allow) = body.allow_cross_pool_inference {
-        // R137: persist to TOML for restart durability AND mirror to the
-        // runtime atomic so cross_pool_extras picks it up on the next
-        // request without a daemon restart.
+        // Goes live with the whole config at the end of this handler;
+        // `cross_pool_extras` reads it on the next request.
         config.pool.allow_cross_pool_inference = allow;
-        state
-            .shared_state
-            .credits
-            .allow_cross_pool_inference
-            .store(allow, std::sync::atomic::Ordering::Release);
     }
     if let Some(share) = body.share_model_catalog {
-        // R137: same pattern as above for the model-catalog gossip flag.
-        // Read by HealthMonitor::broadcast_pool_model_availability on the
+        // Read by `HealthMonitor::broadcast_pool_model_availability` on the
         // next gossip tick (≤30s by default).
         config.pool.share_model_catalog = share;
-        state
-            .shared_state
-            .credits
-            .share_model_catalog
-            .store(share, std::sync::atomic::Ordering::Release);
     }
     if let Some(ref m) = body.update_mode {
         let parsed = match m.as_str() {
@@ -1481,11 +1469,11 @@ pub struct ConfigUpdate {
     pub batch_timeout_ms: Option<u64>,
     /// R137: hot-reloadable cross-pool inference fallback toggle.
     /// Persisted to config TOML + mirrored to
-    /// `state.credits.allow_cross_pool_inference`.
+    /// the live config.
     pub allow_cross_pool_inference: Option<bool>,
     /// R137: hot-reloadable cross-pool model catalog gossip toggle.
     /// Persisted to config TOML + mirrored to
-    /// `state.credits.share_model_catalog`.
+    /// the live config.
     pub share_model_catalog: Option<bool>,
     /// Hand the dashboard its API key to browsers on a private/LAN address.
     /// Persisted to config TOML + mirrored to `state.dashboard_trust_lan` so

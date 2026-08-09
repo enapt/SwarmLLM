@@ -2075,7 +2075,7 @@ pub(crate) async fn dispatch_network_messages(
                                         // announcement (the next state gossip will confirm or refute
                                         // membership before any routing decisions actually fire).
                                         let local_min_members =
-                                            shared_state.config.pool.share_model_catalog_min_members;
+                                            shared_state.cfg().pool.share_model_catalog_min_members;
                                         if local_min_members > 1 {
                                             if let Some(ps_entry) =
                                                 shared_state.credits.pool_registry.get(&announce.pool_id)

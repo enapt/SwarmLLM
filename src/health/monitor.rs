@@ -757,14 +757,14 @@ impl HealthMonitor {
     /// granularity that the wishlist announcement already operates at.
     /// Pure discovery; routing across pool boundaries is NOT enabled.
     async fn broadcast_pool_model_availability(&self) {
-        use std::sync::atomic::Ordering::Relaxed;
-        // R137: read `share_model_catalog` from the runtime AtomicBool
-        // mirror on `state.credits` rather than the startup-frozen config.
-        if !self.shared_state.credits.share_model_catalog.load(Relaxed) {
+        // Live config, not the boot snapshot: the operator can turn catalog
+        // sharing off, or raise the anonymity floor, and have it hold from the
+        // next gossip tick.
+        let live = self.shared_state.cfg();
+        if !live.pool.share_model_catalog {
             return;
         }
-        let cfg = &self.shared_state.config.pool;
-        let min_members = cfg.share_model_catalog_min_members.max(1) as usize;
+        let min_members = live.pool.share_model_catalog_min_members.max(1) as usize;
         let my_id = self.shared_state.identity.node_id().clone();
         let pool_id = {
             let ps = self.shared_state.credits.pool_state.read().await;
