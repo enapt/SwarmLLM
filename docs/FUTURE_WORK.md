@@ -7840,3 +7840,62 @@ true while the code was **unreachable in production**. Neither could have caught
 that. Only running a real node with realistic, *differing* prompts did — the
 same shape as the occupancy counter that was reading the wrong process two days
 earlier.
+
+## Credits never move between nodes (found 2026-08-09, NOT implemented)
+
+Every credit figure in SwarmLLM is **local bookkeeping on each node
+separately**. No credit has ever been transferred from one node to another, and
+no code path exists that could do it.
+
+**What is there.** `credit::transaction` is complete and correct: it builds a
+`CreditTransaction`, signs it with the serving node's key, counter-signs with
+the requester's, verifies both signatures, and rejects replays against
+`TREE_TRANSACTIONS`. The inbound handler in `daemon/dispatch/mod.rs` accepts and
+applies one. `swarmllm_types` carries the wire type. It looks live.
+
+**What is missing.** `credit::transaction::create_transaction` has **zero
+production callers** — grep it. Nothing anywhere constructs or sends a
+`CreditTransaction`, so the inbound handler has never had anything to receive.
+The verifying half of a protocol whose sending half was never written.
+
+**What actually happens today**, measured across two machines on 2026-08-09:
+
+- The requester reserves credits into escrow, then settles: `escrow_reserve`
+  then `escrow_settle_adjust`, both on its own balance. `release_escrow` records
+  `to_node` and logs it — and transfers nothing. The `to_node` field makes it
+  read like a payment; it is a memo.
+- The serving node separately mints its fee locally, via
+  `pending_credit_earn` → `inference_serve_earning`.
+
+So a request debits the requester by ~430 and credits the server ~440, from
+nothing, on two ledgers that never reconcile with each other. The numbers are
+individually sensible and the system-wide total is meaningless.
+
+**Why this matters more than it looks.** The economics are the incentive to
+contribute. As it stands a node's balance measures *its own activity*, not value
+received from anyone, so nothing stops a node inflating its balance by serving
+itself — `anti_gaming` guards rate and pattern, not provenance. This is fine
+while credits gate nothing; it is not fine the moment they do.
+
+**Do not "fix" this by wiring `create_transaction` into the serving path.** The
+hard parts are not the signatures:
+
+- *Who initiates.* The server knows what it did; the requester knows what it
+  received. A transaction signed by the server alone is a self-assessed invoice.
+  The dual signature exists for this, so settlement has to happen where both
+  parties agree on the amount — i.e. at the end of the request, on the
+  requester's side, against a served-work claim.
+- *What happens when settlement fails.* The work is already done. Retry, or the
+  server eats it? An unsettled-work queue is a new persistent structure with its
+  own bounds and sweep.
+- *Double-spend across peers.* A balance is currently a local integer; nothing
+  prevents spending it concurrently with several peers. Replay protection covers
+  a transaction being applied twice, not a balance being promised twice.
+- *Migration.* Existing balances were minted locally by every node in the swarm.
+  Whatever the first real transfer is, it starts from books that do not add up.
+
+Related: gotcha **#280** (money leaving the requester is not evidence of money
+reaching the server) and **#278** (the books reconcile by construction, so
+reconciliation proves nothing). `GET /api/admin/credits/transactions` is what
+makes any of this observable; before v0.3.87 the movements were not recorded at
+all.
