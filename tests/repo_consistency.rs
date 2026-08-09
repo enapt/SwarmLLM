@@ -1516,3 +1516,111 @@ fn frontend_payload_stays_within_budget() {
          one locale is fetched per page load, so this is payload too."
     );
 }
+
+/// Every setting a user can put in `config.toml` appears in the reference.
+///
+/// 16 were missing when this was first measured (2026-08-09) — reachability
+/// controls, the idle-unload timer, the cross-pool sharing flags, anchor mode.
+/// A settings reference is only useful if a reader can conclude that a setting
+/// they cannot find does not exist, and that conclusion was wrong for one option
+/// in nine.
+///
+/// Only leaf scalars are checked: section structs are documented as headings,
+/// and `OperationalParams` is a derived view rather than something anyone writes
+/// in a file.
+#[test]
+fn every_config_setting_is_documented() {
+    let root = repo_root();
+    let doc = std::fs::read_to_string(root.join("docs/book/src/configuration/reference.md"))
+        .expect("read config reference");
+
+    // Structs that are not written by hand into config.toml.
+    let skip_structs = ["OperationalParams", "CustomProvider"];
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut checked = 0;
+    let cfg_dir = root.join("src/config");
+    let Ok(rd) = std::fs::read_dir(&cfg_dir) else {
+        panic!("src/config unreadable");
+    };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if !p.extension().is_some_and(|x| x == "rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let mut current = String::new();
+        let mut in_tests = false;
+        for line in text.lines() {
+            let l = line.trim();
+            if l.starts_with("#[cfg(test)]") {
+                in_tests = true;
+            }
+            if in_tests {
+                continue;
+            }
+            if let Some(rest) = l.strip_prefix("pub struct ") {
+                current = rest
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                continue;
+            }
+            let Some(rest) = l.strip_prefix("pub ") else {
+                continue;
+            };
+            let Some((name, ty)) = rest.split_once(':') else {
+                continue;
+            };
+            let name = name.trim();
+            let ty = ty.trim().trim_end_matches(',');
+            if current.is_empty() || skip_structs.contains(&current.as_str()) {
+                continue;
+            }
+            // Leaf scalars only — a struct-typed field is a section heading.
+            let core = ty
+                .replace("Option<", "")
+                .replace("Vec<", "")
+                .replace('>', "");
+            let is_scalar = matches!(
+                core.as_str(),
+                "bool"
+                    | "String"
+                    | "PathBuf"
+                    | "usize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "i32"
+                    | "i64"
+                    | "f32"
+                    | "f64"
+            );
+            if !is_scalar {
+                continue;
+            }
+            checked += 1;
+            if !doc.contains(&format!("`{name}`")) {
+                missing.push(format!("{current}.{name}"));
+            }
+        }
+    }
+
+    assert!(
+        checked > 100,
+        "only {checked} settings scanned — the config layout moved and this checks nothing"
+    );
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "{} config setting(s) are not in docs/book/src/configuration/reference.md:\n  {}\n\
+         A reference is only useful if a setting a reader cannot find does not exist.",
+        missing.len(),
+        missing.join("\n  ")
+    );
+}

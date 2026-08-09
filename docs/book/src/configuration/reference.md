@@ -30,6 +30,7 @@ booted with.
 | `data_dir` | path | Platform-specific | Where SwarmLLM stores data |
 | `contribution` | string | `"minimal"` | Resource contribution: `"minimal"`, `"moderate"`, `"maximum"`. Applies without a restart, except for the two startup-fixed items noted above |
 | `contribution_auto` | boolean | `true` | Auto-scale contribution at swarm saturation. Applies without a restart |
+| `anchor_mode` | boolean | `false` | Run as a pure bootstrap / relay / reachability-probe node. Skips all inference — no models load, no HuggingFace polling, no shard acquisition, no auto-manage — and binds the dashboard to loopback only. The node still participates fully in the peer-to-peer network |
 
 ## `[resources]` — Resource Limits
 
@@ -73,6 +74,12 @@ booted with.
 | `prefix_kv_compression` | boolean | `false` | Zstd compression for cross-node prefix-KV snapshot wire frames. Default off — meaningful win on WAN where wire size is the bottleneck; roughly neutral on localhost. Receivers always decompress regardless of this flag. |
 | `tensor_compress_level` | integer | `1` | Zstd compression level (1-22, 1 = fastest). Shared between tensor and prefix-KV. |
 | `tensor_compress_threshold` | integer | `1024` | Min payload bytes before compression. Shared between tensor and prefix-KV. |
+| `listen_address` | string | `"0.0.0.0"` | Address to bind peer-to-peer listeners on. Set to `127.0.0.1` on WSL2 to avoid binding unreliable NAT adapters |
+| `enable_quic` | boolean | `true` | QUIC transport. Disabling it on WSL2 avoids a race where the faster QUIC handshake displaces the TCP connection |
+| `enable_upnp` | boolean | `true` | Ask the home router to open the peer-to-peer ports automatically, and confirm the resulting public address with the swarm. The zero-configuration path to being reachable from the internet |
+| `max_connections_per_peer` | integer | `2` | Simultaneous connections to a single peer. **Must be at least 2 for NAT hole punching**: the upgrade dials a direct connection while the relayed one is still open, so `1` kills one of them |
+| `relay_forwarding` | boolean | `false` | Carry *inference* messages between two peers that cannot reach each other. Distinct from `enable_relay`, which carries the connection itself |
+| `relay_forwarding_auto` | boolean | `true` | Donate that relay capacity automatically once this node is confirmed reachable from the open internet |
 
 ## `[inference]` — AI Model Inference
 
@@ -159,6 +166,9 @@ booted with.
 | `streaming_chunk_size_bytes` | integer | `262144` | Chunk size for the above. 256 KiB matches the age STREAM default and the TokenWeave K=2–4 sweet spot |
 | `streaming_min_activation_bytes` | integer | `65536` | Activations below this ship as a single frame regardless of the flag |
 | `streaming_chunk_assembly_ttl_secs` | integer | `30` | Receiver-side TTL for an incomplete chunk assembly before it is swept |
+| `prefill_target_ms` | integer | `100` | Wall-time budget for one tick of prompt processing **while more than one request is active** — the same limit as `prefill_chunk_tokens` but expressed in what a waiting request actually feels |
+| `encrypted_pipeline_auto` | boolean | `true` | Turn prompt privacy on automatically for any model where this node holds both the first and last shard, which is the only condition under which it can work. An explicit per-model or global `encrypted_pipeline` setting always wins |
+| `parallax_partial_ranges` | boolean | `false` | Let the router use only PART of a node's shard range, so a node holding a whole model can serve just one end of it. Off by default: the cost model charges a remote hop once per segment rather than per token, so it cannot see the round-trip penalty and over-splits |
 
 ## `[logging]` — Log Output
 
@@ -231,6 +241,7 @@ a tailnet — devices you authorised — which is why the LAN case stays opt-in.
 | `auto_switch_quants` | boolean | `true` | **R141 default flip**: auto-acquire the recommended quant variant when the recommender (R133) suggests a better one. Set `false` on metered links to keep the current quant |
 | `parallax_auto_rebalance` | boolean | `true` | Bias scoring toward Parallax allocator recommendations (C.2) |
 | `default_model_shard_cap` | integer | `0` | Max shards auto-manage acquires per model. `0` = unlimited |
+| `idle_unload_secs` | integer | `900` | Free a loaded model's GPU memory after this long with no local requests AND little demand for it elsewhere in the network. Shards stay on disk, so the model reloads on the next request |
 
 ## `[pool]` — Device Pool
 
@@ -243,6 +254,10 @@ a tailnet — devices you authorised — which is why the LAN case stays opt-in.
 | `private_mode` | bool | `false` | Restrict inference to pool members only. Toggleable at runtime via API/UI |
 | `private_mode_allow_lan` | bool | `true` | Also allow LAN peers (mDNS-discovered) when private mode is on |
 | `offline_mode` | bool | `false` | Air-gapped: no bootstrap peers, no HF downloads, mDNS-only discovery |
+| `state_diff_gossip` | boolean | `false` | Send pool membership changes as signed differences between full broadcasts, instead of always resending the whole member list |
+| `share_model_catalog` | boolean | `false` | Let the pool owner advertise which models the pool can serve, so other pools can discover it |
+| `share_model_catalog_min_members` | integer | `3` | Anonymity floor for the above: a pool smaller than this never publishes its catalog, whatever the flag says |
+| `allow_cross_pool_inference` | boolean | `false` | With `private_mode` also on, allow routing to another pool's members for a model that pool has advertised. Off means private mode stays strictly within your own devices |
 
 ## `[pool.credit_rates]` — Credit Rates
 
@@ -261,6 +276,7 @@ a tailnet — devices you authorised — which is why the LAN case stays opt-in.
 |---|---|---|---|
 | `auto_update` | string | `"disabled"` | Policy: `"disabled"`, `"stable"`, `"all"`. Default flipped to disabled in R88 (security — users opt in via `[updates] auto_update = "stable"`). |
 | `check_interval_hours` | integer | `6` | Update check frequency |
+| `include_prereleases` | boolean | `true` | Offer pre-release builds. Defaults on because every release so far is tagged `-alpha`, so excluding them would mean never seeing an update at all |
 
 ## `[identity]` — Your Identity
 
