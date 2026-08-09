@@ -168,6 +168,21 @@ pub(super) async fn handle_remote_generate_request(
     // coordinator, which stopped at the first (usage-less) one.
     let forward_net_tx = network_tx.clone();
     let forward_sender = sender_bytes.clone();
+    // Sequence number for the reply stream. Every token is an independent
+    // request_response send — one substream each — so the network gives NO
+    // ordering guarantee between them, and the coordinator used to stop at
+    // whichever token carrying a finish_reason arrived first, discarding
+    // anything still in flight. On a LAN the race is too narrow to see; at
+    // 6s RTT it truncated most replies (observed 2026-08-09 against a peer
+    // in another country: the same 2-token answer arrived as "", "ch" and
+    // "Cherry" on successive attempts).
+    //
+    // `token_id` has been on the wire since the type was introduced and was
+    // hardcoded to 0 at every send site. Filling it in is additive: a
+    // coordinator too old to look at it is unaffected, and a new coordinator
+    // treats an all-zero stream as unsequenced and behaves exactly as before.
+    let stream_seq = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let forward_seq = stream_seq.clone();
     let forward_task = tokio::spawn(async move {
         while let Some(evt) = token_rx.recv().await {
             // Skip events that carry a `finish_reason` — those are the
@@ -182,7 +197,7 @@ pub(super) async fn handle_remote_generate_request(
             }
             let token = StreamingToken {
                 request_id,
-                token_id: 0,
+                token_id: forward_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 finish_reason: None,
                 text: evt.text,
                 usage: None,
@@ -229,10 +244,16 @@ pub(super) async fn handle_remote_generate_request(
         tokens: served_tokens,
     });
 
+    // The done token carries how many content tokens were sent, so the
+    // coordinator can tell "the stream ended" from "the end overtook tokens
+    // still in flight". `forward_task` has been awaited above, so every send
+    // has been queued and the counter is final.
+    let streamed_count = stream_seq.load(std::sync::atomic::Ordering::Relaxed);
+
     let final_token = match gen_result {
         Ok(Ok(out)) => StreamingToken {
             request_id,
-            token_id: 0,
+            token_id: streamed_count,
             finish_reason: Some(match out.finish_reason.as_str() {
                 "stop" => NetworkFinishReason::Stop,
                 "length" => NetworkFinishReason::MaxTokens,
@@ -250,7 +271,7 @@ pub(super) async fn handle_remote_generate_request(
             tracing::warn!(%request_id, error = %e, "remote-generate worker error");
             StreamingToken {
                 request_id,
-                token_id: 0,
+                token_id: streamed_count,
                 finish_reason: Some(NetworkFinishReason::Error(e.to_string())),
                 text: String::new(),
                 usage: None,
@@ -262,7 +283,7 @@ pub(super) async fn handle_remote_generate_request(
             tracing::warn!(%request_id, error = %e, "remote-generate task join failed");
             StreamingToken {
                 request_id,
-                token_id: 0,
+                token_id: streamed_count,
                 finish_reason: Some(NetworkFinishReason::Error(format!("task join: {e}"))),
                 text: String::new(),
                 usage: None,

@@ -25,6 +25,110 @@ use super::PipelineExecutor;
 /// worth of tokens without blocking the inbound dispatch task.
 const REMOTE_GENERATE_TOKEN_CHANNEL_CAP: usize = 256;
 
+/// Reassembles the reply stream of a remote generation.
+///
+/// Each `StreamingToken` is an independent request_response send — one
+/// substream apiece — so the network gives no ordering guarantee between them
+/// and the terminal "done" token can arrive before content tokens still in
+/// flight. The coordinator used to stop at the first token carrying a
+/// `finish_reason` and discard the rest, which truncated replies from distant
+/// peers: measured 2026-08-09 against a peer at ~6s RTT, the same two-token
+/// answer came back as "", "ch" and "Cherry" on successive attempts, while
+/// `usage.completion_tokens` correctly said 2 every time (it rides on the done
+/// token, which always arrives).
+///
+/// `token_id` numbers the content tokens and the done token carries the total,
+/// so "the stream ended" and "the end overtook the middle" become
+/// distinguishable. A server too old to fill it in sends zeros throughout;
+/// `sequenced` stays false and delivery degrades to arrival order, which is
+/// exactly the previous behaviour.
+pub(super) struct StreamReassembler {
+    /// True once any token has carried a non-zero id — i.e. the peer sequences.
+    sequenced: bool,
+    /// Next sequence number that may be emitted.
+    next_seq: u32,
+    /// Tokens that arrived ahead of their turn.
+    pending: std::collections::BTreeMap<u32, swarmllm_types::StreamingToken>,
+    /// Content-token count from the done token, once it has arrived.
+    expected_total: Option<u32>,
+}
+
+impl StreamReassembler {
+    pub(super) fn new() -> Self {
+        Self {
+            sequenced: false,
+            next_seq: 0,
+            pending: std::collections::BTreeMap::new(),
+            expected_total: None,
+        }
+    }
+
+    /// Accept a content token; returns whatever is now emittable, in order.
+    ///
+    /// Only the consecutive run from `next_seq` is released. Emitting past a
+    /// gap would silently reorder the reply, which is worse than delaying it.
+    pub(super) fn push_content(
+        &mut self,
+        tok: swarmllm_types::StreamingToken,
+    ) -> Vec<swarmllm_types::StreamingToken> {
+        if tok.token_id > 0 {
+            self.sequenced = true;
+        }
+        let slot = if self.sequenced {
+            tok.token_id
+        } else {
+            self.next_seq
+        };
+        self.pending.insert(slot, tok);
+
+        let mut ready = Vec::new();
+        while let Some(t) = self.pending.remove(&self.next_seq) {
+            self.next_seq = self.next_seq.saturating_add(1);
+            ready.push(t);
+        }
+        ready
+    }
+
+    /// Record the done token's content-token total.
+    pub(super) fn mark_done(&mut self, total: u32) {
+        if total > 0 {
+            self.sequenced = true;
+        }
+        self.expected_total = Some(total);
+    }
+
+    /// Has the done token arrived?
+    pub(super) fn done_seen(&self) -> bool {
+        self.expected_total.is_some()
+    }
+
+    /// Every token accounted for — safe to finish.
+    ///
+    /// An unsequenced peer cannot tell us what to wait for, so its done token
+    /// completes the stream immediately, as it always did.
+    pub(super) fn is_complete(&self) -> bool {
+        match self.expected_total {
+            None => false,
+            Some(total) => !self.sequenced || self.next_seq >= total,
+        }
+    }
+
+    /// Tokens the peer says it sent that have not been emitted.
+    pub(super) fn missing(&self) -> u32 {
+        self.expected_total
+            .map(|t| t.saturating_sub(self.next_seq))
+            .unwrap_or(0)
+    }
+
+    pub(super) fn emitted(&self) -> u32 {
+        self.next_seq
+    }
+
+    pub(super) fn buffered(&self) -> usize {
+        self.pending.len()
+    }
+}
+
 /// Preconditions for the fast path. All checks are local and cheap.
 fn eligible(exec: &PipelineExecutor) -> bool {
     // Shared disqualifiers: TP, LoRA adapter, vision images.
@@ -101,6 +205,16 @@ pub(crate) fn estimate_prompt_tokens(prompt: &str) -> usize {
 /// Between-token timeout once generation has started. Generous to accommodate
 /// slow prefill-then-decode transitions on big models.
 const INTER_TOKEN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long to keep waiting for content tokens that the server has already
+/// sent but that have not arrived yet.
+///
+/// Every token is an independent request_response send, so the "done" token can
+/// overtake tokens still in flight. Once done arrives the server has finished,
+/// the stragglers are already on the wire, and this only has to cover transit —
+/// generous at any real RTT (the worst peer observed was ~6s), while bounding
+/// the wait when a send was genuinely dropped.
+const STRAGGLER_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl PipelineExecutor {
     /// Try the remote-generate fast path. Returns `Ok(None)` if preconditions
@@ -192,6 +306,9 @@ impl PipelineExecutor {
         let mut token_logprobs: Vec<swarmllm_types::TokenLogProbEntry> = Vec::new();
         let mut first = true;
 
+        // Reassembly of an unordered stream — see `StreamReassembler`.
+        let mut stream = StreamReassembler::new();
+
         loop {
             // Honor external cancel — same pattern as execute_distributed
             // line 174. Without this, a cancelled request keeps draining
@@ -218,7 +335,9 @@ impl PipelineExecutor {
                 finish_reason = "stop".to_string();
                 break;
             }
-            let timeout_dur = if first {
+            let timeout_dur = if stream.done_seen() {
+                STRAGGLER_TIMEOUT
+            } else if first {
                 first_token_budget
             } else {
                 INTER_TOKEN_TIMEOUT
@@ -242,6 +361,22 @@ impl PipelineExecutor {
                     break;
                 }
                 Err(_) => {
+                    // Waiting on stragglers after a done token is not a failed
+                    // request — the answer is complete up to the gap, and the
+                    // caller is better served by the prefix than by an error.
+                    // Only the consecutive run is kept: emitting past a hole
+                    // would silently reorder the reply, which is worse than a
+                    // short one.
+                    if stream.done_seen() {
+                        tracing::warn!(
+                            %request_id,
+                            emitted = stream.emitted(),
+                            missing = stream.missing(),
+                            buffered = stream.buffered(),
+                            "remote-generate: gave up on tokens that never arrived — returning what did"
+                        );
+                        break;
+                    }
                     self.shared_state.streaming_token_txs.remove(&request_id);
                     return Err(SwarmError::PipelineError(format!(
                         "remote-generate timed out waiting for token (first={first})"
@@ -300,6 +435,19 @@ impl PipelineExecutor {
                 if let Some(lp) = tok.logprob.clone() {
                     token_logprobs.push(lp);
                 }
+                // The done token says how many content tokens were sent. If any
+                // are still in flight, keep waiting rather than discarding
+                // them — stopping here is exactly the truncation this solves.
+                stream.mark_done(tok.token_id);
+                if !stream.is_complete() {
+                    tracing::debug!(
+                        %request_id,
+                        emitted = stream.emitted(),
+                        missing = stream.missing(),
+                        "remote-generate: done arrived before all tokens — waiting for stragglers"
+                    );
+                    continue;
+                }
                 if let Some(ref tx) = token_tx {
                     let _ = tx
                         .send(StreamingTokenEvent {
@@ -312,43 +460,71 @@ impl PipelineExecutor {
                 break;
             }
 
-            if let Some(lp) = tok.logprob.clone() {
-                token_logprobs.push(lp);
-            }
-
-            // Streaming token: append text + forward to SSE client.
-            if !tok.text.is_empty() {
-                content.push_str(&tok.text);
+            // Content token. Buffer by sequence and emit only the consecutive
+            // run starting at `next_seq`, so the text the user sees is in
+            // generation order even when the network delivers out of order.
+            // An unsequenced server has arrival order as its only order, so its
+            // tokens slot in at `next_seq` and emit immediately — unchanged
+            // behaviour.
+            let mut client_gone = false;
+            for t in stream.push_content(tok) {
+                if let Some(lp) = t.logprob.clone() {
+                    token_logprobs.push(lp);
+                }
+                if t.text.is_empty() {
+                    continue;
+                }
+                content.push_str(&t.text);
                 if let Some(ref tx) = token_tx {
                     if tx
                         .send(StreamingTokenEvent {
-                            text: tok.text,
+                            text: t.text,
                             finish_reason: None,
                             matched_stop_sequence: None,
                         })
                         .await
                         .is_err()
                     {
-                        tracing::info!(
-                            %request_id,
-                            "remote-generate: client disconnected — sending CancelInference"
-                        );
-                        // Tell the remote to stop its decode immediately so it
-                        // doesn't keep streaming tokens we'll discard.
-                        let _ = self
-                            .network_tx
-                            .send(NetworkCommand::SendDirectMessage {
-                                target_peer_bytes: target_peer_bytes.clone(),
-                                message: crate::types::SwarmMessage::CancelInference(
-                                    swarmllm_types::CancelInference { request_id },
-                                ),
-                                delivery_request_id: None,
-                            })
-                            .await;
-                        finish_reason = "stop".to_string();
+                        client_gone = true;
                         break;
                     }
                 }
+            }
+
+            if client_gone {
+                tracing::info!(
+                    %request_id,
+                    "remote-generate: client disconnected — sending CancelInference"
+                );
+                // Tell the remote to stop its decode immediately so it
+                // doesn't keep streaming tokens we'll discard.
+                let _ = self
+                    .network_tx
+                    .send(NetworkCommand::SendDirectMessage {
+                        target_peer_bytes: target_peer_bytes.clone(),
+                        message: crate::types::SwarmMessage::CancelInference(
+                            swarmllm_types::CancelInference { request_id },
+                        ),
+                        delivery_request_id: None,
+                    })
+                    .await;
+                finish_reason = "stop".to_string();
+                break;
+            }
+
+            // A done token that arrived early completes the request once the
+            // tokens it was waiting on have landed.
+            if stream.is_complete() {
+                if let Some(ref tx) = token_tx {
+                    let _ = tx
+                        .send(StreamingTokenEvent {
+                            text: String::new(),
+                            finish_reason: Some(finish_reason.clone()),
+                            matched_stop_sequence: matched_stop_seq.clone(),
+                        })
+                        .await;
+                }
+                break;
             }
         }
 
@@ -457,5 +633,129 @@ mod first_token_budget_tests {
         // A dead peer must still be detected in bounded time.
         assert_eq!(first_token_timeout(usize::MAX), FIRST_TOKEN_TIMEOUT_MAX);
         assert_eq!(first_token_timeout(10_000_000), FIRST_TOKEN_TIMEOUT_MAX);
+    }
+}
+
+#[cfg(test)]
+mod stream_reassembly_tests {
+    use super::StreamReassembler;
+    use swarmllm_types::StreamingToken;
+
+    fn content(id: u32, text: &str) -> StreamingToken {
+        StreamingToken {
+            request_id: uuid::Uuid::nil(),
+            token_id: id,
+            finish_reason: None,
+            text: text.to_string(),
+            usage: None,
+            matched_stop_sequence: None,
+            logprob: None,
+        }
+    }
+
+    fn joined(toks: Vec<StreamingToken>) -> String {
+        toks.into_iter().map(|t| t.text).collect()
+    }
+
+    /// The measured failure. A peer at ~6s RTT answered "Cherry" as two tokens,
+    /// and the done token — a separate request_response send with no ordering
+    /// relative to them — overtook both. The coordinator stopped there and
+    /// returned "", while `usage` correctly reported 2 completion tokens.
+    #[test]
+    fn a_done_token_that_overtakes_the_content_does_not_end_the_stream() {
+        let mut s = StreamReassembler::new();
+        s.mark_done(2);
+        assert!(
+            !s.is_complete(),
+            "the peer said it sent 2 tokens and none have arrived — finishing here \
+             is what truncated the reply"
+        );
+        assert_eq!(s.missing(), 2);
+
+        assert_eq!(joined(s.push_content(content(0, "Ch"))), "Ch");
+        assert!(!s.is_complete(), "still one token outstanding");
+
+        assert_eq!(joined(s.push_content(content(1, "erry"))), "erry");
+        assert!(s.is_complete(), "both tokens in — now the stream is done");
+    }
+
+    /// Content tokens race each other too, so arrival order is not text order.
+    #[test]
+    fn out_of_order_content_is_emitted_in_generation_order() {
+        let mut s = StreamReassembler::new();
+
+        // Token 1 wins the race; nothing may be emitted yet or the reply reads
+        // "erryCh".
+        assert!(s.push_content(content(1, "erry")).is_empty());
+        // Token 0 lands and releases both, in order.
+        assert_eq!(joined(s.push_content(content(0, "Ch"))), "Cherry");
+    }
+
+    /// A late token releases everything buffered behind it in one go.
+    #[test]
+    fn a_single_late_token_releases_the_whole_run_behind_it() {
+        let mut s = StreamReassembler::new();
+        assert!(s.push_content(content(3, "d")).is_empty());
+        assert!(s.push_content(content(1, "b")).is_empty());
+        assert!(s.push_content(content(2, "c")).is_empty());
+        assert_eq!(joined(s.push_content(content(0, "a"))), "abcd");
+    }
+
+    /// A peer on an older build sends `token_id: 0` for every token. It cannot
+    /// say what to wait for, so arrival order is the only order available and
+    /// its done token must finish the stream immediately — the behaviour that
+    /// shipped before sequencing existed.
+    #[test]
+    fn an_unsequenced_peer_still_streams_in_arrival_order_and_completes() {
+        let mut s = StreamReassembler::new();
+        assert_eq!(joined(s.push_content(content(0, "Ch"))), "Ch");
+        assert_eq!(joined(s.push_content(content(0, "erry"))), "erry");
+
+        s.mark_done(0);
+        assert!(
+            s.is_complete(),
+            "an old peer reports 0; waiting for tokens it will never number \
+             would hang every request it serves"
+        );
+    }
+
+    /// The first token legitimately carries id 0, so a stream is only known to
+    /// be sequenced once something non-zero shows up — including the done
+    /// token, which is what identifies a modern peer that sent exactly one.
+    #[test]
+    fn a_single_token_reply_is_recognised_as_sequenced_by_its_done_token() {
+        let mut s = StreamReassembler::new();
+        assert_eq!(joined(s.push_content(content(0, "Cherry"))), "Cherry");
+        s.mark_done(1);
+        assert!(s.is_complete());
+        assert_eq!(s.missing(), 0);
+    }
+
+    /// A modern peer that generated nothing at all still terminates.
+    #[test]
+    fn an_empty_reply_completes() {
+        let mut s = StreamReassembler::new();
+        s.mark_done(0);
+        assert!(s.is_complete());
+    }
+
+    /// Losing a token must not reorder what survives: the consecutive prefix is
+    /// returned and the tokens stranded behind the gap are reported, not
+    /// spliced in.
+    #[test]
+    fn a_permanent_gap_leaves_a_prefix_rather_than_a_scrambled_reply() {
+        let mut s = StreamReassembler::new();
+        assert_eq!(joined(s.push_content(content(0, "a"))), "a");
+        assert!(s.push_content(content(2, "c")).is_empty());
+        s.mark_done(3);
+
+        assert!(!s.is_complete());
+        assert_eq!(s.emitted(), 1);
+        assert_eq!(s.missing(), 2);
+        assert_eq!(
+            s.buffered(),
+            1,
+            "token 2 is held, never emitted out of order"
+        );
     }
 }
