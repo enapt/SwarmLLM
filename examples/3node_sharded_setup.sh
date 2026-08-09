@@ -2,9 +2,9 @@
 # SWARM-SPEC 3-node sharded cluster — forces distributed pipeline.
 #
 # Layout:
-#   Node A (port 8800): NO model. Pure coordinator/requester.
-#   Node B (port 8801): shard_000 only (layers 0-11). First segment holder.
-#   Node C (port 8802): shard_001 only (layers 12-21). Last segment holder.
+#   Node A (BENCH_PORT_A, default 8890): NO model. Pure coordinator/requester.
+#   Node B (BENCH_PORT_B, default 8891): shard_000 only (layers 0-11). First segment holder.
+#   Node C (BENCH_PORT_C, default 8892): shard_001 only (layers 12-21). Last segment holder.
 #
 # Inference requests to A force a 2-segment distributed pipeline
 # (B → C → result). This exercises Layer 0 (Q8_0 activation
@@ -45,12 +45,30 @@ fi
 # point at a different build (e.g. CUDA, llama feature).
 BINARY="${BINARY:-$(cd "$(dirname "$0")/.." && pwd)/target/release/swarmllm}"
 
-# Match any swarmllm binary, not just one literally named `swarmllm`.
-# Release downloads are named e.g. `swarmllm-linux-x86_64-cuda`, so the
-# old `killall -9 swarmllm` left a released node holding the ports and the
-# cluster then failed to bind with a bare transport error.
-pkill -9 -f '[s]warmllm(-[a-z0-9_.-]+)? run' 2>/dev/null || true
-killall -9 swarmllm 2>/dev/null || true
+# Ports for the throwaway cluster. Deliberately NOT 8800: that is the default
+# port a real node listens on, and this script used to stop and replace whatever
+# was there. Override if these collide with something.
+BENCH_PORT_A="${BENCH_PORT_A:-8890}"
+BENCH_PORT_B="${BENCH_PORT_B:-8891}"
+BENCH_PORT_C="${BENCH_PORT_C:-8892}"
+
+# Stop only the nodes THIS script owns — the ones on its own ports and data
+# directories. A broad `killall swarmllm` / `pkill -f swarmllm` takes down any
+# other node on the machine, including a production one: that happened on
+# 2026-08-09 and cost a live node serving the swarm (gotcha #283). Development
+# machines run more than one instance, always.
+stop_bench_node() {
+    local port="$1"
+    for p in $(pgrep -x swarmllm 2>/dev/null; pgrep -f '[s]warmllm-[a-z0-9_.-]* run' 2>/dev/null); do
+        if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -qE -- "(--port|-p) $port( |$)"; then
+            kill "$p" 2>/dev/null || true
+        fi
+    done
+}
+
+stop_bench_node "$BENCH_PORT_A"
+stop_bench_node "$BENCH_PORT_B"
+stop_bench_node "$BENCH_PORT_C"
 sleep 1
 
 for label in a b c; do
@@ -123,7 +141,7 @@ CFG
 done
 
 # Spawn nodes
-for label_port in a:8800 b:8801 c:8802; do
+for label_port in a:$BENCH_PORT_A b:$BENCH_PORT_B c:$BENCH_PORT_C; do
     label=${label_port%:*}
     port=${label_port#*:}
     DIR=/tmp/swarm_bench_$label
@@ -137,7 +155,7 @@ echo
 echo "Waiting 15s for mDNS discovery + shard announcements..."
 sleep 15
 
-for label_port in a:8800 b:8801 c:8802; do
+for label_port in a:$BENCH_PORT_A b:$BENCH_PORT_B c:$BENCH_PORT_C; do
     label=${label_port%:*}
     port=${label_port#*:}
     DIR=/tmp/swarm_bench_$label
@@ -148,4 +166,6 @@ for label_port in a:8800 b:8801 c:8802; do
 done
 
 echo
-echo "Done. To stop: pkill -9 -f '[s]warmllm.* run'"
+echo "Done. To stop these nodes only: for p in $BENCH_PORT_A $BENCH_PORT_B $BENCH_PORT_C; do
+  for pid in \$(pgrep -x swarmllm); do tr '\\0' ' ' < /proc/\$pid/cmdline | grep -q -- \"-p \$p\" && kill \$pid; done
+done"
