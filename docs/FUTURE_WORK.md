@@ -7906,3 +7906,36 @@ reaching the server) and **#278** (the books reconcile by construction, so
 reconciliation proves nothing). `GET /api/admin/credits/transactions` is what
 makes any of this observable; before v0.3.87 the movements were not recorded at
 all.
+
+
+## Shard removal can strand prompt privacy (found 2026-08-09, surfaced not fixed)
+
+`encrypted_pipeline` is per-model and requires this node to hold the model's
+first and last shard. If those shards go away afterwards, the flag stays on and
+**every request for that model fails**.
+
+The narrow paths are already guarded — `PUT .../encrypted-pipeline` refuses to
+enable it without the shards, auto-manage prune skips models that have it, and
+`delete_model` clears it — yet a live node reached the state anyway, so
+something removes shards without clearing the flag (`delete_shard` is the
+obvious candidate; it does not touch it).
+
+**Surfaced, not fixed.** `GET /api/admin/models` now reports
+`encrypted_pipeline_blocked` for exactly this case, and the scheduler error names
+the setting rather than only the missing shard. What is NOT decided is the
+policy:
+
+- **Clearing the flag automatically** discards a deliberate privacy choice, and
+  silently downgrading privacy is the worst possible default.
+- **Refusing the shard deletion** is defensible but blocks a user from freeing
+  disk on a model they no longer use.
+- **Warning at deletion time** ("this will stop prompt privacy working for X, and
+  requests for it will fail until you turn it off") is probably right, and needs
+  a UI string in 21 locales.
+
+Whichever is chosen, the dashboard should show the blocked state — the field is
+there now and nothing renders it yet.
+
+Related: gotcha **#286**, and the general lesson that a value masked by its own
+precondition must publish the unsatisfied case or the failure has no visible
+cause.
