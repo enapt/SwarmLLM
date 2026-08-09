@@ -2,6 +2,18 @@
 
 > **For contributors and developers.** This guide covers the internal diagnostic logging system used for debugging distributed inference, networking, and pipeline issues.
 
+> **Accuracy is enforced.** Every `DIAG:` marker listed here is checked against
+> the source by `every_documented_diag_line_exists_in_the_source` in
+> `tests/repo_consistency.rs` — a guide whose greps come back empty is worse than
+> no guide, because a failed grep looks exactly like the thing not happening.
+> 28 markers had been renamed or deleted out of the code before that check
+> existed (2026-08-09); rename or remove the entry when you change a log line.
+>
+> **Per-message network events are `debug`, not `info`** — `Received request`,
+> `DIAG: received response`, `DIAG: ResponseSent event` and `DIAG: rr_ping sent`
+> fire once per request_response message, which means once per streamed token
+> under load. Run with `-v` to see them. Failures stay at info/warn.
+
 All diagnostic log lines are prefixed with `DIAG:` for easy filtering.
 
 ## Start here: one line per request
@@ -118,7 +130,6 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 5. **Tensor forward send** → `DIAG: sent tensor forward via send_request` with `is_connected`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager/tensors.rs)
 6. **Codec write** → `DIAG: codec write_request start/done` with `frame_len` (protocol.rs)
 7. **Encryption (if enabled, R139)** → encrypt offloaded from event loop via `tokio::spawn`. Failure: `DIAG: tensor encrypt+encode failed — dropping forward` (manager/tensors.rs). On success the spawn task posts `NetworkCommand::SendEncodedTensor` back through `internal_cmd_tx`; the critical task then performs only the `send_request` step. Decode/decrypt offloaded symmetrically in the inbound path; failures log `DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption`
-8. **Remote receive** → `DIAG: codec read_request header` with `tag`, `len` (protocol.rs)
 9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: stored ResponseChannel` (manager/requests.rs)
 10. **Dispatcher** → `DIAG: dispatcher received LayerForward, spawning handler` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch/mod.rs)
 11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon/dispatch/layer_forward.rs)
@@ -126,7 +137,7 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 13. **Result send** → `DIAG: LayerForward processed via worker subprocess` with `tokens`, `activations_bytes`, `elapsed_ms`, `layer_start`, `layer_end` (daemon/dispatch/layer_forward.rs)
 14. **Response write** → `DIAG: codec write_response start/done` with `frame_len` (protocol.rs)
 15. **ResponseSent event** → `DIAG: ResponseSent event — response written to wire` (manager/events.rs)
-16. **Response read** → `DIAG: codec read_response header` with `tag`, `len` (protocol.rs)
+16. **Response read** → `DIAG: codec read_response done` with `tag`, `len` (protocol.rs)
 17. **Response received** → `DIAG: received response` with `kind`, `was_tensor_forward`, `pending_tensor_out` (manager/events.rs)
 18. **Response dispatch** → `DIAG: received TensorPayload response` (manager/requests.rs)
 19. **Result delivery** → `DIAG: dispatcher received LayerResult` → `DIAG: LayerResult delivered to pipeline` (daemon/dispatch/mod.rs)
@@ -150,7 +161,7 @@ histograms. Adding a field means adding it there once, not at each surface.
 | DEBUG | `DIAG: handling outbound command` — command type for every outbound command | manager/commands.rs |
 | INFO  | `DIAG: OutboundFailure` — `is_connected`, `pending_tensor_out`, `pending_channels` | manager/events.rs |
 | WARN  | `DIAG: InboundFailure` — `pending_channels` | manager/events.rs |
-| INFO  | `DIAG: ResponseSent event` — confirms response written to wire | manager/events.rs |
+| DEBUG | `DIAG: ResponseSent event` — confirms response written to wire. Per-message, so `-v`: at info these were three quarters of an idle node's log, and one line per streamed token under load | manager/events.rs |
 
 ### Failure Paths
 
@@ -175,9 +186,7 @@ All three streaming paths are instrumented with timing and error reporting:
 | WARN  | `DIAG: SSE role delta send failed` — client disconnected before stream started | api/openai/streaming.rs |
 | WARN  | `DIAG: SSE final text delta send failed` — client disconnected on last token | api/openai/streaming.rs |
 | WARN  | `DIAG: SSE finish delta send failed` — client disconnected at finish | api/openai/streaming.rs |
-| WARN  | `DIAG: SSE token delta send failed` — client disconnected mid-stream | api/openai/streaming.rs |
 | DEBUG | `DIAG: SSE stream no finish event from pipeline` — falling back to result_rx | api/openai/streaming.rs |
-| WARN  | `DIAG: SSE fallback content/finish/error send failed` — various fallback failures | api/openai/streaming.rs |
 | WARN  | `DIAG: SSE result_rx channel dropped` — pipeline task died | api/openai/streaming.rs |
 | INFO  | `DIAG: SSE distributed stream completed` — `elapsed_ms`, `token_count` | api/openai/streaming.rs |
 
@@ -187,7 +196,7 @@ All three streaming paths are instrumented with timing and error reporting:
 |-------|------|-------|
 | DEBUG | `DIAG: split stream model not found` — model evicted during request | api/openai/streaming.rs |
 | DEBUG | `DIAG: split stream decode loop complete (subprocess)` — `decode_ms`, `tok_per_sec` | api/openai/streaming.rs |
-| WARN  | `DIAG: split stream client disconnected mid-decode` — `token_count`, `elapsed_ms` | api/openai/streaming.rs |
+| WARN  | `DIAG: split stream client disconnected (connection closed) — cancelling decode` — `token_count`, `elapsed_ms` | api/openai/streaming.rs |
 | INFO  | `DIAG: split stream completed` — `elapsed_ms`, `token_count` | api/openai/streaming.rs |
 
 ### Local Executor Streaming (stream_response)
@@ -205,11 +214,10 @@ The encrypted tensor path logs at multiple levels:
 
 | Level | What | Where |
 |-------|------|-------|
-| DEBUG | `DIAG: encrypting tensor forward` — AAD length, session state | manager/tensors.rs |
 | DEBUG | `DIAG: decrypting tensor` — AAD length, sealed length, session existence | manager/tensors.rs |
 | TRACE | `DIAG: seal() success` — nonce counter, ciphertext length | session.rs |
 | TRACE | `DIAG: open() decryption success` — nonce, plaintext length | session.rs |
-| ERROR | `DIAG: seal() failed` — full context on encryption failure | manager/tensors.rs |
+| ERROR | `DIAG: seal() encryption failed` — full context on encryption failure | manager/tensors.rs |
 | ERROR | `DIAG: decrypt FAILED` — AAD mismatch, key mismatch, or corruption | manager/tensors.rs, session.rs |
 | ERROR | `DIAG: open() decryption FAILED` — nonce state, AAD/sealed lengths | session.rs |
 
@@ -280,10 +288,10 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 
 | Level | What | Where |
 |-------|------|-------|
-| ERROR | `DIAG: request tensor decompression failed` — zstd decompress error | protocol.rs |
-| ERROR | `DIAG: response tensor decompression failed` — zstd decompress error | protocol.rs |
-| DEBUG | `DIAG: request tensor decompressed` — `compressed_len`, `decompressed_len`, `ratio` | protocol.rs |
-| DEBUG | `DIAG: response tensor decompressed` — `compressed_len`, `decompressed_len`, `ratio` | protocol.rs |
+| ERROR | `DIAG: {label} tensor decompression failed` — zstd decompress error | protocol.rs |
+| ERROR | `DIAG: {label} tensor decompression failed` — zstd decompress error | protocol.rs |
+| DEBUG | `DIAG: {label} tensor decompressed` — `compressed_len`, `decompressed_len`, `ratio` | protocol.rs |
+| DEBUG | `DIAG: {label} tensor decompressed` — `compressed_len`, `decompressed_len`, `ratio` | protocol.rs |
 
 ## KV-Cache Diagnostics
 
@@ -326,7 +334,7 @@ The `elapsed_ms` field appears at multiple points:
 5. `DIAG: forward_through_segments completed` — total pipeline forwarding time
 6. `DIAG: execute_request completed successfully` — `schedule_ms` (pipeline assembly) + `execute_ms` (pipeline execution)
 7. `DIAG: split stream decode loop complete (subprocess)` — decode time with `tok_per_sec`
-8. `DIAG: inference completed` — total end-to-end time
+8. `DIAG: request complete` — total end-to-end time
 
 If `schedule_ms` is high, the bottleneck is pipeline assembly. If `execute_ms` is high but individual `segment_ms` values are low, the bottleneck is inter-segment overhead. If a single segment is slow, check that node's compute or network latency.
 
@@ -335,7 +343,7 @@ If `schedule_ms` is high, the bottleneck is pipeline assembly. If `execute_ms` i
 Common causes:
 - **Timeout-then-failover**: A segment times out at 30s, then failover succeeds quickly → ~30s total. Check for `DIAG: segment TIMED OUT` followed by `DIAG: failing over to standby`.
 - **Connection not established**: Tensor sent to a peer that's not connected. Check `is_connected=false` in `Sent tensor forward` logs.
-- **Encryption failure + fallback**: Encrypted send fails, falls back to plaintext, which also fails. Check for `DIAG: seal() failed` logs.
+- **Encryption failure + fallback**: Encrypted send fails, falls back to plaintext, which also fails. Check for `DIAG: seal() encryption failed` logs.
 - **Channel backpressure**: Result arrives but the dispatcher channel is full. Check for `Outbound channel full, dropping tensor result`.
 - **SSE fallback path**: If `DIAG: SSE stream no finish event from pipeline` appears, the streaming token channel broke and the system fell back to waiting for the full result — check pipeline errors above.
 
@@ -448,7 +456,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: speculative record_batch` | `drafted`, `accepted`, `acceptance_rate` |
+| DEBUG | `DIAG: speculative batch` | `drafted`, `accepted`, `acceptance_rate` |
 
 ### Vision (vision.rs + pipeline/mod.rs + daemon/dispatch/mod.rs)
 
@@ -458,9 +466,6 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | DEBUG | `DIAG: merge_vision_text_embeddings` | `text_seq`, `num_vision`, `hidden`, `positions` |
 | INFO  | `DIAG: precompute_vision_embeddings local` | `image_count`, `compressed_bytes` |
 | INFO  | `DIAG: precompute_vision_embeddings remote` | `remote_node` |
-| INFO  | `DIAG: handle_vision_encode_request` | `model_id`, `image_bytes`, `elapsed_ms` |
-| DEBUG | `DIAG: select_vision_node` | `local`, `first_segment`, `any_holder` |
-| WARN  | `DIAG: vision encode timeout` | `node`, `timeout_secs` |
 
 ### Chat Template (chat_template.rs)
 
@@ -501,14 +506,13 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: load_adapter` | `adapter_path`, `rank`, `alpha`, `target_modules` |
+| INFO  | `DIAG: lora adapter loaded` | `adapter_path`, `rank`, `alpha`, `target_modules` |
 
 ### Acquisition (acquisition.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
 | INFO  | `DIAG: handle_acquire` | `model`, `needed_shards` |
-| DEBUG | `DIAG: select_best_peer` | `eligible_peers`, `selected_peer` |
 
 ### Auto-Manage (auto_manage/)
 
@@ -543,7 +547,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: resolve_provider` | `model_id`, `resolved_provider` |
+| DEBUG | `DIAG: provider resolution` | `model_id`, `resolved_provider` |
 
 ### WebSocket (websocket.rs)
 
@@ -623,19 +627,18 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: record_transaction` | `tx_type`, `delta`, `new_balance` |
 
 ### Escrow (escrow.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: create_escrow` / `DIAG: release_escrow` | `tx_id`, `amount`, `state` |
+| INFO  | `DIAG: escrow created` / `DIAG: escrow release` | `tx_id`, `amount`, `state` |
 
 ### Trust (trust.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: update_trust` | `node`, `score_delta`, `new_score` |
+| DEBUG | `DIAG: trust score update` | `node`, `score_delta`, `new_score` |
 
 ## Crypto Subsystem Diagnostics
 
@@ -643,15 +646,13 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: key rotation eviction tick` | `active_sessions`, `stale_evicted` |
-| DEBUG | `DIAG: key rotation re-keying tick` | `active_sessions`, `rekey_initiated` |
+| DEBUG | `DIAG: key rotation tick (eviction)` | `active_sessions`, `stale_evicted` |
+| DEBUG | `DIAG: key rotation tick (re-keying)` | `active_sessions`, `rekey_initiated` |
 
 ### Key Exchange (manager/identify.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: key exchange initiated` | `peer` |
-| INFO  | `DIAG: key exchange completed` | `peer`, `elapsed_ms` |
 
 ## Infrastructure Diagnostics
 
@@ -665,7 +666,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: load identity` | `path` |
+| INFO  | `DIAG: identity key loaded from disk` | `path` |
 
 ### Peer Cache (peer_cache.rs)
 

@@ -140,7 +140,13 @@ impl NetworkManager {
                         SwarmRequest::PrefixKvFetch(_) => "prefix_kv_fetch",
                         SwarmRequest::RelayedTensor(_) => "relayed_tensor",
                     };
-                    tracing::info!(%peer, kind, "Received request");
+                    // debug, not info: this fires for EVERY request_response
+                    // message, and during inference every streamed token is
+                    // one. At info an idle node spent three quarters of its
+                    // log on these three lines, and a 500-token reply added
+                    // ~1500 more. Failures below stay at info/warn — those are
+                    // what an operator needs without asking.
+                    tracing::debug!(%peer, kind, "Received request");
                     self.handle_request(peer, request, channel).await;
                 }
                 request_response::Message::Response {
@@ -155,7 +161,7 @@ impl NetworkManager {
                         SwarmResponse::PrefixKvData(_) => "prefix_kv_data",
                     };
                     let was_tensor = self.pending_tensor_outbound.contains_key(&request_id);
-                    tracing::info!(
+                    tracing::debug!(
                         %peer,
                         kind,
                         ?request_id,
@@ -338,7 +344,7 @@ impl NetworkManager {
                     peer, request_id, ..
                 },
             )) => {
-                tracing::info!(%peer, ?request_id, "DIAG: ResponseSent event — response written to wire");
+                tracing::debug!(%peer, ?request_id, "DIAG: ResponseSent event — response written to wire");
             }
 
             // ── GossipSub peer subscribed — flush matching buffered messages (NET-I4) ──

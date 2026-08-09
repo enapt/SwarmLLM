@@ -1185,7 +1185,7 @@ impl NetworkManager {
                                 let req = SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest));
                                 let outbound_id = self.swarm.behaviour_mut().request_response.send_request(peer_id, req);
                                 self.ping_sent_times.insert(outbound_id, (*peer_id, std::time::Instant::now()));
-                                tracing::info!(
+                                tracing::debug!(
                                     %peer_id,
                                     ?outbound_id,
                                     seq = rr_ping_seq,

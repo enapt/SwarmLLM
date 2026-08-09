@@ -1321,3 +1321,78 @@ fn per_request_state_is_released_in_one_place() {
         offenders.join("\n")
     );
 }
+
+/// Every `DIAG:` line the diagnostics guide tells you to grep for must exist.
+///
+/// `docs/DIAGNOSTICS.md` is a list of greppable markers; its whole value is that
+/// searching for one finds something. 30 of 147 had been renamed or deleted out
+/// of the code (measured 2026-08-09), so one lookup in five sent the reader
+/// hunting for a string that was not there — and silently, because a failed
+/// grep looks exactly like the thing not happening (gotcha #228).
+///
+/// A `start/done` pair in the doc means two lines in the source; both are
+/// checked.
+#[test]
+fn every_documented_diag_line_exists_in_the_source() {
+    let root = repo_root();
+    let doc = std::fs::read_to_string(root.join("docs/DIAGNOSTICS.md")).expect("read DIAGNOSTICS");
+
+    let mut src = String::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                if let Ok(t) = std::fs::read_to_string(&p) {
+                    src.push_str(&t);
+                }
+            }
+        }
+    }
+
+    // Pull `DIAG: ...` out of backticks.
+    let mut claims: Vec<String> = Vec::new();
+    for (i, _) in doc.match_indices("`DIAG: ") {
+        let rest = &doc[i + 1..];
+        if let Some(end) = rest.find('`') {
+            claims.push(rest[..end].to_string());
+        }
+    }
+    claims.sort();
+    claims.dedup();
+    assert!(
+        claims.len() > 50,
+        "parsed only {} DIAG markers — the doc format moved and this checks nothing",
+        claims.len()
+    );
+
+    let mut missing: Vec<String> = Vec::new();
+    for claim in &claims {
+        // Drop the prose the doc appends after an em dash.
+        let core = claim.split('—').next().unwrap_or(claim).trim();
+        // `foo start/done` documents two source lines.
+        let probes: Vec<String> = match core.rsplit_once(" start/done") {
+            Some((head, _)) => vec![format!("{head} start"), format!("{head} done")],
+            None => vec![core.to_string()],
+        };
+        for probe in probes {
+            if !probe.is_empty() && !src.contains(&probe) {
+                missing.push(probe);
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "docs/DIAGNOSTICS.md points at {} log line(s) that no longer exist.\n\
+         A guide whose greps come back empty is worse than no guide — rename or \
+         remove the entry when the line changes.\n  {}",
+        missing.len(),
+        missing.join("\n  ")
+    );
+}
