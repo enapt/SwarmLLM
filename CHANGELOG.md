@@ -4,7 +4,7 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-**Serving several people at once is up to twice as fast, because it was never
+**Serving several people at once is up to 2.4x faster, because it was never
 actually serving them together.** SwarmLLM can answer several conversations in
 one pass instead of one at a time, and that path required everyone in the batch
 to be at the same point with the same amount of history behind them. Concurrent
@@ -15,21 +15,30 @@ a live node with four concurrent requests it was taken **0 times out of 156**.
 Both conditions only protect work done while reading a prompt, not while writing
 a reply, so they now apply only where they are needed.
 
-Measured with the change switched on and off inside one build, four concurrent
-conversations of different lengths:
+The plainest way to see it, on an NVIDIA graphics card with conversations of
+different lengths — total words per second across everyone being served:
 
-| | before | after |
+| people being served | before | after |
 |---|---|---|
-| NVIDIA graphics card | 40.3 | **80.0 tok/s** |
-| processor only | 5.2 | **6.6 tok/s** |
+| 1 | 38.2 | 38.2 tok/s |
+| 4 | 40.3 | **80.0 tok/s** |
+| 8 | 36.9 | **89.6 tok/s** |
 
-The graphics-card figures come with a control: repeat the run with all four
-conversations the *same* length — the shape that always batched — and the
-setting does nothing, 78.2 against 77.0 tok/s. That 1.5% is what "no effect"
-looks like on this machine, against the 99% above.
+**Serving eight people used to produce no more total throughput than serving
+one.** That is the whole defect: everyone waited in turn. The gain now grows
+with load rather than levelling off — 2.4x at eight.
+
+On a processor the same four-way test goes 5.2 to 6.6 tok/s; the gain is smaller
+there because a single conversation already keeps the cores busy.
+
+The figures come with a control: repeat the run with every conversation the
+*same* length — the shape that always batched — and the setting does nothing,
+78.2 against 77.0 tok/s. That 1.5% is what "no effect" looks like on this
+machine, against the 143% above.
 
 Single conversations are unchanged; this only affects a node serving more than
-one person at a time.
+one person at a time. (The 1-user and 8-user rows share a prompt length and are
+directly comparable; the 4-user row was measured separately at a longer one.)
 
 **A node that the internet can reach no longer reports itself as unreachable.**
 SwarmLLM works out whether other people can reach you by asking peers to dial
