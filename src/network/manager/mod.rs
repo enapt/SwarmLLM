@@ -48,6 +48,19 @@ const MAX_TENSOR_FORWARD_SECS: u64 = behaviour::RR_REQUEST_TIMEOUT_SECS;
 /// 10s is generous on LAN (sub-millisecond ACKs in practice) but short enough
 /// to convert a 2-minute hang into a 10-second retry window.
 const RR_ACK_TIMEOUT_SECS: u64 = 10;
+/// Headroom over a peer's measured round trip before its ACK is treated as lost.
+///
+/// The floor above was chosen on a LAN, where ACKs are sub-millisecond, and is a
+/// fixed deadline on a quantity that varies by three orders of magnitude across
+/// real peers — the shape `.claude/rules/architecture.md` § "Timeouts: bound
+/// what actually varies" exists to prevent. A peer 6 seconds away has almost no
+/// margin under it, and one such peer produced a spurious
+/// "peer never acknowledged" on a request it was answering perfectly well
+/// (observed 2026-08-09).
+const RR_ACK_RTT_HEADROOM: u32 = 3;
+/// Ceiling on the scaled ACK deadline, so a nonsense latency reading cannot
+/// disable the sweep this constant exists to drive.
+const RR_ACK_TIMEOUT_MAX_SECS: u64 = 90;
 /// libp2p swarm idle connection timeout. Connections with no traffic for this long are closed.
 const IDLE_CONNECTION_TIMEOUT_SECS: u64 = 120;
 /// Interval for periodic PEX ping health checks. Keeps the outbound queue shallow so
@@ -147,6 +160,11 @@ const REDIAL_BACKOFF_MS: [u64; MAX_REDIAL_ATTEMPTS as usize] =
     [5_000, 15_000, 45_000, 120_000, 300_000];
 /// Cap on `redial_attempts` so a churn storm cannot grow it without bound.
 const MAX_REDIAL_TRACKED_PEERS: usize = 256;
+
+/// One tracked outbound rr send: a label for logging, when it went out, and —
+/// when a streaming caller is blocked on it — that caller's request id together
+/// with the ACK deadline sized for the peer it was sent to.
+type PendingRrSend = (String, std::time::Instant, Option<(uuid::Uuid, u64)>);
 
 /// Consecutive request/response failures to one peer before the connection is
 /// closed as unusable.
@@ -326,15 +344,17 @@ pub struct NetworkManager {
     pending_tensor_result_outbound: HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant)>,
     /// Track outbound rr-message sends. Three uses:
     /// 1. Attribute OutboundFailure events to a label for logging.
-    /// 2. Stale-sweep: any entry older than `RR_ACK_TIMEOUT_SECS` indicates
-    ///    libp2p never delivered the message (silent-drop case observed
-    ///    under load — neither Response nor OutboundFailure fires).
-    /// 3. When the third value is `Some(uuid)`, the entry corresponds to a
-    ///    streaming caller (typically remote-generate fast path) whose
-    ///    `streaming_token_txs[uuid]` should be closed on stale/failure so
-    ///    the caller fails fast instead of waiting 120s for first-token.
-    pending_rr_observability:
-        HashMap<OutboundRequestId, (String, std::time::Instant, Option<uuid::Uuid>)>,
+    /// 2. Stale-sweep: an entry older than its ACK deadline indicates libp2p
+    ///    never delivered the message (silent-drop case observed under load —
+    ///    neither Response nor OutboundFailure fires).
+    /// 3. When the third value is `Some((uuid, deadline_secs))`, the entry
+    ///    corresponds to a streaming caller (typically remote-generate fast
+    ///    path) whose `streaming_token_txs[uuid]` should be closed on
+    ///    stale/failure so the caller fails fast instead of waiting 120s for
+    ///    first-token. The deadline is sized for that specific peer at send
+    ///    time by `NetworkManager::ack_deadline_secs`, because the ACK is a
+    ///    round trip and a fixed one declares a distant peer dead.
+    pending_rr_observability: HashMap<OutboundRequestId, PendingRrSend>,
     /// Suppression state for repeated identical rr failures, keyed by
     /// (peer, message label).
     ///
@@ -1219,14 +1239,14 @@ impl NetworkManager {
                     // so it sees Err immediately. Untracked entries (label-
                     // only) keep the existing long sweep window.
                     let now = std::time::Instant::now();
-                    let mut closed_streaming: Vec<uuid::Uuid> = Vec::new();
+                    let mut closed_streaming: Vec<(uuid::Uuid, u64)> = Vec::new();
                     self.pending_rr_observability
                         .retain(|_id, (_label, inserted, delivery_uuid)| {
                             let age = now.duration_since(*inserted).as_secs();
                             match delivery_uuid {
-                                Some(uuid) => {
-                                    if age >= RR_ACK_TIMEOUT_SECS {
-                                        closed_streaming.push(*uuid);
+                                Some((uuid, deadline)) => {
+                                    if age >= *deadline {
+                                        closed_streaming.push((*uuid, *deadline));
                                         false
                                     } else {
                                         true
@@ -1235,11 +1255,11 @@ impl NetworkManager {
                                 None => age < MAX_TENSOR_FORWARD_SECS,
                             }
                         });
-                    for uuid in closed_streaming {
+                    for (uuid, deadline) in closed_streaming {
                         if self.shared_state.streaming_token_txs.remove(&uuid).is_some() {
                             tracing::warn!(
                                 request_id = %uuid,
-                                ack_timeout_secs = RR_ACK_TIMEOUT_SECS,
+                                ack_timeout_secs = deadline,
                                 "DIAG: rr ACK timeout — closing streaming caller (silent-drop suspected)"
                             );
                         }

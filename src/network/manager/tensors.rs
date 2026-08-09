@@ -844,15 +844,50 @@ impl NetworkManager {
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
+        // Size the ACK deadline for THIS peer. A caller blocked on the reply is
+        // failed fast when the send is silently dropped, and the whole value of
+        // that depends on not also failing a peer that is merely far away.
+        let deadline = self.ack_deadline_secs(&peer_id);
         self.pending_rr_observability.insert(
             req_id,
             (
                 label.to_string(),
                 std::time::Instant::now(),
-                delivery_request_id,
+                delivery_request_id.map(|u| (u, deadline)),
             ),
         );
     }
+
+    /// How long to wait for a peer's ACK before treating the send as dropped.
+    ///
+    /// `RR_ACK_TIMEOUT_SECS` is the floor, so nothing changes on a LAN. Beyond
+    /// that it scales with the round trip we have actually measured to this
+    /// peer, because the ACK IS a round trip: a fixed 10s deadline gives a peer
+    /// 6 seconds away almost no margin, and declared one such peer dead on a
+    /// request it was answering correctly. Capped so an implausible latency
+    /// reading cannot switch the sweep off.
+    fn ack_deadline_secs(&self, peer_id: &libp2p::PeerId) -> u64 {
+        let rtt_ms = crate::network::transport::peer_id_to_node_id(peer_id)
+            .and_then(|nid| {
+                self.shared_state
+                    .peer_registry
+                    .get(&nid)
+                    .and_then(|p| p.latency_ms)
+            })
+            .unwrap_or(0);
+        ack_deadline_from_rtt(rtt_ms)
+    }
+}
+
+/// Turn a measured round trip into an ACK deadline.
+///
+/// Split out from the lookup so it can be tested without a swarm. An unknown
+/// latency (`0`) yields the floor, which is what a freshly-connected peer gets
+/// before its first ping lands — generous is the safe direction, since being
+/// wrong means failing a request the peer was answering correctly.
+fn ack_deadline_from_rtt(rtt_ms: u32) -> u64 {
+    let scaled = (rtt_ms.saturating_mul(super::RR_ACK_RTT_HEADROOM) as u64).div_ceil(1000);
+    scaled.clamp(super::RR_ACK_TIMEOUT_SECS, super::RR_ACK_TIMEOUT_MAX_SECS)
 }
 
 /// Resolve the `pending_layer_results` waiter for `request_id` with a
@@ -873,4 +908,47 @@ pub(crate) fn fail_pending_forward(
     let result = crate::types::LayerResult::error(request_id, reason.into());
     let sender = crate::network::transport::peer_id_to_node_id(target_peer);
     shared_state.resolve_pending_layer_result(sender.as_ref(), result);
+}
+
+#[cfg(test)]
+mod ack_deadline_tests {
+    use super::ack_deadline_from_rtt;
+    use crate::network::manager::{RR_ACK_TIMEOUT_MAX_SECS, RR_ACK_TIMEOUT_SECS};
+
+    /// A LAN peer must be unaffected — the fast-fail this deadline drives is
+    /// worth having, and nothing about it was wrong at 1ms.
+    #[test]
+    fn a_nearby_peer_keeps_the_floor() {
+        assert_eq!(ack_deadline_from_rtt(1), RR_ACK_TIMEOUT_SECS);
+        assert_eq!(ack_deadline_from_rtt(12), RR_ACK_TIMEOUT_SECS);
+        assert_eq!(ack_deadline_from_rtt(600), RR_ACK_TIMEOUT_SECS);
+    }
+
+    /// The case that produced a false "peer never acknowledged": a peer ~6s
+    /// away had under twice its round trip to answer in, against a deadline
+    /// chosen when ACKs were sub-millisecond.
+    #[test]
+    fn a_distant_peer_gets_room_for_its_round_trip() {
+        let d = ack_deadline_from_rtt(6278);
+        assert!(
+            d > RR_ACK_TIMEOUT_SECS,
+            "a 6.3s round trip must not be judged against a 10s deadline"
+        );
+        assert!(d >= 18, "expected roughly 3x the round trip, got {d}");
+    }
+
+    /// An implausible reading must not switch the sweep off — the sweep is what
+    /// turns a silent drop into a fast failure instead of a two-minute hang.
+    #[test]
+    fn an_absurd_latency_is_capped() {
+        assert_eq!(ack_deadline_from_rtt(u32::MAX), RR_ACK_TIMEOUT_MAX_SECS);
+        assert_eq!(ack_deadline_from_rtt(600_000), RR_ACK_TIMEOUT_MAX_SECS);
+    }
+
+    /// Never measured yet — take the floor rather than zero, which would fail
+    /// every send to a peer we have not pinged.
+    #[test]
+    fn an_unknown_latency_takes_the_floor() {
+        assert_eq!(ack_deadline_from_rtt(0), RR_ACK_TIMEOUT_SECS);
+    }
 }

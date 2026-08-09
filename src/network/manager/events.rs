@@ -285,7 +285,7 @@ impl NetworkManager {
                     }
                     // Close the streaming caller's channel immediately so it
                     // sees the failure now, not after FIRST_TOKEN_TIMEOUT.
-                    if let Some(uuid) = delivery_uuid {
+                    if let Some((uuid, _deadline)) = delivery_uuid {
                         self.shared_state.streaming_token_txs.remove(&uuid);
                     }
                 }
