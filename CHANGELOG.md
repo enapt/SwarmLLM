@@ -28,8 +28,13 @@ different lengths — total words per second across everyone being served:
 one.** That is the whole defect: everyone waited in turn. The gain now grows
 with load rather than levelling off — 2.4x at eight.
 
-On a processor the same four-way test goes 5.2 to 6.6 tok/s; the gain is smaller
-there because a single conversation already keeps the cores busy.
+**On a processor the gain is real but much smaller, and it does not grow with
+load** — four conversations go 5.2 to 6.6 tok/s, and eight go 1.9 to 2.2, so if
+your node is processor-only expect something in the range of 1.1x to 1.3x rather
+than the figures above. The reason is that a processor is already close to its
+memory limit serving one conversation, so there is little idle capacity for
+batching to reclaim; a graphics card at one conversation is mostly waiting, and
+that is the headroom this recovers.
 
 The figures come with a control: repeat the run with every conversation the
 *same* length — the shape that always batched — and the setting does nothing,
