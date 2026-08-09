@@ -2,14 +2,34 @@
 
 Every configuration option, organized by section.
 
+## When a change takes effect
+
+Settings changed through the dashboard (or by editing this file and calling
+`POST /api/admin/config/reload`) apply to the running node immediately. You do
+not need to restart for a resource limit, a contribution level, an auto-manage
+threshold, or a batching setting to matter.
+
+Three things are decided once, when the node starts, and keep their startup
+value until it starts again:
+
+| Setting | Why |
+|---|---|
+| `[network] max_peers` (and the contribution level it derives from) | Connection limits are fixed when the peer-to-peer network is built |
+| `[resources] max_cpu_threads` for an **already-loaded** model | Threads are handed to a model's worker when it loads; taking them back would interrupt whatever it is answering. The next model to load uses the new value |
+| `[updates] mode` | The update checker is started, or not, at launch |
+
+Everything else is live. Before v0.3.88 none of it was: a setting would save,
+report success, show its new value, and leave the running node on the value it
+booted with.
+
 ## `[node]` — Basic Node Settings
 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `listen_port` | integer | `8800` | Port for web dashboard and P2P networking |
 | `data_dir` | path | Platform-specific | Where SwarmLLM stores data |
-| `contribution` | string | `"minimal"` | Resource contribution: `"minimal"`, `"moderate"`, `"maximum"` |
-| `contribution_auto` | boolean | `true` | R121: auto-scale contribution at swarm saturation. Read at runtime via the `state.models.contribution_auto` AtomicBool so the Settings panel can flip Auto/Manual without a daemon restart. |
+| `contribution` | string | `"minimal"` | Resource contribution: `"minimal"`, `"moderate"`, `"maximum"`. Applies without a restart, except for the two startup-fixed items noted above |
+| `contribution_auto` | boolean | `true` | Auto-scale contribution at swarm saturation. Applies without a restart |
 
 ## `[resources]` — Resource Limits
 

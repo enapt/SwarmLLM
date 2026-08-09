@@ -1006,7 +1006,7 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         // Runtime value, same reason. Paired with `dashboard_on_overlay` so the
         // settings panel can say whether the overlay path is actually in play
         // on this node rather than just offering an abstract switch.
-        "dashboard_trust_lan": state.shared_state.dashboard_trust_lan.load(std::sync::atomic::Ordering::Relaxed),
+        "dashboard_trust_lan": state.shared_state.cfg().api.dashboard_trust_lan,
         "dashboard_trust_overlay": config.api.dashboard_trust_overlay,
         "dashboard_on_overlay": crate::api::dashboard_trust::node_is_on_overlay(&state.shared_state),
         // Effective, not raw: a config predating the `mode` key reports what it
@@ -1072,14 +1072,6 @@ pub async fn update_config(
     }
     if let Some(auto) = body.contribution_auto {
         config.node.contribution_auto = auto;
-        // Mirror to the runtime atomic so prune.rs picks it up on the
-        // next tick without a daemon restart. Persisted-config side is
-        // for restart durability only.
-        state
-            .shared_state
-            .models
-            .contribution_auto
-            .store(auto, std::sync::atomic::Ordering::Release);
     }
     if let Some(max_reqs) = body.max_concurrent_requests {
         config.inference.max_concurrent_requests = max_reqs.clamp(1, MAX_CONCURRENT_REQUESTS_CAP);
@@ -1182,15 +1174,10 @@ pub async fn update_config(
         }
     }
     if let Some(trust_lan) = body.dashboard_trust_lan {
-        // Same pattern: persist for restart durability AND mirror to the
-        // runtime atomic, because this setting's whole purpose is to make a
-        // dashboard reachable that currently isn't — a restart requirement
-        // would defeat it.
+        // Goes live with the whole config at the end of this handler — which
+        // matters especially here, since this setting's whole purpose is to
+        // make a dashboard reachable that currently isn't.
         config.api.dashboard_trust_lan = trust_lan;
-        state
-            .shared_state
-            .dashboard_trust_lan
-            .store(trust_lan, std::sync::atomic::Ordering::Release);
         tracing::info!(
             enabled = trust_lan,
             "Dashboard local-network trust changed via admin API"

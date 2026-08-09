@@ -29,6 +29,9 @@ Single Rust binary, three simultaneous functions:
 │  ┌────┴───────────────┴─────────────────┴─────────────┐  │
 │  │              Shared State (Arc)                     │  │
 │  │                                                     │  │
+│  │  config      — boot-time snapshot (startup only)    │  │
+│  │  live_config — current config, read via cfg()       │  │
+│  │                                                     │  │
 │  │  ┌─ EventBus (state.events) ──────────────────────┐ │  │
 │  │  │  broadcast::Sender<ActivityEvent> (cap 256)    │ │  │
 │  │  │  broadcast::Sender<DashboardSignal> (cap 32)   │ │  │
@@ -46,7 +49,6 @@ Single Rust binary, three simultaneous functions:
 │  │  │  auto_manage_*, model_trust, locked_shards     │ │  │
 │  │  │  prune_history, download_cancel_flags          │ │  │
 │  │  │  wishlist (R111), hf_trending_cache (R112)     │ │  │
-│  │  │  contribution_auto (R121)                      │ │  │
 │  │  │  foreign_wishlist (R130)                       │ │  │
 │  │  │  quant_recommendations (R133)                  │ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
@@ -917,7 +919,11 @@ Credit earn/spend rates are configurable per pool via the pool configuration API
 
 **Pool credit forwarding**: When a pool member earns credits, `earn_inference` attempts to forward them to the pool owner before crediting locally. If forwarding succeeds, the member retains nothing (return 0). If forwarding fails or the node is not in a pool, credits are applied locally. This prevents credit inflation when pool members accumulate credits that should belong to the owner.
 
-**Pipeline completion credit earn**: Uses the configurable rate from `config.pool.credit_rates.inference_serve` (not the compile-time constant), with `saturating_mul` for overflow safety. Remote peers earn per-forward-step via `track_forward_participation`; local segments earn via `apply_credit_direct` at pipeline completion — these are separate code paths with no double-counting.
+**Serving credit earn**: recorded in ONE place, `SharedState::record_peer_serve`, reached only from the two inbound paths that do work for a peer — `dispatch::layer_forward` (one pipeline segment) and `dispatch::remote_generate` (the whole decode, the single-segment fast path). Both count the work and bill for it together; the token count is clamped to `MAX_CREDITABLE_TOKENS` because the requester chooses it on the wire. Credits accumulate in `pending_credit_earn` and are flushed by the ledger with the `inference_serve_earning` tag.
+
+A node does **not** earn for work it does for itself. The router's own completion hook and its local segment inside a pipeline it coordinates are excluded — counting them credited a user for their own chat and told them they had served the swarm. Before v0.3.88 the accounting lived in `track_forward_participation`, which only the multi-segment path called, so a node serving through the fast path (how a machine holding a whole model answers a peer — the common case) recorded nothing and was paid nothing while the requester was still debited.
+
+Note that `release_escrow` reconciles the **requester's** balance only; it records `to_node` but transfers nothing, and `credit::transaction::create_transaction` has no production callers. The accumulator above is currently the only way a serving node is paid.
 
 ## Device Pools (Multi-Device Credit Linking)
 
@@ -1136,9 +1142,9 @@ the RELAXED-state +1 nudge in `pressure_adjusted_target` and is eligible
 to prune even at zero local pressure. This lets an idle node shed slack
 once the swarm has plenty of copies, instead of waiting for VRAM/disk
 pressure to build. Manual mode (`contribution_auto = false`) keeps the
-pre-R121 behaviour — pressure-driven only. The toggle is hot-reloadable
-via `state.models.contribution_auto: AtomicBool` (mirrors the config
-field, updated atomically on `PUT /api/admin/config`). Pure helper:
+pre-R121 behaviour — pressure-driven only. The toggle is hot-reloadable: like every
+user-settable value it is read from the live config via
+`SharedState::cfg()`, which `PUT /api/admin/config` replaces. Pure helper:
 `effective_prune_target(target, pressure, holder_count, contribution_auto,
 min_replicas)` in `model/auto_manage/prune.rs`.
 

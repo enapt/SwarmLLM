@@ -228,12 +228,10 @@ pub async fn classify(state: &SharedState, ip: IpAddr) -> DashboardTrust {
             }
         }
     }
-    // Runtime atomic, NOT `config.api.dashboard_trust_lan`: the user flips this
-    // precisely when their dashboard is unreachable, so it has to apply without
-    // a restart of the node they cannot reach. See SharedState::dashboard_trust_lan.
-    let trust_lan = state
-        .dashboard_trust_lan
-        .load(std::sync::atomic::Ordering::Relaxed);
+    // Live config, NOT the boot snapshot: the user flips this precisely when
+    // their dashboard is unreachable, so it has to apply without a restart of
+    // the node they cannot reach. See SharedState::cfg.
+    let trust_lan = state.cfg().api.dashboard_trust_lan;
     if trust_lan && (is_local_network_ip(ip) || is_overlay_ip(ip)) {
         return DashboardTrust::LocalNetwork;
     }
@@ -410,9 +408,9 @@ mod tests {
         let router = v4("192.168.1.10");
         assert_eq!(classify(&state, router).await, DashboardTrust::Untrusted);
 
-        state
-            .dashboard_trust_lan
-            .store(true, std::sync::atomic::Ordering::Release);
+        let mut opted_in = (**state.cfg()).clone();
+        opted_in.api.dashboard_trust_lan = true;
+        state.apply_live_config(opted_in);
         assert_eq!(classify(&state, router).await, DashboardTrust::LocalNetwork);
 
         // A public address is never admitted by the LAN opt-in.

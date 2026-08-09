@@ -397,17 +397,6 @@ pub struct SharedState {
     ///
     /// One nonce covers every peer because the ping is a single broadcast.
     pub last_health_ping: parking_lot::Mutex<Option<(u64, std::time::Instant)>>,
-    /// Runtime mirror of `config.api.dashboard_trust_lan` — whether a browser
-    /// on a private/LAN address is handed the dashboard's API key.
-    ///
-    /// `state.config` is startup-frozen, and this is a setting the user flips
-    /// *because* their dashboard is currently unreachable. Requiring a daemon
-    /// restart to apply it would mean the fix for "I can't reach this node"
-    /// is "go to the machine you can't reach and restart it". Written by
-    /// `PUT /api/admin/config`, read by `api::dashboard_trust::classify` on
-    /// the next page load. New code that gates on LAN dashboard trust MUST
-    /// read this atomic, not `state.config.api.dashboard_trust_lan`.
-    pub dashboard_trust_lan: std::sync::atomic::AtomicBool,
     /// NETWORKING_PLAN Phase 3 — whether this node has been observed to be
     /// reachable from the open internet, and may therefore donate itself as an
     /// application-level inference relay.
@@ -772,9 +761,6 @@ impl SharedState {
                 hf_sources,
                 auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
                 auto_manage_enabled: std::sync::atomic::AtomicBool::new(auto_manage_enabled),
-                contribution_auto: std::sync::atomic::AtomicBool::new(
-                    config.node.contribution_auto,
-                ),
                 auto_manage_default_model_cap: AtomicU32::new(default_model_shard_cap),
                 model_auto_manage_policies,
                 hf_probe_cache: DashMap::new(),
@@ -879,7 +865,6 @@ impl SharedState {
             listen_multiaddrs: arc_swap::ArcSwap::from_pointee(Vec::new()),
             observed_inbound_connection: std::sync::atomic::AtomicBool::new(false),
             last_health_ping: parking_lot::Mutex::new(None),
-            dashboard_trust_lan: std::sync::atomic::AtomicBool::new(config.api.dashboard_trust_lan),
             publicly_reachable: std::sync::atomic::AtomicBool::new(false),
             hole_punch_successes: AtomicU64::new(0),
             hole_punch_failures: AtomicU64::new(0),

@@ -222,15 +222,7 @@ impl AutoShardManager {
             // override — at swarm scale an idle node sheds slack without
             // waiting for local pressure to build.
             let target = self.geo_target_replicas(&manifest.id, config.min_replicas, pool_size);
-            // Read from the AtomicBool, not `config.node.contribution_auto`
-            // — the latter is startup-frozen because `state.config` is an
-            // Arc that's never swapped. PUT /api/admin/config updates the
-            // atomic so the toggle takes effect on the next prune tick.
-            let contribution_auto = self
-                .shared_state
-                .models
-                .contribution_auto
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let contribution_auto = live.node.contribution_auto;
 
             for shard in &manifest.shards {
                 let shard_id = ShardId {
