@@ -107,6 +107,7 @@ async fn test_config_reload_notifies_subscribers() {
         max_concurrent_requests: 32,
         auto_manage_interval_minutes: 5,
         max_batch_size: 16,
+        batch_timeout_ms: 75,
         max_peers: 200,
         session_timeout_secs: 3600,
         contribution: swarmllm::config::ContributionMode::Moderate,
@@ -121,6 +122,7 @@ async fn test_config_reload_notifies_subscribers() {
     let received = rx.borrow().clone();
     assert_eq!(received.max_concurrent_requests, 32);
     assert_eq!(received.max_batch_size, 16);
+    assert_eq!(received.batch_timeout_ms, 75);
     assert_eq!(received.max_peers, 200);
     assert_ne!(received, initial);
 }

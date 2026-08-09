@@ -951,10 +951,10 @@ async fn compute_pool_coverage(shared: &crate::daemon::SharedState) -> serde_jso
     }
 
     // Disk budget info
-    let max_storage_mb = if shared.config.auto_manage.max_storage_mb > 0 {
-        shared.config.auto_manage.max_storage_mb
+    let max_storage_mb = if shared.cfg().auto_manage.max_storage_mb > 0 {
+        shared.cfg().auto_manage.max_storage_mb
     } else {
-        shared.config.resources.max_disk_mb / 2
+        shared.cfg().resources.max_disk_mb / 2
     };
     // Estimate current auto-managed disk usage from local shard files
     let shard_store = shared.shard_store();

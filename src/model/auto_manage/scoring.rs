@@ -20,7 +20,7 @@ impl AutoShardManager {
 
         let effective_max = super::compute_budget_max_bytes(
             config.max_storage_mb,
-            self.shared_state.config.resources.max_disk_mb,
+            self.shared_state.cfg().resources.max_disk_mb,
             &self.shared_state.contribution(),
             super::free_disk_bytes_for(&self.shared_state.config.node.data_dir),
         );
@@ -49,7 +49,7 @@ impl AutoShardManager {
             .models
             .auto_manage_default_model_cap
             .load(std::sync::atomic::Ordering::Relaxed);
-        let min_replicas = self.shared_state.config.auto_manage.min_replicas as usize;
+        let min_replicas = self.shared_state.cfg().auto_manage.min_replicas as usize;
         // pool_size: in private mode, only count allowed nodes; otherwise all peers + self
         let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
         // Allowed node set for private mode holder filtering (None = unrestricted)

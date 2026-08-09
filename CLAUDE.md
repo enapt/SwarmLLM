@@ -158,7 +158,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1772 lib tests passing + 11 ignored with `--features dev,claude-subscription` (1783 total); 1762 + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 15 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root; CI runs it explicitly since 2026-08-09), 9 in the vendored request-response patch (CI: path-triggered `.github/workflows/vendored.yml`; locally `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). End-to-end forward-pass bench (no daemon): `SWARM_BENCH_MODEL=<model shard dir> RAYON_NUM_THREADS=4 cargo run --release --no-default-features --features dev --example prefill_bench` — loads a real model from its shard directory and drives `SplitModel::forward` directly, so prompt-processing and decode changes can be A/B'd without chunking policy, batching or the API in the way. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. Attention-op bench: `examples/attn_bench.rs`. Quantized-matmul bench: `cargo run --release --no-default-features --features dev --example qmatmul_bench` — prices the kernel against batch size AND asserts the tiled path is bit-identical to the upstream ordering; it also sweeps rayon pool size. **Use min-of-N on an idle machine**: the same unchanged code path measured 0.42 ms and 0.97 ms across runs on the WSL2 test box. Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1771 lib tests passing + 11 ignored with `--features dev,claude-subscription` (1782 total); 1761 + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 15 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root; CI runs it explicitly since 2026-08-09), 9 in the vendored request-response patch (CI: path-triggered `.github/workflows/vendored.yml`; locally `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). End-to-end forward-pass bench (no daemon): `SWARM_BENCH_MODEL=<model shard dir> RAYON_NUM_THREADS=4 cargo run --release --no-default-features --features dev --example prefill_bench` — loads a real model from its shard directory and drives `SplitModel::forward` directly, so prompt-processing and decode changes can be A/B'd without chunking policy, batching or the API in the way. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. Attention-op bench: `examples/attn_bench.rs`. Quantized-matmul bench: `cargo run --release --no-default-features --features dev --example qmatmul_bench` — prices the kernel against batch size AND asserts the tiled path is bit-identical to the upstream ordering; it also sweeps rayon pool size. **Use min-of-N on an idle machine**: the same unchanged code path measured 0.42 ms and 0.97 ms across runs on the WSL2 test box. Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -202,25 +202,37 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1772 lib (dev,claude-subscription) / 1762 (default) + 79 integration + 15 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-09 (v0.3.87). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1771 lib (dev,claude-subscription) / 1761 (default) + 79 integration + 15 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-09 (v0.3.87). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
 ### UNRELEASED on main (2026-08-09): two settings that reported success and did nothing
 
-**Contribution level was startup-frozen.** Moving the slider persisted the new
-level, returned `{"status":"ok"}` and showed the new value on reload — while the
-running daemon carried on at the level it booted with. Measured on the shipped
-v0.3.87, same script both ways: storage auto-target stayed at **6250 MB** across
-a change to Maximum; on the fix it moves to **37500 MB** and worker threads go
-**4 → 8**. `contribution_auto` got a runtime mirror in R121; the setting it caps,
-three lines above it in the same handler, did not. **When you add a runtime
-mirror, check the settings next to it.** Now read through
-`SharedState::contribution()`, pinned by
-`runtime_paths_read_the_live_contribution_level`. Honest about the parts that
-genuinely cannot follow live — connection limits are fixed at swarm construction
-and CPU threads are handed to a worker at spawn — so the panel says which need a
-restart rather than implying all of it applies (#281).
+**Settings saved, reported success, and did nothing.** Contribution level, max
+disk, max VRAM, max bandwidth, auto-manage storage, shard size and batch timeout
+all persisted to `config.toml`, returned `{"status":"ok"}`, showed their new
+value on reload — and left the running daemon on the value it booted with.
+Measured against the shipped v0.3.87, same script both ways: `max_disk_mb`
+50000 → 123456 reported **50000** (fixed: **123456**); contribution → Maximum
+left the storage target at **6250 MB** (fixed: **37500**, worker threads 4 → 8).
+
+**One cause, and it had already been patched around four times.** `state.config`
+is a boot-time snapshot, so each time somebody noticed a setting doing nothing
+they added a private mirror — `contribution_auto` (R121), `dashboard_trust_lan`,
+the cross-pool toggles — and the next setting stayed broken. `OperationalParams`,
+whose own doc comment says "can be changed without restart", carried **five
+fields nothing consumed**. Replaced by ONE live config: `state.live_config`
+(`ArcSwap<Config>`) read through **`SharedState::cfg()`**, stored by the PUT
+handler; the watch channel now only wakes subsystems that must *react* (resize a
+semaphore, retime an interval) rather than merely re-read. The contribution
+atomic added earlier the same day was folded into it.
+
+Pinned by `user_settable_config_is_read_live_not_from_the_boot_snapshot`, which
+checks whole SECTIONS rather than field names — `config.resources
+.shard_upload_mbps(..)` never mentions `max_bandwidth_mbps`, which is exactly how
+that one survived the first pass. Honest about what cannot follow live:
+connection limits are fixed at swarm construction and CPU threads are handed to a
+worker at spawn, so the panel says which need a restart (#281).
 
 ### UNRELEASED on main (2026-08-09): serving the swarm paid nothing, reported nothing
 

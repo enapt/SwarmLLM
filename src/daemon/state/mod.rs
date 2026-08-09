@@ -183,35 +183,27 @@ impl PendingLayerResult {
     }
 }
 
-/// `ContributionMode` as a `u8` for atomic storage.
-///
-/// Paired with [`contribution_from_u8`]; the two are exhaustively matched so a
-/// new variant is a compile error here rather than a silent mis-decode.
-fn contribution_to_u8(mode: crate::types::ContributionMode) -> u8 {
-    match mode {
-        crate::types::ContributionMode::Minimal => 0,
-        crate::types::ContributionMode::Moderate => 1,
-        crate::types::ContributionMode::Maximum => 2,
-    }
-}
-
-/// Inverse of [`contribution_to_u8`].
-///
-/// An unrecognised byte decodes to `Minimal` — this is a value only ever written
-/// by `contribution_to_u8`, so it cannot happen, and if it somehow did then
-/// contributing the least is the safe way to be wrong about how much of a
-/// stranger's machine to use.
-fn contribution_from_u8(v: u8) -> crate::types::ContributionMode {
-    match v {
-        1 => crate::types::ContributionMode::Moderate,
-        2 => crate::types::ContributionMode::Maximum,
-        _ => crate::types::ContributionMode::Minimal,
-    }
-}
-
 pub struct SharedState {
     // Core infrastructure (accessed by nearly every subsystem)
+    /// The config the daemon **booted with**. Correct for anything decided once
+    /// at startup — the listen addresses, the data directory, how the swarm was
+    /// built. Wrong for anything a user can change while the node runs; use
+    /// [`SharedState::cfg`] for those.
     pub config: Config,
+    /// The config as it is **now**, including changes made through
+    /// `PUT /api/admin/config` since startup.
+    ///
+    /// Read through [`SharedState::cfg`]. Every setting the Settings panel can
+    /// change was previously read from the frozen `config` above by the code
+    /// that acts on it, so saving a setting persisted it, reported success, and
+    /// changed nothing until the next restart — with nothing in the UI saying
+    /// so. Verified on the shipped v0.3.87 for the contribution level; the
+    /// VRAM, disk and storage caps had the same fault.
+    ///
+    /// This exists so the answer is one mechanism rather than a per-setting
+    /// mirror bolted on each time somebody notices. `ArcSwap` because reads
+    /// vastly outnumber writes and a read must not block a request.
+    pub live_config: arc_swap::ArcSwap<Config>,
     pub identity: Identity,
     pub db: Database,
     pub api_key: String,
@@ -416,25 +408,6 @@ pub struct SharedState {
     /// the next page load. New code that gates on LAN dashboard trust MUST
     /// read this atomic, not `state.config.api.dashboard_trust_lan`.
     pub dashboard_trust_lan: std::sync::atomic::AtomicBool,
-    /// Runtime mirror of `config.node.contribution` — how much of this machine
-    /// may be spent on the swarm.
-    ///
-    /// Read it through [`SharedState::contribution`], never as
-    /// `state.config.node.contribution`: `state.config` is startup-frozen, so
-    /// the config field is whatever the daemon booted with. Moving the slider in
-    /// Settings wrote the new level to disk and changed nothing that was
-    /// running — VRAM budget, shard upload rate and the auto-manage caps all
-    /// kept using the old level until a restart, with nothing in the UI saying
-    /// so. Same class as `contribution_auto`, which got a mirror in R121 while
-    /// the setting it caps did not.
-    ///
-    /// Stored as the `u8` discriminant of `ContributionMode` so the read is a
-    /// plain relaxed load on paths that run per request. Not everything can
-    /// follow it live: libp2p's connection limits are fixed when the swarm is
-    /// built, and CPU thread counts are handed to a worker when it spawns.
-    /// Those still need a restart, and the Settings panel says so rather than
-    /// implying the whole setting is live.
-    pub contribution: std::sync::atomic::AtomicU8,
     /// NETWORKING_PLAN Phase 3 — whether this node has been observed to be
     /// reachable from the open internet, and may therefore donate itself as an
     /// application-level inference relay.
@@ -552,26 +525,31 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    /// How much of this machine may currently be spent on the swarm.
+    /// The config as it is **now** — use this for anything a user can change
+    /// while the node is running.
     ///
-    /// **This, not `state.config.node.contribution`.** The config is frozen at
-    /// startup, so reading it means a node keeps using whatever level it booted
-    /// with no matter what the user later chooses. Every path that runs
-    /// repeatedly — the auto-manage tick, a shard upload, a VRAM budget — must
-    /// read it here so a change lands on the next one.
-    pub fn contribution(&self) -> crate::types::ContributionMode {
-        contribution_from_u8(self.contribution.load(std::sync::atomic::Ordering::Relaxed))
+    /// `state.config` is the boot-time snapshot and is correct only for things
+    /// decided once at startup. Reading a user-settable value from it is the
+    /// recurring bug this accessor exists to end: the setting saves, reports
+    /// success, shows its new value, and the running daemon carries on with the
+    /// old one.
+    pub fn cfg(&self) -> arc_swap::Guard<std::sync::Arc<Config>> {
+        self.live_config.load()
     }
 
-    /// Apply a new contribution level to the running daemon.
+    /// Replace the live config after a settings change.
     ///
-    /// Called by `PUT /api/admin/config` alongside persisting the choice.
-    /// Persisting alone is durability, not effect.
-    pub fn set_contribution(&self, mode: crate::types::ContributionMode) {
-        self.contribution.store(
-            contribution_to_u8(mode),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+    /// Called by `PUT /api/admin/config` alongside writing the file. Persisting
+    /// alone is durability, not effect.
+    pub fn apply_live_config(&self, config: Config) {
+        self.live_config.store(std::sync::Arc::new(config));
+    }
+
+    /// How much of this machine may currently be spent on the swarm.
+    ///
+    /// **This, not `state.config.node.contribution`** — see [`Self::cfg`].
+    pub fn contribution(&self) -> crate::types::ContributionMode {
+        self.cfg().node.contribution.clone()
     }
 
     pub fn new(
@@ -681,6 +659,7 @@ impl SharedState {
         let signing_key_bytes: zeroize::Zeroizing<[u8; 32]> =
             zeroize::Zeroizing::new(identity.signing_key_bytes());
         let state = Arc::new(Self {
+            live_config: arc_swap::ArcSwap::from_pointee(config.clone()),
             config: config.clone(),
             identity,
             db: db.clone(),
@@ -901,9 +880,6 @@ impl SharedState {
             observed_inbound_connection: std::sync::atomic::AtomicBool::new(false),
             last_health_ping: parking_lot::Mutex::new(None),
             dashboard_trust_lan: std::sync::atomic::AtomicBool::new(config.api.dashboard_trust_lan),
-            contribution: std::sync::atomic::AtomicU8::new(contribution_to_u8(
-                config.node.contribution,
-            )),
             publicly_reachable: std::sync::atomic::AtomicBool::new(false),
             hole_punch_successes: AtomicU64::new(0),
             hole_punch_failures: AtomicU64::new(0),
@@ -2839,54 +2815,65 @@ mod pending_layer_result_tests {
 }
 
 #[cfg(test)]
-mod contribution_mirror_tests {
-    use super::*;
-    use crate::types::ContributionMode;
+mod live_config_tests {
+    fn test_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use tokio::sync::Mutex;
 
-    /// The u8 encoding is an implementation detail of the atomic, so it has to
-    /// round-trip exactly — a mis-decode would silently run the node at the
-    /// wrong contribution level, which is invisible rather than loud.
-    #[test]
-    fn every_contribution_level_round_trips_through_the_atomic_encoding() {
-        for mode in [
-            ContributionMode::Minimal,
-            ContributionMode::Moderate,
-            ContributionMode::Maximum,
-        ] {
-            let encoded = contribution_to_u8(mode.clone());
-            assert_eq!(
-                contribution_from_u8(encoded),
-                mode,
-                "contribution level did not survive the atomic encoding"
-            );
-        }
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            identity,
+            db,
+            executor,
+            None,
+        );
+        state
     }
 
-    /// Distinct levels must encode distinctly, or two settings collapse into
-    /// one and the slider appears to do nothing for one of its positions.
+    /// The whole point: a setting changed while the node runs must be visible to
+    /// the code that acts on it. Before this existed, `PUT /api/admin/config`
+    /// wrote the file, answered `{"status":"ok"}`, and every consumer carried on
+    /// reading the boot-time value — verified on the released v0.3.87, where
+    /// raising the disk cap left the reported total at its old figure.
     #[test]
-    fn contribution_levels_encode_distinctly() {
-        let encodings = [
-            contribution_to_u8(ContributionMode::Minimal),
-            contribution_to_u8(ContributionMode::Moderate),
-            contribution_to_u8(ContributionMode::Maximum),
-        ];
-        let mut sorted = encodings.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
+    fn a_settings_change_is_visible_to_the_code_that_acts_on_it() {
+        let state = test_state();
+        let before = state.cfg().resources.max_disk_mb;
+
+        let mut updated = (**state.cfg()).clone();
+        updated.resources.max_disk_mb = before + 4242;
+        state.apply_live_config(updated);
+
         assert_eq!(
-            sorted.len(),
-            encodings.len(),
-            "two levels share an encoding"
+            state.cfg().resources.max_disk_mb,
+            before + 4242,
+            "a saved setting must be readable through cfg() without a restart"
+        );
+        assert_eq!(
+            state.config.resources.max_disk_mb, before,
+            "the boot snapshot must stay put — it is what startup-only decisions \
+             were made from, and rewriting it would make them unauditable"
         );
     }
 
-    /// An unknown byte is never written by `contribution_to_u8`, but if one is
-    /// ever read it must mean "use the least of this machine" rather than the
-    /// most — being wrong in the generous direction spends a stranger's
-    /// hardware without being asked.
+    /// `contribution()` is the most-used reader of the live config, and it used
+    /// to be a separate atomic mirror. Folding it in must not have quietly
+    /// reconnected it to the frozen snapshot.
     #[test]
-    fn an_unknown_encoding_decodes_to_the_most_conservative_level() {
-        assert_eq!(contribution_from_u8(200), ContributionMode::Minimal);
+    fn contribution_follows_the_live_config() {
+        use crate::types::ContributionMode;
+        let state = test_state();
+
+        let mut updated = (**state.cfg()).clone();
+        updated.node.contribution = ContributionMode::Maximum;
+        state.apply_live_config(updated);
+
+        assert_eq!(state.contribution(), ContributionMode::Maximum);
     }
 }

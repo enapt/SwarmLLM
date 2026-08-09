@@ -101,7 +101,10 @@ const SATURATION_FACTOR_SEVERE: f64 = 2.0;
 impl AutoShardManager {
     /// Evaluate and prune over-replicated shards. Called after downloads in each cycle.
     pub(super) async fn evaluate_and_prune(&self) {
-        let config = &self.shared_state.config.auto_manage;
+        // Live, not the boot snapshot — prune thresholds are settings the user
+        // can change, and this loop runs every tick.
+        let live = self.shared_state.cfg();
+        let config = &live.auto_manage;
         if !config.prune_enabled {
             return;
         }
@@ -901,14 +904,14 @@ impl AutoShardManager {
 
     /// Compute resource pressure (0.0-1.0) based on VRAM and disk usage.
     fn compute_resource_pressure(&self, live_vram_used: Option<u64>) -> f64 {
-        let config = &self.shared_state.config;
+        let live = self.shared_state.cfg();
         let local_node_id = self.shared_state.identity.node_id().clone();
 
         // Disk pressure
-        let budget_mb = if config.auto_manage.max_storage_mb > 0 {
-            config.auto_manage.max_storage_mb
+        let budget_mb = if live.auto_manage.max_storage_mb > 0 {
+            live.auto_manage.max_storage_mb
         } else {
-            config.resources.max_disk_mb / 2
+            live.resources.max_disk_mb / 2
         };
         let (local_bytes, _) = self.local_shard_bytes(&local_node_id);
         let disk_pressure = if budget_mb > 0 {

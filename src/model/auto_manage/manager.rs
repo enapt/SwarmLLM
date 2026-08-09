@@ -354,7 +354,7 @@ impl AutoShardManager {
                     // shards stay on disk, holder status is unchanged, and a cold
                     // start costs one reload.
                     self.try_idle_vram_unload(
-                        self.shared_state.config.auto_manage.idle_unload_secs,
+                        self.shared_state.cfg().auto_manage.idle_unload_secs,
                     )
                     .await;
 
@@ -468,7 +468,7 @@ impl AutoShardManager {
         // Prune only if enabled -- pruning is the last resort to free resources.
         // The download phase already respects storage budgets, so pruning only
         // fires when we're genuinely over-replicated or under resource pressure.
-        if self.shared_state.config.auto_manage.prune_enabled {
+        if self.shared_state.cfg().auto_manage.prune_enabled {
             self.evaluate_and_prune().await;
         }
 

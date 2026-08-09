@@ -773,16 +773,17 @@ pub async fn storage_breakdown(State(state): State<AppState>) -> Json<serde_json
     // What auto-manage will try to grow to. Shared with the scheduler
     // via `model::auto_manage::compute_budget_max_bytes` so the two
     // can't drift if the ContributionMode scaling changes.
+    let live = state.shared_state.cfg();
     let auto_target_bytes = crate::model::auto_manage::compute_budget_max_bytes(
-        config.auto_manage.max_storage_mb,
-        config.resources.max_disk_mb,
-        // Live level, not the frozen one: `scoring.rs` sizes the real budget
-        // from the mirror, so reading the boot-time config here would show the
-        // user a storage target the scheduler is no longer working towards.
+        live.auto_manage.max_storage_mb,
+        live.resources.max_disk_mb,
+        // Live level: `scoring.rs` sizes the real budget the same way, so
+        // reading the boot-time config here would show the user a storage
+        // target the scheduler is no longer working towards.
         &state.shared_state.contribution(),
         crate::model::auto_manage::free_disk_bytes_for(&config.node.data_dir),
     );
-    let total_bytes = config
+    let total_bytes = live
         .resources
         .max_disk_mb
         .saturating_mul(1024)
@@ -1047,13 +1048,8 @@ pub async fn update_config(
             }
         };
         config.node.contribution = mode.clone();
-        // Mirror to the runtime atomic. Writing the config file alone is
-        // durability, not effect: `state.config` is frozen at startup, so
-        // without this the VRAM budget, shard upload rate, auto-manage caps and
-        // the capability we gossip all kept using the level the daemon booted
-        // with, and the user got no indication that their choice had done
-        // nothing. Same reasoning as `contribution_auto` directly below.
-        state.shared_state.set_contribution(mode.clone());
+        // The level itself goes live with the whole config at the end of this
+        // handler. What needs doing *here* is the part re-reading cannot do:
 
         // Inference thread count is handed to a worker when it spawns, so
         // re-deriving it here means the next worker picks up the new level.
@@ -1236,7 +1232,15 @@ pub async fn update_config(
 
     tracing::info!(path = %config_path.display(), "Configuration saved");
 
-    // Hot-reload operational params so in-memory state reflects the saved config
+    // Make the saved config the LIVE one. This is what turns "saved" into
+    // "applied": every runtime path reads `shared_state.cfg()`, so one store
+    // here covers each setting rather than needing a per-setting mirror added
+    // whenever somebody notices another one doing nothing.
+    state.shared_state.apply_live_config(config.clone());
+
+    // ...and wake the subsystems that must *react* rather than merely re-read:
+    // the router resizes its concurrency and batch limits, auto-manage retimes
+    // its interval. Re-reading alone cannot resize a semaphore already built.
     state
         .shared_state
         .apply_config_reload(crate::config::OperationalParams::from_config(&config));
@@ -1690,7 +1694,7 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
         .collect();
 
     let pool_size = state.shared_state.peer_registry.len() + 1;
-    let min_replicas = state.shared_state.config.auto_manage.min_replicas as usize;
+    let min_replicas = state.shared_state.cfg().auto_manage.min_replicas as usize;
 
     // Build JSON with regional demand, coverage gaps, and replication targets
     let region_json: serde_json::Map<String, serde_json::Value> = regions

@@ -814,7 +814,7 @@ impl HealthMonitor {
     }
 
     async fn broadcast_wishlist_announcement(&self) {
-        if !self.shared_state.config.auto_manage.wishlist_gossip_publish {
+        if !self.shared_state.cfg().auto_manage.wishlist_gossip_publish {
             return;
         }
         let snapshot = self.shared_state.models.wishlist.load_full();

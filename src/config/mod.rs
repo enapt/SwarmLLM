@@ -11,6 +11,7 @@ pub struct OperationalParams {
     pub max_concurrent_requests: u32,
     pub auto_manage_interval_minutes: u32,
     pub max_batch_size: u32,
+    pub batch_timeout_ms: u64,
     pub max_peers: u32,
     pub session_timeout_secs: u64,
     pub contribution: ContributionMode,
@@ -25,6 +26,7 @@ impl OperationalParams {
             max_concurrent_requests: config.inference.max_concurrent_requests,
             auto_manage_interval_minutes: config.auto_manage.interval_minutes,
             max_batch_size: config.inference.max_batch_size,
+            batch_timeout_ms: config.inference.batch_timeout_ms,
             // The RESOLVED ceiling, not the raw `Option`. This is what the
             // dashboard and `GET /api/admin/config` report, and reporting the
             // unresolved value would show `null` on the default path while the

@@ -375,28 +375,35 @@ silently break at the wire if duplicated:
   ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
   and any GPU node whose free VRAM could not be read records `None`, and reading
   that as a zero budget refuses everything.
-- **`SharedState::contribution()`** (2026-08-09) — the single answer to "how much
-  of this machine may be spent on the swarm *right now*". **Never read
-  `state.config.node.contribution`**: the config is frozen at startup, so it is
-  whatever the daemon booted with. Moving the Contribution slider persisted the
-  new level and changed nothing that was running — VRAM budget, shard upload
-  rate, auto-manage caps and the capability gossiped to peers all kept the old
-  value, and the UI said nothing. Measured on the shipped v0.3.87: the storage
-  auto-target stayed at 6250 MB across a change to Maximum that returned
-  `{"status":"ok"}`; on the fix it moves to 37500 MB and worker threads go 4 → 8.
-  Same class as `contribution_auto`, which got a runtime mirror in R121 while the
-  setting it caps did not.
-  `runtime_paths_read_the_live_contribution_level` in `tests/repo_consistency.rs`
-  fails the build on a new frozen-config reader; its allowlist is the handful of
-  genuinely startup-only sites (swarm construction, the dispatch semaphores, the
-  mirror's own initialisation, and the admin handler that reads/writes the
-  persisted file).
-  **Not everything can follow it live, and the UI must not imply otherwise.**
-  libp2p connection limits are fixed when the swarm is built and CPU thread
-  counts are handed to a worker when it spawns, so those need a restart —
-  `settings.contribution_restart_note` says which. When adding a new consumer,
-  prefer reading the mirror at the point of use over caching it at startup; a
-  cached copy is how this became restart-only in the first place.
+- **`SharedState::cfg()`** (2026-08-09) — the live config, and the single answer
+  to "what is this setting **now**". `state.config` is the boot-time snapshot:
+  correct for what is decided once at startup (listen addresses, data dir, how
+  the swarm was built), wrong for anything the Settings panel can change.
+  **Reading a user-settable value from `state.config` is the recurring bug this
+  ends**: the setting saves, answers `{"status":"ok"}`, shows its new value, and
+  the running daemon carries on with the old one. Measured on the released
+  v0.3.87 — `max_disk_mb` 50000 → 123456 still reported 50000; contribution →
+  Maximum left the storage target at 6250 MB.
+  `PUT /api/admin/config` stores the whole updated config here, so a new setting
+  is live with no extra wiring. The `OperationalParams` watch channel remains,
+  but ONLY to wake subsystems that must *react* rather than re-read — resizing
+  the router's concurrency, retiming the auto-manage interval. A value that is
+  merely read each tick needs nothing but `cfg()`.
+  **Do not add another per-setting mirror.** Four already existed
+  (`contribution_auto` from R121, `dashboard_trust_lan`, the two cross-pool
+  toggles) because each was bolted on when someone noticed one setting doing
+  nothing, which left the next one broken; `OperationalParams` meanwhile carried
+  five fields nothing consumed while documenting itself as hot-reloadable.
+  `user_settable_config_is_read_live_not_from_the_boot_snapshot` in
+  `tests/repo_consistency.rs` fails the build on a new frozen read. It checks
+  whole SECTIONS, not field names, because the frozen value is just as often
+  reached through a method — `config.resources.shard_upload_mbps(..)` never
+  mentions `max_bandwidth_mbps`, and that is how that one survived a first pass.
+  **Some things genuinely cannot follow live and the UI must say so** rather than
+  implying otherwise: libp2p connection limits are fixed when the swarm is built,
+  and CPU thread counts are handed to a worker as it spawns (recycling a live
+  worker would drop whatever it is answering). `settings.contribution_restart_note`
+  is where that is said.
 
 - **`SharedState::record_peer_serve`** (2026-08-09) — the single answer to "this
   node did inference work for a peer", counting it AND billing for it. Reached

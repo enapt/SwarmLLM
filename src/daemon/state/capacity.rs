@@ -153,7 +153,7 @@ pub fn compute_swarm_capacity(state: &SharedState) -> SwarmCapacity {
     //    space, refreshed by gossip). Sum these as the swarm's
     //    contributable disk; the local node uses its configured budget.
     //    Peers without capability info contribute 0 — conservative.
-    let local_disk_mb = state.config.resources.max_disk_mb;
+    let local_disk_mb = state.cfg().resources.max_disk_mb;
     let mut total_disk_mb = local_disk_mb;
     for entry in state.peer_registry.iter() {
         if !state.connected_node_ids.contains(entry.key()) {

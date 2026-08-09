@@ -202,7 +202,7 @@ impl NetworkManager {
                 let prepared = self.prepare_shard_read(&shard_req);
                 let bw_limit = self
                     .shared_state
-                    .config
+                    .cfg()
                     .resources
                     .shard_upload_mbps(self.shared_state.contribution());
                 let ticket = uuid::Uuid::new_v4();
@@ -510,7 +510,7 @@ impl NetworkManager {
                 if let Some((_, shard_id)) = self.pending_shard_requests.remove(&request_id) {
                     // Cap total_size to prevent unbounded download loops from malicious peers
                     let max_shard_bytes =
-                        self.shared_state.config.model.shard_size_mb * 1024 * 1024 * 2;
+                        self.shared_state.cfg().model.shard_size_mb * 1024 * 1024 * 2;
                     if data.total_size > max_shard_bytes {
                         tracing::warn!(
                             %peer,

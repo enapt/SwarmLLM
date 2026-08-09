@@ -244,7 +244,7 @@ impl HfWatcher {
     /// Run the watcher loop. Returns Ok when shutdown_rx fires.
     pub async fn run(mut self) -> Result<(), SwarmError> {
         // Honour the kill-switch.
-        if !self.shared_state.config.auto_manage.hf_watcher_enabled {
+        if !self.shared_state.cfg().auto_manage.hf_watcher_enabled {
             tracing::info!("HfWatcher disabled by config — exiting");
             return Ok(());
         }

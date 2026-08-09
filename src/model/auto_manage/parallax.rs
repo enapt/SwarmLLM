@@ -49,7 +49,7 @@ impl AutoShardManager {
     /// shards are skipped entirely rather than falling through to a
     /// misleading "not recommended" signal.
     pub(super) fn update_parallax_stability(&self) {
-        if !self.shared_state.config.auto_manage.parallax_auto_rebalance {
+        if !self.shared_state.cfg().auto_manage.parallax_auto_rebalance {
             return;
         }
         let local_node_id = self.shared_state.identity.node_id().clone();
@@ -109,7 +109,7 @@ impl AutoShardManager {
     /// node hold the given shard for at least `PARALLAX_STABILITY_THRESHOLD`
     /// ticks. `gather_candidates` uses this to multiply the acquire score.
     pub(super) fn parallax_should_boost_acquire(&self, shard_id: &ShardId) -> bool {
-        if !self.shared_state.config.auto_manage.parallax_auto_rebalance {
+        if !self.shared_state.cfg().auto_manage.parallax_auto_rebalance {
             return false;
         }
         self.shared_state
@@ -124,7 +124,7 @@ impl AutoShardManager {
     /// this node holding the given shard. Prune path uses this to add a
     /// prune-score bonus.
     pub(super) fn parallax_should_boost_prune(&self, shard_id: &ShardId) -> bool {
-        if !self.shared_state.config.auto_manage.parallax_auto_rebalance {
+        if !self.shared_state.cfg().auto_manage.parallax_auto_rebalance {
             return false;
         }
         self.shared_state

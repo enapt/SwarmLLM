@@ -546,12 +546,12 @@ pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     let has_gpu = shared.gpu_info.is_some()
         && !crate::daemon::shard_loader::force_cpu_for(shared.config.inference.gpu_layers);
 
-    let configured = shared.config.resources.max_ram_mb;
-    let by_config = shared.config.resources.inference_ram_budget_mb(
-        total_mb,
-        has_gpu,
-        shared.contribution(),
-    )?;
+    let configured = shared.cfg().resources.max_ram_mb;
+    let by_config =
+        shared
+            .cfg()
+            .resources
+            .inference_ram_budget_mb(total_mb, has_gpu, shared.contribution())?;
 
     // Clamp ONLY an explicitly configured number. The automatic value is
     // already a fraction of this machine's own total memory, so clamping it

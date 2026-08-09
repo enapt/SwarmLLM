@@ -154,10 +154,10 @@ impl InferenceRouter {
                 .kv_cache_ttl_secs
                 .unwrap_or(crate::inference::process_pool::DEFAULT_KV_CACHE_TTL_SECS),
         );
-        let max_concurrent = shared_state.config.inference.max_concurrent_requests as usize;
-        let max_batch_size = (shared_state.config.inference.max_batch_size as usize).max(1);
-        let batch_timeout =
-            std::time::Duration::from_millis(shared_state.config.inference.batch_timeout_ms);
+        let live = shared_state.cfg();
+        let max_concurrent = live.inference.max_concurrent_requests as usize;
+        let max_batch_size = (live.inference.max_batch_size as usize).max(1);
+        let batch_timeout = std::time::Duration::from_millis(live.inference.batch_timeout_ms);
         let mut kv_cache = KvCacheManager::new(kv_cache_ttl);
 
         // Restore persisted multi-turn sessions from previous run
@@ -259,6 +259,18 @@ impl InferenceRouter {
                     let params = self.config_watch_rx.borrow().clone();
                     let new_max = params.max_concurrent_requests as usize;
                     let new_batch = (params.max_batch_size as usize).max(1);
+                    // Batching waits this long for a second request before
+                    // giving up and running alone, so it is the setting a user
+                    // reaches for when replies feel laggy — it has to move.
+                    let new_timeout = std::time::Duration::from_millis(params.batch_timeout_ms);
+                    if new_timeout != self.batch_timeout {
+                        tracing::info!(
+                            old_batch_timeout_ms = self.batch_timeout.as_millis() as u64,
+                            new_batch_timeout_ms = params.batch_timeout_ms,
+                            "Hot-reloaded batch timeout"
+                        );
+                        self.batch_timeout = new_timeout;
+                    }
                     if new_max != self.max_concurrent || new_batch != self.max_batch_size {
                         tracing::info!(
                             old_max_concurrent = self.max_concurrent,

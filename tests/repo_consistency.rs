@@ -1143,34 +1143,49 @@ fn serving_is_counted_and_paid_in_exactly_one_place() {
     }
 }
 
-/// `config.node.contribution` is the level the daemon BOOTED with. Anything
-/// that runs repeatedly must read the runtime mirror instead, or the user's
-/// choice silently does nothing until a restart.
+/// A setting the user can change must be READ from the live config, not the
+/// boot-time snapshot — otherwise it saves, reports success, shows its new
+/// value, and changes nothing until restart.
 ///
-/// That was the live bug: moving the Contribution slider wrote the new level to
-/// disk and changed nothing that was running — VRAM budget, shard upload rate,
-/// auto-manage caps and the capability gossiped to peers all kept using the old
-/// value, with no indication in the UI. `contribution_auto` got a runtime mirror
-/// in R121; the setting it caps did not.
+/// Verified on the released v0.3.87: switching contribution to Maximum left the
+/// storage target at 6250 MB. The VRAM, disk, bandwidth, shard-size, batch-
+/// timeout and auto-manage storage caps all had the same fault, and
+/// `OperationalParams` — whose own doc comment says "can be changed without
+/// restart" — carried five fields nothing consumed.
 ///
-/// The allowlist below is the set of places where reading the frozen config is
-/// genuinely correct — they run once, at startup, before anything can have
-/// changed. A new file reading `config.node.contribution` is almost certainly a
-/// per-tick reader and belongs on the mirror.
+/// Whole SECTIONS are checked rather than field names, because the frozen value
+/// is just as often reached through a method: `config.resources
+/// .shard_upload_mbps(..)` never mentions `max_bandwidth_mbps`, and that is
+/// exactly how that one survived a first pass.
 #[test]
-fn runtime_paths_read_the_live_contribution_level() {
+fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
     let root = repo_root();
 
-    // Startup-only readers. Each builds something that cannot be rebuilt live:
-    // libp2p connection limits fixed at swarm construction, the dispatch
-    // semaphores sized once, the initial value of the mirror itself, and the
-    // admin handler that reads/writes the persisted config.
+    // Sections the Settings panel can change.
+    // Whole sections where every field is a resource cap the user can move...
+    let mutable = [
+        ".config.resources.",
+        ".config.auto_manage.",
+        ".config.node.contribution",
+        ".config.model.shard_size_mb",
+        // ...and the three `inference` fields the Settings panel exposes. The
+        // rest of that section (gpu_layers, shard_range, encrypted_pipeline) is
+        // config-file/CLI only, so reading the boot value there is CORRECT —
+        // `shard_range` in particular is meant to be fixed for the process.
+        ".config.inference.max_concurrent_requests",
+        ".config.inference.max_batch_size",
+        ".config.inference.batch_timeout_ms",
+    ];
+
+    // Startup-only readers: each builds something that cannot be rebuilt live
+    // (the swarm's connection limits, the dispatch semaphores), reads or writes
+    // the persisted file, or initialises the live config itself.
     let allowed = [
-        "src/config/mod.rs",
         "src/network/manager/mod.rs",
         "src/daemon/dispatch/mod.rs",
         "src/daemon/state/mod.rs",
         "src/api/admin.rs",
+        "src/daemon/mod.rs",
     ];
 
     let mut offenders: Vec<String> = Vec::new();
@@ -1193,20 +1208,27 @@ fn runtime_paths_read_the_live_contribution_level() {
                 .unwrap_or(&p)
                 .to_string_lossy()
                 .replace('\\', "/");
-            if allowed.contains(&rel.as_str()) {
+            // Test code builds Config values directly; that is not a runtime read.
+            if allowed.contains(&rel.as_str())
+                || rel.starts_with("src/config/")
+                || rel.ends_with("/tests.rs")
+                || rel.contains("/tests/")
+            {
                 continue;
             }
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
+            let mut in_tests = false;
             for (i, line) in text.lines().enumerate() {
                 let l = line.trim();
-                if l.starts_with("//") || l.starts_with("///") {
+                if l.starts_with("#[cfg(test)]") {
+                    in_tests = true;
+                }
+                if in_tests || l.starts_with("//") || l.starts_with("///") {
                     continue;
                 }
-                if l.contains("config.node.contribution")
-                    && !l.contains("config.node.contribution_auto")
-                {
+                if mutable.iter().any(|m| l.contains(m)) {
                     offenders.push(format!("{rel}:{}: {l}", i + 1));
                 }
             }
@@ -1215,8 +1237,8 @@ fn runtime_paths_read_the_live_contribution_level() {
 
     assert!(
         offenders.is_empty(),
-        "these read the startup-frozen contribution level instead of the live one.\n\
-         Use `shared_state.contribution()` so a change in Settings applies without a restart.\n{}",
+        "these read a user-settable value from the boot-time config.\n\
+         Use `shared_state.cfg()` so a change in Settings applies without a restart.\n{}",
         offenders.join("\n")
     );
 }

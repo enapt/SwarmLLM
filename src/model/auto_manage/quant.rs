@@ -90,7 +90,7 @@ pub fn refresh_quant_recommendations(state: &SharedState) {
 /// Returns the number of trust promotions performed (used by the
 /// activity log + tests).
 pub fn apply_quant_auto_action(state: &SharedState) -> usize {
-    if !state.config.auto_manage.auto_switch_quants {
+    if !state.cfg().auto_manage.auto_switch_quants {
         return 0;
     }
     let snapshot = state.models.quant_recommendations.load_full();
