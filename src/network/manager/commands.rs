@@ -367,9 +367,29 @@ impl NetworkManager {
                         if self.buffered_gossip.len() < MAX_BUFFERED_GOSSIP {
                             tracing::debug!(topic, error = %e, "Failed to publish to GossipSub, buffering");
                             self.buffered_gossip.push((topic_str.clone(), publish_data));
+                        } else if matches!(
+                            e,
+                            libp2p::gossipsub::PublishError::NoPeersSubscribedToTopic
+                        ) {
+                            // Nobody is listening yet. That is the normal state
+                            // of every node between starting and finding the
+                            // swarm, and the permanent state of an isolated or
+                            // private one — not a fault, and not something to
+                            // warn about once per attempt. Measured 2026-08-09:
+                            // 263 warnings in 12 minutes on a node whose only
+                            // distinction was having no gossip peers.
+                            //
+                            // A full buffer with peers PRESENT is different —
+                            // that is real backpressure, and still warns below.
+                            tracing::debug!(
+                                topic,
+                                cap = MAX_BUFFERED_GOSSIP,
+                                "No peers subscribed yet; dropping gossip (buffer full)"
+                            );
                         } else {
                             tracing::warn!(
                                 topic,
+                                error = %e,
                                 cap = MAX_BUFFERED_GOSSIP,
                                 "Gossip buffer full, dropping message"
                             );
