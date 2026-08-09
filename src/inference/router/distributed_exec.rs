@@ -86,12 +86,12 @@ pub(super) async fn finalize_request(
     let is_local_api_request = request.requester == crate::types::NodeId([0u8; 32]);
 
     if let Ok(ref result) = output {
-        // AtomicU64 increment — try_write() silently dropped under contention.
-        shared_state
-            .metrics
-            .requests_served_atomic
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Update Prometheus metrics
+        // `requests_served` is deliberately NOT bumped here. This is the
+        // router's own completion hook and it fires for local API requests too,
+        // so counting it made a user's own chat register as "requests your
+        // computer handled for others". Serving is recorded at
+        // `SharedState::record_peer_serve`. `inference_requests_total` below is
+        // the all-requests Prometheus counter and correctly includes local ones.
         shared_state
             .metrics
             .inference_requests_total

@@ -609,19 +609,91 @@ fn record_duration_sample(
     }
 }
 
+/// How much of a request this node served for a peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServeKind {
+    /// One segment of a multi-segment pipeline — we computed a layer range and
+    /// handed the activations on. Counts as a forward, not as a request.
+    Segment,
+    /// The whole decode, start to finish, via the remote-generate fast path.
+    /// This is what serving a peer looks like when one machine holds the model,
+    /// so it counts as BOTH a request served and a forward.
+    WholeRequest,
+}
+
+/// One unit of inference work performed for a peer.
+///
+/// A struct rather than positional arguments so a call site reads as a
+/// description of the work, and so adding a dimension later does not silently
+/// reorder anything at the two sites that build it.
+#[derive(Clone, Copy, Debug)]
+pub struct PeerServe {
+    pub kind: ServeKind,
+    /// Transformer layers computed.
+    pub layers: u32,
+    pub elapsed_ms: u64,
+    /// Activation bytes sent back. The fast path streams tokens instead, so it
+    /// passes 0.
+    pub activation_bytes: u64,
+    /// Tokens to bill for. Clamped here — see `MAX_CREDITABLE_TOKENS`.
+    pub tokens: u32,
+}
+
+/// Ceiling on the tokens a single serve can bill for.
+///
+/// SEC: the requester chooses the token count on the `LayerForward` path, so
+/// without a cap `token_count = u32::MAX` mints ~43B credits on the serving
+/// node at the next flush. 8192 covers any realistic single forward — model
+/// context lengths reach 32K-128K but those arrive as several forwards.
+const MAX_CREDITABLE_TOKENS: u32 = 8192;
+
 impl super::SharedState {
-    /// Record one segment computed on behalf of another peer.
+    /// Record inference work this node performed **for a peer** — the single
+    /// place serving is counted and paid.
     ///
-    /// Called from the serving side of a `LayerForward`. Relaxed atomics: these
-    /// are counters read by a scrape, and this sits on the per-decode-step hot
-    /// path of a serving node, so ordering costs are not worth paying.
-    pub fn record_segment_served(&self, layers: u32, elapsed_ms: u64, activation_bytes: u64) {
+    /// Every path that does work for someone else funnels through here:
+    /// `dispatch::layer_forward` (a pipeline segment) and
+    /// `dispatch::remote_generate` (the whole decode). That is deliberate.
+    /// These counters and the credit earn used to live in
+    /// `track_forward_participation`, which only the segment path called, so a
+    /// node serving through the fast path — the common case, since it is how a
+    /// machine holding a whole model answers a peer — reported serving nothing
+    /// and was paid nothing, while the requester was still debited. Measured
+    /// 2026-08-09: a cross-node request cost the requester 430 credits and
+    /// moved neither counter nor the balance on the node that did the work.
+    ///
+    /// So: do NOT count or bill serving at a call site. A new serving path that
+    /// forgets to call this is invisible and unpaid, which is exactly the
+    /// failure this consolidation exists to make impossible.
+    ///
+    /// Conversely, work this node does for *itself* — its own chat, its own
+    /// segment inside a pipeline it coordinates — must NOT come through here.
+    /// The dashboard promises "requests your computer handled for others" and
+    /// "earns credits"; counting local work there told a user who only ever
+    /// talks to themselves that they were serving the swarm.
+    ///
+    /// Relaxed atomics: these are counters read by a scrape, and this sits on
+    /// the per-decode-step hot path of a serving node.
+    pub fn record_peer_serve(&self, work: PeerServe) {
         use std::sync::atomic::Ordering::Relaxed;
         let m = &self.metrics;
         m.segments_served.fetch_add(1, Relaxed);
-        m.layers_served.fetch_add(layers as u64, Relaxed);
-        m.segment_serve_micros.fetch_add(elapsed_ms * 1000, Relaxed);
-        m.segment_bytes_out.fetch_add(activation_bytes, Relaxed);
+        m.layers_served.fetch_add(work.layers as u64, Relaxed);
+        m.segment_serve_micros
+            .fetch_add(work.elapsed_ms * 1000, Relaxed);
+        m.segment_bytes_out
+            .fetch_add(work.activation_bytes, Relaxed);
+
+        // Both kinds are a forward computed for someone else; only the fast
+        // path completed a whole request.
+        m.forwards_served_atomic.fetch_add(1, Relaxed);
+        if work.kind == ServeKind::WholeRequest {
+            m.requests_served_atomic.fetch_add(1, Relaxed);
+        }
+
+        let tokens = work.tokens.clamp(1, MAX_CREDITABLE_TOKENS) as i64;
+        let earned = crate::credit::ledger::RATE_INFERENCE_SERVE.saturating_mul(tokens);
+        self.credits.pending_credit_earn.fetch_add(earned, Relaxed);
     }
 }
 
@@ -1041,5 +1113,117 @@ mod tests {
         counter.count = 0;
         counter.window_start = Instant::now();
         assert!(counter.count < RELAY_FORWARD_MAX_PER_WINDOW);
+    }
+
+    /// The fast path — one machine holding a whole model answering a peer — is
+    /// how most serving actually happens, and it recorded nothing at all.
+    /// Measured live 2026-08-09: a cross-node request debited the requester 430
+    /// credits while the node that did all 28 layers of work showed
+    /// `requests_served = 0`, `forwards_served = 0` and an unchanged balance.
+    #[test]
+    fn serving_a_whole_request_for_a_peer_is_counted_and_paid() {
+        let state = test_state(crate::config::Config::default());
+        let m = &state.metrics;
+        let relaxed = std::sync::atomic::Ordering::Relaxed;
+
+        state.record_peer_serve(PeerServe {
+            kind: ServeKind::WholeRequest,
+            layers: 28,
+            elapsed_ms: 5540,
+            activation_bytes: 0,
+            tokens: 43,
+        });
+
+        assert_eq!(
+            m.requests_served_atomic.load(relaxed),
+            1,
+            "a whole request served for a peer must count as a request served"
+        );
+        assert_eq!(
+            m.forwards_served_atomic.load(relaxed),
+            1,
+            "it is also a forward computed for someone else"
+        );
+        assert_eq!(
+            state.credits.pending_credit_earn.load(relaxed),
+            crate::credit::ledger::RATE_INFERENCE_SERVE * 43,
+            "the node that did the work must be paid for it"
+        );
+        // The segment telemetry that already worked must keep working.
+        assert_eq!(m.segments_served.load(relaxed), 1);
+        assert_eq!(m.layers_served.load(relaxed), 28);
+    }
+
+    /// A segment is a forward, not a request — the requester assembles the
+    /// request from several of them, and counting each as a whole request would
+    /// inflate a multi-segment serve by the number of hops.
+    #[test]
+    fn serving_a_segment_counts_as_a_forward_but_not_a_request() {
+        let state = test_state(crate::config::Config::default());
+        let m = &state.metrics;
+        let relaxed = std::sync::atomic::Ordering::Relaxed;
+
+        state.record_peer_serve(PeerServe {
+            kind: ServeKind::Segment,
+            layers: 12,
+            elapsed_ms: 40,
+            activation_bytes: 8192,
+            tokens: 1,
+        });
+
+        assert_eq!(m.forwards_served_atomic.load(relaxed), 1);
+        assert_eq!(
+            m.requests_served_atomic.load(relaxed),
+            0,
+            "a segment is one hop of a request, not a request"
+        );
+        assert_eq!(
+            state.credits.pending_credit_earn.load(relaxed),
+            crate::credit::ledger::RATE_INFERENCE_SERVE,
+        );
+        assert_eq!(m.segment_bytes_out.load(relaxed), 8192);
+    }
+
+    /// SEC: the requester picks `token_count` on the `LayerForward` path, so an
+    /// unclamped bill lets a peer mint credits on every node it can reach.
+    #[test]
+    fn billing_is_clamped_against_a_forged_token_count() {
+        let state = test_state(crate::config::Config::default());
+        let relaxed = std::sync::atomic::Ordering::Relaxed;
+
+        state.record_peer_serve(PeerServe {
+            kind: ServeKind::Segment,
+            layers: 1,
+            elapsed_ms: 1,
+            activation_bytes: 0,
+            tokens: u32::MAX,
+        });
+
+        assert_eq!(
+            state.credits.pending_credit_earn.load(relaxed),
+            crate::credit::ledger::RATE_INFERENCE_SERVE * MAX_CREDITABLE_TOKENS as i64,
+            "a forged token count must bill at the cap, not at face value"
+        );
+    }
+
+    /// Zero tokens still represents real work — the floor keeps a serve from
+    /// being free, which is what an `elapsed_ms` of real compute deserves.
+    #[test]
+    fn a_zero_token_serve_still_bills_the_one_token_floor() {
+        let state = test_state(crate::config::Config::default());
+        let relaxed = std::sync::atomic::Ordering::Relaxed;
+
+        state.record_peer_serve(PeerServe {
+            kind: ServeKind::WholeRequest,
+            layers: 4,
+            elapsed_ms: 12,
+            activation_bytes: 0,
+            tokens: 0,
+        });
+
+        assert_eq!(
+            state.credits.pending_credit_earn.load(relaxed),
+            crate::credit::ledger::RATE_INFERENCE_SERVE,
+        );
     }
 }

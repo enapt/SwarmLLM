@@ -1033,3 +1033,112 @@ fn every_asset_the_updater_can_request_is_published_by_the_release_workflow() {
          published: {published:#?}"
     );
 }
+
+/// Serving must be counted and paid in exactly one place, reached only from the
+/// two inbound paths that do work for a peer.
+///
+/// This is pinned rather than documented because the failure it prevents is
+/// silent and was live for several releases. `forwards_served_atomic` and the
+/// credit earn used to be bumped by a helper only the multi-segment path
+/// called, while the remote-generate fast path — how a machine holding a whole
+/// model answers a peer, i.e. the common case — recorded nothing. A node doing
+/// real work reported `requests_served = 0` and was paid nothing while the
+/// requester was still debited. The mirror-image mistake was equally live: the
+/// router's own completion hook and the local-segment path bumped the same
+/// counters for work the node did for *itself*, so a user whose only traffic
+/// was their own chat was told they had served the swarm.
+///
+/// So: the two `*_served_atomic` counters and `pending_credit_earn` may be
+/// written only inside `record_peer_serve`. Everywhere else reads them.
+#[test]
+fn serving_is_counted_and_paid_in_exactly_one_place() {
+    let root = repo_root();
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                if let Ok(t) = std::fs::read_to_string(&p) {
+                    sources.push((p, t));
+                }
+            }
+        }
+    }
+
+    // The single writer. Everything else must only read.
+    let writer = "src/daemon/state/relay.rs";
+    let guarded = [
+        "requests_served_atomic",
+        "forwards_served_atomic",
+        "pending_credit_earn",
+    ];
+
+    let mut offenders: Vec<String> = Vec::new();
+    for (path, text) in &sources {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == writer {
+            continue;
+        }
+        // The ledger owns the flush — it drains `pending_credit_earn` into the
+        // persisted balance and restores it if that write fails, which is the
+        // other half of the same mechanism, not a competing writer.
+        let is_ledger = rel == "src/credit/ledger.rs";
+        // Construction of the zeroed initial state is not a write.
+        let is_ctor = rel == "src/daemon/state/mod.rs" || rel == "src/daemon/state/credits.rs";
+        for (i, line) in text.lines().enumerate() {
+            let l = line.trim();
+            if l.starts_with("//") || l.starts_with("///") {
+                continue;
+            }
+            for name in guarded {
+                if !l.contains(name) {
+                    continue;
+                }
+                let mutates = l.contains("fetch_add")
+                    || l.contains("fetch_sub")
+                    || l.contains(".store(")
+                    || l.contains(".swap(")
+                    || l.contains("compare_exchange");
+                if !mutates {
+                    continue;
+                }
+                if (is_ledger || is_ctor) && name == "pending_credit_earn" {
+                    continue;
+                }
+                offenders.push(format!("{rel}:{}: {l}", i + 1));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "serving counters/credits are written outside `SharedState::record_peer_serve`.\n\
+         Work done FOR A PEER must go through that helper (it counts and bills in one place);\n\
+         work the node does for ITSELF must not be counted as serving at all.\n{}",
+        offenders.join("\n")
+    );
+
+    // And the helper must still be reachable from both serving paths, or the
+    // consolidation has quietly lost one of them again.
+    for expected in [
+        "src/daemon/dispatch/layer_forward.rs",
+        "src/daemon/dispatch/remote_generate.rs",
+    ] {
+        let text = std::fs::read_to_string(root.join(expected)).expect("readable serving path");
+        assert!(
+            text.contains("record_peer_serve"),
+            "{expected} serves peers but no longer records it — that work would be \
+             invisible and unpaid"
+        );
+    }
+}

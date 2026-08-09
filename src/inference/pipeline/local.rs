@@ -303,12 +303,13 @@ impl PipelineExecutor {
             .forward(layer_forward)
             .await?;
 
-        // Track stats — AtomicU64 increment, try_write() previously dropped
-        // silently under contention.
-        self.shared_state
-            .metrics
-            .forwards_served_atomic
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Deliberately NOT counted as a forward served. This is our own segment
+        // inside a pipeline we coordinate — work done for ourselves. The
+        // dashboard tile reads "computations your computer did as part of the
+        // network (earns credits)", and counting local work there told a user
+        // whose only traffic was their own chat that they had served the swarm.
+        // Serving is recorded at `SharedState::record_peer_serve`, reached only
+        // from the two inbound paths.
 
         Ok(layer_result)
     }

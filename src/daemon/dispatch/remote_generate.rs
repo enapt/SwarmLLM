@@ -212,14 +212,22 @@ pub(super) async fn handle_remote_generate_request(
     shared_state.inbound_generate_aborts.remove(&request_id);
     // Count the work regardless of outcome: time and layers were spent either
     // way, and an operator asking "is my node contributing" wants the truth
-    // about effort, not only about successes.
-    shared_state.record_segment_served(
-        layer_range.1.saturating_sub(layer_range.0),
-        serve_start.elapsed().as_millis() as u64,
+    // about effort, not only about successes. Bill only for tokens we can
+    // evidence, though — a failed decode falls back to the 1-token floor rather
+    // than guessing from the requested `max_tokens`, which the peer chose.
+    let served_tokens = match gen_result {
+        Ok(Ok(ref out)) => out.prompt_tokens.saturating_add(out.completion_tokens),
+        _ => 1,
+    };
+    shared_state.record_peer_serve(crate::daemon::state::PeerServe {
+        kind: crate::daemon::state::ServeKind::WholeRequest,
+        layers: layer_range.1.saturating_sub(layer_range.0),
+        elapsed_ms: serve_start.elapsed().as_millis() as u64,
         // The fast path streams tokens rather than returning activations, so
         // there are no activation bytes to attribute.
-        0,
-    );
+        activation_bytes: 0,
+        tokens: served_tokens,
+    });
 
     let final_token = match gen_result {
         Ok(Ok(out)) => StreamingToken {

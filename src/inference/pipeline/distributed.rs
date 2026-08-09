@@ -534,30 +534,20 @@ impl PipelineExecutor {
 
         // Batch credit write — one DB persist for the entire request instead of per-token.
         // Formula: rate * tokens (no layer multiplier — balanced with consume side).
-        let total_tokens = generated_tokens.len() as i64;
-        if total_tokens > 0 {
-            let has_local_segment = self
-                .assignment
-                .segments
-                .iter()
-                .any(|s| s.node_id == *self.shared_state.identity.node_id());
-            if has_local_segment {
-                let rate =
-                    crate::credit::ledger::resolve_credit_rates(&self.shared_state).inference_serve;
-                let total_earned = rate.saturating_mul(total_tokens);
-                if let Err(e) = crate::credit::ledger::apply_credit_direct_noted(
-                    &self.shared_state.credits.credit_balance,
-                    &self.shared_state.db,
-                    total_earned,
-                    crate::credit::ledger::CreditDelta::Earning,
-                    "segment_served_earning",
-                )
-                .await
-                {
-                    tracing::warn!(error = %e, "Failed to persist batched credit earn");
-                }
-            }
-        }
+        // Deliberately no credit earn here. `PipelineExecutor` is built at one
+        // production site — the router's coordinator path — so a local segment
+        // in this assignment is always work this node is doing for ITSELF, and
+        // paying for it credited the node for its own chat. Observed
+        // 2026-08-09: a purely local request logged `segment_served_earning
+        // +20` alongside the escrow charges for the same request.
+        //
+        // That contradicts what the product tells users — "earn credits by
+        // hosting model shards and serving inference for others", "inference
+        // across your own devices is free" — and it inflated `lifetime_earned`
+        // with credits no peer ever paid, which is precisely the unexplainable
+        // movement the transaction log was added to eliminate. Serving is
+        // earned at `SharedState::record_peer_serve`, reached only from the two
+        // inbound paths.
 
         Ok(InferenceOutput {
             request_id,

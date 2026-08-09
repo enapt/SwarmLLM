@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use crate::types::NetworkCommand;
 
 use super::super::state::SharedState;
-use super::{seal_layer_result, track_forward_participation};
+use super::seal_layer_result;
 
 pub(super) async fn handle_layer_forward(
     shared_state: Arc<SharedState>,
@@ -155,15 +155,24 @@ pub(super) async fn handle_layer_forward(
         tp = tp_meta.is_some(),
         "DIAG: LayerForward processed via worker subprocess"
     );
-    // Serving-side accounting. Everything else in the observability stack is
-    // requester-side, so without this an operator cannot answer "is my node
-    // actually contributing, and how well" — nor can we distinguish a
-    // well-behaved peer from one whose segments everyone times out on.
-    shared_state.record_segment_served(
-        layer_end.saturating_sub(layer_start) as u32,
-        forward_elapsed.as_millis() as u64,
-        result.activations.len() as u64,
-    );
+    // Serving-side accounting and credit earn, in one call. Everything else in
+    // the observability stack is requester-side, so without this an operator
+    // cannot answer "is my node actually contributing, and how well" — nor can
+    // we distinguish a well-behaved peer from one whose segments everyone times
+    // out on.
+    //
+    // Recorded here rather than after the reply is sent: the work is already
+    // done at this point, and the TP branch below has three early returns for
+    // encoding failures. Counting only successful replies would drop effort
+    // that was genuinely spent, which is the opposite of what an operator
+    // asking "is my node contributing" wants to know.
+    shared_state.record_peer_serve(crate::daemon::state::PeerServe {
+        kind: crate::daemon::state::ServeKind::Segment,
+        layers: layer_end.saturating_sub(layer_start) as u32,
+        elapsed_ms: forward_elapsed.as_millis() as u64,
+        activation_bytes: result.activations.len() as u64,
+        tokens: estimated_tokens,
+    });
 
     // TP path: send partial as AllReduceRequest to the coordinator (sender) instead of LayerResult
     if let Some(ref tp) = tp_meta {
@@ -223,11 +232,8 @@ pub(super) async fn handle_layer_forward(
             tracing::warn!(error = %e, "Failed to send TpAllReduceRequest");
         }
 
-        track_forward_participation(&shared_state, estimated_tokens);
         return;
     }
-
-    track_forward_participation(&shared_state, estimated_tokens);
 
     // Pipeline sealing: encrypt token IDs for requester if this is the final segment
     let mut result = result;

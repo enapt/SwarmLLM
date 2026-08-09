@@ -615,11 +615,17 @@ impl CreditLedger {
                     if let Some(ref ss) = self.shared_state {
                         let pending = ss.credits.pending_credit_earn.swap(0, std::sync::atomic::Ordering::AcqRel);
                         if pending != 0 {
-                            if let Err(e) = apply_credit_direct(
+                            if let Err(e) = apply_credit_direct_noted(
                                 &self.balance,
                                 &self.db,
                                 pending,
                                 if pending > 0 { CreditDelta::Earning } else { CreditDelta::Spending },
+                                // Tagged, not "unspecified". This is the one
+                                // place inference serving reaches the balance,
+                                // and an untagged +440 in the transaction log is
+                                // exactly the movement nobody can account for
+                                // that the log exists to prevent.
+                                "inference_serve_earning",
                             ).await {
                                 // Restore the credits so they aren't lost. Use
                                 // compare_exchange so we don't double-count: if

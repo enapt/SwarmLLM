@@ -38,7 +38,7 @@ pub use hf::{HfProbeInfo, HfSource};
 pub use metrics::{ChannelCounters, ChannelMetricsSet, MetricsProviders};
 pub use models::{ModelMgmt, FOREIGN_WISHLIST_MAX_AGE_MS, MAX_FOREIGN_WISHLIST_ENTRIES};
 pub use peer_speed::{PeerSpeed, WorkKind};
-pub use relay::{RelayForwardCounter, RelayProvenFeatures, RelayRoute};
+pub use relay::{PeerServe, RelayForwardCounter, RelayProvenFeatures, RelayRoute, ServeKind};
 pub use tp_allreduce::TpAllReduceCollector;
 
 // ---- Main SharedState ----

@@ -243,34 +243,6 @@ pub fn estimate_vram_from_shard_dir(
     ((total_bytes as f64 * layer_fraction) / (1024.0 * 1024.0)) as u64
 }
 
-/// Track inference participation: increment `forwards_served_atomic` and
-/// earn credits (non-blocking). The caller must pass `estimated_tokens`
-/// already capped against the model's real context length and the
-/// per-forward batch cap so a forged `token_count` can't inflate credits.
-pub(super) fn track_forward_participation(shared_state: &SharedState, estimated_tokens: u32) {
-    // AtomicU64 increment — try_write() silently dropped under contention.
-    shared_state
-        .metrics
-        .forwards_served_atomic
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // Credits earned per forward step for remote peers serving segments.
-    // Local segments don't go through dispatch — they use process_local_segment
-    // which only earns via apply_credit_direct at pipeline completion.
-    // Multiply by estimated token count to account for prefill (many tokens in one forward).
-    // SEC: cap peer-controlled token count. The requester sets `token_count` in
-    // the LayerForward message; without a cap, `token_count = u32::MAX` would mint
-    // ~43B credits per serving node on the next pending_credit_earn flush.
-    // 8192 covers any realistic single-forward batch (model context lengths cap
-    // out at ~32K-128K but those are split across multiple forwards).
-    const MAX_CREDITABLE_TOKENS: u32 = 8192;
-    let tokens = estimated_tokens.clamp(1, MAX_CREDITABLE_TOKENS) as i64;
-    let earned = crate::credit::ledger::RATE_INFERENCE_SERVE.saturating_mul(tokens);
-    shared_state
-        .credits
-        .pending_credit_earn
-        .fetch_add(earned, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// Dispatch inbound network messages to the appropriate subsystem.
 ///
 /// Inference-related messages (InferenceRequest, LayerForward, LayerResult,
