@@ -25,7 +25,19 @@ unnumbered, and the receiver correctly falls back to the old behaviour.
 node waited a fixed ten seconds for confirmation that a request had arrived. That
 confirmation is itself a round trip, so a peer six seconds away had almost no
 margin, and one was dropped mid-answer. The wait is now based on the round trip
-actually measured to that peer.
+actually measured to that peer, with the old ten seconds as a floor — nothing
+changes on a local network. The trade-off: when a message to a distant peer is
+genuinely lost, noticing now takes proportionally longer, up to a ninety-second
+ceiling. Failing a peer that was answering correctly seemed the worse of the two.
+
+**A private network was not private.** Setting a custom network ID changed only
+the encryption key, so those nodes still shared the public network's channels:
+their messages reached every public node, which rejected each one and logged a
+warning. Private networks now use their own channels. Public nodes are
+unaffected — with no ID set the channel names are unchanged.
+
+**Requests sent through the Responses API or MCP were never counted**, so the
+request total on the dashboard stayed at zero for anyone using them.
 
 **A quiet node wrote three quarters of its log about nothing.** Three lines per
 network message, which during a reply means several per word — one answer could
