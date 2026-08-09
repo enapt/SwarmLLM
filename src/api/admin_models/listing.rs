@@ -78,9 +78,21 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         };
 
     // Helper: check encrypted pipeline status for a model.
-    // Returns (effective_flag, has_first_shard, has_last_shard).
-    // effective_flag is true only when the DB flag is set AND node holds first+last.
-    let encrypted_pipeline_info = |model_id: &str| -> (bool, bool, bool) {
+    // Returns (effective_flag, has_first_shard, has_last_shard, blocked).
+    //
+    // `effective_flag` is true only when the flag is set AND this node holds
+    // first+last — that is what the UI's "privacy is on" indicator must show,
+    // because claiming privacy that is not actually happening is worse than
+    // showing nothing.
+    //
+    // `blocked` is the state that masking used to hide: prompt privacy is ON for
+    // this model and this node CANNOT satisfy it, so every request for it fails
+    // with "Encrypted pipeline requires the requesting node to hold shard 0".
+    // Reported live 2026-08-09 on a model whose shards had since been removed —
+    // the dashboard said `encrypted_pipeline: false` while the scheduler said
+    // "Encrypted pipeline active" for the same model in the same second, and
+    // nothing anywhere connected the failure to the setting causing it.
+    let encrypted_pipeline_info = |model_id: &str| -> (bool, bool, bool, bool) {
         let mid = crate::types::ModelId(model_id.to_string());
         // Same answer the scheduler acts on, including the automatic-on case.
         let flag = state.shared_state.encrypted_pipeline_for(&mid);
@@ -108,7 +120,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             false
         };
         let effective = flag && has_first && has_last;
-        (effective, has_first, has_last)
+        let blocked = flag && !(has_first && has_last);
+        (effective, has_first, has_last, blocked)
     };
 
     // Helper: build the common model JSON object shared by all 3 listing paths.
@@ -167,6 +180,10 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "encrypted_pipeline": enc_info.0,
             "has_first_shard": enc_info.1,
             "has_last_shard": enc_info.2,
+            // Prompt privacy is on for this model and unsatisfiable here, so
+            // every request for it will fail until the first+last shards are
+            // present or the setting is turned off.
+            "encrypted_pipeline_blocked": enc_info.3,
             "hf_source": hf_source,
         })
     };

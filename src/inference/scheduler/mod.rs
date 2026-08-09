@@ -836,11 +836,24 @@ impl PipelineScheduler {
                     .cloned()
                     .collect();
                 if local_only.is_empty() {
-                    return Err(SwarmError::PipelineError(
-                        "Encrypted pipeline requires the requesting node to hold shard 0 \
-                         (embedding table). Download the first shard to enable this mode."
-                            .to_string(),
-                    ));
+                    // Name the setting, not just the missing shard. This fires
+                    // when prompt privacy is on for a model whose first shard
+                    // this node does not have — commonly because the setting was
+                    // enabled while the shards were present and outlived them.
+                    // The old wording said only "download the first shard",
+                    // which does not tell anyone WHY it is suddenly required,
+                    // and the dashboard reported the setting as off.
+                    let model = candidates
+                        .first()
+                        .map(|c| c.shard_id.model_id.0.as_str())
+                        .unwrap_or("this model");
+                    return Err(SwarmError::PipelineError(format!(
+                        "Prompt privacy (encrypted_pipeline) is enabled for {model}, which \
+                         requires this node to hold that model's first shard (the embedding \
+                         table) so no peer ever sees your prompt. This node does not have it. \
+                         Either download the first shard, or turn prompt privacy off for this \
+                         model."
+                    )));
                 }
                 options = local_only;
             }
