@@ -4,6 +4,45 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.87-alpha] — 2026-08-09
+
+**From a node operator's report.** Three fixes and one thing that turned out not
+to be broken.
+
+**You can now see where your credits went.** A node kept only running totals, so
+if the numbers looked strange there was nothing to inspect — not for you, not for
+us. One operator found 205,170 spent and 204,880 refunded on a node that had
+never answered a single request, and there was no way to find out what any of it
+was. Every movement is now recorded with what changed, why, and the balance
+afterwards, at `GET /api/admin/credits/transactions`.
+
+Two things worth knowing when you look at it. The totals adding up was never
+evidence of health — anything unexplained gets attributed to refunds, so the sums
+close either way. And the log starts empty, so it explains what happens from here
+rather than what already happened.
+
+**The API key can be rotated.** It could not be before. The key is kept in the
+node's database and the file beside it is only a copy, so deleting that file
+handed back the same key — and the only real way to replace a leaked one was to
+destroy the node's identity along with it. `POST /api/admin/api-key/rotate`
+issues a new one. It takes effect when the node next starts, and says so rather
+than quietly handing you a key that does not work yet.
+
+**Update settings pointed at a section that does not exist.** The documentation
+said to put them under `[update]`; the node reads `[updates]`. An unrecognised
+section is warned about and ignored, so anyone who followed it configured nothing
+at all and got whatever the defaults gave them. The node now states which update
+mode it resolved every time it starts, and what it was configured with — only
+`install` ever installs on its own.
+
+**Not a bug:** a node reporting a shorter uptime than `ps` shows is correct on
+both sides. Installing an update replaces the running program in place, which
+keeps the process id and the system's record of when it first started, so `ps`
+measures from the original launch while the node measures from the new version.
+The version a node reports is built into it and always describes what is actually
+running.
+
+
 ## [0.3.86-alpha] — 2026-08-09
 
 **A node told to hold part of a model can now be told to stop.** Setting a shard
