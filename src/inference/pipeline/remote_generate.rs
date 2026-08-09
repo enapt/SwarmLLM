@@ -739,6 +739,24 @@ mod stream_reassembly_tests {
         assert!(s.is_complete());
     }
 
+    /// A duplicate or already-emitted id must not stall the stream. It lands in
+    /// the buffer at a slot the drain has passed and stays there until the
+    /// request ends — bounded by one reply's token count — while completion
+    /// still turns on `next_seq`, so nothing waits on it.
+    #[test]
+    fn a_late_duplicate_does_not_stall_completion() {
+        let mut s = StreamReassembler::new();
+        assert_eq!(joined(s.push_content(content(0, "a"))), "a");
+        assert_eq!(joined(s.push_content(content(1, "b"))), "b");
+        // Token 0 again, after both have been emitted.
+        assert!(s.push_content(content(0, "a")).is_empty());
+        s.mark_done(2);
+        assert!(
+            s.is_complete(),
+            "a re-delivered token must not hold the stream open"
+        );
+    }
+
     /// Losing a token must not reorder what survives: the consecutive prefix is
     /// returned and the tokens stranded behind the gap are reported, not
     /// spliced in.
