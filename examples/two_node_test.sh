@@ -41,34 +41,80 @@ ln -s "$MODELS_DIR" "$S/models"
 
 # Kill only what this script started. A broad `pkill swarmllm` takes down any
 # other node on the machine, production included (gotcha #283).
-cleanup() { kill ${SPID:-} ${CPID:-} 2>/dev/null; rm -rf "$BASE"; }
+cleanup() { kill ${SPID:-} ${CPID:-} 2>/dev/null; [ -n "${SWARM_TWONODE_KEEP:-}" ] || rm -rf "$BASE"; [ -n "${SWARM_TWONODE_KEEP:-}" ] && echo "  logs kept in $BASE"; }
 trap cleanup EXIT
 
-for d in "$S" "$C"; do
-cat > "$d/config.toml" <<CFG
+# A private gossip id is NOT isolation on its own: the DHT and mDNS still find
+# whatever else is on the machine and the LAN, and the scheduler then routes to
+# it. An earlier version of this script sent its request to a peer on the far
+# side of the internet and "passed". So: mDNS off, no public bootstrap, and the
+# client is pointed at the server explicitly once the server has an address.
+cat > "$S/config.toml" <<CFG
 [network]
 bootstrap_peers = []
 disable_default_bootstrap = true
 gossip_network_id = "swarmllm-twonode-test"
-enable_mdns = true
+enable_mdns = false
 
 [auto_manage]
 enabled = false
 CFG
-done
 
 echo "two-node: $("$BIN" --version), server=$SERVER_PORT client=$CLIENT_PORT"
 SWARMLLM_NODE_DATA_DIR="$S" "$BIN" run -p "$SERVER_PORT" -v > "$S/log" 2>&1 & SPID=$!
-SWARMLLM_NODE_DATA_DIR="$C" "$BIN" run -p "$CLIENT_PORT" -v > "$C/log" 2>&1 & CPID=$!
 
 for _ in $(seq 1 90); do
-  [ -f "$S/api_key" ] && [ -f "$C/api_key" ] \
-    && curl -s -m 3 "http://localhost:$SERVER_PORT/health" >/dev/null 2>&1 \
-    && curl -s -m 3 "http://localhost:$CLIENT_PORT/health" >/dev/null 2>&1 && break
+  [ -f "$S/api_key" ] && curl -s -m 3 "http://localhost:$SERVER_PORT/health" >/dev/null 2>&1 && break
+  sleep 2
+done
+SK=$(cat "$S/api_key" 2>/dev/null || true)
+[ -z "$SK" ] && { echo "  server never came up"; tail -20 "$S/log"; exit 1; }
+
+# Any direct (non-relayed) address the server publishes. Loopback is filtered
+# out of that list on purpose, so take the LAN one — same machine either way.
+SERVER_ADDRS=$(curl -s -m 8 -H "Authorization: Bearer $SK" \
+  "http://localhost:$SERVER_PORT/api/admin/diagnostics" \
+  | grep -oE "/ip4/[0-9.]+/tcp/[0-9]+/p2p/[A-Za-z0-9]+" | grep -v "p2p-circuit")
+# 10.255.255.254 is WSL2's NAT gateway — reachable, and the documented source of
+# the connection churn that loses sends between two nodes on one host. Prefer a
+# real LAN address when the node has one.
+SERVER_ADDR=$(echo "$SERVER_ADDRS" | grep -v "10\.255\.255\.254" | head -1)
+[ -z "$SERVER_ADDR" ] && SERVER_ADDR=$(echo "$SERVER_ADDRS" | head -1)
+if [ -z "$SERVER_ADDR" ]; then
+  echo "  server never published a loopback address to dial"
+  exit 1
+fi
+echo "  server at $SERVER_ADDR"
+
+cat > "$C/config.toml" <<CFG
+[network]
+bootstrap_peers = ["$SERVER_ADDR"]
+disable_default_bootstrap = true
+gossip_network_id = "swarmllm-twonode-test"
+enable_mdns = false
+
+[auto_manage]
+enabled = false
+CFG
+
+SWARMLLM_NODE_DATA_DIR="$C" "$BIN" run -p "$CLIENT_PORT" -v > "$C/log" 2>&1 & CPID=$!
+for _ in $(seq 1 90); do
+  [ -f "$C/api_key" ] && curl -s -m 3 "http://localhost:$CLIENT_PORT/health" >/dev/null 2>&1 && break
   sleep 2
 done
 CK=$(cat "$C/api_key" 2>/dev/null || true)
 [ -z "$CK" ] && { echo "  nodes never came up"; tail -20 "$C/log"; exit 1; }
+
+# Isolation cannot be asserted by peer count on a live LAN: other nodes dial IN,
+# and no local setting prevents that. So verify the OUTCOME instead — that the
+# request was answered by this script's server and not by something else the
+# scheduler happened to like. An earlier version asserted neither and "passed"
+# on a reply from a peer on the far side of the internet.
+SERVER_NODE=$(curl -s -m 8 -H "Authorization: Bearer $SK" \
+  "http://localhost:$SERVER_PORT/api/admin/diagnostics" \
+  | grep -oE "^node: +[0-9a-f]+" | grep -oE "[0-9a-f]{16,}" | head -1)
+[ -z "$SERVER_NODE" ] && { echo "  could not read the server's node id"; exit 1; }
+echo "  server node: ${SERVER_NODE:0:16}"
 
 echo -n "  waiting for the client to see $MODEL on its peer"
 found=0
@@ -123,15 +169,23 @@ else:
 fi
 
 echo "  served by:"
-curl -s -m 8 -H "Authorization: Bearer $CK" "http://localhost:$CLIENT_PORT/api/admin/performance" \
+SERVED_BY=$(curl -s -m 8 -H "Authorization: Bearer $CK" "http://localhost:$CLIENT_PORT/api/admin/performance" \
   | python3 -c "
 import sys,json
 d=json.load(sys.stdin); r=(d.get('recent') or [{}])[0]
-segs=[s.get('node_id','?')[:8] for s in r.get('segments',[])]
-print('    route:', r.get('route'), '| segments:', segs, '| completion_tokens:', r.get('completion_tokens'))
-import sys as s2
-s2.exit(0 if segs else 1)
-" || fails=$((fails+1))
+segs=[x.get('node_id','') for x in r.get('segments',[])]
+print(segs[0] if segs else '')
+" 2>/dev/null)
+if [ -n "$SERVED_BY" ] && [ "$SERVED_BY" = "$SERVER_NODE" ]; then
+  echo "    answered by this script's server (${SERVED_BY:0:16}) — the path under test"
+elif [ -n "$SERVED_BY" ]; then
+  echo "    answered by ${SERVED_BY:0:16}, NOT this script's server (${SERVER_NODE:0:16})"
+  echo "    the result says nothing about the build under test"
+  fails=$((fails+1))
+else
+  echo "    nothing served it"
+  fails=$((fails+1))
+fi
 
 # The server numbers its content tokens and the done token carries the total;
 # that total must equal what the client counted, or reassembly lost something.
