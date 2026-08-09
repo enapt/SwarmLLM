@@ -4,6 +4,48 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.88-alpha] — 2026-08-09
+
+**Two things that reported success and did nothing.** Both were found by running
+a node and checking what actually happened, rather than by reading the code.
+
+**If your machine served someone else's request, you were not paid for it and it
+was not counted.** The dashboard showed "Served: 0" and "Forwards: 0" no matter
+how much work your node did, and no credits arrived — while the person who asked
+was charged normally. Measured across two machines: a request that took 28 layers
+and five and a half seconds of GPU time cost the requester 430 credits and moved
+nothing at all on the node that answered it.
+
+This affected the most common way of contributing. If your machine holds a whole
+model and answers a request end to end, that path had no accounting on it at all;
+only the case where a request is split across several machines did. Serving is now
+counted and paid the same way whichever path it takes.
+
+The same two figures had the opposite fault: your own chat, answered entirely by
+your own machine, counted as work done for the network and paid you for it. It no
+longer does — those numbers now mean what they say, which is work done for other
+people. If yours drop to zero after updating, that is the correction, not a
+regression.
+
+**Settings saved, said "ok", and left the node running on the old value.**
+Contribution level, disk limit, VRAM limit, bandwidth limit, auto-managed storage,
+shard size and batching delay all wrote themselves to the config file, reported
+success, and showed the new number when you reopened Settings — while the running
+node carried on with whatever it started with. Nothing said a restart was needed.
+Raising the disk limit from 50 GB to 123 GB, for instance, left the node still
+working to the old figure.
+
+Those settings now take effect immediately. Three things are still decided when
+the node starts and say so in Settings: how many peers you connect to, the
+processor cores a model that is already loaded has been given (taking them back
+would interrupt whatever it is answering), and the update mode.
+
+**Also:** credit movements from serving now carry a reason in the transaction log
+instead of appearing as "unspecified", so what arrived and why is answerable.
+
+**Upgrading:** nothing to do. Existing config files and credit balances are
+unchanged.
+
 ## [0.3.87-alpha] — 2026-08-09
 
 **From a node operator's report.** Three fixes and one thing that turned out not
