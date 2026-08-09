@@ -85,6 +85,21 @@ exit(0 if 'choices' in d and d['choices'][0]['message']['content'].strip() else 
     -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Say the single word: plum\"}],\"max_tokens\":10,\"stream\":true}" \
     | grep -c "^data:")
   [ "${N:-0}" -gt 1 ]; check "streaming emits events" $?
+
+  # The Anthropic surface is how Claude Code talks to a node, and it has its own
+  # request translation, response assembly and streaming — a break here is
+  # invisible to every check above.
+  curl -s -m 300 -H "Authorization: Bearer $K" -H 'Content-Type: application/json' \
+    "http://localhost:$PORT/v1/messages" \
+    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Say the single word: pear\"}],\"max_tokens\":10}" \
+    | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+blocks=d.get('content') or []
+text=''.join(b.get('text','') for b in blocks if isinstance(b,dict))
+exit(0 if text.strip() else 1)
+" 2>/dev/null
+  check "Anthropic endpoint returns text" $?
 else
   echo "  (inference checks skipped — $MODEL not present)"
 fi
