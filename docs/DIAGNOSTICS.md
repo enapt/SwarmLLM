@@ -161,6 +161,7 @@ histograms. Adding a field means adding it there once, not at each surface.
 | DEBUG | `DIAG: handling outbound command` — command type for every outbound command | manager/commands.rs |
 | INFO  | `DIAG: OutboundFailure` — `is_connected`, `pending_tensor_out`, `pending_channels` | manager/events.rs |
 | WARN  | `DIAG: InboundFailure` — `pending_channels` | manager/events.rs |
+| DEBUG | `DIAG: remote-generate stream complete` — `streamed_count`, the number the done token carries so the coordinator can tell a finished stream from one whose end overtook its middle | daemon/dispatch/remote_generate.rs |
 | DEBUG | `DIAG: ResponseSent event` — confirms response written to wire. Per-message, so `-v`: at info these were three quarters of an idle node's log, and one line per streamed token under load | manager/events.rs |
 
 ### Failure Paths

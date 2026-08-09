@@ -249,6 +249,11 @@ pub(super) async fn handle_remote_generate_request(
     // still in flight". `forward_task` has been awaited above, so every send
     // has been queued and the counter is final.
     let streamed_count = stream_seq.load(std::sync::atomic::Ordering::Relaxed);
+    tracing::debug!(
+        %request_id,
+        streamed_count,
+        "DIAG: remote-generate stream complete — done token carries the content-token count"
+    );
 
     let final_token = match gen_result {
         Ok(Ok(out)) => StreamingToken {
