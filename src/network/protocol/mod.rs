@@ -30,6 +30,66 @@ pub const TOPIC_POOLS: &str = "swarm/pools";
 /// GossipSub topic for regional shard summaries and demand gossip.
 pub const TOPIC_REGIONS: &str = "swarm/regions";
 
+/// The GossipSub topic to use for `base` on this node's network.
+///
+/// **A private network must not share topics with the public one.** Only the
+/// gossip *encryption key* was derived from `network.gossip_network_id`, while
+/// the topic names were fixed — so a node on a private network subscribed to
+/// exactly the same topics, its messages reached every public node, and each of
+/// them rejected the lot with "Rejecting unsigned/invalid gossip message —
+/// Decryption failed". Measured 2026-08-09: 97 such warnings in 40 minutes on a
+/// node that simply had private-network neighbours on its LAN. Bandwidth,
+/// decrypt attempts and a stream of alarming warnings, all for a configuration
+/// difference that is not an error.
+///
+/// `None` — the default, the public swarm — returns the base name unchanged, so
+/// the topics every existing node is subscribed to are byte-identical and this
+/// is not a wire break. A configured id scopes the topic, which is what makes
+/// the separation real rather than key-deep.
+pub fn topic_for_network(base: &str, network_id: Option<&str>) -> String {
+    match network_id {
+        None => base.to_string(),
+        Some(id) => format!("{base}/{id}"),
+    }
+}
+
+#[cfg(test)]
+mod topic_scoping_tests {
+    use super::*;
+
+    /// The public swarm's topic names must not move: every node already running
+    /// is subscribed to these exact strings.
+    #[test]
+    fn the_public_network_keeps_the_bare_topic_names() {
+        assert_eq!(topic_for_network(TOPIC_MODELS, None), "swarm/models");
+        assert_eq!(topic_for_network(TOPIC_CREDITS, None), "swarm/credits");
+        assert_eq!(topic_for_network(TOPIC_REGIONS, None), "swarm/regions");
+    }
+
+    /// A private network gets its own topics, so its traffic never reaches a
+    /// public node to be rejected.
+    #[test]
+    fn a_private_network_gets_its_own_topics() {
+        assert_eq!(
+            topic_for_network(TOPIC_MODELS, Some("my-lab")),
+            "swarm/models/my-lab"
+        );
+        assert_ne!(
+            topic_for_network(TOPIC_MODELS, Some("my-lab")),
+            topic_for_network(TOPIC_MODELS, None)
+        );
+    }
+
+    /// Two different private networks must not collide with each other either.
+    #[test]
+    fn two_private_networks_do_not_share_topics() {
+        assert_ne!(
+            topic_for_network(TOPIC_HEALTH, Some("a")),
+            topic_for_network(TOPIC_HEALTH, Some("b"))
+        );
+    }
+}
+
 /// Maximum message size for request_response protocol (256 MB).
 const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 /// Maximum JSON control message size (4 MB).

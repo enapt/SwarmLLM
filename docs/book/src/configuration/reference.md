@@ -59,7 +59,7 @@ booted with.
 | `bootstrap_peers` | list | built-in anchor | Peer addresses to dial on startup. An empty list means "not configured" and falls back to the built-in anchors |
 | `disable_default_bootstrap` | boolean | `false` | Genuinely start with no bootstrap peers (private / air-gapped swarm). Implied by `node.anchor_mode` |
 | `enable_mdns` | boolean | `true` | LAN peer discovery |
-| `gossip_network_id` | string | none | Custom network ID for private networks |
+| `gossip_network_id` | string | none | Run a private network. Nodes sharing this value form their own gossip network: they use their own topics and their own encryption key, so their traffic never reaches the public swarm and vice versa. Leave unset to join the public network |
 | `peer_exchange` | boolean | `true` | Share peer lists with connected nodes |
 | `enable_relay` | boolean | `true` | Act as relay for peers behind firewalls |
 | `enable_relay_client` | boolean | `true` | Let THIS node route its own traffic through someone else's relay when it is not directly reachable. Turning it off leaves the node able to reach others but generally unreachable from the internet. The opposite role — relaying for others — is `enable_relay` |

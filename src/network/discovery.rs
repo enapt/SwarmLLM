@@ -92,10 +92,18 @@ pub fn trigger_bootstrap(swarm: &mut Swarm<SwarmBehaviour>) -> Result<(), SwarmE
     }
 }
 
-/// Subscribe to the standard GossipSub topics.
-pub fn subscribe_topics(swarm: &mut Swarm<SwarmBehaviour>) -> Result<(), SwarmError> {
+/// Subscribe to the standard GossipSub topics for this node's network.
+///
+/// `network_id` is `None` on the public swarm, which keeps the topic names
+/// exactly as every existing node knows them. A configured private network gets
+/// its own scoped topics — see `protocol::topic_for_network`.
+pub fn subscribe_topics(
+    swarm: &mut Swarm<SwarmBehaviour>,
+    network_id: Option<&str>,
+) -> Result<(), SwarmError> {
     use crate::network::protocol::{
-        TOPIC_CREDITS, TOPIC_HEALTH, TOPIC_IDENTITY, TOPIC_MODELS, TOPIC_POOLS, TOPIC_REGIONS,
+        topic_for_network, TOPIC_CREDITS, TOPIC_HEALTH, TOPIC_IDENTITY, TOPIC_MODELS, TOPIC_POOLS,
+        TOPIC_REGIONS,
     };
     use libp2p::gossipsub::IdentTopic;
 
@@ -108,8 +116,9 @@ pub fn subscribe_topics(swarm: &mut Swarm<SwarmBehaviour>) -> Result<(), SwarmEr
         TOPIC_REGIONS,
     ];
 
-    for topic_str in &topics {
-        let topic = IdentTopic::new(*topic_str);
+    for base in &topics {
+        let topic_str = topic_for_network(base, network_id);
+        let topic = IdentTopic::new(topic_str.clone());
         swarm
             .behaviour_mut()
             .gossipsub

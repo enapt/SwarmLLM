@@ -342,7 +342,19 @@ impl NetworkManager {
                     }
                 };
 
-                let gossip_topic = IdentTopic::new(topic);
+                // Same scoping as the subscription, or a private network would
+                // publish where it does not listen. Computed once: the buffer
+                // below replays by name, so buffering the unscoped one would
+                // send a private network's backlog onto the public topic.
+                let topic_str = crate::network::protocol::topic_for_network(
+                    topic,
+                    self.shared_state
+                        .config
+                        .network
+                        .gossip_network_id
+                        .as_deref(),
+                );
+                let gossip_topic = IdentTopic::new(topic_str.clone());
                 match self
                     .swarm
                     .behaviour_mut()
@@ -354,7 +366,7 @@ impl NetworkManager {
                         // NET-I4: Buffer messages that fail at startup (no peers), capped to prevent memory leak
                         if self.buffered_gossip.len() < MAX_BUFFERED_GOSSIP {
                             tracing::debug!(topic, error = %e, "Failed to publish to GossipSub, buffering");
-                            self.buffered_gossip.push((topic.to_string(), publish_data));
+                            self.buffered_gossip.push((topic_str.clone(), publish_data));
                         } else {
                             tracing::warn!(
                                 topic,

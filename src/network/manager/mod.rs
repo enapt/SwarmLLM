@@ -893,7 +893,14 @@ impl NetworkManager {
         self.refresh_listen_multiaddrs();
 
         // Subscribe to GossipSub topics
-        discovery::subscribe_topics(&mut self.swarm)?;
+        discovery::subscribe_topics(
+            &mut self.swarm,
+            self.shared_state
+                .config
+                .network
+                .gossip_network_id
+                .as_deref(),
+        )?;
 
         // Persistent pipeline stream: obtain a Control, register the protocol
         // acceptor, publish the client to SharedState, and spawn the accept
