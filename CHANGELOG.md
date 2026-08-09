@@ -4,6 +4,22 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.86-alpha] — 2026-08-09
+
+**A node told to hold part of a model can now be told to stop.** Setting a shard
+range saves it to that node's database, and leaving the option off *restores*
+the saved value — so a machine told once to hold half a model held half of it
+for good. Nothing in the config file could override it, because the config is
+not where the value was kept; the only way out was deleting the database.
+
+That did not matter while the setting was being ignored. It started mattering in
+v0.3.85, which is the release that made it work — so if you tried splitting a
+model there and changed your mind, this is the version you need.
+
+Run with `--shards all` once to clear it. The node goes back to claiming every
+shard it holds.
+
+
 ## [0.3.85-alpha] — 2026-08-09
 
 **Serving several people at once is up to 2.4x faster, because it was never
