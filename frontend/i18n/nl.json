@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Bijdragemodus",
   "settings.contribution_mode_manual": "Handmatig",
   "settings.contribution_mode_manual_sub": "Vast op niveau hieronder",
+  "settings.contribution_restart_note": "Werkt meteen. Twee dingen veranderen pas wanneer SwarmLLM opnieuw start: met hoeveel peers je verbinding maakt en de processorkernen die een draaiend model al heeft gereserveerd.",
   "settings.copy_token_title": "Toegangstoken kopiëren",
   "settings.detecting": "Controleren...",
   "settings.disk_50pct": "50% van schijflimiet",

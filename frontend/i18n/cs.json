@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Režim příspěvku",
   "settings.contribution_mode_manual": "Ruční",
   "settings.contribution_mode_manual_sub": "Pevně na úrovni níže",
+  "settings.contribution_restart_note": "Projeví se ihned. Až při příštím spuštění SwarmLLM se změní jen dvě věci: ke kolika uzlům se připojujete a jádra procesoru, která si už vyhradil běžící model.",
   "settings.copy_token_title": "Kopírovat přístupový token",
   "settings.detecting": "Kontroluji...",
   "settings.disk_50pct": "50 % limitu disku",

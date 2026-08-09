@@ -514,7 +514,7 @@ pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     shared
         .config
         .resources
-        .inference_vram_budget_mb(gpu_total, shared.config.node.contribution.clone())
+        .inference_vram_budget_mb(gpu_total, shared.contribution())
 }
 
 /// Percentage of *currently free* system RAM a configured budget may claim.
@@ -550,7 +550,7 @@ pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     let by_config = shared.config.resources.inference_ram_budget_mb(
         total_mb,
         has_gpu,
-        shared.config.node.contribution.clone(),
+        shared.contribution(),
     )?;
 
     // Clamp ONLY an explicitly configured number. The automatic value is

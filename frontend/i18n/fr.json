@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Mode de contribution",
   "settings.contribution_mode_manual": "Manuel",
   "settings.contribution_mode_manual_sub": "Fixé au niveau ci-dessous",
+  "settings.contribution_restart_note": "Prend effet immédiatement. Deux choses ne changent qu'au prochain démarrage de SwarmLLM : le nombre de pairs auxquels vous vous connectez et les cœurs du processeur déjà réservés par un modèle en cours d'exécution.",
   "settings.copy_token_title": "Copier le jeton d'accès",
   "settings.detecting": "Vérification...",
   "settings.disk_50pct": "50% de la limite disque",

@@ -183,6 +183,32 @@ impl PendingLayerResult {
     }
 }
 
+/// `ContributionMode` as a `u8` for atomic storage.
+///
+/// Paired with [`contribution_from_u8`]; the two are exhaustively matched so a
+/// new variant is a compile error here rather than a silent mis-decode.
+fn contribution_to_u8(mode: crate::types::ContributionMode) -> u8 {
+    match mode {
+        crate::types::ContributionMode::Minimal => 0,
+        crate::types::ContributionMode::Moderate => 1,
+        crate::types::ContributionMode::Maximum => 2,
+    }
+}
+
+/// Inverse of [`contribution_to_u8`].
+///
+/// An unrecognised byte decodes to `Minimal` — this is a value only ever written
+/// by `contribution_to_u8`, so it cannot happen, and if it somehow did then
+/// contributing the least is the safe way to be wrong about how much of a
+/// stranger's machine to use.
+fn contribution_from_u8(v: u8) -> crate::types::ContributionMode {
+    match v {
+        1 => crate::types::ContributionMode::Moderate,
+        2 => crate::types::ContributionMode::Maximum,
+        _ => crate::types::ContributionMode::Minimal,
+    }
+}
+
 pub struct SharedState {
     // Core infrastructure (accessed by nearly every subsystem)
     pub config: Config,
@@ -390,6 +416,25 @@ pub struct SharedState {
     /// the next page load. New code that gates on LAN dashboard trust MUST
     /// read this atomic, not `state.config.api.dashboard_trust_lan`.
     pub dashboard_trust_lan: std::sync::atomic::AtomicBool,
+    /// Runtime mirror of `config.node.contribution` — how much of this machine
+    /// may be spent on the swarm.
+    ///
+    /// Read it through [`SharedState::contribution`], never as
+    /// `state.config.node.contribution`: `state.config` is startup-frozen, so
+    /// the config field is whatever the daemon booted with. Moving the slider in
+    /// Settings wrote the new level to disk and changed nothing that was
+    /// running — VRAM budget, shard upload rate and the auto-manage caps all
+    /// kept using the old level until a restart, with nothing in the UI saying
+    /// so. Same class as `contribution_auto`, which got a mirror in R121 while
+    /// the setting it caps did not.
+    ///
+    /// Stored as the `u8` discriminant of `ContributionMode` so the read is a
+    /// plain relaxed load on paths that run per request. Not everything can
+    /// follow it live: libp2p's connection limits are fixed when the swarm is
+    /// built, and CPU thread counts are handed to a worker when it spawns.
+    /// Those still need a restart, and the Settings panel says so rather than
+    /// implying the whole setting is live.
+    pub contribution: std::sync::atomic::AtomicU8,
     /// NETWORKING_PLAN Phase 3 — whether this node has been observed to be
     /// reachable from the open internet, and may therefore donate itself as an
     /// application-level inference relay.
@@ -507,6 +552,28 @@ pub struct SharedState {
 }
 
 impl SharedState {
+    /// How much of this machine may currently be spent on the swarm.
+    ///
+    /// **This, not `state.config.node.contribution`.** The config is frozen at
+    /// startup, so reading it means a node keeps using whatever level it booted
+    /// with no matter what the user later chooses. Every path that runs
+    /// repeatedly — the auto-manage tick, a shard upload, a VRAM budget — must
+    /// read it here so a change lands on the next one.
+    pub fn contribution(&self) -> crate::types::ContributionMode {
+        contribution_from_u8(self.contribution.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Apply a new contribution level to the running daemon.
+    ///
+    /// Called by `PUT /api/admin/config` alongside persisting the choice.
+    /// Persisting alone is durability, not effect.
+    pub fn set_contribution(&self, mode: crate::types::ContributionMode) {
+        self.contribution.store(
+            contribution_to_u8(mode),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     pub fn new(
         config: Config,
         identity: Identity,
@@ -834,6 +901,9 @@ impl SharedState {
             observed_inbound_connection: std::sync::atomic::AtomicBool::new(false),
             last_health_ping: parking_lot::Mutex::new(None),
             dashboard_trust_lan: std::sync::atomic::AtomicBool::new(config.api.dashboard_trust_lan),
+            contribution: std::sync::atomic::AtomicU8::new(contribution_to_u8(
+                config.node.contribution,
+            )),
             publicly_reachable: std::sync::atomic::AtomicBool::new(false),
             hole_punch_successes: AtomicU64::new(0),
             hole_punch_failures: AtomicU64::new(0),
@@ -2765,5 +2835,58 @@ mod pending_layer_result_tests {
         assert!(!pending.accepts(None));
         assert!(!pending.accepts(Some(&NodeId([3u8; 32]))));
         assert!(pending.accepts(Some(&NodeId([2u8; 32]))));
+    }
+}
+
+#[cfg(test)]
+mod contribution_mirror_tests {
+    use super::*;
+    use crate::types::ContributionMode;
+
+    /// The u8 encoding is an implementation detail of the atomic, so it has to
+    /// round-trip exactly — a mis-decode would silently run the node at the
+    /// wrong contribution level, which is invisible rather than loud.
+    #[test]
+    fn every_contribution_level_round_trips_through_the_atomic_encoding() {
+        for mode in [
+            ContributionMode::Minimal,
+            ContributionMode::Moderate,
+            ContributionMode::Maximum,
+        ] {
+            let encoded = contribution_to_u8(mode.clone());
+            assert_eq!(
+                contribution_from_u8(encoded),
+                mode,
+                "contribution level did not survive the atomic encoding"
+            );
+        }
+    }
+
+    /// Distinct levels must encode distinctly, or two settings collapse into
+    /// one and the slider appears to do nothing for one of its positions.
+    #[test]
+    fn contribution_levels_encode_distinctly() {
+        let encodings = [
+            contribution_to_u8(ContributionMode::Minimal),
+            contribution_to_u8(ContributionMode::Moderate),
+            contribution_to_u8(ContributionMode::Maximum),
+        ];
+        let mut sorted = encodings.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            encodings.len(),
+            "two levels share an encoding"
+        );
+    }
+
+    /// An unknown byte is never written by `contribution_to_u8`, but if one is
+    /// ever read it must mean "use the least of this machine" rather than the
+    /// most — being wrong in the generous direction spends a stranger's
+    /// hardware without being asked.
+    #[test]
+    fn an_unknown_encoding_decodes_to_the_most_conservative_level() {
+        assert_eq!(contribution_from_u8(200), ContributionMode::Minimal);
     }
 }

@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "貢献モード",
   "settings.contribution_mode_manual": "手動",
   "settings.contribution_mode_manual_sub": "下のレベルで固定",
+  "settings.contribution_restart_note": "すぐに反映されます。次回 SwarmLLM を起動したときに変わるのは 2 つだけです。接続するピアの数と、実行中のモデルがすでに確保しているプロセッサコアです。",
   "settings.copy_token_title": "アクセストークンをコピー",
   "settings.detecting": "確認中...",
   "settings.disk_50pct": "ディスク制限の50%",

@@ -21,7 +21,7 @@ impl AutoShardManager {
         let effective_max = super::compute_budget_max_bytes(
             config.max_storage_mb,
             self.shared_state.config.resources.max_disk_mb,
-            &self.shared_state.config.node.contribution,
+            &self.shared_state.contribution(),
             super::free_disk_bytes_for(&self.shared_state.config.node.data_dir),
         );
         effective_max.saturating_sub(current_bytes)
@@ -605,7 +605,7 @@ impl AutoShardManager {
         // Moderate: 1-2 based on peer count (original behavior)
         // Maximum: 2-4 for aggressive seeding
         let peers = self.shared_state.peer_registry.len();
-        let per_cycle_cap = match self.shared_state.config.node.contribution {
+        let per_cycle_cap = match self.shared_state.contribution() {
             swarmllm_types::ContributionMode::Minimal => 1,
             swarmllm_types::ContributionMode::Moderate => {
                 if peers < 5 {

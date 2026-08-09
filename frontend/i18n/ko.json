@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "기여 모드",
   "settings.contribution_mode_manual": "수동",
   "settings.contribution_mode_manual_sub": "아래 수준으로 고정",
+  "settings.contribution_restart_note": "즉시 적용됩니다. SwarmLLM을 다시 시작할 때에만 바뀌는 항목은 두 가지입니다. 연결하는 피어 수와 실행 중인 모델이 이미 확보한 프로세서 코어입니다.",
   "settings.copy_token_title": "액세스 토큰 복사",
   "settings.detecting": "확인 중...",
   "settings.disk_50pct": "디스크 한도의 50%",

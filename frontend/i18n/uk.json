@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Режим внеску",
   "settings.contribution_mode_manual": "Вручну",
   "settings.contribution_mode_manual_sub": "Зафіксовано на рівні нижче",
+  "settings.contribution_restart_note": "Застосовується одразу. Лише дві речі змінюються під час наступного запуску SwarmLLM: до скількох вузлів ви під'єднуєтеся та ядра процесора, вже зайняті запущеною моделлю.",
   "settings.copy_token_title": "Копіювати токен доступу",
   "settings.detecting": "Перевірка...",
   "settings.disk_50pct": "50% ліміту диску",

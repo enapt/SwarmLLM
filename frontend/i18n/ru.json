@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Режим вклада",
   "settings.contribution_mode_manual": "Вручную",
   "settings.contribution_mode_manual_sub": "Зафиксирован на уровне ниже",
+  "settings.contribution_restart_note": "Применяется сразу. Только две вещи изменятся при следующем запуске SwarmLLM: к скольким узлам вы подключаетесь и ядра процессора, уже занятые работающей моделью.",
   "settings.copy_token_title": "Скопировать токен доступа",
   "settings.detecting": "Проверка...",
   "settings.disk_50pct": "50% лимита диска",

@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Contribution Mode",
   "settings.contribution_mode_manual": "Manual",
   "settings.contribution_mode_manual_sub": "Fixed at level below",
+  "settings.contribution_restart_note": "Takes effect right away. Two things only change when SwarmLLM next starts: how many peers you connect to, and the processor cores a running model has already reserved.",
   "settings.copy_token_title": "Copy access token",
   "settings.detecting": "Checking...",
   "settings.disk_50pct": "50% of disk limit",

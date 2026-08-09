@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Katkı Modu",
   "settings.contribution_mode_manual": "Manuel",
   "settings.contribution_mode_manual_sub": "Aşağıdaki düzeyde sabit",
+  "settings.contribution_restart_note": "Hemen etkili olur. Yalnızca iki şey SwarmLLM bir sonraki başlatıldığında değişir: kaç eşle bağlantı kurduğunuz ve çalışan bir modelin hâlihazırda ayırdığı işlemci çekirdekleri.",
   "settings.copy_token_title": "Erişim anahtarını kopyala",
   "settings.detecting": "Kontrol ediliyor...",
   "settings.disk_50pct": "Disk limitinin %50'si",

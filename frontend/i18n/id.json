@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Mode Kontribusi",
   "settings.contribution_mode_manual": "Manual",
   "settings.contribution_mode_manual_sub": "Tetap pada level di bawah",
+  "settings.contribution_restart_note": "Langsung berlaku. Hanya dua hal yang berubah saat SwarmLLM dijalankan berikutnya: berapa banyak peer yang Anda hubungi dan inti prosesor yang sudah dipakai model yang sedang berjalan.",
   "settings.copy_token_title": "Salin token akses",
   "settings.detecting": "Memeriksa...",
   "settings.disk_50pct": "50% batas disk",

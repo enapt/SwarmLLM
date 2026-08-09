@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "وضع المساهمة",
   "settings.contribution_mode_manual": "يدوي",
   "settings.contribution_mode_manual_sub": "ثابت عند المستوى أدناه",
+  "settings.contribution_restart_note": "يسري المفعول فورًا. شيئان فقط يتغيران عند تشغيل SwarmLLM في المرة القادمة: عدد الأقران الذين تتصل بهم، وأنوية المعالج التي حجزها بالفعل نموذج قيد التشغيل.",
   "settings.copy_token_title": "نسخ رمز الوصول",
   "settings.detecting": "جارٍ التحقق...",
   "settings.disk_50pct": "50% من حد القرص",

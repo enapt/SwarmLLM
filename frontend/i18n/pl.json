@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Tryb udziału",
   "settings.contribution_mode_manual": "Ręczny",
   "settings.contribution_mode_manual_sub": "Stały na poziomie poniżej",
+  "settings.contribution_restart_note": "Działa od razu. Tylko dwie rzeczy zmienią się przy następnym uruchomieniu SwarmLLM: z iloma węzłami się łączysz oraz rdzenie procesora zarezerwowane już przez działający model.",
   "settings.copy_token_title": "Kopiuj token dostępu",
   "settings.detecting": "Sprawdzanie...",
   "settings.disk_50pct": "50% limitu dysku",

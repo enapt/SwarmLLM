@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Modalità di contributo",
   "settings.contribution_mode_manual": "Manuale",
   "settings.contribution_mode_manual_sub": "Fisso al livello sotto",
+  "settings.contribution_restart_note": "Ha effetto subito. Solo due cose cambiano al prossimo avvio di SwarmLLM: a quanti peer ti colleghi e i core del processore già riservati da un modello in esecuzione.",
   "settings.copy_token_title": "Copia token di accesso",
   "settings.detecting": "Verifica...",
   "settings.disk_50pct": "50% del limite disco",

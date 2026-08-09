@@ -776,7 +776,10 @@ pub async fn storage_breakdown(State(state): State<AppState>) -> Json<serde_json
     let auto_target_bytes = crate::model::auto_manage::compute_budget_max_bytes(
         config.auto_manage.max_storage_mb,
         config.resources.max_disk_mb,
-        &config.node.contribution,
+        // Live level, not the frozen one: `scoring.rs` sizes the real budget
+        // from the mirror, so reading the boot-time config here would show the
+        // user a storage target the scheduler is no longer working towards.
+        &state.shared_state.contribution(),
         crate::model::auto_manage::free_disk_bytes_for(&config.node.data_dir),
     );
     let total_bytes = config
@@ -1033,7 +1036,7 @@ pub async fn update_config(
     let mut config = state.config.clone();
 
     if let Some(contribution) = &body.contribution {
-        config.node.contribution = match contribution.as_str() {
+        let mode = match contribution.as_str() {
             "minimal" => ContributionMode::Minimal,
             "moderate" => ContributionMode::Moderate,
             "maximum" => ContributionMode::Maximum,
@@ -1043,6 +1046,33 @@ pub async fn update_config(
                 ))));
             }
         };
+        config.node.contribution = mode.clone();
+        // Mirror to the runtime atomic. Writing the config file alone is
+        // durability, not effect: `state.config` is frozen at startup, so
+        // without this the VRAM budget, shard upload rate, auto-manage caps and
+        // the capability we gossip all kept using the level the daemon booted
+        // with, and the user got no indication that their choice had done
+        // nothing. Same reasoning as `contribution_auto` directly below.
+        state.shared_state.set_contribution(mode.clone());
+
+        // Inference thread count is handed to a worker when it spawns, so
+        // re-deriving it here means the next worker picks up the new level.
+        // Workers already running keep the pool they were given — recycling a
+        // live worker would drop whatever it is currently answering.
+        let (physical_cores, logical_cores) = crate::config::ResourceConfig::detect_cpu_topology();
+        let threads =
+            config
+                .resources
+                .inference_cpu_threads(physical_cores, logical_cores, mode.clone());
+        state
+            .shared_state
+            .model_process_pool
+            .set_cpu_threads(threads);
+        tracing::info!(
+            contribution = ?mode,
+            inference_cpu_threads = threads,
+            "Contribution level changed — applied to the running daemon"
+        );
     }
     if let Some(auto) = body.contribution_auto {
         config.node.contribution_auto = auto;

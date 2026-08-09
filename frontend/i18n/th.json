@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "โหมดการมีส่วนร่วม",
   "settings.contribution_mode_manual": "กำหนดเอง",
   "settings.contribution_mode_manual_sub": "คงที่ตามระดับด้านล่าง",
+  "settings.contribution_restart_note": "มีผลทันที มีเพียงสองอย่างที่จะเปลี่ยนเมื่อเปิด SwarmLLM ครั้งถัดไป คือ จำนวนเพียร์ที่คุณเชื่อมต่อ และคอร์ประมวลผลที่โมเดลซึ่งกำลังทำงานอยู่จองไว้แล้ว",
   "settings.copy_token_title": "คัดลอกโทเค็นการเข้าถึง",
   "settings.detecting": "กำลังตรวจสอบ...",
   "settings.disk_50pct": "50% ของขีดจำกัดดิสก์",

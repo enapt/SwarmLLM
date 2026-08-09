@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "贡献模式",
   "settings.contribution_mode_manual": "手动",
   "settings.contribution_mode_manual_sub": "固定在下方所选级别",
+  "settings.contribution_restart_note": "立即生效。只有两项会在 SwarmLLM 下次启动时才改变：您连接的节点数量，以及正在运行的模型已占用的处理器核心。",
   "settings.copy_token_title": "复制访问令牌",
   "settings.detecting": "检查中...",
   "settings.disk_50pct": "磁盘限制的 50%",

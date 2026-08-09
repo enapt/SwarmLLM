@@ -204,7 +204,7 @@ impl NetworkManager {
                     .shared_state
                     .config
                     .resources
-                    .shard_upload_mbps(self.shared_state.config.node.contribution.clone());
+                    .shard_upload_mbps(self.shared_state.contribution());
                 let ticket = uuid::Uuid::new_v4();
                 self.pending_shard_responses
                     .insert(ticket, (std::time::Instant::now(), channel));

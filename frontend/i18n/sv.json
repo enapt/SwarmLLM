@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "Bidragsläge",
   "settings.contribution_mode_manual": "Manuell",
   "settings.contribution_mode_manual_sub": "Låst på nivån nedan",
+  "settings.contribution_restart_note": "Träder i kraft direkt. Bara två saker ändras när SwarmLLM startar nästa gång: hur många noder du ansluter till och de processorkärnor som en modell som redan körs har reserverat.",
   "settings.copy_token_title": "Kopiera åtkomsttoken",
   "settings.detecting": "Kontrollerar...",
   "settings.disk_50pct": "50% av diskgräns",

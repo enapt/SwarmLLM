@@ -957,6 +957,7 @@
   "settings.contribution_mode_label": "योगदान मोड",
   "settings.contribution_mode_manual": "मैनुअल",
   "settings.contribution_mode_manual_sub": "नीचे दिए स्तर पर स्थिर",
+  "settings.contribution_restart_note": "यह तुरंत लागू होता है। केवल दो चीज़ें SwarmLLM के अगली बार शुरू होने पर बदलती हैं: आप कितने पीयर से जुड़ते हैं, और चल रहे मॉडल द्वारा पहले से आरक्षित प्रोसेसर कोर।",
   "settings.copy_token_title": "एक्सेस टोकन कॉपी करें",
   "settings.detecting": "जाँच हो रही है...",
   "settings.disk_50pct": "डिस्क सीमा का 50%",

@@ -516,7 +516,10 @@ impl HealthMonitor {
             disk_available_mb,
             bandwidth_mbps: 0.0,
             hosted_shards: hosted_shards.clone(),
-            max_contribution: self.shared_state.config.node.contribution.clone().into(),
+            // From the runtime mirror: this is what we tell the swarm we are
+            // willing to do, so a level the user changed an hour ago must not
+            // keep being advertised as the one we booted with.
+            max_contribution: self.shared_state.contribution().into(),
             uptime_seconds,
             version: env!("CARGO_PKG_VERSION").to_string(),
             region: self.shared_state.effective_region().await,

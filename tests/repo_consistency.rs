@@ -1142,3 +1142,81 @@ fn serving_is_counted_and_paid_in_exactly_one_place() {
         );
     }
 }
+
+/// `config.node.contribution` is the level the daemon BOOTED with. Anything
+/// that runs repeatedly must read the runtime mirror instead, or the user's
+/// choice silently does nothing until a restart.
+///
+/// That was the live bug: moving the Contribution slider wrote the new level to
+/// disk and changed nothing that was running — VRAM budget, shard upload rate,
+/// auto-manage caps and the capability gossiped to peers all kept using the old
+/// value, with no indication in the UI. `contribution_auto` got a runtime mirror
+/// in R121; the setting it caps did not.
+///
+/// The allowlist below is the set of places where reading the frozen config is
+/// genuinely correct — they run once, at startup, before anything can have
+/// changed. A new file reading `config.node.contribution` is almost certainly a
+/// per-tick reader and belongs on the mirror.
+#[test]
+fn runtime_paths_read_the_live_contribution_level() {
+    let root = repo_root();
+
+    // Startup-only readers. Each builds something that cannot be rebuilt live:
+    // libp2p connection limits fixed at swarm construction, the dispatch
+    // semaphores sized once, the initial value of the mirror itself, and the
+    // admin handler that reads/writes the persisted config.
+    let allowed = [
+        "src/config/mod.rs",
+        "src/network/manager/mod.rs",
+        "src/daemon/dispatch/mod.rs",
+        "src/daemon/state/mod.rs",
+        "src/api/admin.rs",
+    ];
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if allowed.contains(&rel.as_str()) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            for (i, line) in text.lines().enumerate() {
+                let l = line.trim();
+                if l.starts_with("//") || l.starts_with("///") {
+                    continue;
+                }
+                if l.contains("config.node.contribution")
+                    && !l.contains("config.node.contribution_auto")
+                {
+                    offenders.push(format!("{rel}:{}: {l}", i + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these read the startup-frozen contribution level instead of the live one.\n\
+         Use `shared_state.contribution()` so a change in Settings applies without a restart.\n{}",
+        offenders.join("\n")
+    );
+}
