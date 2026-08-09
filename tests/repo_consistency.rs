@@ -1624,3 +1624,66 @@ fn every_config_setting_is_documented() {
         missing.join("\n  ")
     );
 }
+
+/// The async Python client exposes everything the sync one does.
+///
+/// Two of them drifted: `generate-code` and `join` — the `swarmpool://` invite
+/// flow — shipped in the sync client and never reached the async one, so an
+/// async user simply could not use invite codes (logged as deferred in the sweep
+/// log, found still open 2026-08-09).
+///
+/// Only parity is checked. Which endpoints the SDK wraps at all is a product
+/// decision; the two clients disagreeing is always a mistake.
+#[test]
+fn the_two_python_clients_wrap_the_same_endpoints() {
+    let root = repo_root().join("python/swarmllm_client");
+    let Ok(rd) = std::fs::read_dir(&root) else {
+        panic!("python client dir unreadable");
+    };
+
+    let mut sync = String::new();
+    let mut asyncc = String::new();
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if !p.extension().is_some_and(|x| x == "py") {
+            continue;
+        }
+        let Ok(t) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        if p.file_name().is_some_and(|n| n == "async_client.py") {
+            asyncc.push_str(&t);
+        } else {
+            sync.push_str(&t);
+        }
+    }
+
+    // Endpoint path literals, as the clients write them.
+    let paths = |txt: &str| -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for (i, _) in txt.match_indices("\"/api/") {
+            let rest = &txt[i + 1..];
+            if let Some(end) = rest.find('"') {
+                out.insert(rest[..end].to_string());
+            }
+        }
+        out
+    };
+    let s = paths(&sync);
+    let a = paths(&asyncc);
+    assert!(
+        s.len() > 20,
+        "parsed only {} endpoints from the sync client — the layout moved",
+        s.len()
+    );
+
+    let only_sync: Vec<&String> = s.difference(&a).collect();
+    let only_async: Vec<&String> = a.difference(&s).collect();
+    assert!(
+        only_sync.is_empty() && only_async.is_empty(),
+        "the Python clients have drifted.\n  only in sync:  {:?}\n  only in async: {:?}\n\
+         Whichever gained an endpoint, the other needs it too.",
+        only_sync,
+        only_async
+    );
+}

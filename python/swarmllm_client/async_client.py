@@ -285,6 +285,29 @@ class AsyncPoolClient:
         """GET /api/pool/leaderboard"""
         return await self._p._get("/api/pool/leaderboard")
 
+    async def generate_code(self) -> str:
+        """POST /api/pool/generate-code — Mint a ``swarmpool://`` invite code.
+
+        Owner only. The returned blob carries this node's reachable addresses
+        alongside the join token, so the joining device can dial directly
+        without already sharing a swarm. Hand it to the other machine and pass
+        it to :meth:`join` there.
+
+        Raises if the daemon has not finished binding its listeners (no
+        reachable address to advertise yet).
+        """
+        return (await self._p._post("/api/pool/generate-code"))["code"]
+
+    async def join(self, code: str) -> dict[str, Any]:
+        """POST /api/pool/join — Join a pool using an invite code.
+
+        Accepts either a ``swarmpool://`` blob from :meth:`generate_code`
+        (dials the embedded addresses, then sends the join request) or a
+        legacy 8-character code such as ``A3F7K2M9`` (only works when both
+        nodes are already on a shared swarm).
+        """
+        return await self._p._post("/api/pool/join", json={"code": code.strip()})
+
 
 class AsyncSwarmLLM:
     """Asynchronous SwarmLLM client.
