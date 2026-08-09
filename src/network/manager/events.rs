@@ -46,11 +46,31 @@ impl NetworkManager {
                     .gossip_sealer
                     .open_signed(&message.data)
                     .map_err(|e| {
-                        tracing::warn!(
-                            source = ?message.source,
-                            error = %e,
-                            "Rejecting unsigned/invalid gossip message"
-                        );
+                        // Rate-limited per peer, and careful about blame. The
+                        // overwhelmingly likely cause is a neighbour running a
+                        // PRIVATE network — before topic scoping those nodes
+                        // published onto the public topics, and one such
+                        // neighbour produced 97 warnings in 40 minutes here
+                        // (2026-08-09). Calling that "unsigned/invalid" reads as
+                        // an attack and sends the reader hunting; it is a
+                        // configuration difference, and a node too old to scope
+                        // its topics will keep doing it.
+                        let peer = message.source.or(Some(propagation_source));
+                        let decision = match peer {
+                            Some(p) => {
+                                self.observe_repeated_peer_failure(p, "gossip_undecryptable")
+                            }
+                            None => super::PeerFailureLog::Emit { suppressed: 0 },
+                        };
+                        if let super::PeerFailureLog::Emit { suppressed } = decision {
+                            tracing::warn!(
+                                source = ?message.source,
+                                error = %e,
+                                suppressed_since_last = suppressed,
+                                "Gossip from a peer we cannot decrypt — most likely a node on a \
+                                 different private network (network.gossip_network_id); ignoring"
+                            );
+                        }
                         e
                     })
                     .and_then(|(sender_pub, plaintext)| {
@@ -211,8 +231,9 @@ impl NetworkManager {
                 // label is not known this early; the emitted count keeps the
                 // real rate visible, which is the property that matters.
                 let diag_decision =
-                    self.observe_rr_failure_for_log(peer, "\u{0}outbound-failure-diag");
-                if let crate::network::manager::RrFailureLog::Emit { suppressed } = diag_decision {
+                    self.observe_repeated_peer_failure(peer, "\u{0}outbound-failure-diag");
+                if let crate::network::manager::PeerFailureLog::Emit { suppressed } = diag_decision
+                {
                     tracing::warn!(
                     %peer,
                     ?request_id,
@@ -270,11 +291,11 @@ impl NetworkManager {
                     // (peer, label) so one broken link cannot hide a second,
                     // different failure.
                     let decision = if delivery_uuid.is_some() {
-                        crate::network::manager::RrFailureLog::Emit { suppressed: 0 }
+                        crate::network::manager::PeerFailureLog::Emit { suppressed: 0 }
                     } else {
-                        self.observe_rr_failure_for_log(peer, &label)
+                        self.observe_repeated_peer_failure(peer, &label)
                     };
-                    if let crate::network::manager::RrFailureLog::Emit { suppressed } = decision {
+                    if let crate::network::manager::PeerFailureLog::Emit { suppressed } = decision {
                         tracing::warn!(
                             %peer,
                             label,

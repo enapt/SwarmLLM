@@ -235,7 +235,7 @@ const _: () = assert!(
 
 /// Per-(peer, label) state for throttling repeated identical rr failures.
 #[derive(Debug, Clone)]
-pub(crate) struct RrFailureSuppression {
+pub(crate) struct PeerFailureSuppression {
     /// When the most recent warning was actually emitted.
     last_logged: std::time::Instant,
     /// Failures swallowed since then, reported with the next emitted line so
@@ -249,17 +249,17 @@ pub(crate) struct RrFailureSuppression {
 /// Five minutes against a 30-second failure cadence turns 10 lines into 1,
 /// which is enough to stop one broken link drowning a log without ever making
 /// the reader wait long to learn the link is broken.
-pub(crate) const RR_FAILURE_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+pub(crate) const PEER_FAILURE_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Cap on distinct (peer, label) pairs tracked, so a churn of peers cannot grow
 /// this without bound. Far above any real peer count for a single node's
 /// message labels; the map is cleared wholesale if it is ever exceeded, since
 /// losing suppression state costs at most one extra log line per pair.
-pub(crate) const MAX_RR_FAILURE_SUPPRESSION_ENTRIES: usize = 4096;
+pub(crate) const MAX_PEER_FAILURE_SUPPRESSION_ENTRIES: usize = 4096;
 
 /// What to do with an rr failure that is about to be logged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RrFailureLog {
+pub(crate) enum PeerFailureLog {
     /// Emit a warning. Carries how many identical failures were suppressed
     /// since the last emitted one (0 on the first).
     Emit { suppressed: u64 },
@@ -267,21 +267,21 @@ pub(crate) enum RrFailureLog {
     Suppress,
 }
 
-impl RrFailureSuppression {
+impl PeerFailureSuppression {
     /// Decide whether this failure should be logged, updating the state.
     ///
     /// Deliberately time-based rather than count-based: a peer failing once an
     /// hour should say so every time, while one failing twice a minute should
     /// not. A count-based rule ("every 50th") gets both of those wrong.
-    fn observe(&mut self, now: std::time::Instant, window: std::time::Duration) -> RrFailureLog {
+    fn observe(&mut self, now: std::time::Instant, window: std::time::Duration) -> PeerFailureLog {
         if now.duration_since(self.last_logged) >= window {
             let suppressed = self.suppressed;
             self.last_logged = now;
             self.suppressed = 0;
-            RrFailureLog::Emit { suppressed }
+            PeerFailureLog::Emit { suppressed }
         } else {
             self.suppressed += 1;
-            RrFailureLog::Suppress
+            PeerFailureLog::Suppress
         }
     }
 }
@@ -373,7 +373,7 @@ pub struct NetworkManager {
     /// The failure is still reported; it is reported *once* per window, with a
     /// count of what it stood in for, which is strictly more information than
     /// the same line 247 times.
-    rr_failure_log_suppression: HashMap<(libp2p::PeerId, String), RrFailureSuppression>,
+    peer_failure_log_suppression: HashMap<(libp2p::PeerId, String), PeerFailureSuppression>,
     /// Holds ResponseChannels for pending tensor forwards, keyed by inference UUID.
     /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
     /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
@@ -669,7 +669,7 @@ impl NetworkManager {
             pending_tensor_outbound: HashMap::new(),
             pending_tensor_result_outbound: HashMap::new(),
             pending_rr_observability: HashMap::new(),
-            rr_failure_log_suppression: HashMap::new(),
+            peer_failure_log_suppression: HashMap::new(),
             pending_tensor_channels: HashMap::new(),
             connection_addrs: HashMap::new(),
             peer_direct_conns: HashMap::new(),
@@ -707,35 +707,35 @@ impl NetworkManager {
     /// the peer stale. Any rr activity proves liveness — treat it as a heartbeat.
     /// Record an rr failure and decide whether it should be logged now.
     ///
-    /// See `rr_failure_log_suppression` for why this exists: one peer failing
+    /// See `peer_failure_log_suppression` for why this exists: one peer failing
     /// identically every 30s produced 1928 warnings in three days and drowned
     /// everything else in that node's log.
-    pub(super) fn observe_rr_failure_for_log(
+    pub(super) fn observe_repeated_peer_failure(
         &mut self,
         peer: libp2p::PeerId,
         label: &str,
-    ) -> RrFailureLog {
+    ) -> PeerFailureLog {
         let now = std::time::Instant::now();
-        if self.rr_failure_log_suppression.len() >= MAX_RR_FAILURE_SUPPRESSION_ENTRIES {
+        if self.peer_failure_log_suppression.len() >= MAX_PEER_FAILURE_SUPPRESSION_ENTRIES {
             // Losing this state costs at most one extra line per pair, so a
             // wholesale clear is a fine way to stay bounded under peer churn.
-            self.rr_failure_log_suppression.clear();
+            self.peer_failure_log_suppression.clear();
         }
         match self
-            .rr_failure_log_suppression
+            .peer_failure_log_suppression
             .get_mut(&(peer, label.to_string()))
         {
-            Some(state) => state.observe(now, RR_FAILURE_LOG_WINDOW),
+            Some(state) => state.observe(now, PEER_FAILURE_LOG_WINDOW),
             None => {
                 // First failure of this shape — always say so immediately.
-                self.rr_failure_log_suppression.insert(
+                self.peer_failure_log_suppression.insert(
                     (peer, label.to_string()),
-                    RrFailureSuppression {
+                    PeerFailureSuppression {
                         last_logged: now,
                         suppressed: 0,
                     },
                 );
-                RrFailureLog::Emit { suppressed: 0 }
+                PeerFailureLog::Emit { suppressed: 0 }
             }
         }
     }
@@ -1627,7 +1627,7 @@ mod tests {
     fn a_repeating_failure_is_logged_once_per_window_with_its_count() {
         let t0 = std::time::Instant::now();
         let window = std::time::Duration::from_secs(300);
-        let mut s = RrFailureSuppression {
+        let mut s = PeerFailureSuppression {
             last_logged: t0,
             suppressed: 0,
         };
@@ -1637,7 +1637,7 @@ mod tests {
         for i in 1..=9u64 {
             assert_eq!(
                 s.observe(t0 + std::time::Duration::from_secs(30 * i), window),
-                RrFailureLog::Suppress,
+                PeerFailureLog::Suppress,
                 "failure at +{}s should have been held",
                 30 * i
             );
@@ -1646,12 +1646,12 @@ mod tests {
         // the point — suppressing silently would understate the problem.
         assert_eq!(
             s.observe(t0 + std::time::Duration::from_secs(301), window),
-            RrFailureLog::Emit { suppressed: 9 }
+            PeerFailureLog::Emit { suppressed: 9 }
         );
         // ...and the counter resets, so the next line is not cumulative.
         assert_eq!(
             s.observe(t0 + std::time::Duration::from_secs(602), window),
-            RrFailureLog::Emit { suppressed: 0 }
+            PeerFailureLog::Emit { suppressed: 0 }
         );
     }
 
@@ -1661,14 +1661,14 @@ mod tests {
     fn an_infrequent_failure_is_never_suppressed() {
         let t0 = std::time::Instant::now();
         let window = std::time::Duration::from_secs(300);
-        let mut s = RrFailureSuppression {
+        let mut s = PeerFailureSuppression {
             last_logged: t0,
             suppressed: 0,
         };
         for i in 1..=5u64 {
             assert_eq!(
                 s.observe(t0 + std::time::Duration::from_secs(3600 * i), window),
-                RrFailureLog::Emit { suppressed: 0 }
+                PeerFailureLog::Emit { suppressed: 0 }
             );
         }
     }
@@ -1684,11 +1684,11 @@ mod tests {
     fn the_two_sites_for_one_failure_suppress_independently() {
         let t0 = std::time::Instant::now();
         let window = std::time::Duration::from_secs(300);
-        let mut diag = RrFailureSuppression {
+        let mut diag = PeerFailureSuppression {
             last_logged: t0,
             suppressed: 0,
         };
-        let mut rr = RrFailureSuppression {
+        let mut rr = PeerFailureSuppression {
             last_logged: t0,
             suppressed: 0,
         };
@@ -1696,21 +1696,21 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(
                 diag.observe(t0 + std::time::Duration::from_secs(30), window),
-                RrFailureLog::Suppress
+                PeerFailureLog::Suppress
             );
             assert_eq!(
                 rr.observe(t0 + std::time::Duration::from_secs(30), window),
-                RrFailureLog::Suppress
+                PeerFailureLog::Suppress
             );
         }
         // Each carries its OWN count — neither swallowed the other's window.
         assert_eq!(
             diag.observe(t0 + std::time::Duration::from_secs(400), window),
-            RrFailureLog::Emit { suppressed: 5 }
+            PeerFailureLog::Emit { suppressed: 5 }
         );
         assert_eq!(
             rr.observe(t0 + std::time::Duration::from_secs(400), window),
-            RrFailureLog::Emit { suppressed: 5 }
+            PeerFailureLog::Emit { suppressed: 5 }
         );
     }
 
@@ -1718,8 +1718,8 @@ mod tests {
     /// never left wondering whether a broken link is still broken.
     #[test]
     fn rr_failure_window_collapses_the_observed_cadence() {
-        assert!(RR_FAILURE_LOG_WINDOW >= std::time::Duration::from_secs(120));
-        assert!(RR_FAILURE_LOG_WINDOW <= std::time::Duration::from_secs(900));
+        assert!(PEER_FAILURE_LOG_WINDOW >= std::time::Duration::from_secs(120));
+        assert!(PEER_FAILURE_LOG_WINDOW <= std::time::Duration::from_secs(900));
     }
 
     #[test]
