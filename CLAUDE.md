@@ -202,57 +202,63 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1765 lib (dev,claude-subscription) / 1755 (default) + 79 integration + 13 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-09 (v0.3.85). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1765 lib (dev,claude-subscription) / 1755 (default) + 79 integration + 13 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-09 (v0.3.87). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.85-alpha (2026-08-09): things that were true only by luck
+### Latest — v0.3.85 / .86 / .87-alpha (2026-08-09): claims nothing could check
 
-**Five defects, and every one of them was a claim nothing could contradict.**
+**Three releases in one session. The recurring defect was not wrong behaviour —
+it was a claim with no mechanism able to contradict it.** In most cases the fix
+was making the claim answerable, not changing what the code does.
 
-**Serving several people at once never batched.** The gate required every
-request to sit at the same position with the same history — which concurrent
-conversations never do. Taken **0 times out of 156** on a live node. Both
-conditions only protect prompt processing, so they now apply only there.
-**8 users previously got no more total throughput than 1** (36.9 vs 38.2 tok/s);
-now **89.6 (2.4x)**, with an equal-length null control moving 1.5%. CPU gains
-less and does NOT scale (1.27x at 4, 1.14x at 8) — bandwidth-bound already.
+**v0.3.85 — six defects users feel.**
+- **Serving several people at once never batched.** The gate required every
+  request at the same position with the same history; concurrent chats are never
+  that. Taken **0 of 156 times** on a live node. Both conditions only protect
+  prompt processing, so they now apply only there. **8 users previously got no
+  more total throughput than 1** (36.9 vs 38.2 tok/s) → **89.6 (2.4x)**, null
+  control (equal lengths) 1.5%. **CPU does NOT scale** — 1.27x at 4, 1.14x at 8;
+  it is bandwidth-bound already. Expect 1.1-1.3x on a processor.
+- **`inference.shard_range` read in FIVE places, ignored in THREE** — splitting a
+  model across machines never happened outside startup, because a **rescan on a
+  timer re-registered everything on disk ~5 min later**. Now
+  `InferenceConfig::claims_shard`. Verified across two machines, then a genuine
+  **2-segment pipeline** answered correctly (`x-swarm-segments: 2`).
+- **AutoNAT read an impossible probe as proof** (`127.0.0.1`, LAN, link-local —
+  84 in one log). Success arm was guarded, failure arm was not. Now
+  `autonat_verdict` with a third outcome, `Uninformative`.
+- **~44% of a node's log** announced nothing had changed (96,850 / 453,591).
+- **Two documented commands failed**: `status --json` did not exist; `status |
+  grep "peer id"` returned nothing. Peer id must come from the **LAST** `/p2p/`
+  or you publish the relay's identity.
+- **MSRV wrong by nine releases** (`redb` needs 1.89); **51 tests ran in NO
+  automation**; 7 API routes undocumented.
 
-**`inference.shard_range` was read in five places and ignored by three**, so
-splitting one model across two machines silently did not happen. Startup applied
-it; the periodic **rescan re-registered everything still on disk minutes later**
-— `ranges=[(0,12)]` at boot, `layers=[0..28)` alone five minutes on. Now
-`InferenceConfig::claims_shard`; verified across two real machines, holding 10
-min against the 4m47s it took to break, then a genuine **2-segment pipeline**
-answered correctly (`x-swarm-segments: 2`, both node ids in the route).
+**v0.3.86 — the escape hatch v0.3.85 created.** `--shards` persists to the DB and
+omitting it RESTORES it, so a node told once to hold half a model held half
+forever. Harmless while ignored; a trap the moment it worked. `--shards all`
+clears it.
 
-**AutoNAT treated an impossible test as proof.** libp2p probes every candidate
-address including `127.0.0.1` and the LAN address; those cannot succeed, and the
-failure arm read them as "behind NAT" — **84 such results in one log**. The
-SUCCESS arm was already guarded and the failure arm was not. Now
-`autonat_verdict` with a third outcome, `Uninformative`.
+**v0.3.87 — from an operator's report.** Credit movements were **never
+persisted** — only totals — so 205k spent / 204k refunded against 0 requests was
+unexplainable by anyone. Now logged with reason tags at
+`GET /api/admin/credits/transactions`. **The books reconciling proved nothing**:
+`backfill_historical_refunds` attributes unexplained gaps to refunds, so the
+identity closes by construction (#278). Also: **API key could not be rotated**
+(DB is the source, the file is a copy) → `POST /api/admin/api-key/rotate`; and
+the update docs named `[update]` when the code reads `[updates]` — an unknown
+section warns and is ignored. Resolved update mode now logged at every start.
+**One reported finding was NOT a bug**: `exec` keeps the PID and kernel start
+time, so `ps` and `uptime_seconds` are both right and `version` is always
+truthful (#277).
 
-**~44% of a node's log announced that nothing had changed** (96,850 of 453,591
-lines): manifest re-gossip logged at INFO twice per repeat. Now INFO only when
-`manifest_hash` differs.
-
-**Two documented commands did not work** — `swarmllm status --json` (no such
-flag; the bug-reporting instruction was itself an error) and
-`status | grep "peer id"` (no peer id in the payload, on the anchor-setup path).
-Both work; peer id comes from the LAST `/p2p/` segment or you publish the
-relay's identity.
-
-**Also**: the advertised Rust version was wrong by nine releases (`redb` needs
-1.89); **51 tests ran in NO automation** (`--lib --bins` excludes integration
-targets, hook is fmt+clippy only) including the guard added after v0.3.83 shipped
-no container images; 7 API routes undocumented; a flaky log-capture test that
-blamed innocent commits.
-
-**Process, worth keeping**: my first fix for the flaky test passed its tests and
-was WRONG (mutex still failed run 5/60); my first `shard_range` fix passed its
-tests and **reverted itself on a timer**; I twice read a build marker without
-reading the error above it. Everything here was verified by running the system,
-not by the diff. Gotchas **#269-#274**.
+**Process, worth keeping.** Three of my own fixes passed their tests while being
+wrong — one **reverted itself on a timer**. Twice I read a build marker with the
+compile error printed directly above it. Once I told the user a node was restored
+when only its config was, not its DB state. **Everything here was verified by
+running the system, and the releases were verified on the DOWNLOADED artifacts,
+not local builds.** Gotchas **#269-#278**.
 
 ### Prior — v0.3.83-alpha (2026-08-08): GPU decode routing, and a measurement floor
 
