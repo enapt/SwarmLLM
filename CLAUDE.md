@@ -206,7 +206,7 @@ All 20 build phases complete. All subsystems wired — no stubs. **1771 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### UNRELEASED on main (2026-08-09): two settings that reported success and did nothing
+### Latest — v0.3.88-alpha (2026-08-09): two things that reported success and did nothing
 
 **Settings saved, reported success, and did nothing.** Contribution level, max
 disk, max VRAM, max bandwidth, auto-manage storage, shard size and batch timeout
@@ -234,7 +234,7 @@ that one survived the first pass. Honest about what cannot follow live:
 connection limits are fixed at swarm construction and CPU threads are handed to a
 worker at spawn, so the panel says which need a restart (#281).
 
-### UNRELEASED on main (2026-08-09): serving the swarm paid nothing, reported nothing
+### v0.3.88-alpha, second half: serving the swarm paid nothing, reported nothing
 
 **The two dashboard tiles that answer "is my node contributing" were exactly
 inverted.** Measured on two machines, both directions: a peer's request this
