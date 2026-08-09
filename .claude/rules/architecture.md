@@ -374,6 +374,22 @@ silently break at the wire if duplicated:
   ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
   and any GPU node whose free VRAM could not be read records `None`, and reading
   that as a zero budget refuses everything.
+- **`inference::pipeline::remote_generate::StreamReassembler`** (2026-08-09) — the
+  single place a remote reply's token stream is put back in order. Each token is
+  an independent `request_response` send, so the transport orders nothing between
+  them and the terminal token can overtake content still in flight. Emit through
+  the reassembler, never straight from the receive loop, and **never treat a
+  `finish_reason` as end-of-stream on its own** — that is precisely what
+  truncated replies from distant peers (gotcha #282).
+  The contract: content tokens carry `token_id` 0,1,2…; the done token carries
+  the total sent. An all-zero stream means the peer is too old to sequence, and
+  the reassembler degrades to arrival order so a mixed-version network keeps
+  working — do not "simplify" that away. Only the consecutive run is released, so
+  a lost token truncates rather than silently reordering the reply.
+  Any new multi-message exchange should be asked the same question — what happens
+  if these arrive backwards. R139's chunked activation forwards already answer it
+  (slot table indexed by `chunk_idx` plus a filled count); this path did not.
+
 - **`SharedState::cfg()`** (2026-08-09) — the live config, and the single answer
   to "what is this setting **now**". `state.config` is the boot-time snapshot:
   correct for what is decided once at startup (listen addresses, data dir, how
