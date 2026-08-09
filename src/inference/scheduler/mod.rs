@@ -849,10 +849,9 @@ impl PipelineScheduler {
                         .unwrap_or("this model");
                     return Err(SwarmError::PipelineError(format!(
                         "Prompt privacy (encrypted_pipeline) is enabled for {model}, which \
-                         requires this node to hold that model's first shard (the embedding \
-                         table) so no peer ever sees your prompt. This node does not have it. \
-                         Either download the first shard, or turn prompt privacy off for this \
-                         model."
+                         requires this node to hold shard 0 (the embedding table) so no peer \
+                         ever sees your prompt. This node does not have it. Either download \
+                         shard 0, or turn prompt privacy off for this model."
                     )));
                 }
                 options = local_only;
