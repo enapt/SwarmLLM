@@ -375,6 +375,32 @@ silently break at the wire if duplicated:
   ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
   and any GPU node whose free VRAM could not be read records `None`, and reading
   that as a zero budget refuses everything.
+- **`SharedState::record_peer_serve`** (2026-08-09) — the single answer to "this
+  node did inference work for a peer", counting it AND billing for it. Reached
+  from exactly two places, the only two inbound paths that serve someone else:
+  `dispatch/layer_forward.rs` (one segment of a pipeline) and
+  `dispatch/remote_generate.rs` (the whole decode, the fast path).
+  **Do not count or bill serving at a call site**, and do not write
+  `requests_served_atomic`, `forwards_served_atomic` or `pending_credit_earn`
+  anywhere else — `serving_is_counted_and_paid_in_exactly_one_place` in
+  `tests/repo_consistency.rs` fails the build if you do.
+  **Why it is enforced rather than documented**: the previous helper,
+  `track_forward_participation`, had a doc comment saying exactly this and was
+  still called by only one of the two paths — the *less* travelled one. The fast
+  path is how a machine holding a whole model answers a peer, so in practice
+  most serving recorded nothing and earned nothing while the requester was still
+  debited (gotcha #279).
+  **The converse is equally load-bearing**: work the node does for ITSELF must
+  not come through here. The router's completion hook and the local-segment path
+  both used to bump these counters, and `pipeline/distributed.rs` used to credit
+  the node for its own segment, so a user whose only traffic was their own chat
+  was told they had served the swarm and was paid for it. The product promises
+  "earn credits by serving inference for others" and "inference across your own
+  devices is free"; both directions have to hold for that to be true.
+  Note that `release_escrow` transfers nothing to `to_node` despite recording it,
+  and `credit::transaction::create_transaction` has no production callers — so
+  this accumulator is the ONLY way a serving node is ever paid (gotcha #280).
+
 - **`config::InferenceConfig::claims_shard`** (2026-08-09) — the single answer to
   "does this node claim shard N?", i.e. how `inference.shard_range` is read.
   **Never read `shard_range` directly.** Five places asked the question with
