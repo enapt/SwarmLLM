@@ -867,9 +867,37 @@ pub async fn apply_credit_direct(
     delta: i64,
     kind: CreditDelta,
 ) -> Result<(), SwarmError> {
+    apply_credit_direct_noted(balance, db, delta, kind, "unspecified").await
+}
+
+/// As [`apply_credit_direct`], but records WHY in the audit log.
+///
+/// **Every movement of a node's balance goes through here, and until now none
+/// of them was written down.** A node reported 205,170 spent and 204,880
+/// refunded against zero requests made or served, and there was no way for
+/// anyone — its operator or us — to find out what any of it was. The totals
+/// reconciled, but that proves only that the arithmetic held: unexplained gaps
+/// are attributed to refunds by `backfill_historical_refunds`, so the books
+/// close by construction.
+///
+/// `note` is a short stable tag for the reason, not a message. It is the
+/// difference between "205k moved" and "205k of escrow reservations that were
+/// released again", which is the whole question an operator is asking.
+pub async fn apply_credit_direct_noted(
+    balance: &Arc<RwLock<CreditBalance>>,
+    db: &crate::storage::db::Database,
+    delta: i64,
+    kind: CreditDelta,
+    note: &str,
+) -> Result<(), SwarmError> {
     // Update in-memory balance under write lock, then release before DB write.
     // The small crash window (memory updated, process dies before persist) is
     // acceptable — the same pattern is used by CreditLedger::apply_credit.
+    let kind_str = match kind {
+        CreditDelta::Earning => "earning",
+        CreditDelta::Spending => "spending",
+        CreditDelta::Refund => "refund",
+    };
     let snapshot = {
         let mut bal = balance.write().await;
         // SEC-I1: saturating arithmetic to prevent overflow
@@ -933,6 +961,18 @@ pub async fn apply_credit_direct(
         );
         return Err(e);
     }
+
+    // Audit line, written only after the balance is durable so the log never
+    // claims a movement that did not persist. Best-effort: a node that cannot
+    // write its diagnostic log must still be able to transact.
+    let _ = db.append_credit_log(&serde_json::json!({
+        "seq": chrono::Utc::now().timestamp_millis(),
+        "at": chrono::Utc::now().to_rfc3339(),
+        "delta": delta,
+        "kind": kind_str,
+        "note": note,
+        "balance_after": snapshot.balance,
+    }));
 
     Ok(())
 }

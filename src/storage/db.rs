@@ -562,6 +562,57 @@ impl Database {
         self.put_json("config", "shard_range", &(start, end))
     }
 
+    /// Append one credit movement to the audit log, oldest evicted past the cap.
+    ///
+    /// **There was no audit log at all**, only the running totals. A node
+    /// reported 205,170 spent and 204,880 refunded against zero requests, and
+    /// nothing in the system could say what any of it was — not for the
+    /// operator, not for us. The books reconciled, which proved only that the
+    /// arithmetic held; `backfill_historical_refunds` attributes any unexplained
+    /// gap to refunds, so reconciliation is true by construction rather than
+    /// evidence of health.
+    ///
+    /// Bounded at `CREDIT_LOG_MAX` because this is a diagnostic, not a
+    /// blockchain: enough to answer "what moved my balance in the last while",
+    /// not enough to grow without limit on a busy node. Keys are zero-padded
+    /// sequence numbers so lexical order is chronological order.
+    pub fn append_credit_log(&self, entry: &serde_json::Value) -> Result<(), SwarmError> {
+        /// Roughly a day of movement on a busy node, and a whole history on a
+        /// quiet one.
+        const CREDIT_LOG_MAX: usize = 500;
+
+        let next: u64 = self
+            .get_json::<u64>("credit_log", "seq")
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+            .wrapping_add(1);
+        self.put_json("credit_log", &format!("e{next:020}"), entry)?;
+        self.put_json("credit_log", "seq", &next)?;
+        // Evict from the front once past the cap. `seq` is not an entry key, so
+        // it is never a candidate — hence the `e` prefix on entries.
+        if next as usize > CREDIT_LOG_MAX {
+            let drop_upto = next - CREDIT_LOG_MAX as u64;
+            for i in (drop_upto.saturating_sub(16))..=drop_upto {
+                let _ = self.remove("credit_log", &format!("e{i:020}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The credit audit log, oldest first.
+    pub fn credit_log(&self) -> Vec<serde_json::Value> {
+        let mut out: Vec<serde_json::Value> = self
+            .iter_json::<serde_json::Value>("credit_log")
+            .unwrap_or_default()
+            .into_iter()
+            // `seq` deserializes as a bare number; entries are objects.
+            .filter(|v| v.is_object())
+            .collect();
+        out.sort_by_key(|v| v.get("seq").and_then(|s| s.as_u64()).unwrap_or(0));
+        out
+    }
+
     /// Forget any persisted shard range, so the node claims every shard again.
     ///
     /// Without this there was no way back: `--shards 0-1` saves the range, and

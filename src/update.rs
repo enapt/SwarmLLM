@@ -762,6 +762,22 @@ impl UpdateChecker {
         use crate::config::UpdateMode;
 
         let mode = self.config.effective_mode();
+        // Say the resolved mode out loud, every start.
+        //
+        // An operator reported on 2026-08-09 that their node installed two
+        // versions while they believed it was set to notify. Whether that was a
+        // mistyped key, a `[update]` section that does not exist, or something
+        // else could not be established from the outside, because nothing ever
+        // stated what the node had actually concluded. The setting is resolved
+        // from two fields (`mode`, falling back to the legacy `auto_update`),
+        // which is exactly the kind of derivation worth printing rather than
+        // leaving someone to infer from behaviour.
+        tracing::info!(
+            ?mode,
+            configured_mode = ?self.config.mode,
+            legacy_auto_update = ?self.config.auto_update,
+            "Update mode resolved — 'install' is the only value that installs by itself"
+        );
         if mode == UpdateMode::Off {
             tracing::info!("Update checking disabled (updates.mode = \"off\")");
             return;

@@ -768,12 +768,12 @@ pub(crate) async fn dispatch_network_messages(
                                         // if we are the recipient
                                         let local_id = shared_state.identity.node_id().clone();
                                         if tx.to == local_id {
-                                            if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                                            if let Err(e) = crate::credit::ledger::apply_credit_direct_noted(
                                                 &shared_state.credits.credit_balance,
                                                 &shared_state.db,
                                                 tx.amount,
                                                 crate::credit::ledger::CreditDelta::Earning,
-                                            ).await {
+                                            "peer_credit_tx_in").await {
                                                 tracing::warn!(error = %e, "Failed to apply credit transaction");
                                             }
                                             let bal = shared_state.credits.credit_balance.read().await;

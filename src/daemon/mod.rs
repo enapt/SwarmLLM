@@ -26,6 +26,7 @@ mod supervisor;
 
 // Re-export public types so callers use crate::daemon::SharedState etc.
 pub use dispatch::estimate_vram_from_shard_dir;
+pub use helpers::publish_api_key_file;
 pub use helpers::SubsystemCriticality;
 pub use manifest::generate_and_register_local_manifest;
 pub use shard_loader::{try_load_from_shards, ShardLoadParams};

@@ -130,7 +130,12 @@ impl Default for UpdateConfig {
 // Decisions" and the C1 deferred-item note: until binary signing is wired,
 // every node opting in to auto-update is downloading SHA256-only-verified
 // binaries from GitHub. Default-disabled is the documented safe posture;
-// users opt-in via `[update] auto_update = "stable"` in config.toml.
+// users opt-in via `[updates] auto_update = "stable"` in config.toml.
+//
+// **The section is `[updates]`, plural.** This said `[update]` for a long time.
+// An unknown section warns and is ignored, so anyone following it set nothing
+// and got the defaults — the shape of a 2026-08-09 report from an operator who
+// believed they had set `notify` and watched their node install twice anyway.
 fn default_auto_update() -> AutoUpdateMode {
     AutoUpdateMode::Disabled
 }

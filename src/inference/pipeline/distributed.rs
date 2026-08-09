@@ -545,11 +545,12 @@ impl PipelineExecutor {
                 let rate =
                     crate::credit::ledger::resolve_credit_rates(&self.shared_state).inference_serve;
                 let total_earned = rate.saturating_mul(total_tokens);
-                if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                if let Err(e) = crate::credit::ledger::apply_credit_direct_noted(
                     &self.shared_state.credits.credit_balance,
                     &self.shared_state.db,
                     total_earned,
                     crate::credit::ledger::CreditDelta::Earning,
+                    "segment_served_earning",
                 )
                 .await
                 {

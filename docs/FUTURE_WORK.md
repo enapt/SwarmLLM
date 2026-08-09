@@ -3815,7 +3815,7 @@ the intended path now.
 
 **Relation to what already exists.** SwarmLLM already ships prebuilt binaries via
 GitHub Releases with a SHA256-verified, atomic-apply auto-updater
-(`src/update.rs`, `UpdateChecker`; opt-in `[update] auto_update`). Pear would be a
+(`src/update.rs`, `UpdateChecker`; opt-in `[updates] auto_update`). Pear would be a
 *second, opt-in* surface, never a replacement.
 
 **Recommendation.** Viable and low-risk *as an opt-in channel* — the wrapper's

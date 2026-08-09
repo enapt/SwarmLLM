@@ -1805,6 +1805,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `POST   /api/admin/models/{id}/shards/{index}/unload` — Unload a shard from memory (narrows shard window, restarts worker, frees RAM/VRAM)
 - `GET    /api/admin/models/{id}/pipeline-plan` — Pipeline assembly plan: ordered segments + holder candidates per shard window
 - `POST   /api/admin/models/{id}/enable-privacy` — Fetch the first and last shards of a model so the encrypted "boomerang" pipeline can engage; privacy then turns itself on
+- `POST   /api/admin/api-key/rotate` — Issue a new API key and invalidate the old one. Takes effect on the next daemon start (the running server holds the current key in immutable state). Until this existed the key could not be rotated at all: it lives in the database and `data/api_key` is only a published copy, so deleting that file republished the same value — leaving no remedy for a leaked key short of destroying the node's identity.
+- `GET    /api/admin/credits/transactions` — Bounded log of recent balance movements (delta, kind, reason, resulting balance), oldest first. Added because only the running totals were kept, so a node reporting large spend/refund figures against zero requests could not be investigated by anyone. Note `lifetime_refunded` is partly synthetic — `backfill_historical_refunds` attributes unexplained gaps to refunds, so the books close by construction rather than as evidence the movements were understood.
 - `GET    /api/admin/reference-models` — The pinned smoke/standard/stress models from `docs/REFERENCE_MODELS.md`, for cross-swarm comparison (opt-in via `swarmllm get-model`)
 - `GET/PUT /api/admin/schedule` — Resource schedule management
 - `GET    /api/admin/prune-history` — Recent auto-prune events

@@ -569,7 +569,7 @@ pub async fn pool_rates_set(
     };
 
     // Validate: all rates must be positive (penalty is stored as a positive magnitude,
-    // negated at the point of use in router.rs via `apply_credit_direct(..., -penalty, ...)`)
+    // negated at the point of use in router.rs via `apply_credit_direct_noted(..., -penalty, ..., "pool_admin_adjust")`)
     let positive_rates = [
         ("inference_serve", new_rates.inference_serve),
         ("inference_consume", new_rates.inference_consume),

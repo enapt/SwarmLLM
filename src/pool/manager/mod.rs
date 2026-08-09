@@ -1034,11 +1034,12 @@ impl PoolManager {
         // audit-log write: balance applied, dedup empty, next retry double-
         // credits. That window is microseconds and crashes are user-driven,
         // so manual reconciliation is acceptable.
-        if let Err(e) = crate::credit::ledger::apply_credit_direct(
+        if let Err(e) = crate::credit::ledger::apply_credit_direct_noted(
             &self.shared_state.credits.credit_balance,
             &self.shared_state.db,
             forward.amount,
             crate::credit::ledger::CreditDelta::Earning,
+            "pool_forward_earning",
         )
         .await
         {

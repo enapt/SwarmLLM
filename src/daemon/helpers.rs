@@ -97,7 +97,7 @@ pub(super) fn resolve_api_key(config: &Config, db: &Database) -> String {
 /// So the write is no longer a side effect of resolving the key at all. Only
 /// the daemon's own startup calls [`publish_api_key_file`], and nothing that
 /// merely builds a `SharedState` can touch the user's data directory.
-pub(super) fn publish_api_key_file(data_dir: &std::path::Path, key: &str) {
+pub fn publish_api_key_file(data_dir: &std::path::Path, key: &str) {
     write_api_key_file(data_dir, key)
 }
 

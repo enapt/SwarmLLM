@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::credit::ledger::{apply_credit_direct, CreditDelta};
+use crate::credit::ledger::{apply_credit_direct_noted, CreditDelta};
 use crate::error::SwarmError;
 use crate::storage::db::Database;
 use crate::types::{CreditBalance, NodeId};
@@ -111,7 +111,14 @@ impl EscrowManager {
         // exists — the user loses credits. This is better than the reverse: if we
         // crash after persisting escrow but before deducting balance, cleanup_expired
         // would refund into a balance that was never deducted, creating free credits.
-        if let Err(e) = apply_credit_direct(balance, &self.db, -amount, CreditDelta::Spending).await
+        if let Err(e) = apply_credit_direct_noted(
+            balance,
+            &self.db,
+            -amount,
+            CreditDelta::Spending,
+            "escrow_reserve",
+        )
+        .await
         {
             tracing::warn!(error = %e, "Failed to persist balance for escrow deduction");
             return Err(SwarmError::CreditError(format!(
@@ -205,7 +212,14 @@ impl EscrowManager {
         let delta = amount - actual;
         if delta > 0 {
             // Reserved more than needed — hand the remainder back.
-            if let Err(e) = apply_credit_direct(balance, &self.db, delta, CreditDelta::Refund).await
+            if let Err(e) = apply_credit_direct_noted(
+                balance,
+                &self.db,
+                delta,
+                CreditDelta::Refund,
+                "escrow_settle",
+            )
+            .await
             {
                 tracing::warn!(error = %e, "Failed to persist escrow over-reservation refund");
             }
@@ -214,8 +228,14 @@ impl EscrowManager {
             // `apply_credit_direct` takes a SIGNED delta and adds it — `kind`
             // only selects which lifetime counter moves — so a charge passes
             // the negative through rather than negating it.
-            if let Err(e) =
-                apply_credit_direct(balance, &self.db, delta, CreditDelta::Spending).await
+            if let Err(e) = apply_credit_direct_noted(
+                balance,
+                &self.db,
+                delta,
+                CreditDelta::Spending,
+                "escrow_settle_adjust",
+            )
+            .await
             {
                 tracing::warn!(error = %e, "Failed to persist escrow shortfall charge");
             }
@@ -287,7 +307,15 @@ impl EscrowManager {
 
         // Return credits to requester. CreditDelta::Refund leaves
         // `lifetime_spent` alone (monotonic) and only adjusts `balance`.
-        if let Err(e) = apply_credit_direct(balance, &self.db, amount, CreditDelta::Refund).await {
+        if let Err(e) = apply_credit_direct_noted(
+            balance,
+            &self.db,
+            amount,
+            CreditDelta::Refund,
+            "escrow_refund",
+        )
+        .await
+        {
             tracing::warn!(error = %e, "Failed to persist refunded balance");
         }
 
@@ -352,7 +380,7 @@ impl EscrowManager {
                 // back to Pending for retry. Remove only after the refund succeeds.
 
                 // Refund the expired amount. We deliberately DO NOT use
-                // `apply_credit_direct(..., CreditDelta::Refund)` here even
+                // `apply_credit_direct_noted(..., CreditDelta::Refund, "escrow_expire_refund")` here even
                 // though the accounting semantics match — `cleanup_expired`
                 // requires strict crash-safety to support its retry loop:
                 // on persist failure, the in-memory balance MUST be reverted

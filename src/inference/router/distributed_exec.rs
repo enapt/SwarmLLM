@@ -170,11 +170,12 @@ pub(super) async fn finalize_request(
                 }
             } else {
                 // Normal node or pool owner: charge locally
-                if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                if let Err(e) = crate::credit::ledger::apply_credit_direct_noted(
                     &shared_state.credits.credit_balance,
                     &shared_state.db,
                     -spent,
                     crate::credit::ledger::CreditDelta::Spending,
+                    "inference_charge",
                 )
                 .await
                 {
@@ -779,20 +780,22 @@ pub(super) async fn execute_request(
                         .await
                     {
                         tracing::warn!(error = %e, "Failed to forward failure penalty to pool master — falling back to local apply");
-                        let _ = crate::credit::ledger::apply_credit_direct(
+                        let _ = crate::credit::ledger::apply_credit_direct_noted(
                             &shared_state.credits.credit_balance,
                             &shared_state.db,
                             -penalty,
                             crate::credit::ledger::CreditDelta::Spending,
+                            "inference_charge_retry",
                         )
                         .await;
                     }
                 }
-            } else if let Err(pe) = crate::credit::ledger::apply_credit_direct(
+            } else if let Err(pe) = crate::credit::ledger::apply_credit_direct_noted(
                 &shared_state.credits.credit_balance,
                 &shared_state.db,
                 -penalty,
                 crate::credit::ledger::CreditDelta::Spending,
+                "inference_charge",
             )
             .await
             {

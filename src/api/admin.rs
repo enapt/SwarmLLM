@@ -1335,6 +1335,86 @@ pub async fn credit_info(State(state): State<AppState>) -> Json<serde_json::Valu
 
 /// GET /api/admin/api-key — Return the current API key.
 /// This endpoint requires authentication itself (Bearer token).
+/// GET /api/admin/credits/transactions — the individual movements behind the totals.
+///
+/// **The totals were all there was.** A node reported 205,170 spent and 204,880
+/// refunded against zero requests made or served, and asked, reasonably, whether
+/// anything could show the transactions behind those figures. Nothing could:
+/// only the running counters were kept.
+///
+/// Worth knowing when reading this: `lifetime_refunded` is partly synthetic.
+/// `backfill_historical_refunds` attributes any otherwise-unexplained gap to
+/// refunds, so `earned - spent + refunded == balance` closes by construction and
+/// is not evidence that the movements were understood. This log is.
+pub async fn credit_transactions(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let entries = state.shared_state.db.credit_log();
+    let bal = state.shared_state.credits.credit_balance.read().await;
+    Json(serde_json::json!({
+        "transactions": entries,
+        "count": entries.len(),
+        "note": "Bounded log of recent balance movements, oldest first. Entries \
+                 predating this feature are absent — a node with large totals and \
+                 an empty log has simply not moved credits since upgrading.",
+        "totals": {
+            "balance": bal.balance,
+            "lifetime_earned": bal.lifetime_earned,
+            "lifetime_spent": bal.lifetime_spent,
+            "lifetime_refunded": bal.lifetime_refunded,
+        },
+    }))
+}
+
+/// POST /api/admin/api-key/rotate — issue a new key and invalidate the old one.
+///
+/// **There was no way to do this.** The key is generated once and kept in the
+/// database; `data/api_key` is only a published copy, so deleting that file
+/// republishes the same value byte for byte. An operator who believed they had
+/// rotated a leaked key had not, and the only real remedy was destroying the
+/// node's database — which also destroys its identity and its credit balance.
+/// Reported 2026-08-09 by someone running a node reachable from the internet,
+/// where it matters most.
+///
+/// The new key takes effect on the next daemon start, because the running
+/// server holds the current one in `SharedState`, which is immutable by design.
+/// Saying so plainly is the honest option: silently issuing a key that does not
+/// yet work would be worse than asking for a restart.
+pub async fn rotate_api_key(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let key = hex::encode(bytes);
+
+    state
+        .shared_state
+        .db
+        .put_json("config", "api_key", &key)
+        .map_err(ApiError)?;
+    // Publish it alongside, so the file and the database never disagree — a
+    // stale file is how someone concludes rotation did nothing.
+    crate::daemon::publish_api_key_file(&state.shared_state.config.node.data_dir, &key);
+
+    tracing::warn!("API key rotated by admin request — restart this node for it to take effect");
+    state.shared_state.emit_activity(
+        crate::daemon::state::ActivityEvent::new(
+            "security",
+            "api_key_rotated",
+            "A new API key was issued. Restart this node to start using it — \
+             anything holding the old key keeps working until then."
+                .to_string(),
+        )
+        .with_toast("warning", 10000),
+    );
+
+    Ok(Json(serde_json::json!({
+        "api_key": key,
+        "active": false,
+        "message": "New key saved. Restart this node for it to take effect; \
+                    the previous key keeps working until you do.",
+    })))
+}
+
 pub async fn get_api_key(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "api_key": state.shared_state.api_key,
