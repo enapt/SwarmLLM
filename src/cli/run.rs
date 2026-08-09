@@ -34,9 +34,20 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
         args.bootstrap,
     )?;
 
-    // Parse --shards range (e.g. "0-4" → (0, 4)) — hidden dev flag
+    // Parse --shards range (e.g. "0-4" → (0, 4)) — hidden dev flag.
+    //
+    // `--shards all` clears it. Without that there was NO way to undo this:
+    // setting a range persists it to the database, and leaving the flag off
+    // restores the saved value, so a node that was once told to hold half a
+    // model held half of it forever. Harmless while the setting was being
+    // ignored (fixed 2026-08-09); a trap the moment it started working, since
+    // the only escape was deleting the database.
+    let mut clear_shard_range = false;
     if let Some(ref shard_str) = args.shards {
-        if let Some((start, end)) = shard_str.split_once('-') {
+        if matches!(shard_str.trim(), "all" | "none") {
+            clear_shard_range = true;
+            tracing::info!("Clearing any saved shard range — this node claims every shard");
+        } else if let Some((start, end)) = shard_str.split_once('-') {
             if let (Ok(s), Ok(e)) = (start.parse::<u32>(), end.parse::<u32>()) {
                 if s > e {
                     anyhow::bail!("Invalid --shards range: start ({s}) must be <= end ({e})");
@@ -47,7 +58,10 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
                 anyhow::bail!("Invalid --shards format: expected 'START-END' (e.g. '0-4')");
             }
         } else {
-            anyhow::bail!("Invalid --shards format: expected 'START-END' (e.g. '0-4')");
+            anyhow::bail!(
+                "Invalid --shards format: expected 'START-END' (e.g. '0-4'), or 'all' to \
+                 clear a previously saved range"
+            );
         }
     }
 
@@ -74,7 +88,12 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let db = Database::open(&config.node.data_dir)?;
 
     // Persist or restore shard range: CLI flag takes priority, else load from DB
-    if let Some((s, e)) = config.inference.shard_range {
+    if clear_shard_range {
+        if let Err(err) = db.clear_shard_range() {
+            tracing::warn!(error = %err, "Failed to clear saved shard range");
+        }
+        config.inference.shard_range = None;
+    } else if let Some((s, e)) = config.inference.shard_range {
         if let Err(err) = db.save_shard_range(s, e) {
             tracing::warn!(error = %err, "Failed to persist shard range to database");
         }

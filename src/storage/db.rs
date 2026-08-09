@@ -562,6 +562,15 @@ impl Database {
         self.put_json("config", "shard_range", &(start, end))
     }
 
+    /// Forget any persisted shard range, so the node claims every shard again.
+    ///
+    /// Without this there was no way back: `--shards 0-1` saves the range, and
+    /// omitting the flag *restores* it, so a node told once to hold half a model
+    /// held half of it for good. Reached via `--shards all`.
+    pub fn clear_shard_range(&self) -> Result<(), SwarmError> {
+        self.remove("config", "shard_range")
+    }
+
     /// Load a previously persisted shard range, if any.
     pub fn load_shard_range(&self) -> Result<Option<(u32, u32)>, SwarmError> {
         self.get_json("config", "shard_range")
