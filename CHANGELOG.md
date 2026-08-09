@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.85-alpha] — 2026-08-09
+
 **Serving several people at once is up to 2.4x faster, because it was never
 actually serving them together.** SwarmLLM can answer several conversations in
 one pass instead of one at a time, and that path required everyone in the batch
@@ -44,6 +46,20 @@ machine, against the 143% above.
 Single conversations are unchanged; this only affects a node serving more than
 one person at a time. (The 1-user and 8-user rows share a prompt length and are
 directly comparable; the 4-user row was measured separately at a longer one.)
+
+**Splitting one model across two machines now actually happens.** The setting
+that tells a node to hold only part of a model was read in five places and
+ignored by three of them — including a check that runs every few minutes. A node
+would start up correctly holding its half, and minutes later notice the rest of
+the files still on disk and claim them all over again.
+
+So the machine stopped being half of a split model and loaded the whole thing
+into memory. The saving you asked for was exactly what did not happen, with no
+error and no warning, on the feature that lets two ordinary machines run a model
+neither could run alone.
+
+Confirmed working across two real machines afterwards: one holding the first
+half, one the second, answering a question together as a two-stage pipeline.
 
 **A node that the internet can reach no longer reports itself as unreachable.**
 SwarmLLM works out whether other people can reach you by asking peers to dial

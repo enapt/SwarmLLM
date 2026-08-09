@@ -158,7 +158,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1760 lib tests passing + 11 ignored with `--features dev,claude-subscription` (1771 total); 1750 + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 13 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root; CI runs it explicitly since 2026-08-09), 9 in the vendored request-response patch (CI: path-triggered `.github/workflows/vendored.yml`; locally `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). End-to-end forward-pass bench (no daemon): `SWARM_BENCH_MODEL=<model shard dir> RAYON_NUM_THREADS=4 cargo run --release --no-default-features --features dev --example prefill_bench` — loads a real model from its shard directory and drives `SplitModel::forward` directly, so prompt-processing and decode changes can be A/B'd without chunking policy, batching or the API in the way. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. Attention-op bench: `examples/attn_bench.rs`. Quantized-matmul bench: `cargo run --release --no-default-features --features dev --example qmatmul_bench` — prices the kernel against batch size AND asserts the tiled path is bit-identical to the upstream ordering; it also sweeps rayon pool size. **Use min-of-N on an idle machine**: the same unchanged code path measured 0.42 ms and 0.97 ms across runs on the WSL2 test box. Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1765 lib tests passing + 11 ignored with `--features dev,claude-subscription` (1776 total); 1755 + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 13 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root; CI runs it explicitly since 2026-08-09), 9 in the vendored request-response patch (CI: path-triggered `.github/workflows/vendored.yml`; locally `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). End-to-end forward-pass bench (no daemon): `SWARM_BENCH_MODEL=<model shard dir> RAYON_NUM_THREADS=4 cargo run --release --no-default-features --features dev --example prefill_bench` — loads a real model from its shard directory and drives `SplitModel::forward` directly, so prompt-processing and decode changes can be A/B'd without chunking policy, batching or the API in the way. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. Attention-op bench: `examples/attn_bench.rs`. Quantized-matmul bench: `cargo run --release --no-default-features --features dev --example qmatmul_bench` — prices the kernel against batch size AND asserts the tiled path is bit-identical to the upstream ordering; it also sweeps rayon pool size. **Use min-of-N on an idle machine**: the same unchanged code path measured 0.42 ms and 0.97 ms across runs on the WSL2 test box. Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -202,23 +202,57 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1760 lib (dev,claude-subscription) / 1750 (default) + 79 integration + 13 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-09. Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1765 lib (dev,claude-subscription) / 1755 (default) + 79 integration + 13 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-09 (v0.3.85). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.84-alpha (2026-08-08): container images, broken by a manifest line
+### Latest — v0.3.85-alpha (2026-08-09): things that were true only by luck
 
-**v0.3.83 shipped binaries and NO container images.** A `[[example]]` declared
-without an explicit `path` makes cargo resolve it by scanning `examples/` — and
-**fail to parse the whole manifest** when that directory is absent, which is
-exactly the Dockerfile's build context (it copies `src/`, `crates/`, `frontend/`,
-`config/` and nothing else). Green: compiler, clippy on 3 feature sets, 1749
-tests, all 13 CI jobs, the pre-push hook, every release binary. **Docker only
-builds on a tag, so it surfaced at release.** Gotcha **#268** — second time in
-two days that a construct correct in the repo was wrong in a REDUCED build
-context. Guarded by `every_declared_example_has_an_explicit_path`, confirmed to
-fail against the real bug. Reproduce cheaply: copy exactly what the Dockerfile
-copies into a temp dir and run `cargo build --release` there.
+**Five defects, and every one of them was a claim nothing could contradict.**
+
+**Serving several people at once never batched.** The gate required every
+request to sit at the same position with the same history — which concurrent
+conversations never do. Taken **0 times out of 156** on a live node. Both
+conditions only protect prompt processing, so they now apply only there.
+**8 users previously got no more total throughput than 1** (36.9 vs 38.2 tok/s);
+now **89.6 (2.4x)**, with an equal-length null control moving 1.5%. CPU gains
+less and does NOT scale (1.27x at 4, 1.14x at 8) — bandwidth-bound already.
+
+**`inference.shard_range` was read in five places and ignored by three**, so
+splitting one model across two machines silently did not happen. Startup applied
+it; the periodic **rescan re-registered everything still on disk minutes later**
+— `ranges=[(0,12)]` at boot, `layers=[0..28)` alone five minutes on. Now
+`InferenceConfig::claims_shard`; verified across two real machines, holding 10
+min against the 4m47s it took to break, then a genuine **2-segment pipeline**
+answered correctly (`x-swarm-segments: 2`, both node ids in the route).
+
+**AutoNAT treated an impossible test as proof.** libp2p probes every candidate
+address including `127.0.0.1` and the LAN address; those cannot succeed, and the
+failure arm read them as "behind NAT" — **84 such results in one log**. The
+SUCCESS arm was already guarded and the failure arm was not. Now
+`autonat_verdict` with a third outcome, `Uninformative`.
+
+**~44% of a node's log announced that nothing had changed** (96,850 of 453,591
+lines): manifest re-gossip logged at INFO twice per repeat. Now INFO only when
+`manifest_hash` differs.
+
+**Two documented commands did not work** — `swarmllm status --json` (no such
+flag; the bug-reporting instruction was itself an error) and
+`status | grep "peer id"` (no peer id in the payload, on the anchor-setup path).
+Both work; peer id comes from the LAST `/p2p/` segment or you publish the
+relay's identity.
+
+**Also**: the advertised Rust version was wrong by nine releases (`redb` needs
+1.89); **51 tests ran in NO automation** (`--lib --bins` excludes integration
+targets, hook is fmt+clippy only) including the guard added after v0.3.83 shipped
+no container images; 7 API routes undocumented; a flaky log-capture test that
+blamed innocent commits.
+
+**Process, worth keeping**: my first fix for the flaky test passed its tests and
+was WRONG (mutex still failed run 5/60); my first `shard_range` fix passed its
+tests and **reverted itself on a timer**; I twice read a build marker without
+reading the error above it. Everything here was verified by running the system,
+not by the diff. Gotchas **#269-#274**.
 
 ### Prior — v0.3.83-alpha (2026-08-08): GPU decode routing, and a measurement floor
 

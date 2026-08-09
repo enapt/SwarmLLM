@@ -375,6 +375,24 @@ silently break at the wire if duplicated:
   ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
   and any GPU node whose free VRAM could not be read records `None`, and reading
   that as a zero budget refuses everything.
+- **`config::InferenceConfig::claims_shard`** (2026-08-09) — the single answer to
+  "does this node claim shard N?", i.e. how `inference.shard_range` is read.
+  **Never read `shard_range` directly.** Five places asked the question with
+  their own copy of the comparison and THREE never asked at all: the startup
+  disk scan, the periodic rescan, and one manifest path. The rescan is the one
+  that mattered — startup applied the range correctly and then, minutes later,
+  the rescan found the remaining files still on disk and re-registered them, so
+  a node configured for shards 0-1 of a four-shard model came up serving
+  `layers=[0..12)` and was serving `[0..28)` on its own five minutes later.
+  The feature then fails twice over: the node stops being half of a split model
+  AND loads the whole thing into memory, which is the saving being asked for.
+  Silent — no error, no warning, and the config key parses.
+  **A new shard-registration path MUST call this**; that is the whole reason it
+  is a method on the config that owns the field rather than a free function
+  someone can forget. Verified on two machines: the restriction held for 10
+  minutes against the 4m47s it previously took to lose it, and a genuine
+  two-segment pipeline then answered correctly across both.
+
 - **`inference::cpu_pools::in_phase_pool`** (2026-08-07) — binds a forward pass
   to the CPU thread pool that suits its phase, at ONE choke point:
   `SplitModel::forward_inner_impl` and `forward_batch`. Every entry point —
