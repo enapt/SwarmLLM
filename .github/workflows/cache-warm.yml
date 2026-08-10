@@ -43,6 +43,18 @@ on:
       # step ran nothing at all, and the stale cache would have been handed
       # straight to the next release.
       - ".github/actions/**"
+      # The vendored crates are `[patch.crates-io]`'d INTO this build — candle,
+      # candle-flash-attn and float8 are all compiled by the CUDA cell. Editing
+      # one invalidates the warm cache's copy, and without this trigger nothing
+      # re-warms it: the next release restores a cache whose candle is stale and
+      # rebuilds candle-core + candle-nn + candle-transformers + swarmllm cold.
+      #
+      # Same failure as `.github/actions/**` above — a file that changes what
+      # this workflow builds not triggering the workflow that builds it. Found
+      # 2026-08-10 the honest way: a commit patching
+      # `vendor/candle/.../quantized/cuda.rs` ran CI (green, `cargo check` only)
+      # and no warm at all.
+      - "vendor/**"
   schedule:
     # Weekly, comfortably inside GitHub's 7-day unused-cache eviction.
     - cron: "0 4 * * 1"

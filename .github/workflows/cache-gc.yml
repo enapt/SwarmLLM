@@ -1,0 +1,121 @@
+####################################################################
+# Keep the Actions cache under GitHub's per-repository limit, so the
+# EXPENSIVE caches are never the ones evicted.
+#
+# The problem this solves
+# -----------------------
+# GitHub gives a repository 10 GB of Actions cache and, once that is
+# exceeded, "deletes caches based on last access date, from oldest to
+# most recent" — the docs warn this causes thrashing when a repo sits
+# near the limit.
+#
+# That eviction order is exactly backwards for us. The Linux CUDA
+# release cache is the single most expensive thing here: 1536 MB, built
+# by a ~55 min `cache-warm` run, and restored only by releases and the
+# weekly warm. Every ordinary push, meanwhile, refreshes ~4 GB of CI
+# caches. So the CUDA cache is reliably the OLDEST-by-last-access large
+# entry, and is first out of the door when the cap is hit.
+#
+# MEASURED, 2026-08-10. Cache total stood at 9.37 GB of 10 GB. The
+# Linux CUDA release build takes 30-37 min with a warm cache — and took
+# **102 min** on 2026-08-08, a cold rebuild, in the same window a stale
+# CI generation (1.65 GB, 4 entries) was sitting unread. That is ~67
+# minutes added to a release by an eviction nothing needed to suffer.
+#
+# What it does
+# ------------
+# `Swatinem/rust-cache` keys end in a hash of the dependency set, so a
+# dependency change leaves the previous generation orphaned — still
+# counted against the limit, never read again, and only removed by
+# GitHub's own 7-day sweep. This deletes those superseded generations,
+# keeping ONLY the newest entry per job.
+#
+# Deliberately conservative:
+#   * Only `v0-rust-*` keys — rust-cache's own prefix. Anything else
+#     (e.g. the Vulkan SDK cache) is left alone.
+#   * A cache is deleted ONLY when a strictly newer one exists for the
+#     same job. A job with a single generation is never touched, so
+#     this can never delete a cache that is the current one.
+#   * Deleting is safe even if wrong: the worst case is one cold build.
+#
+# Nothing here is load-bearing for correctness — if it never ran, the
+# repo would simply drift back toward the cap.
+####################################################################
+name: Cache GC
+
+on:
+  schedule:
+    # Daily. The cap is only approached over several pushes, so this does
+    # not need to chase every run.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write # required to delete caches
+  contents: read
+
+concurrency:
+  group: cache-gc
+  cancel-in-progress: false
+
+jobs:
+  gc:
+    name: Prune superseded caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Delete superseded rust-cache generations
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          gh cache list --limit 200 \
+            --json key,sizeInBytes,createdAt \
+            --jq '.[] | [.createdAt, (.sizeInBytes|tostring), .key] | @tsv' > caches.tsv || true
+
+          if [ ! -s caches.tsv ]; then
+            echo "No caches listed — nothing to do."
+            exit 0
+          fi
+
+          before=$(awk -F'\t' '{s+=$2} END {printf "%.2f", s/1073741824}' caches.tsv)
+          echo "Cache total before: ${before} GB across $(wc -l < caches.tsv) entries"
+
+          # Group by the key with its trailing `-<hash>` segment removed: that
+          # final segment is rust-cache's dependency hash, and it is the only
+          # part that changes when the lockfile does. Keep the newest per group.
+          python3 - <<'PY' > to_delete.txt
+          import csv, sys
+          rows = list(csv.reader(open("caches.tsv"), delimiter="\t"))
+          groups = {}
+          for created, size, key in rows:
+              if not key.startswith("v0-rust-"):
+                  continue  # not a rust-cache key — leave it alone
+              group = key.rsplit("-", 1)[0]
+              groups.setdefault(group, []).append((created, int(size), key))
+          for group, entries in groups.items():
+              if len(entries) < 2:
+                  continue  # only one generation: never delete the current cache
+              entries.sort(reverse=True)  # newest createdAt first
+              for _, size, key in entries[1:]:
+                  print(f"{size}\t{key}")
+          PY
+
+          if [ ! -s to_delete.txt ]; then
+            echo "No superseded generations. Nothing to prune."
+            exit 0
+          fi
+
+          freed=$(awk -F'\t' '{s+=$1} END {printf "%.2f", s/1073741824}' to_delete.txt)
+          echo "Pruning $(wc -l < to_delete.txt) superseded entries (${freed} GB):"
+          while IFS=$'\t' read -r size key; do
+            echo "  - ${key}"
+            # A cache can vanish between listing and deleting (GitHub's own
+            # sweep, a concurrent run). That is the outcome we wanted anyway,
+            # so it must not fail the job.
+            gh cache delete "$key" || echo "    (already gone)"
+          done < to_delete.txt
+
+          echo "Freed approximately ${freed} GB."
