@@ -224,16 +224,21 @@ impl SplitModel {
         if device.is_cuda() {
             tracing::info!(layer_start, layer_end, "Split model using CUDA GPU");
         } else if force_cpu {
-            // `force_cpu` has two callers now. Before R146 it was set only by
-            // the load-time GPU-OOM retry in `shard_loader`, so the message
-            // named that cause outright; since `gpu_layers = 0` also routes
-            // here, saying "GPU OOM fallback" to an operator who simply
-            // configured CPU-only is actively misleading — it reads as a
-            // failure report for a deliberate setting.
+            // The worker is TOLD where to run; it does not know why, and there
+            // are three possible whys (see `process_pool::CpuReason`). The old
+            // wording — "requested: gpu_layers = 0, or GPU OOM fallback" — tried
+            // to name them and instead asserted a config value that may never
+            // have been set: a tester read it as proof their `gpu_layers = -1`
+            // was ignored, when the daemon had honoured it and then refused the
+            // model for VRAM (reported 2026-08-10).
+            //
+            // So state only what this process actually knows, and point at the
+            // side that does know. The daemon logs the reason on every spawn.
             tracing::info!(
                 layer_start,
                 layer_end,
-                "Split model using CPU (requested: gpu_layers = 0, or GPU OOM fallback)"
+                "Split model using CPU (placement chosen by the daemon — see its \
+                 'Model will run on the CPU' line for the reason)"
             );
         } else {
             tracing::info!(

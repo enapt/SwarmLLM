@@ -4,6 +4,31 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**"Why is my model running on the processor instead of the graphics card?" is now
+answerable.** There are three reasons a model goes to the processor: you asked
+for it, your card is too old for this build, or the model did not fit in the
+graphics memory available at the time. All three produced an identical worker
+command line and an identical log line claiming `gpu_layers = 0` — including for
+people whose setting was `-1` and was being honoured, then overridden.
+
+A tester spent a session on this today and reasonably concluded the setting was
+being ignored. It was not; their 7B model did not fit their 6 GB card. Checking
+the worker's real command line — the correct way to rule out a mere logging
+mistake — could not tell the two apart either, because it genuinely is the same
+command line.
+
+The daemon now states which of the three it was, every time a worker starts, with
+the value you configured and the numbers behind the decision:
+
+```
+Model will run on the CPU  reason="not_enough_vram"  configured_gpu_layers=-1
+                           estimated_vram_mb=3887    vram_budget_mb=500
+```
+
+`GET /api/admin/models` carries the same answer as `cpu_placement_reason`, so it
+can be seen without catching the log line at the moment the decision was taken.
+The worker no longer claims a `gpu_layers` value it was never told.
+
 **Deleting one piece of a model could silently break it, and the dashboard said
 the opposite of what was wrong.** End-to-end encryption needs the first and last
 pieces of a model on your own machine. Removing either of them left the setting

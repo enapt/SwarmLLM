@@ -733,6 +733,36 @@ async fn dispatch_scheduler_group(pool: &Arc<ModelProcessPool>, msgs: Vec<BatchS
 /// interleaved fashion — each request's message arrives at the worker in the
 /// order it was sent, and responses flow back in whatever order the worker
 /// emits them.
+/// Why a model is running on the CPU.
+///
+/// Kept as three distinct values rather than a bool because they call for three
+/// different actions from the user: change a setting, free some memory, or
+/// accept that this machine's GPU is too old. Downstream they were all just
+/// `--gpu-layers 0`, which is how a correct setting and an override came to look
+/// identical — see [`ModelProcessPool::cpu_reason`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuReason {
+    /// `inference.gpu_layers = 0` — the user asked for CPU.
+    Configured,
+    /// This build's CUDA kernels need a newer card than the one present.
+    GpuTooOld,
+    /// The model's estimated footprint exceeds the free VRAM budget. Unlike the
+    /// other two this clears itself once memory frees up.
+    NotEnoughVram,
+}
+
+impl CpuReason {
+    /// Stable machine-readable tag. Used in logs and in the admin API, so keep
+    /// these values stable — something will grep for them.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CpuReason::Configured => "configured_cpu_only",
+            CpuReason::GpuTooOld => "gpu_too_old_for_this_build",
+            CpuReason::NotEnoughVram => "not_enough_vram",
+        }
+    }
+}
+
 pub struct ModelProcessPool {
     workers: DashMap<ModelId, Arc<WorkerHandle>>,
     /// Serializes worker spawning to prevent TOCTOU races where two concurrent
@@ -752,6 +782,7 @@ pub struct ModelProcessPool {
     /// Device placement passed to future-spawned workers, mirroring
     /// `InferenceConfig::gpu_layers`: `-1` auto, `0` CPU only, `>0` GPU.
     gpu_layers: std::sync::atomic::AtomicI32,
+    // (see `CpuReason` for why the three CPU causes are kept distinct)
     /// Models forced onto the CPU for the rest of this daemon's life because
     /// a worker died of a GPU OOM while serving them. Without this, the
     /// respawned worker makes the identical allocation and dies the same way,
@@ -1137,8 +1168,29 @@ impl ModelProcessPool {
     /// The `--gpu-layers` value a worker for `model_id` should be spawned with.
     /// A model pinned to the CPU by a previous OOM overrides the config.
     fn effective_gpu_layers(&self, model_id: &ModelId) -> i32 {
+        match self.cpu_reason(model_id) {
+            Some(_) => 0,
+            None => self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Why this model is going to the CPU, when it is — `None` means the GPU.
+    ///
+    /// **The three causes are indistinguishable downstream and mean completely
+    /// different things.** All of them spawn `swarmllm model-worker
+    /// --gpu-layers 0` and log `requested: gpu_layers = 0`: one is the user's
+    /// own setting, the other two are this node overriding it. A tester on
+    /// 2026-08-10 concluded from exactly those two signals that
+    /// `inference.gpu_layers` was being ignored on a node that was honouring it
+    /// and then refusing the model for VRAM — and checking the worker's real
+    /// command line, which is the correct way to rule out a mere logging bug,
+    /// could not separate them either. The information existed; nothing carried
+    /// it to where the question gets asked.
+    fn cpu_reason(&self, model_id: &ModelId) -> Option<CpuReason> {
+        // Checked first: an OOM pin overrides whatever the config says, and is
+        // the only one of the three that clears itself when memory frees up.
         if self.cpu_pinned_models.contains(model_id) {
-            return 0;
+            return Some(CpuReason::NotEnoughVram);
         }
         // A GPU older than this build's kernel floor cannot run a single
         // forward, so sending a worker there produces a fatal CUDA error, a
@@ -1148,14 +1200,30 @@ impl ModelProcessPool {
         // atomic load after the first call.
         #[cfg(feature = "candle-cuda")]
         if !crate::daemon::gpu_support::local_gpu_is_supported() {
-            return 0;
+            return Some(CpuReason::GpuTooOld);
         }
-        self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed)
+        if self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            return Some(CpuReason::Configured);
+        }
+        None
+    }
+
+    /// Public form of [`ModelProcessPool::cpu_reason`], for the admin API — so
+    /// "why is this model not on my GPU" is answerable without reading the log
+    /// at the moment the decision was taken.
+    pub fn cpu_placement_reason(&self, model_id: &ModelId) -> Option<&'static str> {
+        self.cpu_reason(model_id).map(CpuReason::as_str)
     }
 
     /// Is this model currently forced onto the CPU after a GPU OOM?
     pub fn is_cpu_pinned(&self, model_id: &ModelId) -> bool {
         self.cpu_pinned_models.contains(model_id)
+    }
+
+    /// The configured value, before any override — so a log line can show what
+    /// the user asked for next to what actually happened.
+    pub fn configured_gpu_layers(&self) -> i32 {
+        self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Estimate this model's GPU footprint from its own GGUF header and shards.
@@ -1666,6 +1734,26 @@ impl ModelProcessPool {
                     );
                 }
             }
+        }
+        // Say WHICH of the three reasons put this model on the CPU, every time
+        // a worker spawns — not only at the moment a VRAM pin is taken. The
+        // worker's command line and the loader's own log line are identical for
+        // all three, so a node inspected later cannot otherwise be asked
+        // "is this my setting, or did you override it?". Reported 2026-08-10 by
+        // a tester who reasonably concluded the setting was being ignored.
+        if going_to_cpu {
+            let reason = self
+                .cpu_reason(model_id)
+                .map(CpuReason::as_str)
+                .unwrap_or("not_enough_vram");
+            tracing::info!(
+                model = %model_id,
+                reason,
+                configured_gpu_layers = self.configured_gpu_layers(),
+                estimated_vram_mb = self.estimate_gpu_footprint_mb(model_id),
+                vram_budget_mb = self.vram_budget_mb.load(std::sync::atomic::Ordering::Relaxed),
+                "Model will run on the CPU"
+            );
         }
         // Anything landing in system RAM — a CPU-only node, or the fallback
         // just taken above — is charged against the RAM budget. There is no
