@@ -416,7 +416,13 @@ impl SplitModel {
             } else {
                 super::kv_budget::standard_kv_elems(head_count_kv, head_dim)
             };
-            let per_token = super::kv_budget::kv_bytes_per_token(seg_layers, k_elems, v_elems);
+            // GQA models on CUDA also carry the f16 flash mirror, which is real
+            // VRAM the head-room check must charge for. MLA never mirrors.
+            let mirrored = !matches!(model_arch, ModelArch::DeepSeek2)
+                && crate::inference::layers::model_wants_kv_mirror(head_count, head_count_kv)
+                && cfg!(feature = "flash-attn");
+            let per_token =
+                super::kv_budget::kv_bytes_per_token(seg_layers, k_elems, v_elems, mirrored);
             let weight_bytes = segment_weight_bytes(&ct, layer_start, layer_end, is_first, is_last);
 
             // A missing nvidia-smi means "unknown", never "zero" — a budget

@@ -54,11 +54,26 @@ pub(crate) const VRAM_HEADROOM_PCT: u64 = 85;
 /// K and V are cached *before* the GQA repeat (see `LayerWeights::forward`,
 /// which reshapes to `n_kv_head` and appends that), so the per-token cost is
 /// driven by `n_kv_head`, not `n_head`. Both are stored f32.
-pub(crate) fn kv_bytes_per_token(layers: usize, k_elems: usize, v_elems: usize) -> u64 {
+///
+/// `mirrored` adds the f16 BSHD mirror `LayerKv` keeps for the CUDA flash
+/// kernel — the same elements again at half the width, so 1.5x in total.
+/// **It has to be counted here.** This figure is what the runtime head-room
+/// check charges a request for, so omitting the mirror would let a GQA model
+/// on a GPU claim 50% more VRAM than the budget believes and then run out for
+/// real — trading a clean 503 that reroutes to a peer for an OOM. See
+/// `layers::model_wants_kv_mirror` for which models carry one.
+pub(crate) fn kv_bytes_per_token(
+    layers: usize,
+    k_elems: usize,
+    v_elems: usize,
+    mirrored: bool,
+) -> u64 {
     const F32: u64 = std::mem::size_of::<f32>() as u64;
+    const F16: u64 = std::mem::size_of::<half::f16>() as u64;
+    let per_elem = if mirrored { F32 + F16 } else { F32 };
     (layers as u64)
         .saturating_mul((k_elems as u64).saturating_add(v_elems as u64))
-        .saturating_mul(F32)
+        .saturating_mul(per_elem)
 }
 
 /// Per-token K and V element counts for the standard (MHA/GQA) attention path.
@@ -144,7 +159,7 @@ mod tests {
         let (gk, gv) = standard_kv_elems(8, 128);
         let (mk, mv) = mla_kv_elems(128, 192, 128);
         assert!(
-            kv_bytes_per_token(1, mk, mv) > kv_bytes_per_token(1, gk, gv),
+            kv_bytes_per_token(1, mk, mv, false) > kv_bytes_per_token(1, gk, gv, false),
             "MLA per-token cost must exceed GQA's"
         );
     }
@@ -157,7 +172,7 @@ mod tests {
     #[test]
     fn a_long_context_model_on_a_small_card_gets_a_short_budget() {
         let (k, v) = standard_kv_elems(8, 64);
-        let per_token = kv_bytes_per_token(16, k, v);
+        let per_token = kv_bytes_per_token(16, k, v, false);
         let free = 7_000u64 * 1024 * 1024;
         let weights = 1_300u64 * 1024 * 1024;
         let budget = kv_headroom_bytes(weights, free);
@@ -263,5 +278,34 @@ mod tests {
         assert!(claim_exceeds_headroom(10, u64::MAX, u64::MAX, usize::MAX));
         // A zero per-token cost cannot claim anything, so it never refuses.
         assert!(!claim_exceeds_headroom(0, 0, 0, 512));
+    }
+
+    /// The f16 flash mirror is real VRAM and the head-room check must charge
+    /// for it.
+    ///
+    /// `LayerKv` keeps an f16 BSHD copy of K and V for GQA models on CUDA, so
+    /// those caches cost 1.5x what the f32 figure alone says. If this were left
+    /// uncounted the admission check would let a model claim half again as much
+    /// VRAM as the budget believes, and the clean 503 that reroutes the request
+    /// to a peer would be replaced by an actual out-of-memory.
+    #[test]
+    fn a_mirrored_cache_is_charged_for_the_mirror() {
+        let (k, v) = standard_kv_elems(8, 128);
+        let plain = kv_bytes_per_token(28, k, v, false);
+        let mirrored = kv_bytes_per_token(28, k, v, true);
+        assert_eq!(
+            mirrored,
+            plain + plain / 2,
+            "the mirror is the same elements at half the width, so 1.5x"
+        );
+        // Stated as a claim about admission, not just arithmetic: the same
+        // headroom must admit fewer positions once a mirror is in play.
+        let headroom = plain * 1000;
+        let fits_plain = headroom / plain;
+        let fits_mirrored = headroom / mirrored;
+        assert!(
+            fits_mirrored < fits_plain,
+            "a mirrored cache must exhaust the budget sooner ({fits_mirrored} vs {fits_plain})"
+        );
     }
 }
