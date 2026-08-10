@@ -32,6 +32,19 @@ trap cleanup EXIT
 
 [ -d "$MODELS_DIR" ] && ln -s "$MODELS_DIR" "$D/models"
 
+# That symlink points at the REAL models directory, so this throwaway node can
+# delete the models of the node you actually run. Auto-manage prunes shards it
+# considers over-replicated, and it is working as designed when it does — on
+# 2026-08-10 a test node started exactly like this removed a live node's
+# llama-3.2-3b shard ("Pruning over-replicated shard ... holders=4 target=2").
+# Written before the daemon starts so there is no window in which the default
+# (enabled) applies.
+cat > "$D/config.toml" <<'TOML'
+[auto_manage]
+enabled = false
+prune_enabled = false
+TOML
+
 echo "smoke: $("$BIN" --version) on port $PORT"
 SWARMLLM_NODE_DATA_DIR="$D" "$BIN" run -p "$PORT" > "$D/node.log" 2>&1 &
 PID=$!

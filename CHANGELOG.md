@@ -4,6 +4,26 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Asking several models at once could run far past its own time limit, and you
+could pay for a batch you never saw.** The compare, research and batch tools
+each apply a two-minute limit. That limit was being applied to every model
+separately, one after another, so twenty models could legitimately take twenty
+times it — forty minutes against a number documented as two. Long before that
+the app asking had given up and shown nothing, while this node carried on
+working, and charging, for a result nobody would ever receive.
+
+The limit now covers the whole batch, however many models are in it. Models that
+have not finished by then are reported as timed out in their own place in the
+list, so the results still line up with what you sent, and their work is stopped
+rather than left running at your expense.
+
+**A model can also answer successfully and say nothing at all** — a reasoning
+model that spends its entire budget thinking, or a reply left empty once control
+tokens are stripped out. That was counted as a completed task, so a batch could
+report five of six done with no way to tell that one of the five was blank.
+Blank replies are now marked as such, and the summary tells you how many replies
+actually contain text alongside how many did not fail.
+
 **Apps streaming from the Anthropic endpoint could not see prompt usage.** A
 streamed reply reported zero input tokens where the same request, not streamed,
 reported the real number — so anything tracking cost or remaining context from
@@ -114,6 +134,32 @@ space they do on disk. That is true for a compressed model and half the truth fo
 an uncompressed one, which expands to twice its file size once loaded. A model
 that could not fit could therefore be admitted and then run out of memory. It is
 now measured correctly.
+
+**A node can now tell you it is running an older version than it installed.**
+Reported twice by the same operator, who believed their node had silently missed
+eight releases of fixes, on the evidence that its process id and start time had
+not changed since before any of them.
+
+That evidence cannot settle it either way. Installing an update replaces the
+running program in place and deliberately keeps both the process id and the
+system's record of when it started, so those look identical whether the update
+took effect or never did. Nothing else answered the question either: the node
+knew which version it had installed and which one it was running, and never
+compared the two.
+
+It does now, at every start. If a newer version is sitting on disk unused it says
+so in the log, raises it in the dashboard, and reports it at
+`GET /api/admin/update-status`. A deliberate rollback is not nagged about.
+
+**The peer count changed without saying so.** Reported as "peer count flaps with
+no log". The number fell inside the disconnect path, which was logged, but rose
+silently when a peer's identity was resolved — a step that happens after a
+connection is established. So watching the count drop and climb produced a line
+for half the changes and nothing for the other half, which makes a healthy
+network indistinguishable from one losing peers.
+
+Both directions are now logged, once per actual change and with the new count.
+Confirmed against the live network: four peers, four lines, none repeated.
 
 ## [0.3.89-alpha] — 2026-08-09
 
