@@ -193,6 +193,30 @@ pub async fn delete_shard(
         )));
     }
 
+    // Would this delete strand prompt privacy? The setting requires BOTH ends of
+    // the model locally, and unlike `delete_model` there is no flag to clear
+    // here — removing an end would leave the setting on and every request for
+    // the model failing at pipeline assembly. Refuse and name the setting, so
+    // turning it off stays the user's explicit choice rather than a side effect
+    // of freeing disk. See `SharedState::privacy_required_shards`.
+    if let Some((first, last)) = shared.privacy_required_shards(&mid) {
+        if shard_index == first || shard_index == last {
+            let which = if shard_index == first && shard_index == last {
+                "only shard".to_string()
+            } else if shard_index == first {
+                "first shard".to_string()
+            } else {
+                "last shard".to_string()
+            };
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "Shard {model_id}/{shard_index} is the {which} of a model with prompt \
+                 privacy switched on, which needs both ends of the model on this node. \
+                 Deleting it would make every request for {model_id} fail. Turn prompt \
+                 privacy off for this model first if you want to remove the shard."
+            ))));
+        }
+    }
+
     // Delete shard file from disk
     let shard_store = state.shared_state.shard_store();
     let shard_path = shard_store.shard_path(&mid, shard_index);

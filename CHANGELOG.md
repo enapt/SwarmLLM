@@ -4,6 +4,24 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Deleting one piece of a model could silently break it, and the dashboard said
+the opposite of what was wrong.** End-to-end encryption needs the first and last
+pieces of a model on your own machine. Removing either of them left the setting
+switched on with nothing able to satisfy it, and from then on every request for
+that model failed. Deleting a whole model already turned the setting off;
+deleting a single piece had no setting to turn off and removed it anyway.
+
+That is now refused, with a message naming the setting and what to do — turning
+your privacy off to let a delete through is not something the app should decide
+for you. Deleting pieces from the middle of a model, or from a model without the
+setting, is unaffected.
+
+The dashboard made it worse: a model in that state was shown as "in-transit
+only", the same as a model with no protection configured. So it reported a
+privacy level when the real situation was that nothing worked at all, and it
+offered no way to switch the setting back off. That state now has its own
+display, says requests are failing, and gives you the off switch.
+
 **A graphics card could not run any unquantized model.** Many models on
 HuggingFace are published in a full-precision "F16" form alongside the smaller
 compressed ones. Downloading one of those and asking it a question failed every

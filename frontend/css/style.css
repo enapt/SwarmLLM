@@ -4835,6 +4835,14 @@ textarea.pool-code-input { min-height: 4.5em; }
   background: rgba(245,158,11,0.08);
 }
 .model-card-expanded .mce-left .mce-section.mce-section-state-amber .mce-section-title { color: var(--orange); }
+/* Red is NOT "worse amber": amber means the model works without prompt privacy,
+   red means the setting is on, cannot be satisfied, and every request for this
+   model is failing right now. Those need to look different at a glance. */
+.model-card-expanded .mce-left .mce-section.mce-section-state-red {
+  border-color: rgba(239,68,68,0.45);
+  background: var(--red-dim);
+}
+.model-card-expanded .mce-left .mce-section.mce-section-state-red .mce-section-title { color: var(--red); }
 
 /* Toggleable section (clickable panel — e.g. Privacy enable/disable) */
 .model-card-expanded .mce-left .mce-section.mce-section-toggleable {

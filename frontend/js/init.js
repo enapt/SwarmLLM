@@ -519,7 +519,14 @@
         var encReady = (target.getAttribute('data-enc-ready') || (target.closest('[data-enc-ready]') || {}).getAttribute && (target.closest('[data-enc-ready]') || {}).getAttribute('data-enc-ready')) === '1';
         if (encReady) {
           var encModelData = (App.data.cache.models || []).find(function(m) { return m.id === encToggle; });
-          var isActive = encModelData ? !!encModelData.encrypted_pipeline : (target.classList.contains('active') || target.closest('.active') != null);
+          // `encrypted_pipeline` is the EFFECTIVE value (setting AND both ends
+          // present), so a blocked model reports false — and clicking its
+          // toggle would have asked to ENABLE what is already on, which the API
+          // rightly refuses for the missing shards. Blocked means the setting IS
+          // on, so the only sensible intent is to turn it off.
+          var isActive = encModelData
+            ? (!!encModelData.encrypted_pipeline || !!encModelData.encrypted_pipeline_blocked)
+            : (target.classList.contains('active') || target.closest('.active') != null);
           App.authFetch(U.modelApiUrl(encToggle, 'encrypted-pipeline'), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },

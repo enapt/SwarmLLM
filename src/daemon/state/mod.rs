@@ -1427,6 +1427,46 @@ impl SharedState {
         )
     }
 
+    /// The shard indices prompt privacy needs this node to keep, or `None` when
+    /// the setting is off for this model.
+    ///
+    /// Prompt privacy ("boomerang") works by handling the FIRST segment (the
+    /// embedding) and the LAST (sampling) locally, so losing either end strands
+    /// the setting: it stays on, nothing can satisfy it, and **every** request
+    /// for that model then fails at pipeline assembly with "Encrypted pipeline
+    /// requires the requesting node to hold shard 0".
+    ///
+    /// A live node reached exactly that state on 2026-08-09. `delete_model`
+    /// clears the flag on its way out, but `delete_shard` has no flag to clear —
+    /// it removes one end and leaves the setting pointing at something that is
+    /// no longer there. So it refuses instead, which is also symmetric with
+    /// `set_model_encrypted_pipeline` refusing to turn the setting ON without
+    /// both ends present.
+    ///
+    /// Refusing rather than clearing is deliberate: silently turning someone's
+    /// privacy off to let a delete through is the worst of the available
+    /// outcomes. The refusal names the setting, so the user can turn it off and
+    /// repeat the delete if that is what they meant.
+    pub fn privacy_required_shards(&self, model_id: &crate::types::ModelId) -> Option<(u32, u32)> {
+        Self::privacy_required_shards_inner(
+            self.encrypted_pipeline_for(model_id),
+            self.model_registry.get_manifest(model_id)?.shard_count,
+        )
+    }
+
+    /// Pure rule behind [`SharedState::privacy_required_shards`], split out so
+    /// the decision is testable without a registry — same shape as
+    /// [`SharedState::resolve_encrypted_pipeline_inner`] above.
+    fn privacy_required_shards_inner(enabled: bool, shard_count: u32) -> Option<(u32, u32)> {
+        if !enabled {
+            return None;
+        }
+        // The same ends `holds_both_model_ends` checks. A single-shard model has
+        // one piece that is both ends at once, so first == last and that piece is
+        // pinned once rather than not at all.
+        Some((0, shard_count.saturating_sub(1)))
+    }
+
     pub fn standalone_tokenizer(
         &self,
         model_id: &crate::types::ModelId,
@@ -2619,6 +2659,47 @@ mod encrypted_pipeline_precedence_tests {
 
     fn resolve(explicit: Option<bool>, global: bool, auto: bool, ends: bool) -> bool {
         SharedState::resolve_encrypted_pipeline_inner(explicit, global, auto, || ends)
+    }
+
+    /// Does prompt privacy pin this shard against deletion?
+    fn pins(enabled: bool, shard_count: u32, index: u32) -> bool {
+        SharedState::privacy_required_shards_inner(enabled, shard_count)
+            .is_some_and(|(first, last)| index == first || index == last)
+    }
+
+    /// Removing either END of a privacy-enabled model strands the setting: it
+    /// stays on, nothing can satisfy it, and every request for the model then
+    /// fails at pipeline assembly. A live node reached that state on
+    /// 2026-08-09 — `delete_model` clears the flag, `delete_shard` had no flag
+    /// to clear and removed the shard anyway.
+    #[test]
+    fn privacy_pins_both_ends_of_the_model() {
+        assert!(pins(true, 4, 0), "first shard carries the embedding");
+        assert!(pins(true, 4, 3), "last shard carries the output head");
+    }
+
+    /// ...but only the ends. Prompt privacy says nothing about the middle, and
+    /// refusing those would block freeing disk for no reason.
+    #[test]
+    fn privacy_does_not_pin_the_middle_shards() {
+        assert!(!pins(true, 4, 1));
+        assert!(!pins(true, 4, 2));
+    }
+
+    /// With the setting off nothing is pinned — the guard must not become a
+    /// blanket ban on deleting first/last shards.
+    #[test]
+    fn nothing_is_pinned_when_privacy_is_off() {
+        for index in 0..4 {
+            assert!(!pins(false, 4, index));
+        }
+    }
+
+    /// A one-shard model's single piece is both ends at once, so it is pinned
+    /// once rather than falling between the two comparisons.
+    #[test]
+    fn a_single_shard_model_pins_its_only_piece() {
+        assert!(pins(true, 1, 0));
     }
 
     /// The point of the change: privacy applies automatically wherever it can,

@@ -1246,9 +1246,31 @@
           var hasFirst = !!m.has_first_shard;
           var hasLast  = !!m.has_last_shard;
           var encActive = !!m.encrypted_pipeline;
-          var canToggle = hasFirst && hasLast;
+          // The setting is ON but this node cannot satisfy it, so every request
+          // for this model fails at pipeline assembly. Without its own state it
+          // fell through to the amber "unprotected" branch below, which told the
+          // user their prompts were unprotected when the truth was that nothing
+          // worked at all — and offered no way to switch the setting back off.
+          var encBlocked = !!m.encrypted_pipeline_blocked;
+          // Blocked must stay toggleable: turning the setting OFF is the fix,
+          // and disabling has no shard precondition (only enabling does).
+          var canToggle = (hasFirst && hasLast) || encBlocked;
           var encState; // { stateMod, badgeCls, icon, label, detail, tip, action }
-          if (encActive) {
+          if (encBlocked) {
+            var blockedParts = [];
+            if (!hasFirst) blockedParts.push(I18n.t('dashboard.enc_missing_first'));
+            if (!hasLast)  blockedParts.push(I18n.t('dashboard.enc_missing_last', { n: shardCount }));
+            var blockedMissing = blockedParts.length === 2
+              ? I18n.t('enc.missing_both')
+              : (blockedParts.length === 1 ? I18n.t('enc.missing_the', { which: blockedParts[0] }) : '');
+            encState = {
+              stateMod: 'mce-section-state-red', badgeCls: 'cb-incomplete',
+              icon: '⚠', label: I18n.t('enc.blocked'),
+              detail: I18n.t('enc.blocked_detail', { missing: blockedMissing }),
+              tip: I18n.t('enc.blocked_tip'),
+              action: I18n.t('enc.disable')
+            };
+          } else if (encActive) {
             encState = {
               stateMod: 'mce-section-state-green', badgeCls: 'cb-active',
               icon: '\uD83D\uDD12', label: I18n.t('enc.active'),
