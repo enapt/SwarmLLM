@@ -57,7 +57,45 @@ fn main() -> anyhow::Result<()> {
 
     // llama-3.2-3b decode: one new query row against the cache.
     let (n_head, n_kv, head_dim) = (24usize, 8usize, 128usize);
-    for kv_len in [272usize, 528, 912, 2064] {
+
+    // **Measure ONE size per process when the number matters** — pass it as an
+    // argument. Measuring several in one run inflates the LATER ones, badly.
+    //
+    // Measured 2026-08-10 on an idle RTX 3070, "WHOLE arm" at kv=912:
+    //
+    //     run alone                        13.04, 14.66 ms/token
+    //     run after 272 and 528            77.33 ms/token      <- 5.9x inflated
+    //     run first, before 528 and 272    16.24 ms/token
+    //
+    // Identical code, same card, same iteration count. Only the composite rows
+    // drift — they allocate ~6 large temporaries per iteration, and the VRAM
+    // state left behind by a previous size changes what that costs. The
+    // single-op rows are stable throughout.
+    //
+    // The isolated figure REPRODUCES the number in `docs/FUTURE_WORK.md`
+    // (13.04 at kv=912) to the decimal, so that table was measured correctly
+    // and stands; it is the convenience of looping over sizes that is unsound.
+    // An earlier version of this comment claimed the table was the unreliable
+    // part — that was wrong, and measuring in isolation is what showed it.
+    //
+    //     cargo run --release --features flash-attn --example gpu_decode_bench -- 912
+    //
+    // **kv=2064 is suspect at ANY ordering** (~90-96 ms/token whether run first
+    // or last). That cannot be what the forward pass does: end-to-end decode at
+    // 3084 KV is ~40 ms/token in TOTAL across all 28 layers. In the real forward
+    // `k` is a view into the cache's pre-allocated buffer with the model
+    // resident, not a standalone allocation, so treat 2064 here as a property of
+    // this bench's allocation pattern and not of decode. Prefer an end-to-end
+    // measurement at that length — gotcha #266.
+    let sizes: Vec<usize> = {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.is_empty() {
+            vec![272usize, 528, 912, 2064]
+        } else {
+            args.iter().filter_map(|a| a.parse().ok()).collect()
+        }
+    };
+    for kv_len in sizes {
         let f32b = (kv_len * n_kv * head_dim * 4) as f64;
         println!(
             "\nkv_len={kv_len}  (K or V alone: {:.1} MB f32, {:.1} MB f16 — x28 layers)",

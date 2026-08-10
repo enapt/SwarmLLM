@@ -7561,6 +7561,60 @@ f32. A contained alternative is an f16 BSHD shadow maintained incrementally
 inside `KvCacheEntry` — appending one position per token instead of converting
 the history — at the cost of ~50% more KV memory unless the f32 copy is dropped.
 
+#### Re-measured 2026-08-10, and the numerics question answered
+
+Re-measured before acting on the numbers above (three FUTURE_WORK entries have
+moved under re-measurement before). **They hold**, with one methodology fix:
+measure ONE kv size per process. Looping over sizes inflates the later ones —
+kv=912's whole arm read 77.33 ms/token after 272 and 528, and 13.04 ms/token
+run alone, which reproduces the table above to the decimal. `gpu_decode_bench`
+now takes the size as an argument and documents this; kv=2064 is unreliable at
+any ordering and should be measured end-to-end instead.
+
+Isolated, on an idle RTX 3070: **272 → 1.6x, 528 → 1.75x, 912 → 1.86x**
+(whole arm vs the f16+BSHD ceiling), both orderings agreeing to 4% at the two
+smaller sizes. Comfortably above this box's ~25% GPU measurement floor.
+
+**The numerics worry is smaller than it looks, and that changes the design.**
+Research turned up ["The Illusion of Equivalence: Systematic FP16 Divergence in
+KV-Cached Autoregressive Inference"](https://arxiv.org/pdf/2604.15409), which
+reports f16 KV diverging from f32 as generation proceeds, worse beyond ~500
+tokens and worse under GQA — i.e. exactly our models and exactly the lengths
+where the win is. Its mechanism is *repeated* quantise/dequantise cycles
+compounding.
+
+That mechanism does not apply to the flash path here, and the reason is worth
+writing down because it is what makes this change cheap:
+
+- Today the cache holds pristine f32 and is rounded to f16 **on every read**.
+  Rounding the same unchanged f32 value repeatedly yields the same f16 value —
+  there is no compounding, but there is also no extra precision reaching the
+  kernel. **Flash already sees f16.**
+- Storing f16 rounds **once at write**. The kernel therefore receives bitwise
+  the same values it receives today.
+
+So for every CUDA path that routes to flash — GQA decode and prefill, the cases
+this optimisation targets — an f16 cache is numerically identical to current
+behaviour, not merely close. The paper's warning lands only where the cache is
+read at f32, which is `standard_attention`: MHA decode, prefill-with-prefix, and
+forced-standard spec/SWIFT sessions. That is the boundary the design must
+respect, and it is a much narrower one than "changing KV dtype is risky".
+
+Practical consequence: the f16 BSHD shadow is the right shape after all, because
+the two representations genuinely serve different consumers rather than one
+being a lossy copy of the other. Whether the f32 copy can be dropped is then a
+question only about `standard_attention`, and is answerable on its own.
+
+Production engines corroborate the direction — vLLM and TensorRT-LLM store KV in
+the compute dtype and hand it to the kernel without a per-step conversion; fp8 is
+the aggressive setting, f16 is simply the norm.
+
+**Not implemented.** It needs a wrapper around candle's `KvCache` maintaining
+both representations, updated at all three `cache.append` sites plus
+`truncate_to`, prefix-cache hydration and snapshot import — and a desynchronised
+shadow would produce silently wrong attention rather than an error, so it wants
+its own change with tests that fail when the shadow drifts.
+
 ### Rejected: fusing the transpose and the cast
 
 `transpose().to_dtype()` reads the strided f32 source and writes contiguous f16
