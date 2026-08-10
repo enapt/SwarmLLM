@@ -78,6 +78,18 @@ pub enum UpdateMode {
     Install,
 }
 
+impl UpdateMode {
+    /// Wire name, matching the `[updates] mode` config value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdateMode::Off => "off",
+            UpdateMode::Notify => "notify",
+            UpdateMode::Download => "download",
+            UpdateMode::Install => "install",
+        }
+    }
+}
+
 impl UpdateConfig {
     /// The mode actually in force, migrating a pre-`mode` config.
     ///
@@ -304,5 +316,50 @@ mod update_mode_tests {
         // A fresh install checks often enough to matter when several releases
         // can ship in one day.
         assert!(cfg.check_interval_hours <= 1);
+    }
+
+    /// The reported update mode must be what the node DOES, not the legacy
+    /// `auto_update` field it is derived from.
+    ///
+    /// `auto_update` defaults to `Disabled`, and `effective_mode` deliberately
+    /// resolves that to `Notify` — so a stock install checks for releases and
+    /// says so. `GET /api/admin/version` reported the legacy field instead and
+    /// therefore answered "disabled" on a node that was checking on schedule,
+    /// with a populated `last_checked` sitting next to it (observed live
+    /// 2026-08-10). Anyone asking "will this node tell me about a release?" got
+    /// the wrong answer from the endpoint built to answer it.
+    #[test]
+    fn a_stock_install_reports_that_it_checks_for_updates() {
+        let cfg = UpdateConfig::default();
+        assert_eq!(cfg.auto_update, AutoUpdateMode::Disabled, "precondition");
+        assert_eq!(
+            cfg.effective_mode().as_str(),
+            "notify",
+            "a default node checks and notifies — reporting the legacy field \
+             here is how it came to claim updates were disabled"
+        );
+    }
+
+    #[test]
+    fn every_update_mode_has_a_distinct_wire_name() {
+        let all = [
+            UpdateMode::Off,
+            UpdateMode::Notify,
+            UpdateMode::Download,
+            UpdateMode::Install,
+        ];
+        let names: Vec<&str> = all.iter().map(|m| m.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "duplicate wire name: {names:?}");
+        // The names are the `[updates] mode` config vocabulary; they must round
+        // trip so the value reported is one a user can paste back into config.
+        for (m, n) in all.iter().zip(&names) {
+            let parsed: UpdateMode = toml::from_str(&format!("mode = \"{n}\""))
+                .map(|c: UpdateConfig| c.mode.unwrap())
+                .unwrap_or_else(|e| panic!("wire name {n} is not a valid config value: {e}"));
+            assert_eq!(parsed, *m);
+        }
     }
 }

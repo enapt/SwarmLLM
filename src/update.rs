@@ -184,6 +184,27 @@ fn select_target_release(
         .find(|r| !r.draft && (include_prereleases || !r.prerelease))
 }
 
+/// Whether a discovered update should be staged to disk.
+///
+/// **The single rule, because there are two callers and they had diverged.**
+/// The background check loop and `POST /api/admin/update/check` both decide
+/// this; the manual endpoint used to decide it from the legacy
+/// `updates.auto_update` field while the loop used `effective_mode()`, and its
+/// comment said it mirrored the loop. It did not.
+///
+/// The consequence was that the modern setting did nothing on that path: a user
+/// who set `mode = "download"` still has `auto_update` at its `Disabled`
+/// default, so pressing "check for updates" in the dashboard refused to stage
+/// anything while the background loop happily staged the same release. Two
+/// answers to one question, and the one the user triggered was the wrong one.
+///
+/// A managed install (deb/rpm, hardened anchor) can never replace its own
+/// binary, so it does not download at all — otherwise it re-fetches the release
+/// on every check, forever.
+pub(crate) fn should_stage_download(mode: crate::config::UpdateMode, info: &UpdateInfo) -> bool {
+    mode >= crate::config::UpdateMode::Download && info.self_update_supported
+}
+
 impl UpdateChecker {
     pub fn new(
         config: UpdateConfig,
@@ -920,8 +941,7 @@ impl UpdateChecker {
                     // apply what it downloads, so it does not download at all —
                     // otherwise it re-fetches the release every check forever.
                     let mut info = info;
-                    let should_download =
-                        mode >= UpdateMode::Download && info.self_update_supported;
+                    let should_download = should_stage_download(mode, &info);
                     if mode >= UpdateMode::Download && !info.self_update_supported {
                         tracing::info!(
                             latest = %info.latest_version,

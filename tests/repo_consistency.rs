@@ -1725,3 +1725,70 @@ fn every_model_facing_entry_point_counts_the_request() {
         missing.join("\n  ")
     );
 }
+
+/// What a node REPORTS about updates must be what it DOES.
+///
+/// `updates.auto_update` is the legacy field. It defaults to `Disabled`, and
+/// `UpdateConfig::effective_mode()` deliberately resolves that to `Notify` —
+/// because `disabled` was the shipped default rather than anyone's decision,
+/// and honouring it literally left nodes on old builds with nothing ever
+/// saying so.
+///
+/// `GET /api/admin/version` read the legacy field directly, so a stock node
+/// answered `"channel": "disabled"` while checking on schedule with a
+/// populated `last_checked` in the same response (observed on a live node,
+/// 2026-08-10). The endpoint built to answer "will this node tell me about a
+/// release?" gave the opposite answer, to essentially every node, because
+/// `Disabled` is the default.
+///
+/// The fix is to report `effective_mode()`. This guard exists because the
+/// tempting read — the field literally named `auto_update` — is the wrong one,
+/// and nothing else would catch a revert: the config-level unit tests pass
+/// either way, since the bug was the handler bypassing them.
+#[test]
+fn update_reporting_uses_the_effective_mode_not_the_legacy_field() {
+    let root = repo_root();
+    let api = root.join("src/api");
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![api];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let Ok(src) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
+                for (i, line) in src.lines().enumerate() {
+                    let l = line.trim();
+                    if l.starts_with("//") || l.starts_with("///") {
+                        continue;
+                    }
+                    // Reading the legacy field anywhere under the HTTP surface
+                    // means something user-facing is describing update
+                    // behaviour from a value that does not determine it.
+                    if l.contains("updates.auto_update") || l.contains("AutoUpdateMode::") {
+                        offenders.push(format!(
+                            "{}:{}: {}",
+                            p.strip_prefix(&root).unwrap_or(&p).display(),
+                            i + 1,
+                            l
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the API reports update behaviour from the legacy `auto_update` field. \
+         Use `cfg().updates.effective_mode()` — `auto_update` defaults to \
+         Disabled, which resolves to Notify, so reading it directly tells \
+         almost every user their updates are off while the node is checking:\n{}",
+        offenders.join("\n")
+    );
+}

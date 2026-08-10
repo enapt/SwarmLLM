@@ -962,17 +962,32 @@ pub async fn version_info(State(state): State<AppState>) -> Json<serde_json::Val
             (None, false, None)
         };
 
-    let channel = match state.shared_state.config.updates.auto_update {
-        crate::config::AutoUpdateMode::Disabled => "disabled",
-        crate::config::AutoUpdateMode::Stable => "stable",
-        crate::config::AutoUpdateMode::All => "all",
-    };
+    // Report what the node ACTUALLY does, which is `effective_mode()`, not the
+    // legacy `auto_update` field this used to read.
+    //
+    // Those two disagree by design: a legacy `auto_update` of `disabled` is
+    // resolved to `Notify`, deliberately, because `disabled` was the shipped
+    // default rather than a decision and suppressing the check entirely left
+    // nodes on old builds with nothing ever saying so. Since it IS the default,
+    // almost every node reported its updates as "disabled" while checking on
+    // schedule and populating `last_checked` — observed live on 2026-08-10.
+    // Anyone reading this endpoint to answer "will this node tell me about a
+    // release?" got exactly the wrong answer, which is the confusion the
+    // `effective_mode` migration existed to end.
+    //
+    // Read through `cfg()` so a mode changed from the Settings panel is
+    // reflected without a restart; `state.config` is the boot snapshot.
+    let cfg = state.shared_state.cfg();
+    let mode = cfg.updates.effective_mode().as_str();
 
     Json(serde_json::json!({
         "current_version": current_version,
         "latest_version": latest_version,
         "update_available": update_available,
-        "channel": channel,
+        // Named `mode` to match the `[updates] mode` setting it reports. The
+        // previous name was `channel`, which suggested stable-vs-prerelease —
+        // that is `include_prereleases`, a different setting entirely.
+        "mode": mode,
         "last_checked": update_state.last_checked,
         "last_error": update_state.last_error,
         // Set when a newer version is installed on disk than the one running —
@@ -1008,20 +1023,21 @@ pub async fn check_update(
     match checker.check_for_update().await {
         Ok(Some(info)) => {
             let mut info = info;
-            // Mirror the background loop's gating: only auto-download when
-            // the operator has explicitly opted into updates. Without this
-            // gate, a user with `auto_update = "disabled"` (the documented
-            // safe default until C1 binary signing lands) would still get
-            // a binary written to disk every time the dashboard pings
-            // /update/check, contradicting their setting and producing a
-            // misleading "ready to apply" banner. Stable mode also skips
-            // pre-release tags so a release-candidate doesn't auto-stage.
-            let is_prerelease = info.latest_version.contains('-');
-            let should_download = match state.shared_state.config.updates.auto_update {
-                crate::config::AutoUpdateMode::Disabled => false,
-                crate::config::AutoUpdateMode::Stable => !is_prerelease,
-                crate::config::AutoUpdateMode::All => true,
-            };
+            // The SAME gate the background loop uses, via the shared helper —
+            // this used to be a second, hand-written rule reading the legacy
+            // `auto_update` field, so a user who set `mode = "download"` got
+            // downloads from the background loop and a refusal from this
+            // endpoint. Whether an update is staged must not depend on which
+            // of the two noticed it.
+            //
+            // Prerelease filtering is deliberately NOT repeated here: it belongs
+            // at the check, where `include_prereleases` already applies it. Doing
+            // it again at the download decision applied a second, different rule
+            // to the same question.
+            let should_download = crate::update::should_stage_download(
+                state.shared_state.cfg().updates.effective_mode(),
+                &info,
+            );
             if should_download {
                 if let Ok(tmp_path) = checker.download_update(&info).await {
                     // Only flag downloaded=true when the staging path is the

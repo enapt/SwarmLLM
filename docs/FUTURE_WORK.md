@@ -8099,12 +8099,23 @@ and that a node will never tell them about a release — the exact confusion the
 `effective_mode` migration existed to end. It also mirrors a known trap here:
 this reads `state.config`, the boot snapshot, rather than `state.cfg()`.
 
-Fix is small — report `effective_mode()` (and name the field for what it is,
-since "channel" now suggests stable-vs-prerelease, which is `include_prereleases`).
-It is listed here rather than fixed inline because it changes a value the
-dashboard and any script reading this endpoint already branch on, so it wants
-its own change with the frontend updated alongside, not a drive-by during a
-release cut.
+**FIXED 2026-08-10.** The endpoint now reports `effective_mode()` as `mode`
+(renamed from `channel`, which suggested stable-vs-prerelease — that is
+`include_prereleases`), read through `cfg()` so a change from the Settings panel
+applies without a restart. Nothing in the frontend consumed the old field.
 
-Worth checking at the same time whether anything else still reads
-`updates.auto_update` directly instead of `effective_mode()`.
+**Checking for other readers found a worse one**, which is why the guard is a
+build-failing test rather than a fixed line: `POST /api/admin/update/check`
+decided whether to STAGE a download from the same legacy field. Its comment said
+it mirrored the background loop's gating; the loop used `effective_mode()`, so
+they disagreed. A user who set the modern `mode = "download"` still had
+`auto_update` at its `Disabled` default, so the background loop staged updates
+and pressing "check for updates" in the dashboard refused to — two answers to
+one question, and the one the user triggered was the wrong one. Both now call
+`update::should_stage_download`.
+
+`update_reporting_uses_the_effective_mode_not_the_legacy_field` in
+`tests/repo_consistency.rs` fails the build on any new read of
+`updates.auto_update` under `src/api`. The config-level unit tests pass either
+way — the bug was handlers bypassing them — so a grep guard is what actually
+catches a revert here.
