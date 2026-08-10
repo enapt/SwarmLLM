@@ -1696,7 +1696,7 @@ support is three pieces, shared by the OpenAI and Anthropic layers:
 - **`research`:** fan-out a question to multiple models (auto-selects if models omitted), returns all responses with token usage
 - **`batch_prompts`:** execute up to 20 independent {id, model, prompt} tasks in parallel
 - **`delegate`:** offload a task to the best model for a given tier (fast/cheap/smart) — auto-selects model
-- **`node_info`:** detailed node status (loaded model, peers, credits, registry models, cloud providers)
+- **`node_info`:** detailed node status (loaded model, peers, credits, registry models, cloud providers). The loaded-model object carries `servable_now`: `loaded_model_info` is cached when the node starts and says what was loaded, NOT whether a request can be routed now — those differ, and an operator reported the reported-loaded model failing every request while two others answered (2026-08-10). `servable_now` is whether any reachable node currently holds that model's first shard; `false` means requests will fail whatever "loaded" says.
 
 ### Cloud Fallback (Optional)
 When a requested model isn't available locally or on the swarm, requests can optionally be routed to 12 cloud providers:
@@ -1739,7 +1739,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET     /api/admin/quant-recommendations` — R133: per-family quant-choice recommendations with rationale tags
 - `GET     /api/admin/foreign-pool-catalog` — R134: discovery-only cache of models advertised by other pools (gated on `pool.share_model_catalog`)
 - `GET     /api/admin/responses` — List stored `/v1/responses` records for the dashboard (filter by `?status=…&limit=…`)
-- `GET     /api/admin/models` — Model list with shard status, VRAM estimates, acquisition state
+- `GET     /api/admin/models` — Model list with shard status, VRAM estimates, acquisition state. `encrypted_pipeline` is the EFFECTIVE state (`flag && has_first && has_last`) so the UI's "privacy is on" indicator never claims privacy that is not happening; `encrypted_pipeline_blocked` reports the case that masking hides — the setting is on and this node cannot satisfy it, so every request for that model fails. Both are needed: without the second, the failing state appears on no surface a user looks at (gotcha #286).
 - `POST    /api/admin/models/{id}/add` — Trigger model acquisition
 - `GET     /api/admin/models/{id}/status` — Model acquisition progress
 - `GET     /api/admin/peers` — Connected peers with latency/trust
@@ -1822,7 +1822,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET    /api/admin/provider-models` — List models available from cloud providers
 - `GET    /api/admin/provider-health` — Probe cloud provider availability
 - `POST   /api/admin/provider-model-status` — Check specific model availability on provider
-- `GET    /api/admin/version` — Version info (binary version, git hash, build features)
+- `GET    /api/admin/version` — Version info (binary version, git hash, build features), plus `restart_required`: set when a NEWER version is installed on disk than the one running, i.e. the restart into it did not take effect. `null` when they agree or nothing has been installed. Exists because an in-place update `exec`s and therefore keeps the process id AND the kernel's start time, so `ps` cannot distinguish "updated" from "never restarted" (gotcha #277/#287) — an operator concluded twice from exactly that evidence that their node had missed eight releases, and nothing could contradict it. The node knows what it installed and what it runs; this is the comparison. A deliberate rollback (running newer than the record) is not flagged.
 - `POST   /api/admin/update/check` — Check for new SwarmLLM releases
 - `POST   /api/admin/update/apply` — Download and apply update
 - `GET    /api/admin/network-map` — Network topology heatmap data
