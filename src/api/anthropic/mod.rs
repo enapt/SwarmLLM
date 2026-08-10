@@ -714,6 +714,7 @@ mod tests {
             stop_reason: "stop_sequence".into(),
             stop_sequence: Some("\n\nHuman:".into()),
             output_tokens: 42,
+            input_tokens: None,
         });
         assert_eq!(event_type, "message_delta");
         let v: serde_json::Value = serde_json::from_str(&data).unwrap();
@@ -728,6 +729,7 @@ mod tests {
             stop_reason: "end_turn".into(),
             stop_sequence: None,
             output_tokens: 10,
+            input_tokens: None,
         });
         let v: serde_json::Value = serde_json::from_str(&data).unwrap();
         assert_eq!(v["delta"]["stop_reason"], "end_turn");

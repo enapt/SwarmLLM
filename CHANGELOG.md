@@ -4,6 +4,13 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Apps streaming from the Anthropic endpoint could not see prompt usage.** A
+streamed reply reported zero input tokens where the same request, not streamed,
+reported the real number — so anything tracking cost or remaining context from
+the stream was working from a wrong figure. The count is now reported once the
+reply finishes, where it is actually known, and is left out entirely on the one
+path that genuinely cannot know it rather than being sent as a confident zero.
+
 **Apps can now see how long a conversation this node will actually serve.**
 `GET /v1/models` reports `max_model_len` for each model — prompt plus reply,
 after the shipped 4096 default and any `max_seq_len_override` you set.

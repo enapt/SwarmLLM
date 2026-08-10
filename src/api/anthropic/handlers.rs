@@ -366,12 +366,17 @@ pub(super) async fn anthropic_stream(
                 matched,
                 output_tokens,
                 text_block,
+                // Streamed token events carry no prompt count; the router's
+                // final output does, but this arm returns before awaiting it.
+                None,
             )
             .await;
         } else {
             // Fallback: pipeline finished without streaming events
             match result {
                 Ok(Ok(output)) => {
+                    // Captured before `output.content` is moved below.
+                    let prompt_tokens = output.prompt_tokens;
                     if !output.content.is_empty() {
                         let _ = sse_tx
                             .send(AnthropicSseEvent::ContentBlockDelta {
@@ -391,11 +396,12 @@ pub(super) async fn anthropic_stream(
                         output.matched_stop_sequence,
                         output.completion_tokens,
                         TextBlock::Open,
+                        Some(prompt_tokens),
                     )
                     .await;
                 }
                 _ => {
-                    send_sse_epilogue(&sse_tx, "end_turn".into(), streamed_token_count).await;
+                    send_sse_epilogue(&sse_tx, "end_turn".into(), streamed_token_count, None).await;
                 }
             }
         }
@@ -479,7 +485,7 @@ pub(super) async fn anthropic_split_stream(
             stream_trace.clone(),
         );
         stream_trace.mark_dequeued();
-        let (mut token_rx, failure, _usage) = match crate::api::openai::spawn_split_stream(
+        let (mut token_rx, failure, usage) = match crate::api::openai::spawn_split_stream(
             &state,
             &requested_mid,
             &messages,
@@ -489,7 +495,7 @@ pub(super) async fn anthropic_split_stream(
         ) {
             Some(pair) => pair,
             None => {
-                send_sse_epilogue(&sse_tx, "end_turn".into(), 0).await;
+                send_sse_epilogue(&sse_tx, "end_turn".into(), 0, None).await;
                 return;
             }
         };
@@ -606,12 +612,19 @@ pub(super) async fn anthropic_split_stream(
         );
         state.shared_state.publish_request_trace(&stream_trace);
 
+        // The split stream publishes (prompt, completion) once generation
+        // finishes, which is exactly now. It used to be dropped on the floor,
+        // so a streaming client saw input_tokens = 0 for a prompt the
+        // non-streaming sibling reported correctly.
+        let prompt_tokens = usage.lock().ok().and_then(|u| u.map(|(p, _)| p));
+
         send_sse_epilogue_with_stop(
             &sse_tx,
             stop_reason,
             matched_stop_sequence,
             total_output_tokens,
             text_block,
+            prompt_tokens,
         )
         .await;
     });
@@ -1203,7 +1216,7 @@ async fn stream_openai_to_anthropic(
         Some("stop") | None => "end_turn",
         Some(other) => map_finish_reason(other),
     };
-    send_sse_epilogue(&sse_tx, stop_reason.into(), output_tokens).await;
+    send_sse_epilogue(&sse_tx, stop_reason.into(), output_tokens, None).await;
 }
 
 #[cfg(test)]

@@ -44,6 +44,16 @@ pub(super) enum AnthropicSseEvent {
         /// sequence fired. `None` for `end_turn` / `max_tokens` reasons.
         stop_sequence: Option<String>,
         output_tokens: u32,
+        /// Prompt tokens, when this path knows them.
+        ///
+        /// Anthropic reports input tokens on `message_start`, which this server
+        /// sends before generation begins — at which point the prompt has not
+        /// been tokenised and the number does not exist yet. It was therefore
+        /// hardcoded to 0 and never corrected, so a STREAMING client could not
+        /// see prompt usage at all while the non-streaming sibling reported it
+        /// correctly (measured 2026-08-10: 0 against a true 59). Reporting it
+        /// here, where it IS known, is what the official SDKs accumulate.
+        input_tokens: Option<u32>,
     },
     MessageStop,
 }
@@ -124,15 +134,21 @@ pub(super) fn serialize_anthropic_event(event: &AnthropicSseEvent) -> (&'static 
             stop_reason,
             stop_sequence,
             output_tokens,
-        } => (
-            "message_delta",
+            input_tokens,
+        } => ("message_delta", {
+            let mut usage = serde_json::json!({ "output_tokens": output_tokens });
+            // Omitted rather than sent as 0 when unknown: a client that sums
+            // usage across events must not be handed a confident zero.
+            if let Some(input) = input_tokens {
+                usage["input_tokens"] = (*input).into();
+            }
             serde_json::json!({
                 "type": "message_delta",
                 "delta": { "stop_reason": stop_reason, "stop_sequence": stop_sequence },
-                "usage": { "output_tokens": output_tokens }
+                "usage": usage
             })
-            .to_string(),
-        ),
+            .to_string()
+        }),
         AnthropicSseEvent::MessageStop => (
             "message_stop",
             serde_json::json!({ "type": "message_stop" }).to_string(),
@@ -204,8 +220,17 @@ pub(super) async fn send_sse_epilogue(
     sse_tx: &tokio::sync::mpsc::Sender<AnthropicSseEvent>,
     stop_reason: String,
     output_tokens: u32,
+    input_tokens: Option<u32>,
 ) {
-    send_sse_epilogue_with_stop(sse_tx, stop_reason, None, output_tokens, TextBlock::Open).await
+    send_sse_epilogue_with_stop(
+        sse_tx,
+        stop_reason,
+        None,
+        output_tokens,
+        TextBlock::Open,
+        input_tokens,
+    )
+    .await
 }
 
 /// Whether the opening text block (index 0) is still open when the epilogue
@@ -237,6 +262,7 @@ pub(super) async fn send_sse_epilogue_with_stop(
     stop_sequence: Option<String>,
     output_tokens: u32,
     text_block: TextBlock,
+    input_tokens: Option<u32>,
 ) {
     if text_block == TextBlock::Open {
         let _ = sse_tx
@@ -248,6 +274,7 @@ pub(super) async fn send_sse_epilogue_with_stop(
             stop_reason,
             stop_sequence,
             output_tokens,
+            input_tokens,
         })
         .await;
     let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
@@ -327,8 +354,15 @@ mod block_sequencing_tests {
     #[tokio::test]
     async fn epilogue_skips_the_text_block_when_already_closed() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(8);
-        send_sse_epilogue_with_stop(&tx, "tool_use".into(), None, 5, TextBlock::AlreadyClosed)
-            .await;
+        send_sse_epilogue_with_stop(
+            &tx,
+            "tool_use".into(),
+            None,
+            5,
+            TextBlock::AlreadyClosed,
+            None,
+        )
+        .await;
         drop(tx);
 
         let mut names = Vec::new();
@@ -346,7 +380,7 @@ mod block_sequencing_tests {
     #[tokio::test]
     async fn epilogue_closes_the_text_block_when_still_open() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(8);
-        send_sse_epilogue_with_stop(&tx, "end_turn".into(), None, 5, TextBlock::Open).await;
+        send_sse_epilogue_with_stop(&tx, "end_turn".into(), None, 5, TextBlock::Open, None).await;
         drop(tx);
 
         let mut names = Vec::new();
@@ -356,6 +390,56 @@ mod block_sequencing_tests {
         assert_eq!(
             names,
             vec!["content_block_stop", "message_delta", "message_stop"]
+        );
+    }
+
+    /// Prompt usage must reach a STREAMING client.
+    ///
+    /// `message_start` is emitted before the prompt is tokenised, so its
+    /// `input_tokens` is structurally 0; the count is known by the time the
+    /// epilogue runs and belongs there. Measured 2026-08-10: a streaming
+    /// request reported 0 for a prompt the non-streaming sibling reported as
+    /// 59, so a client tracking cost or context from the stream could not see
+    /// prompt usage at all.
+    #[tokio::test]
+    async fn the_epilogue_reports_prompt_tokens_when_known() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(8);
+        send_sse_epilogue_with_stop(&tx, "end_turn".into(), None, 5, TextBlock::Open, Some(38))
+            .await;
+        drop(tx);
+
+        let mut delta = None;
+        while let Some(e) = rx.recv().await {
+            let (name, json) = serialize_anthropic_event(&e);
+            if name == "message_delta" {
+                delta = Some(serde_json::from_str::<serde_json::Value>(&json).unwrap());
+            }
+        }
+        let d = delta.expect("message_delta emitted");
+        assert_eq!(d["usage"]["input_tokens"], 38);
+        assert_eq!(d["usage"]["output_tokens"], 5);
+    }
+
+    /// ...and is OMITTED, not zeroed, on a path that does not know it. A client
+    /// summing usage across events must never be handed a confident zero.
+    #[tokio::test]
+    async fn an_unknown_prompt_count_is_omitted_rather_than_zero() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(8);
+        send_sse_epilogue_with_stop(&tx, "end_turn".into(), None, 5, TextBlock::Open, None).await;
+        drop(tx);
+
+        let mut delta = None;
+        while let Some(e) = rx.recv().await {
+            let (name, json) = serialize_anthropic_event(&e);
+            if name == "message_delta" {
+                delta = Some(serde_json::from_str::<serde_json::Value>(&json).unwrap());
+            }
+        }
+        let d = delta.expect("message_delta emitted");
+        assert!(
+            d["usage"].get("input_tokens").is_none(),
+            "unknown must be absent, not 0: {}",
+            d["usage"]
         );
     }
 }
