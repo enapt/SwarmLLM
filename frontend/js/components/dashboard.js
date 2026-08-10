@@ -1336,6 +1336,44 @@
             '</div>';
         }
 
+        // WHY THIS MODEL IS NOT ON THE GRAPHICS CARD.
+        //
+        // Rendered only when it is not, and only when this node holds shards —
+        // a model served entirely by peers has no local placement to explain.
+        // The backend already distinguishes the three causes
+        // (`cpu_placement_reason`); before this the only place that answer
+        // existed was one log line written at the moment the worker spawned,
+        // which is no use to someone looking at a dashboard hours later. A
+        // tester spent a session on exactly this question (2026-08-10).
+        var placementSectionHtml = '';
+        var cpuReason = m.cpu_placement_reason;
+        if (cpuReason && hostedShards > 0) {
+          // `not_enough_vram` is the recoverable one and reads as amber; the
+          // other two are settled facts about this machine until something
+          // changes, so they are plain.
+          var reasonKeys = {
+            not_enough_vram:            { key: 'placement.not_enough_vram',  mod: 'mce-section-state-amber', badge: 'cb-fragile' },
+            configured_cpu_only:        { key: 'placement.configured',       mod: '',                        badge: 'cb-ready' },
+            gpu_too_old_for_this_build: { key: 'placement.gpu_too_old',      mod: 'mce-section-state-amber', badge: 'cb-fragile' }
+          };
+          var r = reasonKeys[cpuReason];
+          if (r) {
+            placementSectionHtml =
+              '<div class="mce-section mce-section-placement ' + r.mod + '" title="' + U.escapeHtml(I18n.t('placement.tip')) + '">' +
+                '<div class="mce-section-header">' +
+                  '<div class="mce-section-title">' + U.escapeHtml(I18n.t('placement.section')) + '</div>' +
+                '</div>' +
+                '<div class="mce-section-body">' +
+                  '<span class="composite-badge ' + r.badge + '">' +
+                    '<span class="mce-section-icon">🖥</span>' +
+                    U.escapeHtml(I18n.t('placement.on_cpu')) +
+                  '</span>' +
+                  '<div class="mce-section-detail">' + U.escapeHtml(I18n.t(r.key)) + '</div>' +
+                '</div>' +
+              '</div>';
+          }
+        }
+
         // YOUR own download progress is rendered exclusively by the global
         // Downloads panel (see frontend/js/components/downloads.js). The model
         // card never duplicates it — peer_downloads dots in the matrix view
@@ -1470,6 +1508,9 @@
                 // Above CONFIG so the connector line lands higher and closer
                 // to the endpoint shard rows on the right.
                 privacySectionHtml +
+                // PLACEMENT — only present when this node runs the model on its
+                // processor, and says which of the three reasons it is.
+                placementSectionHtml +
                 // CONFIG — static spec sheet: arch, quant, size, shards, mode, vram.
                 // Trust badge sits in the header top-right.
                 '<div class="mce-section mce-section-config">' +

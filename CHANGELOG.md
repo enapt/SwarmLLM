@@ -36,6 +36,10 @@ would have claimed a protection that is not there, which is worse than shipping
 nothing. The numbers, and what is still unexplained, are in `docs/FUTURE_WORK.md`.
 
 **"Why is my model running on the processor instead of the graphics card?" is now
+answerable — in the dashboard, not just the log.** The model card says which of
+the three reasons applies, and only for models this machine actually holds.
+
+**"Why is my model running on the processor instead of the graphics card?" is now
 answerable.** There are three reasons a model goes to the processor: you asked
 for it, your card is too old for this build, or the model did not fit in the
 graphics memory available at the time. All three produced an identical worker

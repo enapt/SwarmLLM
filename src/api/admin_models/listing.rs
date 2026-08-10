@@ -190,10 +190,18 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             // used to look identical from outside the daemon (`--gpu-layers 0`),
             // so "is this my setting or your override?" was unanswerable
             // without catching the one log line written at decision time.
-            "cpu_placement_reason": state
-                .shared_state
-                .model_process_pool
-                .cpu_placement_reason(&crate::types::ModelId(id.to_string())),
+            // Only meaningful for a model this node actually holds shards of —
+            // for a peer-served model there is no local placement to explain,
+            // and answering "configured_cpu_only" about someone else's machine
+            // is noise the caller has to know to ignore.
+            "cpu_placement_reason": if hosted_shards > 0 {
+                state
+                    .shared_state
+                    .model_process_pool
+                    .cpu_placement_reason(&crate::types::ModelId(id.to_string()))
+            } else {
+                None
+            },
             "hf_source": hf_source,
         })
     };
