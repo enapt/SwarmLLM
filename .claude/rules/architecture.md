@@ -760,6 +760,29 @@ Two gates matter here:
   works locally when `nvcc` is present (set `CUDA_COMPUTE_CAP=80` to match
   the release build) but compiles the kernels, so budget tens of minutes.
 
+  **It must be `--all-targets`, and that is not a detail.** CI runs
+  `cargo check --locked --features flash-attn --all-targets`; a plain
+  `cargo build --features cuda` does NOT compile test code, so a gated
+  `#[cfg(feature = "flash-attn")]` **test** is invisible to it. That is
+  precisely how main went red on 2026-08-10: `run_attention` gained a
+  parameter, every production caller was updated, and one caller inside a
+  flash-attn-gated benchmark test was not — through a release `--features
+  cuda` build, a default `--all-targets` clippy, 1819 passing tests and a
+  green pre-push hook. **Changing the signature of anything callable from
+  gated code means running the gated check with `--all-targets` before
+  pushing.** Grep for the symbol first: `grep -rn "the_fn(" src/` shows the
+  gated callers that no default build will compile.
+
+  A debug-profile `cargo check --features flash-attn` rebuilds the kernels
+  (tens of minutes) even though the release profile may already have them.
+  Adding `--release` reuses them and is much faster, but then the
+  **integration-test targets fail spuriously**: `Database::open_temp` is
+  `#[cfg(any(test, debug_assertions))]`, and `--release` turns
+  `debug_assertions` off, so `tests/integration/*` stop compiling with a
+  wall of `no associated function named open_temp`. That is the profile,
+  not a regression. Read which TARGET failed — `lib test` is the one that
+  carries the gated unit tests and the one CI reports.
+
 **The specific trap, which has now fired (gotcha #264): an import used only
 inside a `cfg`-gated arm is reported UNUSED by every local build.** Acting on
 that advice — which clippy gives confidently, and which is correct for the

@@ -3207,6 +3207,11 @@ mod flash_vs_standard {
                         *n_kv_head,
                         *head_dim,
                         None,
+                        // No mirror: this benchmark builds its K/V directly
+                        // rather than through a cache, and it is comparing
+                        // KERNELS — handing one arm pre-converted operands
+                        // would measure the mirror instead.
+                        None,
                     )
                     .unwrap();
                     // Force realisation — candle is lazy enough that dropping
