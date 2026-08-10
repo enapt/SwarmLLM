@@ -115,6 +115,104 @@ fn main() -> anyhow::Result<()> {
         bench("bare synchronize (profiler overhead)", 0.0, &dev, || Ok(()));
     }
 
+    // ── Batched decode: N launches vs one varlen launch ──
+    //
+    // `forward_attn_batched` batches every stage except the attention core,
+    // which loops per slot because each request has its own KV cache and its own
+    // history length. On a launch-bound card that loop is the batched path's
+    // remaining cost. `flash_attn_varlen` computes all of them in ONE call, at
+    // the price of concatenating the slots' caches and building offsets.
+    //
+    // Whether that trades well is an empirical question, not an arithmetic one:
+    // the concatenation copies real bytes every step while the launch saving is
+    // fixed, so there is a batch size below which it loses. This prices both
+    // arms at the same shapes. Slots are given DIFFERENT history lengths, which
+    // is the case that matters — equal lengths would not need varlen at all.
+    for batch in [4usize, 8] {
+        let lens: Vec<usize> = (0..batch).map(|i| 512 + i * 128).collect();
+        let total_kv: usize = lens.iter().sum();
+        println!("\nbatched decode: {batch} slots, kv lens {lens:?} (total {total_kv})");
+
+        // Per-slot operands as the mirror already stores them: f16, BSHD.
+        let qs: Vec<Tensor> = (0..batch)
+            .map(|_| {
+                Tensor::randn(0f32, 1., (1, 1, n_head, head_dim), &dev)
+                    .unwrap()
+                    .to_dtype(DType::F16)
+                    .unwrap()
+            })
+            .collect();
+        let ks: Vec<Tensor> = lens
+            .iter()
+            .map(|&l| {
+                Tensor::randn(0f32, 1., (1, l, n_kv, head_dim), &dev)
+                    .unwrap()
+                    .to_dtype(DType::F16)
+                    .unwrap()
+            })
+            .collect();
+        let vs: Vec<Tensor> = lens
+            .iter()
+            .map(|&l| {
+                Tensor::randn(0f32, 1., (1, l, n_kv, head_dim), &dev)
+                    .unwrap()
+                    .to_dtype(DType::F16)
+                    .unwrap()
+            })
+            .collect();
+
+        bench("  A: per-slot flash_attn (today)", 0.0, &dev, || {
+            for i in 0..batch {
+                let _ = candle_flash_attn::flash_attn(&qs[i], &ks[i], &vs[i], 0.088388, false)?;
+            }
+            Ok(())
+        });
+
+        // cu_seqlens are fixed per step shape; building them is part of the cost
+        // but they are tiny, so they are built inside the timed region honestly.
+        let q_flat: Vec<Tensor> = qs
+            .iter()
+            .map(|t| t.reshape((1, n_head, head_dim)).unwrap())
+            .collect();
+        let k_flat: Vec<Tensor> = ks
+            .iter()
+            .zip(&lens)
+            .map(|(t, &l)| t.reshape((l, n_kv, head_dim)).unwrap())
+            .collect();
+        let v_flat: Vec<Tensor> = vs
+            .iter()
+            .zip(&lens)
+            .map(|(t, &l)| t.reshape((l, n_kv, head_dim)).unwrap())
+            .collect();
+        let mut cu_k = vec![0u32];
+        for &l in &lens {
+            cu_k.push(cu_k.last().unwrap() + l as u32);
+        }
+        let cu_q: Vec<u32> = (0..=batch as u32).collect();
+        let max_k = *lens.iter().max().unwrap();
+
+        bench("  B: concat + flash_attn_varlen", 0.0, &dev, || {
+            let q = Tensor::cat(&q_flat, 0)?;
+            let k = Tensor::cat(&k_flat, 0)?;
+            let v = Tensor::cat(&v_flat, 0)?;
+            let sq = Tensor::from_slice(&cu_q, cu_q.len(), &dev)?;
+            let sk = Tensor::from_slice(&cu_k, cu_k.len(), &dev)?;
+            let _ = candle_flash_attn::flash_attn_varlen(
+                &q, &k, &v, &sq, &sk, 1, max_k, 0.088388, false,
+            )?;
+            Ok(())
+        });
+
+        // What the concatenation alone costs — if B loses, this says whether it
+        // is the copy or the kernel.
+        bench("  B1: the concatenation alone", 0.0, &dev, || {
+            let _q = Tensor::cat(&q_flat, 0)?;
+            let _k = Tensor::cat(&k_flat, 0)?;
+            let _v = Tensor::cat(&v_flat, 0)?;
+            Ok(())
+        });
+    }
+
     for kv_len in sizes {
         let f32b = (kv_len * n_kv * head_dim * 4) as f64;
         println!(

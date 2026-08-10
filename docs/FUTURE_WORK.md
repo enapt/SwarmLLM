@@ -8172,41 +8172,43 @@ launches are typically 5-10 us), so the ORDERING of the conclusion should hold o
 native Linux while the magnitude may not. Re-measure `rms_norm on one decode row`
 on a native-Linux GPU before sizing any launch-reduction work from these numbers.
 
-## The remaining batched-decode launch: attention, via `flash_attn_varlen`
+## Batched-decode attention via `flash_attn_varlen` — MEASURED, does not pay
 
-Follow-on from the launch-bound finding above, and from discovering that the
-qkv/output projections are already batched. In `forward_attn_batched` every
-stage is now one launch for the whole batch EXCEPT the attention core, which
-loops per slot because each request has its own KV cache and its own history
-length. At batch 8 that is 8 launches per layer, 224 per token on a 28-layer
-model — and on a card where a launch costs tens of microseconds regardless of
-its contents, that loop is the batched path's remaining cost.
+Follow-on from the launch-bound finding. In `forward_attn_batched` every stage
+is one launch for the whole batch EXCEPT the attention core, which loops per slot
+because each request has its own KV cache and its own history length. At batch 8
+that is 8 launches per layer, 224 per token. `candle_flash_attn::flash_attn_varlen`
+computes all of them in ONE call from concatenated q/k/v plus `cu_seqlens`, and
+the f16 mirror already stores each slot's K/V in the BSHD layout it wants — so
+this looked like the obvious next win.
 
-**The vendored kernel already supports the fix.** `candle_flash_attn::
-flash_attn_varlen` (and its `_windowed` / `_alibi` variants) takes concatenated
-q/k/v plus `cu_seqlens` offsets and computes every sequence in ONE kernel —
-which is precisely "N histories of different lengths, one launch".
+**It was measured before building, and it loses.** `gpu_decode_bench`, RTX 3070,
+ragged histories (the case that needs varlen at all), ms per layer:
 
-**The f16 mirror makes this cheaper than it would otherwise be.** `LayerKv`
-already holds each slot's K/V as f16 in BSHD, which is the layout varlen wants;
-the work is concatenating the slots' mirrors and building `cu_seqlens`, not
-converting anything.
+    batch 4, total kv 2816    per-slot 0.757   varlen 0.562   concat alone 0.257
+    batch 8, total kv 7680    per-slot 1.830   varlen 3.368   concat alone 2.684
 
-Unknowns to settle first, in order:
-1. Whether concatenating N per-slot mirrors each step costs more than the N-1
-   launches it saves. A ragged batch copies real bytes; the launch saving is
-   fixed. There will be a batch size below which it loses.
-2. Whether the decode routing rule still holds — `cuda_decode_prefers_standard`
-   sends MHA decode to `standard_attention`, so a varlen path applies to GQA
-   only, exactly like the mirror.
-3. Numerical equivalence against the existing loop. `batched_attention_tests`
-   already pins the batched path against the per-request one, including
-   differing history lengths, so a varlen implementation has a ready-made
-   oracle — extend those rather than writing new ones.
+At batch 4 varlen is **1.35x faster**. At batch 8 it is **1.84x slower**, and the
+concatenation ALONE (2.68 ms) costs more than the entire per-slot loop it was
+meant to replace (1.83 ms). Verified order-independent — running batch 8 first
+reproduces it within 2% (3.370 vs 3.368), so this is not the ordering artifact
+this benchmark is otherwise prone to.
 
-**Measure with `SWARM_BENCH_BATCH=N` in `prefill_bench` and a null control at
-batch 1**, where varlen must be neutral because there is nothing to collapse.
-Do NOT size this from FLOPs: the whole point is that the cost is dispatch, and
-the last estimate made that way (~1.15x for the projections) described work that
-was already done.
+**Why, and why it matters.** The launch saving is fixed (N-1 launches) while the
+concatenation copies every byte of every slot's history, every layer, every
+token. Worse, it scales superlinearly here: 2.7x the bytes cost 10.4x the time,
+which points at allocation rather than bandwidth (~47 MB of fresh temporaries per
+iteration at batch 8). So the approach fails hardest on precisely the workload it
+targets — a busy node holding long conversations.
 
+**Do not implement it as a straight swap.** It would be a regression for the
+case that motivated it, visible only under concurrent load with long histories,
+which is the hardest kind of regression to notice.
+
+**What would actually work** is removing the copy rather than paying it: keep
+each layer's K/V for all slots in ONE contiguous buffer that varlen can index in
+place, which is what a paged KV cache is for. That is an architectural change to
+`LayerKv`/`KvCacheStore` and a much larger piece of work — and note PagedAttention
+was vendored here once and never wired (gotcha #257), so the kernels exist but
+nothing has ever driven them. Size that properly before starting; the numbers
+above are the bar it has to beat, and `gpu_decode_bench` reproduces them.
