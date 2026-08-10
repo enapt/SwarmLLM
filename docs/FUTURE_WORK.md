@@ -8001,3 +8001,41 @@ reporter's 71 °C baseline, but were never confirmed against a real sensor — t
 development box (WSL2) exposes no CPU temperature at all, only `AC1`/`BAT1`. A
 machine with `k10temp` or `coretemp` should confirm both the reading and that
 normal load does not trip the warning.
+
+## `GET /api/admin/version` reports the update channel as "disabled" on a node that is checking
+
+Observed 2026-08-10 on a live node, both before and after updating it to
+v0.3.90-alpha. The endpoint answers `"channel": "disabled"` while the same node
+has a populated `last_checked` and is polling GitHub on its interval.
+
+The two disagree because they read different things. `channel` is derived
+straight from the legacy `updates.auto_update` field:
+
+```rust
+let channel = match state.shared_state.config.updates.auto_update { ... }
+```
+
+whose compiled default is `AutoUpdateMode::Disabled`. But behaviour comes from
+`UpdateConfig::effective_mode()`, which deliberately resolves a legacy
+`Disabled` to `UpdateMode::Notify` — its own doc comment explains why: legacy
+`disabled` "was the shipped default rather than a decision, and it suppressed
+the update check entirely — so nodes went on running old builds with nothing
+ever telling anyone."
+
+So the migration that fixed the *behaviour* left the *report* on the old field.
+Since `Disabled` is the default, essentially every node that has never written
+an `[updates]` section reports its update channel as "disabled" while actually
+checking and notifying. A user reading the dashboard concludes updates are off
+and that a node will never tell them about a release — the exact confusion the
+`effective_mode` migration existed to end. It also mirrors a known trap here:
+this reads `state.config`, the boot snapshot, rather than `state.cfg()`.
+
+Fix is small — report `effective_mode()` (and name the field for what it is,
+since "channel" now suggests stable-vs-prerelease, which is `include_prereleases`).
+It is listed here rather than fixed inline because it changes a value the
+dashboard and any script reading this endpoint already branch on, so it wants
+its own change with the frontend updated alongside, not a drive-by during a
+release cut.
+
+Worth checking at the same time whether anything else still reads
+`updates.auto_update` directly instead of `effective_mode()`.
