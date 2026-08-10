@@ -206,7 +206,44 @@ All 20 build phases complete. All subsystems wired — no stubs. **1787 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.88-alpha (2026-08-09): two things that reported success and did nothing
+### Latest — v0.3.89-alpha (2026-08-09/10): things that were invisible from here
+
+**Most of this round was invisible on a LAN, and some of it was invisible in the
+dashboard too.** A third-party peer in France (874-6278 ms) exposed three defects
+within an hour; probing the running node exposed the rest.
+
+**Replies from distant peers came back SCRAMBLED** — every word present, order
+wrong (`"You counting going seven ten!! eight...'re Keep six nine"`). Each token
+is an independent `request_response` send with no ordering, and the coordinator
+stopped at the first token carrying a `finish_reason`. **The tell was a token
+count that disagreed with the text.** `token_id` had been on the wire since the
+type existed, hardcoded to `0` at all five send sites. **Needs the SERVING node
+updated** — numbering is done by the sender (#282).
+
+**A model refused every request while the dashboard said nothing was wrong**:
+prompt privacy on for a model whose shards were gone. In the same second the
+model list said `false`, the scheduler logged "active", and the per-model
+endpoint said `true` — the list computes `flag && has_first && has_last`, right
+for the indicator and wrong as the only report (#286).
+
+**A "private network" shared the PUBLIC network's gossip topics** — key-only
+separation, 97 warnings in 40 min on the live node; topics now scoped, public
+names byte-identical, 9→0 measured (#285). **A fixed 10s ACK deadline**
+("generous on LAN") declared a 6s peer dead mid-answer (#284). **74% of an idle
+node's log was noise** (1540 → 340 lines/hour).
+
+**Consolidated**: `SharedState::cfg()` is the ONLY settings mechanism (four
+private mirrors folded in); `OperationalParams` carries only fields with a
+consumer; `release_request_state` for the three per-request maps. Ten new
+build-failing guards, each verified to go red. New: `examples/smoke_test.sh`,
+`examples/two_node_test.sh`.
+
+**Process**: `pkill -x swarmllm` killed the live node (**#283** — the committed
+bench scripts did it too); a counting fix double-counted; and a commit chained on
+`cargo test | tail`, whose exit status comes from the pager, so main went red for
+minutes. Detail: `memory/round_log_0809_night.md`.
+
+### Prior — v0.3.88-alpha (2026-08-09): two things that reported success and did nothing
 
 **Settings saved, reported success, and did nothing.** Contribution level, max
 disk, max VRAM, max bandwidth, auto-manage storage, shard size and batch timeout
