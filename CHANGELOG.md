@@ -4,6 +4,54 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Long conversations now generate about 1.4x faster on a graphics card.** Every
+word produced re-converted the whole conversation so far into the form the card
+needs — work that grew with the conversation, to add a single position. It is
+now converted once, as each position is added, so that cost stops growing.
+
+Measured on an RTX 3070 with a 3B model, comparing both settings inside one
+program: at a 2048-word conversation, 31.0-32.2 milliseconds per word before and
+21.7-22.8 after, with no overlap between the two sets of runs. The gain grows
+with the conversation, exactly as the cause predicts — barely measurable at 256
+words, 1.07x at 896, 1.41x at 2048. Reading a prompt is unchanged, and answers
+are unchanged: the rounding the card already applied on every read now happens
+once when the data is stored, from the same untouched source, so it receives
+exactly the same numbers.
+
+Models that cannot use this keep their previous behaviour exactly. Checking one
+of them is what caught the design: they were initially made to keep the second
+copy too, which cost them a few percent per word for something nothing reads.
+
+**Asking a node to download updates now actually downloads them.** Two places
+decided how a node handles updates, from two different settings, and they
+disagreed. Setting the update mode to "download" or "install" worked in the
+background check but was ignored when you pressed "check for updates" yourself —
+that path read an older setting nobody had touched, so it stayed at its default
+and refused to stage anything. Both now use one rule.
+
+Relatedly, a node reported its update mode as "disabled" while it was checking on
+schedule, with the time of the last check in the same response. It read that same
+older setting, whose default is "disabled" but which the node deliberately treats
+as "check and tell me" — so nearly every node gave the opposite of the truth to
+anyone asking whether it would mention a new release. It now reports what it
+does, and follows a change made in Settings without a restart.
+
+**A long conversation on a graphics card could run out of memory instead of
+handing the request to another node.** The speed-up above keeps a second,
+half-width copy of the conversation, and the check that decides whether more of a
+conversation fits was still costing memory at the old size. A conversation could
+therefore be admitted on the basis that it fit and then genuinely run out —
+turning a clean "busy, try another node", which still answers the user, into a
+failure. The budget now counts both copies.
+
+**Resuming a saved conversation no longer costs speed on some models.** Which
+models can use the second copy is decided when a conversation starts, but a
+conversation rebuilt from a saved one is restored from a snapshot that does not
+record enough to make that decision, so it kept the copy regardless. The same
+model behaved differently depending on how the conversation began. The decision
+is now made on each pass by the code that knows, so a resumed conversation is
+corrected immediately.
+
 ## [0.3.90-alpha] — 2026-08-10
 
 **Asking several models at once could run far past its own time limit, and you
