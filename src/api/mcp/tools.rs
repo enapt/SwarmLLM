@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 
 use super::dispatch::{
-    collect_handle_results, dispatch_model_call, spawn_model_call_task, MCP_TASK_TIMEOUT,
+    collect_handle_results, count_answered, dispatch_model_call, spawn_model_call_task,
+    MCP_TASK_TIMEOUT,
 };
 use super::resources::mcp_peer_json;
 use super::types::{JsonRpcResponse, INTERNAL_ERROR, INVALID_PARAMS, RESOURCE_UNAVAILABLE};
@@ -315,10 +316,15 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
     }
 
     let results = collect_handle_results(handles).await;
+    // No success count on this tool, but an empty answer must still be
+    // distinguishable from a real one when comparing models side by side —
+    // that is the whole purpose of the comparison.
+    let answered = count_answered(&results);
 
     let summary = json!({
         "prompt": prompt,
         "models_compared": models.len(),
+        "responses_with_content": answered,
         "results": results,
     });
 
@@ -457,11 +463,15 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
         .map(|r| r["input_tokens"].as_u64().unwrap_or(0) + r["output_tokens"].as_u64().unwrap_or(0))
         .sum();
     let successful = results.iter().filter(|r| r["status"] == "ok").count();
+    let answered = count_answered(&results);
 
     let summary = json!({
         "question": question,
         "models_queried": models.len(),
         "successful_responses": successful,
+        // How many of those actually returned text. Lower than
+        // `successful_responses` when a model answered with nothing.
+        "responses_with_content": answered,
         "total_tokens_used": total_tokens,
         "results": results,
     });
@@ -630,11 +640,16 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
 
     let results = collect_handle_results(handles).await;
 
+    // `tasks_completed` keeps its original meaning — did not error — because
+    // clients already read it. `tasks_with_content` is the number a caller
+    // usually wants: how many tasks came back with an actual answer.
     let successful = results.iter().filter(|r| r["status"] == "ok").count();
+    let answered = count_answered(&results);
 
     let summary = json!({
         "tasks_submitted": tasks.len(),
         "tasks_completed": successful,
+        "tasks_with_content": answered,
         "results": results,
     });
 

@@ -405,6 +405,23 @@ silently break at the wire if duplicated:
   if these arrive backwards. R139's chunked activation forwards already answer it
   (slot table indexed by `chunk_idx` plus a filled count); this path did not.
 
+- **`api::mcp::dispatch::spawn_model_call_task`** (2026-08-10) — the single place
+  that decides whether a fan-out model call actually **answered**, as opposed to
+  merely not erroring. Every real model call in `compare` / `research` /
+  `batch_prompts` passes through it, so it stamps `"empty": true` onto any result
+  whose call succeeded with blank text, and `count_answered` downstream only reads
+  that flag. Do NOT re-derive blankness by inspecting the collected JSON.
+  **The three tools deliberately name the answer field differently** — `content`
+  for compare and batch, `response` for research — so a downstream check has to
+  know every one of those names and silently mis-reports the moment a fourth tool
+  picks a new one. That is not hypothetical: the first cut of this fix did exactly
+  that, checked `content` only, and would have flagged every successful research
+  answer as blank (gotcha #291). The verdict belongs where the text is, before any
+  tool names it. A new fan-out tool inherits the flag with no author action.
+  Note `status` is deliberately NOT changed for a blank answer — clients already
+  branch on `"ok"`, and reclassifying a success to fix a reporting gap would break
+  them.
+
 - **`SharedState::cfg()`** (2026-08-09) — the live config, and the single answer
   to "what is this setting **now**". `state.config` is the boot-time snapshot:
   correct for what is decided once at startup (listen addresses, data dir, how
