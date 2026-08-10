@@ -8119,3 +8119,50 @@ one question, and the one the user triggered was the wrong one. Both now call
 `updates.auto_update` under `src/api`. The config-level unit tests pass either
 way — the bug was handlers bypassing them — so a grep guard is what actually
 catches a revert here.
+
+## GPU decode on this box is LAUNCH-BOUND, not compute-bound (measured 2026-08-10)
+
+After the f16 KV mirror landed, a synchronised per-stage profile of decode
+(`SWARMLLM_PROFILE=1`, llama-3.2-3b GQA, ~2064 KV, RTX 3070) puts a 21 ms token
+at:
+
+    19.7%  qkv projections      4.1 ms
+    19.0%  rms norms            3.9 ms
+    11.2%  attention core       2.3 ms      <- was the dominant term before
+    10.3%  ffn up + gate        2.1 ms
+     9.2%  output projection    1.9 ms
+     5.8%  ffn down             1.2 ms
+    13.4%  unattributed         2.8 ms
+
+**Attention is no longer the problem** — the mirror moved it from dominant to
+11%. What is striking is RMS norms at 19%, so that was measured directly rather
+than inferred (`gpu_decode_bench`, first two rows):
+
+    rms_norm on one decode row              0.046 ms   (56 calls/token = 2.6 ms)
+    bare synchronize (profiler overhead)    0.000 ms
+
+Two things follow. First, **the profiler is telling the truth**: 56 x 46 us
+lands on the 3.9 ms it reports, and a bare `synchronize()` is free, so the
+suspicion that stages timed more often absorb more overhead (norms are timed
+twice per layer, projections once) is WRONG — it was tested and refuted.
+
+Second, and the useful part: **46 us to normalise 3072 floats is ~0.27 GB/s.**
+That is not arithmetic and not bandwidth, it is per-kernel dispatch. The whole
+token behaves the same way — 21 ms over 28 layers is ~0.75 ms/layer across
+roughly 15-20 launches, i.e. tens of microseconds each regardless of what the
+kernel does.
+
+**So the lever here is FEWER LAUNCHES, not faster ops.** Fusion, CUDA graphs, and
+batching work across requests all attack the real cost; micro-optimising any
+single op cannot, because the op is not where the time goes. This also revises
+the recorded estimate for batching the qkv/output projections across a decode
+batch (~1.15x): that number was reasoned from arithmetic, and its real value is
+higher, since collapsing N launches into one is worth more than the FLOPs
+suggest.
+
+**Caveat worth checking before investing:** this is WSL2, where CUDA launch
+overhead is inflated by the virtualisation layer. 46 us is high even so (native
+launches are typically 5-10 us), so the ORDERING of the conclusion should hold on
+native Linux while the magnitude may not. Re-measure `rms_norm on one decode row`
+on a native-Linux GPU before sizing any launch-reduction work from these numbers.
+

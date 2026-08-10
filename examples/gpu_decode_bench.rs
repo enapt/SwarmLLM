@@ -95,6 +95,26 @@ fn main() -> anyhow::Result<()> {
             args.iter().filter_map(|a| a.parse().ok()).collect()
         }
     };
+
+    // ── Why this is here ──
+    // A per-stage profile of GPU decode (SWARMLLM_PROFILE=1) attributes ~19% of
+    // a token to RMS norms — nearly as much as the qkv projections — for 56
+    // launches over a 3072-element vector, which is far too much arithmetic-wise.
+    // Two candidates: the norm really is launch-bound at that size, or the
+    // profiler's per-stage `synchronize()` costs enough that stages timed MORE
+    // OFTEN (norms are timed twice per layer, projections once) absorb more
+    // overhead. This prices both.
+    {
+        let hidden = 3072usize;
+        let x = Tensor::zeros((1usize, 1, hidden), DType::F32, &dev)?;
+        let alpha = Tensor::ones(hidden, DType::F32, &dev)?;
+        bench("rms_norm on one decode row", 0.0, &dev, || {
+            let _ = candle_nn::ops::rms_norm(&x, &alpha, 1e-5)?;
+            Ok(())
+        });
+        bench("bare synchronize (profiler overhead)", 0.0, &dev, || Ok(()));
+    }
+
     for kv_len in sizes {
         let f32b = (kv_len * n_kv * head_dim * 4) as f64;
         println!(
