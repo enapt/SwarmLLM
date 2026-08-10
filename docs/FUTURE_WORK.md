@@ -7939,3 +7939,65 @@ there now and nothing renders it yet.
 Related: gotcha **#286**, and the general lesson that a value masked by its own
 precondition must publish the unsatisfied case or the failure has no visible
 cause.
+
+
+## Thermal throttling had no measurable effect (built and removed 2026-08-10)
+
+A tester's laptop went from 71 °C to 88 °C in five minutes running a real prompt
+on a 7B model that had silently fallen back to the CPU, and they killed it by
+hand. Their observation was right and worth acting on:
+
+> nothing would have stopped this on its own [...] config.toml has ceilings for
+> VRAM, RAM, disk, bandwidth, concurrent requests and rate limits, but nothing
+> tied to CPU load or temperature.
+
+**What shipped**: temperature is now observed in the worker and reported —
+`inference::thermal`, WARN on crossing 85 °C, INFO on recovery below 78 °C, with
+hysteresis. It changes nothing about how inference runs.
+
+**What did NOT ship, and why.** The intended fix was to run both phases on a
+half-width thread pool while hot. It was built, and measured to do nothing:
+
+| `SWARMLLM_THERMAL_FORCE` | peak instantaneous CPU | wall |
+|---|---|---|
+| `0` (off) | 744.0% | 118.1 s |
+| `1` (on)  | 741.3% | 115.4 s |
+
+llama-3.2-3b Q4_K_M, ~700-token prompt, `gpu_layers = 0`,
+`contribution = "maximum"` (so `RAYON_NUM_THREADS=8`), one binary with the arm
+flipped by the env var, CPU sampled from `/proc/<pid>/stat` utime+stime deltas
+rather than `ps %cpu` (which is a lifetime average and initially gave a
+*backwards* answer — 319% vs 454% — for that reason).
+
+**The pool was real and was installed.** Its `swarm-cool-*` threads were visible
+in `/proc/<pid>/task`, exactly 4 of them on an 8-physical-core box. The work
+nevertheless kept running ~8 threads wide, which is the whole puzzle: candle's
+quantized matmul parallelises with `par_chunks_mut` / `into_par_iter`, and those
+are supposed to use the *current* pool inside `ThreadPool::install`.
+
+Note the adjacent evidence that `install` normally DOES confine work here: the
+decode pool in `cpu_pools` was measured at 1.42-1.53x by exactly this mechanism.
+So the question is specific — why does prefill escape it?
+
+Leads for whoever picks this up, cheapest first:
+
+1. Check whether the prefill path actually reaches `in_phase_pool` at all when
+   `batched_prefill_forward` is on. The throttle branch was added inside that
+   helper; if batched prefill dispatches the matmul from somewhere else, the
+   install never wrapped the hot loop and everything above is explained.
+2. Look for a `rayon::spawn` / `ThreadPool::spawn` (global-pool) call, or a
+   `rayon::scope` created before the install, anywhere under the prefill matmul.
+3. Instrument rather than infer: log `rayon::current_num_threads()` from inside
+   the matmul. It reports the *current* pool's width, so it answers the question
+   directly instead of by elimination.
+
+**Do not re-ship the throttle without re-running the A/B above.** A thermal
+protection that does not protect is worse than none: it invites people to rely
+on it. The env override exists precisely so the arm can be flipped inside one
+binary.
+
+Also unresolved: the thresholds (85 / 78 °C) are reasoned from TJ_MAX and the
+reporter's 71 °C baseline, but were never confirmed against a real sensor — the
+development box (WSL2) exposes no CPU temperature at all, only `AC1`/`BAT1`. A
+machine with `k10temp` or `coretemp` should confirm both the reading and that
+normal load does not trip the warning.

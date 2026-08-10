@@ -158,6 +158,33 @@ pub(crate) fn in_phase_pool<R: Send>(seq_len: usize, f: impl FnOnce() -> R + Sen
     }
 }
 
+/// Is the machine currently too hot? Observed by [`super::thermal`] and reported
+/// to the user; it does NOT narrow the pools.
+///
+/// **A thermal throttle was built here on 2026-08-10 and removed the same day
+/// because it measurably did nothing.** Routing both phases through a
+/// half-width pool while hot left CPU usage unchanged — 744% peak against 741%,
+/// wall 118 s against 115 s, on llama-3.2-3b Q4_K_M with a ~700-token prompt at
+/// `contribution = "maximum"`. The pool was genuinely built and genuinely
+/// installed (its `swarm-cool-*` threads are visible in `/proc/<pid>/task`), yet
+/// the work kept running ~8 threads wide, so `install` is not confining
+/// candle's `par_chunks_mut` on this path and the reason is not yet known. See
+/// `docs/FUTURE_WORK.md` § "Thermal throttling had no measurable effect".
+///
+/// Kept because the *observation* is worth having on its own: the user is told
+/// the machine is hot, which is what nothing did before.
+static MACHINE_IS_HOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn machine_is_hot() -> bool {
+    MACHINE_IS_HOT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Record the hot/not-hot state. Returns whether it changed, so the caller can
+/// log a transition rather than a level.
+pub fn set_machine_is_hot(hot: bool) -> bool {
+    MACHINE_IS_HOT.swap(hot, std::sync::atomic::Ordering::Relaxed) != hot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

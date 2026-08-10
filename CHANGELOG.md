@@ -4,6 +4,22 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Your machine now says when it is running hot.** Every other resource a node
+spends has a ceiling — graphics memory, memory, disk, bandwidth, how many
+requests at once. Heat had nothing. A tester watched a laptop go from 71 °C to
+88 °C in five minutes on a model that had quietly fallen back to the processor,
+and only knew because they were watching the sensor themselves.
+
+The node now warns when the processor crosses a temperature it should not sit
+at, and says so again when it recovers. On machines that expose no temperature
+at all — most containers and virtual machines — it stays silent.
+
+**It reports; it does not act.** An automatic thread reduction was written for
+this and then removed, because measuring it showed it did nothing: processor
+usage was 744% with it off and 741% with it on, over the same work. Shipping it
+would have claimed a protection that is not there, which is worse than shipping
+nothing. The numbers, and what is still unexplained, are in `docs/FUTURE_WORK.md`.
+
 **"Why is my model running on the processor instead of the graphics card?" is now
 answerable.** There are three reasons a model goes to the processor: you asked
 for it, your card is too old for this build, or the model did not fit in the

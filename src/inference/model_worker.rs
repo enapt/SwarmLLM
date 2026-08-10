@@ -280,6 +280,27 @@ pub async fn run_worker(
     let pending_fetches: PrefixFetchWaiterMap = Arc::new(DashMap::new());
     let cancelled: CancelledSet = Arc::new(DashMap::new());
 
+    // Temperature reporting. Polled in the worker because this is the process
+    // actually doing the arithmetic, so it is the one whose heat is worth
+    // reporting. Every other resource this node spends has a ceiling; heat had
+    // nothing at all until a reporter's laptop went 71 °C → 88 °C in five
+    // minutes on a model that had silently fallen back to the CPU (2026-08-10),
+    // and they only knew because they were watching `k10temp` themselves.
+    //
+    // Reports; does not act. An automatic thread reduction was built and
+    // measured to change nothing — see `inference::thermal`. Dormant wherever
+    // no sensor is readable, which is most containers and VMs.
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            // The read touches a few small sysfs files; keep it off the runtime
+            // in case a flaky sensor driver blocks.
+            let _ = tokio::task::spawn_blocking(crate::inference::thermal::poll_and_report).await;
+        }
+    });
+
     // Spawn a reader task that pushes framed IPC messages onto an mpsc.
     // Decoupling read-from-socket from the main select! loop keeps frame
     // alignment safe under cancellation (recv_framed itself is not cancel-safe).

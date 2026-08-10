@@ -27,6 +27,7 @@ pub mod speculative;
 pub mod split;
 pub mod swift;
 pub(crate) mod tensor_util;
+pub mod thermal;
 pub(crate) mod tokenizer;
 pub mod trace;
 pub mod vision;
