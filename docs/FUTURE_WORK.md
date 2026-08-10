@@ -7702,13 +7702,19 @@ correct and expected. The projections have no such excuse.
 **The fix**: split `forward_attn` so the projections run on the batched tensor
 and only the attention core loops — qkv on `[batch, 1, hidden]`, then per-slot
 rope / KV append / attention, then restack and one batched output projection.
-That is a refactor of the hottest function in the codebase, so it wants its own
-careful pass.
 
-**Worth ~1.15x aggregate at batch 8** on these numbers (29.5 ms/token of
-unbatched projections, halving to ~14.8 if they amortise like the FFN does,
-against 113.8 ms/token total). Aggregate throughput at batch 8 is currently
-1.26x batch 1; this would take it to ~1.44x.
+**DONE — this has since been implemented and the entry above is stale.**
+`LayerWeights::forward_attn_batched` is that split: "Batched: projections,
+biases, norms, RoPE", then a per-slot loop for the attention core alone,
+then "Batched again: output projection". `forward_batch_body` calls it, and
+`forward_attn_batched` is pinned numerically identical to looping the
+per-request path by a test in `layers/mod.rs`. RoPE additionally batches when
+every row sits at the same position and falls back to per-row when they differ,
+which is the normal concurrent-chat case.
+
+Checked 2026-08-11 while about to implement it — the third time this session
+that re-reading a recorded number changed what got built. **Anything still
+wanting the ~1.15x figure should re-measure rather than assume it is available.**
 
 ### The bigger gap is the kernel, not the plumbing
 
@@ -8154,15 +8160,53 @@ kernel does.
 
 **So the lever here is FEWER LAUNCHES, not faster ops.** Fusion, CUDA graphs, and
 batching work across requests all attack the real cost; micro-optimising any
-single op cannot, because the op is not where the time goes. This also revises
-the recorded estimate for batching the qkv/output projections across a decode
-batch (~1.15x): that number was reasoned from arithmetic, and its real value is
-higher, since collapsing N launches into one is worth more than the FLOPs
-suggest.
+single op cannot, because the op is not where the time goes. This also bears on cross-request
+batching generally: collapsing N launches into one is worth more than the FLOPs
+suggest. (The specific qkv/output-projection batching this originally pointed at
+turned out to be already implemented — see the entry above. The reasoning still
+applies to whatever launches remain.)
 
 **Caveat worth checking before investing:** this is WSL2, where CUDA launch
 overhead is inflated by the virtualisation layer. 46 us is high even so (native
 launches are typically 5-10 us), so the ORDERING of the conclusion should hold on
 native Linux while the magnitude may not. Re-measure `rms_norm on one decode row`
 on a native-Linux GPU before sizing any launch-reduction work from these numbers.
+
+## The remaining batched-decode launch: attention, via `flash_attn_varlen`
+
+Follow-on from the launch-bound finding above, and from discovering that the
+qkv/output projections are already batched. In `forward_attn_batched` every
+stage is now one launch for the whole batch EXCEPT the attention core, which
+loops per slot because each request has its own KV cache and its own history
+length. At batch 8 that is 8 launches per layer, 224 per token on a 28-layer
+model — and on a card where a launch costs tens of microseconds regardless of
+its contents, that loop is the batched path's remaining cost.
+
+**The vendored kernel already supports the fix.** `candle_flash_attn::
+flash_attn_varlen` (and its `_windowed` / `_alibi` variants) takes concatenated
+q/k/v plus `cu_seqlens` offsets and computes every sequence in ONE kernel —
+which is precisely "N histories of different lengths, one launch".
+
+**The f16 mirror makes this cheaper than it would otherwise be.** `LayerKv`
+already holds each slot's K/V as f16 in BSHD, which is the layout varlen wants;
+the work is concatenating the slots' mirrors and building `cu_seqlens`, not
+converting anything.
+
+Unknowns to settle first, in order:
+1. Whether concatenating N per-slot mirrors each step costs more than the N-1
+   launches it saves. A ragged batch copies real bytes; the launch saving is
+   fixed. There will be a batch size below which it loses.
+2. Whether the decode routing rule still holds — `cuda_decode_prefers_standard`
+   sends MHA decode to `standard_attention`, so a varlen path applies to GQA
+   only, exactly like the mirror.
+3. Numerical equivalence against the existing loop. `batched_attention_tests`
+   already pins the batched path against the per-request one, including
+   differing history lengths, so a varlen implementation has a ready-made
+   oracle — extend those rather than writing new ones.
+
+**Measure with `SWARM_BENCH_BATCH=N` in `prefill_bench` and a null control at
+batch 1**, where varlen must be neutral because there is nothing to collapse.
+Do NOT size this from FLOPs: the whole point is that the cost is dispatch, and
+the last estimate made that way (~1.15x for the projections) described work that
+was already done.
 
