@@ -8166,6 +8166,30 @@ suggest. (The specific qkv/output-projection batching this originally pointed at
 turned out to be already implemented — see the entry above. The reasoning still
 applies to whatever launches remain.)
 
+**Corroborated by the CPU profile, which is what makes it solid.** The same
+model and the same stage instrumentation on CPU (llama-3.2-3b, 527 KV,
+203 ms/token) puts RMS norms at **0.3%** — against 19% on the GPU:
+
+    stage                    CPU      GPU
+    attention core          26.1%    11.2%
+    ffn up + gate           21.7%    10.3%
+    qkv projections         17.8%    19.7%
+    ffn down                12.2%     5.8%
+    rope / transpose         9.1%     4.2%
+    output projection        6.7%     9.2%
+    rms norms                0.3%    19.0%   <- same arithmetic, 60x the share
+
+Identical work cannot be 0.3% of a token on one device and 19% on another
+because of arithmetic. It is dispatch, and two unrelated methods now agree —
+the direct microbenchmark (46 us for a 3072-element norm) and this
+cross-device comparison.
+
+Note the CPU profile also shows `rope / transpose` at 9.1% for a SINGLE token,
+which is far more than rotating ~4k values can cost; that stage is the reshape /
+transpose / contiguous sequence around the attention operands, so it is
+allocation there too. Roughly 168 small allocations per token across 28 layers.
+Not chased — recorded because it is the same shape of cost on the other device.
+
 **Caveat worth checking before investing:** this is WSL2, where CUDA launch
 overhead is inflated by the virtualisation layer. 46 us is high even so (native
 launches are typically 5-10 us), so the ORDERING of the conclusion should hold on
