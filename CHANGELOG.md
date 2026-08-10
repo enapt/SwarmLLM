@@ -4,6 +4,21 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Apps can now see how long a conversation this node will actually serve.**
+`GET /v1/models` reports `max_model_len` for each model — prompt plus reply,
+after the shipped 4096 default and any `max_seq_len_override` you set.
+
+Nothing advertised it before, so a client had to guess. A tester registered a
+32k-capable model at its full length against a node serving 4096 and got a
+request with no room for a prompt at all: "400 tokens of prompt plus 4096
+reserved". The number existed the whole time, in the daemon's log, where nothing
+the app reads could reach it.
+
+It reflects what this node will really do, so it follows your override, and it
+never claims more than the model itself declares — a 2048-token model still
+reports 2048 however high the override goes. Models whose declared context
+cannot be read report nothing rather than a guess.
+
 **Your machine now says when it is running hot.** Every other resource a node
 spends has a ceiling — graphics memory, memory, disk, bandwidth, how many
 requests at once. Heat had nothing. A tester watched a laptop go from 71 °C to

@@ -570,6 +570,21 @@ pub struct ModelInfo {
     pub object: &'static str,
     pub created: i64,
     pub owned_by: String,
+    /// Longest conversation this node will actually serve for the model, in
+    /// tokens — prompt plus reply, after the shipped cap and any
+    /// `inference.max_seq_len_override`.
+    ///
+    /// Not part of OpenAI's own schema, but the field vLLM added for exactly
+    /// this reason, so OpenAI-compatible clients already look for it and the
+    /// rest ignore an unknown key. Omitted when the model's declared context
+    /// cannot be read rather than guessed at, since a wrong number here is
+    /// worse than none.
+    ///
+    /// Reported 2026-08-10: with nothing advertised, a client registered a
+    /// 32k-capable model at its full length against a node serving 4096, and
+    /// the mismatch surfaced as a request with "no room for any prompt at all".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_model_len: Option<usize>,
 }
 
 // ---- Embeddings request/response ----

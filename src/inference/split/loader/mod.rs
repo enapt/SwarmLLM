@@ -331,6 +331,11 @@ impl SplitModel {
         let mut context_length = md_get("context_length")
             .and_then(|v| v.to_u32().map_err(SwarmError::internal))
             .unwrap_or(DEFAULT_MAX_SEQ_LEN as u32) as usize;
+        // One rule, in `split::effective_context_length`; the branches below only
+        // decide what to SAY about it. Computing it here as well is how the
+        // loader, the VRAM estimator and `/v1/models` would come to disagree
+        // about the same number.
+        let effective = super::effective_context_length(context_length);
         if let Some(cap) = super::max_seq_len_override() {
             if cap < context_length {
                 tracing::info!(
@@ -338,7 +343,7 @@ impl SplitModel {
                     override_value = cap,
                     "Clamping context_length to MAX_SEQ_LEN_OVERRIDE — KV-cache and RoPE table sized to override"
                 );
-                context_length = cap;
+                context_length = effective;
             }
         } else {
             // No explicit override. Two independent reductions apply, in order.
@@ -368,9 +373,13 @@ impl SplitModel {
                      several GB of KV cache for no gain at typical conversation lengths. Raise \
                      it with inference.max_seq_len_override",
                 );
-                context_length = DEFAULT_MAX_SEQ_LEN;
+                context_length = effective;
             }
         }
+        debug_assert_eq!(
+            context_length, effective,
+            "the loader must serve exactly the context the estimator charges for"
+        );
 
         // 2. Record how much GPU memory this segment's KV cache may occupy in
         //    total. This USED to shrink `context_length` so that one

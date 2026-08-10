@@ -53,6 +53,41 @@ pub use self::shard_reader::{resolve_tied_output, TiedOutputSource};
 
 pub(crate) const DEFAULT_MAX_SEQ_LEN: usize = 4096;
 
+/// How long a conversation this node will actually serve for a model that
+/// declares `declared` tokens of context.
+///
+/// **The single answer to "what is this model's context here".** The rule is
+/// two lines and was written out three times — the loader (which sizes the KV
+/// cache and RoPE tables), the VRAM estimator (which charges for it) and now
+/// `/v1/models` (which tells clients). Three copies of a number that has to
+/// agree is how a node ends up charging for one context and serving another.
+///
+/// An explicit `inference.max_seq_len_override` wins; otherwise the shipped
+/// default caps it, the way llama.cpp's `-c` defaults to 4096 rather than to
+/// whatever the model advertises. Neither can raise the figure above what the
+/// model itself declares.
+///
+/// Reported 2026-08-10: a client registered a 32k-capable model at its declared
+/// length, the node served 4096, and the mismatch surfaced as "400 tokens of
+/// prompt plus 4096 reserved" with no room for a prompt. The number was only
+/// ever in the daemon's log, so nothing the client read could have known it —
+/// which is why this now also feeds `max_model_len` on `/v1/models`.
+pub fn effective_context_length(declared: usize) -> usize {
+    effective_context_length_with(declared, max_seq_len_override())
+}
+
+/// [`effective_context_length`] against an explicitly supplied override.
+///
+/// The daemon keeps the override in its own atomic — the process-global above
+/// belongs to the worker and is set at spawn — so it needs to apply the same
+/// rule to a different source. Pure, so the rule is testable without either.
+pub fn effective_context_length_with(declared: usize, override_cap: Option<usize>) -> usize {
+    match override_cap {
+        Some(cap) if cap > 0 => declared.min(cap),
+        _ => declared.min(DEFAULT_MAX_SEQ_LEN),
+    }
+}
+
 /// Process-global override for the GGUF `context_length` value. When non-zero,
 /// the loader clamps `context_length` to this number before allocating the
 /// KV cache and RoPE tables. Set at worker startup from `--max-seq-len-override`.
@@ -67,5 +102,52 @@ pub fn max_seq_len_override() -> Option<usize> {
         None
     } else {
         Some(v)
+    }
+}
+
+#[cfg(test)]
+mod effective_context_tests {
+    use super::{effective_context_length_with, DEFAULT_MAX_SEQ_LEN};
+
+    /// The shipped default caps a model that declares more, the way llama.cpp's
+    /// `-c` does. A 32k-capable model is served at 4096 unless asked otherwise.
+    #[test]
+    fn a_long_context_model_is_capped_by_default() {
+        assert_eq!(
+            effective_context_length_with(32768, None),
+            DEFAULT_MAX_SEQ_LEN
+        );
+    }
+
+    /// A model that declares LESS than the default keeps its own figure —
+    /// the cap must never invent context the model does not have.
+    #[test]
+    fn a_short_context_model_keeps_its_own_limit() {
+        assert_eq!(effective_context_length_with(2048, None), 2048);
+        assert_eq!(
+            effective_context_length_with(2048, Some(32768)),
+            2048,
+            "and an override cannot raise it past what the model declares"
+        );
+    }
+
+    /// An explicit override wins over the default, which is the documented way
+    /// to serve a model's full context. Reported 2026-08-10: setting it to
+    /// 32768 was what made a 32k model usable.
+    #[test]
+    fn an_override_replaces_the_default_cap() {
+        assert_eq!(effective_context_length_with(32768, Some(32768)), 32768);
+        assert_eq!(effective_context_length_with(32768, Some(8192)), 8192);
+    }
+
+    /// Zero means unset, not "no context" — the daemon stores the override in
+    /// an atomic where 0 is the sentinel, and reading it as a real cap would
+    /// serve every model a zero-length conversation.
+    #[test]
+    fn zero_means_unset_not_zero_context() {
+        assert_eq!(
+            effective_context_length_with(32768, Some(0)),
+            DEFAULT_MAX_SEQ_LEN
+        );
     }
 }

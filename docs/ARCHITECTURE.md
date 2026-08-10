@@ -1635,7 +1635,11 @@ the sidecar holds.
 - `GET    /v1/responses/{id}/input_items` — Paginated list of the original input items (synthetic ids `item_N`)
 - `POST   /v1/messages` — Anthropic Messages API (full Claude Code compatibility — tools, tool_choice, thinking, cache_control, metadata)
 - `POST   /v1/embeddings` — Text embeddings
-- `GET    /v1/models` — List available models
+- `GET    /v1/models` — List available models. Each entry carries `max_model_len`
+  (the effective context this node will serve for that model — prompt plus reply,
+  after the shipped 4096 default and any `inference.max_seq_len_override`), which
+  is the field vLLM added for the same purpose. Omitted when the model's declared
+  context is unreadable, since a wrong figure is worse than an absent one.
 - `GET    /v1/providers` — List configured cloud providers and their available models
 - `GET    /v1/status` — SwarmLLM node status
 

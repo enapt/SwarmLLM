@@ -671,6 +671,56 @@ fn owned_by_for(state: &AppState, model_id: &str) -> String {
     crate::api::model_source_for(&state.shared_state, model_id).to_string()
 }
 
+/// Longest conversation this node will serve for `model_id`, or `None` when its
+/// declared context cannot be read.
+///
+/// The DECLARED value lives only in the model's GGUF header, so this reads it —
+/// cached, because `/v1/models` is polled by clients on a timer and a header
+/// read per model per poll would be pure waste. `None` for a model whose header
+/// is not on disk (a network-only model this node has never fetched), because a
+/// guessed context is worse than an absent one.
+///
+/// **Only the declared value is cached, and the cap is applied per call.** The
+/// override is user-settable while the node runs, so caching the effective
+/// figure would pin whatever it was at first poll. And the override must be read
+/// from the live config here rather than from
+/// `split::MAX_SEQ_LEN_OVERRIDE`: that process-global belongs to the WORKER and
+/// is set when a worker spawns, so in the daemon it is always 0. Reading it
+/// reported 4096 on a node explicitly configured for 32768 — measured, and
+/// exactly the user who had already hit this problem once.
+fn max_model_len_for(state: &AppState, model_id: &str) -> Option<usize> {
+    use std::sync::OnceLock;
+    static DECLARED: OnceLock<dashmap::DashMap<String, Option<usize>>> = OnceLock::new();
+    let cache = DECLARED.get_or_init(dashmap::DashMap::new);
+    let declared = match cache.get(model_id) {
+        Some(hit) => *hit,
+        None => {
+            let read = (|| {
+                let header = state
+                    .model_dir(model_id)
+                    .join(crate::model::shard::HEADER_FILENAME);
+                let file = std::fs::File::open(header).ok()?;
+                let mut reader = std::io::BufReader::new(file);
+                let ct = candle_core::quantized::gguf_file::Content::read(&mut reader).ok()?;
+                let arch = crate::inference::split::gguf_arch_str(&ct);
+                ct.metadata
+                    .get(&format!("{arch}.context_length"))
+                    .and_then(|v| v.to_u32().ok())
+                    .map(|v| v as usize)
+            })();
+            cache.insert(model_id.to_string(), read);
+            read
+        }
+    };
+    let override_cap = state
+        .shared_state
+        .cfg()
+        .inference
+        .max_seq_len_override
+        .map(|v| v as usize);
+    declared.map(|d| crate::inference::split::effective_context_length_with(d, override_cap))
+}
+
 /// GET /v1/models
 ///
 /// Lists models usable for inference. A model is usable when all its layers
@@ -715,11 +765,13 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         // `owned_by` must describe shard possession, not which model happened
         // to be loaded last. See `api::count_shard_availability`.
         let owned_by = owned_by_for(&state, &model_id);
+        let max_model_len = max_model_len_for(&state, &model_id);
         data.push(ModelInfo {
             id: model_id,
             object: "model",
             created,
             owned_by,
+            max_model_len,
         });
     }
 
@@ -732,11 +784,13 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         if all_shards_available(&state, &id) {
             seen.insert(id.clone());
             let owned_by = owned_by_for(&state, &id);
+            let max_model_len = max_model_len_for(&state, &id);
             data.push(ModelInfo {
                 id,
                 object: "model",
                 created: manifest.publish_date.timestamp(),
                 owned_by,
+                max_model_len,
             });
         }
     }

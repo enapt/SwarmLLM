@@ -1281,14 +1281,20 @@ impl ModelProcessPool {
         let declared_ctx = md_u32("context_length").unwrap_or(4096);
         // The KV cache is sized to the EFFECTIVE context, which is the override
         // when set and otherwise the shipped default cap — not the GGUF value.
+        // The daemon holds the override in its own atomic (the worker's global
+        // is set at spawn), so apply the shared rule against that value rather
+        // than re-deriving the arithmetic here.
         let override_ctx = self
             .max_seq_len_override
-            .load(std::sync::atomic::Ordering::Relaxed) as u64;
-        let effective_ctx = if override_ctx > 0 {
-            declared_ctx.min(override_ctx)
-        } else {
-            declared_ctx.min(crate::inference::split::DEFAULT_MAX_SEQ_LEN as u64)
-        };
+            .load(std::sync::atomic::Ordering::Relaxed) as usize;
+        let effective_ctx =
+            crate::inference::split::effective_context_length_with(declared_ctx as usize, {
+                if override_ctx > 0 {
+                    Some(override_ctx)
+                } else {
+                    None
+                }
+            }) as u64;
         let vocab = md_u32("vocab_size").unwrap_or(meta.vocab.len() as u64);
 
         // Only the shards actually on disk will be mapped.
