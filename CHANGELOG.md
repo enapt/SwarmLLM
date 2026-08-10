@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.90-alpha] — 2026-08-10
+
 **Asking several models at once could run far past its own time limit, and you
 could pay for a batch you never saw.** The compare, research and batch tools
 each apply a two-minute limit. That limit was being applied to every model
@@ -63,10 +65,6 @@ would have claimed a protection that is not there, which is worse than shipping
 nothing. The numbers, and what is still unexplained, are in `docs/FUTURE_WORK.md`.
 
 **"Why is my model running on the processor instead of the graphics card?" is now
-answerable — in the dashboard, not just the log.** The model card says which of
-the three reasons applies, and only for models this machine actually holds.
-
-**"Why is my model running on the processor instead of the graphics card?" is now
 answerable.** There are three reasons a model goes to the processor: you asked
 for it, your card is too old for this build, or the model did not fit in the
 graphics memory available at the time. All three produced an identical worker
@@ -90,6 +88,10 @@ Model will run on the CPU  reason="not_enough_vram"  configured_gpu_layers=-1
 `GET /api/admin/models` carries the same answer as `cpu_placement_reason`, so it
 can be seen without catching the log line at the moment the decision was taken.
 The worker no longer claims a `gpu_layers` value it was never told.
+
+The dashboard shows it too, so it can be answered without reading a log at all:
+each model card names whichever of the three reasons applies, and only for models
+this machine actually holds.
 
 **Deleting one piece of a model could silently break it, and the dashboard said
 the opposite of what was wrong.** End-to-end encryption needs the first and last
