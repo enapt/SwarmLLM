@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.89-alpha] — 2026-08-09
+
 **Replies from a distant machine came back wrong.** If the node answering your
 question was far away — another country, a slow link — words could go missing or
 arrive in the wrong order. Asked to count, one peer replied "You counting going
@@ -50,6 +52,19 @@ take effect without a restart like everything else — the session timeout was
 described as doing so and was connected to nothing. Reloading the config now
 reports which settings took effect and which need a restart, rather than
 presenting them as one list.
+
+**A model could refuse every request while the dashboard showed nothing wrong.**
+Prompt privacy can be turned on for a single model. It needs this machine to hold
+that model's first and last pieces — that is what keeps your prompt and the reply
+off other people's machines. If those pieces later go away, the setting stays on
+and every request for that model fails. The model list reported the setting as
+OFF in exactly that case, because it was showing whether privacy was actually
+working; correct for the indicator, but it left the failing state visible
+nowhere. The list now also reports when the setting is on and cannot be met, and
+the error says which setting is responsible instead of only naming a missing
+piece. Nothing turns the setting off for you — that would quietly reduce your
+privacy — so if you hit this, either fetch the missing piece or turn it off for
+that model.
 
 **For contributors:** two new scripts — `examples/smoke_test.sh` checks any built
 binary starts, serves and applies a setting, and `examples/two_node_test.sh`
