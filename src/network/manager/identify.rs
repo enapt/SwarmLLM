@@ -341,7 +341,20 @@ impl NetworkManager {
         // Populated here (not at ConnectionEstablished) because we only learn
         // the NodeId after Identify. Identify also re-pushes periodically;
         // DashSet insert is idempotent so repeat inserts are harmless.
-        self.shared_state.connected_node_ids.insert(node_id.clone());
+        // Log only a real transition. Identify re-pushes periodically and the
+        // insert is idempotent, so logging every call would be pure noise —
+        // but logging none of them is why an operator reported the peer count
+        // "flapping with no log" (2026-08-10): the number they watch is the
+        // size of THIS set, it falls inside the logged disconnect path, and it
+        // rose here in silence.
+        if self.shared_state.connected_node_ids.insert(node_id.clone()) {
+            tracing::info!(
+                %peer_id,
+                node = %node_id,
+                peers = self.shared_state.connected_node_ids.len(),
+                "Peer connected"
+            );
+        }
         // R110: refresh swarm-capacity snapshot so the dashboard banner
         // reflects the new contributor without waiting for the next ~1.5s
         // stats-cache tick.

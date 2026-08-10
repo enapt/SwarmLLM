@@ -383,7 +383,17 @@ impl NetworkManager {
             if let Some(ref nid) = node_id_for_cleanup {
                 // Remove from libp2p-connected ground-truth set so HealthMonitor
                 // can now evict the peer_registry entry if it goes stale.
-                self.shared_state.connected_node_ids.remove(nid);
+                if self.shared_state.connected_node_ids.remove(nid).is_some() {
+                    // Pairs with "Peer connected" in identify.rs. Between them,
+                    // every change to the peer count an operator sees has a
+                    // line, which it did not before.
+                    tracing::info!(
+                        %peer_id,
+                        node = %nid,
+                        peers = self.shared_state.connected_node_ids.len(),
+                        "Peer disconnected"
+                    );
+                }
                 // R110: refresh swarm-capacity so the banner contributor count
                 // and serveable-models list reflect the lost peer immediately
                 // (the WS stats-cache otherwise lags by ~1.5s, leaving the
