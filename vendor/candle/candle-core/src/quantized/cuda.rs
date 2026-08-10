@@ -1,6 +1,9 @@
 use super::{GgmlDType, QStorage};
 use crate::quantized::k_quants::GgmlType;
-use crate::{backend::BackendDevice, cuda_backend::WrapErr};
+use crate::{
+    backend::{BackendDevice, BackendStorage},
+    cuda_backend::WrapErr,
+};
 use crate::{builder_arg as barg, CudaDevice, CudaStorage, Result};
 use half::f16;
 
@@ -158,6 +161,32 @@ fn dequantize_f32(
         unsafe { builder.launch(cfg) }.w()?;
     }
     Ok(CudaStorage::wrap_cuda_slice(dst, dev.clone()))
+}
+
+/// SwarmLLM patch: the dtypes that have a CUDA dequantize kernel.
+///
+/// `dequantize_f32` and `dequantize_f16` below are generated from the same
+/// list of block types, so a dtype outside it — an *unquantized* GGUF, i.e.
+/// `F16` / `BF16` / `F32` — has no kernel on either side and must be handled
+/// on the host. Both `QCudaStorage::dequantize` and
+/// `QCudaStorage::dequantize_f16` gate on this ONE predicate so they cannot
+/// disagree about which dtypes they accept: they used to, and the f16 side
+/// was the one missing the fallback.
+fn has_dequantize_kernel(dtype: GgmlDType) -> bool {
+    matches!(
+        dtype,
+        GgmlDType::Q4_0
+            | GgmlDType::Q4_1
+            | GgmlDType::Q5_0
+            | GgmlDType::Q5_1
+            | GgmlDType::Q8_0
+            | GgmlDType::Q2K
+            | GgmlDType::Q3K
+            | GgmlDType::Q4K
+            | GgmlDType::Q5K
+            | GgmlDType::Q6K
+            | GgmlDType::Q8K
+    )
 }
 
 fn dequantize_f16(
@@ -556,21 +585,7 @@ impl QCudaStorage {
             T::to_float(&vec, dst)
         }
 
-        let fast_kernel = matches!(
-            self.dtype,
-            GgmlDType::Q4_0
-                | GgmlDType::Q4_1
-                | GgmlDType::Q5_0
-                | GgmlDType::Q5_1
-                | GgmlDType::Q8_0
-                | GgmlDType::Q2K
-                | GgmlDType::Q3K
-                | GgmlDType::Q4K
-                | GgmlDType::Q5K
-                | GgmlDType::Q6K
-                | GgmlDType::Q8K
-        );
-        if fast_kernel {
+        if has_dequantize_kernel(self.dtype) {
             return dequantize_f32(&self.data, self.dtype, elem_count, self.device());
         }
         // Run the dequantization on cpu.
@@ -603,7 +618,22 @@ impl QCudaStorage {
     }
 
     pub fn dequantize_f16(&self, elem_count: usize) -> Result<CudaStorage> {
-        dequantize_f16(&self.data, self.dtype, elem_count, self.device())
+        if has_dequantize_kernel(self.dtype) {
+            return dequantize_f16(&self.data, self.dtype, elem_count, self.device());
+        }
+        // SwarmLLM patch: an unquantized GGUF (F16 / BF16 / F32) has no
+        // dequantize kernel, and this entry point used to `bail!` on it while
+        // its `dequantize` sibling quietly fell back to the host. Nothing
+        // upstream of here knows the difference, so the model LOADED on a CUDA
+        // node and then failed every single request with "unsupported dtype
+        // for dequantize F16" — while the same file served correctly on CPU.
+        //
+        // Go through the sibling (which owns the host fallback) and cast on
+        // the device, so there is exactly one place that knows how to handle a
+        // kernel-less dtype. This costs a transient f32 buffer, which is
+        // acceptable for what is a one-shot load-time conversion.
+        let storage = self.dequantize(elem_count)?;
+        storage.to_dtype(&crate::Layout::contiguous(elem_count), crate::DType::F16)
     }
 
     pub fn quantize(&mut self, src: &CudaStorage) -> Result<()> {

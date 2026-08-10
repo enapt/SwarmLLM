@@ -4,6 +4,32 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A graphics card could not run any unquantized model.** Many models on
+HuggingFace are published in a full-precision "F16" form alongside the smaller
+compressed ones. Downloading one of those and asking it a question failed every
+single time on a machine with an NVIDIA card, with the message `unsupported dtype
+for dequantize F16`. The same file answered perfectly well on a processor.
+
+Nothing warned beforehand. The model downloaded, appeared in the model list
+looking healthy, and was offered to the rest of the network — so requests from
+other people were routed to it and failed too, and the machine looked like the
+faulty one to everyone else.
+
+The cause was a gap in the GPU code for turning stored weights back into numbers:
+it handled every compressed format and quietly refused the uncompressed ones,
+even though the equivalent processor code has always handled them. Both paths now
+share a single definition of what they support, so they cannot disagree again.
+
+Verified on an RTX 3070: the same model and the same machine that produced the
+error above now answers normally on the GPU, and compressed models are unaffected.
+
+**Related, and only reachable now that those models load at all:** the check that
+decides whether a model fits in graphics memory assumed weights occupy the same
+space they do on disk. That is true for a compressed model and half the truth for
+an uncompressed one, which expands to twice its file size once loaded. A model
+that could not fit could therefore be admitted and then run out of memory. It is
+now measured correctly.
+
 ## [0.3.89-alpha] — 2026-08-09
 
 **Replies from a distant machine came back wrong.** If the node answering your

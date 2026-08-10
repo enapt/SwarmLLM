@@ -502,9 +502,16 @@ impl SplitModel {
             // Resident for the worker's whole life at EMBEDDING_DTYPE — on a
             // large-vocabulary model this is the biggest single allocation the
             // worker makes, so the narrower type is what decides whether a
-            // modest GPU can serve the model at all. On CUDA candle has a
-            // specialised f16 dequantize kernel, so there is no transient f32
-            // copy of the full table.
+            // modest GPU can serve the model at all.
+            //
+            // On CUDA candle has a specialised f16 dequantize kernel for the
+            // QUANTIZED block types, so those avoid a transient f32 copy of the
+            // full table. An UNQUANTIZED GGUF (F16/BF16/F32 — what HuggingFace
+            // offers as the "F16" variant) has no such kernel and is converted
+            // via the host instead; see the `has_dequantize_kernel` patch in
+            // `vendor/candle/candle-core/src/quantized/cuda.rs`. Until that
+            // patch this line was the single reason a CUDA node could not serve
+            // an unquantized model at all: it loaded, then failed every request.
             let tok_embd = tok_embd
                 .dequantize_f16(&device)
                 .map_err(SwarmError::internal)?;

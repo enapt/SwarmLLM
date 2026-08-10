@@ -33,8 +33,18 @@ pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
 /// and the 4096 default bound (see `inference::split::kv_budget`).
 #[derive(Debug, Clone, Copy)]
 pub struct VramFootprintInputs {
-    /// Sum of the shard bytes this worker will map. Quantized, on-disk size.
+    /// Sum of the shard bytes this worker will map. On-disk size.
     pub quantized_weight_bytes: u64,
+    /// Bytes per element of the weight tensors when the checkpoint is NOT
+    /// quantized (F16/BF16 → 2, F32 → 4); `None` for a quantized checkpoint.
+    ///
+    /// candle keeps a quantized tensor quantized on the device, but materialises
+    /// an unquantized one as dense f32 (`QMatMul::from_arc` dequantizes F16 /
+    /// BF16 / F32 eagerly rather than keeping a `QTensor`). So an F16 checkpoint
+    /// occupies TWICE its file size in VRAM, and reading the on-disk figure as
+    /// the resident one understates the dominant term by 2x for precisely the
+    /// models this gate most needs to refuse.
+    pub unquantized_bytes_per_element: Option<u64>,
     /// Rows in the embedding table — `{arch}.vocab_size`, or the token count.
     pub vocab_size: u64,
     /// `{arch}.embedding_length` (hidden dim).
@@ -113,7 +123,18 @@ pub const EMBEDDING_TABLE_BYTES_PER_ELEMENT: u64 = 2;
 /// are this plus a different constant.
 fn estimate_model_resident_bytes(i: &VramFootprintInputs) -> u64 {
     const F32: u64 = 4;
-    let mut bytes = i.quantized_weight_bytes;
+    // Weights. A quantized checkpoint stays quantized on the device, so its
+    // on-disk size is what it costs. An UNQUANTIZED one does not: candle's
+    // `QMatMul::from_arc` dequantizes F16 / BF16 / F32 to a dense f32 tensor
+    // eagerly, so an F16 file costs twice its bytes. See
+    // `unquantized_bytes_per_element`.
+    let mut bytes = match i.unquantized_bytes_per_element {
+        Some(bpe) if bpe > 0 && bpe < F32 => i
+            .quantized_weight_bytes
+            .saturating_mul(F32)
+            .saturating_div(bpe),
+        _ => i.quantized_weight_bytes,
+    };
 
     // Embedding table, dequantized by the loader at
     // `EMBEDDING_TABLE_BYTES_PER_ELEMENT`. First segment only.
@@ -671,6 +692,7 @@ mod footprint_tests {
     fn tinyllama() -> VramFootprintInputs {
         VramFootprintInputs {
             quantized_weight_bytes: 667_078_656,
+            unquantized_bytes_per_element: None,
             vocab_size: 32_000,
             embedding_length: 2048,
             segment_layers: 22,
@@ -687,6 +709,7 @@ mod footprint_tests {
     fn llama32_1b() -> VramFootprintInputs {
         VramFootprintInputs {
             quantized_weight_bytes: 860_807_296,
+            unquantized_bytes_per_element: None,
             vocab_size: 128_256,
             embedding_length: 2048,
             segment_layers: 16,
@@ -703,6 +726,7 @@ mod footprint_tests {
     fn phi35() -> VramFootprintInputs {
         VramFootprintInputs {
             quantized_weight_bytes: 2_392_493_952,
+            unquantized_bytes_per_element: None,
             vocab_size: 32_064,
             embedding_length: 3072,
             segment_layers: 32,
@@ -813,6 +837,7 @@ mod footprint_tests {
     fn gemma2_2b(effective_context: u64) -> VramFootprintInputs {
         VramFootprintInputs {
             quantized_weight_bytes: 1629 * 1024 * 1024,
+            unquantized_bytes_per_element: None,
             vocab_size: 256_000,
             embedding_length: 2304,
             segment_layers: 26,
@@ -864,6 +889,7 @@ mod footprint_tests {
     fn degenerate_inputs_are_safe() {
         let z = VramFootprintInputs {
             quantized_weight_bytes: 0,
+            unquantized_bytes_per_element: None,
             vocab_size: 0,
             embedding_length: 0,
             segment_layers: 0,
@@ -880,6 +906,7 @@ mod footprint_tests {
         );
         let huge = VramFootprintInputs {
             quantized_weight_bytes: u64::MAX,
+            unquantized_bytes_per_element: None,
             vocab_size: u64::MAX,
             embedding_length: u64::MAX,
             segment_layers: u64::MAX,
@@ -909,6 +936,78 @@ mod footprint_tests {
                 "the two must differ only by the process overhead"
             );
         }
+    }
+
+    /// qwen2.5-0.5b as HuggingFace ships its "F16" variant: 948 MB of shards
+    /// that are NOT quantized, 151k vocabulary, 24 layers.
+    fn qwen05b_f16() -> VramFootprintInputs {
+        VramFootprintInputs {
+            quantized_weight_bytes: 994_156_864,
+            unquantized_bytes_per_element: Some(2),
+            vocab_size: 151_936,
+            embedding_length: 896,
+            segment_layers: 24,
+            head_count_kv: 2,
+            head_dim: 64,
+            rope_dim: 64,
+            effective_context: 4096,
+            is_first: true,
+        }
+    }
+
+    /// An unquantized checkpoint costs TWICE its file size on the device.
+    ///
+    /// candle's `QMatMul::from_arc` dequantizes an F16 / BF16 / F32 tensor to a
+    /// dense f32 one rather than keeping it quantized, so the on-disk figure —
+    /// which is the right answer for every Q* checkpoint — understates the
+    /// dominant term by 2x here. This is an ADMISSION estimate, so being low is
+    /// the direction that ends in `CUDA_ERROR_OUT_OF_MEMORY`.
+    ///
+    /// Latent until 2026-08-10: an unquantized GGUF could not load on a CUDA
+    /// node at all (`unsupported dtype for dequantize F16`), so nothing ever
+    /// reached the gate with one.
+    #[test]
+    fn an_unquantized_checkpoint_is_charged_twice_its_file_size() {
+        let f16 = qwen05b_f16();
+        let as_if_quantized = VramFootprintInputs {
+            unquantized_bytes_per_element: None,
+            ..f16
+        };
+
+        let with = estimate_worker_vram_mb(&f16);
+        let without = estimate_worker_vram_mb(&as_if_quantized);
+        let file_mb = f16.quantized_weight_bytes / (1024 * 1024);
+
+        assert_eq!(
+            with - without,
+            file_mb,
+            "an f16 checkpoint must be charged one extra copy of its file size"
+        );
+        assert!(
+            with > file_mb * 2,
+            "estimate {with} MB must exceed twice the {file_mb} MB checkpoint \
+             (weights are doubled, and the embedding table is on top)"
+        );
+    }
+
+    /// F32 on disk is already the dtype candle materialises, so it must NOT be
+    /// scaled — only the narrower types expand. Getting this wrong would refuse
+    /// models that fit.
+    #[test]
+    fn an_f32_checkpoint_is_not_charged_twice() {
+        let f32_ckpt = VramFootprintInputs {
+            unquantized_bytes_per_element: Some(4),
+            ..qwen05b_f16()
+        };
+        let quantized = VramFootprintInputs {
+            unquantized_bytes_per_element: None,
+            ..qwen05b_f16()
+        };
+        assert_eq!(
+            estimate_worker_vram_mb(&f32_ckpt),
+            estimate_worker_vram_mb(&quantized),
+            "f32 weights are already dense f32 on the device"
+        );
     }
 
     /// A CPU worker establishes no device context, so its baseline is lower —

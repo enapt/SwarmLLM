@@ -1237,8 +1237,25 @@ impl ModelProcessPool {
             })
             .unwrap_or(0);
 
+        // Is this an UNQUANTIZED checkpoint? Read it off the largest tensor,
+        // which on any architecture is one of the big linear weights: in a
+        // quantized GGUF that is a Q* block type, and in an unquantized one it
+        // is F16/BF16/F32. Norm and bias tensors are f32 even in a quantized
+        // file, so "does any f32 tensor exist" would answer the wrong question.
+        let unquantized_bytes_per_element = ct
+            .tensor_infos
+            .values()
+            .max_by_key(|t| t.shape.elem_count())
+            .and_then(|t| match t.ggml_dtype {
+                candle_core::quantized::GgmlDType::F16
+                | candle_core::quantized::GgmlDType::BF16 => Some(2),
+                candle_core::quantized::GgmlDType::F32 => Some(4),
+                _ => None,
+            });
+
         Some(VramFootprintInputs {
             quantized_weight_bytes: shard_bytes,
+            unquantized_bytes_per_element,
             vocab_size: vocab,
             embedding_length: tensor_meta.embedding_length as u64,
             segment_layers: tensor_meta.block_count as u64,
