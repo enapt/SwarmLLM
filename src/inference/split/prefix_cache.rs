@@ -31,8 +31,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+use crate::inference::split::kv_cache::LayerKv;
 use candle_core::Tensor;
-use candle_nn::kv_cache::KvCache;
 
 use crate::error::SwarmError;
 use crate::types::PrefixBlockEntry;
@@ -552,7 +552,7 @@ impl PrefixCache {
             // a build that reserved a model's whole context window up front —
             // honouring it would re-inflate the reservation this node just
             // stopped making. See `KV_CACHE_GROWTH_TOKENS`.
-            let mut kv = KvCache::new(
+            let mut kv = LayerKv::with_dim(
                 snapshot.dim,
                 crate::inference::layers::kv_cache_reservation(snapshot.token_count),
             );
@@ -673,7 +673,7 @@ fn narrow_snapshot(snap: &KvSnapshot, target_tokens: usize) -> Result<KvSnapshot
 }
 
 fn snapshot_at(
-    layers: &[Option<KvCache>],
+    layers: &[Option<LayerKv>],
     pos: usize,
     dim: usize,
     max_seq_len: usize,
@@ -1011,7 +1011,7 @@ mod tests {
             let k = Tensor::zeros((1usize, 1, seq_len, 4), DType::F32, &device).unwrap();
             let v = Tensor::zeros((1usize, 1, seq_len, 4), DType::F32, &device).unwrap();
             // dim=2 is the sequence dim for this shape
-            let mut kv = KvCache::new(2, 4096);
+            let mut kv = LayerKv::with_dim(2, 4096);
             kv.append(&k, &v).unwrap();
             *slot = Some(kv);
         }

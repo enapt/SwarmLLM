@@ -67,8 +67,18 @@ fn gqa_flash_vs_standard_llama3_prefill() {
 
     let out_std =
         standard_attention(&q, &k, &v, Some(&mask), head_dim, n_head, n_kv_head, None).unwrap();
-    let out_flash =
-        run_attention(&q, &k, &v, Some(&mask), n_head, n_kv_head, head_dim, None).unwrap();
+    let out_flash = run_attention(
+        &q,
+        &k,
+        &v,
+        Some(&mask),
+        n_head,
+        n_kv_head,
+        head_dim,
+        None,
+        None,
+    )
+    .unwrap();
     assert_tensors_close(&out_std, &out_flash, 1e-4, "GQA ratio=4 flash vs standard");
 }
 
@@ -83,7 +93,8 @@ fn gqa_flash_vs_standard_llama3_decode() {
     let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
 
     let out_std = standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None).unwrap();
-    let out_flash = run_attention(&q, &k, &v, None, n_head, n_kv_head, head_dim, None).unwrap();
+    let out_flash =
+        run_attention(&q, &k, &v, None, n_head, n_kv_head, head_dim, None, None).unwrap();
     assert_tensors_close(&out_std, &out_flash, 1e-4, "GQA decode flash vs standard");
 }
 

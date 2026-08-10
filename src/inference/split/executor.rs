@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 
+use crate::inference::split::kv_cache::LayerKv;
 use candle_core::{IndexOp, Result as CandleResult, Tensor};
-use candle_nn::kv_cache::KvCache;
 use candle_nn::Module;
 
 use crate::error::SwarmError;
@@ -433,7 +433,7 @@ impl SplitModel {
         // Use mem::take instead of clone to avoid copying the KV cache Vec.
         #[allow(unused_mut)]
         let (mut layer_kv_caches, mut layer_ssm_states): (
-            Vec<Option<KvCache>>,
+            Vec<Option<LayerKv>>,
             Vec<Option<SsmState>>,
         ) = {
             let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
@@ -1095,7 +1095,7 @@ impl SplitModel {
 
         // Extract all per-request KV-caches and SSM states up front (drop DashMap guards immediately).
         // Use mem::take instead of clone to avoid deep-copying all KV tensors.
-        let mut all_kv_caches: Vec<Vec<Option<KvCache>>> = Vec::with_capacity(batch_size);
+        let mut all_kv_caches: Vec<Vec<Option<LayerKv>>> = Vec::with_capacity(batch_size);
         let mut all_ssm_states: Vec<Vec<Option<SsmState>>> = Vec::with_capacity(batch_size);
         for item in items.iter() {
             let key = KvCacheStore::cache_key(&model_key, item.request_id);
@@ -1114,7 +1114,7 @@ impl SplitModel {
         // which would silently mask the wrong key positions. Verify per-slot
         // `kv_offset` actually matches before sharing one mask, and fall back
         // to sequential when it doesn't.
-        let kv_offset_for = |slot: &Vec<Option<KvCache>>| -> usize {
+        let kv_offset_for = |slot: &Vec<Option<LayerKv>>| -> usize {
             slot.first()
                 .and_then(|l| l.as_ref())
                 .map(|c| c.current_seq_len())
@@ -1200,7 +1200,7 @@ impl SplitModel {
                     // shares `index_pos` (checked above — a mixed batch fell
                     // back to sequential `forward` before reaching this loop),
                     // which is what makes a single RoPE call correct.
-                    let mut layer_caches: Vec<&mut Option<KvCache>> = all_kv_caches
+                    let mut layer_caches: Vec<&mut Option<LayerKv>> = all_kv_caches
                         .iter_mut()
                         .map(|per_req| &mut per_req[layer_idx])
                         .collect();

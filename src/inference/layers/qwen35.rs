@@ -1,5 +1,5 @@
+use crate::inference::split::kv_cache::LayerKv;
 use candle_core::{DType, Device, Result as CandleResult, Tensor};
-use candle_nn::kv_cache::KvCache;
 use candle_nn::Module;
 
 use super::{run_attention, DeltaNetWeights, Qwen35AttnWeights, SsmState};
@@ -28,7 +28,7 @@ impl Qwen35AttnWeights {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
-        kv_cache: &mut Option<KvCache>,
+        kv_cache: &mut Option<LayerKv>,
         max_seq_len: usize,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _hidden) = x.dims3()?;
@@ -81,7 +81,10 @@ impl Qwen35AttnWeights {
         // KV-cache
         let (k, v) = match kv_cache {
             None => {
-                let mut cache = super::new_kv_cache(max_seq_len);
+                let mut cache = super::new_kv_cache(
+                    max_seq_len,
+                    super::model_wants_kv_mirror(self.n_head, self.n_kv_head),
+                );
                 let kv = cache.append(&k, &v)?;
                 *kv_cache = Some(cache);
                 kv
@@ -95,6 +98,7 @@ impl Qwen35AttnWeights {
         };
 
         // Attention
+        let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());
         let y = run_attention(
             &q,
             &k,
@@ -104,6 +108,7 @@ impl Qwen35AttnWeights {
             self.n_kv_head,
             self.head_dim,
             None,
+            mirror.as_ref().map(|(k, v)| (k, v)),
         )?;
 
         // Apply output gate: sigmoid(gate + attn_gate_bias) * attn_output

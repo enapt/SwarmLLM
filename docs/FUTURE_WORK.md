@@ -7609,11 +7609,26 @@ Production engines corroborate the direction — vLLM and TensorRT-LLM store KV 
 the compute dtype and hand it to the kernel without a per-step conversion; fp8 is
 the aggressive setting, f16 is simply the norm.
 
-**Not implemented.** It needs a wrapper around candle's `KvCache` maintaining
-both representations, updated at all three `cache.append` sites plus
-`truncate_to`, prefix-cache hydration and snapshot import — and a desynchronised
-shadow would produce silently wrong attention rather than an error, so it wants
-its own change with tests that fail when the shadow drifts.
+**IMPLEMENTED 2026-08-10** as `inference::split::kv_cache::LayerKv`. Measured end
+to end on an RTX 3070, llama-3.2-3b (GQA 24/8), three alternations per arm inside
+ONE binary via `SWARMLLM_DISABLE_KV_MIRROR`:
+
+    decode ms/token at ~2064 KV    mirror off 31.0 32.2 31.1   mirror on 21.7 22.8 22.5
+
+**1.41x**, arms fully separated. The gain is concentrated at long context, which
+is what an O(history) cost predicts — 256 KV ~1.04x (noise), 896 ~1.07x, 2064
+1.41x — and prefill is unchanged either way (~2000 tok/s both arms).
+
+**The null control changed the design.** phi-3.5 (MHA 32/32) got 3-8% SLOWER with
+the mirror on: MHA decode takes `standard_attention`, so the mirror was built and
+appended on every token for a consumer that never ran. `model_wants_kv_mirror`
+now gates it on GQA, after which MHA overlaps within 1% (38.4/39.3/39.4 vs
+38.7/39.1/39.8). Without that control the change would have shipped a regression
+for every MHA model to speed up GQA ones.
+
+Note the microbenchmark over-predicted: it priced the attention arm at 1.6x for
+272 KV where end to end shows ~1.04x, because attention is only part of a token
+(gotcha #266 again — the isolated call is not the forward).
 
 ### Rejected: fusing the transpose and the cast
 

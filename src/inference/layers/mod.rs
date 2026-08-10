@@ -9,10 +9,10 @@ use candle_core::quantized::QTensor;
 // it on that advice breaks every GPU build while every local check stays green.
 // That is exactly what happened on 2026-08-07 (gotcha #264). Keep the import;
 // the `cfg` on the attribute is what tells the compiler the truth.
+use crate::inference::split::kv_cache::LayerKv;
 #[cfg_attr(not(feature = "flash-attn"), allow(unused_imports))]
 use candle_core::DType;
 use candle_core::{Device, Result as CandleResult, Tensor};
-use candle_nn::kv_cache::KvCache;
 use candle_nn::Module;
 use candle_transformers::quantized_nn::RmsNorm;
 
@@ -368,7 +368,7 @@ impl MlaWeights {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
-        kv_cache: &mut Option<KvCache>,
+        kv_cache: &mut Option<LayerKv>,
         max_seq_len: usize,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _hidden) = x.dims3()?;
@@ -431,7 +431,10 @@ impl MlaWeights {
         let __kv_t = std::time::Instant::now();
         let (k, v) = match kv_cache {
             None => {
-                let mut cache = new_kv_cache(max_seq_len);
+                // MLA reconstructs K per head, so every head has its own key —
+                // MHA-shaped for routing purposes, and decode therefore reads
+                // the f32 cache. No mirror.
+                let mut cache = new_kv_cache(max_seq_len, false);
                 let kv = cache.append(&k, &v)?;
                 *kv_cache = Some(cache);
                 kv
@@ -1111,8 +1114,29 @@ pub(crate) const KV_CACHE_GROWTH_TOKENS: usize = 512;
 /// model's `max_seq_len` directly is the bug this exists to prevent, and it
 /// looks completely reasonable at the call site — the parameter is even named
 /// `max_seq_len`, so passing it reads as correct.
-pub(crate) fn new_kv_cache(max_seq_len: usize) -> KvCache {
-    KvCache::new(2, KV_CACHE_GROWTH_TOKENS.min(max_seq_len.max(1)))
+pub(crate) fn new_kv_cache(max_seq_len: usize, mirror_for_flash: bool) -> LayerKv {
+    let growth = KV_CACHE_GROWTH_TOKENS.min(max_seq_len.max(1));
+    let mut kv = LayerKv::new(growth);
+    kv.set_mirror_wanted(mirror_for_flash);
+    kv
+}
+
+/// Whether a model with these head counts should maintain the f16 BSHD mirror.
+///
+/// **GQA only, because that is exactly where decode uses the flash kernel.** On
+/// MHA the decode path takes `standard_attention` (see
+/// `cuda_decode_prefers_standard`), which reads the f32 cache — so a mirror
+/// there is built and paid for on every token and never read. Measured on
+/// phi-3.5 (MHA 32/32) at 2064 KV, maintaining it unconditionally cost
+/// **39.0-39.8 -> 40.2-43.1 ms/token**, roughly 3-8%: the conversion itself is
+/// tiny, but it is ~8 extra CUDA launches per layer per token for a consumer
+/// that never runs. It also spent 50% more KV memory for nothing.
+///
+/// Prefill takes flash on both, so MHA gives up a smaller prefill gain to avoid
+/// a decode regression — the right trade, since decode is where a conversation
+/// spends its time.
+pub(crate) fn model_wants_kv_mirror(n_head: usize, n_kv_head: usize) -> bool {
+    n_head != n_kv_head
 }
 
 /// Reservation for a cache that must hold `positions` tokens the moment it is
@@ -1315,6 +1339,14 @@ pub(crate) fn cuda_decode_prefers_standard(q_len: usize, n_head: usize, n_kv_hea
 ///
 /// All paths produce output in BHSD layout `(b, n_head, seq, head_dim)`.
 #[allow(clippy::too_many_arguments)]
+/// Pre-converted f16 BSHD (K, V) for the CUDA flash kernel, when the caller has
+/// a [`LayerKv`] mirror to hand.
+///
+/// `None` keeps the original behaviour — convert the whole f32 cache here — so
+/// every path without a mirror (CPU, tests, direct calls) is unaffected.
+pub(crate) type FlashKv<'a> = Option<(&'a Tensor, &'a Tensor)>;
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_attention(
     q: &Tensor,
     k: &Tensor,
@@ -1324,7 +1356,9 @@ pub(crate) fn run_attention(
     n_kv_head: usize,
     head_dim: usize,
     attn_logit_softcap: Option<f32>,
+    flash_kv: FlashKv<'_>,
 ) -> CandleResult<Tensor> {
+    let _ = &flash_kv; // consumed only by the CUDA flash arm below
     let force_standard = crate::inference::attn_kernel::is_force_standard_attn();
     match q.device() {
         Device::Cpu => {
@@ -1497,13 +1531,22 @@ pub(crate) fn run_attention(
             // only goes away by storing the cache as f16, not by reordering
             // these two calls.
             let q_bshd = q.transpose(1, 2)?.contiguous()?;
-            let k_bshd = k.transpose(1, 2)?.contiguous()?;
-            let v_bshd = v.transpose(1, 2)?.contiguous()?;
 
-            // Flash attention requires F16
+            // Flash attention requires F16.
+            //
+            // Q is one step's worth and is converted here regardless. K and V
+            // are the whole history, so they come from the [`LayerKv`] f16 BSHD
+            // mirror when the caller has one — that is the O(history) cost this
+            // avoids. Converting here is the fallback for every path without a
+            // mirror, and is what the numbers above were measured against.
             let q_f16 = q_bshd.to_dtype(DType::F16)?;
-            let k_f16 = k_bshd.to_dtype(DType::F16)?;
-            let v_f16 = v_bshd.to_dtype(DType::F16)?;
+            let (k_f16, v_f16) = match flash_kv {
+                Some((k_mirror, v_mirror)) => (k_mirror.clone(), v_mirror.clone()),
+                None => (
+                    k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F16)?,
+                    v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F16)?,
+                ),
+            };
 
             let softmax_scale = 1.0 / (head_dim as f32).sqrt();
 
@@ -1591,7 +1634,7 @@ impl LayerWeights {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
-        kv_cache: &mut Option<KvCache>,
+        kv_cache: &mut Option<LayerKv>,
         max_seq_len: usize,
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
@@ -1674,7 +1717,10 @@ impl LayerWeights {
         // KV-cache: use pre-allocated KvCache buffers (avoids Tensor::cat per step)
         let (k, v) = match kv_cache {
             None => {
-                let mut cache = new_kv_cache(max_seq_len);
+                let mut cache = new_kv_cache(
+                    max_seq_len,
+                    model_wants_kv_mirror(self.n_head, self.n_kv_head),
+                );
                 let kv = cache.append(&k, &v)?;
                 *kv_cache = Some(cache);
                 kv
@@ -1686,6 +1732,10 @@ impl LayerWeights {
                 cache.append(&k, &v)?
             }
         };
+
+        // The f16 BSHD mirror, if this cache is maintaining one — lets the CUDA
+        // flash arm skip converting the whole history every token.
+        let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());
 
         // Unified attention dispatch: flash (CPU/GPU) or standard matmul fallback.
         // All backends return BHSD (b, n_head, seq, head_dim).
@@ -1700,6 +1750,7 @@ impl LayerWeights {
                 self.n_kv_head,
                 self.head_dim,
                 self.attn_logit_softcap,
+                mirror.as_ref().map(|(k, v)| (k, v)),
             )
         )?;
 
@@ -1765,7 +1816,7 @@ impl LayerWeights {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_positions: &[usize],
-        caches: &mut [&mut Option<KvCache>],
+        caches: &mut [&mut Option<LayerKv>],
         max_seq_len: usize,
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
@@ -1849,7 +1900,7 @@ impl LayerWeights {
         // ── Per request: KV cache append and attention ──
         let mut heads: Vec<Tensor> = Vec::with_capacity(b_sz);
         for (i, cache_slot) in caches.iter_mut().enumerate() {
-            let cache_slot: &mut Option<KvCache> = cache_slot;
+            let cache_slot: &mut Option<LayerKv> = cache_slot;
             let qi = q.narrow(0, i, 1)?.contiguous()?;
             let ki = k.narrow(0, i, 1)?.contiguous()?;
             let vi = v.narrow(0, i, 1)?.contiguous()?;
@@ -1867,7 +1918,10 @@ impl LayerWeights {
             };
             let (ki, vi) = match cache_slot {
                 None => {
-                    let mut cache = new_kv_cache(max_seq_len);
+                    let mut cache = new_kv_cache(
+                        max_seq_len,
+                        model_wants_kv_mirror(self.n_head, self.n_kv_head),
+                    );
                     let kv = cache.append(&ki, &vi)?;
                     *cache_slot = Some(cache);
                     kv
@@ -1879,6 +1933,7 @@ impl LayerWeights {
                     cache.append(&ki, &vi)?
                 }
             };
+            let mirror = cache_slot.as_ref().and_then(|c| c.flash_operands());
             heads.push(crate::inference::prof::timed!(
                 P::AttnCore,
                 run_attention(
@@ -1890,6 +1945,7 @@ impl LayerWeights {
                     self.n_kv_head,
                     self.head_dim,
                     self.attn_logit_softcap,
+                    mirror.as_ref().map(|(k, v)| (k, v)),
                 )
             )?);
         }
@@ -2000,8 +2056,8 @@ mod batched_attention_tests {
             let max_seq = 64;
 
             // Batched.
-            let mut owned: Vec<Option<KvCache>> = (0..batch).map(|_| None).collect();
-            let mut caches: Vec<&mut Option<KvCache>> = owned.iter_mut().collect();
+            let mut owned: Vec<Option<LayerKv>> = (0..batch).map(|_| None).collect();
+            let mut caches: Vec<&mut Option<LayerKv>> = owned.iter_mut().collect();
             let got = lw
                 .forward_attn_batched(
                     &x,
@@ -2017,7 +2073,7 @@ mod batched_attention_tests {
             let mut rows = Vec::with_capacity(batch);
             for i in 0..batch {
                 let xi = x.narrow(0, i, 1).unwrap().contiguous().unwrap();
-                let mut c: Option<KvCache> = None;
+                let mut c: Option<LayerKv> = None;
                 rows.push(
                     lw.forward_attn(&xi, None, index_pos, &mut c, max_seq, None)
                         .expect("per-request attention"),
@@ -2060,8 +2116,8 @@ mod batched_attention_tests {
         let x = Tensor::randn(0f32, 1., (batch, 1usize, hidden), &dev).unwrap();
         let max_seq = 64;
 
-        let mut owned: Vec<Option<KvCache>> = (0..batch).map(|_| None).collect();
-        let mut caches: Vec<&mut Option<KvCache>> = owned.iter_mut().collect();
+        let mut owned: Vec<Option<LayerKv>> = (0..batch).map(|_| None).collect();
+        let mut caches: Vec<&mut Option<LayerKv>> = owned.iter_mut().collect();
         let got = lw
             .forward_attn_batched(&x, None, &positions, &mut caches, max_seq, None)
             .expect("mixed-position batched attention");
@@ -2069,7 +2125,7 @@ mod batched_attention_tests {
         let mut rows = Vec::with_capacity(batch);
         for (i, pos) in positions.iter().enumerate() {
             let xi = x.narrow(0, i, 1).unwrap().contiguous().unwrap();
-            let mut c: Option<KvCache> = None;
+            let mut c: Option<LayerKv> = None;
             rows.push(
                 lw.forward_attn(&xi, None, *pos, &mut c, max_seq, None)
                     .expect("per-request attention"),
@@ -2119,8 +2175,8 @@ mod batched_attention_tests {
         // Warm each slot to its own length, one token at a time, exactly as a
         // real conversation arrives. Both sides are fed the SAME draw at each
         // step, so the only difference under test is batched-vs-sequential.
-        let mut batched_caches: Vec<Option<KvCache>> = (0..batch).map(|_| None).collect();
-        let mut solo_caches: Vec<Option<KvCache>> = (0..batch).map(|_| None).collect();
+        let mut batched_caches: Vec<Option<LayerKv>> = (0..batch).map(|_| None).collect();
+        let mut solo_caches: Vec<Option<LayerKv>> = (0..batch).map(|_| None).collect();
         for (i, &len) in histories.iter().enumerate() {
             for pos in 0..len {
                 let t = Tensor::randn(0f32, 1., (1usize, 1usize, hidden), &dev).unwrap();
@@ -2147,7 +2203,7 @@ mod batched_attention_tests {
         let positions: Vec<usize> = histories.to_vec();
         let x = Tensor::randn(0f32, 1., (batch, 1usize, hidden), &dev).unwrap();
 
-        let mut refs: Vec<&mut Option<KvCache>> = batched_caches.iter_mut().collect();
+        let mut refs: Vec<&mut Option<LayerKv>> = batched_caches.iter_mut().collect();
         let got = lw
             .forward_attn_batched(&x, None, &positions, &mut refs, max_seq, None)
             .expect("batched decode over unequal histories");
@@ -2183,8 +2239,8 @@ mod batched_attention_tests {
         let dev = Device::Cpu;
         let lw = test_layer_weights(4, 2, 8, &dev);
         let x = Tensor::randn(0f32, 1., (3usize, 1usize, 32usize), &dev).unwrap();
-        let mut owned: Vec<Option<KvCache>> = vec![None, None, None];
-        let mut caches: Vec<&mut Option<KvCache>> = owned.iter_mut().collect();
+        let mut owned: Vec<Option<LayerKv>> = vec![None, None, None];
+        let mut caches: Vec<&mut Option<LayerKv>> = owned.iter_mut().collect();
         assert!(lw
             .forward_attn_batched(&x, None, &[0, 1], &mut caches, 64, None)
             .is_err());
@@ -2198,8 +2254,8 @@ mod batched_attention_tests {
         let dev = Device::Cpu;
         let lw = test_layer_weights(4, 2, 8, &dev);
         let x = Tensor::randn(0f32, 1., (3usize, 1usize, 32usize), &dev).unwrap();
-        let mut owned: Vec<Option<KvCache>> = vec![None, None]; // 2 for 3 rows
-        let mut caches: Vec<&mut Option<KvCache>> = owned.iter_mut().collect();
+        let mut owned: Vec<Option<LayerKv>> = vec![None, None]; // 2 for 3 rows
+        let mut caches: Vec<&mut Option<LayerKv>> = owned.iter_mut().collect();
         assert!(lw
             .forward_attn_batched(&x, None, &[0, 0, 0], &mut caches, 64, None)
             .is_err());
@@ -3199,9 +3255,10 @@ mod flash_vs_standard {
         let mask = Some(&m);
         let std_out = {
             let _g = ForceStandardAttnGuard::new(true);
-            run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, None).unwrap()
+            run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, None, None).unwrap()
         };
-        let flash_out = run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, None).unwrap();
+        let flash_out =
+            run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, None, None).unwrap();
         assert_eq!(std_out.dims(), flash_out.dims(), "layout must match");
 
         let diff = (&std_out - &flash_out)
@@ -3244,10 +3301,31 @@ mod flash_vs_standard {
         let softcap = 2.0f32;
         let capped_std = {
             let _g = ForceStandardAttnGuard::new(true);
-            run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, Some(softcap)).unwrap()
+            run_attention(
+                &q,
+                &k,
+                &v,
+                mask,
+                n_head,
+                n_kv_head,
+                head_dim,
+                Some(softcap),
+                None,
+            )
+            .unwrap()
         };
-        let capped_flash =
-            run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, Some(softcap)).unwrap();
+        let capped_flash = run_attention(
+            &q,
+            &k,
+            &v,
+            mask,
+            n_head,
+            n_kv_head,
+            head_dim,
+            Some(softcap),
+            None,
+        )
+        .unwrap();
         let cap_diff = (&capped_std - &capped_flash)
             .unwrap()
             .abs()

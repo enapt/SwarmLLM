@@ -5,9 +5,9 @@
 use super::super::super::layers::{run_attention, standard_attention};
 use super::super::*;
 use super::common::*;
+use crate::inference::split::kv_cache::LayerKv;
 use candle_core::quantized::QTensor;
 use candle_core::{Device, Tensor};
-use candle_nn::kv_cache::KvCache;
 
 #[test]
 fn tensor_roundtrip() {
@@ -136,7 +136,7 @@ fn kv_cache_store_isolates_requests() {
     // Create caches for both requests using KvCache
     {
         let mut entry_a = store.get_or_create(model_key, req_a, num_layers);
-        let mut cache = KvCache::new(2, 128);
+        let mut cache = LayerKv::with_dim(2, 128);
         let k = Tensor::from_vec(vec![1.0f32, 2.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
         let v = Tensor::from_vec(vec![3.0f32, 4.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
         cache.append(&k, &v).unwrap();
@@ -144,7 +144,7 @@ fn kv_cache_store_isolates_requests() {
     }
     {
         let mut entry_b = store.get_or_create(model_key, req_b, num_layers);
-        let mut cache = KvCache::new(2, 128);
+        let mut cache = LayerKv::with_dim(2, 128);
         let k = Tensor::from_vec(vec![10.0f32, 20.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
         let v = Tensor::from_vec(vec![30.0f32, 40.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
         cache.append(&k, &v).unwrap();
@@ -216,7 +216,7 @@ fn kv_truncate_to_preserves_prefix_and_drops_suffix() {
     let store = KvCacheStore::new(std::time::Duration::from_secs(600));
     {
         let mut entry = store.get_or_create("m", "r", 1);
-        let mut cache = KvCache::new(2, 128);
+        let mut cache = LayerKv::with_dim(2, 128);
         append_pos(&mut cache, 1.0, 10.0);
         append_pos(&mut cache, 2.0, 20.0);
         append_pos(&mut cache, 3.0, 30.0);
@@ -242,7 +242,7 @@ fn kv_truncate_to_target_geq_current_is_noop() {
     let store = KvCacheStore::new(std::time::Duration::from_secs(600));
     {
         let mut entry = store.get_or_create("m", "r", 1);
-        let mut cache = KvCache::new(2, 128);
+        let mut cache = LayerKv::with_dim(2, 128);
         append_pos(&mut cache, 1.0, 10.0);
         append_pos(&mut cache, 2.0, 20.0);
         entry.layers[0] = Some(cache);
@@ -261,7 +261,7 @@ fn kv_truncate_unallocated_layer_is_skipped() {
     {
         let mut entry = store.get_or_create("m", "r", 3);
         // Layer 0 has data; layers 1 and 2 are None — must be skipped, not panic.
-        let mut cache = KvCache::new(2, 128);
+        let mut cache = LayerKv::with_dim(2, 128);
         append_pos(&mut cache, 1.0, 10.0);
         append_pos(&mut cache, 2.0, 20.0);
         entry.layers[0] = Some(cache);
@@ -292,7 +292,7 @@ fn kv_truncate_all_layers_aligned() {
     {
         let mut entry = store.get_or_create("m", "r", 4);
         for layer_idx in 0..4 {
-            let mut cache = KvCache::new(2, 128);
+            let mut cache = LayerKv::with_dim(2, 128);
             append_pos(&mut cache, 1.0, 10.0);
             append_pos(&mut cache, 2.0, 20.0);
             append_pos(&mut cache, 3.0, 30.0);
@@ -821,8 +821,18 @@ fn flash_attn_cpu_vs_standard_attention() {
         standard_attention(&q, &k, &v, Some(&mask), head_dim, n_head, n_kv_head, None).unwrap();
 
     // Flash path (run_attention dispatches to CPU flash on CPU device)
-    let out_flash =
-        run_attention(&q, &k, &v, Some(&mask), n_head, n_kv_head, head_dim, None).unwrap();
+    let out_flash = run_attention(
+        &q,
+        &k,
+        &v,
+        Some(&mask),
+        n_head,
+        n_kv_head,
+        head_dim,
+        None,
+        None,
+    )
+    .unwrap();
 
     assert_eq!(out_std.shape(), out_flash.shape());
 
@@ -858,7 +868,8 @@ fn flash_attn_cpu_decode_no_mask() {
     let out_std = standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None).unwrap();
 
     // Flash path
-    let out_flash = run_attention(&q, &k, &v, None, n_head, n_kv_head, head_dim, None).unwrap();
+    let out_flash =
+        run_attention(&q, &k, &v, None, n_head, n_kv_head, head_dim, None, None).unwrap();
 
     assert_eq!(out_std.shape(), out_flash.shape());
 

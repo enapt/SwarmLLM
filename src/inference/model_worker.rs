@@ -3695,7 +3695,7 @@ mod prefix_reconcile_tests {
     fn hydrate(store: &Arc<KvCacheStore>, n: usize, layers: usize) {
         let mut entry = store.get_or_create(MODEL_KEY, REQ, layers);
         for slot in entry.layers.iter_mut() {
-            let mut kv = candle_nn::kv_cache::KvCache::new(2, 64);
+            let mut kv = crate::inference::split::kv_cache::LayerKv::with_dim(2, 64);
             // [batch, heads, seq, head_dim]
             let k =
                 Tensor::zeros((1usize, 2, n, 4), candle_core::DType::F32, &Device::Cpu).unwrap();
