@@ -443,6 +443,9 @@ impl MlaWeights {
                 if index_pos == 0 {
                     cache.reset();
                 }
+                // MLA reconstructs K per head, so decode reads the f32 cache —
+                // shed any mirror a hydrated snapshot left behind.
+                cache.set_mirror_wanted(false);
                 cache.append(&k, &v)?
             }
         };
@@ -1729,6 +1732,12 @@ impl LayerWeights {
                 if index_pos == 0 {
                     cache.reset();
                 }
+                // A cache can arrive from prefix-cache hydration, which builds
+                // it from a snapshot and cannot tell GQA from MHA — the
+                // snapshot carries `n_kv_head` in its shape but not `n_head`.
+                // Correct it here, where both are known: an MHA cache sheds a
+                // mirror nothing will read, a GQA one keeps the one it has.
+                cache.set_mirror_wanted(model_wants_kv_mirror(self.n_head, self.n_kv_head));
                 cache.append(&k, &v)?
             }
         };
@@ -1930,6 +1939,9 @@ impl LayerWeights {
                     if index_pos == 0 {
                         cache.reset();
                     }
+                    // Same correction as the single-request path: a hydrated
+                    // cache cannot know whether its model is GQA, and this does.
+                    cache.set_mirror_wanted(model_wants_kv_mirror(self.n_head, self.n_kv_head));
                     cache.append(&ki, &vi)?
                 }
             };

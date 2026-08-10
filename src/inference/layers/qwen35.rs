@@ -93,6 +93,7 @@ impl Qwen35AttnWeights {
                 if index_pos == 0 {
                     cache.reset();
                 }
+                cache.set_mirror_wanted(super::model_wants_kv_mirror(self.n_head, self.n_kv_head));
                 cache.append(&k, &v)?
             }
         };

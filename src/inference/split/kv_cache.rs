@@ -125,6 +125,15 @@ impl LayerKv {
 
     /// Opt this cache out of mirroring — for a model whose decode path reads the
     /// f32 cache anyway. See `model_wants_kv_mirror`.
+    ///
+    /// **Only the `false` direction does anything, deliberately.** Turning a
+    /// mirror ON mid-conversation would start it empty against a cache already
+    /// holding N positions, and since it only ever appends new ones it could
+    /// never catch up — `flash_operands` would then refuse it forever on the
+    /// length check, leaving the memory and the per-token conversion with no
+    /// reader. A cache that should mirror is built that way from the start
+    /// (`new_kv_cache`) or filled in one append (prefix-cache hydration, which
+    /// mirrors the whole snapshot correctly because it appends it at once).
     pub(crate) fn set_mirror_wanted(&mut self, wanted: bool) {
         if !wanted {
             self.mirrorable = false;
@@ -763,5 +772,49 @@ mod tests {
         let mut kv = LayerKv::with_dim(1, 64);
         kv.force_shadow_for_test();
         assert!(kv.flash_operands().is_none());
+    }
+
+    #[test]
+    fn a_cache_that_should_not_mirror_sheds_one_it_inherited() {
+        // Prefix-cache hydration builds a cache from a snapshot, which carries
+        // `n_kv_head` in its tensor shapes but not `n_head` — so it cannot tell
+        // GQA from MHA and may mirror a model whose decode never reads one. The
+        // forward pass knows both counts and corrects it; this is that
+        // correction. Without it an MHA model resuming a cached conversation
+        // pays ~3-8% per token and 50% more KV memory for a copy nothing reads,
+        // while the same model starting fresh does not — the same model
+        // behaving differently depending on how the conversation began.
+        let dev = candle_core::Device::Cpu;
+        let mut kv = LayerKv::new(64);
+        kv.force_shadow_for_test();
+        let k = t(&dev, 1, 2, 4, 4);
+        kv.append(&k, &k).unwrap();
+        assert_eq!(kv.shadow_len_for_test(), Some(4), "precondition: mirroring");
+
+        kv.set_mirror_wanted(false);
+        assert_eq!(kv.shadow_len_for_test(), None, "the mirror was not dropped");
+
+        // And it must stay off — a later append must not resurrect it.
+        kv.append(&k, &k).unwrap();
+        assert_eq!(kv.shadow_len_for_test(), None, "mirroring came back on");
+        assert!(kv.flash_operands().is_none());
+    }
+
+    #[test]
+    fn turning_mirroring_on_late_does_not_create_a_useless_mirror() {
+        // The `true` direction is deliberately inert: a mirror started against a
+        // cache that already holds positions can never catch up, because it only
+        // appends new ones. It would fail `flash_operands`' length check forever
+        // while still costing memory and a conversion per token.
+        let dev = candle_core::Device::Cpu;
+        let mut kv = LayerKv::new(64);
+        let k = t(&dev, 1, 2, 4, 4);
+        kv.append(&k, &k).unwrap();
+        kv.set_mirror_wanted(true);
+        assert_eq!(
+            kv.shadow_len_for_test(),
+            None,
+            "a mirror enabled mid-conversation could never match the cache"
+        );
     }
 }
