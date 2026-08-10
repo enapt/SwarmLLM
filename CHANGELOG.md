@@ -151,7 +151,8 @@ compared the two.
 
 It does now, at every start. If a newer version is sitting on disk unused it says
 so in the log, raises it in the dashboard, and reports it at
-`GET /api/admin/update-status`. A deliberate rollback is not nagged about.
+`GET /api/admin/version` as `restart_required`. A deliberate rollback is not
+nagged about.
 
 **The peer count changed without saying so.** Reported as "peer count flaps with
 no log". The number fell inside the disconnect path, which was logged, but rose
