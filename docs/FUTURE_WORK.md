@@ -8190,6 +8190,16 @@ transpose / contiguous sequence around the attention operands, so it is
 allocation there too. Roughly 168 small allocations per token across 28 layers.
 Not chased — recorded because it is the same shape of cost on the other device.
 
+**One tempting explanation for that 9.1% is already ruled out.** At `seq_len == 1`
+the `transpose(1, 2)` before attention swaps a size-1 axis, so it looks like the
+following `.contiguous()` must be copying for nothing. It is not: candle's
+`Shape::is_contiguous` skips size-1 dimensions outright (`if dim > 1 && stride
+!= acc`), so the transposed view still reports contiguous and `.contiguous()`
+returns without copying. Checked in `vendor/candle/candle-core/src/shape.rs`
+before writing anything. What remains in that stage is the RoPE calls and the
+per-op rayon dispatch on very small tensors — the same many-small-operations
+cost as the GPU launches, not redundant copying.
+
 **Caveat worth checking before investing:** this is WSL2, where CUDA launch
 overhead is inflated by the virtualisation layer. 46 us is high even so (native
 launches are typically 5-10 us), so the ORDERING of the conclusion should hold on
