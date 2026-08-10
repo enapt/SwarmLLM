@@ -73,11 +73,62 @@ pub struct UpdateInfo {
 }
 
 /// State for the update checker, stored in SharedState.
+/// redb tree holding update bookkeeping.
+pub const TREE_UPDATE: &str = "update";
+/// Last version the updater reported installing successfully.
+pub const KEY_INSTALLED_VERSION: &str = "installed_version";
+
+/// Compare what was last installed against what is running.
+///
+/// `None` when they agree, when nothing has been installed yet, or when the
+/// running version is NEWER than the record (a manual upgrade, or a rollback
+/// followed by a fresh install — either way not a stuck restart).
+///
+/// Deliberately a pure function of two strings so the comparison is testable
+/// without a daemon, a disk or an update.
+pub fn restart_required_for(running: &str, installed: Option<&str>) -> Option<RestartRequired> {
+    let installed = installed?;
+    if installed == running {
+        return None;
+    }
+    // Only flag the case that matters: installed something, still running the
+    // older image. A deliberate rollback leaves `installed` behind `running`
+    // and must not nag.
+    if !is_newer_version(running, installed) {
+        return None;
+    }
+    Some(RestartRequired {
+        running: running.to_string(),
+        installed: installed.to_string(),
+    })
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UpdateState {
     pub update_available: Option<UpdateInfo>,
     pub last_checked: Option<String>,
     pub last_error: Option<String>,
+    /// Set when a newer version was installed on disk but this process is still
+    /// running an older image — i.e. the restart into it did not happen.
+    ///
+    /// An operator reported (2026-08-09, again 2026-08-10) believing their node
+    /// had silently missed eight releases. The install path `exec`s into the new
+    /// binary, which KEEPS the process id and the kernel's start time, so `ps`
+    /// shows the original launch either way and cannot distinguish "updated in
+    /// place" from "never restarted" (gotcha #277). Nothing else could either:
+    /// the node knew what it had installed and what it was running and never
+    /// compared them. This is that comparison, so the question stops needing
+    /// forensics.
+    pub restart_required: Option<RestartRequired>,
+}
+
+/// A newer version is installed on disk than the one running.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct RestartRequired {
+    /// Version this process is actually running (compiled in — cannot be stale).
+    pub running: String,
+    /// Version the updater last reported installing successfully.
+    pub installed: String,
 }
 
 /// Performs update checks against the GitHub releases API.
@@ -688,8 +739,22 @@ impl UpdateChecker {
             tracing::info!(
                 new = %self.binary_path.display(),
                 backup = %backup_path.display(),
+                version = %latest_version,
                 "Update applied — restart required to use new version"
             );
+            // Remember what we installed. If the restart does not take effect,
+            // the next start compares this against the version compiled into
+            // the running image and says so, instead of leaving an operator to
+            // deduce it from process ids.
+            if let Some(shared) = self.shared.as_ref() {
+                if let Err(e) =
+                    shared
+                        .db
+                        .put_json(TREE_UPDATE, KEY_INSTALLED_VERSION, &latest_version)
+                {
+                    tracing::warn!(error = %e, "Could not record the installed version");
+                }
+            }
 
             Ok(())
         }
@@ -757,9 +822,56 @@ impl UpdateChecker {
         );
     }
 
+    /// Compare the last recorded install against the running image, and say so
+    /// loudly if a newer version is sitting on disk unused.
+    async fn report_pending_restart(&self) {
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let installed: Option<String> = shared
+            .db
+            .get_json::<String>(TREE_UPDATE, KEY_INSTALLED_VERSION)
+            .ok()
+            .flatten();
+        let running = env!("CARGO_PKG_VERSION");
+        let Some(pending) = restart_required_for(running, installed.as_deref()) else {
+            return;
+        };
+
+        tracing::warn!(
+            running = %pending.running,
+            installed = %pending.installed,
+            "A newer version is installed on disk than the one running — the restart into it \
+             did not take effect. Restart this node to pick up v{}. (Process id and start time \
+             are NOT evidence either way: an in-place update keeps both.)",
+            pending.installed
+        );
+        shared.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "update",
+                "restart_required",
+                format!(
+                    "v{} is installed but this node is still running v{} — restart to use it",
+                    pending.installed, pending.running
+                ),
+            )
+            .with_toast("warning", 15000),
+        );
+        self.state.write().await.restart_required = Some(pending);
+    }
+
     /// Background update loop — checks periodically and stores results in shared state.
     pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) {
         use crate::config::UpdateMode;
+
+        // Did the last install actually take effect? The updater `exec`s into
+        // the new binary, which keeps the process id and the kernel's start
+        // time, so `ps` cannot tell "updated in place" from "never restarted"
+        // (gotcha #277) — and an operator reported twice that they believed
+        // their node had missed eight releases on exactly that evidence. Only
+        // the node can answer it: it knows what it installed and what it is
+        // running. Say so at every start rather than leaving it to forensics.
+        self.report_pending_restart().await;
 
         let mode = self.config.effective_mode();
         // Say the resolved mode out loud, every start.
@@ -1722,5 +1834,43 @@ mod cpu_baseline_asset_tests {
         ] {
             assert_eq!(host_asset_name(name), name);
         }
+    }
+}
+
+#[cfg(test)]
+mod pending_restart_tests {
+    use super::restart_required_for;
+
+    /// The reported case: a newer version installed, an older one still running.
+    /// Nothing could previously distinguish this from a healthy node, because
+    /// an in-place update keeps the process id and start time (gotcha #277) and
+    /// `ps` is therefore silent either way.
+    #[test]
+    fn an_installed_but_unused_version_is_reported() {
+        let r = restart_required_for("0.3.81-alpha", Some("0.3.88-alpha"))
+            .expect("installed newer than running must be reported");
+        assert_eq!(r.running, "0.3.81-alpha");
+        assert_eq!(r.installed, "0.3.88-alpha");
+    }
+
+    /// The normal case after a successful restart: they agree, say nothing.
+    #[test]
+    fn agreement_is_silent() {
+        assert!(restart_required_for("0.3.89-alpha", Some("0.3.89-alpha")).is_none());
+    }
+
+    /// A node that has never installed an update has nothing to compare.
+    #[test]
+    fn no_record_is_silent() {
+        assert!(restart_required_for("0.3.89-alpha", None).is_none());
+    }
+
+    /// A deliberate rollback leaves the record ahead of nothing — the running
+    /// binary is NEWER than the last recorded install (e.g. installed manually,
+    /// or a later release was put in place by hand). Nagging about that would
+    /// be telling someone to undo a choice they made.
+    #[test]
+    fn a_newer_running_version_is_not_a_pending_restart() {
+        assert!(restart_required_for("0.3.89-alpha", Some("0.3.85-alpha")).is_none());
     }
 }

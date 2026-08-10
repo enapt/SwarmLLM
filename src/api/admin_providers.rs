@@ -975,6 +975,9 @@ pub async fn version_info(State(state): State<AppState>) -> Json<serde_json::Val
         "channel": channel,
         "last_checked": update_state.last_checked,
         "last_error": update_state.last_error,
+        // Set when a newer version is installed on disk than the one running —
+        // i.e. the restart into it did not happen. `null` when they agree.
+        "restart_required": update_state.restart_required,
         "changelog": changelog,
     }))
 }

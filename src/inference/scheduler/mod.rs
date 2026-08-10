@@ -1018,8 +1018,21 @@ impl PipelineScheduler {
                     current_layer = range.1;
                 }
                 None => {
+                    // Name the model and say what is missing. "No node available
+                    // for layer 0" was reported (2026-08-10) against a model the
+                    // node's own status called "loaded", which reads as a
+                    // contradiction: loaded describes what was started, this
+                    // describes who can serve the piece containing that layer
+                    // right now, and nobody currently can.
+                    let model = candidates
+                        .first()
+                        .map(|c| c.shard_id.model_id.0.as_str())
+                        .unwrap_or("this model");
                     return Err(SwarmError::PipelineError(format!(
-                        "No node available for layer {current_layer}"
+                        "No reachable node holds the part of {model} containing layer \
+                         {current_layer}. A model can be listed, and even loaded here, while \
+                         the peer that held that piece has gone — try again, or fetch that \
+                         shard locally."
                     )));
                 }
             }

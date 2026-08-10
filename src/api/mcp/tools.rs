@@ -860,12 +860,42 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
 
 /// Node info tool: detailed node status, models, peers, resources.
 async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
-    // Loaded model
+    // Loaded model.
+    //
+    // `loaded_model_info` is a description cached when the node started; it says
+    // what was loaded, NOT whether a request for it can be routed right now. An
+    // operator reported (2026-08-10) that the model reported here failed every
+    // request with "No node available for layer 0" while two others answered
+    // normally — reasonably reading "loaded" as "usable". Serving needs a holder
+    // for the model's first shard to be reachable at this moment, which is a
+    // different question and can change without this cache moving, so answer
+    // both rather than letting one imply the other.
     let info = state.shared_state.loaded_model_info.read().await;
     let loaded_model = info.as_ref().map(|i| {
+        let servable = state
+            .shared_state
+            .model_registry
+            .models()
+            .into_iter()
+            .find(|m| m.name == i.name || m.id.0 == i.name)
+            .map(|m| {
+                !state
+                    .shared_state
+                    .model_registry
+                    .shard_holders(&crate::types::ShardId {
+                        model_id: m.id.clone(),
+                        index: 0,
+                    })
+                    .is_empty()
+            });
         json!({
             "name": i.name,
             "size_bytes": i.size_bytes,
+            // Whether anyone reachable currently holds this model's first
+            // shard. `false` means requests for it will fail with "No node
+            // available for layer 0" no matter what "loaded" says; `null` means
+            // the model is not in the registry under this name.
+            "servable_now": servable,
         })
     });
     drop(info);
