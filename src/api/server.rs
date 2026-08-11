@@ -554,10 +554,18 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             middleware::rate_limit_middleware,
         ))
+        // MUST be registered BEFORE the CORS layer. A `.layer()` does not wrap a
+        // fallback added after it, so registering this last put it OUTSIDE CORS
+        // — where it intercepted the browser's `OPTIONS` preflight and answered
+        // 405 with no `access-control-*` headers, which fails the preflight and
+        // takes the dashboard's API calls with it. Caught against the released
+        // binary, which answers the same preflight 200 with full CORS headers.
+        // Deliberately still OUTSIDE auth, so a wrong method is answered rather
+        // than turned into a 401 that hides the real mistake.
+        .method_not_allowed_fallback(wrong_method)
         .layer(middleware::cors_layer(state.config.node.listen_port))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .fallback(unknown_route)
-        .method_not_allowed_fallback(wrong_method)
         .with_state(state)
 }
 

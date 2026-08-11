@@ -1854,4 +1854,22 @@ fn the_router_answers_bad_methods_in_the_error_envelope() {
         src.contains("async fn wrong_method("),
         "the method-not-allowed fallback handler must exist"
     );
+
+    // ORDER, not just presence. A `.layer()` does not wrap a fallback added
+    // after it, so registering this one last put it outside the CORS layer,
+    // where it answered the browser's OPTIONS preflight 405 with no
+    // `access-control-*` headers — failing the preflight and taking the
+    // dashboard's API calls with it. The released binary answers that same
+    // preflight 200; the regression was caught only by comparing against it.
+    let fallback_at = src
+        .find(".method_not_allowed_fallback(")
+        .expect("checked above");
+    let cors_at = src
+        .find(".layer(middleware::cors_layer(")
+        .expect("the CORS layer must still be applied");
+    assert!(
+        fallback_at < cors_at,
+        "method_not_allowed_fallback must be registered BEFORE the CORS layer, \
+         or OPTIONS preflight bypasses CORS and every browser client breaks"
+    );
 }
