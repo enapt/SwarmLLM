@@ -550,6 +550,32 @@ impl PipelineExecutor {
             finish_reason = "stop".to_string();
         }
 
+        // Report the tokens the caller actually RECEIVED, not the count the peer
+        // says it generated.
+        //
+        // `usage` rides on the done token, which always arrives, while content
+        // tokens can be lost — so a truncated reply reported the full count
+        // beside a short answer. That mismatch is precisely the signal used to
+        // diagnose the truncation bug in the first place (#282): a token count
+        // disagreeing with the text means tokens went missing. Passing it on as
+        // truth hands clients the same misleading figure, and it is also what
+        // the request is BILLED on — settlement multiplies this number — so a
+        // reply that lost half its tokens was charged in full for them.
+        //
+        // Clamping down only. A peer under-reporting is its own problem and not
+        // one to paper over by inventing usage the caller cannot see.
+        let delivered = stream.emitted();
+        if completion_tokens > delivered {
+            tracing::warn!(
+                %request_id,
+                claimed = completion_tokens,
+                delivered,
+                "remote-generate: peer reported more tokens than were delivered — \
+                 reporting and billing the delivered count"
+            );
+            completion_tokens = delivered;
+        }
+
         Ok(Some(InferenceOutput {
             request_id,
             content,
@@ -759,6 +785,43 @@ mod stream_reassembly_tests {
         assert!(s.push_content(content(2, "!")).is_empty());
         assert_eq!(s.emitted(), 1, "the prefix is real and worth returning");
         assert!(!s.is_complete());
+    }
+
+    /// The count reported to the caller must describe what they RECEIVED.
+    ///
+    /// `usage` rides on the done token, which always arrives; content tokens
+    /// can be lost. So a reply that lost tokens carried the peer's full count
+    /// next to a short answer — the exact disagreement that identifies a
+    /// delivery failure (#282), handed to clients as fact and, worse, used as
+    /// the quantity the request is billed on.
+    ///
+    /// `emitted()` is the honest number and is what the caller now sees.
+    #[test]
+    fn delivered_token_count_is_what_the_caller_received() {
+        let mut s = StreamReassembler::new();
+        s.mark_done(4);
+        assert_eq!(joined(s.push_content(content(0, "a"))), "a");
+        assert_eq!(joined(s.push_content(content(1, "b"))), "b");
+        // Tokens 2 and 3 never arrive.
+        assert_eq!(
+            s.emitted(),
+            2,
+            "two tokens reached the caller; the peer claims four"
+        );
+        assert!(!s.is_complete(), "the reply is short and known to be short");
+    }
+
+    /// ...and a complete reply must not be clamped: emitted equals claimed, so
+    /// the guard is invisible on the normal path.
+    #[test]
+    fn a_complete_reply_reports_every_token_it_generated() {
+        let mut s = StreamReassembler::new();
+        s.mark_done(3);
+        for (i, t) in [(0, "x"), (1, "y"), (2, "z")] {
+            assert!(!s.push_content(content(i, t)).is_empty());
+        }
+        assert!(s.is_complete());
+        assert_eq!(s.emitted(), 3, "nothing to clamp on a complete reply");
     }
 
     /// A late token releases everything buffered behind it in one go.

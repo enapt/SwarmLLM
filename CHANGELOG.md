@@ -4,6 +4,21 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A shortened reply from another machine was still counted, and charged, in
+full.** The number of words a reply contains travels on the final message, which
+always arrives, while the words themselves travel separately and can be lost. So
+a reply that arrived incomplete reported the full count next to a short answer —
+and that count is what the request is billed on, so you paid for words you never
+received.
+
+The count now describes what actually reached you. It is only ever adjusted
+downwards; a machine reporting fewer words than it sent is a different problem
+and not one to paper over.
+
+This also removes a misleading signal: a word count that disagrees with the text
+is how incomplete replies are recognised in the first place, so reporting it as
+fact hid the very thing it was evidence of.
+
 ## [0.3.91-alpha] — 2026-08-11
 
 **A request sent to another machine could come back empty, and be charged for.**
