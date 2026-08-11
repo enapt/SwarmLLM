@@ -4,6 +4,13 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A mistyped invite code sometimes answered with programmer jargon.** Pasting a
+broken pool invite could return "Invalid last symbol 101, offset 6" instead of
+the plain explanation its sibling cases already gave. Which one you saw depended
+on exactly how the code had been mangled, and only one of them could be acted
+on. Every damaged code now gives the same message and the same remedy: ask the
+inviter to generate a new one.
+
 **Private mode said no without saying what to do.** When none of your own
 devices had all of a model, the refusal named a list of numbered pieces and
 offered no way forward. It now explains the options: download the model here,

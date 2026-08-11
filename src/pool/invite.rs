@@ -133,9 +133,19 @@ pub fn decode_invite_code(raw: &str) -> Result<InviteCodePayload, SwarmError> {
         )));
     }
 
+    // Every way the bytes can be wrong means one thing to the person holding
+    // the code — it did not survive being copied — and they can act on exactly
+    // one remedy. Passing the library's own text through instead produced
+    // "Invite code is not valid base64url: Invalid last symbol 101, offset 6"
+    // beside a sibling arm that reads "is corrupt or was edited — ask the
+    // inviter to regenerate", so which of the two a user got depended on HOW
+    // their paste was mangled. The detail is logged, not shown.
     let packed = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded.as_bytes())
-        .map_err(|e| SwarmError::Validation(format!("Invite code is not valid base64url: {e}")))?;
+        .map_err(|e| {
+            tracing::debug!(error = %e, "invite code failed base64url decode");
+            SwarmError::Validation(CORRUPT_CODE_MESSAGE.into())
+        })?;
 
     if packed.len() < 32 + 12 + 16 {
         return Err(SwarmError::Validation(
@@ -147,19 +157,18 @@ pub fn decode_invite_code(raw: &str) -> Result<InviteCodePayload, SwarmError> {
     let nonce_bytes = &packed[32..44];
     let ciphertext = &packed[44..];
 
-    let cipher = ChaCha20Poly1305::new_from_slice(key_bytes)
-        .map_err(|e| SwarmError::Validation(format!("Invite code key invalid: {e}")))?;
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
-        SwarmError::Validation(
-            "Invite code is corrupt or was edited — ask the inviter to regenerate".into(),
-        )
+    let cipher = ChaCha20Poly1305::new_from_slice(key_bytes).map_err(|e| {
+        tracing::debug!(error = %e, "invite code embedded key rejected");
+        SwarmError::Validation(CORRUPT_CODE_MESSAGE.into())
     })?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| SwarmError::Validation(CORRUPT_CODE_MESSAGE.into()))?;
 
     let payload: InviteCodePayload = serde_json::from_slice(&plaintext).map_err(|e| {
-        SwarmError::Validation(format!(
-            "Invite code payload is not valid (newer daemon version?): {e}"
-        ))
+        tracing::debug!(error = %e, "invite code payload did not parse after decryption");
+        SwarmError::Validation(CORRUPT_CODE_MESSAGE.into())
     })?;
 
     if payload.version != INVITE_VERSION {
@@ -180,6 +189,16 @@ pub fn decode_invite_code(raw: &str) -> Result<InviteCodePayload, SwarmError> {
     }
     Ok(payload)
 }
+
+/// What every "these bytes are not a usable code" failure tells the user.
+///
+/// Shared so the message cannot drift between the ways a paste can be mangled:
+/// truncated, re-wrapped by a chat client, edited by hand, or corrupted in
+/// transit all leave the reader with the same single remedy. The specific cause
+/// goes to `debug!` — useful to whoever is debugging, meaningless to whoever is
+/// joining a pool.
+pub(crate) const CORRUPT_CODE_MESSAGE: &str =
+    "Invite code is corrupt or was edited — ask the inviter to regenerate";
 
 /// Quick sniff: does this string look like a v2 code? Used by the API layer
 /// to route a pasted blob to either the v2 path or the legacy 8-char path.
@@ -262,6 +281,38 @@ fn is_public_ipv6(ip: std::net::Ipv6Addr) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// However a pasted code is mangled, the person holding it gets one message
+    /// and one remedy.
+    ///
+    /// The arms used to disagree: a base64 fault surfaced the library's own text
+    /// ("Invalid last symbol 101, offset 6") while a decryption fault said
+    /// "corrupt or was edited — ask the inviter to regenerate". Which one a user
+    /// saw depended on HOW their paste broke, and only one of the two could be
+    /// acted on.
+    #[test]
+    fn every_mangled_code_gives_the_same_actionable_message() {
+        let cases = [
+            ("swarmpool://garbage", "non-base64 characters"),
+            ("swarmpool://QUJDREVGRw", "decodes but far too short"),
+            (
+                "swarmpool://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "right shape, will not decrypt",
+            ),
+        ];
+        for (code, why) in cases {
+            let err = decode_invite_code(code).expect_err(why);
+            let msg = err.to_string();
+            assert!(
+                matches!(err, SwarmError::Validation(_)),
+                "{why}: a bad paste is the caller's input, not a daemon fault — got {err:?}"
+            );
+            assert!(
+                !msg.contains("offset") && !msg.contains("symbol") && !msg.contains("base64"),
+                "{why}: leaks library detail a user cannot act on: {msg}"
+            );
+        }
+    }
     use super::*;
 
     /// **A LAN peer confirming a LAN address does not make this node public.**
