@@ -8246,3 +8246,33 @@ place, which is what a paged KV cache is for. That is an architectural change to
 was vendored here once and never wired (gotcha #257), so the kernels exist but
 nothing has ever driven them. Size that properly before starting; the numbers
 above are the bar it has to beat, and `gpu_decode_bench` reproduces them.
+
+## MCP `node_info` duplicates the whole cloud-model catalogue (2026-08-12)
+
+`node_info` returns **9.3 KB / ~2,300 tokens**, of which 230 cloud-model ids are
+the bulk. The `models` tool returns the same 230 under `source: "cloud"` (239
+entries, ~25 KB), so a client that calls both — which Claude Code reasonably
+does when orienting itself — spends roughly 8,500 tokens largely on one list
+twice.
+
+**Measured 2026-08-12** on a node with one cloud provider configured
+(`deepseek`). The count scales with providers, so an operator with several would
+see it grow.
+
+`node_info` already reports `cloud_models_available: 230` beside the list, which
+is the *status* answer; the enumeration is a catalogue, and cataloguing is what
+`models` is for.
+
+**Not changed, deliberately.** No internal consumer reads either copy
+(`grep cloud_models` finds only the producer and two unrelated comments), which
+makes trimming look safe — but the MCP endpoint is a public surface and a third
+party may parse it, so shrinking a tool's payload is a product decision rather
+than a defect fix. Two comments elsewhere (`config/providers.rs`,
+`api/admin.rs`) note that `cloud_models: []` is itself diagnostic, so the field
+should not simply disappear.
+
+**If it is trimmed**, the shape that keeps the diagnostic value is the count plus
+a short sample (`cloud_models_sample`, first ~10) and a pointer to the `models`
+tool for the rest — an empty list must stay distinguishable from an absent one,
+because that distinction is what tells an operator their provider key never
+loaded.
