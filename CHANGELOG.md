@@ -4,6 +4,22 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.94-alpha] — 2026-08-11
+
+**A model the network can only partly reach was reported as a fault in your own
+machine.** If some pieces of a model were unreachable, the reply said something
+had gone wrong here; if *no* pieces were reachable, it correctly said the network
+could not serve it. The same situation gave a different answer depending on how
+much was missing. Both now say the same thing, and still name which part is
+missing.
+
+This also restores something that had quietly stopped working. When a piece
+looks unreachable, a machine is meant to wait briefly for directory results and
+try again, because the list of who has what may simply not have arrived yet.
+That decision was made by looking for particular words in the message; the
+message was reworded to be clearer and no longer contained them, so the retry
+stopped happening — silently. It no longer depends on wording.
+
 **Using the wrong method on a valid address gave an empty reply.** Asking a page
 of the settings API for something it does not answer that way returned a bare
 failure with no text at all, so the dashboard could only say "action failed"
