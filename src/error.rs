@@ -392,6 +392,22 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
              `swarmllm get-model <name>`, or turn prompt privacy off for this model to \
              let the swarm run it. Retrying as-is won't help.",
         ),
+        // The only refusal that had no hint, and its message is the least
+        // readable of them: "missing shards: [0, 1, 2, 3]" tells a non-technical
+        // user nothing, and nothing else on screen says what to do about it.
+        //
+        // Turning private mode off is deliberately listed LAST and with its
+        // consequence stated. It is the quickest way to make the error go away
+        // and the only one that changes where the user's prompts travel, so
+        // offering it casually would trade someone's privacy for convenience
+        // without telling them.
+        SwarmError::PrivateModeUnavailable { .. } => Some(
+            "Private mode keeps your prompts on your own devices, and none of them has \
+             all of this model. Either download it here with `swarmllm get-model <name>`, \
+             or add the device that has it to your pool. You can also turn private mode \
+             off in Settings — but then your prompts can be sent to other people's \
+             machines to run.",
+        ),
         SwarmError::InferenceTimeout(_) => Some(
             "The request took too long. Try a shorter prompt, reduce the max tokens, \
              or wait for a less busy time.",
@@ -558,6 +574,32 @@ mod tests {
             "missing SOME of a model and missing ALL of it must not differ in status"
         );
         assert_eq!(incomplete.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Every refusal a user can hit must say what to do about it. Private mode
+    /// was the only one with no hint at all, and its message ("missing shards:
+    /// [0, 1, 2, 3]") is the least readable of them — a non-technical user was
+    /// shown a refusal, a list of numbers, and no way forward.
+    ///
+    /// The hint must not push them to disable private mode without saying what
+    /// that costs: it is the fastest way to clear the error and the only one
+    /// that changes where their prompts travel.
+    #[test]
+    fn private_mode_refusal_explains_the_options_including_the_cost() {
+        let hint = error_hint(&SwarmError::PrivateModeUnavailable {
+            model_id: "m".into(),
+            missing_shards: vec![0, 1],
+        })
+        .expect("private mode refusal needs a hint like every other refusal");
+        let lower = hint.to_lowercase();
+        assert!(
+            lower.contains("get-model") || lower.contains("pool"),
+            "must name a way to keep private mode on, got {hint:?}"
+        );
+        assert!(
+            lower.contains("other people's machines") || lower.contains("sent to other"),
+            "if it offers turning private mode off, it must say what that costs: {hint:?}"
+        );
     }
 
     #[test]

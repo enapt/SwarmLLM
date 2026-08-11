@@ -4,6 +4,13 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Private mode said no without saying what to do.** When none of your own
+devices had all of a model, the refusal named a list of numbered pieces and
+offered no way forward. It now explains the options: download the model here,
+add the device that has it to your pool, or turn private mode off — and it says
+plainly that the last one means your prompts can be sent to other people's
+machines.
+
 ## [0.3.94-alpha] — 2026-08-11
 
 **A model the network can only partly reach was reported as a fault in your own
