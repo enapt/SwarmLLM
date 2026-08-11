@@ -2907,6 +2907,23 @@ impl ModelProcessPool {
         if let Some(model) = model_unavailable_detail(&message) {
             return SwarmError::ModelNotAvailable(crate::types::ModelId(model));
         }
+        // Third instance of the same flattening, and the one that costs a
+        // working answer rather than just a confusing status. The KV-budget
+        // check refuses a forward with `ServiceUnavailable` when the GPU cannot
+        // hold another growth quantum — `inference::split::kv_budget` documents
+        // that as "503, so a coordinator re-routes to a peer". Flattened to text
+        // it arrived as `Inference` → 500, which a coordinator reads as a fault
+        // in the serving node rather than "ask someone else", so a request that
+        // another peer could have served simply failed.
+        //
+        // Observed on a node sharing its GPU with another process: the reply
+        // read `Inference error: prefill forward: Service unavailable: Not
+        // enough free GPU memory to continue this conversation (168 MB of KV
+        // cache already in use, budget 323 MB)` — the words "Service
+        // unavailable" sitting inside an HTTP 500.
+        if let Some(detail) = service_unavailable_detail(&message) {
+            return SwarmError::ServiceUnavailable(detail);
+        }
         SwarmError::Inference(message)
     }
 
@@ -3295,6 +3312,31 @@ mod tests {
         assert_eq!(pool.cpu_pinned_model_ids(), vec!["zeta"]);
     }
 
+    /// The full classification, not just the string helper: a GPU with no room
+    /// left must come back as `ServiceUnavailable` so the router can hand the
+    /// request to a peer. As `Inference` it was HTTP 500, which a coordinator
+    /// reads as "this node is broken" rather than "ask someone else" — costing
+    /// an answer another peer could have given.
+    ///
+    /// Not marked fatal: the worker is fine, the GPU is merely full, so it must
+    /// keep its worker rather than being evicted and reloaded.
+    #[test]
+    fn a_full_gpu_is_classified_as_service_unavailable_not_an_inference_fault() {
+        let pool = test_pool();
+        let model = ModelId("m".into());
+        let err = pool.classify_worker_error(
+            &model,
+            "prefill forward: Service unavailable: Not enough free GPU memory to continue \
+             this conversation (168 MB of KV cache already in use, budget 323 MB)."
+                .into(),
+            false,
+        );
+        assert!(
+            matches!(err, SwarmError::ServiceUnavailable(_)),
+            "a full GPU must be 503 so the router re-routes, got {err:?}"
+        );
+    }
+
     #[test]
     fn fatal_error_evicts_worker_and_returns_service_unavailable() {
         let pool = test_pool();
@@ -3359,6 +3401,27 @@ fn model_unavailable_detail(message: &str) -> Option<String> {
     }
 }
 
+/// Recover a `ServiceUnavailable` flattened to text crossing the worker IPC
+/// boundary, mirroring [`validation_detail`] and [`model_unavailable_detail`].
+///
+/// The third of the same shape. This one is not merely cosmetic: the KV-budget
+/// refusal is documented as 503 precisely "so a coordinator re-routes to a
+/// peer", and as a 500 the coordinator treats it as a fault in this node
+/// instead of asking another — losing an answer a peer could have given.
+///
+/// `rfind` takes the innermost marker, so a message wrapped more than once
+/// (worker → pipeline → router) still yields the original reason.
+fn service_unavailable_detail(message: &str) -> Option<String> {
+    const MARKER: &str = "Service unavailable: ";
+    let idx = message.rfind(MARKER)?;
+    let detail = message[idx + MARKER.len()..].trim();
+    if detail.is_empty() {
+        None
+    } else {
+        Some(detail.to_string())
+    }
+}
+
 fn validation_detail(message: &str) -> Option<String> {
     const MARKER: &str = "Validation error: ";
     let idx = message.rfind(MARKER)?;
@@ -3372,7 +3435,7 @@ fn validation_detail(message: &str) -> Option<String> {
 
 #[cfg(test)]
 mod validation_detail_tests {
-    use super::{model_unavailable_detail, validation_detail};
+    use super::{model_unavailable_detail, service_unavailable_detail, validation_detail};
 
     /// A model whose files are gone must reach the caller as 404, not 500.
     /// Reported with a real trace: the message plainly said "Model not
@@ -3394,6 +3457,45 @@ mod validation_detail_tests {
             model_unavailable_detail(msg).as_deref(),
             Some("real-model-id")
         );
+    }
+
+    /// A GPU that cannot fit another conversation must reach the caller as 503,
+    /// not 500 — a coordinator re-routes on 503 and gives up on 500, so the
+    /// wrong status costs an answer another peer could have given.
+    ///
+    /// Observed with two processes sharing one GPU: `Inference error: prefill
+    /// forward: Service unavailable: Not enough free GPU memory to continue
+    /// this conversation (168 MB of KV cache already in use, budget 323 MB)` —
+    /// served as HTTP 500 with the words "Service unavailable" inside it.
+    #[test]
+    fn a_gpu_out_of_room_is_recovered_as_service_unavailable() {
+        let msg = "Inference error: prefill forward: Service unavailable: Not enough free \
+                   GPU memory to continue this conversation (168 MB of KV cache already in \
+                   use, budget 323 MB).";
+        let got = service_unavailable_detail(msg).expect("should be recognised");
+        assert!(
+            got.starts_with("Not enough free GPU memory"),
+            "must keep the actionable part, got {got:?}"
+        );
+    }
+
+    /// The innermost marker wins, as with its two siblings — a doubly-wrapped
+    /// message must still yield the original reason rather than a wrapper.
+    #[test]
+    fn the_innermost_service_unavailable_marker_wins() {
+        let msg = "outer: Service unavailable: mid: Service unavailable: the real reason";
+        assert_eq!(
+            service_unavailable_detail(msg).as_deref(),
+            Some("the real reason")
+        );
+    }
+
+    /// An ordinary failure must NOT be reclassified as unavailable — that would
+    /// turn a genuine bug into a "try again later" and hide it.
+    #[test]
+    fn an_ordinary_failure_is_not_reclassified_as_unavailable() {
+        assert!(service_unavailable_detail("Inference error: tensor shape mismatch").is_none());
+        assert!(service_unavailable_detail("Service unavailable: ").is_none());
     }
 
     /// An ordinary inference failure must NOT be reclassified as a missing
