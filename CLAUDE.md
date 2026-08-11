@@ -162,7 +162,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1824 lib tests passing + 11 ignored with `--features dev,claude-subscription` (1835 total); 1814 + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 22 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root; CI runs it explicitly since 2026-08-09), 9 in the vendored request-response patch (CI: path-triggered `.github/workflows/vendored.yml`; locally `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). End-to-end forward-pass bench (no daemon): `SWARM_BENCH_MODEL=<model shard dir> RAYON_NUM_THREADS=4 cargo run --release --no-default-features --features dev --example prefill_bench` — loads a real model from its shard directory and drives `SplitModel::forward` directly, so prompt-processing and decode changes can be A/B'd without chunking policy, batching or the API in the way. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. Attention-op bench: `examples/attn_bench.rs`. Quantized-matmul bench: `cargo run --release --no-default-features --features dev --example qmatmul_bench` — prices the kernel against batch size AND asserts the tiled path is bit-identical to the upstream ordering; it also sweeps rayon pool size. **Use min-of-N on an idle machine**: the same unchanged code path measured 0.42 ms and 0.97 ms across runs on the WSL2 test box. End-to-end smoke test (any binary, isolated node, never touches a running one): `examples/smoke_test.sh [binary] [port]` — starts, admin API, a setting applying without restart, reload response shape, non-empty inference, streaming, the Anthropic surface, and zero startup errors. Run it after a refactor: the test suite passing and the daemon still booting and serving are different questions. Isolated two-node cross-node test: `examples/two_node_test.sh [binary]` — one node holds the models, one holds none, both on a private gossip network so the scheduler cannot pick a public peer; asserts the reply is non-empty and that the server's `streamed_count` matches the client's `completion_tokens`. **Expect it to fail on a single multi-interface host** (the documented connection-churn case — it names that failure explicitly rather than implying a regression, and reproduces on released binaries); run it across two machines. Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons on ports 8890-8892 — deliberately NOT 8800, and it stops only its own nodes, because the old broad `killall swarmllm` took down whatever else was running) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1829 lib tests passing + 11 ignored with `--features dev,claude-subscription` (1840 total); 1819 + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 23 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root; CI runs it explicitly since 2026-08-09), 9 in the vendored request-response patch (CI: path-triggered `.github/workflows/vendored.yml`; locally `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). End-to-end forward-pass bench (no daemon): `SWARM_BENCH_MODEL=<model shard dir> RAYON_NUM_THREADS=4 cargo run --release --no-default-features --features dev --example prefill_bench` — loads a real model from its shard directory and drives `SplitModel::forward` directly, so prompt-processing and decode changes can be A/B'd without chunking policy, batching or the API in the way. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. Attention-op bench: `examples/attn_bench.rs`. Quantized-matmul bench: `cargo run --release --no-default-features --features dev --example qmatmul_bench` — prices the kernel against batch size AND asserts the tiled path is bit-identical to the upstream ordering; it also sweeps rayon pool size. **Use min-of-N on an idle machine**: the same unchanged code path measured 0.42 ms and 0.97 ms across runs on the WSL2 test box. End-to-end smoke test (any binary, isolated node, never touches a running one): `examples/smoke_test.sh [binary] [port]` — starts, admin API, a setting applying without restart, reload response shape, non-empty inference, streaming, the Anthropic surface, and zero startup errors. Run it after a refactor: the test suite passing and the daemon still booting and serving are different questions. Isolated two-node cross-node test: `examples/two_node_test.sh [binary]` — one node holds the models, one holds none, both on a private gossip network so the scheduler cannot pick a public peer; asserts the reply is non-empty and that the server's `streamed_count` matches the client's `completion_tokens`. **Expect it to fail on a single multi-interface host** (the documented connection-churn case — it names that failure explicitly rather than implying a regression, and reproduces on released binaries); run it across two machines. Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons on ports 8890-8892 — deliberately NOT 8800, and it stops only its own nodes, because the old broad `killall swarmllm` took down whatever else was running) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -206,51 +206,74 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1824 lib (dev,claude-subscription) / 1814 (default) + 79 integration + 23 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-11 (post-v0.3.90, pre-v0.3.91). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1829 lib (dev,claude-subscription) / 1819 (default) + 79 integration + 23 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-11 (post-v0.3.92). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.91-alpha (2026-08-10/11): a 1.4x speed-up, and four defects inside it
+### Latest — v0.3.92-alpha (2026-08-11): a model asked in another model's format
+
+**A model could be asked a question in a DIFFERENT model's format.**
+`resolve_chat_template` returned `loaded_model_info`'s template, BOS and EOS for
+ANY requested model — and that template BUILDS THE PROMPT. So on a node with one
+model resident, every other model was prompted in the resident one's format. No
+error; the model answers a question phrased the way another model expects, which
+reads as a weak model rather than a fault (gotcha #169's class).
+**Only on the non-split route** — the split path derives its template per model —
+so the same model looked correct served locally and wrong when routed, which is
+how it survived. **Fourth instance of one invariant**: `local_executor_serves`
+had it fixed for DISPATCH ("a request for a different model was answered by the
+resident one — wrong weights and wrong prompt template"), `owned_by` for
+reporting, MCP for ids. The matcher (`model_id_names`) already existed and this
+path never got it → `SharedState::loaded_model_info_is_for`.
+
+**A shortened reply was counted, and CHARGED, in full.** `usage.completion_tokens`
+rides on the done token, which always arrives, while content tokens can be lost —
+so a truncated reply reported the peer's full count beside a short answer, and
+settlement multiplies that number. Now clamped to `stream.emitted()`, downwards
+only. It also stopped the system contradicting its own diagnostics: a token count
+disagreeing with the text is how truncation is RECOGNISED (#282), so reporting it
+as fact concealed the evidence.
+
+**Both came from a tester report that described neither.** It named blank answers
+(fixed in v0.3.91) and a status field that never updates (`loaded_model` is a
+start-time cache — working as designed, which is why `servable_now` exists).
+Following the second is what found the template bug. The report also inferred old
+code from an unchanged pid+start time — impossible from `ps` (#287) — but their
+OWN data settled it: they observed `servable_now`, added 2026-08-10, so the
+update had taken effect.
+
+### Prior — v0.3.91-alpha (2026-08-10/11): 1.4x on long conversations, and four defects inside it
 
 **Long conversations generate ~1.4x faster on a GPU.** Every token re-converted
-the WHOLE history into the layout flash-attn wants (cache is f32 BHSD, kernel
-wants f16 BSHD) — O(history) work to add one position. `LayerKv` now keeps an
-f16 BSHD mirror appended one position at a time. Measured RTT 3070,
-llama-3.2-3b GQA, 3 alternations in ONE binary via `SWARMLLM_DISABLE_KV_MIRROR`:
-**2064 KV 31.0/32.2/31.1 → 21.7/22.8/22.5 ms/token**, no overlap. Long-context
-only (256 KV ~1.04x), which is what an O(history) cost predicts. Numerically
-identical on the flash path — rounding moves from every-read to once-at-write
-from an unchanged f32 source. **The MHA null control changed the design**: it
-came out 3-8% SLOWER, because MHA decode reads the f32 cache and never touches
-the mirror → now GQA-gated. See `.claude/rules/architecture.md` § `LayerKv`.
+the WHOLE history into the layout flash-attn wants (cache f32 BHSD, kernel f16
+BSHD) — O(history) work to add one position. `LayerKv` keeps an f16 BSHD mirror
+appended one position at a time. RTX 3070, llama-3.2-3b GQA, 3 alternations in
+ONE binary via `SWARMLLM_DISABLE_KV_MIRROR`: **2064 KV 31.0/32.2/31.1 →
+21.7/22.8/22.5 ms/token**, no overlap; long-context only (256 KV ~1.04x).
+Numerically identical on the flash path. **The MHA null control changed the
+design** — 3-8% SLOWER there, so it is GQA-gated. See `.claude/rules/
+architecture.md` § `LayerKv`.
 
-**Three of the four fixes this round were defects INSIDE that change**, found by
-auditing it after it shipped to main: CI red from a `cfg(flash-attn)` TEST caller
-(gated checks need `--all-targets`; a release `--features cuda` build skips test
-targets — gotcha #264 again), the KV budget under-counting the mirror by 33%
-(admit-then-OOM instead of a 503 that reroutes), and prefix-cache hydration
-mirroring regardless of GQA (same model behaving differently depending on how the
-conversation began). The fourth was independent: **`mode = "download"` was
-ignored by the manual update check**, which read the legacy `auto_update` field
-while the background loop used `effective_mode()` — two answers to one question,
-and the user-triggered one was wrong.
+**Also: replies from a routing node came back EMPTY and were charged for.** Since
+the reassembly fix (#282), a token ARRIVING and a token being SHOWN are different
+events; the loop asked the first, so a lost first token meant "complete, empty,
+successful". ~50% of calls, 35-40s each. Refunds were fine all along — those
+calls were not failing.
 
-**Four optimisations were investigated and NOT built, which was the round's main
-value.** Batching the qkv/output projections was already implemented; the ~1.15x
-estimate that pointed at it described finished work. `flash_attn_varlen` for
-batched decode measured as a **1.84x REGRESSION at batch 8** — the concatenation
-alone (2.68 ms) exceeds the whole per-slot loop (1.83 ms), because the launch
-saving is fixed while the copy grows with history; it fails hardest on the busy
-long-conversation node it targets. And a "wasted `.contiguous()` at seq_len=1"
-does not exist — candle's `is_contiguous` skips size-1 dims.
+**Three of the round's fixes were defects INSIDE the mirror**, found by auditing
+it after it shipped: CI red from a `cfg(flash-attn)` TEST caller (gated checks
+need `--all-targets`; a release `--features cuda` build skips test targets), the
+KV budget under-counting the mirror by 33% (admit-then-OOM), and prefix-cache
+hydration mirroring regardless of GQA.
 
-**The durable finding: GPU decode here is LAUNCH-BOUND, not compute-bound.**
-Post-mirror profile puts attention at 11% and rms norms at 19%; measured
-directly, one fused norm over 3072 floats costs **46 us** (~0.27 GB/s) — dispatch,
-not arithmetic. Corroborated cross-device: the same norms are **0.3% on CPU**.
-So the lever is FEWER LAUNCHES (fusion, CUDA graphs, paged KV), not faster ops.
-**Do not size launch-reduction work from FLOPs** — that is exactly how the last
-estimate came to describe finished work. Detail:
+**Four optimisations investigated and NOT built** — the round's main value.
+Batching qkv/output projections was already implemented. `flash_attn_varlen` for
+batched decode measured a **1.84x REGRESSION at batch 8** (the concatenation
+alone exceeds the whole per-slot loop; the launch saving is fixed while the copy
+grows with history). A "wasted `.contiguous()` at seq_len=1" does not exist.
+**GPU decode here is LAUNCH-BOUND** — one fused rms_norm over 3072 floats costs
+**46 us**, and the same norms are **0.3% on CPU vs 19% on GPU**. So the lever is
+FEWER LAUNCHES, not faster ops; **do not size that work from FLOPs.** Detail:
 `memory/round_log_0810_kv_mirror.md`, `docs/FUTURE_WORK.md`.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
