@@ -861,6 +861,53 @@ mod tests {
         assert!(state.is_shard_in_vram(&ModelId("llama-3.2".into()), 0));
     }
 
+    /// A model's prompt must never be built with a DIFFERENT model's template.
+    ///
+    /// `loaded_model_info` holds whichever model was loaded last, and
+    /// `resolve_chat_template` returned it for any requested model — so on a
+    /// node with one model resident, every other model was prompted in the
+    /// resident one's format, with its BOS and EOS. That produces a plausible
+    /// wrong answer, not an error (gotcha #169), and only on the non-split
+    /// route, so the same model looked correct when served locally.
+    #[tokio::test]
+    async fn the_resident_models_template_is_not_lent_to_other_models() {
+        let state = make_test_state();
+        *state.loaded_model_info.write().await = Some(crate::daemon::state::LoadedModelInfo {
+            name: "Qwen2.5 Coder 7B Instruct".into(),
+            size_bytes: 0,
+            eos_tokens: vec![],
+            chat_template: Some("QWEN-TEMPLATE".into()),
+            bos_token: "<qwen-bos>".into(),
+            eos_token: "<qwen-eos>".into(),
+        });
+
+        // The resident model, by display name and by slug, is itself.
+        for id in ["Qwen2.5 Coder 7B Instruct", "qwen2.5-coder-7b-instruct"] {
+            assert!(
+                state
+                    .loaded_model_info_is_for(&crate::types::ModelId(id.into()))
+                    .await,
+                "{id} names the resident model"
+            );
+        }
+
+        // Anything else is not, and must fall through to its own header.
+        for id in [
+            "llama-3.2-3b-instruct-q4-k-m",
+            "qwen2.5-0.5b-instruct-fp16",
+            // Same family and prefix, different model — matching must not be a
+            // substring test.
+            "qwen2.5-coder-7b-instruct-q4-k-m-EXTRA",
+        ] {
+            assert!(
+                !state
+                    .loaded_model_info_is_for(&crate::types::ModelId(id.into()))
+                    .await,
+                "{id} must NOT inherit the resident model's template"
+            );
+        }
+    }
+
     /// The flag can be true while the cached info is absent (unload clears the
     /// info under a separate lock). Say no rather than guessing.
     #[tokio::test]

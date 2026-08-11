@@ -1898,6 +1898,28 @@ impl SharedState {
             .is_some_and(|loaded| self.model_id_names(model_id, &loaded.name))
     }
 
+    /// Does the in-memory `loaded_model_info` describe THIS model?
+    ///
+    /// The template/BOS/EOS in `loaded_model_info` belong to whichever model was
+    /// loaded last, and `resolve_chat_template` used to return them for ANY
+    /// requested model — so on a node with one model resident, every other
+    /// model's prompt was built with the resident one's template, its BOS and
+    /// its EOS. No error; just a model asked a question in another model's
+    /// format, which is the most expensive kind of defect this codebase has had
+    /// (gotcha #169).
+    ///
+    /// Same rule as [`Self::local_executor_serves`], which had the identical bug
+    /// fixed on the dispatch side — this is the prompt-building side of it.
+    /// Deliberately does NOT require `model_loaded`: that flag is about whether
+    /// the singleton executor can answer, while this asks only whose template
+    /// this is. Answering "no" costs a read of the model's own GGUF header,
+    /// which is correct by construction.
+    pub(crate) async fn loaded_model_info_is_for(&self, model_id: &crate::types::ModelId) -> bool {
+        let info = self.loaded_model_info.read().await;
+        info.as_ref()
+            .is_some_and(|loaded| self.model_id_names(model_id, &loaded.name))
+    }
+
     /// Does `model_id` name the model whose GGUF display name is `loaded_name`?
     ///
     /// The one rule for "is this identifier that model", shared by

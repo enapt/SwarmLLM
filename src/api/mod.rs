@@ -202,8 +202,21 @@ pub(crate) async fn resolve_chat_template(
     state: &crate::api::server::AppState,
     model_name: &str,
 ) -> (Option<String>, String, String) {
-    // 1. In-memory loaded model info
-    {
+    // 1. In-memory loaded model info — ONLY when it is this model's.
+    //
+    // `loaded_model_info` is the most-recently-loaded singleton, not the model
+    // being asked for. Returning it unconditionally meant that on a node with
+    // any model resident, every OTHER model's prompt was built with the
+    // resident one's template, BOS and EOS — a model asked a question in
+    // another model's format, answered without error and with the requested
+    // name echoed back. The split path resolves its own template correctly, so
+    // the same model looked fine served locally and wrong when routed through
+    // the distributed path, which is how it stayed hidden.
+    //
+    // `local_executor_serves` had this identical bug fixed on the dispatch
+    // side; this is the prompt-building side of the same rule.
+    let mid = crate::types::ModelId(model_name.to_string());
+    if state.shared_state.loaded_model_info_is_for(&mid).await {
         let info = state.shared_state.loaded_model_info.read().await;
         if let Some(i) = info.as_ref() {
             return (
@@ -226,7 +239,6 @@ pub(crate) async fn resolve_chat_template(
     }
 
     // 3. HuggingFace metadata probe
-    let mid = crate::types::ModelId(model_name.to_string());
     if let Some(hf_src) = state.shared_state.models.hf_sources.get(&mid) {
         let model_dir = state.shared_state.model_dir(model_name);
         let shard_size = state.shared_state.config.model.shard_size_bytes();

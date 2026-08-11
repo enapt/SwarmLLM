@@ -4,6 +4,23 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A model could be asked a question in a different model's format.** When a node
+had one model resident and was asked for another, the prompt for the second was
+built using the FIRST one's chat template, start token and end token. Nothing
+failed — the model simply answered a question phrased the way a different model
+expects, which reads as the model being poor rather than as a fault.
+
+It only happened on the route used when a node does not hold the model's pieces
+itself, because the other route works out the format per model. So the same
+model looked correct served locally and wrong when the work was sent elsewhere,
+which is why it went unnoticed.
+
+The stored format is now used only when it belongs to the model being asked for;
+otherwise the model's own file is read. The same mistake was fixed once before
+for choosing which model answers, and twice for reporting which models are
+local — this was the remaining place that read "the last model loaded" as "the
+model you asked about".
+
 **A shortened reply from another machine was still counted, and charged, in
 full.** The number of words a reply contains travels on the final message, which
 always arrives, while the words themselves travel separately and can be lost. So
