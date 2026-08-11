@@ -97,7 +97,8 @@
     // Meta row: size + memory required + replication summary
     var meta = document.createElement('div');
     meta.className = 'wishlist-card-meta';
-    meta.appendChild(_metaSpan(I18n.t('wishlist.meta_size', { size: U.formatSize(entry.size_mb) })));
+    var sizeText = _sizeTextOrNull(entry.size_mb);
+    if (sizeText) meta.appendChild(_metaSpan(sizeText));
     if (entry.vram_required_mb > 0) {
       meta.appendChild(_metaSpan(I18n.t('wishlist.meta_memory', { size: U.formatSize(entry.vram_required_mb) })));
     }
@@ -189,6 +190,19 @@
     return tmpl;
   }
 
+  // `size_mb: 0` means UNKNOWN, not tiny. Most wishlist rows are HuggingFace
+  // candidates whose size is not known until the file is probed, and
+  // `formatSize(0)` renders "< 1 MB" — so the Swarm tab advertised an 8B model
+  // as under a megabyte, which is exactly backwards for the one number a user
+  // checks before deciding to download something. The sibling meta field
+  // (`vram_required_mb`) was already guarded with `> 0`; the size was not.
+  // Returns null when there is nothing honest to show, so callers omit the row
+  // rather than inventing a figure.
+  function _sizeTextOrNull(mb) {
+    if (!mb || mb <= 0) return null;
+    return I18n.t('wishlist.meta_size', { size: U.formatSize(mb) });
+  }
+
   function _metaSpan(text) {
     var s = document.createElement('span');
     s.className = 'wishlist-meta-item';
@@ -260,8 +274,9 @@
       card.appendChild(name);
       var meta = document.createElement('div');
       meta.className = 'capacity-card-meta text-muted text-2xs';
-      meta.textContent = I18n.t('wishlist.meta_size', { size: U.formatSize(m.size_mb) }) +
-        ' · ' + I18n.t(m.holders === 1 ? 'wishlist.meta_replicas_ok_one' : 'wishlist.meta_replicas_ok_other', { have: m.holders });
+      var replicaText = I18n.t(m.holders === 1 ? 'wishlist.meta_replicas_ok_one' : 'wishlist.meta_replicas_ok_other', { have: m.holders });
+      var sizeMeta = _sizeTextOrNull(m.size_mb);
+      meta.textContent = sizeMeta ? sizeMeta + ' · ' + replicaText : replicaText;
       card.appendChild(meta);
       grid.appendChild(card);
     });
@@ -1006,7 +1021,9 @@
         ul.className = 'capacity-plan-unlocks-list';
         sc.newly_unlocked.forEach(function (m) {
           var li = document.createElement('li');
-          li.textContent = m.display_name + ' (' + U.formatSize(m.size_mb) + ')';
+          li.textContent = m.size_mb > 0
+            ? m.display_name + ' (' + U.formatSize(m.size_mb) + ')'
+            : m.display_name;
           ul.appendChild(li);
         });
         card.appendChild(ul);

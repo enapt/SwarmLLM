@@ -4,6 +4,13 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Models of unknown size were advertised as under a megabyte.** On the Swarm
+tab, suggested models whose size is not known yet — most of them, until the file
+has been checked — showed "< 1 MB", including models several gigabytes large.
+That is the one number someone looks at before deciding to download something.
+The size is now left out until it is actually known, the same way the memory
+figure beside it already behaved.
+
 **A mistyped model name was reported as a broken server.** Adding a model from
 HuggingFace with the name spelled wrong answered "Bad Gateway" and advised
 trying again — blaming the connection for something in what was typed, and
