@@ -395,29 +395,16 @@ pub(super) fn spawn_initial_announcements(
                 .await;
         }
 
-        // Broadcast manifests for models where we hold at least one shard
-        // (not just models we originally published). This allows shard-holding
-        // nodes to propagate manifests to pure-consumer peers.
-        let hosted_models: std::collections::HashSet<String> = shared_state
-            .model_registry
-            .all_shard_entries()
-            .into_iter()
-            .filter_map(|(shard_id, holders)| {
-                if holders.contains(&node_id) {
-                    Some(shard_id.model_id.0.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for manifest in shared_state.model_registry.models() {
-            if manifest.publisher == node_id || hosted_models.contains(&manifest.id.0) {
-                let _ = network_tx
-                    .send(NetworkCommand::Broadcast(SwarmMessage::ModelManifest(
-                        manifest,
-                    )))
-                    .await;
-            }
+        // Models we published OR hold at least one shard of, so shard-holding
+        // nodes propagate manifests to pure-consumer peers. Shared with the
+        // health monitor's periodic broadcast — see
+        // `ModelRegistry::manifests_to_gossip`.
+        for manifest in shared_state.model_registry.manifests_to_gossip(&node_id) {
+            let _ = network_tx
+                .send(NetworkCommand::Broadcast(SwarmMessage::ModelManifest(
+                    manifest,
+                )))
+                .await;
         }
         "initial_announcements"
     });

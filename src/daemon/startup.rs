@@ -255,7 +255,7 @@ pub(super) async fn restore_persistent_state(
                         }
                     }
 
-                    let manifest_loaded = if let Ok(mut manifest) =
+                    let manifest_loaded = if let Ok(manifest) =
                         crate::types::ModelManifest::load_from_dir(&model_dir)
                     {
                         // A manifest states its own model id, but shard scanning
@@ -297,11 +297,19 @@ pub(super) async fn restore_persistent_state(
                             );
                             false
                         } else if manifest.verify_hash().is_ok() {
-                            // Claim publisher as ourselves so health monitor
-                            // broadcasts this manifest (and its HF source) to peers.
-                            manifest.publisher = shared_state.identity.node_id().clone();
-                            use crate::model::manifest::ModelManifestExt;
-                            manifest.manifest_hash = manifest.compute_hash();
+                            // Deliberately does NOT rewrite `publisher` to this
+                            // node. That claim existed only to earn broadcast
+                            // rights, and broadcasting is now driven by what we
+                            // HOLD (`ModelRegistry::manifests_to_gossip`), so the
+                            // rewrite bought nothing and cost a great deal: every
+                            // holder claimed the same model, `register_manifest`
+                            // overwrites unconditionally, so holders erased each
+                            // other's claim until none of them broadcast at all.
+                            // It also changed `manifest_hash` on every restart,
+                            // making an unchanged model look changed to every
+                            // peer — 81 registrations under 50 publishers for one
+                            // model on a 5-node swarm. `publisher` now means what
+                            // it says: who published it.
                             shared_state
                                 .model_registry
                                 .register_manifest(manifest.clone());

@@ -384,6 +384,43 @@ impl ModelRegistry {
         self.manifests.iter().map(|v| v.value().clone()).collect()
     }
 
+    /// The manifests this node should re-gossip: ones it published, **and ones
+    /// it holds at least one shard of**.
+    ///
+    /// The second half is the load-bearing one, and leaving it out of the
+    /// periodic broadcast broke model discovery swarm-wide. `publisher` is not a
+    /// stable "who owns this" — every holder used to rewrite it to itself at
+    /// startup purely to earn broadcast rights, and `register_manifest`
+    /// overwrites unconditionally, so each holder's claim erased the previous
+    /// one. Measured on a 5-node swarm: `phi-3.5-mini` had been registered 81
+    /// times under **50 distinct publishers**. With a publisher-only filter that
+    /// race converges on *nobody* broadcasting, and since there is no on-demand
+    /// manifest fetch, a node that joins later can never learn the model exists
+    /// in full — `all_shards_available` stays false and every request for it
+    /// answers "No model loaded" while the dashboard lists it as available.
+    ///
+    /// Holding a shard is the honest signal: a node serving part of a model can
+    /// vouch for its manifest, which is why the gossip handler deliberately does
+    /// NOT require `sender == publisher`. Any new manifest-broadcast path must
+    /// come through here rather than re-deriving the predicate — the one-shot
+    /// startup announcement had it right and the 30s timer did not, so discovery
+    /// worked for whoever was already connected at boot and for nobody after.
+    pub fn manifests_to_gossip(&self, node_id: &NodeId) -> Vec<ModelManifest> {
+        let hosted: std::collections::HashSet<String> = self
+            .all_shard_entries()
+            .into_iter()
+            .filter_map(|(shard_id, holders)| {
+                holders
+                    .contains(node_id)
+                    .then(|| shard_id.model_id.0.clone())
+            })
+            .collect();
+        self.models()
+            .into_iter()
+            .filter(|m| m.publisher == *node_id || hosted.contains(&m.id.0))
+            .collect()
+    }
+
     /// Build a "model not found" error carrying the list of known models.
     ///
     /// Callers get `SwarmError::ModelNotAvailable` (mapped to HTTP 404 by the
@@ -615,6 +652,56 @@ mod tests {
         assert!(registry
             .reject_if_unknown_model(&ModelId("real-model".into()))
             .is_none());
+    }
+
+    /// Holding a shard of a model MUST earn the right to re-gossip its
+    /// manifest. Filtering on `publisher` alone stopped model discovery for a
+    /// whole swarm: every holder rewrote `publisher` to itself at startup to
+    /// earn broadcast rights, `register_manifest` overwrites unconditionally,
+    /// so holders erased each other's claim until none of them broadcast. With
+    /// no on-demand manifest fetch, a node that joined later could never learn
+    /// the model and answered "No model loaded" for a model the dashboard
+    /// listed as available.
+    #[test]
+    fn a_shard_holder_gossips_the_manifest_even_when_someone_else_published_it() {
+        let registry = ModelRegistry::new();
+        let us = NodeId([7u8; 32]);
+        let someone_else = NodeId([9u8; 32]);
+
+        // Published by a peer — exactly what every acquired model looks like,
+        // and what our own copy degrades to the moment that peer re-announces.
+        let mut foreign = test_manifest("held-model", "Held");
+        foreign.publisher = someone_else.clone();
+        registry.register_manifest(foreign);
+
+        // A model we neither published nor hold: not ours to vouch for.
+        let mut untouched = test_manifest("other-model", "Other");
+        untouched.publisher = someone_else.clone();
+        registry.register_manifest(untouched);
+
+        assert!(
+            registry.manifests_to_gossip(&us).is_empty(),
+            "holding nothing must gossip nothing"
+        );
+
+        registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("held-model".into()),
+                index: 0,
+            },
+            us.clone(),
+        );
+
+        let ids: Vec<String> = registry
+            .manifests_to_gossip(&us)
+            .into_iter()
+            .map(|m| m.id.0)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["held-model".to_string()],
+            "a shard we hold must earn the manifest a broadcast, and nothing else should"
+        );
     }
 
     fn test_manifest(id: &str, name: &str) -> ModelManifest {

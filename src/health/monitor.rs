@@ -610,11 +610,14 @@ impl HealthMonitor {
     /// Broadcast model manifests and HF sources so peers can discover and acquire models.
     async fn broadcast_manifests(&self) {
         let our_id = self.shared_state.identity.node_id().clone();
-        for manifest in self.shared_state.model_registry.models() {
-            // Only broadcast manifests we published (or locally generated)
-            if manifest.publisher != our_id {
-                continue;
-            }
+        // Models we published OR hold a shard of. A publisher-only filter here
+        // silently stopped model discovery for the whole swarm — see
+        // `ModelRegistry::manifests_to_gossip`.
+        for manifest in self
+            .shared_state
+            .model_registry
+            .manifests_to_gossip(&our_id)
+        {
             let msg = NetworkCommand::Broadcast(SwarmMessage::ModelManifest(manifest.clone()));
             if let Err(e) = self.network_tx.send(msg).await {
                 tracing::debug!(error = %e, model = %manifest.id, "DIAG: failed to broadcast manifest");

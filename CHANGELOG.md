@@ -4,6 +4,23 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A new node could see the swarm's models and run none of them.** Starting
+SwarmLLM fresh showed a list of models with other machines hosting them, all
+marked available — and every single request answered "No model loaded". This is
+the thing the whole system is for: you are not supposed to need a model on your
+own machine to use one.
+
+A machine only passed on a model's description if it was the machine that first
+added that model. Every machine holding a copy quietly claimed that role from
+the last one, so after a short while none of them believed it was theirs to pass
+on and the descriptions stopped circulating. Machines already running had them
+from earlier and carried on working, which is why this went unseen — it only
+affected people joining, and it affected all of them.
+
+Any machine holding part of a model now passes on its description. Confirmed on
+a node holding nothing at all: it learned the model from a peer and answered
+correctly across the network.
+
 **A request that could never succeed told you to keep trying.** With prompt
 privacy switched on, a model can only run if this machine holds its first part —
 that is what keeps your prompt off every other machine. When that part was

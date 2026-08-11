@@ -617,6 +617,24 @@ silently break at the wire if duplicated:
   through an equivalent attribution check. `ServiceUnavailable` means
   "THIS server can't serve" and `Internal` means our own bug — neither can
   ever justify charging a peer.
+- **`ModelRegistry::manifests_to_gossip`** (2026-08-11) — the single answer to
+  "which manifests should this node re-broadcast?": ones it published **and ones
+  it holds a shard of**. Both the one-shot startup announcement
+  (`daemon/background.rs`) and the 30s periodic broadcast
+  (`health/monitor.rs::broadcast_manifests`) go through it.
+  **Never filter on `publisher` alone.** Doing so broke model discovery
+  swarm-wide: every holder used to rewrite `publisher` to itself at startup to
+  earn broadcast rights, and `register_manifest` overwrites unconditionally, so
+  holders erased each other's claim until none of them broadcast. Since there is
+  **no on-demand manifest fetch**, a node that joined later could never learn a
+  model in full — `all_shards_available` stayed false and every request answered
+  "No model loaded" while the dashboard listed the model as available. Measured:
+  `phi-3.5-mini` registered 81 times under 50 distinct publishers (gotcha #296).
+  The correct predicate already existed in the startup path and was missing from
+  the timer, so discovery worked only for peers connected during someone's boot.
+  Holding a shard is the honest signal, which is why the gossip handler
+  deliberately does NOT require `sender == publisher`. `publisher` means who
+  published it — do not reintroduce a self-claim to grant broadcast rights.
 - **`model::huggingface::is_trusted_publisher`** (R141) — canonical
   curator-allowlist check for an HF `repo_id`. Splits on the first `/`
   and case-insensitively matches the prefix against
