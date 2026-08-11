@@ -206,298 +206,87 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1824 lib (dev,claude-subscription) / 1814 (default) + 79 integration + 23 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-10 (post-v0.3.89). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1824 lib (dev,claude-subscription) / 1814 (default) + 79 integration + 23 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-11 (post-v0.3.90, pre-v0.3.91). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.89-alpha (2026-08-09/10): things that were invisible from here
+### Latest — v0.3.91-alpha (2026-08-10/11): a 1.4x speed-up, and four defects inside it
 
-**Most of this round was invisible on a LAN, and some of it was invisible in the
-dashboard too.** A third-party peer in France (874-6278 ms) exposed three defects
-within an hour; probing the running node exposed the rest.
+**Long conversations generate ~1.4x faster on a GPU.** Every token re-converted
+the WHOLE history into the layout flash-attn wants (cache is f32 BHSD, kernel
+wants f16 BSHD) — O(history) work to add one position. `LayerKv` now keeps an
+f16 BSHD mirror appended one position at a time. Measured RTT 3070,
+llama-3.2-3b GQA, 3 alternations in ONE binary via `SWARMLLM_DISABLE_KV_MIRROR`:
+**2064 KV 31.0/32.2/31.1 → 21.7/22.8/22.5 ms/token**, no overlap. Long-context
+only (256 KV ~1.04x), which is what an O(history) cost predicts. Numerically
+identical on the flash path — rounding moves from every-read to once-at-write
+from an unchanged f32 source. **The MHA null control changed the design**: it
+came out 3-8% SLOWER, because MHA decode reads the f32 cache and never touches
+the mirror → now GQA-gated. See `.claude/rules/architecture.md` § `LayerKv`.
 
-**Replies from distant peers came back SCRAMBLED** — every word present, order
-wrong (`"You counting going seven ten!! eight...'re Keep six nine"`). Each token
-is an independent `request_response` send with no ordering, and the coordinator
-stopped at the first token carrying a `finish_reason`. **The tell was a token
-count that disagreed with the text.** `token_id` had been on the wire since the
-type existed, hardcoded to `0` at all five send sites. **Needs the SERVING node
-updated** — numbering is done by the sender (#282).
+**Three of the four fixes this round were defects INSIDE that change**, found by
+auditing it after it shipped to main: CI red from a `cfg(flash-attn)` TEST caller
+(gated checks need `--all-targets`; a release `--features cuda` build skips test
+targets — gotcha #264 again), the KV budget under-counting the mirror by 33%
+(admit-then-OOM instead of a 503 that reroutes), and prefix-cache hydration
+mirroring regardless of GQA (same model behaving differently depending on how the
+conversation began). The fourth was independent: **`mode = "download"` was
+ignored by the manual update check**, which read the legacy `auto_update` field
+while the background loop used `effective_mode()` — two answers to one question,
+and the user-triggered one was wrong.
 
-**A model refused every request while the dashboard said nothing was wrong**:
-prompt privacy on for a model whose shards were gone. In the same second the
-model list said `false`, the scheduler logged "active", and the per-model
-endpoint said `true` — the list computes `flag && has_first && has_last`, right
-for the indicator and wrong as the only report (#286).
+**Four optimisations were investigated and NOT built, which was the round's main
+value.** Batching the qkv/output projections was already implemented; the ~1.15x
+estimate that pointed at it described finished work. `flash_attn_varlen` for
+batched decode measured as a **1.84x REGRESSION at batch 8** — the concatenation
+alone (2.68 ms) exceeds the whole per-slot loop (1.83 ms), because the launch
+saving is fixed while the copy grows with history; it fails hardest on the busy
+long-conversation node it targets. And a "wasted `.contiguous()` at seq_len=1"
+does not exist — candle's `is_contiguous` skips size-1 dims.
 
-**A "private network" shared the PUBLIC network's gossip topics** — key-only
-separation, 97 warnings in 40 min on the live node; topics now scoped, public
-names byte-identical, 9→0 measured (#285). **A fixed 10s ACK deadline**
-("generous on LAN") declared a 6s peer dead mid-answer (#284). **74% of an idle
-node's log was noise** (1540 → 340 lines/hour).
-
-**Consolidated**: `SharedState::cfg()` is the ONLY settings mechanism (four
-private mirrors folded in); `OperationalParams` carries only fields with a
-consumer; `release_request_state` for the three per-request maps. Ten new
-build-failing guards, each verified to go red. New: `examples/smoke_test.sh`,
-`examples/two_node_test.sh`.
-
-**Process**: `pkill -x swarmllm` killed the live node (**#283** — the committed
-bench scripts did it too); a counting fix double-counted; and a commit chained on
-`cargo test | tail`, whose exit status comes from the pager, so main went red for
-minutes. Detail: `memory/round_log_0809_night.md`.
-
-### Prior — v0.3.88-alpha (2026-08-09): two things that reported success and did nothing
-
-**Settings saved, reported success, and did nothing.** Contribution level, max
-disk, max VRAM, max bandwidth, auto-manage storage, shard size and batch timeout
-all persisted to `config.toml`, returned `{"status":"ok"}`, showed their new
-value on reload — and left the running daemon on the value it booted with.
-Measured against the shipped v0.3.87, same script both ways: `max_disk_mb`
-50000 → 123456 reported **50000** (fixed: **123456**); contribution → Maximum
-left the storage target at **6250 MB** (fixed: **37500**, worker threads 4 → 8).
-
-**One cause, and it had already been patched around four times.** `state.config`
-is a boot-time snapshot, so each time somebody noticed a setting doing nothing
-they added a private mirror — `contribution_auto` (R121), `dashboard_trust_lan`,
-the cross-pool toggles — and the next setting stayed broken. `OperationalParams`,
-whose own doc comment says "can be changed without restart", carried **five
-fields nothing consumed**. Replaced by ONE live config: `state.live_config`
-(`ArcSwap<Config>`) read through **`SharedState::cfg()`**, stored by the PUT
-handler; the watch channel now only wakes subsystems that must *react* (resize a
-semaphore, retime an interval) rather than merely re-read. The contribution
-atomic added earlier the same day was folded into it.
-
-Pinned by `user_settable_config_is_read_live_not_from_the_boot_snapshot`, which
-checks whole SECTIONS rather than field names — `config.resources
-.shard_upload_mbps(..)` never mentions `max_bandwidth_mbps`, which is exactly how
-that one survived the first pass. Honest about what cannot follow live:
-connection limits are fixed at swarm construction and CPU threads are handed to a
-worker at spawn, so the panel says which need a restart (#281).
-
-### v0.3.88-alpha, second half: serving the swarm paid nothing, reported nothing
-
-**The two dashboard tiles that answer "is my node contributing" were exactly
-inverted.** Measured on two machines, both directions: a peer's request this
-node served end to end (28 layers, 5.54s, correct answer) moved **neither**
-counter and earned **zero** credits — while the requester was debited 430; and
-a purely local chat moved **both**, and paid the node 20 credits for its own
-work. So a user serving the swarm was told they had contributed nothing, and a
-user talking only to themselves was told they were serving the network.
-
-**Serving accounting lived on the path with less traffic.**
-`track_forward_participation` was called only from `layer_forward.rs`
-(multi-segment); the single-segment fast path — how a machine holding a whole
-model answers a peer, i.e. the common case — never called it. "One invariant,
-N paths" again, with a twist: **the missed path was not obscure, it was the
-busy one.** Now consolidated at `SharedState::record_peer_serve` (two inbound
-call sites) and pinned by `serving_is_counted_and_paid_in_exactly_one_place`,
-which fails the build if those counters or `pending_credit_earn` are written
-elsewhere — the previous helper had a doc comment saying the same thing and was
-still skipped.
-
-**`release_escrow` transfers nothing** despite recording `to_node`, and
-`create_transaction` (dual-signature) has **zero production callers** — so that
-accumulator is the only way a serving node is ever paid (#280). Inference
-earnings now carry a reason tag instead of landing as `unspecified`.
-
-**Verified with a null control**, which is what makes it attributable: a peer's
-request moves both counters and earns 440 (10/token × 44, tagged
-`inference_serve_earning`); a local chat immediately after moves neither and
-earns nothing. Corrects the "the ledger is fine" half of #278. Gotchas
-**#279-#280**.
-
-### Prior — v0.3.85 / .86 / .87-alpha (2026-08-09): claims nothing could check
-
-**Three releases in one session. The recurring defect was not wrong behaviour —
-it was a claim with no mechanism able to contradict it.** In most cases the fix
-was making the claim answerable, not changing what the code does.
-
-**v0.3.85 — six defects users feel.**
-- **Serving several people at once never batched.** The gate required every
-  request at the same position with the same history; concurrent chats are never
-  that. Taken **0 of 156 times** on a live node. Both conditions only protect
-  prompt processing, so they now apply only there. **8 users previously got no
-  more total throughput than 1** (36.9 vs 38.2 tok/s) → **89.6 (2.4x)**, null
-  control (equal lengths) 1.5%. **CPU does NOT scale** — 1.27x at 4, 1.14x at 8;
-  it is bandwidth-bound already. Expect 1.1-1.3x on a processor.
-- **`inference.shard_range` read in FIVE places, ignored in THREE** — splitting a
-  model across machines never happened outside startup, because a **rescan on a
-  timer re-registered everything on disk ~5 min later**. Now
-  `InferenceConfig::claims_shard`. Verified across two machines, then a genuine
-  **2-segment pipeline** answered correctly (`x-swarm-segments: 2`).
-- **AutoNAT read an impossible probe as proof** (`127.0.0.1`, LAN, link-local —
-  84 in one log). Success arm was guarded, failure arm was not. Now
-  `autonat_verdict` with a third outcome, `Uninformative`.
-- **~44% of a node's log** announced nothing had changed (96,850 / 453,591).
-- **Two documented commands failed**: `status --json` did not exist; `status |
-  grep "peer id"` returned nothing. Peer id must come from the **LAST** `/p2p/`
-  or you publish the relay's identity.
-- **MSRV wrong by nine releases** (`redb` needs 1.89); **51 tests ran in NO
-  automation**; 7 API routes undocumented.
-
-**v0.3.86 — the escape hatch v0.3.85 created.** `--shards` persists to the DB and
-omitting it RESTORES it, so a node told once to hold half a model held half
-forever. Harmless while ignored; a trap the moment it worked. `--shards all`
-clears it.
-
-**v0.3.87 — from an operator's report.** Credit movements were **never
-persisted** — only totals — so 205k spent / 204k refunded against 0 requests was
-unexplainable by anyone. Now logged with reason tags at
-`GET /api/admin/credits/transactions`. **The books reconciling proved nothing**:
-`backfill_historical_refunds` attributes unexplained gaps to refunds, so the
-identity closes by construction (#278). Also: **API key could not be rotated**
-(DB is the source, the file is a copy) → `POST /api/admin/api-key/rotate`; and
-the update docs named `[update]` when the code reads `[updates]` — an unknown
-section warns and is ignored. Resolved update mode now logged at every start.
-**One reported finding was NOT a bug**: `exec` keeps the PID and kernel start
-time, so `ps` and `uptime_seconds` are both right and `version` is always
-truthful (#277).
-
-**Process, worth keeping.** Three of my own fixes passed their tests while being
-wrong — one **reverted itself on a timer**. Twice I read a build marker with the
-compile error printed directly above it. Once I told the user a node was restored
-when only its config was, not its DB state. **Everything here was verified by
-running the system, and the releases were verified on the DOWNLOADED artifacts,
-not local builds.** Gotchas **#269-#278**.
-
-### Prior — v0.3.83-alpha (2026-08-08): GPU decode routing, and a measurement floor
-
-**GQA decode on CUDA had a `k_len >= 1024` crossover below which it took
-`standard_attention`. That threshold came from timing the attention call in
-ISOLATION and was wrong at every length.** Measured end to end, A/B in one
-binary: **1.13x at kv~272, 1.42x at ~528, 1.61x at ~912** in flash's favour.
-CPU and CUDA now use the SAME decode rule — MHA standard, GQA flash, always.
-**Third occurrence of gotcha #255** → now gotcha **#266**: measure the FORWARD,
-never the call.
-
-**Null controls are what made it believable**, not the effect size: a context
-above the old threshold came out identical (both arms already flash) and an MHA
-model identical *to the decimal* (38.90 vs 38.90).
-
-**⚠ MEASUREMENT FLOOR (gotcha #267): this box cannot resolve a GPU change below
-~25%.** Within-arm spread 24% vs a 7% between-arm gap; GPU 64→80 C and
-270→1740 MHz across one alternation set. A "1.23x win" (fusing the transpose and
-cast) evaporated under four alternations and was REJECTED. Below 1.3x, require a
-null control.
-
-**Diagnosed, not fixed — two sized opportunities.** (1) The KV cache is f32 BHSD
-and flash wants f16 BSHD, so the WHOLE history is converted every token: O(n) per
-token, worth **~1.3x short / ~2x long context**, corroborated by end-to-end
-scaling agreeing to 4%. (2) Batched decode never batches the **qkv and output
-projections** (only the FFN), because `forward_batch_body` loops per-request
-through `forward_attn` — worth ~1.15x aggregate, with a larger kernel-reuse gap
-behind it. The batched path had NO profiler coverage at all, which is why the
-flat curve sat undiagnosed for two days; it does now.
-
-Detail: `memory/round_log_0807_fused_attn.md`.
-
-### Prior — v0.3.82-alpha (2026-08-08): fused attention tail on CPU, +19% prompt processing
-
-**Attention's tail was FOUR passes over an 11 MB tensor.** `masked_fill`,
-`softmax` and the scale each materialised their own
-`[batch, heads, q_len, kv_len]` score temporary and read the previous one back —
-~90 MB of traffic per layer per chunk for ~3 MB of arithmetic. `src/inference/
-attn_softmax.rs` now does scale + Gemma-2 soft-cap + mask + softmax in ONE pass
-(a candle `CustomOp2`), and the mask is additive f32 everywhere instead of a `u8`
-predicate plus a float copy the flash arm rebuilt per call. `masked_fill` and
-`neg_inf` are gone from three weight structs and every attention signature.
-
-**Measured, min of 3, llama-3.2-3b Q4_K_M, 896-token prompt, 4 threads**
-(`examples/prefill_bench.rs`, new): prompt processing **22.04 → 26.14 tok/s
-(1.19x)**, decode unchanged. `SWARMLLM_PROFILE=1` on the same run confirms the
-mechanism instead of inferring it — **attention core 9066 → 3274 ms (2.77x)**
-while every other stage moves under 1.6%. Attention was 22.4% of a prompt chunk
-and is now 9.5%.
-
-**Prompt processing is now 84.5% quantized matmul.** Do not spend another round
-on CPU attention without re-profiling; two rounds have gone into stages that
-turned out to be minorities.
-
-**Two process findings.** An equivalence test where both sides call the same
-helper is a tautology — `fused_matches_composed_reference` passes with the scale
-INVERTED, which is why a second test compares against candle's own `/ f64`; all
-three injected defects were confirmed to go red. And **`SWARMLLM_PROFILE=1` did
-nothing on its own** — the dump was env-gated but the clock feeding it started
-only under DEBUG logging, so the documented way to profile printed nothing.
-
-**Second change, same day: a short conversation reserved as much memory as a
-long one.** candle's `Cache::new(dim, n)` sets `grow_by` AND `max_seq_len` to
-`n`, and `append` allocates the full buffer on the FIRST append — so passing a
-model's context length (which every site did, because the parameter is *named*
-`max_seq_len`) reserved the whole window from token one. **A 100-token chat held
-940 MB at 3% utilisation.** `layers::new_kv_cache` + `KV_CACHE_GROWTH_TOKENS`
-now grow on demand: **940 → 117 MB** (short chat) and **940 → 235 MB** (896-token
-prompt, 22% → 88% utilisation), speed unchanged, no conversation shortened.
-
-**RSS could not have found it**: across that 4-8x reservation change process RSS
-moved ~5%, in both directions, because `Tensor::zeros` gets lazily-faulted pages
-— it tracks USAGE while the defect was in RESERVATION. `KvCacheStore::occupancy()`
-now reports it directly (`DIAG: KV-cache occupancy`). Gotchas **#261**, **#262**.
-
-**Third change: contributing more of your machine made replies SLOWER.** Reading
-a prompt and writing a reply want opposite thread counts — re-measured after the
-attention fix, prompt processing scales to **1.83x** past decode's optimum while
-decode gets **2.0x worse** at the same setting (it is bandwidth-bound at 69% of
-roofline). One pool served both, so raising `contribution` sped prompts 1.5x and
-slowed replies 13%. `inference::cpu_pools` caps decode only, at one choke point;
-A/B in a single binary via `SWARMLLM_DECODE_THREADS=0`: **decode 1.42x at 8
-threads, 1.53x at 14, prompt processing IDENTICAL**. No change at the default.
-**Re-measuring first was the value** — the old FUTURE_WORK table said 1.18x and
-did not know about the perverse effect.
-
-Detail: `memory/round_log_0807_fused_attn.md`.
-
-### Prior — UNRELEASED on main (2026-08-07): FlashAttention on CUDA, compute cap 75 → 80
-
-**Per attention call: prompt processing 2.4-7.8x on an NVIDIA card,
-long-context GQA generation 1.4-4.9x. END TO END (measured 2026-08-08, the
-number users feel): prompt processing 1.3x at ~900 tokens rising to 2.0x at
-~3072, decode unchanged below the 1024 crossover then 2.1-2.4x above it.** The
-per-call figure was quoted in the CHANGELOG as if it were the user-visible one;
-attention is only part of a forward pass and the quantized matmuls around it are
-unchanged. Pre-Ampere cards (RTX 20-series / GTX 16-series) lose the candle GPU
-path** and fall back to CPU with an explicit message — `cuda_if_available`
-SUCCEEDS on those cards and only module load fails, so without the probe a node
-starts clean, logs "GPU detected", and then fails every request. Detail in
-`memory/round_log_0807_flash_attn.md`.
-
-**Turning flash-attn on the obvious way would have made generation MUCH slower.**
-candle-flash-attn ships **no split-KV kernels**, so one query row leaves the card
-idle: **4x-25x slower on MHA decode**, widening with context. GQA reverses above
-~1k because `standard_attention` rebuilds the `repeat_kv` expansion every token.
-**Gotcha #255 again on a different device** — right kernel OPPOSITE for prefill vs
-decode, turning on GQA. Shipped rule `cuda_decode_prefers_standard`: prefill
-always flash; decode flash only when GQA AND `k_len >= 1024`.
-
-| | prefill | decode |
-|---|---|---|
-| phi-3.5 (MHA) | 2.4-4.0x | unchanged — router keeps standard |
-| llama-3.2 (GQA) | 4.2-7.8x | 1.4-4.9x past ~1k context |
-
-**PagedAttention was NOT restored — it never ran** (#257): `None` at its own
-introducing commit, no call site, deleted three weeks later as "never wired", and
-the 46.4 tok/s figure it was credited for was measured *between* those dates.
-
-**Two non-performance findings.** The CUDA flash path **silently dropped
-`attn_logit_softcap`** (the plain entry point hardcodes it off) → **Gemma-2
-quietly wrong on GPU only**, right shapes and plausible output (#258). And
-flash-attn's `dylib=cudart` would have broken the **driver-only install model**
-AND failed the CI link outright → `vendor/candle-flash-attn` with `cudart_static`
-+ the 18 unreachable bf16 kernels dropped (37 → 19, halving the kernel build).
-
-**Measurement discipline paid three times, all against my own claims:** the
-numerics assertion caught the benchmark comparing **causal against full
-attention** (relative 3.15 vs an F16 budget of 0.05); median-of-9 gave **3.08 ms
-and 191 ms for the same shape** → min-of-20; and a build-time *estimate* stated as
-fact (~2.5 h) measured **76 min / 66 min**. `SWARMLLM_FORCE_STANDARD_ATTN=1` A/Bs
-the kernel inside ONE binary — two builds differ in more than the kernel.
-
-**Before tagging**: end-to-end GPU tok/s NOT re-measured (README says so rather
-than quoting numbers). CI 13/13 green; cache-warm green on all three cells, both
-GPU builds verified in-log as compiling `19 of 19 kernels`.
+**The durable finding: GPU decode here is LAUNCH-BOUND, not compute-bound.**
+Post-mirror profile puts attention at 11% and rms norms at 19%; measured
+directly, one fused norm over 3072 floats costs **46 us** (~0.27 GB/s) — dispatch,
+not arithmetic. Corroborated cross-device: the same norms are **0.3% on CPU**.
+So the lever is FEWER LAUNCHES (fusion, CUDA graphs, paged KV), not faster ops.
+**Do not size launch-reduction work from FLOPs** — that is exactly how the last
+estimate came to describe finished work. Detail:
+`memory/round_log_0810_kv_mirror.md`, `docs/FUTURE_WORK.md`.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
+
+Read the named round log before re-deriving any of these.
+
+- **v0.3.90** (08-10): **a GPU could not run ANY unquantized model** — F16/BF16/F32
+  GGUFs loaded clean on CUDA then failed 100% of requests (candle `dequantize_f16`
+  bailed where its `dequantize` sibling fell back); verified with a null control,
+  v0.3.89 fails the identical request. Plus `cpu_placement_reason`, `max_model_len`
+  on `/v1/models`, and a shard-delete guard. Gotchas #288-#290.
+- **v0.3.89** (08-09/10): **replies from distant peers arrived SCRAMBLED** — every
+  token is an independent rr send with no ordering and the coordinator stopped at
+  the first `finish_reason`; `token_id` had been on the wire since day one,
+  hardcoded 0 at all five send sites (`StreamReassembler`, #282). A "private
+  network" shared the PUBLIC gossip topics (#285). A fixed 10s ACK deadline killed
+  a 6s peer (#284). 74% of an idle log was noise. **#283: `pkill -x swarmllm`
+  killed the user's live node.** Log: `round_log_0809_night.md`.
+- **v0.3.88** (08-09): **settings saved, said "ok", and did nothing** — one cause
+  (`state.config` is a boot snapshot) already patched around FOUR times; now ONE
+  live config via **`SharedState::cfg()`** (#281). Second half: **serving the swarm
+  paid nothing and reported nothing** — the two "am I contributing" tiles were
+  exactly inverted, because accounting lived only on the LESS travelled path
+  (#279/#280) → `SharedState::record_peer_serve`.
+- **v0.3.85/.86/.87** (08-09): every defect was a claim nothing could contradict.
+  Batching NEVER engaged (0/156) → **2.4x** on GPU, but CPU does not scale.
+  `shard_range` read in 5 places, ignored in 3 — **a rescan on a timer undid the
+  split**. Credit movements never persisted (#278). **51 tests ran in NO
+  automation.** Log: `round_log_0808_night.md`.
+- **v0.3.82/.83** (08-07/08): fused attention tail on CPU (**+19%** prompt
+  processing, `attn_softmax`); CUDA decode routing corrected — the 1024 crossover
+  came from timing the call in ISOLATION and was wrong at every length (**gotcha
+  #266: measure the FORWARD**). KV reservation fix: a 100-token chat held 940 MB
+  (#261). Per-phase CPU pools — prompt and decode want OPPOSITE thread counts.
+  **⚠ #267: this box cannot resolve a GPU change below ~25%.**
+  Logs: `round_log_0807_fused_attn.md`, `round_log_0807_flash_attn.md`.
 
 Read the named round log before re-deriving any of these.
 

@@ -534,6 +534,31 @@ silently break at the wire if duplicated:
   RSS**: the reservation is lazily-faulted zero pages, so a 4-8x change in
   reserved bytes moved RSS ~5% and in both directions. Two conclusions drawn
   from RSS about this cache were wrong before the counter existed.
+- **`inference::split::kv_cache::LayerKv`** (2026-08-10) — one layer's KV cache:
+  the f32 BHSD cache every path reads, plus an optional f16 BSHD mirror for the
+  CUDA flash kernel. **Never touch the inner `KvCache` directly.** `append` and
+  `reset` are INHERENT methods and so take priority over the `Deref`, which is
+  what stops an existing call site reaching the inner versions and leaving the
+  mirror behind; `KvCacheStore::truncate_to` (the speculative-decode path) got
+  correct behaviour for free from that, since it truncates via reset+append.
+  **Why a mirror rather than replacing the f32 cache**: rounding to f16 moves
+  from every-read to once-at-write, and since the f32 source is never itself
+  overwritten the flash kernel receives bitwise the same numbers — so the flash
+  path is numerically unchanged, not merely close, while `standard_attention`
+  keeps full precision. Published results on f16 KV divergence (arXiv 2604.15409)
+  are worst under long context and GQA, which is exactly our case, so the f32
+  copy stays.
+  **Three things a new caller must respect.** (1) The mirror is GQA-only —
+  `layers::model_wants_kv_mirror` gates it, because MHA decode reads the f32
+  cache and an unread mirror cost 3-8% per token plus 50% more KV memory
+  (measured on phi-3.5). (2) `set_mirror_wanted(true)` is deliberately INERT: a
+  mirror started against a cache that already holds positions can never catch up
+  and would be refused forever by the length guard while still costing memory.
+  (3) The mirror is real VRAM and `kv_budget::kv_bytes_per_token` must charge for
+  it — omitting it let a model be admitted and then OOM instead of returning the
+  503 that reroutes to a peer.
+  Worth 1.41x on GQA decode at ~2064 KV; the win is long-context only (~1.04x at
+  256), which is what an O(history) cost predicts.
 - **`inference::attn_softmax::scaled_masked_softmax`** (2026-08-07) — the single
   expression of attention's tail: scale, optional Gemma-2 logit soft-cap,
   additive mask, softmax. Do NOT re-express those as separate candle ops in a

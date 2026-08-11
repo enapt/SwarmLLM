@@ -344,7 +344,10 @@ only the transformer layers it owns, forwarding hidden-state activations between
 
 The module is split into focused subfiles: `model.rs` (SplitModel struct + accessors),
 `loader.rs` (GGUF/shard load), `executor.rs` (forward pass + tensor-parallel),
-`kv_cache.rs` (per-request KV-cache store), `entry.rs` (model entry + LRU eviction),
+`kv_cache.rs` (per-request KV-cache store; `LayerKv` holds each layer's f32 BHSD
+cache plus an optional f16 BSHD mirror for the CUDA flash kernel — GQA only, worth
+1.41x on long-context decode, see `.claude/rules/architecture.md`),
+`entry.rs` (model entry + LRU eviction),
 `gguf_meta.rs` (GGUF header parsing), `shard_reader.rs` (multi-shard virtual reader),
 `rope.rs` (RoPE precomputation), `prefix_cache.rs` (cross-request prefix-KV reuse).
 
