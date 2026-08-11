@@ -31,6 +31,31 @@ Run `/cleanup` after committing changes to: SharedState fields, API endpoints, J
 
 Never use `Config` or `Internal` for request validation. When unsure between Internal vs ProviderError vs ServiceUnavailable, look at the surrounding code in the same function — it usually picks a clear pattern (translate.rs lines 549-559 use ProviderError, so the tool_call missing-field arms should too).
 
+### A policy refusal is 503, and must never be told to retry
+
+A request this node declines *by configuration* — private mode, prompt privacy —
+is `ServiceUnavailable`-shaped (503), not `Internal` (500). 500 reports a
+deliberate setting as a crash: it tells monitoring this node has a bug and the
+user nothing they can act on. `PrivateModeUnavailable` and
+`PromptPrivacyUnavailable` are the two worked examples — each is its own variant
+with its own `error_type`, not a string stuffed into a general variant.
+
+**Give a permanent failure its own variant rather than filing it under
+`PipelineError(String)`.** That variant mixes transient and permanent causes, and
+its hint is picked by substring-matching user-facing prose that gets rewritten —
+so a new permanent failure silently inherits a *default* hint asserting that a
+peer went offline and to try again. Three failures have now been given that
+advice for a condition retrying can never fix (gotcha #295).
+
+Two follow-ups a new `SwarmError` variant must not skip:
+
+- **`failure_is_penalty_worthy`** (`router/distributed_exec.rs`) defaults to
+  `_ => true`, i.e. blame the peer. A variant describing OUR OWN config or a
+  local fault must join the local-only list or it docks credits from innocent
+  peers.
+- **`error_hint`** — if retrying cannot help, say so. Test on the ADVICE, not the
+  wording: a test pinned to a phrase passes while the user is still looping.
+
 ## Verify before deleting sweep findings
 
 Sweep agents report dead code / orphaned keys with confidence ≥80%, but their grep may miss call sites in adjacent directories (R120 caught Agent 4 missing 6 `enc.*` callers in `init.js`, `core/utils.js`, `chat.js`). Before deleting anything an agent flagged:

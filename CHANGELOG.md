@@ -4,6 +4,22 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A request that could never succeed told you to keep trying.** With prompt
+privacy switched on, a model can only run if this machine holds its first part —
+that is what keeps your prompt off every other machine. When that part was
+missing, the answer came back as a server fault, advising that a peer had
+probably dropped out and to try again. Trying again could not help: the setting
+and the files on disk disagreed until one of them changed, so the advice was a
+loop with no way out.
+
+The reply now names the two things that actually resolve it — fetch the model's
+first part, or turn prompt privacy off for that model — and says plainly that
+retrying will not work. It is also no longer reported as a fault in the server,
+because refusing on purpose is not a malfunction.
+
+The same wrong advice had been given twice before for other permanent failures,
+so the general wording no longer claims a cause it cannot know.
+
 ## [0.3.92-alpha] — 2026-08-11
 
 **A model could be asked a question in a different model's format.** When a node

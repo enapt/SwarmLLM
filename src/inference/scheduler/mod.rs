@@ -836,23 +836,24 @@ impl PipelineScheduler {
                     .cloned()
                     .collect();
                 if local_only.is_empty() {
-                    // Name the setting, not just the missing shard. This fires
-                    // when prompt privacy is on for a model whose first shard
-                    // this node does not have — commonly because the setting was
-                    // enabled while the shards were present and outlived them.
-                    // The old wording said only "download the first shard",
-                    // which does not tell anyone WHY it is suddenly required,
-                    // and the dashboard reported the setting as off.
+                    // Fires when prompt privacy is on for a model whose first
+                    // shard this node does not have — commonly because the
+                    // setting was enabled while the shards were present and
+                    // outlived them.
+                    //
+                    // This is its OWN error rather than a `PipelineError` for a
+                    // reason: as the latter it was answered 500 "server_error"
+                    // with the generic pipeline hint, which told the user a peer
+                    // had gone offline and to try again. Nothing about retrying
+                    // can help here — the setting and the shards on disk
+                    // disagree until one of them changes.
                     let model = candidates
                         .first()
                         .map(|c| c.shard_id.model_id.0.as_str())
                         .unwrap_or("this model");
-                    return Err(SwarmError::PipelineError(format!(
-                        "Prompt privacy (encrypted_pipeline) is enabled for {model}, which \
-                         requires this node to hold shard 0 (the embedding table) so no peer \
-                         ever sees your prompt. This node does not have it. Either download \
-                         shard 0, or turn prompt privacy off for this model."
-                    )));
+                    return Err(SwarmError::PromptPrivacyUnavailable {
+                        model_id: model.to_string(),
+                    });
                 }
                 options = local_only;
             }

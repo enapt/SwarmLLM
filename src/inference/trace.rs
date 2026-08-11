@@ -684,6 +684,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::PeerNotFound(_) => "PeerNotFound",
         E::PipelineError(_) => "PipelineError",
         E::PrivateModeUnavailable { .. } => "PrivateModeUnavailable",
+        E::PromptPrivacyUnavailable { .. } => "PromptPrivacyUnavailable",
         E::ProviderError { .. } => "ProviderError",
         E::Serialization(_) => "Serialization",
         E::ServiceUnavailable(_) => "ServiceUnavailable",

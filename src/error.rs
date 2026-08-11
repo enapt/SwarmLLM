@@ -104,6 +104,19 @@ pub enum SwarmError {
         missing_shards: Vec<u32>,
     },
 
+    /// Prompt privacy (`inference.encrypted_pipeline`) is on for this model, but
+    /// this node does not hold shard 0 — the embedding table that has to stay
+    /// local for the prompt to be hidden from every peer.
+    ///
+    /// This is a POLICY refusal, not a fault: the setting and the shards on disk
+    /// disagree, commonly because privacy was switched on while shard 0 was
+    /// present and the shard was later pruned. Retrying can never resolve it,
+    /// which is why it is its own variant rather than a `PipelineError` — as the
+    /// latter it inherited a generic "a peer went offline, try again" hint and
+    /// sent users round a loop that had no exit.
+    #[error("Prompt privacy is on for {model_id}, but this node does not hold shard 0 (the embedding table) that keeps your prompt away from every peer")]
+    PromptPrivacyUnavailable { model_id: String },
+
     // Overload
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
@@ -164,6 +177,11 @@ impl IntoResponse for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.0.to_string(),
                 "private_mode_error",
+            ),
+            SwarmError::PromptPrivacyUnavailable { .. } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                self.0.to_string(),
+                "prompt_privacy_error",
             ),
             SwarmError::VisionEncoderUnavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -332,9 +350,22 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
              connected peer. Fetch the whole model with `swarmllm get-model <name> --all`, \
              or wait for more peers to come online.",
         ),
+        // The remaining pipeline failures are a mix of transient and permanent
+        // causes, and we do not know which this one is. The old wording picked
+        // the transient reading and stated it as fact — "a peer went offline …
+        // try again" — so every permanent cause sent the user round a loop with
+        // no exit. Say what is known, offer both branches, promise neither.
         SwarmError::PipelineError(_) => Some(
-            "Something went wrong assembling the inference pipeline. This usually means \
-             a peer went offline mid-request. Try again — a different route will be used.",
+            "The route to run this model couldn't be put together. If a peer dropped out \
+             this will fix itself — try once more. If it fails the same way again, the \
+             model is missing a piece: fetch it with `swarmllm get-model <name> --all`, \
+             or pick a model marked as ready in the dashboard.",
+        ),
+        SwarmError::PromptPrivacyUnavailable { .. } => Some(
+            "Prompt privacy keeps your prompt on this machine, which needs the model's \
+             first part stored here — and it isn't. Either fetch it with \
+             `swarmllm get-model <name>`, or turn prompt privacy off for this model to \
+             let the swarm run it. Retrying as-is won't help.",
         ),
         SwarmError::InferenceTimeout(_) => Some(
             "The request took too long. Try a shorter prompt, reduce the max tokens, \
@@ -425,6 +456,61 @@ mod tests {
             actual: "def".into(),
         };
         assert!(error_hint(&err).unwrap().contains("corrupted"));
+    }
+
+    /// A failure that retrying cannot fix must never be answered with advice to
+    /// retry. This is the third time that rule has been broken the same way: the
+    /// generic `PipelineError` hint asserts a transient cause ("a peer went
+    /// offline"), and each permanent failure filed under that variant inherited
+    /// it — first the missing-layer case (reported 2026-07-30), then prompt
+    /// privacy, which is why the latter is now its own variant.
+    ///
+    /// Asserting on the ADVICE rather than the wording is deliberate: the prose
+    /// gets rewritten, and a test pinned to a phrase would pass while the user
+    /// was still being sent round a loop with no exit.
+    #[test]
+    fn permanent_failures_are_never_told_to_retry() {
+        for err in [
+            SwarmError::PromptPrivacyUnavailable {
+                model_id: "m".into(),
+            },
+            SwarmError::PipelineError("No node available for layer 10".into()),
+        ] {
+            let hint = error_hint(&err).expect("permanent failure needs a hint");
+            let lower = hint.to_lowercase();
+            assert!(
+                !lower.contains("try again")
+                    && !lower.contains("a different route")
+                    && !lower.contains("peer went offline"),
+                "{err} is permanent but its hint advises retrying: {hint}"
+            );
+        }
+    }
+
+    /// Prompt privacy is a policy refusal by THIS node, not a bug in it, and not
+    /// the caller's mistake — so it answers 503, the same as the sibling
+    /// `PrivateModeUnavailable`. It answered 500 "server_error" until
+    /// 2026-08-11, which reports a deliberate configuration as a crash.
+    #[test]
+    fn prompt_privacy_refusal_is_service_unavailable_not_a_bug() {
+        let resp = ApiError(SwarmError::PromptPrivacyUnavailable {
+            model_id: "m".into(),
+        })
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The generic pipeline hint covers causes we cannot tell apart, so it must
+    /// not state one of them as fact. It may offer retrying as a possibility;
+    /// it may not promise it will work.
+    #[test]
+    fn generic_pipeline_hint_does_not_assert_a_cause_it_cannot_know() {
+        let hint = error_hint(&SwarmError::PipelineError("segment 1 failed".into())).unwrap();
+        let lower = hint.to_lowercase();
+        assert!(
+            !lower.contains("this usually means") && !lower.contains("a different route will"),
+            "generic hint asserts a cause it cannot know: {hint}"
+        );
     }
 
     #[test]

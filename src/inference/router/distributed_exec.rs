@@ -855,6 +855,7 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         | SwarmError::ModelNotAvailable(_)
         | SwarmError::InsufficientCapacity(_)
         | SwarmError::PrivateModeUnavailable { .. }
+        | SwarmError::PromptPrivacyUnavailable { .. }
         | SwarmError::InsufficientCredits { .. }
         | SwarmError::InsufficientDisk { .. }
         | SwarmError::Database(_)
