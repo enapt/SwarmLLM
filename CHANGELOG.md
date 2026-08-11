@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.91-alpha] — 2026-08-11
+
 **A request sent to another machine could come back empty, and be charged for.**
 Reported as intermittent blank answers — roughly half of calls on a node that
 routes to peers, each taking 35-40 seconds before returning nothing, with no
