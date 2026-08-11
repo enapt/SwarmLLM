@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.92-alpha] — 2026-08-11
+
 **A model could be asked a question in a different model's format.** When a node
 had one model resident and was asked for another, the prompt for the second was
 built using the FIRST one's chat template, start token and end token. Nothing
