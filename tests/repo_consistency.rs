@@ -1873,3 +1873,25 @@ fn the_router_answers_bad_methods_in_the_error_envelope() {
          or OPTIONS preflight bypasses CORS and every browser client breaks"
     );
 }
+
+/// Both HuggingFace probe call sites must tell a mistyped repo apart from an
+/// upstream fault.
+///
+/// A wrong repo name is the caller's to fix; a rate limit or an outage is not.
+/// `probe.rs` classified them and `shards.rs` did not, so the endpoint people
+/// actually use to add a model answered a typo with `502 Bad Gateway` and the
+/// generic cloud-provider hint ("The cloud provider returned an error. Try
+/// again") — naming the wrong system and advising the one thing that cannot
+/// help. The stale comment there even claimed to match probe.rs.
+#[test]
+fn both_huggingface_probe_sites_treat_a_typo_as_the_callers_mistake() {
+    let root = repo_root();
+    for rel in ["src/api/admin_hf/probe.rs", "src/api/admin_hf/shards.rs"] {
+        let src = std::fs::read_to_string(root.join(rel)).expect("call site must exist");
+        assert!(
+            src.contains("probe_failure_is_user_fixable"),
+            "{rel} probes HuggingFace, so it must separate a wrong name from an \
+             upstream failure — otherwise a typo is reported as a gateway error"
+        );
+    }
+}

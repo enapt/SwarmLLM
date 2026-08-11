@@ -180,17 +180,26 @@ pub async fn hf_download_shards(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "HuggingFace probe failed");
-                // SEC / contract: HuggingFace is the upstream service, so a
-                // probe failure is an upstream error (502 Bad Gateway), not
-                // local "this server can't serve" (503). Matches the variant
-                // used in probe.rs and search.rs and prevents leaking local-
-                // vs-upstream topology via 503/502 differentiation.
+                let detail = crate::api::scrub_truncate_error(&e);
+                // A wrong repo name or filename is the caller's to fix, exactly
+                // as in probe.rs. This arm was missing here, so the endpoint
+                // people actually use to add a model answered a typo with
+                // `502 Bad Gateway` and the generic cloud-provider hint —
+                // "The cloud provider returned an error. Try again" — which
+                // names the wrong system and advises the one thing that cannot
+                // work. The comment this replaces claimed to "match the variant
+                // used in probe.rs"; probe.rs learned to tell the two apart and
+                // this call site did not, so the comment read as verification
+                // while the behaviour had diverged.
+                if crate::model::huggingface::probe_failure_is_user_fixable(&e) {
+                    return ApiError(crate::error::SwarmError::NotFound(detail));
+                }
+                // Anything else really is upstream: rate limits, outages,
+                // network faults. 502 keeps those distinct from local "this
+                // server can't serve" (503) without leaking topology.
                 ApiError(crate::error::SwarmError::ProviderError {
                     status: 502,
-                    body: format!(
-                        "HuggingFace probe failed: {}",
-                        crate::api::scrub_truncate_error(&e)
-                    ),
+                    body: format!("HuggingFace probe failed: {detail}"),
                 })
             })?;
 

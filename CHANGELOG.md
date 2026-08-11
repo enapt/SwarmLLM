@@ -4,6 +4,14 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A mistyped model name was reported as a broken server.** Adding a model from
+HuggingFace with the name spelled wrong answered "Bad Gateway" and advised
+trying again — blaming the connection for something in what was typed, and
+suggesting the one thing that could never help. It now says the name could not
+be found, and that it may also be a private repository needing an access token.
+Genuine upstream problems, like a rate limit or an outage, still report as
+upstream.
+
 **A mistyped invite code sometimes answered with programmer jargon.** Pasting a
 broken pool invite could return "Invalid last symbol 101, offset 6" instead of
 the plain explanation its sibling cases already gave. Which one you saw depended
