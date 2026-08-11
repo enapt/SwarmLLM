@@ -237,8 +237,13 @@ impl PipelineExecutor {
                 SwarmError::Network(format!("No peer_id_bytes for node {}", segment.node_id))
             })?;
 
-        // Build the chat-templated prompt (same as the standard path).
-        let prompt = self.build_prompt().await;
+        // Build the chat-templated prompt AND the stop strings that template
+        // implies. Taking the prompt without the stops is the bug this pairing
+        // exists to prevent: the serving node only truncates the stop list it
+        // is handed, so a marker we do not send is one nothing will ever match.
+        let (prompt, sampling) = self
+            .build_prompt_and_stops(self.request.sampling_params.clone())
+            .await;
         // Sized from the prompt we are about to send, before it is moved.
         // Prefer the model's own tokenizer: a character heuristic mis-sizes the
         // budget by several-fold across scripts. It is often unavailable here —
@@ -266,7 +271,7 @@ impl PipelineExecutor {
             model_id: segment.shard_id.model_id.clone(),
             layer_range: segment.layer_range,
             prompt,
-            sampling: self.request.sampling_params.clone(),
+            sampling,
             session_id: self.request.session_id.clone(),
             sender_peer_bytes: None,
         });

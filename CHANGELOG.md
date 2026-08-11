@@ -4,6 +4,16 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A reply from another machine could end with a stray marker and a conversation
+you never had.** Models mark the end of their turn with a short piece of text,
+and when the work ran on another machine that marker was not passed along with
+the request — so nothing stopped the reply there. Instead of finishing, the
+model carried on and wrote the next question itself, which arrived looking like
+part of the answer.
+
+The markers now travel with the request that needs them, so the reply ends where
+the model meant it to.
+
 ## [0.3.93-alpha] — 2026-08-11
 
 **A new node could see the swarm's models and run none of them.** Starting

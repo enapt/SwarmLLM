@@ -1792,3 +1792,40 @@ fn update_reporting_uses_the_effective_mode_not_the_legacy_field() {
         offenders.join("\n")
     );
 }
+
+/// A path that renders a chat template must send the stops that template
+/// implies, not the caller's params untouched.
+///
+/// A model ends its turn with a marker (`<|user|>`, `<|im_end|>`, `<|eot_id|>`)
+/// rather than only the tokenizer's EOS id. A path that builds a templated
+/// prompt but forwards `sampling_params` unchanged lets the model run to
+/// `max_tokens` emitting those markers as visible text and then invent the next
+/// turn. The serving node cannot rescue it — it only truncates the stop list it
+/// is handed, so a marker the coordinator never sends is one nothing matches.
+///
+/// `with_template_stops` was written for this and its own comment named the
+/// three paths needing it, yet the router/remote path went unwired for
+/// releases: `remote_generate` is the fast path taken whenever ONE peer holds
+/// the whole model — the normal case for a node that stores nothing itself.
+/// Observed on TinyLlama over the network:
+/// `'Count from six to ten.\n<|user|> Can you give me a summary…'`.
+///
+/// Pinned at source level because the leak only shows when the model happens to
+/// emit a marker, so a behavioural test passes most runs with the bug present.
+#[test]
+fn templated_prompts_carry_their_template_stops() {
+    let root = repo_root();
+    let path = root.join("src/inference/pipeline/remote_generate.rs");
+    let src = std::fs::read_to_string(&path).expect("remote_generate.rs must exist");
+
+    assert!(
+        src.contains("build_prompt_and_stops"),
+        "remote_generate builds a chat-templated prompt, so it must obtain its \
+         stop strings from the same place — use build_prompt_and_stops"
+    );
+    assert!(
+        !src.contains("sampling: self.request.sampling_params.clone()"),
+        "remote_generate must not forward the caller's sampling params untouched: \
+         the template's stop markers would never reach the serving node"
+    );
+}

@@ -203,7 +203,8 @@ pub fn spawn_split_stream(
     // (used by BOTH the OpenAI and Anthropic local-complete routes, and so by
     // the dashboard compare page) was the one place that didn't, which is why
     // the leak only showed up on some models via some endpoints.
-    let params = with_template_stops(params, meta.chat_template.as_deref());
+    let params =
+        crate::inference::chat_template::with_template_stops(params, meta.chat_template.as_deref());
     let rid = crate::api::request_uuid(request_id);
     let (token_tx, token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
     // Attach the caller's trace so TTFT is stamped on the first token that
@@ -377,29 +378,6 @@ pub async fn submit_stream_to_router(
 ///
 /// Shared core for both OpenAI and Anthropic split_non_stream handlers.
 /// Resolves model metadata, builds the prompt, and runs generation via subprocess.
-/// Add the stop strings implied by a model's chat template to `params`.
-///
-/// A local model signals the end of its turn with a template marker rather than
-/// only the tokenizer's EOS id, so without these a model can run to `max_tokens`
-/// emitting `<|im_end|>` and friends as visible text.
-///
-/// **This exists as a shared helper because forgetting it is the recurring bug.**
-/// Three separate call sites need it — the streaming split path, the
-/// non-streaming split path, and the router paths — and it has now been missed
-/// twice: first on the fast path (fixed), then on the non-streaming sibling,
-/// reported by a tester who saw `<|im_end|>` in a reply with
-/// `finish_reason: "length"` (ran to the token cap, never matched a stop).
-/// Any new path that builds a prompt from a chat template MUST route through
-/// this rather than passing `params` through untouched.
-fn with_template_stops(mut params: SamplingParams, chat_template: Option<&str>) -> SamplingParams {
-    for stop in crate::inference::chat_template::extract_stop_strings(chat_template) {
-        if !params.stop.contains(&stop) {
-            params.stop.push(stop);
-        }
-    }
-    params
-}
-
 pub async fn run_split_generate(
     state: &AppState,
     model_id: &crate::types::ModelId,
@@ -424,7 +402,8 @@ pub async fn run_split_generate(
         "DIAG: non-stream built prompt (subprocess)"
     );
 
-    let params = with_template_stops(params, meta.chat_template.as_deref());
+    let params =
+        crate::inference::chat_template::with_template_stops(params, meta.chat_template.as_deref());
 
     let rid = crate::api::request_uuid(request_id);
 

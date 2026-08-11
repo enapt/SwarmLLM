@@ -143,6 +143,40 @@ pub fn extract_stop_strings(template: Option<&str>) -> Vec<String> {
     stops
 }
 
+/// Add the stop strings implied by a model's chat template to `params`.
+///
+/// A model signals the end of its turn with a template marker rather than only
+/// the tokenizer's EOS id, so without these it can run to `max_tokens` emitting
+/// `<|im_end|>`, `<|user|>` and friends as visible text — and then keep going,
+/// inventing the next turn of a conversation the user never had.
+///
+/// **This exists as a shared helper because forgetting it is the recurring
+/// bug**, and it has now been missed three times: the streaming split path, its
+/// non-streaming sibling (a tester saw `<|im_end|>` in a reply with
+/// `finish_reason: "length"` — ran to the cap, never matched a stop), and the
+/// router/remote path, which built a templated prompt and forwarded the
+/// caller's params untouched. That third one is the fast path a node takes
+/// whenever ONE peer holds the whole model, i.e. the normal case for a machine
+/// that stores nothing itself.
+///
+/// It lives here, next to `extract_stop_strings`, rather than in one API
+/// module: the inference paths that need it cannot reach into `api::openai`,
+/// which is why the router paths went without for as long as they did. New
+/// prompt-building paths should prefer
+/// `PipelineExecutor::build_prompt_and_stops`, which returns the prompt and
+/// these stops together so they cannot be separated.
+pub fn with_template_stops(
+    mut params: swarmllm_types::inference::SamplingParams,
+    chat_template: Option<&str>,
+) -> swarmllm_types::inference::SamplingParams {
+    for stop in extract_stop_strings(chat_template) {
+        if !params.stop.contains(&stop) {
+            params.stop.push(stop);
+        }
+    }
+    params
+}
+
 /// Build a chat prompt using the given template, falling back to ChatML.
 ///
 /// This is the main entry point for chat prompt construction.

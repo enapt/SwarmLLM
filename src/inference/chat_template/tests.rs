@@ -622,6 +622,56 @@ fn extract_stop_strings_covers_llama3_message_and_header_markers() {
 }
 
 /// Other families' boundary markers, so one model's fix doesn't regress others.
+/// Every path that renders a chat template must also carry that template's stop
+/// markers into the sampling params.
+///
+/// A model ends its turn with a marker, not only the tokenizer's EOS id, so a
+/// path that renders the template and forwards params untouched lets the model
+/// emit `<|user|>` as visible text and then invent the next turn. It has been
+/// missed three times; the third was `remote_generate` — the fast path used
+/// whenever ONE peer holds the whole model, which is the normal case for a node
+/// that stores nothing itself. Observed on TinyLlama over the network:
+/// `'Count from six to ten.\n<|user|> Can you give me a summary…'`.
+///
+/// Asserted on the PARAMS rather than on generated text: the leak only appears
+/// when the model happens to emit a marker, so a test driving a real model
+/// passes most runs while the defect is fully present.
+#[test]
+fn template_stops_reach_the_sampling_params() {
+    let tinyllama = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n        {{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n        {{ '<|assistant|>\n' + message['content'] + eos_token }}\n{% endif %}\n{% endfor %}";
+
+    let bare = swarmllm_types::inference::SamplingParams::default();
+    assert!(
+        !bare.stop.iter().any(|s| s == "<|user|>"),
+        "precondition: default params carry no template stops"
+    );
+
+    let with_stops = super::with_template_stops(bare, Some(tinyllama));
+    assert!(
+        with_stops.stop.iter().any(|s| s == "<|user|>"),
+        "the template's own role marker must become a stop, got {:?}",
+        with_stops.stop
+    );
+
+    // Idempotent: paths that already applied it must not accumulate duplicates.
+    let twice = super::with_template_stops(with_stops.clone(), Some(tinyllama));
+    assert_eq!(
+        twice.stop.len(),
+        with_stops.stop.len(),
+        "applying twice must not duplicate stops"
+    );
+
+    // A caller's own stops survive.
+    let mut custom = swarmllm_types::inference::SamplingParams::default();
+    custom.stop.push("###".to_string());
+    let merged = super::with_template_stops(custom, Some(tinyllama));
+    assert!(
+        merged.stop.iter().any(|s| s == "###") && merged.stop.iter().any(|s| s == "<|user|>"),
+        "caller stops and template stops must coexist, got {:?}",
+        merged.stop
+    );
+}
+
 #[test]
 fn extract_stop_strings_covers_other_families() {
     let cases: &[(&str, &str)] = &[

@@ -79,6 +79,61 @@ impl PipelineExecutor {
         self.build_prompt_with_header(header_data.as_ref()).await
     }
 
+    /// The prompt AND the stop strings its chat template implies, resolved
+    /// together from one read of the model's header.
+    ///
+    /// They are returned as a pair because separating them is the recurring
+    /// bug. A model ends its turn with a template marker (`<|user|>`,
+    /// `<|im_end|>`, `<|eot_id|>`) rather than only the tokenizer's EOS id, so a
+    /// path that renders the template but forwards `sampling_params` untouched
+    /// lets the model run to `max_tokens` emitting those markers as **visible
+    /// text**, then carry on inventing the next turn — the user sees a control
+    /// token followed by a conversation they did not have.
+    ///
+    /// `with_template_stops` was written for exactly this and its own comment
+    /// names the three paths that need it: "the streaming split path, the
+    /// non-streaming split path, and the router paths". The router paths were
+    /// never wired, so `remote_generate` — the fast path a node takes whenever
+    /// ONE peer holds the whole model, i.e. the common case for a machine that
+    /// stores nothing itself — built a templated prompt and sent the caller's
+    /// params through unchanged. Observed on TinyLlama served across the
+    /// network: `'Count from six to ten.\n<|user|> Can you give me a summary of
+    /// the text material I just read?'`. The serving side cannot rescue it —
+    /// it only truncates the list it is handed.
+    ///
+    /// Returning one value keeps them in step: a caller cannot take the prompt
+    /// and forget the stops.
+    pub(super) async fn build_prompt_and_stops(
+        &self,
+        params: swarmllm_types::inference::SamplingParams,
+    ) -> (String, swarmllm_types::inference::SamplingParams) {
+        let model_id = &self.request.model_id;
+        let header_path = self
+            .shared_state
+            .model_dir(&model_id.0)
+            .join(crate::model::shard::HEADER_FILENAME);
+        let header_data = template_from_header(&header_path);
+        let prompt = self.build_prompt_with_header(header_data.as_ref()).await;
+
+        // Resolve the template the same way `build_prompt_with_header` does, so
+        // the stops always describe the template the prompt was actually built
+        // from — including the `loaded_model_info` branch, which is only
+        // legitimate when that singleton really describes this model (#294).
+        let template: Option<String> = match header_data {
+            Some((ref tmpl, _, _)) => tmpl.clone(),
+            None => {
+                let info = self.shared_state.loaded_model_info.read().await;
+                info.as_ref()
+                    .filter(|i| loaded_info_describes(&i.name, &model_id.0))
+                    .and_then(|i| i.chat_template.clone())
+            }
+        };
+        (
+            prompt,
+            chat_template::with_template_stops(params, template.as_deref()),
+        )
+    }
+
     /// Build chat prompt using pre-parsed GGUF header data or loaded_model_info fallback.
     pub(super) async fn build_prompt_with_header(
         &self,
