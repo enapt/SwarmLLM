@@ -117,6 +117,17 @@ pub enum SwarmError {
     #[error("Prompt privacy is on for {model_id}, but this node does not hold shard 0 (the embedding table) that keeps your prompt away from every peer")]
     PromptPrivacyUnavailable { model_id: String },
 
+    /// No reachable node holds the piece of this model covering `layer` — the
+    /// swarm is missing part of it, so no pipeline can be assembled.
+    ///
+    /// A capacity problem, not a fault in this server, and the sibling of
+    /// `InsufficientCapacity`: that one fires when NOTHING is available and
+    /// already answered 503, while this one fired when SOME shards were missing
+    /// and answered 500. Two readings of one situation — "the swarm hasn't got
+    /// all of this model" — differing only by how much was absent.
+    #[error("No reachable node holds the part of {model_id} containing layer {layer}. A model can be listed, and even loaded here, while the peer that held that piece has gone")]
+    ModelIncompleteInSwarm { model_id: String, layer: u32 },
+
     // Overload
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
@@ -182,6 +193,15 @@ impl IntoResponse for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.0.to_string(),
                 "prompt_privacy_error",
+            ),
+            // The swarm is missing part of this model: "this server can't
+            // serve", exactly like its sibling `InsufficientCapacity`. It
+            // answered 500 until 2026-08-11, reporting a capacity shortfall as
+            // a fault in the node the user is talking to.
+            SwarmError::ModelIncompleteInSwarm { .. } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                self.0.to_string(),
+                "server_error",
             ),
             SwarmError::VisionEncoderUnavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -361,6 +381,11 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
              model is missing a piece: fetch it with `swarmllm get-model <name> --all`, \
              or pick a model marked as ready in the dashboard.",
         ),
+        SwarmError::ModelIncompleteInSwarm { .. } => Some(
+            "Part of this model isn't on any machine that's reachable right now. If a peer \
+             just dropped out this may fix itself shortly. Otherwise fetch the model with \
+             `swarmllm get-model <name> --all`, or pick a model the dashboard marks as ready.",
+        ),
         SwarmError::PromptPrivacyUnavailable { .. } => Some(
             "Prompt privacy keeps your prompt on this machine, which needs the model's \
              first part stored here — and it isn't. Either fetch it with \
@@ -511,6 +536,28 @@ mod tests {
             !lower.contains("this usually means") && !lower.contains("a different route will"),
             "generic hint asserts a cause it cannot know: {hint}"
         );
+    }
+
+    /// The swarm not having all of a model is a capacity shortfall, not a fault
+    /// in the node the user is talking to. Its sibling `InsufficientCapacity` —
+    /// same situation, nothing rather than something available — has always
+    /// answered 503; this one answered 500 until 2026-08-11, so which status you
+    /// got depended on HOW MUCH of the model was missing.
+    #[test]
+    fn a_model_the_swarm_cannot_complete_is_503_like_its_sibling() {
+        let incomplete = ApiError(SwarmError::ModelIncompleteInSwarm {
+            model_id: "m".into(),
+            layer: 0,
+        })
+        .into_response();
+        let nothing_available =
+            ApiError(SwarmError::InsufficientCapacity(ModelId("m".into()))).into_response();
+        assert_eq!(
+            incomplete.status(),
+            nothing_available.status(),
+            "missing SOME of a model and missing ALL of it must not differ in status"
+        );
+        assert_eq!(incomplete.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]

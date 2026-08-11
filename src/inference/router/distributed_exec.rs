@@ -364,6 +364,16 @@ async fn assemble_awaiting_dht(
 /// Only this case benefits from waiting — the holder cache may simply not have
 /// been populated yet.
 fn assembly_failed_for_lack_of_holders(err: &SwarmError) -> bool {
+    // Matched on the TYPE, because matching the prose broke silently. The
+    // scheduler's wording changed to "No reachable node holds the part of …" on
+    // 2026-08-10 and neither substring below matches it, so the DHT wait — the
+    // whole point of which is "the holder cache may simply not be populated
+    // yet" — stopped firing for the commonest missing-holder failure and nobody
+    // saw a thing. The remaining substrings cover the `PipelineError` forms that
+    // are still stringly-typed.
+    if matches!(err, SwarmError::ModelIncompleteInSwarm { .. }) {
+        return true;
+    }
     let msg = err.to_string();
     msg.contains("No node available") || msg.contains("No shard holders")
 }
@@ -856,6 +866,7 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         | SwarmError::InsufficientCapacity(_)
         | SwarmError::PrivateModeUnavailable { .. }
         | SwarmError::PromptPrivacyUnavailable { .. }
+        | SwarmError::ModelIncompleteInSwarm { .. }
         | SwarmError::InsufficientCredits { .. }
         | SwarmError::InsufficientDisk { .. }
         | SwarmError::Database(_)
@@ -873,6 +884,23 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
 mod tests {
     use super::*;
     use crate::types::ModelId;
+
+    /// The DHT wait must key on the failure's TYPE, not its wording.
+    ///
+    /// The scheduler's message became "No reachable node holds the part of …"
+    /// on 2026-08-10 and matched neither substring this predicate looked for, so
+    /// the wait-and-retry — whose entire purpose is "the holder cache may not be
+    /// populated yet" — stopped firing for the commonest missing-holder failure,
+    /// silently. Reworded prose must never be able to switch routing off again.
+    #[test]
+    fn the_dht_wait_survives_a_reworded_message() {
+        assert!(assembly_failed_for_lack_of_holders(
+            &SwarmError::ModelIncompleteInSwarm {
+                model_id: "m".into(),
+                layer: 0,
+            }
+        ));
+    }
 
     /// Only the "nothing known to serve this" failure benefits from waiting for
     /// DHT results. Waiting on anything else just adds latency to a verdict that

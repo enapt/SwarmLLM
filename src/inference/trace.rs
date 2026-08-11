@@ -685,6 +685,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::PipelineError(_) => "PipelineError",
         E::PrivateModeUnavailable { .. } => "PrivateModeUnavailable",
         E::PromptPrivacyUnavailable { .. } => "PromptPrivacyUnavailable",
+        E::ModelIncompleteInSwarm { .. } => "ModelIncompleteInSwarm",
         E::ProviderError { .. } => "ProviderError",
         E::Serialization(_) => "Serialization",
         E::ServiceUnavailable(_) => "ServiceUnavailable",

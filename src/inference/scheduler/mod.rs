@@ -1029,12 +1029,10 @@ impl PipelineScheduler {
                         .first()
                         .map(|c| c.shard_id.model_id.0.as_str())
                         .unwrap_or("this model");
-                    return Err(SwarmError::PipelineError(format!(
-                        "No reachable node holds the part of {model} containing layer \
-                         {current_layer}. A model can be listed, and even loaded here, while \
-                         the peer that held that piece has gone — try again, or fetch that \
-                         shard locally."
-                    )));
+                    return Err(SwarmError::ModelIncompleteInSwarm {
+                        model_id: model.to_string(),
+                        layer: current_layer,
+                    });
                 }
             }
         }
