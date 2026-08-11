@@ -348,10 +348,22 @@ impl PipelineExecutor {
                 Ok(None) => {
                     // Channel closed by the daemon's ACK-timeout sweep
                     // (libp2p rr silent-drop) or by an OutboundFailure event.
-                    // If no tokens arrived yet, surface as an explicit error
-                    // so the caller can retry; otherwise treat as graceful
+                    // If nothing was EMITTED, surface as an explicit error so
+                    // the caller can retry; otherwise treat as graceful
                     // end-of-stream and return what we have.
-                    if first {
+                    //
+                    // **Emitted, not "a token arrived".** Since tokens are
+                    // reassembled by `token_id`, one can arrive and be BUFFERED
+                    // rather than released — a reply whose first token is lost
+                    // but whose later tokens land has `first == false` and
+                    // nothing to show. Keying off arrival therefore returned an
+                    // empty reply as a SUCCESS: billed, no error, no retry.
+                    // Reported 2026-08-11 as intermittent empty answers on a
+                    // node that routes remotely, ~50% of calls, 35-39s each —
+                    // the delay being this loop waiting for a token that never
+                    // came. Regression from the reassembly fix (#282), which
+                    // made arrival and emission different events.
+                    if stream.emitted() == 0 {
                         tracing::warn!(%request_id, "remote-generate: token channel closed before any token (likely send failure)");
                         return Err(SwarmError::PipelineError(format!(
                             "remote-generate: peer never acknowledged request_id={request_id} (silent drop or disconnect)"
@@ -367,7 +379,11 @@ impl PipelineExecutor {
                     // Only the consecutive run is kept: emitting past a hole
                     // would silently reorder the reply, which is worse than a
                     // short one.
-                    if stream.done_seen() {
+                    // ...but "the prefix" has to BE something. When the hole is
+                    // at the very start there is no prefix, only an empty reply
+                    // that would be returned as a success and charged for. That
+                    // is a failed request and must say so.
+                    if stream.done_seen() && stream.emitted() > 0 {
                         tracing::warn!(
                             %request_id,
                             emitted = stream.emitted(),
@@ -689,6 +705,60 @@ mod stream_reassembly_tests {
         assert!(s.push_content(content(1, "erry")).is_empty());
         // Token 0 lands and releases both, in order.
         assert_eq!(joined(s.push_content(content(0, "Ch"))), "Cherry");
+    }
+
+    /// A token arriving is NOT the same as a token being shown, and the
+    /// difference decides whether a request is a success or a failure.
+    ///
+    /// This is the state the caller has to distinguish: the peer's later tokens
+    /// landed, the FIRST one never did, so the reassembler is holding content it
+    /// cannot release. `emitted()` is 0 while tokens have definitely arrived.
+    ///
+    /// The loop in `stream_remote_tokens` used to decide "did we get anything?"
+    /// from whether a token had arrived (`first`), which is true here — so a
+    /// closed channel or a straggler timeout took the graceful end-of-stream
+    /// path and returned an EMPTY reply as a success. Reported 2026-08-11 as
+    /// intermittent empty answers, ~50% of remote calls, each taking 35-39s,
+    /// charged for and never refunded. It has to key off `emitted()`.
+    #[test]
+    fn tokens_can_arrive_while_nothing_can_be_shown() {
+        let mut s = StreamReassembler::new();
+        s.mark_done(3);
+
+        // Tokens 1 and 2 arrive; token 0 is lost.
+        assert!(s.push_content(content(1, "ell")).is_empty());
+        assert!(s.push_content(content(2, "o")).is_empty());
+
+        assert_eq!(
+            s.emitted(),
+            0,
+            "nothing can be released while the first token is missing"
+        );
+        assert_eq!(s.buffered(), 2, "but tokens HAVE arrived");
+        assert!(!s.is_complete());
+        // `missing()` counts what has not been EMITTED, not what is absent from
+        // the wire: 3, even though only token 0 is actually lost and the other
+        // two are sitting in the buffer. Worth stating, because reading it as
+        // "tokens the peer still owes us" is wrong and this test asserted that
+        // first.
+        assert_eq!(s.missing(), 3);
+
+        // Emitting only the consecutive run stays correct once the hole fills.
+        assert_eq!(joined(s.push_content(content(0, "H"))), "Hello");
+        assert_eq!(s.emitted(), 3);
+    }
+
+    /// The converse, so the guard cannot be "always error on a gap": a reply
+    /// that lost a token in the MIDDLE has a real prefix, and the caller is
+    /// better served by it than by an error.
+    #[test]
+    fn a_hole_after_the_start_still_leaves_something_to_return() {
+        let mut s = StreamReassembler::new();
+        s.mark_done(3);
+        assert_eq!(joined(s.push_content(content(0, "Hi"))), "Hi");
+        assert!(s.push_content(content(2, "!")).is_empty());
+        assert_eq!(s.emitted(), 1, "the prefix is real and worth returning");
+        assert!(!s.is_complete());
     }
 
     /// A late token releases everything buffered behind it in one go.

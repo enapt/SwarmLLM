@@ -4,6 +4,27 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A request sent to another machine could come back empty, and be charged for.**
+Reported as intermittent blank answers — roughly half of calls on a node that
+routes to peers, each taking 35-40 seconds before returning nothing, with no
+error and no refund.
+
+Each word of a reply travels separately and they can arrive out of order, so
+they are put back in order before being shown. The code that decided whether
+anything had come back asked whether a word had *arrived* rather than whether
+any had been *shown*. Those are different once reordering exists: if the first
+word is lost and later ones arrive, there is something in hand but nothing that
+can be shown yet, so the request was treated as finished and returned blank —
+successfully, as far as the caller could tell.
+
+It now reports a failure, which lets the request be retried against another
+machine instead of silently costing money for nothing. A reply that loses a word
+in the MIDDLE still returns the part before the gap, which is more useful than an
+error; only a reply with nothing to show is treated as failed.
+
+Introduced by the fix for out-of-order replies in v0.3.89 — before that, any word
+that arrived was shown immediately, so the two questions had the same answer.
+
 **Long conversations now generate about 1.4x faster on a graphics card.** Every
 word produced re-converted the whole conversation so far into the form the card
 needs — work that grew with the conversation, to add a single position. It is
