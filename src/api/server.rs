@@ -557,6 +557,7 @@ pub fn build_router(state: AppState) -> Router {
         .layer(middleware::cors_layer(state.config.node.listen_port))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .fallback(unknown_route)
+        .method_not_allowed_fallback(wrong_method)
         .with_state(state)
 }
 
@@ -584,6 +585,37 @@ async fn unknown_route(uri: axum::http::Uri) -> impl IntoResponse {
                 "type": "not_found_error",
                 "param": null,
                 "code": "not_found_error",
+            }
+        })),
+    )
+}
+
+/// Answer a right-path/wrong-method request with the same envelope, instead of
+/// a bare 405 with an empty body.
+///
+/// The sibling of `unknown_route`, and the same defect: `POST /api/admin/config`
+/// (a PUT endpoint) returned 405 and **nothing at all**. The dashboard reads
+/// failures with `await resp.json()` inside a try/catch, so an empty body throws,
+/// the catch swallows it, and the user is shown the generic "action failed" with
+/// the real reason discarded — the exact behaviour the error-envelope rule in
+/// `.claude/rules/architecture.md` exists to prevent.
+///
+/// The status stays 405: the path exists and the method is what is wrong, which
+/// is worth telling the caller precisely.
+async fn wrong_method(method: axum::http::Method, uri: axum::http::Uri) -> impl IntoResponse {
+    (
+        axum::http::StatusCode::METHOD_NOT_ALLOWED,
+        Json(serde_json::json!({
+            "error": {
+                "message": format!(
+                    "{} is not supported on {} — the endpoint exists but expects a different \
+                     HTTP method.",
+                    method.as_str(),
+                    uri.path()
+                ),
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "method_not_allowed",
             }
         })),
     )

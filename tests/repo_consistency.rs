@@ -1829,3 +1829,29 @@ fn templated_prompts_carry_their_template_stops() {
          the template's stop markers would never reach the serving node"
     );
 }
+
+/// Every failure the API can produce must be readable by the caller, including
+/// the ones axum generates itself.
+///
+/// The router already answers an unrouted path with the standard envelope. The
+/// right-path/wrong-method case did not: `POST /api/admin/config` (a PUT
+/// endpoint) returned 405 and an EMPTY body. The dashboard parses failures with
+/// `await resp.json()` in a try/catch, so an empty body throws, the catch
+/// swallows it, and the user sees the generic "action failed" with the real
+/// reason discarded — which is precisely what the error-envelope rule exists to
+/// prevent.
+#[test]
+fn the_router_answers_bad_methods_in_the_error_envelope() {
+    let root = repo_root();
+    let src =
+        std::fs::read_to_string(root.join("src/api/server.rs")).expect("api/server.rs must exist");
+    assert!(
+        src.contains(".method_not_allowed_fallback("),
+        "the router must install a method-not-allowed fallback, or a wrong-method \
+         request returns 405 with an empty body that no client can read"
+    );
+    assert!(
+        src.contains("async fn wrong_method("),
+        "the method-not-allowed fallback handler must exist"
+    );
+}

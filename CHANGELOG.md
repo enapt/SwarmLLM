@@ -4,6 +4,11 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Using the wrong method on a valid address gave an empty reply.** Asking a page
+of the settings API for something it does not answer that way returned a bare
+failure with no text at all, so the dashboard could only say "action failed"
+with the real reason thrown away. It now says which method the address expects.
+
 **A reply from another machine could end with a stray marker and a conversation
 you never had.** Models mark the end of their turn with a short piece of text,
 and when the work ran on another machine that marker was not passed along with
