@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.93-alpha] — 2026-08-11
+
 **A new node could see the swarm's models and run none of them.** Starting
 SwarmLLM fresh showed a list of models with other machines hosting them, all
 marked available — and every single request answered "No model loaded". This is
