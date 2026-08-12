@@ -249,7 +249,7 @@ pub async fn start_background_stream(
                             "id": id_for_cleanup,
                             "status": "failed",
                             "error": {
-                                "code": "internal_error",
+                                "code": "server_error",
                                 "message": "background task panicked"
                             }
                         }

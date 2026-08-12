@@ -24,6 +24,15 @@ from something the model actually said, and it was stored in the conversation as
 if the model had said it. It is now sent as an error, which clients can tell
 apart from an answer.
 
+**A background request that failed said only that something had gone wrong
+internally.** Work submitted to run in the background reports its outcome on a
+record you poll rather than as a status code, so that one field is all the
+caller has to tell "fix your request" from "try again later". Every failure was
+labelled an internal fault — a model name that does not exist and a prompt
+longer than the model can hold read identically, even though asking for the same
+two things directly answered "not found" and "too long". Background failures now
+describe themselves the same way the direct request would.
+
 **Being asked for too much is no longer reported as this server breaking.** A
 conversation longer than a model can hold is something the sender can fix, and
 when the reply was not streamed it was already reported that way, with how much

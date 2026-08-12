@@ -671,7 +671,7 @@ async fn start_background(
             if let Ok(Some(mut rec)) = store::load(&state_panic.db, &id_panic) {
                 rec.response.status = ResponseStatus::Failed;
                 rec.response.error = Some(ResponseError::new(
-                    "internal_error",
+                    "server_error",
                     "background task panicked",
                 ));
                 if let Err(e) = store::store(&state_panic.db, &rec) {
@@ -778,12 +778,20 @@ async fn run_background_inference(
     {
         Ok(r) => r,
         Err(e) => {
+            // Classified, not assumed. Stamping `internal_error` here reported
+            // a model that does not exist, and a prompt that was simply too
+            // long, as this server having had an internal fault — while the
+            // foreground path answered the identical request `404
+            // not_found_error` / `400 invalid_request_error`. The background
+            // caller cannot see a status code, so this string is the only thing
+            // telling them whether to fix their request or retry.
+            let code = stream::classify_error_code(&e);
             finalize(
                 ResponseStatus::Failed,
                 Vec::new(),
                 None,
                 ResponsesUsage::default(),
-                Some(ResponseError::new("internal_error", e.0.to_string())),
+                Some(ResponseError::new(&code, e.0.to_string())),
             );
             return;
         }
@@ -799,7 +807,7 @@ async fn run_background_inference(
                     None,
                     ResponsesUsage::default(),
                     Some(ResponseError::new(
-                        "internal_error",
+                        "server_error",
                         format!("buffer error: {e}"),
                     )),
                 );
@@ -832,7 +840,7 @@ async fn run_background_inference(
                 Vec::new(),
                 None,
                 ResponsesUsage::default(),
-                Some(ResponseError::new("internal_error", msg)),
+                Some(ResponseError::new("server_error", msg)),
             );
             return;
         }

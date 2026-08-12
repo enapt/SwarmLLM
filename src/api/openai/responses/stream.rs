@@ -304,7 +304,7 @@ where
                 Ok(b) => b,
                 Err(e) => {
                     let error = ResponseError::new(
-                        "internal_error",
+                        "server_error",
                         format!("buffer chat error body: {e}"),
                     );
                     let failed = build_failed_response(
@@ -834,18 +834,28 @@ fn build_failed_response(
     resp
 }
 
-/// Pick a coarse error code for an `ApiError` raised during chat-completions
-/// setup. The chat handler emits SwarmError variants that fan out to
-/// roughly two buckets (request validation vs. internal/upstream); this
-/// matches them onto the OpenAI error-code naming used in non-streaming
-/// failures.
-fn classify_error_code(err: &ApiError) -> String {
+/// The `error.code` a Responses failure reports, for BOTH of this API's paths.
+///
+/// Derives from `crate::error::classify_error` — the one classification the
+/// whole daemon shares — and refines a single case for this surface, where
+/// "the model provider failed" is more useful than the generic server fault
+/// the HTTP envelope reports.
+///
+/// It is shared because its two paths had drifted apart: the streaming path
+/// classified (though it said `not_found` where every other surface says
+/// `not_found_error`), while the background path did not classify at all and
+/// stamped `internal_error` on everything. A background request naming a model
+/// that does not exist, and one whose prompt was simply too long, both came
+/// back as this server having had an internal fault — while the *foreground*
+/// path answered the identical input `404 not_found_error` and
+/// `400 invalid_request_error` (measured 2026-08-12).
+pub(super) fn classify_error_code(err: &ApiError) -> String {
     use crate::error::SwarmError;
     match &err.0 {
-        SwarmError::Validation(_) => "invalid_request_error".into(),
-        SwarmError::ModelNotAvailable(_) | SwarmError::ShardNotFound(_) => "not_found".into(),
+        // Refinement, not divergence: this surface reports work handed to a
+        // model provider, so a provider failure is worth naming as one.
         SwarmError::ProviderError { .. } => "upstream_error".into(),
-        _ => "internal_error".into(),
+        other => crate::error::classify_error(other).2.to_string(),
     }
 }
 
@@ -957,37 +967,52 @@ mod tests {
         assert_eq!(events, vec!["{\"a\":1}".to_string()]);
     }
 
+    /// A Responses failure is named the same as the identical failure on every
+    /// other surface.
+    ///
+    /// This used to say `not_found` where the HTTP envelope, the chat stream
+    /// and the Anthropic surface all say `not_found_error` — one daemon,
+    /// one failure, two names, and the test pinned the divergence rather than
+    /// catching it. It now derives from `crate::error::classify_error`, so a
+    /// new variant is classified once and every surface inherits it.
     #[test]
-    fn classify_error_code_buckets_swarmerror_variants() {
+    fn classify_error_code_agrees_with_every_other_surface() {
         use crate::error::SwarmError;
         use crate::types::{ModelId, ShardId};
-        assert_eq!(
-            classify_error_code(&ApiError(SwarmError::Validation("bad".into()))),
-            "invalid_request_error"
-        );
-        assert_eq!(
-            classify_error_code(&ApiError(SwarmError::ModelNotAvailable(ModelId(
-                "x".into()
-            )))),
-            "not_found"
-        );
-        assert_eq!(
-            classify_error_code(&ApiError(SwarmError::ShardNotFound(ShardId {
-                model_id: ModelId("x".into()),
-                index: 0,
-            }))),
-            "not_found"
-        );
+        for (err, expected) in [
+            (
+                SwarmError::Validation("bad".into()),
+                "invalid_request_error",
+            ),
+            (
+                SwarmError::ModelNotAvailable(ModelId("x".into())),
+                "not_found_error",
+            ),
+            (
+                SwarmError::ShardNotFound(ShardId {
+                    model_id: ModelId("x".into()),
+                    index: 0,
+                }),
+                "not_found_error",
+            ),
+            (SwarmError::Internal("boom".into()), "server_error"),
+        ] {
+            let canonical = crate::error::classify_error(&err).2;
+            let got = classify_error_code(&ApiError(err));
+            assert_eq!(got, expected);
+            assert_eq!(
+                got, canonical,
+                "the Responses code must match the canonical classification"
+            );
+        }
+        // The one deliberate refinement: this surface names a provider failure
+        // as one, rather than the generic server fault the envelope reports.
         assert_eq!(
             classify_error_code(&ApiError(SwarmError::ProviderError {
                 status: 502,
                 body: "upstream".into(),
             })),
             "upstream_error"
-        );
-        assert_eq!(
-            classify_error_code(&ApiError(SwarmError::Internal("boom".into()))),
-            "internal_error"
         );
     }
 
