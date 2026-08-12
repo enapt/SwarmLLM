@@ -158,6 +158,50 @@ impl From<SwarmError> for ApiError {
     }
 }
 
+/// Recover the CLASS of an error from a message that crossed a boundary which
+/// does not carry types.
+///
+/// `SwarmError` survives neither the worker IPC hop nor the network hop — both
+/// deliver a `String`. Whatever is left is re-wrapped as `Inference`, i.e. HTTP
+/// 500 `server_error`, so a failure the caller could act on, or that another
+/// peer could have served, is reported as this server having broken.
+///
+/// Both boundaries had the same problem; only the worker one had the remedy.
+/// Measured 2026-08-12: an over-long prompt sent to a model held only by peers
+/// came back `500 server_error: Inference error: Validation error: This
+/// conversation is too long …` — the peer had diagnosed it exactly right, and
+/// the diagnosis arrived wearing the wrong status. Locally the identical
+/// request is a `400 invalid_request_error`.
+///
+/// `rfind` takes the INNERMOST marker so a message wrapped more than once
+/// (worker → pipeline → router → peer) still yields the original reason rather
+/// than a fragment of an outer wrapper. Precedence is fixed and matches the
+/// order these are checked at the worker boundary.
+///
+/// This is deliberately matching on prose, which is normally the trap in gotcha
+/// #295 — it is sound *only* because the markers are `SwarmError`'s own
+/// `#[error(...)]` Display prefixes, which are part of the type, not
+/// user-facing wording that gets rewritten. Adding a variant here means adding
+/// its marker, and nothing else re-derives a class from a message.
+pub fn reclassify_flattened_error(message: &str) -> Option<SwarmError> {
+    fn detail_after(message: &str, marker: &str) -> Option<String> {
+        let idx = message.rfind(marker)?;
+        let detail = message[idx + marker.len()..].trim();
+        (!detail.is_empty()).then(|| detail.to_string())
+    }
+
+    if let Some(d) = detail_after(message, "Validation error: ") {
+        return Some(SwarmError::Validation(d));
+    }
+    if let Some(d) = detail_after(message, "Model not available: ") {
+        return Some(SwarmError::ModelNotAvailable(ModelId(d)));
+    }
+    if let Some(d) = detail_after(message, "Service unavailable: ") {
+        return Some(SwarmError::ServiceUnavailable(d));
+    }
+    None
+}
+
 /// Classify an error into (HTTP status, client-safe message, error type).
 ///
 /// The single definition of what an error *is* to a caller. Extracted from
@@ -488,6 +532,46 @@ mod tests {
             assert!(
                 !status.is_server_error(),
                 "a caller-fixable error must not be a 5xx: {err}"
+            );
+        }
+    }
+
+    /// A peer's diagnosis of the CALLER's mistake must not arrive as a server
+    /// fault.
+    ///
+    /// `SwarmError` survives neither the worker hop nor the network hop. Only
+    /// the worker one recovered the class, so an over-long prompt sent to a
+    /// model held by peers came back `500 server_error` while the identical
+    /// request on a local model came back `400 invalid_request_error`
+    /// (measured 2026-08-12). It also charged the peer, which had done nothing
+    /// wrong — `failure_is_penalty_worthy` exempts `Validation` but never saw
+    /// one, because the class had already been flattened to `Inference`.
+    #[test]
+    fn a_peers_diagnosis_of_the_callers_mistake_survives_the_wire() {
+        let from_peer = "Inference error: Validation error: This conversation is too long \
+                         for qwen2.5-0.5b-instruct-fp16: 9020 tokens of prompt plus 20 \
+                         reserved for the reply is 9040, and the model's limit is 4096.";
+        let recovered = reclassify_flattened_error(from_peer).expect("class must be recovered");
+        let (status, _msg, error_type) = classify_error(&recovered);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_type, "invalid_request_error");
+        assert!(
+            matches!(recovered, SwarmError::Validation(ref d) if d.starts_with("This conversation"))
+        );
+    }
+
+    /// A genuine fault must NOT be laundered into something caller-fixable —
+    /// that would hide a real bug behind a 400 and stop it being retried.
+    #[test]
+    fn an_ordinary_failure_is_left_as_a_server_fault() {
+        for msg in [
+            "Inference error: tensor shape mismatch",
+            "CUDA out of memory",
+            "Validation error: ",
+        ] {
+            assert!(
+                reclassify_flattened_error(msg).is_none(),
+                "{msg:?} must not be reclassified"
             );
         }
     }

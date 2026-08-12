@@ -422,6 +422,24 @@ silently break at the wire if duplicated:
   branch on `"ok"`, and reclassifying a success to fix a reporting gap would break
   them.
 
+- **`crate::error::reclassify_flattened_error`** (2026-08-12) — recovers an
+  error's CLASS from a message that crossed a boundary carrying no types.
+  `SwarmError` survives neither the worker IPC hop nor the network hop; both
+  deliver a `String`, and whatever is left is re-wrapped as `Inference` → HTTP
+  500. Call it at any such boundary before falling back to `Inference`.
+  Two boundaries had the identical problem and only the worker one had a
+  remedy (three private helpers in `process_pool.rs`, now folded into this).
+  A prompt too long for a peer-held model answered `500 server_error` carrying
+  the words "Validation error", while the same request on a local model
+  answered `400 invalid_request_error` — so whose fault a mistake was depended
+  on which machine held the model (gotcha #304). It also mis-attributed blame:
+  `failure_is_penalty_worthy` exempts `Validation` but never saw one, so the
+  peer was docked for the caller's mistake. **Matching on prose is #295's trap
+  and this is the exception** — the markers are `SwarmError`'s own
+  `#[error(...)]` Display prefixes, i.e. part of the type, not wording written
+  for a human that gets rewritten. Adding a variant means adding its marker
+  here; nothing else may re-derive a class from a message.
+
 - **`crate::error::classify_error`** (2026-08-12) — the single answer to "what is
   this failure, to a caller": `(StatusCode, client-safe message, error type)`.
   `ApiError::into_response` is one caller; the SSE encoders are the others.

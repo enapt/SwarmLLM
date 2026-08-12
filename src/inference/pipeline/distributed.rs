@@ -432,7 +432,12 @@ impl PipelineExecutor {
                             NetworkFinishReason::Stop => "stop".to_string(),
                             NetworkFinishReason::MaxTokens => "length".to_string(),
                             NetworkFinishReason::Error(e) => {
-                                return Err(SwarmError::Inference(e));
+                                // Same recovery as the remote-generate sibling:
+                                // the class does not survive the wire, and
+                                // without it the caller is told this server
+                                // broke and the peer is charged for it.
+                                return Err(crate::error::reclassify_flattened_error(&e)
+                                    .unwrap_or(SwarmError::Inference(e)));
                             }
                         };
                         // Send finish event on streaming channel

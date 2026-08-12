@@ -24,6 +24,15 @@ from something the model actually said, and it was stored in the conversation as
 if the model had said it. It is now sent as an error, which clients can tell
 apart from an answer.
 
+**Asking a model on someone else's machine for too much now says so, instead
+of looking like this server broke.** A conversation longer than the model can
+hold is something the sender can shorten, and when the model runs on your own
+machine that is exactly what you were told. When it ran on a peer, the peer
+worked it out correctly and the answer still came back as an internal server
+fault — so the same mistake was your fault or ours depending only on where the
+model happened to live. It also charged the peer for a request it had been right
+to refuse.
+
 **A background request that failed said only that something had gone wrong
 internally.** Work submitted to run in the background reports its outcome on a
 record you poll rather than as a status code, so that one field is all the

@@ -2892,37 +2892,10 @@ impl ModelProcessPool {
         // `worker_error_is_fatal` already takes for the same reason (the typed
         // information does not survive the hop). Observed against a 2176-token
         // prompt on a 2048-context model, 2026-07-29.
-        if let Some(detail) = validation_detail(&message) {
-            return SwarmError::Validation(detail);
-        }
-        // Same flattening, same remedy, one variant over. A model whose files
-        // have gone reaches here as the text of a `ModelNotAvailable`, falls
-        // through to `Inference`, and is served as HTTP 500 `server_error` —
-        // telling the operator to look for a bug in the server when the actual
-        // cause is a missing file, and telling any retry-on-5xx client to keep
-        // re-sending a request that cannot succeed until the file comes back.
-        // The documented contract maps this to 404
-        // (`.claude/rules/completeness.md` § Error type discipline). Reported
-        // 2026-08-02 alongside a model deleted from disk.
-        if let Some(model) = model_unavailable_detail(&message) {
-            return SwarmError::ModelNotAvailable(crate::types::ModelId(model));
-        }
-        // Third instance of the same flattening, and the one that costs a
-        // working answer rather than just a confusing status. The KV-budget
-        // check refuses a forward with `ServiceUnavailable` when the GPU cannot
-        // hold another growth quantum — `inference::split::kv_budget` documents
-        // that as "503, so a coordinator re-routes to a peer". Flattened to text
-        // it arrived as `Inference` → 500, which a coordinator reads as a fault
-        // in the serving node rather than "ask someone else", so a request that
-        // another peer could have served simply failed.
-        //
-        // Observed on a node sharing its GPU with another process: the reply
-        // read `Inference error: prefill forward: Service unavailable: Not
-        // enough free GPU memory to continue this conversation (168 MB of KV
-        // cache already in use, budget 323 MB)` — the words "Service
-        // unavailable" sitting inside an HTTP 500.
-        if let Some(detail) = service_unavailable_detail(&message) {
-            return SwarmError::ServiceUnavailable(detail);
+        // One recovery, shared with the network boundary, which has the same
+        // problem for the same reason (`crate::error::reclassify_flattened_error`).
+        if let Some(recovered) = crate::error::reclassify_flattened_error(&message) {
+            return recovered;
         }
         SwarmError::Inference(message)
     }
@@ -3376,66 +3349,31 @@ mod tests {
     }
 }
 
-/// Pull the user-facing part out of a worker message that wrapped a validation
-/// failure, or `None` when it is not one.
-///
-/// Worker messages arrive with call-site context prepended
-/// (`"prefill forward: Validation error: <detail>"`). Taking the text after the
-/// LAST marker drops that plumbing, which the caller can neither act on nor
-/// understand, and keeps the part that tells them what to change.
-/// Recover a `ModelNotAvailable` that was flattened to text crossing the worker
-/// IPC boundary, mirroring [`validation_detail`].
-///
-/// The worker's message carries the `Display` form, `"Model not available: {id}"`,
-/// often behind a prefix from whichever stage wrapped it. `rfind` takes the
-/// innermost marker so a message that has been wrapped more than once still
-/// yields the original id rather than a fragment of an outer wrapper.
-fn model_unavailable_detail(message: &str) -> Option<String> {
-    const MARKER: &str = "Model not available: ";
-    let idx = message.rfind(MARKER)?;
-    let detail = message[idx + MARKER.len()..].trim();
-    if detail.is_empty() {
-        None
-    } else {
-        Some(detail.to_string())
-    }
-}
-
-/// Recover a `ServiceUnavailable` flattened to text crossing the worker IPC
-/// boundary, mirroring [`validation_detail`] and [`model_unavailable_detail`].
-///
-/// The third of the same shape. This one is not merely cosmetic: the KV-budget
-/// refusal is documented as 503 precisely "so a coordinator re-routes to a
-/// peer", and as a 500 the coordinator treats it as a fault in this node
-/// instead of asking another — losing an answer a peer could have given.
-///
-/// `rfind` takes the innermost marker, so a message wrapped more than once
-/// (worker → pipeline → router) still yields the original reason.
-fn service_unavailable_detail(message: &str) -> Option<String> {
-    const MARKER: &str = "Service unavailable: ";
-    let idx = message.rfind(MARKER)?;
-    let detail = message[idx + MARKER.len()..].trim();
-    if detail.is_empty() {
-        None
-    } else {
-        Some(detail.to_string())
-    }
-}
-
-fn validation_detail(message: &str) -> Option<String> {
-    const MARKER: &str = "Validation error: ";
-    let idx = message.rfind(MARKER)?;
-    let detail = message[idx + MARKER.len()..].trim();
-    if detail.is_empty() {
-        None
-    } else {
-        Some(detail.to_string())
-    }
-}
-
 #[cfg(test)]
 mod validation_detail_tests {
-    use super::{model_unavailable_detail, service_unavailable_detail, validation_detail};
+    use crate::error::{reclassify_flattened_error, SwarmError};
+
+    /// These live here because this is the boundary they were written against,
+    /// but the recovery is now shared with the network boundary — see
+    /// `crate::error::reclassify_flattened_error`.
+    fn model_unavailable_detail(m: &str) -> Option<String> {
+        match reclassify_flattened_error(m) {
+            Some(SwarmError::ModelNotAvailable(id)) => Some(id.0),
+            _ => None,
+        }
+    }
+    fn service_unavailable_detail(m: &str) -> Option<String> {
+        match reclassify_flattened_error(m) {
+            Some(SwarmError::ServiceUnavailable(d)) => Some(d),
+            _ => None,
+        }
+    }
+    fn validation_detail(m: &str) -> Option<String> {
+        match reclassify_flattened_error(m) {
+            Some(SwarmError::Validation(d)) => Some(d),
+            _ => None,
+        }
+    }
 
     /// A model whose files are gone must reach the caller as 404, not 500.
     /// Reported with a real trace: the message plainly said "Model not

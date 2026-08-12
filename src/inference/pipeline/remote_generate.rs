@@ -443,7 +443,15 @@ impl PipelineExecutor {
                                 .blacklist_holder_for_request(request_id, &segment.node_id);
                         }
                         self.shared_state.streaming_token_txs.remove(&request_id);
-                        return Err(SwarmError::Inference(e.clone()));
+                        // A peer's error arrives as text, so its class is
+                        // gone unless we recover it. Without this a prompt too
+                        // long for a peer-held model answered 500
+                        // `server_error` while the identical request on a local
+                        // model answered 400 — and, because the peer is blamed
+                        // for anything that is not a local-only variant, it was
+                        // also docked for a mistake that was the caller's.
+                        return Err(crate::error::reclassify_flattened_error(e)
+                            .unwrap_or_else(|| SwarmError::Inference(e.clone())));
                     }
                 };
                 if let Some(usage) = tok.usage {
