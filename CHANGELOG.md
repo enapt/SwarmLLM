@@ -4,6 +4,16 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.95-alpha] — 2026-08-12
+
+**A machine whose graphics memory was full said it was broken, so your request
+was never handed to one that could help.** Running out of room for another
+conversation is meant to mean "not me right now", which sends the work to
+another machine. Instead it was reported as a fault, and a fault means give up —
+so a request another machine could have answered simply failed. This was most
+likely to happen on the machines people actually use, where something else is
+already using the graphics card.
+
 **Models of unknown size were advertised as under a megabyte.** On the Swarm
 tab, suggested models whose size is not known yet — most of them, until the file
 has been checked — showed "< 1 MB", including models several gigabytes large.
