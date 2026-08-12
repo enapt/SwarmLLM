@@ -24,6 +24,13 @@ from something the model actually said, and it was stored in the conversation as
 if the model had said it. It is now sent as an error, which clients can tell
 apart from an answer.
 
+**Tool calls from Claude Code now say whether the call or the server was at
+fault.** Every failure reported through the MCP tool interface claimed an
+internal server error, including naming a model that does not exist and sending
+a prompt longer than the model can hold. A tool client reads that as "this tool
+is broken" rather than "fix the request", which is the difference between
+retrying forever and telling you what to change.
+
 **Asking a model on someone else's machine for too much now says so, instead
 of looking like this server broke.** A conversation longer than the model can
 hold is something the sender can shorten, and when the model runs on your own

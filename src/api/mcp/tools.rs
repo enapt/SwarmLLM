@@ -150,9 +150,11 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
                 ]
             }),
         ),
-        Ok(Err(e)) => {
-            JsonRpcResponse::error(id, INTERNAL_ERROR, format!("Inference error: {}", e.0))
-        }
+        Ok(Err(e)) => JsonRpcResponse::error(
+            id,
+            super::types::tool_error_code(&e.0),
+            format!("Inference error: {}", e.0),
+        ),
         Err(_) => JsonRpcResponse::error(id, INTERNAL_ERROR, "Inference request timed out"),
     }
 }
