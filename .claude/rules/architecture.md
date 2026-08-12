@@ -422,6 +422,38 @@ silently break at the wire if duplicated:
   branch on `"ok"`, and reclassifying a success to fix a reporting gap would break
   them.
 
+- **`crate::error::classify_error`** (2026-08-12) — the single answer to "what is
+  this failure, to a caller": `(StatusCode, client-safe message, error type)`.
+  `ApiError::into_response` is one caller; the SSE encoders are the others.
+  **Never choose an error type at a call site.** It used to live inside
+  `into_response`, so streaming could not reach it and both encoders hardcoded
+  one: the same over-long prompt was a `400 invalid_request_error` when the
+  client did not stream and a `"server_error"` inside a `200` when it did — the
+  user's own mistake reported as this server breaking, and monitoring told this
+  node has a bug (gotcha #301). Classify where the typed error still exists:
+  `StreamFailure::from_error` does it at the site that previously discarded it
+  with `e.to_string()`. Do NOT re-derive a type by matching on the message —
+  that is #295's substring-matching-prose trap, and the wording is what changes.
+  `a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling` fails
+  the build on a new literal.
+
+- **`AnthropicSseEvent::Error`** (2026-08-12) — the ONLY way the Anthropic
+  streaming surface reports a failure. Emit `event: error`; never write the
+  reason into assistant content, and never invent a `stop_reason` for it.
+  Before it existed this surface could not say "that went wrong" at all, so each
+  path improvised: the router arm reported every failure as `stop_reason:
+  "end_turn"` with an empty body (a `PromptPrivacyUnavailable` refusal — the
+  thing #295 exists to explain — reached the client as the model choosing to say
+  nothing), and the split path wrote `[inference failed: …]` into the message,
+  where a client cannot tell it from a real reply and it persists as an
+  assistant turn, alongside `stop_reason: "error"`, which the API does not
+  define (gotcha #300). Three invariants a new caller must keep: the frame is
+  **terminal** (`build_anthropic_sse_response` ends its keepalive ticker on it,
+  as it does on `message_stop` — a terminal frame that does not stop the ticker
+  hangs the connection); close any open content block first; and translate the
+  type through `anthropic_error_type`, because our canonical types are
+  OpenAI-flavoured and Anthropic clients match on Anthropic's own set (#302).
+
 - **`SharedState::cfg()`** (2026-08-09) — the live config, and the single answer
   to "what is this setting **now**". `state.config` is the boot-time snapshot:
   correct for what is decided once at startup (listen addresses, data dir, how

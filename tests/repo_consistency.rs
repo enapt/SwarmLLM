@@ -1895,3 +1895,49 @@ fn both_huggingface_probe_sites_treat_a_typo_as_the_callers_mistake() {
         );
     }
 }
+
+/// A streaming error frame must take its type from `classify_error`, never a
+/// literal.
+///
+/// Both SSE encoders used to hardcode one, so every failure a stream reported
+/// was typed `server_error` — an over-long prompt, which the non-streaming
+/// sibling answers `400 invalid_request_error`, was reported inside a 200 as
+/// this server breaking (measured on the released v0.3.95 binary, 2026-08-12).
+/// A literal here is invisible: the frame still looks well-formed, and only a
+/// client comparing the two surfaces on the same input can tell.
+#[test]
+fn a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling() {
+    let root = repo_root();
+    for rel in [
+        "src/api/openai/streaming.rs",
+        "src/api/anthropic/handlers.rs",
+    ] {
+        let src =
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        // The encoders build the frame from the event's own `error_type`; a
+        // quoted type next to `"type":` means someone chose one locally again.
+        for literal in [
+            "\"type\": \"server_error\"",
+            "\"type\":\"server_error\"",
+            "\"type\": \"api_error\"",
+        ] {
+            assert!(
+                !src.contains(literal),
+                "{rel} hardcodes {literal} in a streamed error frame — take the \
+                 type from crate::error::classify_error so the streaming and \
+                 non-streaming surfaces cannot disagree about the same failure"
+            );
+        }
+    }
+
+    // `stop_reason` carries only values the Messages API defines, and "error"
+    // is not one of them. The split stream used to send it.
+    let anthropic = std::fs::read_to_string(root.join("src/api/anthropic/handlers.rs"))
+        .expect("read anthropic handlers");
+    assert!(
+        !anthropic.contains("stop_reason = \"error\""),
+        "src/api/anthropic/handlers.rs sets stop_reason to \"error\", which the \
+         Anthropic API does not define — report the failure with an `error` SSE \
+         event instead, which is terminal and needs no stop_reason"
+    );
+}

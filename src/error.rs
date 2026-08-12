@@ -158,140 +158,148 @@ impl From<SwarmError> for ApiError {
     }
 }
 
+/// Classify an error into (HTTP status, client-safe message, error type).
+///
+/// The single definition of what an error *is* to a caller. Extracted from
+/// `ApiError::into_response` so the STREAMING paths can label an SSE error
+/// frame with the same type the non-streaming sibling returns for the identical
+/// failure.
+///
+/// They could not, so they hardcoded one: an over-long prompt came back as
+/// `invalid_request_error` with a 400 when the client didn't stream, and as
+/// `server_error` inside a 200 when it did — the same user mistake reported as
+/// this server breaking (measured 2026-08-12). Anything that needs to name an
+/// error to a client goes through here rather than choosing a type locally.
+pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
+    match err {
+        SwarmError::ModelNotAvailable(_) => {
+            (StatusCode::NOT_FOUND, err.to_string(), "not_found_error")
+        }
+        SwarmError::NoModelLoaded => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "server_error",
+        ),
+        SwarmError::InferenceTimeout(_) => {
+            (StatusCode::GATEWAY_TIMEOUT, err.to_string(), "server_error")
+        }
+        SwarmError::InsufficientCredits { .. } => (
+            StatusCode::PAYMENT_REQUIRED,
+            err.to_string(),
+            "insufficient_credits",
+        ),
+        SwarmError::InsufficientCapacity(_) | SwarmError::ServiceUnavailable(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "server_error",
+        ),
+        SwarmError::PrivateModeUnavailable { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "private_mode_error",
+        ),
+        SwarmError::PromptPrivacyUnavailable { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "prompt_privacy_error",
+        ),
+        // The swarm is missing part of this model: "this server can't
+        // serve", exactly like its sibling `InsufficientCapacity`. It
+        // answered 500 until 2026-08-11, reporting a capacity shortfall as
+        // a fault in the node the user is talking to.
+        SwarmError::ModelIncompleteInSwarm { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "server_error",
+        ),
+        SwarmError::VisionEncoderUnavailable(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "server_error",
+        ),
+        SwarmError::InsufficientDisk { .. } => (
+            StatusCode::INSUFFICIENT_STORAGE,
+            err.to_string(),
+            "server_error",
+        ),
+        SwarmError::ShardIntegrity { .. } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            err.to_string(),
+            "server_error",
+        ),
+        SwarmError::ShardIncomplete { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "service_unavailable",
+        ),
+        SwarmError::PipelineError(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            err.to_string(),
+            "server_error",
+        ),
+        SwarmError::Inference(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            err.to_string(),
+            "server_error",
+        ),
+        SwarmError::ProviderError { status, ref body } => {
+            let http_status = StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
+            // Truncate provider body to avoid leaking upstream internals
+            let safe_body: String = body.chars().take(512).collect();
+            (
+                http_status,
+                format!("Provider error: {safe_body}"),
+                "server_error",
+            )
+        }
+        SwarmError::PeerNotFound(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "server_error",
+        ),
+        SwarmError::Unauthorized(_) => (
+            StatusCode::UNAUTHORIZED,
+            err.to_string(),
+            "authentication_error",
+        ),
+        // SwarmError::Config is for daemon startup / config-file errors per
+        // .claude/rules/completeness.md. If it surfaces in an HTTP response
+        // path, the daemon has shipped misconfigured — that's a 500, not a
+        // 400 (the user did not send invalid input).
+        SwarmError::Config(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            err.to_string(),
+            "server_error",
+        ),
+        SwarmError::InvalidNickname(_) | SwarmError::Validation(_) => (
+            StatusCode::BAD_REQUEST,
+            err.to_string(),
+            "invalid_request_error",
+        ),
+        SwarmError::ShardNotFound(_) => (StatusCode::NOT_FOUND, err.to_string(), "not_found_error"),
+        SwarmError::NotFound(_) => (StatusCode::NOT_FOUND, err.to_string(), "not_found_error"),
+        // Network upstream-unreachable: 502 + a distinct error_type so
+        // SDK retry logic can distinguish 'try later' from a 500 bug.
+        SwarmError::Network(_) => (StatusCode::BAD_GATEWAY, err.to_string(), "network_error"),
+        _ => {
+            // Log the full error internally but return a generic message
+            // to avoid leaking internal paths, peer errors, or DB details.
+            tracing::error!(
+                error = %err,
+                "Internal server error"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "An internal error occurred".to_string(),
+                "server_error",
+            )
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let (status, message, error_type) = match &self.0 {
-            SwarmError::ModelNotAvailable(_) => {
-                (StatusCode::NOT_FOUND, self.0.to_string(), "not_found_error")
-            }
-            SwarmError::NoModelLoaded => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::InferenceTimeout(_) => (
-                StatusCode::GATEWAY_TIMEOUT,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::InsufficientCredits { .. } => (
-                StatusCode::PAYMENT_REQUIRED,
-                self.0.to_string(),
-                "insufficient_credits",
-            ),
-            SwarmError::InsufficientCapacity(_) | SwarmError::ServiceUnavailable(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::PrivateModeUnavailable { .. } => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                self.0.to_string(),
-                "private_mode_error",
-            ),
-            SwarmError::PromptPrivacyUnavailable { .. } => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                self.0.to_string(),
-                "prompt_privacy_error",
-            ),
-            // The swarm is missing part of this model: "this server can't
-            // serve", exactly like its sibling `InsufficientCapacity`. It
-            // answered 500 until 2026-08-11, reporting a capacity shortfall as
-            // a fault in the node the user is talking to.
-            SwarmError::ModelIncompleteInSwarm { .. } => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::VisionEncoderUnavailable(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::InsufficientDisk { .. } => (
-                StatusCode::INSUFFICIENT_STORAGE,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::ShardIntegrity { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::ShardIncomplete { .. } => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                self.0.to_string(),
-                "service_unavailable",
-            ),
-            SwarmError::PipelineError(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::Inference(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::ProviderError { status, ref body } => {
-                let http_status = StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
-                // Truncate provider body to avoid leaking upstream internals
-                let safe_body: String = body.chars().take(512).collect();
-                (
-                    http_status,
-                    format!("Provider error: {safe_body}"),
-                    "server_error",
-                )
-            }
-            SwarmError::PeerNotFound(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::Unauthorized(_) => (
-                StatusCode::UNAUTHORIZED,
-                self.0.to_string(),
-                "authentication_error",
-            ),
-            // SwarmError::Config is for daemon startup / config-file errors per
-            // .claude/rules/completeness.md. If it surfaces in an HTTP response
-            // path, the daemon has shipped misconfigured — that's a 500, not a
-            // 400 (the user did not send invalid input).
-            SwarmError::Config(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                self.0.to_string(),
-                "server_error",
-            ),
-            SwarmError::InvalidNickname(_) | SwarmError::Validation(_) => (
-                StatusCode::BAD_REQUEST,
-                self.0.to_string(),
-                "invalid_request_error",
-            ),
-            SwarmError::ShardNotFound(_) => {
-                (StatusCode::NOT_FOUND, self.0.to_string(), "not_found_error")
-            }
-            SwarmError::NotFound(_) => {
-                (StatusCode::NOT_FOUND, self.0.to_string(), "not_found_error")
-            }
-            // Network upstream-unreachable: 502 + a distinct error_type so
-            // SDK retry logic can distinguish 'try later' from a 500 bug.
-            SwarmError::Network(_) => {
-                (StatusCode::BAD_GATEWAY, self.0.to_string(), "network_error")
-            }
-            _ => {
-                // Log the full error internally but return a generic message
-                // to avoid leaking internal paths, peer errors, or DB details.
-                tracing::error!(
-                    error = %self.0,
-                    "Internal server error"
-                );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "An internal error occurred".to_string(),
-                    "server_error",
-                )
-            }
-        };
+        let (status, message, error_type) = classify_error(&self.0);
         // Log 5xx errors so they appear in tracing output (catch non-catch-all 5xx)
         if status.is_server_error() && error_type != "server_error" {
             tracing::error!(
@@ -458,6 +466,44 @@ mod tests {
     fn hint_for_model_not_available() {
         let err = SwarmError::ModelNotAvailable(ModelId("test-model".into()));
         assert!(error_hint(&err).unwrap().contains("Models tab"));
+    }
+
+    /// The caller's own mistake must never be reported as this server failing.
+    ///
+    /// The streaming encoders could not reach this classification, so they
+    /// hardcoded `server_error` for every failure: an over-long prompt was a
+    /// `400 invalid_request_error` when the client did not stream and a
+    /// `server_error` when it did (measured on the released v0.3.95 binary,
+    /// 2026-08-12). Both now read the type from here, so the two surfaces agree
+    /// by construction — this test pins the classification they share.
+    #[test]
+    fn a_users_own_input_error_is_never_classified_as_a_server_fault() {
+        for err in [
+            SwarmError::Validation("This conversation is too long".into()),
+            SwarmError::InvalidNickname("bad".into()),
+        ] {
+            let (status, _msg, error_type) = classify_error(&err);
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+            assert_eq!(error_type, "invalid_request_error", "{err}");
+            assert!(
+                !status.is_server_error(),
+                "a caller-fixable error must not be a 5xx: {err}"
+            );
+        }
+    }
+
+    /// A policy refusal is this node declining by configuration, not a crash.
+    /// It is the case that reached an Anthropic streaming client as a clean
+    /// empty turn until 2026-08-12, so the classification it now streams with
+    /// is worth pinning.
+    #[test]
+    fn a_policy_refusal_classifies_as_unavailable_not_internal() {
+        let err = SwarmError::PromptPrivacyUnavailable {
+            model_id: "m".into(),
+        };
+        let (status, _msg, error_type) = classify_error(&err);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_type, "prompt_privacy_error");
     }
 
     #[test]

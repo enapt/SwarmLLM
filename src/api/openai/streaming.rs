@@ -117,9 +117,40 @@ fn build_chat_completion_response(
 ///
 /// Resolves model metadata, builds the prompt, and spawns the worker subprocess.
 /// Returns None if the model is not loaded as a split model.
+/// Why a local split-model stream produced nothing, in the terms a client needs
+/// to hear it: the message AND the error type.
+///
+/// The type is recorded here, at the one place the typed error still exists,
+/// rather than left for the SSE layer to infer. It used to be dropped
+/// (`e.to_string()`), so both stream encoders had to pick a type blind and both
+/// picked the same wrong one — reporting an over-long prompt, a policy refusal,
+/// and a genuine crash identically as this server failing. Do not re-derive a
+/// type by matching on `message`: that is the substring-matching-user-prose trap
+/// (gotcha #295), and the wording is what changes.
+#[derive(Clone, Debug)]
+pub struct StreamFailure {
+    pub message: String,
+    pub error_type: &'static str,
+}
+
+impl StreamFailure {
+    /// Classify at the point of failure, where the typed error is still in hand.
+    pub fn from_error(err: &crate::error::SwarmError) -> Self {
+        let (_status, _message, error_type) = crate::error::classify_error(err);
+        // `err.to_string()`, not the classified message: that one is
+        // deliberately redacted to "An internal error occurred" for the
+        // catch-all, and this slot feeds an operator-facing log as well as the
+        // client frame.
+        StreamFailure {
+            message: err.to_string(),
+            error_type,
+        }
+    }
+}
+
 /// Records why a local split-model stream produced nothing, so the SSE layer can
 /// tell the client instead of closing the stream silently.
-pub type SplitStreamFailure = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+pub type SplitStreamFailure = std::sync::Arc<std::sync::Mutex<Option<StreamFailure>>>;
 
 /// Token counts from a completed local split-model generation.
 ///
@@ -294,7 +325,7 @@ pub fn spawn_split_stream(
                     // Also hand the reason to the SSE layer so the client is
                     // told what happened instead of receiving silence.
                     if let Ok(mut slot) = failure_sink.lock() {
-                        *slot = Some(e.to_string());
+                        *slot = Some(StreamFailure::from_error(&e));
                     }
                 }
             }
@@ -768,6 +799,7 @@ async fn router_inference_stream(
                     if sse_tx
                         .send(StreamEvent::Error {
                             message: format!("{e}"),
+                            error_type: crate::error::classify_error(&e).2,
                         })
                         .await
                         .is_err()
@@ -1055,8 +1087,14 @@ pub(super) async fn split_stream_response(
                 // A proper SSE error frame, not text smuggled into content:
                 // clients can distinguish a failure from a model that chose to
                 // reply with that string.
-                let _ =
-                    crate::api::sse_send_live(&tx, StreamEvent::Error { message: reason }).await;
+                let _ = crate::api::sse_send_live(
+                    &tx,
+                    StreamEvent::Error {
+                        message: reason.message,
+                        error_type: reason.error_type,
+                    },
+                )
+                .await;
                 finish = "error".to_string();
             }
         }
@@ -1310,11 +1348,14 @@ fn stream_events_to_sse(
                 Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()),
             )
         }
-        StreamEvent::Error { message } => {
+        StreamEvent::Error {
+            message,
+            error_type,
+        } => {
             let error_json = serde_json::json!({
                 "error": {
                     "message": message,
-                    "type": "server_error"
+                    "type": error_type
                 }
             });
             Ok(Event::default().data(serde_json::to_string(&error_json).unwrap_or_default()))

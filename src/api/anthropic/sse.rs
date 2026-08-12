@@ -56,6 +56,44 @@ pub(super) enum AnthropicSseEvent {
         input_tokens: Option<u32>,
     },
     MessageStop,
+    /// A failure, in the shape the Anthropic API actually uses for one.
+    ///
+    /// This surface had no way to say "that went wrong", and the two streaming
+    /// paths invented one each: the router path reported a failed request as a
+    /// normal empty turn (`stop_reason: "end_turn"`, HTTP 200 — a policy refusal
+    /// or a dead pipeline arrived as the model choosing to say nothing), and the
+    /// split path wrote the reason into the assistant's own text as
+    /// `[inference failed: …]` and set `stop_reason: "error"`, which is not a
+    /// value the API defines — so an SDK deserialising that enum sees a reply
+    /// the model never made. Both measured 2026-08-12.
+    ///
+    /// `error` is terminal: `build_anthropic_sse_response` ends the stream on it
+    /// exactly as it does on `message_stop`, so no epilogue follows.
+    Error {
+        error_type: &'static str,
+        message: String,
+    },
+}
+
+/// Translate our canonical error type into one the Anthropic API defines.
+///
+/// The canonical set (`crate::error::classify_error`) is OpenAI-flavoured
+/// because that is the older surface; Anthropic names some of the same things
+/// differently and clients match on the name. The overlapping types pass
+/// through unchanged and everything else becomes `api_error`, which is
+/// Anthropic's generic server-side failure — never a made-up type, because an
+/// unknown one deserialises no better than the `"error"` stop_reason did.
+fn anthropic_error_type(error_type: &str) -> &'static str {
+    match error_type {
+        "invalid_request_error" => "invalid_request_error",
+        "authentication_error" => "authentication_error",
+        "not_found_error" => "not_found_error",
+        "permission_error" => "permission_error",
+        "rate_limit_error" => "rate_limit_error",
+        "request_too_large" => "request_too_large",
+        "overloaded_error" => "overloaded_error",
+        _ => "api_error",
+    }
 }
 
 /// Serialize an Anthropic SSE event to (event_type, data_json).
@@ -153,6 +191,17 @@ pub(super) fn serialize_anthropic_event(event: &AnthropicSseEvent) -> (&'static 
             "message_stop",
             serde_json::json!({ "type": "message_stop" }).to_string(),
         ),
+        AnthropicSseEvent::Error {
+            error_type,
+            message,
+        } => (
+            "error",
+            serde_json::json!({
+                "type": "error",
+                "error": { "type": anthropic_error_type(error_type), "message": message }
+            })
+            .to_string(),
+        ),
     }
 }
 
@@ -171,8 +220,12 @@ pub(super) fn build_anthropic_sse_response(
     let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| {
         let (event_type, data) = serialize_anthropic_event(&event);
         // `message_stop` is Anthropic's terminal frame; after it the ticker
-        // must end or `merge` would hold the response open forever.
-        if event_type == "message_stop" {
+        // must end or `merge` would hold the response open forever. `error` is
+        // terminal too — upstream ends the stream there rather than following it
+        // with an epilogue, and a frame that ends the stream without ending the
+        // ticker would leave the client hanging on a request it has already been
+        // told failed.
+        if event_type == "message_stop" || event_type == "error" {
             finished_for_map.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         Ok::<_, Infallible>(Event::default().event(event_type).data(data))
@@ -347,6 +400,106 @@ mod block_sequencing_tests {
             }
         }
         assert!(open.is_none(), "a content block was left open: {open:?}");
+    }
+
+    /// A failure goes on the wire as Anthropic's `error` event, never as text.
+    ///
+    /// The split stream used to emit the reason as a `content_block_delta`, so
+    /// the model appeared to have said `[inference failed: …]` — indistinguishable
+    /// from a real reply, and persisted into conversation history as an assistant
+    /// turn. Measured on the released v0.3.95 binary 2026-08-12.
+    #[test]
+    fn a_failure_is_an_error_event_not_assistant_text() {
+        let (name, data) = serialize_anthropic_event(&AnthropicSseEvent::Error {
+            error_type: "invalid_request_error",
+            message: "This conversation is too long".into(),
+        });
+        assert_eq!(name, "error", "must use the SSE `error` event name");
+        let v: serde_json::Value = serde_json::from_str(&data).expect("valid JSON");
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+        assert_eq!(v["error"]["message"], "This conversation is too long");
+        // The reason must not be reachable as assistant content.
+        assert!(
+            v.get("delta").is_none() && v.get("content_block").is_none(),
+            "an error must not carry content: {data}"
+        );
+    }
+
+    /// `stop_reason` may only carry values the API defines.
+    ///
+    /// `"error"` is not one of them — the split path used to send it alongside
+    /// the fake assistant text, so an SDK deserialising that enum was handed a
+    /// value it has no variant for.
+    #[test]
+    fn stop_reason_is_never_a_value_the_api_does_not_define() {
+        // Per the Messages API: end_turn | max_tokens | stop_sequence |
+        // tool_use | pause_turn | refusal | model_context_window_exceeded.
+        const DEFINED: &[&str] = &[
+            "end_turn",
+            "max_tokens",
+            "stop_sequence",
+            "tool_use",
+            "pause_turn",
+            "refusal",
+            "model_context_window_exceeded",
+        ];
+        for reason in ["end_turn", "max_tokens", "tool_use", "stop_sequence"] {
+            let (_n, data) = serialize_anthropic_event(&AnthropicSseEvent::MessageDelta {
+                stop_reason: reason.to_string(),
+                stop_sequence: None,
+                output_tokens: 1,
+                input_tokens: None,
+            });
+            let v: serde_json::Value = serde_json::from_str(&data).unwrap();
+            let got = v["delta"]["stop_reason"].as_str().unwrap_or_default();
+            assert!(
+                DEFINED.contains(&got),
+                "`{got}` is not a stop_reason the Anthropic API defines"
+            );
+        }
+    }
+
+    /// Our canonical error types are OpenAI-flavoured; the Anthropic surface
+    /// must only ever name a type Anthropic defines, falling back to
+    /// `api_error` rather than inventing one.
+    #[test]
+    fn error_types_are_translated_into_anthropics_own_set() {
+        const ANTHROPIC_DEFINED: &[&str] = &[
+            "invalid_request_error",
+            "authentication_error",
+            "permission_error",
+            "not_found_error",
+            "request_too_large",
+            "rate_limit_error",
+            "api_error",
+            "overloaded_error",
+        ];
+        // Every type `classify_error` can produce, including the ones with no
+        // Anthropic equivalent.
+        for ours in [
+            "invalid_request_error",
+            "not_found_error",
+            "authentication_error",
+            "server_error",
+            "network_error",
+            "insufficient_credits",
+            "private_mode_error",
+            "prompt_privacy_error",
+            "service_unavailable",
+        ] {
+            let mapped = anthropic_error_type(ours);
+            assert!(
+                ANTHROPIC_DEFINED.contains(&mapped),
+                "`{ours}` mapped to `{mapped}`, which Anthropic does not define"
+            );
+        }
+        // A caller's own mistake must not be laundered into a server fault.
+        assert_eq!(
+            anthropic_error_type("invalid_request_error"),
+            "invalid_request_error"
+        );
+        assert_eq!(anthropic_error_type("server_error"), "api_error");
     }
 
     /// The epilogue must not close block 0 a second time once the tool path has

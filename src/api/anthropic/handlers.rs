@@ -400,8 +400,37 @@ pub(super) async fn anthropic_stream(
                     )
                     .await;
                 }
-                _ => {
-                    send_sse_epilogue(&sse_tx, "end_turn".into(), streamed_token_count, None).await;
+                // The pipeline failed, or died without sending a result. Say so.
+                //
+                // This arm used to send `end_turn` with an empty body, so every
+                // failure on the Anthropic router path — the one a request takes
+                // when the model is served by peers — reached the client as HTTP
+                // 200 and a model that had chosen to reply with nothing. Measured
+                // 2026-08-12: a `PromptPrivacyUnavailable` refusal, which the
+                // non-streaming sibling reports as a 503 with a hint explaining
+                // exactly what to change, arrived here as a clean empty turn and
+                // the reason never left the daemon.
+                Ok(Err(e)) => {
+                    let _ = crate::api::sse_send_live(
+                        &sse_tx,
+                        AnthropicSseEvent::Error {
+                            error_type: crate::error::classify_error(&e).2,
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+                Err(_) => {
+                    let _ = crate::api::sse_send_live(
+                        &sse_tx,
+                        AnthropicSseEvent::Error {
+                            error_type: "api_error",
+                            message: "The inference pipeline stopped without \
+                                      returning a result. Nothing was generated."
+                                .to_string(),
+                        },
+                    )
+                    .await;
                 }
             }
         }
@@ -584,32 +613,48 @@ pub(super) async fn anthropic_split_stream(
 
         // Nothing generated + a recorded failure: say why instead of emitting a
         // clean-looking empty message (external report 2026-07-25).
+        //
+        // As an `error` frame, not as assistant text. Writing the reason into
+        // the message body made the model appear to have SAID
+        // `[inference failed: …]`: a client cannot tell that from a real reply,
+        // it lands in the conversation history as an assistant turn, and the
+        // `stop_reason: "error"` that accompanied it is not a value the API
+        // defines. The stream ends here — `error` is terminal, so no epilogue.
         if total_output_tokens == 0 {
             let reason = failure.lock().ok().and_then(|s| s.clone());
             if let Some(reason) = reason {
+                if let TextBlock::Open = text_block {
+                    let _ = crate::api::sse_send_live(
+                        &sse_tx,
+                        AnthropicSseEvent::ContentBlockStop { index: 0 },
+                    )
+                    .await;
+                }
                 let _ = crate::api::sse_send_live(
                     &sse_tx,
-                    AnthropicSseEvent::ContentBlockDelta {
-                        index: 0,
-                        text: format!("[inference failed: {reason}]"),
+                    AnthropicSseEvent::Error {
+                        error_type: reason.error_type,
+                        message: reason.message,
                     },
                 )
                 .await;
-                stop_reason = "error".to_string();
+                stream_trace.mark_finished(
+                    crate::inference::trace::Outcome::Error("SplitStreamError".into()),
+                    0,
+                    0,
+                );
+                state.shared_state.publish_request_trace(&stream_trace);
+                return;
             }
         }
 
         // Publish before the terminal frames: a client that has already walked
         // away must not cost us the record of work the node actually did.
-        stream_trace.mark_finished(
-            if stop_reason == "error" {
-                crate::inference::trace::Outcome::Error("SplitStreamError".into())
-            } else {
-                crate::inference::trace::Outcome::Ok
-            },
-            0,
-            total_output_tokens,
-        );
+        //
+        // Reaching here means the stream produced tokens and ended on a real
+        // stop reason — the failure case returned above, after its `error`
+        // frame. There is no longer an "error" stop_reason to test for.
+        stream_trace.mark_finished(crate::inference::trace::Outcome::Ok, 0, total_output_tokens);
         state.shared_state.publish_request_trace(&stream_trace);
 
         // The split stream publishes (prompt, completion) once generation

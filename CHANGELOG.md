@@ -4,6 +4,33 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A request that failed could come back as an empty reply, as though the model
+had chosen to say nothing.** When an answer is streamed — which is how a chat
+normally arrives, and how Claude Code always talks to a node — a failure had no
+way to be reported on the Anthropic interface at all. So a request that was
+refused, or whose pipeline broke, ended as a perfectly ordinary finished turn
+with nothing in it. The reason was written to this node's log and never sent to
+whoever asked.
+
+The case that shows why it matters: a node set to keep prompts private, on a
+model whose first shard it no longer holds, is right to refuse — and when the
+answer is not streamed it says exactly that, and what to change. Streamed, the
+explanation vanished and the user saw silence. Failures are now reported as
+failures, carrying the same reason the non-streamed reply would have given.
+
+**A model appeared to say "[inference failed: …]".** On the other streaming
+path the reason was written into the reply itself, so it was indistinguishable
+from something the model actually said, and it was stored in the conversation as
+if the model had said it. It is now sent as an error, which clients can tell
+apart from an answer.
+
+**Being asked for too much is no longer reported as this server breaking.** A
+conversation longer than a model can hold is something the sender can fix, and
+when the reply was not streamed it was already reported that way, with how much
+to shorten. Streamed, the identical request was labelled a server fault instead
+— which told monitoring this node had a bug and told the user nothing they could
+act on. Both now describe the same failure the same way.
+
 ## [0.3.95-alpha] — 2026-08-12
 
 **A machine whose graphics memory was full said it was broken, so your request

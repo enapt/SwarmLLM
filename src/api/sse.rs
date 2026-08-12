@@ -56,8 +56,16 @@ pub enum StreamEvent {
         role: Option<String>,
         finish_reason: Option<String>,
     },
+    /// A failure, in the same terms the non-streaming sibling would report it.
+    ///
+    /// `error_type` is a required field rather than an encoder-side default
+    /// precisely so a new call site has to say what kind of failure this is.
+    /// The encoder used to stamp every one of them `server_error`, which told
+    /// the caller that this server had broken when in fact their prompt was too
+    /// long. Fill it from `crate::error::classify_error`, never by hand.
     Error {
         message: String,
+        error_type: &'static str,
     },
     /// A complete set of tool calls recovered from a local model's output.
     ///
