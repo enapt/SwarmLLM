@@ -210,12 +210,12 @@ All 20 build phases complete. All subsystems wired — no stubs. **1853 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — UNRELEASED (2026-08-12): a failure could not report itself
+### Latest — v0.3.96-alpha (2026-08-15): a failure could not report itself
 
-**Four fix commits are pushed and NOT released** (`36249e54`, `dbe62912`,
-`104cc812`, `6a1723c7`; the doc commits after them carry no behaviour). The swarm — including the live node and the anchor —
-still runs **v0.3.95-alpha**, which has none of them. `CHANGELOG.md` carries them
-under `[Unreleased]`. **Cutting the release is the user's call.**
+**Shipped 2026-08-15.** All four workflows green (CI, Docker, Release, Cache
+warm); 25 assets, not a draft. Verified on the DOWNLOADED CUDA artifact —
+sha256 match, smoke 8/8, and **all six fixes re-checked on it** — before the
+live node was updated (rollback: `~/.local/bin/swarmllm.0.3.95.bak`).
 
 **Six defects, one shape: an error's type is known in one place and a literal is
 written in another.** Each surface looked internally consistent; the bug is only
