@@ -8319,6 +8319,15 @@ which tells a caller (or an upstream coordinator) to re-route or retry rather th
 to report a fault. The 93 s is the retry policy working as designed, so this is a
 status-correctness item rather than a latency one, and it is bounded.
 
+**Second instance, measured 2026-08-15 on two real machines:** with only two
+holders of a shard range and one of them busy, a distributed request fails with
+`Pipeline assembly failed: Segment 1 failed with no standby available` — also a
+500. It succeeded on retry once the peer was idle. Same argument: the caller's
+request is fine and this node is fine, there was simply nobody free, which is
+503. Note the router already gets the *attribution* right here (`Skipping credit
+penalty — failure is not attributable to a peer`); it is only the status that
+misreports.
+
 Not investigated: `is_transient_remote_failure` already matches "never
 acknowledged" and retries, so the change is in what the *exhausted* path returns —
 `PipelineError` (→ 500) rather than `ServiceUnavailable` (→ 503). Check
