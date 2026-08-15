@@ -8358,8 +8358,11 @@ written to the database, nor overridden by what is stored there, so deleting the
 line undoes it. The `--shards` flag keeps its documented stickiness. See gotcha
 #306.
 
-Still open from this investigation: `POST /api/admin/rescan-shards` returned
+Also fixed: `POST /api/admin/rescan-shards` returned
 `{"count":0,"models_updated":[]}` while a present, unclaimed shard file sat on
-disk — it reports what it changed but not what it considered, so it reads as
-"nothing to do" when the truthful answer is "something was deliberately passed
-over". Worth surfacing the skipped-and-why count.
+disk — it reported what it changed but not what it considered, so it read as
+"nothing to do" when the truthful answer was "something was deliberately passed
+over". It now also returns `skipped_outside_shard_range`, counting only shards
+that are actually ON DISK (every manifest lists shards a node was never going to
+hold, and counting those would drown the number that matters). Additive:
+`status`, `count` and `models_updated` are unchanged for existing clients.

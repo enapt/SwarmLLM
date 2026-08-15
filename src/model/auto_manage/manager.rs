@@ -317,7 +317,7 @@ impl AutoShardManager {
                         .auto_manage_enabled
                         .load(std::sync::atomic::Ordering::Acquire);
                     let net_arg = if auto_enabled { Some(&self.network_tx) } else { None };
-                    let changed = rescan_local_shards(&self.shared_state, net_arg).await;
+                    let changed = rescan_local_shards(&self.shared_state, net_arg).await.changed;
                     if !changed.is_empty() {
                         tracing::info!(
                             models = ?changed.iter().map(|m| m.0.as_str()).collect::<Vec<_>>(),

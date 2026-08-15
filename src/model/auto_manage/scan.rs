@@ -13,19 +13,35 @@ use super::vram::{compute_vram_budget, estimate_segment_vram_mb};
 /// register the local node as a holder, re-announce to the network, and trigger
 /// model (re)loading so the node can use the new shards without a restart.
 ///
-/// Returns the list of model IDs that had new shards discovered.
+/// Returns what changed and what was deliberately left alone.
+///
+/// What a rescan did, and what it deliberately left alone.
+///
+/// It used to return only the models it changed, so a rescan that adopted
+/// nothing was indistinguishable from one that had nothing to adopt — see
+/// `skipped_outside_shard_range`.
+#[derive(Debug, Default, Clone)]
+pub struct RescanOutcome {
+    /// Models whose local shard set changed.
+    pub changed: Vec<ModelId>,
+    /// Shards present ON DISK that this node declines to claim because they
+    /// fall outside `inference.shard_range`. Non-zero means storage is in use
+    /// for shards this node advertises to nobody.
+    pub skipped_outside_shard_range: u32,
+}
+
 pub async fn rescan_local_shards(
     shared: &Arc<SharedState>,
     network_tx: Option<&mpsc::Sender<NetworkCommand>>,
-) -> Vec<ModelId> {
+) -> RescanOutcome {
+    let mut outcome = RescanOutcome::default();
     let models_dir = shared.shard_store().models_dir();
     if !models_dir.is_dir() {
-        return vec![];
+        return outcome;
     }
 
     let local_node_id = shared.identity.node_id().clone();
     let shard_store = shared.shard_store();
-    let mut changed_models = Vec::new();
 
     let md = models_dir.to_path_buf();
     let dir_entries: Vec<String> = tokio::task::spawn_blocking(move || {
@@ -66,6 +82,19 @@ pub async fn rescan_local_shards(
             // a split model, and it loads the whole thing into memory — the
             // saving being asked for is exactly what silently does not happen.
             if !shared.config.inference.claims_shard(shard_info.index) {
+                // Count it ONLY when the file is actually here. Every manifest
+                // lists shards this node was never going to hold, so counting
+                // those would drown the number that matters: a shard sitting on
+                // disk that the rescan is deliberately declining to adopt.
+                //
+                // That case used to be invisible. `POST /api/admin/rescan-shards`
+                // answered `{"count":0,"models_updated":[]}` while a 709 MB shard
+                // sat unclaimed beside the ones it did adopt — "nothing to do"
+                // when the truthful answer was "something was passed over, and
+                // here is why" (measured 2026-08-15 diagnosing gotcha #306).
+                if shard_store.shard_path(&model_id, shard_info.index).exists() {
+                    outcome.skipped_outside_shard_range += 1;
+                }
                 continue;
             }
             let shard_id = ShardId {
@@ -240,7 +269,7 @@ pub async fn rescan_local_shards(
         }
 
         if new_shards > 0 {
-            changed_models.push(model_id.clone());
+            outcome.changed.push(model_id.clone());
             tracing::info!(
                 model = %model_id_str,
                 new_shards,
@@ -268,9 +297,9 @@ pub async fn rescan_local_shards(
     }
 
     // For models with new shards: reload the model and re-announce
-    if !changed_models.is_empty() {
+    if !outcome.changed.is_empty() {
         let vram_budget = compute_vram_budget(shared);
-        for model_id in &changed_models {
+        for model_id in &outcome.changed {
             // Evict old model segments so they reload with updated layer ranges
             // Use secondary index for O(1) lookup of segments to evict
             let ranges: Vec<(usize, usize)> = shared
@@ -330,7 +359,7 @@ pub async fn rescan_local_shards(
         }
     }
 
-    changed_models
+    outcome
 }
 
 /// Spawn the canonical "shard landed → reload model → refresh dashboard" task.

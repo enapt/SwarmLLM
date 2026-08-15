@@ -1605,13 +1605,18 @@ pub(crate) use crate::model::auto_manage::vram::detect_gpu_nvidia_smi;
 /// and re-announces shards to the network. No restart needed.
 pub async fn rescan_shards(State(state): State<AppState>) -> Json<serde_json::Value> {
     let network_tx = state.network_tx.clone();
-    let changed =
+    let outcome =
         crate::model::auto_manage::rescan_local_shards(&state.shared_state, network_tx.as_ref())
             .await;
+    // `skipped_*` is additive — `status`, `models_updated` and `count` keep
+    // their meaning. Without it a rescan reported `count: 0` whether it had
+    // nothing to do or had deliberately passed over a shard sitting on disk,
+    // and those are very different answers to "why is this shard not served?".
     Json(serde_json::json!({
         "status": "ok",
-        "models_updated": changed.iter().map(|m| &m.0).collect::<Vec<_>>(),
-        "count": changed.len(),
+        "models_updated": outcome.changed.iter().map(|m| &m.0).collect::<Vec<_>>(),
+        "count": outcome.changed.len(),
+        "skipped_outside_shard_range": outcome.skipped_outside_shard_range,
     }))
 }
 
