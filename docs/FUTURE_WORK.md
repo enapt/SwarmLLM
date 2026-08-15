@@ -8334,7 +8334,7 @@ acknowledged" and retries, so the change is in what the *exhausted* path returns
 `failure_is_penalty_worthy` at the same time: a peer that never answered may or
 may not deserve the penalty it currently gets.
 
-## `shard_range` exclusions are permanent (measured 2026-08-15)
+## `shard_range` exclusions are permanent (measured 2026-08-15) — FIXED same day
 
 Removing `inference.shard_range` does not restore the shards it excluded. See
 gotcha #306 for the full reproduction: config cleared, two restarts, file
@@ -8353,7 +8353,13 @@ converts every excluded shard into dead weight: occupying the storage budget,
 advertised to no one, and recoverable only by re-downloading bytes that are
 already on disk.
 
-Two things to check when fixing: that the disk scan can re-adopt a shard whose
-claim was previously withdrawn, and that `rescan-shards` reports what it
-considered rather than only what it changed (it returned `count: 0` with no
-indication that a present, unclaimed file had been passed over).
+**Fixed** in `cli::run::resolve_shard_range`: a config-file value is no longer
+written to the database, nor overridden by what is stored there, so deleting the
+line undoes it. The `--shards` flag keeps its documented stickiness. See gotcha
+#306.
+
+Still open from this investigation: `POST /api/admin/rescan-shards` returned
+`{"count":0,"models_updated":[]}` while a present, unclaimed shard file sat on
+disk — it reports what it changed but not what it considered, so it reads as
+"nothing to do" when the truthful answer is "something was deliberately passed
+over". Worth surfacing the skipped-and-why count.
