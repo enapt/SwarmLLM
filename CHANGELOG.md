@@ -15,6 +15,15 @@ points at using a cloud provider instead.
 whether there was nothing to do or a shard was sitting on disk being
 deliberately skipped — very different answers to "why is this not being served".
 
+**Removing a shard range from the config file now takes effect.** Restricting a
+node to part of a model worked, but undoing it did not: the node stayed
+restricted across restarts, a file edit, and an explicit rescan, while the piece
+it had stopped offering sat on disk doing nothing. Found on a live node, where
+it left 709 MB as dead weight and quietly dropped that piece of a model to a
+single machine for the whole network. Only the command-line flag is remembered
+between runs now — the config file is read fresh each time, so deleting the line
+undoes it, and `--shards all` clears a range the flag set.
+
 **A machine that loaded a model from a file was not offered to the swarm for
 it.** It announced that model under its human-readable name — "Llama 3.2 3B
 Instruct" — where every other node uses the short id, so no peer could connect
