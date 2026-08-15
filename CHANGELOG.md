@@ -4,6 +4,20 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Writing a reply is 1.41x faster on processors without a graphics card**, for
+most models released in the last couple of years — Llama 3.x, Qwen2.5, Mistral
+and anything else that shares key/value data across attention heads.
+
+Those models store their memory of the conversation compactly, and SwarmLLM was
+expanding it back to full size on every single word it produced, in every layer
+of the model. On a 3B model with about 900 words of context that came to roughly
+640MB of copying per word written — of data already held in memory. The copy is
+unnecessary: the parts that share that memory can read it where it already sits.
+
+Measured on the same machine, three runs each: writing went from 4.71 to 6.63
+words per second, and reading a prompt was unchanged. Machines with a graphics
+card are unaffected — they already took a different route.
+
 ## [0.3.97-alpha] — 2026-08-15
 
 **Asking for embeddings no longer looks like a temporary outage.** This build
