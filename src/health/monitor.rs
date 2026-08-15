@@ -387,8 +387,15 @@ impl HealthMonitor {
         // represent the full model as shard index 0.
         if hosted_shards.is_empty() && self.shared_state.config.inference.shard_range.is_none() {
             if let Some(info) = self.shared_state.loaded_model_info.read().await.as_ref() {
+                // Slugified, NOT the raw display name. This announcement is
+                // how peers learn what we hold, and they match it against a
+                // manifest id — which `generate_and_register_local_manifest`
+                // derives from this same field via the same helper. Sending
+                // "Llama 3.2 3B Instruct" where the manifest says
+                // "llama-3.2-3b-instruct" made this node invisible as a holder
+                // and put a phantom entry in every peer's model list (#310).
                 hosted_shards.push(crate::types::ShardId {
-                    model_id: crate::types::ModelId(info.name.clone()),
+                    model_id: crate::types::ModelId(crate::types::slugify_model_name(&info.name)),
                     index: 0,
                 });
             }

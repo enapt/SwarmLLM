@@ -685,6 +685,27 @@ silently break at the wire if duplicated:
   Holding a shard is the honest signal, which is why the gossip handler
   deliberately does NOT require `sender == publisher`. `publisher` means who
   published it — do not reintroduce a self-claim to grant broadcast rights.
+- **`types::slugify_model_name`** (2026-08-15) — the single derivation of a model
+  id from a human display name. It is what
+  `daemon::manifest::generate_and_register_local_manifest` registers, persists
+  and gossips, so resolving a name a user typed, building the model's directory
+  path, and announcing which models this node hosts must all arrive at the same
+  string or they are looking for a model nobody published.
+  There were **three** derivations and no two agreed. Two were near-identical
+  slugifiers differing on any character that is neither alphanumeric nor `-`/`.`
+  — one DELETED it, the other REPLACED it with `-` — so `Model (Q4_K_M)`
+  registered as `model-q4-k-m` and resolved as `model-q4km`; quant suffixes carry
+  underscores, so that is an ordinary GGUF name. The third was no derivation at
+  all: `health::monitor`'s capability announcement sent the RAW display name, so
+  a node that loaded a model with `-m` advertised holdings under an id no peer
+  could match to a manifest — **invisible as a holder of a model it was sitting
+  on**, and a phantom `shard_count: 0` entry in every peer's list (gotcha #310).
+  **The replace-and-collapse semantics are canonical because they made the ids
+  already on disk and in the DHT.** `the_shared_helper_still_produces_the_ids_
+  already_on_disk` reproduces the old manifest algorithm verbatim and asserts
+  agreement, so changing the semantics renames every user's models and goes red.
+  A new surface that turns a name into an id calls this; it must never grow a
+  second copy, and a raw display name is never a `ModelId`.
 - **`model::huggingface::is_trusted_publisher`** (R141) — canonical
   curator-allowlist check for an HF `repo_id`. Splits on the first `/`
   and case-insensitively matches the prefix against

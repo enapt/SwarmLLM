@@ -15,6 +15,24 @@ points at using a cloud provider instead.
 whether there was nothing to do or a shard was sitting on disk being
 deliberately skipped — very different answers to "why is this not being served".
 
+**A machine that loaded a model from a file was not offered to the swarm for
+it.** It announced that model under its human-readable name — "Llama 3.2 3B
+Instruct" — where every other node uses the short id, so no peer could connect
+the two. The machine was sitting on a model nobody could be sent to it for, and
+everyone else's model list grew a second, unusable entry beside the real one:
+picking it always failed. Both come from the same cause, and the name is now
+turned into an id in exactly one place.
+
+The same tidy-up fixes a related case that had not been reported yet: a model
+whose name contains an underscore or brackets — which is most quantised model
+files, like `Q4_K_M` — could be registered under one id and looked up under
+another, so asking for it by name would never find it.
+
+**Models the swarm has but this node knows nothing about are no longer listed as
+"available".** They cannot be run — there is nothing describing how the model is
+split up — so choosing one always failed. They are still listed, because it is
+useful to see what is out there, but they now say what they are.
+
 **If you run SwarmLLM on one machine and open the dashboard from another, it no
 longer blames your API key when you check for updates.** Updating and shutting
 down have always been restricted to the computer the node is running on, which

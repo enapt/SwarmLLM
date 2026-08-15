@@ -475,8 +475,27 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     }
 
     // 3. Models discovered from peer announcements (not in our registry or loaded)
+    //
+    // "discovered", NOT "available": we have a peer's word that it holds shards
+    // of something by this name, and no manifest. Without one there is no shard
+    // count and no layer ranges, so no pipeline can be assembled — and there is
+    // no on-demand manifest fetch, so this does not resolve itself on request.
+    // Every one of these answers `404 Model not available` if a user picks it.
+    // Calling that "available" is the shape of #296, where a node listed models
+    // it could not run; the entry is still worth showing, because it tells you
+    // the swarm has something you could acquire. `trust_level` already said
+    // "discovered" while `status` claimed otherwise (#310).
+    //
+    // Also dedup on the slug, which folds away a peer that is still announcing
+    // a raw display name while publishing a manifest under the slug of it —
+    // i.e. any node not yet carrying the #310 fix. Without this the same model
+    // shows up twice during a rollout. It cannot fold a model whose manifest id
+    // came from somewhere other than its display name (an HF filename carries a
+    // quant suffix the name does not), and it is not meant to: those are two
+    // genuinely distinct registrations.
     for (model_name, peers) in &model_peers {
-        if seen_ids.contains(model_name) {
+        let slug = crate::types::slugify_model_name(model_name);
+        if seen_ids.contains(model_name) || seen_ids.contains(&slug) {
             continue;
         }
         seen_ids.insert(model_name.clone());
@@ -487,7 +506,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             0,
             0,
             0,
-            "available",
+            "discovered",
             "full",
             "network",
             peers.len(),

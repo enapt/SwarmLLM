@@ -15,17 +15,12 @@ pub fn generate_and_register_local_manifest(
     info: &LoadedModelInfo,
     model_path: &std::path::Path,
 ) {
-    // Use a filesystem-safe slug for the model ID.
-    // Lowercase, replace spaces/special chars with hyphens, collapse runs.
-    let slug = info
-        .name
-        .to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-    let model_id = crate::types::ModelId(slug);
+    // Filesystem-safe slug for the model ID. This is the id that gets
+    // registered, persisted and gossiped, so it MUST come from the shared
+    // helper — every surface that resolves a display name, builds this model's
+    // directory path, or announces that we host it derives the same string
+    // there. This site used to carry its own copy of the algorithm (#310).
+    let model_id = crate::types::ModelId(crate::types::slugify_model_name(&info.name));
 
     // Check if we already have a manifest for this model (e.g. persisted from a previous run).
     // Even if the manifest exists, we must still register ourselves as shard holders.
