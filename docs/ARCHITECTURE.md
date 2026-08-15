@@ -1570,6 +1570,17 @@ the type; it must never be extended to match user-facing prose (gotcha #295).
   `/api/admin/hf/*` (downloads), `/api/admin/api-key`, `/api/admin/provider-models`
 - **Exempt paths**: `/`, `/health`, `/admin`, `/chat`, `/setup`, `/static/*`,
   read-only admin dashboard endpoints (GET `/api/admin/stats`, `/api/admin/models`, etc.)
+- **Loopback-only actions**: `POST /api/admin/update/check`, `/api/admin/update/apply`
+  and `/api/admin/shutdown` additionally require the request to originate on the
+  node's own machine. A valid API key is *not* sufficient — the first two write
+  to disk and replace the running binary, so a remote key-holder must not be able
+  to drive them. Refusal is `SwarmError::LocalOnly` → **403 `permission_error`**,
+  never 401: the caller authenticated fine and is being refused on origin. Filing
+  it under `Unauthorized` meant the hint told a remote admin to go and fetch an
+  API key they had already used successfully, which could not work (gotcha #309).
+  Note this is the one place `addr.ip().is_loopback()` is the right predicate —
+  it is an origin restriction, not the "may we hand over the key?" question that
+  `api::dashboard_trust::classify` answers (gotcha #195).
 - Request body size limit: 32MB (configurable via `DefaultBodyLimit`, raised from 2MB for VLM image payloads)
 - Content-Security-Policy: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
 - **Dashboard key bootstrap** (`src/api/dashboard_trust.rs`) — the dashboard has

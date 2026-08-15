@@ -586,8 +586,16 @@ impl NetworkManager {
         let enable_dcutr = config.network.enable_dcutr;
         let enable_upnp = config.network.enable_upnp;
         // Load cached peer count to auto-scale GossipSub mesh parameters.
-        let known_peers = crate::network::peer_cache::load_peer_cache(&shared_state.db).len()
-            + config.network.bootstrap_peers.len();
+        // This is the one call that genuinely is a restore from the last
+        // session, so it is the one that says so — see `load_peer_cache`.
+        let cached_peers = crate::network::peer_cache::load_peer_cache(&shared_state.db).len();
+        if cached_peers > 0 {
+            tracing::info!(
+                count = cached_peers,
+                "Loaded cached peers from last session"
+            );
+        }
+        let known_peers = cached_peers + config.network.bootstrap_peers.len();
         let swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(

@@ -242,10 +242,6 @@ impl CreditLedger {
         self.identity = Some(identity);
     }
 
-    pub async fn get_balance(&self) -> CreditBalance {
-        self.balance.read().await.clone()
-    }
-
     /// Resolve effective credit rates: per-pool override > global config > compile-time defaults.
     fn credit_rates(&self) -> crate::config::CreditRateConfig {
         if let Some(ref ss) = self.shared_state {

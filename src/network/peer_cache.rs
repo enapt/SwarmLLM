@@ -210,6 +210,13 @@ pub fn save_peer_cache(db: &Database, addrs: &[String]) {
 /// Load cached peer multiaddrs from the database.
 ///
 /// Returns addresses from the last session for immediate reconnection.
+///
+/// **A pure read, and deliberately silent.** It used to announce "Loaded cached
+/// peers from last session" at INFO, which is true only of the one call made
+/// while the swarm is being built — and it is also called on every re-dial pass
+/// and by two admin endpoints, so a periodic query reported itself as a restart
+/// 141 times in five hours. The startup announcement now lives at that one
+/// call site, where the wording is accurate.
 pub fn load_peer_cache(db: &Database) -> Vec<String> {
     let entries = match db.iter_raw(TREE_PEER_CACHE) {
         Ok(e) => e,
@@ -224,10 +231,6 @@ pub fn load_peer_cache(db: &Database) -> Vec<String> {
         if let Ok(addr) = std::str::from_utf8(&value) {
             addrs.push(addr.to_string());
         }
-    }
-
-    if !addrs.is_empty() {
-        tracing::info!(count = addrs.len(), "Loaded cached peers from last session");
     }
 
     addrs
