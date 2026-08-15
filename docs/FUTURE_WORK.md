@@ -8333,3 +8333,27 @@ acknowledged" and retries, so the change is in what the *exhausted* path returns
 `PipelineError` (→ 500) rather than `ServiceUnavailable` (→ 503). Check
 `failure_is_penalty_worthy` at the same time: a peer that never answered may or
 may not deserve the penalty it currently gets.
+
+## `shard_range` exclusions are permanent (measured 2026-08-15)
+
+Removing `inference.shard_range` does not restore the shards it excluded. See
+gotcha #306 for the full reproduction: config cleared, two restarts, file
+touched, explicit `POST /api/admin/rescan-shards` — the node still refuses to
+claim the shard, while the file sits on disk intact and `load_all_local` reports
+`rejected_count=0`.
+
+The retraction half works correctly and fast (<20 s to propagate). It is only
+the re-adoption that is missing, which suggests the claim is persisted in redb
+and the startup scan reconciles against that record rather than against the
+files present.
+
+Worth fixing because `shard_range` is the documented mechanism for splitting a
+model across machines, so changing it is routine — and today that silently
+converts every excluded shard into dead weight: occupying the storage budget,
+advertised to no one, and recoverable only by re-downloading bytes that are
+already on disk.
+
+Two things to check when fixing: that the disk scan can re-adopt a shard whose
+claim was previously withdrawn, and that `rescan-shards` reports what it
+considered rather than only what it changed (it returned `count: 0` with no
+indication that a present, unclaimed file had been passed over).
