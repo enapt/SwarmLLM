@@ -15,6 +15,18 @@ points at using a cloud provider instead.
 whether there was nothing to do or a shard was sitting on disk being
 deliberately skipped — very different answers to "why is this not being served".
 
+**If you run SwarmLLM on one machine and open the dashboard from another, it no
+longer blames your API key when you check for updates.** Updating and shutting
+down have always been restricted to the computer the node is running on, which
+is deliberate — they replace the program on that machine's disk, and that should
+not be triggerable from elsewhere. But the refusal was reported as a sign-in
+failure, and it told you to go and find your API key, which was never the
+problem: you had already used it correctly to get that far. It now says clearly
+that this particular action has to be done on the computer running SwarmLLM, and
+that your key is fine. Affects anyone whose node lives on a home server, a
+container, or anything reached over a private network — where a "check for
+updates" button was on offer and could not succeed.
+
 
 ## [0.3.96-alpha] — 2026-08-15
 

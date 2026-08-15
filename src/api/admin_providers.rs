@@ -1005,8 +1005,8 @@ pub async fn check_update(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !addr.ip().is_loopback() {
-        return Err(ApiError(crate::error::SwarmError::Unauthorized(
-            "Update check only allowed from localhost".into(),
+        return Err(ApiError(crate::error::SwarmError::LocalOnly(
+            "Checking for updates".into(),
         )));
     }
     let config = state.shared_state.config.updates.clone();
@@ -1085,8 +1085,8 @@ pub async fn apply_update(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !addr.ip().is_loopback() {
-        return Err(ApiError(crate::error::SwarmError::Unauthorized(
-            "Update apply only allowed from localhost".into(),
+        return Err(ApiError(crate::error::SwarmError::LocalOnly(
+            "Applying an update".into(),
         )));
     }
     let update_state = state.shared_state.events.update_state.read().await;

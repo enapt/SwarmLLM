@@ -857,6 +857,7 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         // that a peer has no part in.
         SwarmError::ServiceUnavailable(_)
         | SwarmError::NotImplemented(_)
+        | SwarmError::LocalOnly(_)
         | SwarmError::Internal(_)
         | SwarmError::Validation(_)
         | SwarmError::Config(_)

@@ -1491,8 +1491,8 @@ pub async fn shutdown_node(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !addr.ip().is_loopback() {
-        return Err(ApiError(crate::error::SwarmError::Unauthorized(
-            "Shutdown only allowed from localhost".into(),
+        return Err(ApiError(crate::error::SwarmError::LocalOnly(
+            "Shutting the node down".into(),
         )));
     }
     tracing::info!(addr = %addr, "Shutdown requested via API");

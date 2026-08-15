@@ -70,6 +70,14 @@ so a new permanent failure silently inherits a *default* hint asserting that a
 peer went offline and to try again. Three failures have now been given that
 advice for a condition retrying can never fix (gotcha #295).
 
+**A variant carrying two causes that need opposite advice is the same bug.**
+`Unauthorized` meant both *no valid credential* and *valid credential, wrong
+machine* (the loopback-only update and shutdown endpoints). One hint had to serve
+both, so remote admins were told to go and fetch an API key they had already sent
+successfully — the advice could not work, and following it looped. Split into
+`LocalOnly` → 403 `permission_error` (gotcha #309). Ask of any shared variant:
+*would the two situations get the same next step?* If not, they are two variants.
+
 Two follow-ups a new `SwarmError` variant must not skip:
 
 - **`failure_is_penalty_worthy`** (`router/distributed_exec.rs`) defaults to

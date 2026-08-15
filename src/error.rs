@@ -79,6 +79,22 @@ pub enum SwarmError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    /// Refused because the action must be performed ON the machine running this
+    /// node — NOT because the caller failed to authenticate.
+    ///
+    /// Kept separate from `Unauthorized` because the two need opposite advice
+    /// and only one of them is fixable by the caller. `Unauthorized`'s hint
+    /// sends the user to the dashboard to fetch their API key, which is exactly
+    /// right for a missing key and useless here: the caller already sent a valid
+    /// one, so following that hint loops forever. This is gotcha #295's shape —
+    /// a permanent failure handed advice that cannot resolve it — and the reason
+    /// a permanent refusal gets its own variant rather than a string stuffed
+    /// into a general one.
+    ///
+    /// Holds the action, capitalised, e.g. `"Applying an update"`.
+    #[error("{0} can only be done on the computer running this node")]
+    LocalOnly(String),
+
     // Validation
     #[error("Validation error: {0}")]
     Validation(String),
@@ -321,6 +337,10 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
             err.to_string(),
             "authentication_error",
         ),
+        // 403, not 401: the caller IS authenticated. 401 tells them their
+        // credentials were not accepted, which sends them off to re-check a key
+        // that was fine all along.
+        SwarmError::LocalOnly(_) => (StatusCode::FORBIDDEN, err.to_string(), "permission_error"),
         // SwarmError::Config is for daemon startup / config-file errors per
         // .claude/rules/completeness.md. If it surfaces in an HTTP response
         // path, the daemon has shipped misconfigured — that's a 500, not a
@@ -413,6 +433,17 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
         SwarmError::Unauthorized(_) => Some(
             "Authentication required. Your API key can be found on the dashboard \
              Settings page. Include it as a Bearer token in the Authorization header.",
+        ),
+        // Deliberately says nothing about API keys: the caller already has a
+        // working one, and repeating the Unauthorized advice here is what sent
+        // remote admins to re-copy a key that was never the problem.
+        // Says why WITHOUT naming a mechanism: this covers replacing the
+        // binary, downloading it, and shutting the node down, and "it writes to
+        // that machine's disk" was false for the last one.
+        SwarmError::LocalOnly(_) => Some(
+            "This one has to be done on the computer that is running SwarmLLM, \
+             because it acts on that machine itself. Open the dashboard there \
+             and try again — your API key is fine.",
         ),
         SwarmError::PeerNotFound(_) => Some(
             "That peer is offline or unreachable. Check your internet connection \
@@ -647,6 +678,45 @@ mod tests {
     fn hint_for_unauthorized() {
         let err = SwarmError::Unauthorized("missing token".into());
         assert!(error_hint(&err).unwrap().contains("Authorization"));
+    }
+
+    /// A caller who already sent a valid API key must not be told to go and
+    /// find their API key. The update endpoints are loopback-only on purpose,
+    /// but they filed that refusal under `Unauthorized`, so a LAN or Docker
+    /// admin clicking "Check for updates" got a 401 whose hint pointed at the
+    /// one thing that was never wrong — the same shape as gotcha #295.
+    ///
+    /// Asserted on the ADVICE rather than the wording: pinning the sentence
+    /// lets a rewrite keep passing while the user is still looping.
+    #[test]
+    fn a_local_only_refusal_never_blames_the_callers_api_key() {
+        let err = SwarmError::LocalOnly("Applying an update".into());
+        let hint = error_hint(&err).expect("a refusal the caller cannot retry needs a hint");
+        let misleading = ["api key can be found", "bearer", "authorization header"];
+        for phrase in misleading {
+            assert!(
+                !hint.to_lowercase().contains(phrase),
+                "hint sends an authenticated caller after credentials: {hint}"
+            );
+        }
+        // And it must say where the action CAN be performed, or the user is
+        // left knowing only that it failed.
+        assert!(hint.to_lowercase().contains("computer"), "hint: {hint}");
+
+        // The genuinely-unauthenticated case keeps the opposite advice.
+        let missing = SwarmError::Unauthorized("missing token".into());
+        assert!(error_hint(&missing).unwrap().contains("Authorization"));
+    }
+
+    /// 401 says "your credentials were rejected"; these callers authenticated
+    /// fine and are being refused on where the request came from.
+    #[test]
+    fn a_local_only_refusal_is_forbidden_not_unauthenticated() {
+        let (status, _, error_type) = classify_error(&SwarmError::LocalOnly("Shutdown".into()));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(error_type, "permission_error");
+        let (status, _, _) = classify_error(&SwarmError::Unauthorized("no key".into()));
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "regression guard");
     }
 
     #[test]

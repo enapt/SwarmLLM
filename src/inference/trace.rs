@@ -694,6 +694,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::ShardIncomplete { .. } => "ShardIncomplete",
         E::ShardNotFound(_) => "ShardNotFound",
         E::Unauthorized(_) => "Unauthorized",
+        E::LocalOnly(_) => "LocalOnly",
         E::Validation(_) => "Validation",
         E::VisionEncoderUnavailable(_) => "VisionEncoderUnavailable",
     }
