@@ -81,8 +81,29 @@ jobs:
             ' CHANGELOG.md > "$NOTES_FILE"
 
             if [ -s "$NOTES_FILE" ]; then
-              printf '\n---\n\nFull commit list: https://github.com/%s/compare/...%s\n' \
-                "$GITHUB_REPOSITORY" "$TAG" >> "$NOTES_FILE"
+              # The previous published tag, so the compare link actually
+              # compares something. It was `compare/...$TAG` with nothing before
+              # the `...` — a dead link in every release body and in every
+              # update notification a node shows (found 2026-08-15 by reading
+              # what an out-of-date node is told).
+              #
+              # Taken from the releases API rather than `git describe`, because
+              # `actions/checkout` is shallow here and has no tag history. It is
+              # positional, not "newest that isn't me": on a re-run for an older
+              # tag the newest release IS newer, and naming it would invert the
+              # comparison.
+              PREV_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=30" \
+                --jq "[.[] | select(.draft==false) | .tag_name] as \$t | (\$t | index(\"$TAG\")) as \$i | if \$i == null then (\$t[0] // \"\") else (\$t[\$i+1] // \"\") end" \
+                2>/dev/null || echo "")
+              if [ -n "$PREV_TAG" ]; then
+                printf '\n---\n\nFull commit list: https://github.com/%s/compare/%s...%s\n' \
+                  "$GITHUB_REPOSITORY" "$PREV_TAG" "$TAG" >> "$NOTES_FILE"
+              else
+                # First release, or the list could not be read: link the commits
+                # for this tag rather than emit a comparison against nothing.
+                printf '\n---\n\nCommits: https://github.com/%s/commits/%s\n' \
+                  "$GITHUB_REPOSITORY" "$TAG" >> "$NOTES_FILE"
+              fi
               gh release create "$TAG" \
                 --draft \
                 --title "$TAG" \
