@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.96-alpha] — 2026-08-15
+
 **When something went wrong, SwarmLLM often could not tell you what.** Six
 places reported a failure as something other than what it was — and the same
 failure could be described differently depending only on how you had asked.
