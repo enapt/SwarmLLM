@@ -8276,3 +8276,51 @@ a short sample (`cloud_models_sample`, first ~10) and a pointer to the `models`
 tool for the rest — an empty list must stay distinguishable from an absent one,
 because that distinction is what tells an operator their provider key never
 loaded.
+
+## `max_model_len` is unknown for network-only models (deferred 2026-08-12)
+
+`GET /v1/models` reports `max_model_len: null` for every model this node does not
+hold locally — i.e. exactly the models the swarm exists to let you use. A client
+sizing a request has nothing to plan against and must discover the limit by being
+refused.
+
+**Reporting `null` is currently correct, not a bug.** `ModelManifest` genuinely
+does not carry a context length, and inventing one would repeat the v0.3.95
+"models of unknown size advertised as < 1 MB" mistake — omitting an unknown beats
+guessing it.
+
+Fixing it is an **additive protocol change**, so it needs sign-off rather than a
+quiet patch:
+
+- Add `context_length: Option<u32>` to `ModelManifest` with `#[serde(default)]`
+  (additive per `.claude/rules/architecture.md` § Additive Protocol Evolution —
+  an older node's manifest deserialises as `None`, so no version bump).
+- Populate it where the header is already read (`daemon::manifest`,
+  `huggingface::probe`), which is the same place the tied-output sidecar is
+  produced.
+- Report it from `/v1/models` when the local value is absent.
+- Mixed-version swarms stay `None` until holders re-publish, so the API must keep
+  tolerating `null` indefinitely — this reduces how often it happens, it does not
+  eliminate it.
+
+## `peer never acknowledged` answers 500 after ~93 s (observed 2026-08-12)
+
+A request for a model held only by an unreachable peer spends the retry budget and
+then fails:
+
+```
+HTTP 500 server_error: Pipeline assembly failed: remote-generate: peer never
+acknowledged request_id=…
+```
+
+`500` says this server has a bug. Nothing is wrong with this server and nothing is
+wrong with the caller's request — the correct shape is `503 ServiceUnavailable`,
+which tells a caller (or an upstream coordinator) to re-route or retry rather than
+to report a fault. The 93 s is the retry policy working as designed, so this is a
+status-correctness item rather than a latency one, and it is bounded.
+
+Not investigated: `is_transient_remote_failure` already matches "never
+acknowledged" and retries, so the change is in what the *exhausted* path returns —
+`PipelineError` (→ 500) rather than `ServiceUnavailable` (→ 503). Check
+`failure_is_penalty_worthy` at the same time: a peer that never answered may or
+may not deserve the penalty it currently gets.

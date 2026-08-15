@@ -206,131 +206,66 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1853 lib (dev,claude-subscription) / 1843 (default) + 79 integration + 27 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-12 (post-v0.3.94). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1853 lib (dev,claude-subscription) / 1843 (default) + 79 integration + 27 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-12 (post-v0.3.95 + the unreleased error-reporting round). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.93 / v0.3.94-alpha (2026-08-11/12): a new node could see the swarm's models and run none of them
+### Latest — UNRELEASED (2026-08-12): a failure could not report itself
 
-**Starting SwarmLLM fresh listed 7 models as available and answered every
-request "No model loaded".** The core promise — you do not need a model on your
-own machine to use one — failed for every newcomer, and only for newcomers, so
-running nodes never saw it. A model's description is passed on only by a machine
-that considers itself its publisher; the startup scan CLAIMED that role by
-rewriting the publisher to itself, `register_manifest` overwrites
-unconditionally, and the periodic broadcast skipped anything unclaimed. So each
-holder erased the previous claimant until **nobody** broadcast (measured:
-`phi-3.5-mini`, 81 registrations, **50 distinct publishers**). With no on-demand
-manifest fetch, a late joiner could never learn a model in full.
-**The correct predicate already existed in the one-shot startup announcement and
-was missing from the 30s timer** → `ModelRegistry::manifests_to_gossip`, and the
-self-claim is gone so `publisher` means who published it (gotcha #296).
+**Four commits are pushed and NOT released** (`36249e54`, `dbe62912`,
+`104cc812`, `6a1723c7`). The swarm — including the live node and the anchor —
+still runs **v0.3.95-alpha**, which has none of them. `CHANGELOG.md` carries them
+under `[Unreleased]`. **Cutting the release is the user's call.**
 
-**Also shipped**: a permanent failure no longer advises retrying (#295 — third
-instance, the second documented two lines above the bug); a reply from another
-machine no longer runs past its ending (#297 — template stop markers were never
-sent on the remote path, and the helper lived where the inference layer could not
-reach it); a partial-model request answers 503 not 500, **restoring a DHT retry
-that had been dead since a message was reworded** (#298); a readable 405.
+**Six defects, one shape: an error's type is known in one place and a literal is
+written in another.** Each surface looked internally consistent; the bug is only
+visible by sending the same bad request two ways and comparing. The fix that
+generalises is never "correct this arm" but *make the classification reachable
+from here* — all six now end at `crate::error::classify_error`.
 
-**Two regressions of my own, caught before shipping**, both by comparing against
-the released binary: a 405 fallback registered after `.layer()` swallowed CORS
-preflight, and a "choke-point" fix would have disabled pruning swarm-wide. See
-`memory/round_log_0811_retry_advice.md` § near-misses — **after N instances of a
-defect shape, the (N+1)th candidate is not automatically the same bug.**
+| surface | before | after |
+|---|---|---|
+| Anthropic **router** stream | `stop_reason:"end_turn"`, empty, HTTP 200 | `event: error` + real reason |
+| Anthropic **split** stream | `[inference failed: …]` as assistant TEXT + undefined `stop_reason:"error"` | `event: error` |
+| OpenAI stream | validation error typed `server_error` | `invalid_request_error` |
+| Responses `background` | every failure `internal_error` | classified |
+| network boundary | peer's validation error → `500` + peer charged | `400`, no penalty |
+| MCP `tools/call` | every failure `-32603` "tool broken" | `-32602` "fix the call" |
 
+The Anthropic streaming surface had **no error frame at all**, so a refused or
+broken request arrived as *the model choosing to say nothing* — a
+`PromptPrivacyUnavailable` refusal (the thing #295 exists to explain) reached the
+client as a clean empty turn while the reason sat in `node.log`. The network
+boundary lost the class the same way the worker boundary did (#299), and because
+`failure_is_penalty_worthy` never saw the `Validation` it exempts, **the peer was
+docked for the caller's mistake** — fixing the status fixed the billing, which is
+the tell that the lost class was the real defect.
+
+New choke points: `crate::error::classify_error` (one classification, HTTP +
+every stream), `reclassify_flattened_error` (recover a class across a boundary
+that carries no types), `AnthropicSseEvent::Error`. Gotchas #300-#305; full
+detail incl. what was probed and found CLEAN in
+`memory/round_log_0812_error_reporting.md`.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
-- **v0.3.92** (08-11): a model could be asked a question in ANOTHER model's format — `resolve_chat_template` returned the RESIDENT model's template for any request, on the non-split route only; 4th reader of that singleton (#294). Plus a shortened reply counted and charged in full.
-- **v0.3.91** (08-10/11): **1.4x on long GQA conversations** via an f16 KV mirror (**the MHA null control came out 3-8% SLOWER**, so it is GQA-gated); replies from a routing node came back EMPTY and were charged (#293). **GPU decode is LAUNCH-BOUND — do not size that work from FLOPs.**
-
-- **v0.3.90** (08-10): **a GPU could not run ANY unquantized model** — F16/BF16/F32
-  GGUFs loaded clean on CUDA then failed 100% of requests (candle `dequantize_f16`
-  bailed where its `dequantize` sibling fell back); verified with a null control,
-  v0.3.89 fails the identical request. Plus `cpu_placement_reason`, `max_model_len`
-  on `/v1/models`, and a shard-delete guard. Gotchas #288-#290.
-- **v0.3.89** (08-09/10): **replies from distant peers arrived SCRAMBLED** — every
-  token is an independent rr send with no ordering and the coordinator stopped at
-  the first `finish_reason`; `token_id` had been on the wire since day one,
-  hardcoded 0 at all five send sites (`StreamReassembler`, #282). A "private
-  network" shared the PUBLIC gossip topics (#285). A fixed 10s ACK deadline killed
-  a 6s peer (#284). 74% of an idle log was noise. **#283: `pkill -x swarmllm`
-  killed the user's live node.** Log: `round_log_0809_night.md`.
-- **v0.3.88** (08-09): **settings saved, said "ok", and did nothing** — one cause
-  (`state.config` is a boot snapshot) already patched around FOUR times; now ONE
-  live config via **`SharedState::cfg()`** (#281). Second half: **serving the swarm
-  paid nothing and reported nothing** — the two "am I contributing" tiles were
-  exactly inverted, because accounting lived only on the LESS travelled path
-  (#279/#280) → `SharedState::record_peer_serve`.
-- **v0.3.85/.86/.87** (08-09): every defect was a claim nothing could contradict.
-  Batching NEVER engaged (0/156) → **2.4x** on GPU, but CPU does not scale.
-  `shard_range` read in 5 places, ignored in 3 — **a rescan on a timer undid the
-  split**. Credit movements never persisted (#278). **51 tests ran in NO
-  automation.** Log: `round_log_0808_night.md`.
-- **v0.3.82/.83** (08-07/08): fused attention tail on CPU (**+19%** prompt
-  processing, `attn_softmax`); CUDA decode routing corrected — the 1024 crossover
-  came from timing the call in ISOLATION and was wrong at every length (**gotcha
-  #266: measure the FORWARD**). KV reservation fix: a 100-token chat held 940 MB
-  (#261). Per-phase CPU pools — prompt and decode want OPPOSITE thread counts.
-  **⚠ #267: this box cannot resolve a GPU change below ~25%.**
-  Logs: `round_log_0807_fused_attn.md`, `round_log_0807_flash_attn.md`.
-
-Read the named round log before re-deriving any of these.
-
-- **v0.3.81** (08-06/07): **CPU inference, measured instead of guessed** — batching was worth ~1.05x (candle's `k_quants::matmul` made the batch row the OUTER SEQUENTIAL loop → **tiled it**, bit-identical); that moved prefill only 1.2x, so a stage profiler (`SWARMLLM_PROFILE=1`) was built and **every guess about the rest was under 2.5% COMBINED — it was attention**, wrong in BOTH phases in opposite directions. Prefill 4571→640 ms, decode 1368→249 ms/token at 1150 KV. Gotchas #254-#256. Log: `round_log_0806_batching.md`.
-- **v0.3.78/.79** (08-06): **the whole prompt pipeline was wrong** — Llama-3
-  tokenised at **~2x** (`pre="llama-bpe"` absent from the match → whitespace-split
-  fallback), the **system prompt rendered TWICE**, every Llama-3 model **told the
-  date was 26 Jul 2024**. All invisible; found by diffing against `tokenizers` +
-  `jinja2` references built from the model's OWN vocab/template — **encode→decode
-  round-trips passed the whole time**. Also tool-call ids were model-invented, and
-  a **network-status panel shipped in English to 20 languages** (key parity checks
-  KEYS not VALUES). **.79** shipped AVX2: release binaries had candle's quantized
-  kernels **compiled out** (`#[cfg(target_feature)]` is compile-time), **3.09x**;
-  x86-64 assets now `-C target-cpu=x86-64-v3` with blocking `-baseline` assets for
-  pre-2013 CPUs. Gotchas #246-#253. Log: `round_log_0805_prompt_pipeline.md`.
-- **v0.3.60-.77** (08-02→05): **v0.3.72 our API key was being sent to strangers** —
-  `forward_to_peer` forwarded the caller's `Authorization` header verbatim and that
-  key also guards `/api/admin/*`; **nothing in that code changed, its PREMISE did**
-  (#238). **.73/.74** concurrent requests failed OUTRIGHT on CPU-only nodes —
-  `forward_batch` lacked the f32 widening and a single item returns early, so it was
-  **invisible on GPU and total on CPU** (#241); `max_tokens` off by one (#240); emoji
-  → `���` (#239); deleting a model mid-reply destroyed it (#243). **.77** peer latency
-  was measured then discarded, wiped by every Identify. Logs:
-  `round_log_0805_security.md`, `round_log_releases_0802_0803.md`,
-  `round_log_lan_peering_0802.md`, `round_log_0803*.md`.
-- **v0.3.49-.59** (07-29→08-01): **SPM tokenizer CLOSED** — stale merge-queue entries
-  mis-tokenised **64.9% of inputs** on Phi-3.5's vocab, now 0 vs reference. **A hash
-  cannot tell "wrong bytes" from "not all the bytes" — check `size_bytes` FIRST**
-  (#203). A model could be freed *while answering* because `active_pipelines` is
-  coordinator-only and `serving_models` peer-served-only (#194). `cargo test`
-  overwrote a running node's API key (#226).
-- **v0.3.39-.46** (07-27→29, `round_log_overnight_0728.md`): `CachedDecoder` built
-  `is_sentencepiece:false` under a stale comment, so local replies took a **GPT-2
-  byte fallback** (#200) — **peer-served work is decoded on the SERVING side, so
-  cross-node checks looked clean**. Overlay trust was satisfiable by coincidence
-  (`100.64.0.0/10` is shared CGNAT) (#199). A default living only in
-  `#[serde(default)]` never reaches a config the daemon already wrote (#198).
-  `is_loopback()` is wrong BOTH ways (#195). `prefill_chunk_tokens` bounded decode
-  interruption in TOKENS not time (#191) — **the first fix made GPUs WORSE**; the
-  pacer self-disables if a shrink did not help, do not remove that check.
-  `current_exe()` returns `"...(deleted)"` once the binary is replaced, and
-  replacing it IS updating (#188). **Timeouts must bound what actually varies**
-  (#189, #190).
-- **v0.3.15-.38** (07-23→28, `round_log_networking_audit.md`): **read gotcha #179
-  before touching connection selection** — a relay carrying an INBOUND connection is
-  a bare `/p2p/<peer>` and counted as direct, winning every send; and **retraction
-  alone is futile, the blacklist is REQUIRED**. Publishing an inbound connection's
-  ephemeral port poisoned caches, which need a node RESTART (#165).
-  `max_established_per_peer = 1` structurally disabled DCUtR (#163). The
-  control-token leak chased across four releases was a **prompt** bug (#169).
-  **"tok/s per node per shard" is NOT measurable in a pipeline.**
-- **R136-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT v1→v2,
-  `--anchor`), request cancellation, `gpu_layers` plumbing, per-shard download backoff
-  (#150-160); SWARM-SPEC v0.1 cascade; `swarmpool://` invites v2; cross-pool routing.
+- **v0.3.93/.94** (08-11/12): **a new node could see the swarm's models and run NONE of them** — holders each rewrote a manifest's `publisher` to themselves to earn broadcast rights, erasing each other until nobody broadcast (81 registrations, 50 publishers, one model); the right predicate existed in the startup path, missing from the 30s timer → `manifests_to_gossip` (#296). Plus #295/#297/#298. `round_log_0811_retry_advice.md`.
+- **v0.3.92** (08-11): a model could be asked a question in ANOTHER model's format — `resolve_chat_template` returned the RESIDENT model's template on the non-split route (#294). `round_log_0810_kv_mirror.md`.
+- **v0.3.91** (08-10/11): **1.4x on long GQA conversations** via an f16 KV mirror — GQA-gated because **the MHA null control came out 3-8% SLOWER**; empty+charged replies from a routing node (#293). **GPU decode is LAUNCH-BOUND — do not size it from FLOPs.**
+- **v0.3.90** (08-10): **a GPU could not run ANY unquantized model** — F16/BF16/F32 loaded clean on CUDA then failed 100% of requests (#288-#290); verified with a null control. Also `max_model_len` on `/v1/models`, shard-delete guard.
+- **v0.3.89** (08-09/10): **replies from distant peers arrived SCRAMBLED** — each token an independent rr send, `token_id` hardcoded 0 at all five sites → `StreamReassembler` (#282). A "private network" shared PUBLIC gossip topics (#285); a fixed 10s ACK deadline killed a 6s peer (#284). **#283: `pkill -x swarmllm` killed the user's live node.** `round_log_0809_night.md`.
+- **v0.3.88** (08-09): **settings saved, said "ok", did nothing** — `state.config` is a boot snapshot, patched around FOUR times → **`SharedState::cfg()`** (#281). **Serving the swarm paid nothing and reported nothing** — accounting lived only on the LESS travelled path (#279/#280) → `record_peer_serve`.
+- **v0.3.85/.86/.87** (08-09): every defect was a claim nothing could contradict — batching NEVER engaged (0/156) → **2.4x** GPU; **a rescan on a timer undid the shard split**; credits never persisted (#278); **51 tests ran in NO automation.** `round_log_0808_night.md`.
+- **v0.3.82/.83** (08-07/08): CPU fused attention **+19%** prompt processing; CUDA decode routing corrected — the crossover came from timing the call in ISOLATION and was wrong at every length (**#266: measure the FORWARD**). KV reservation: a 100-token chat held 940 MB (#261). **⚠ #267: this box cannot resolve a GPU change below ~25%.** `round_log_0807_*.md`.
+- **v0.3.81** (08-06/07): **CPU inference measured, not guessed** — every guess was <2.5% COMBINED; **it was attention**, wrong in BOTH phases in opposite directions (#254-#256). Prefill 4571→640 ms. `round_log_0806_batching.md`.
+- **v0.3.78/.79** (08-06): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE, wrong date. All invisible; found by diffing against `tokenizers`/`jinja2` references built from the model's OWN vocab (#246-#253). **.79** shipped AVX2 — release binaries had candle's quantized kernels COMPILED OUT, **3.09x**. `round_log_0805_prompt_pipeline.md`.
+- **v0.3.60-.77** (08-02→05): **v0.3.72 our API key was being sent to strangers** — `forward_to_peer` forwarded the caller's `Authorization` verbatim; **nothing in that code changed, its PREMISE did** (#238). Concurrent requests failed outright on CPU-only nodes — invisible on GPU, total on CPU (#241). `round_log_0805_security.md`, `round_log_0803*.md`.
+- **v0.3.49-.59** (07-29→08-01): **SPM tokenizer CLOSED** — stale merge-queue entries mis-tokenised **64.9%** of inputs. **A hash cannot tell "wrong bytes" from "not all the bytes" — check `size_bytes` FIRST** (#203). `cargo test` overwrote a running node's API key (#226).
+- **v0.3.39-.46** (07-27→29): local replies took a **GPT-2 byte fallback** under a stale comment (#200) — **peer-served work is decoded on the SERVING side, so cross-node checks looked clean**. `current_exe()` returns `"…(deleted)"` once the binary is replaced (#188). **Timeouts must bound what actually varies** (#189/#190). `round_log_overnight_0728.md`.
+- **v0.3.15-.38** (07-23→28): **read #179 before touching connection selection** — a relay carrying an INBOUND connection is a bare `/p2p/<peer>`, counted as direct, and wins every send; **retraction alone is futile, the blacklist is REQUIRED**. `max_established_per_peer = 1` structurally disabled DCUtR (#163). `round_log_networking_audit.md`.
+- **R136-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT v1→v2, `--anchor`), request cancellation, `gpu_layers` plumbing, per-shard download backoff (#150-#160); SWARM-SPEC v0.1 cascade; `swarmpool://` invites v2; cross-pool routing.
 - **Pre-R136**: the 20 build phases. `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)

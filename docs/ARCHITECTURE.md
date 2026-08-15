@@ -1535,6 +1535,33 @@ shared key that any node can overwrite. Each node publishes only its own shard h
   replay-window constants apply to every signed timestamp the daemon
   accepts
 
+## Error classification (all surfaces)
+
+`crate::error::classify_error(&SwarmError) -> (StatusCode, message, error_type)`
+is the single definition of what a failure IS to a caller. Every surface derives
+from it, so the same failure cannot be named two things:
+
+| surface | how it consumes the classification |
+|---|---|
+| HTTP envelope | `ApiError::into_response` — status + `error.type`/`code` |
+| OpenAI SSE | `StreamEvent::Error { message, error_type }` |
+| Anthropic SSE | `AnthropicSseEvent::Error`, translated by `anthropic_error_type` |
+| Responses API | `responses::stream::classify_error_code` (both the streaming and background paths) |
+| MCP | `mcp::types::tool_error_code` → JSON-RPC `-32602` / `-32000` / `-32603` |
+
+Two **refinements** are deliberate and documented at their definition: Responses
+names a provider failure `upstream_error`, and MCP maps 503 to
+`RESOURCE_UNAVAILABLE`. A refinement names something more precisely than the
+canonical answer; a *divergence* is the same meaning under a different word and
+is a bug.
+
+`crate::error::reclassify_flattened_error(&str) -> Option<SwarmError>` recovers a
+class across a boundary that carries no types — `SwarmError` survives neither the
+worker IPC hop nor the network hop, both of which deliver a `String` that would
+otherwise be re-wrapped as `Inference` → HTTP 500. Used at both boundaries. It
+matches on `SwarmError`'s own `#[error(...)]` Display prefixes, which are part of
+the type; it must never be extended to match user-facing prose (gotcha #295).
+
 ## API Authentication
 
 - Bearer token middleware in `src/api/middleware.rs` (constant-time comparison)
@@ -1669,6 +1696,17 @@ Full Anthropic Messages API compatibility for use as a Claude Code backend:
 - **Routing:** Claude models → Anthropic cloud (full pass-through); non-Claude models → Anthropic→OpenAI translation proxy (supports streaming — SSE events translated in real time); local GGUF models → tool calls/thinking converted to text for inference
 - **Total prompt cap:** 4MB (raised from 64KB for Claude Code compatibility — tool results and long-context prompts can exceed the old limit)
 - **Claude Code usage:** `ANTHROPIC_BASE_URL=http://localhost:8800 claude --model qwen2.5-coder-7b`
+- **Failure reporting (2026-08-12):** a failure is an `event: error` SSE frame —
+  `{"type":"error","error":{"type":…,"message":…}}` — and never assistant text.
+  The frame is TERMINAL: `build_anthropic_sse_response` ends the keepalive ticker
+  on it as it does on `message_stop`, and no epilogue follows. `stop_reason`
+  carries only values the API defines (`end_turn`, `max_tokens`, `stop_sequence`,
+  `tool_use`, `pause_turn`, `refusal`, `model_context_window_exceeded`). The
+  error `type` is translated from the canonical classification into Anthropic's
+  own set by `anthropic_error_type`, defaulting to `api_error` rather than
+  inventing a name. Before this the surface had no error frame at all: the
+  router path reported every failure as an empty `end_turn` and the split path
+  wrote `[inference failed: …]` into the message body (gotchas #300-#302).
 
 ### Tool calling on a LOCAL model
 

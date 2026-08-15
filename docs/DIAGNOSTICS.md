@@ -176,6 +176,52 @@ histograms. Adding a field means adding it there once, not at each surface.
 - **No pending channel** → `DIAG: No pending channel for LayerResult — timed out, duplicate, or hedge loser` (daemon/dispatch/mod.rs)
 - **Streaming done event** → `DIAG: streaming done_event send failed` (router/mod.rs or router/distributed_exec.rs)
 
+## Comparing a change against the released binary (null control)
+
+The cheapest way to prove a change caused a difference — rather than something
+ambient (peer set, model state, load) — is to run the **same data dir and the
+same request** under both binaries.
+
+```bash
+T=/tmp/nullctl; rm -rf "$T"; mkdir -p "$T/models"
+cp -r ~/.local/share/swarmllm/models/<model> "$T/models/"
+printf '[auto_manage]\nenabled = false\nprune_enabled = false\n' > "$T/config.toml"
+
+# candidate
+SWARMLLM_NODE_DATA_DIR="$T" ./target/release/swarmllm run -p 8872 &
+# ...run the probe, record the output...
+
+# stop ONLY this node: match the data dir, never a bare pkill (gotcha #283)
+for p in $(pgrep -x swarmllm); do
+  tr '\0' '\n' < /proc/$p/environ 2>/dev/null | grep -q "SWARMLLM_NODE_DATA_DIR=$T" && kill $p
+done
+
+# control — the RELEASED binary, same dir, same probe
+SWARMLLM_NODE_DATA_DIR="$T" ~/.local/bin/swarmllm run -p 8872 &
+```
+
+The match also catches that node's `model-worker` child, so kill the daemon, not
+just the first hit. Peer-dependent probes need ~45 s after a restart for the peer
+set to settle — a different failure right after start is usually the swarm, not
+the change.
+
+## Measuring cancellation (what NOT to use)
+
+`active_requests` from `/api/admin/stats` reads **0 even mid-stream** on the
+local split fast path, because that path bypasses the router. It cannot measure
+whether a client walking away stopped the work. Use the worker's CPU instead:
+
+```bash
+# worker pid for a given data dir
+pgrep -x swarmllm | while read p; do
+  tr ' ' ' ' < /proc/$p/cmdline | grep -q "model-worker.*$DATA_DIR" && echo $p
+done
+# utime+stime from /proc/<pid>/stat fields 14,15, sampled over N seconds
+```
+
+Healthy cancellation on this box: ~330% of one core during generation → ~30% 4 s
+after the client closes (the in-flight forward finishing) → 0% by 8 s.
+
 ## SSE Streaming Diagnostics
 
 All three streaming paths are instrumented with timing and error reporting:

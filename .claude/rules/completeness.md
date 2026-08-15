@@ -22,6 +22,29 @@ Run `/cleanup` after committing changes to: SharedState fields, API endpoints, J
 
 ## Error type discipline
 
+**Never choose an error type at a call site.** `crate::error::classify_error`
+returns `(StatusCode, client-safe message, error_type)` and is the single answer
+for every surface — HTTP, both SSE encoders, the Responses API, MCP. A literal
+next to `"type":` is the bug: it produced the same failure reported four
+different ways at once (gotchas #300-#305), and
+`a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling` in
+`tests/repo_consistency.rs` now fails the build on a new one.
+
+A surface may **refine** — Responses names a provider failure `upstream_error`,
+MCP maps 503 to `RESOURCE_UNAVAILABLE`, Anthropic translates into its own
+vocabulary — when the refinement names something *more precisely* than the
+canonical answer, and it must be commented at its definition. Naming the same
+meaning with a different word is a divergence, not a refinement, and is a bug.
+
+**A type that crossed a boundary is already lost.** `SwarmError` survives neither
+the worker IPC hop nor the network hop; both deliver a `String` that gets
+re-wrapped as `Inference` → 500. Call `reclassify_flattened_error` before falling
+back. This is the ONLY sanctioned place to derive a class from a message, and it
+matches `SwarmError`'s own `#[error(...)]` Display prefixes — which are part of
+the type, not prose written for a human (#295's trap).
+
+The variant → status contract:
+
 - `SwarmError::Validation` → 400, API input errors
 - `SwarmError::ModelNotAvailable` / `ShardNotFound` → 404
 - `SwarmError::Config` → startup / config file only
