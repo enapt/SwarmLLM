@@ -1212,6 +1212,41 @@ pub(crate) fn standard_attention(
     n_kv_head: usize,
     attn_logit_softcap: Option<f32>,
 ) -> CandleResult<Tensor> {
+    // GQA decode: group the query heads instead of expanding the KV heads.
+    //
+    // `repeat_kv` materialises K and V at `n_head` instead of `n_kv_head`, and
+    // it does it again for every token and every layer. On llama-3.2-3b (24
+    // heads over 8 KV heads) at ~900 context that is ~23 MB of copies per
+    // layer, ~640 MB per decoded token across 28 layers — for data that is
+    // bit-for-bit three copies of what is already in the cache.
+    //
+    // It is avoidable because every query head in a group attends to the SAME
+    // K and V. Reshaping `[b, n_head, 1, d]` to `[b, n_kv_head, n_rep, d]`
+    // turns those heads into extra query ROWS against the unexpanded cache, so
+    // the two matmuls compute the identical arithmetic with no copy. The
+    // reshape is valid because `repeat_kv` numbers heads group-major — query
+    // head `h` belongs to group `h / n_rep` — which is the layout a contiguous
+    // reshape produces.
+    //
+    // Restricted to `q_len == 1` deliberately. Measured on this model,
+    // attention is 46.4% of a decode step but only 10.0% of prefill (which is
+    // 83.8% quantized matmul), so the decode case is where nearly all of the
+    // win is, and it is the case where the mask is a single row and the
+    // grouping is unambiguous. Prefill keeps the existing path.
+    let n_rep = n_head / n_kv_head;
+    if n_rep > 1 && q.dim(2)? == 1 {
+        return grouped_gqa_decode_attention(
+            q,
+            k,
+            v,
+            mask,
+            head_dim,
+            n_head,
+            n_kv_head,
+            attn_logit_softcap,
+        );
+    }
+
     let k = candle_transformers::utils::repeat_kv(k.clone(), n_head / n_kv_head)?;
     let v = candle_transformers::utils::repeat_kv(v.clone(), n_head / n_kv_head)?;
     // `v` is used once per block; make it contiguous here rather than inside
@@ -1266,6 +1301,50 @@ pub(crate) fn standard_attention(
         start += len;
     }
     Tensor::cat(&parts, 2)
+}
+
+/// Single-token GQA attention that reads the KV cache at its stored width.
+///
+/// See the comment at the call site in [`standard_attention`] for why this
+/// exists. The arithmetic is the same as the expanded path — same operands in
+/// the same order, only arranged so the shared K/V are visited once per group
+/// instead of once per query head.
+///
+/// The mask is broadcast to the grouped row count rather than left at one row.
+/// All `n_rep` rows are the same query position so they take the same mask row,
+/// and handing the fused softmax a `[n_rep, kv_len]` block keeps it on its fast
+/// path — it declines a mask whose shape does not line up and falls back to the
+/// unfused composition, which is what this is trying to avoid paying.
+#[allow(clippy::too_many_arguments)]
+fn grouped_gqa_decode_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    head_dim: usize,
+    n_head: usize,
+    n_kv_head: usize,
+    attn_logit_softcap: Option<f32>,
+) -> CandleResult<Tensor> {
+    let (b, _, _, d) = q.dims4()?;
+    let n_rep = n_head / n_kv_head;
+
+    // `q` arrives via reshape/transpose and is generally strided; the regroup
+    // is a reinterpretation of the head axis, so it has to be contiguous first.
+    let qg = q.contiguous()?.reshape((b, n_kv_head, n_rep, d))?;
+    let kt = k.t()?;
+    let v = v.contiguous()?;
+
+    let mask_g = match mask {
+        None => None,
+        Some(m) => {
+            let kv_len = k.dim(2)?;
+            Some(m.broadcast_as((n_rep, kv_len))?.contiguous()?)
+        }
+    };
+
+    let out = attention_scores_block(&qg, &kt, &v, mask_g.as_ref(), head_dim, attn_logit_softcap)?;
+    out.reshape((b, n_head, 1, d))
 }
 
 /// One block of [`standard_attention`] — the original body, over whatever
@@ -1394,8 +1473,23 @@ pub(crate) fn run_attention(
             // SWIFT / spec sessions force standard regardless so prefill +
             // draft + verify share identical numerics (tiny softmax drift
             // breaks accept rate even at skip_ratio=0).
-            let is_gqa = n_head != n_kv_head;
-            let use_standard_for_decode = seq_len == 1 && !is_gqa;
+            // GQA no longer excluded — see `grouped_gqa_decode_attention`. The
+            // exclusion existed because `standard_attention` expanded the KV
+            // cache with `repeat_kv` every token, which is what made it collapse
+            // on long contexts. It does not do that any more, and the same
+            // benchmark that produced the old rule now reports the opposite at
+            // every length. Measured here, ms per attention call, standard
+            // WITHOUT grouping -> WITH, on this box:
+            //     28/4 GQA   kv 1024    7.94 -> 1.81   (fused 5.27)
+            //                kv 2048   36.62 -> 2.51   (fused 5.82)
+            //                kv 8192  229.20 -> 4.61   (fused 43.57)
+            //     32/8 GQA   kv 2048   66.66 -> 2.76   (fused 9.07)
+            //                kv 8192  263.68 -> 6.62   (fused 95.42)
+            // The control run is the load-bearing part: reverted to the
+            // committed code the bench reproduces the OLD verdict (fused wins
+            // from kv>=1024), so the flip is attributable to the grouping and
+            // not to the machine or the harness.
+            let use_standard_for_decode = seq_len == 1;
             // PREFILL also takes the standard path — measured 2026-08-06, and the
             // opposite of what the decode routing above might suggest.
             //
@@ -2477,6 +2571,96 @@ mod blocked_attention_tests {
             .zip(b.iter())
             .map(|(x, y)| (x - y).abs())
             .fold(0.0, f32::max)
+    }
+
+    /// Grouping the query heads must compute what expanding the KV heads
+    /// computed. The load-bearing assumption is the head ORDER: `repeat_kv`
+    /// numbers heads group-major, so query head `h` belongs to group
+    /// `h / n_rep`. Get that backwards and every head reads another group's
+    /// cache — which still produces plausible-looking logits, so only a
+    /// comparison against the expanded path catches it.
+    ///
+    /// `n_head` and `n_kv_head` are deliberately not multiples that would make
+    /// a transposed grouping accidentally agree.
+    #[test]
+    fn grouping_query_heads_matches_expanding_kv_heads() {
+        let dev = Device::Cpu;
+        let mk = |b: usize, h: usize, s: usize, d: usize, seed: f32| {
+            let n = b * h * s * d;
+            let data: Vec<f32> = (0..n)
+                .map(|i| ((i as f32 * 0.7 + seed).sin()) * 0.5)
+                .collect();
+            Tensor::from_vec(data, (b, h, s, d), &dev).unwrap()
+        };
+        for (n_head, n_kv_head) in [(24usize, 8usize), (8, 2), (12, 4)] {
+            let head_dim = 16;
+            let k_len = 37;
+            let q = mk(1, n_head, 1, head_dim, 0.0);
+            let k = mk(1, n_kv_head, k_len, head_dim, 1.3);
+            let v = mk(1, n_kv_head, k_len, head_dim, 2.9);
+            // A decode mask: one row, everything visible. Included rather than
+            // passing None so the broadcast-to-grouped-rows path is exercised.
+            let m = Tensor::from_vec(vec![0.0f32; k_len], (1, k_len), &dev).unwrap();
+
+            // Grouped path (what `standard_attention` now takes for q_len == 1).
+            let grouped =
+                standard_attention(&q, &k, &v, Some(&m), head_dim, n_head, n_kv_head, None)
+                    .unwrap();
+
+            // Expanded path, written out explicitly — the previous behaviour.
+            let n_rep = n_head / n_kv_head;
+            let ke = candle_transformers::utils::repeat_kv(k.clone(), n_rep).unwrap();
+            let ve = candle_transformers::utils::repeat_kv(v.clone(), n_rep)
+                .unwrap()
+                .contiguous()
+                .unwrap();
+            let expanded =
+                attention_scores_block(&q, &ke.t().unwrap(), &ve, Some(&m), head_dim, None)
+                    .unwrap();
+
+            assert_eq!(
+                grouped.dims(),
+                expanded.dims(),
+                "shape ({n_head},{n_kv_head})"
+            );
+            let a = grouped.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let b = expanded.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let worst = a
+                .iter()
+                .zip(&b)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                worst < 1e-5,
+                "grouped GQA diverges from expanded at ({n_head},{n_kv_head}): worst {worst}"
+            );
+        }
+    }
+
+    /// MHA (`n_head == n_kv_head`) must not take the grouped path — there is no
+    /// expansion to avoid, and the reshape would be a no-op that only adds a
+    /// contiguous copy.
+    #[test]
+    fn mha_decode_is_unchanged() {
+        let dev = Device::Cpu;
+        let mk = |h: usize, s: usize, d: usize, seed: f32| {
+            let n = h * s * d;
+            let data: Vec<f32> = (0..n)
+                .map(|i| ((i as f32 * 0.7 + seed).sin()) * 0.5)
+                .collect();
+            Tensor::from_vec(data, (1, h, s, d), &dev).unwrap()
+        };
+        let (h, d, k_len) = (8usize, 16usize, 21usize);
+        let q = mk(h, 1, d, 0.0);
+        let k = mk(h, k_len, d, 1.3);
+        let v = mk(h, k_len, d, 2.9);
+        let got = standard_attention(&q, &k, &v, None, d, h, h, None).unwrap();
+        let want =
+            attention_scores_block(&q, &k.t().unwrap(), &v.contiguous().unwrap(), None, d, None)
+                .unwrap();
+        let a = got.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let b = want.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(a, b, "MHA decode must be byte-identical to the plain path");
     }
 
     /// The blocking claim is that it is EXACT, not approximate. Softmax runs
