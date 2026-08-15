@@ -129,3 +129,25 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 event: message_stop
 data: {"type":"message_stop"}
 ```
+
+### Errors during a stream
+
+If the request fails after the stream has opened — the model is unavailable, the
+node refuses by policy, the prompt is too long — the failure arrives as an
+`error` event, in the same shape the Anthropic API uses:
+
+```
+event: error
+data: {"type":"error","error":{"type":"invalid_request_error","message":"This conversation is too long for …"}}
+```
+
+The `error` event is **terminal**: the stream ends there, with no
+`message_delta` or `message_stop` after it. The `error.type` is one Anthropic
+defines (`invalid_request_error`, `not_found_error`, `authentication_error`,
+`permission_error`, `rate_limit_error`, `request_too_large`, `overloaded_error`,
+or `api_error`), so a client matching on it behaves the same as against the real
+API.
+
+A failure is never delivered as assistant text, and `stop_reason` never carries
+a value the API does not define — so a reply your client receives as content is
+always something the model actually produced.

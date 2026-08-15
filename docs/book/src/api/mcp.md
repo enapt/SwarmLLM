@@ -302,3 +302,19 @@ If your IDE extension supports the OpenAI API format, point it directly at Swarm
 ## Model Compare Dashboard
 
 The compare functionality is also available in the web dashboard via the **Compare** tab. Select 2-10 models, enter a prompt, and view results side-by-side with latency, token counts, and response content.
+
+## Errors
+
+Tool failures come back as JSON-RPC errors whose code says who should act:
+
+| Code | Meaning | Examples |
+|---|---|---|
+| `-32602` | Invalid params — fix the call | model name does not exist, prompt longer than the context window, missing required field |
+| `-32000` | Resource unavailable — the node cannot serve this right now, the call is fine | no models loaded, worker unavailable |
+| `-32603` | Internal error — an actual fault | a bug in the server |
+
+The distinction matters for a tool client: `-32603` reads as "this tool is
+broken" and invites a retry or a bug report, while `-32602` tells the caller
+what to change. Fan-out tools (`compare`, `research`, `batch_prompts`) do not
+fail the whole call when one model fails — each result carries its own `status`
+and `error`, and the summary counts only the ones that actually answered.

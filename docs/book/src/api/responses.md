@@ -68,6 +68,15 @@ All endpoints accept the same Bearer-auth header as the rest of the API.
   `GET /v1/responses/{id}?stream=true` that replays buffered events and
   then tails the live producer.
 
+  A background run that fails stores `status: "failed"` with an `error.code`
+  describing **why**, not merely that something went wrong — the same code the
+  foreground request would have returned for the identical input
+  (`not_found_error` for a model that does not exist, `invalid_request_error`
+  for a prompt longer than the context, `upstream_error` for a provider
+  failure, `server_error` for an actual fault). Since a background caller never
+  sees a status code, that field is the only thing distinguishing "fix the
+  request" from "retry later".
+
 ## Validation (ingress)
 
 The handler runs `validate_responses_ingress` BEFORE any routing decision
