@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.97-alpha] — 2026-08-15
+
 **Asking for embeddings no longer looks like a temporary outage.** This build
 does not serve them — inference runs in worker subprocesses — but it answered
 with a status that means "try again later", so anything that retries on server
