@@ -4,57 +4,46 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**When something went wrong, SwarmLLM often could not tell you what.** Six
+places reported a failure as something other than what it was — and the same
+failure could be described differently depending only on how you had asked.
+Each is fixed, and every interface now describes a given failure the same way.
+
 **A request that failed could come back as an empty reply, as though the model
-had chosen to say nothing.** When an answer is streamed — which is how a chat
-normally arrives, and how Claude Code always talks to a node — a failure had no
-way to be reported on the Anthropic interface at all. So a request that was
-refused, or whose pipeline broke, ended as a perfectly ordinary finished turn
-with nothing in it. The reason was written to this node's log and never sent to
-whoever asked.
+had chosen to say nothing.** When an answer is streamed — how a chat normally
+arrives, and how Claude Code always talks to a node — the Anthropic interface
+had no way to report a failure at all. A request that was refused, or whose
+pipeline broke, ended as an ordinary finished turn with nothing in it, and the
+reason went only to this node's log.
 
 The case that shows why it matters: a node set to keep prompts private, on a
-model whose first shard it no longer holds, is right to refuse — and when the
-answer is not streamed it says exactly that, and what to change. Streamed, the
-explanation vanished and the user saw silence. Failures are now reported as
-failures, carrying the same reason the non-streamed reply would have given.
+model whose first shard it no longer holds, is right to refuse — and unstreamed
+it says exactly that, and what to change. Streamed, the explanation vanished and
+you saw silence.
 
-**A model appeared to say "[inference failed: …]".** On the other streaming
-path the reason was written into the reply itself, so it was indistinguishable
-from something the model actually said, and it was stored in the conversation as
-if the model had said it. It is now sent as an error, which clients can tell
-apart from an answer.
+**A model could appear to say "[inference failed: …]".** On the other streaming
+path the reason was written into the reply itself, so it could not be told apart
+from something the model actually said, and it was kept in the conversation as
+if it were. Failures are now sent as failures, which a client can distinguish
+from an answer.
 
-**Tool calls from Claude Code now say whether the call or the server was at
-fault.** Every failure reported through the MCP tool interface claimed an
-internal server error, including naming a model that does not exist and sending
-a prompt longer than the model can hold. A tool client reads that as "this tool
-is broken" rather than "fix the request", which is the difference between
-retrying forever and telling you what to change.
+**Asking for more than a model can hold now says so, wherever the model is.**
+That is something the sender can fix, and a direct, unstreamed request already
+said so. The same request answered "the server had an internal error" when it
+was streamed, and again when the model lived on someone else's machine — where
+the peer had diagnosed it correctly and was then charged for a request it had
+been right to refuse.
 
-**Asking a model on someone else's machine for too much now says so, instead
-of looking like this server broke.** A conversation longer than the model can
-hold is something the sender can shorten, and when the model runs on your own
-machine that is exactly what you were told. When it ran on a peer, the peer
-worked it out correctly and the answer still came back as an internal server
-fault — so the same mistake was your fault or ours depending only on where the
-model happened to live. It also charged the peer for a request it had been right
-to refuse.
+**Background work now reports why it failed.** Work submitted to run in the
+background reports its outcome on a record you poll rather than as a status
+code, so that one field is all you have to tell "fix your request" from "try
+again later". Every failure was labelled an internal fault, so a model name that
+does not exist and an over-long prompt read identically.
 
-**A background request that failed said only that something had gone wrong
-internally.** Work submitted to run in the background reports its outcome on a
-record you poll rather than as a status code, so that one field is all the
-caller has to tell "fix your request" from "try again later". Every failure was
-labelled an internal fault — a model name that does not exist and a prompt
-longer than the model can hold read identically, even though asking for the same
-two things directly answered "not found" and "too long". Background failures now
-describe themselves the same way the direct request would.
-
-**Being asked for too much is no longer reported as this server breaking.** A
-conversation longer than a model can hold is something the sender can fix, and
-when the reply was not streamed it was already reported that way, with how much
-to shorten. Streamed, the identical request was labelled a server fault instead
-— which told monitoring this node had a bug and told the user nothing they could
-act on. Both now describe the same failure the same way.
+**Tool calls from Claude Code say whether the call or the server was at fault.**
+Every failure through the MCP tool interface claimed an internal server error. A
+tool client reads that as "this tool is broken" rather than "fix the request" —
+the difference between retrying forever and telling you what to change.
 
 ## [0.3.95-alpha] — 2026-08-12
 
