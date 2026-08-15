@@ -856,6 +856,7 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         // `Internal` is our own bug; the rest are scheduling/config problems
         // that a peer has no part in.
         SwarmError::ServiceUnavailable(_)
+        | SwarmError::NotImplemented(_)
         | SwarmError::Internal(_)
         | SwarmError::Validation(_)
         | SwarmError::Config(_)

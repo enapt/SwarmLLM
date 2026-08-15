@@ -132,6 +132,16 @@ pub enum SwarmError {
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
 
+    /// This build does not implement the thing that was asked for.
+    ///
+    /// Distinct from `ServiceUnavailable`, which means "not right now" and
+    /// invites a retry. This one will never succeed however long you wait, so
+    /// it must not wear a 503: a client with retry-on-5xx re-sends forever, and
+    /// monitoring reads a permanent capability gap as this node being unwell.
+    /// 501 says the honest thing; the message must name what to do instead.
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
+
     // Generic
     #[error("Internal error: {0}")]
     Internal(String),
@@ -231,6 +241,11 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
             StatusCode::PAYMENT_REQUIRED,
             err.to_string(),
             "insufficient_credits",
+        ),
+        SwarmError::NotImplemented(_) => (
+            StatusCode::NOT_IMPLEMENTED,
+            err.to_string(),
+            "not_implemented_error",
         ),
         SwarmError::InsufficientCapacity(_) | SwarmError::ServiceUnavailable(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -574,6 +589,29 @@ mod tests {
                 "{msg:?} must not be reclassified"
             );
         }
+    }
+
+    /// A permanent capability gap must not wear a "try again later" status.
+    ///
+    /// Embeddings returned `503 server_error` for something no amount of
+    /// waiting can fix — inference runs in worker subprocesses in every
+    /// supported configuration — so a client with retry-on-5xx re-sends it
+    /// forever and monitoring reads a missing feature as this node being
+    /// unwell (measured 2026-08-15). 501 is the honest status, and it is the
+    /// same lesson as #295 expressed in the status rather than the hint.
+    #[test]
+    fn an_unimplemented_feature_is_501_not_a_retryable_503() {
+        let err = SwarmError::NotImplemented("no embeddings in this build".into());
+        let (status, _msg, error_type) = classify_error(&err);
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(error_type, "not_implemented_error");
+        assert_ne!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "503 invites a retry that can never succeed"
+        );
+        // And it must never be blamed on a peer.
+        assert!(error_hint(&err).is_none() || !error_hint(&err).unwrap().contains("Try again"));
     }
 
     /// A policy refusal is this node declining by configuration, not a crash.

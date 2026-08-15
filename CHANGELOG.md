@@ -4,6 +4,18 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Asking for embeddings no longer looks like a temporary outage.** This build
+does not serve them — inference runs in worker subprocesses — but it answered
+with a status that means "try again later", so anything that retries on server
+errors would have kept asking forever, and monitoring read a missing feature as
+this node being unwell. It now says plainly that it is not implemented, and
+points at using a cloud provider instead.
+
+**Rescanning shards now says what it passed over.** The answer was the same
+whether there was nothing to do or a shard was sitting on disk being
+deliberately skipped — very different answers to "why is this not being served".
+
+
 ## [0.3.96-alpha] — 2026-08-15
 
 **When something went wrong, SwarmLLM often could not tell you what.** Six

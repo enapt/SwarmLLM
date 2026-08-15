@@ -822,8 +822,15 @@ pub async fn embeddings(
     State(_state): State<AppState>,
     crate::api::server::JsonBody(_req): crate::api::server::JsonBody<EmbeddingRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-        "Embeddings API not available with subprocess inference. Use a dedicated embedding model or provider.".into(),
+    // 501, not 503: inference runs in worker subprocesses in every supported
+    // configuration, so this is not "not right now" — waiting cannot make it
+    // work, and a 503 has retry-on-5xx clients re-sending forever while
+    // monitoring reads a missing feature as this node being unwell.
+    Err(ApiError(crate::error::SwarmError::NotImplemented(
+        "this build does not serve embeddings — inference runs in worker \
+         subprocesses. Point embeddings at a cloud provider configured in \
+         Settings, or use a dedicated embedding service."
+            .into(),
     )))
 }
 

@@ -681,6 +681,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::NoSession(_) => "NoSession",
         E::NonceOverflow => "NonceOverflow",
         E::NotFound(_) => "NotFound",
+        E::NotImplemented(_) => "NotImplemented",
         E::PeerNotFound(_) => "PeerNotFound",
         E::PipelineError(_) => "PipelineError",
         E::PrivateModeUnavailable { .. } => "PrivateModeUnavailable",
