@@ -40,7 +40,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cuda
-    image: ghcr.io/enapt/swarmllm:cuda
+    image: ghcr.io/enapt/swarmllm:latest-cuda
     container_name: swarmllm
     ports:
       - "${SWARMLLM_NODE_LISTEN_PORT:-8800}:8800/tcp"

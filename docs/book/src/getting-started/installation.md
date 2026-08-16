@@ -96,8 +96,8 @@ Pre-built images on GHCR:
 |---|---|
 | `ghcr.io/enapt/swarmllm:latest` | CPU-only |
 | `ghcr.io/enapt/swarmllm:latest-cuda` | NVIDIA GPU (CUDA 12.4) |
-| `ghcr.io/enapt/swarmllm:0.3.14-alpha` | Pinned version (CPU) |
-| `ghcr.io/enapt/swarmllm:0.3.14-alpha-cuda` | Pinned version (GPU) |
+| `ghcr.io/enapt/swarmllm:0.3.98-alpha` | Pinned version (CPU) |
+| `ghcr.io/enapt/swarmllm:0.3.98-alpha-cuda` | Pinned version (GPU) |
 
 Data is persisted in Docker volumes. Model shards are stored in the `swarmllm-models` volume (or bind-mount a host directory via `SWARMLLM_MODELS_DIR` in `.env`).
 
