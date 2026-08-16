@@ -6,22 +6,28 @@
 //! materialises a fresh `KvCacheEntry` seeded with the cached tensors so
 //! prefill skips those positions and only processes the suffix.
 //!
-//! Scope (v1):
+//! Scope:
 //! - Per-worker-subprocess, per-model-key. One instance manages all models
 //!   inside a worker.
-//! - Flat set of entries per model, bounded by `max_entries`. No radix tree;
-//!   insertion happens at block boundaries AND at the full prompt tail so
-//!   cross-user "same system prompt" sharing still hits (first N block
-//!   boundaries coincide) while staying simple.
+//! - Flat set of entries per model, bounded by `max_entries`. No radix tree.
+//! - **One snapshot per insert, at the full prompt length.** Partial-prefix
+//!   reuse comes from `lookup` narrowing a longer entry to the shared prefix
+//!   at hit time — the same primitive `export_snapshot_bytes` has always used
+//!   to serve any block boundary from a full-length entry. Snapshotting every
+//!   block boundary at insert time was gotcha #312: `O(prompt² / block)`
+//!   copied bytes per request — ~15 GB and minutes of CPU stall for one
+//!   2.9k-token prompt on a 3B model.
 //! - LRU eviction by `last_hit` timestamp.
 //! - Tensors are cloned on restore (candle `append` copies into a fresh
 //!   pre-allocated buffer). No reference-counted sharing across live
 //!   requests.
+//! - Cross-node sharing: `export_snapshot_bytes` serves any hashed block
+//!   boundary to a peer; `hydrate_request_from_bytes` seeds a request from a
+//!   peer's serialized snapshot.
 //!
 //! What this does NOT do:
 //! - SSM / hybrid-model state (Qwen3.5-SSM). Caches containing SSM state
 //!   are skipped; the model runs a full prefill.
-//! - Cross-node sharing. The snapshot lives only in this worker process.
 //! - True radix-tree de-duplication. Storage is `O(entries * prompt_len *
 //!   hidden * layers)` in the worst case — configure `max_entries` with
 //!   this in mind.
@@ -170,10 +176,12 @@ pub struct PrefixCache {
     /// Prompts longer than this (in tokens) are not inserted — they'd blow
     /// memory. Lookups against long prompts still walk the cache.
     max_prompt_tokens: usize,
-    /// Granularity for multi-point inserts. For a prompt of length L, inserts
-    /// happen at positions `block_tokens, 2*block_tokens, ...` that are `≥
-    /// min_tokens` and `< L`, plus one at L itself. 0 disables multi-point
-    /// inserts (only the full prompt is stored).
+    /// Block granularity for the chained BLAKE3 manifest used by cross-node
+    /// prefix sharing. Inserts always store ONE snapshot at the full prompt
+    /// length (see gotcha #312 — per-boundary snapshots were quadratic);
+    /// blocks only shape the announce manifest and the boundaries
+    /// `export_snapshot_bytes` can serve. 0 disables the manifest (no
+    /// cross-node announcing); local narrowing lookups are unaffected.
     block_tokens: usize,
     enabled: bool,
 }
@@ -213,15 +221,24 @@ impl PrefixCache {
     }
 
     /// Block-size used to chunk prompt tokens into chained BLAKE3 hashes for
-    /// cross-node prefix-cache sharing. Returns 0 when multi-point inserts
-    /// are disabled — callers should treat 0 as "no manifest" and skip
+    /// cross-node prefix-cache sharing. Returns 0 when the manifest is
+    /// disabled — callers should treat 0 as "no manifest" and skip
     /// announcing.
     pub fn block_tokens(&self) -> usize {
         self.block_tokens
     }
 
-    /// Find the longest cached token prefix of `input_tokens` for `model_key`.
-    /// Returns `None` if no suitable prefix is cached or the cache is disabled.
+    /// Find the longest cached token prefix shared with `input_tokens` for
+    /// `model_key`. Returns `None` if no suitable prefix is cached or the
+    /// cache is disabled.
+    ///
+    /// An entry no longer has to be a whole prefix of the input: a longer
+    /// entry is narrowed to the shared length at hit time — the same
+    /// primitive `export_snapshot_bytes` uses to serve any block boundary
+    /// from a full-length entry. This is what replaced per-block-boundary
+    /// snapshot storage (gotcha #312), and it also means an *identical*
+    /// repeated prompt now hits at `len - 1` (one token left to forward)
+    /// where it previously missed outright.
     pub fn lookup(&self, model_key: &str, input_tokens: &[u32]) -> Option<Arc<KvSnapshot>> {
         if !self.enabled || input_tokens.len() < self.min_tokens {
             return None;
@@ -230,30 +247,53 @@ impl PrefixCache {
         // nothing to compute logits for. Clamp the usable prefix length.
         let usable_max = input_tokens.len().saturating_sub(1);
 
-        // Fast path: read lock only. Walk to find the longest prefix, clone
-        // the winning snapshot Arc, and bump the entry's atomic last_hit
-        // without ever upgrading to a write lock.
+        // Fast path: read lock only. Walk to find the longest shared prefix,
+        // clone the winning snapshot Arc, and bump the entry's atomic
+        // last_hit without ever upgrading to a write lock.
         let inner = self.inner.read().ok()?;
         let entries = inner.per_model.get(model_key)?;
-        let mut best: Option<&Entry> = None;
+        let mut best: Option<(&Entry, usize)> = None;
         for e in entries.iter() {
-            if e.tokens.len() < self.min_tokens || e.tokens.len() > usable_max {
+            let lcp = e
+                .tokens
+                .iter()
+                .zip(input_tokens.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let usable = lcp.min(usable_max);
+            if usable < self.min_tokens {
                 continue;
             }
-            if input_tokens.starts_with(&e.tokens) {
-                match best {
-                    None => best = Some(e),
-                    Some(cur) if e.tokens.len() > cur.tokens.len() => {
-                        best = Some(e);
-                    }
-                    _ => {}
-                }
+            match best {
+                None => best = Some((e, usable)),
+                Some((_, cur)) if usable > cur => best = Some((e, usable)),
+                _ => {}
             }
         }
-        let winner = best?;
+        let (winner, usable) = best?;
         winner.last_hit.store(self.next_tick(), Ordering::Relaxed);
-        let snapshot = winner.snapshot.clone();
+        let full = winner.snapshot.clone();
         drop(inner);
+        // Narrow OUTSIDE the lock — it copies up to `usable` tokens of KV and
+        // must not stall concurrent lookups/inserts. Whole-entry hits skip
+        // the copy entirely (the Arc is shared; hydrate copies on append).
+        let snapshot = if usable == full.token_count {
+            full
+        } else {
+            match narrow_snapshot(&full, usable) {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    tracing::warn!(
+                        model_key,
+                        usable,
+                        entry_tokens = full.token_count,
+                        error = %e,
+                        "prefix-cache: narrowing cached snapshot failed — treating as miss"
+                    );
+                    return None;
+                }
+            }
+        };
         tracing::info!(
             model_key,
             matched_tokens = snapshot.token_count,
@@ -263,10 +303,18 @@ impl PrefixCache {
         Some(snapshot)
     }
 
-    /// Capture the current KV state of `kv_store` for `request_id` into
-    /// snapshots at block boundaries and insert them into the cache. Called
-    /// after prefill (or at end of decode) when the full prompt KV is
+    /// Capture the current KV state of `kv_store` for `request_id` as ONE
+    /// snapshot at the full prompt length and insert it into the cache.
+    /// Called after prefill (or at end of decode) when the full prompt KV is
     /// populated.
+    ///
+    /// One snapshot, not one per block boundary: per-boundary snapshots each
+    /// copied `[0..pos]` of every layer's K and V, which is
+    /// `O(prompt² / block)` bytes — ~15 GB copied and minutes of CPU stall
+    /// for a single 2.9k-token prompt on a 3B model (gotcha #312). `lookup`
+    /// and `export_snapshot_bytes` both narrow the full-length snapshot to
+    /// whatever boundary a consumer needs, so the extra entries bought
+    /// nothing.
     ///
     /// `prompt_tokens` is the token sequence that produced the KV state —
     /// its length must equal the current KV cache seq_len for this request.
@@ -338,84 +386,68 @@ impl PrefixCache {
             return Vec::new();
         }
 
-        let insert_points = self.compute_insert_points(available);
-        if insert_points.is_empty() {
-            tracing::debug!(
-                model_key,
-                available,
-                block_tokens = self.block_tokens,
-                min_tokens = self.min_tokens,
-                "prefix-cache: not snapshotting — no block boundary at or above the floor"
-            );
-            return Vec::new();
-        }
+        let snap_tokens = &prompt_tokens[..available];
 
-        let insert_points_len = insert_points.len();
-        let mut snapshots: Vec<(usize, Arc<KvSnapshot>)> = Vec::with_capacity(insert_points_len);
-        for pos in insert_points {
-            match snapshot_at(&entry.layers, pos, dim, max_seq_len) {
-                Ok(snap) => snapshots.push((pos, Arc::new(snap))),
-                Err(e) => {
-                    // Stop at the first failure instead of trying the rest.
-                    //
-                    // `compute_insert_points` returns ASCENDING block
-                    // boundaries and a snapshot copies `[0..pos]` of every
-                    // layer's K and V, so each remaining point allocates
-                    // strictly MORE than the one that just failed. Once one
-                    // fails there is no prospect of a later one succeeding.
-                    //
-                    // Continuing was not free: on a 6 GB card a long prefill
-                    // failed here every 64 tokens, so the request paid a futile
-                    // allocation attempt and emitted a warning per block, on
-                    // exactly the machine least able to spare either. Reported
-                    // 2026-08-02.
-                    //
-                    // Snapshots already taken at SMALLER positions are kept —
-                    // they succeeded and are still useful prefixes — so this
-                    // degrades to "cache as much as fitted" rather than
-                    // dropping the lot.
-                    tracing::warn!(
+        // Fast path: an entry already covering this prefix (equal or longer)
+        // makes the snapshot redundant — `lookup` narrows the longer entry to
+        // any shared length at hit time. Skipping here is what makes a
+        // repeated identical prompt cost nothing instead of re-copying the
+        // whole KV every request. `last_hit` is atomic, so the bump needs
+        // only the read lock (same as `lookup`).
+        {
+            let Ok(inner) = self.inner.read() else {
+                return Vec::new();
+            };
+            if let Some(bucket) = inner.per_model.get(model_key) {
+                if let Some(covering) = bucket.iter().find(|e| e.tokens.starts_with(snap_tokens)) {
+                    covering.last_hit.store(self.next_tick(), Ordering::Relaxed);
+                    let manifest = enumerate_manifest_locked(bucket, self.block_tokens);
+                    tracing::debug!(
                         model_key,
-                        pos,
-                        captured = snapshots.len(),
-                        error = %e,
-                        "prefix-cache: snapshot failed — keeping what fitted and \
-                         skipping the larger insert points for this request"
+                        prompt_tokens = available,
+                        covering_tokens = covering.tokens.len(),
+                        "prefix-cache: prefix already covered — skipping snapshot"
                     );
-                    break;
+                    return manifest;
                 }
             }
         }
-        drop(entry);
 
-        if snapshots.is_empty() {
-            tracing::debug!(
-                model_key,
-                attempted = insert_points_len,
-                "prefix-cache: not snapshotting — every snapshot attempt failed"
-            );
-            return Vec::new();
-        }
+        let snap = match snapshot_at(&entry.layers, available, dim, max_seq_len) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                // Most likely an allocation failure on a memory-starved
+                // device (observed on a 6 GB card, 2026-08-02). The cache is
+                // an optimisation — degrade to "not cached", never fail the
+                // request.
+                tracing::warn!(
+                    model_key,
+                    tokens = available,
+                    error = %e,
+                    "prefix-cache: snapshot failed — request continues uncached"
+                );
+                return Vec::new();
+            }
+        };
+        drop(entry);
 
         let Ok(mut inner) = self.inner.write() else {
             return Vec::new();
         };
         let bucket = inner.per_model.entry(model_key.to_string()).or_default();
-        for (pos, snap) in snapshots {
-            let tokens = prompt_tokens[..pos].to_vec();
-            let tick = self.next_tick();
-            // Skip if an entry for this exact prefix already exists; bump LRU.
-            if let Some(existing) = bucket.iter_mut().find(|e| e.tokens == tokens) {
-                existing.last_hit.store(tick, Ordering::Relaxed);
-                existing.snapshot = snap;
-                continue;
-            }
-            bucket.push(Entry {
-                tokens,
-                snapshot: snap,
-                last_hit: AtomicU64::new(tick),
-            });
-        }
+        let tokens = snap_tokens.to_vec();
+        let tick = self.next_tick();
+        // Entries whose tokens are a prefix of ours (including an exact match
+        // that raced in since the read-lock check) are fully covered by the
+        // new entry — `lookup` narrows to serve them — so retaining them
+        // would only burn `max_entries` slots and their KV bytes. A growing
+        // conversation therefore keeps ONE entry, not one per turn.
+        bucket.retain(|e| !tokens.starts_with(&e.tokens));
+        bucket.push(Entry {
+            tokens,
+            snapshot: snap,
+            last_hit: AtomicU64::new(tick),
+        });
 
         // Evict LRU until within cap.
         if bucket.len() > self.max_entries {
@@ -565,24 +597,6 @@ impl PrefixCache {
         }
         entry.last_accessed = Instant::now();
         Ok(snapshot.token_count)
-    }
-
-    fn compute_insert_points(&self, available: usize) -> Vec<usize> {
-        let mut points = Vec::new();
-        if self.block_tokens > 0 {
-            let mut p = self.block_tokens;
-            while p < available {
-                if p >= self.min_tokens {
-                    points.push(p);
-                }
-                p += self.block_tokens;
-            }
-        }
-        if available >= self.min_tokens {
-            points.push(available);
-        }
-        points.dedup();
-        points
     }
 
     #[cfg(test)]
@@ -959,40 +973,6 @@ pub fn deserialize_snapshot_full(
 
 #[cfg(test)]
 mod tests {
-
-    /// The insert points must ASCEND, because the snapshot loop now stops at
-    /// the first failure instead of trying the rest.
-    ///
-    /// That break is only sound while every later point allocates more than the
-    /// one that failed — a snapshot copies `[0..pos]` of every layer's K and V,
-    /// so ascending positions mean monotonically growing allocations. If this
-    /// ever returned unordered or descending points, breaking would start
-    /// skipping points that could still have fitted, and the prefix cache would
-    /// quietly cache less than it can.
-    #[test]
-    fn insert_points_ascend_so_stopping_at_the_first_failure_is_sound() {
-        for (block, min_tokens, available) in [
-            (64usize, 32usize, 512usize),
-            (16, 16, 100),
-            (128, 64, 129),
-            (64, 32, 64),
-        ] {
-            let cache = PrefixCache::new(true, 8, block, min_tokens, 8192);
-            let points = cache.compute_insert_points(available);
-            for w in points.windows(2) {
-                assert!(
-                    w[1] > w[0],
-                    "insert points must strictly ascend (block={block}, min={min_tokens}, \
-                     available={available}), got {points:?}"
-                );
-            }
-            assert!(
-                points.iter().all(|p| *p <= available),
-                "no insert point may exceed the available positions: {points:?}"
-            );
-        }
-    }
-
     use super::*;
     use candle_core::{DType, Device};
 
@@ -1046,22 +1026,113 @@ mod tests {
     }
 
     #[test]
-    fn block_aligned_inserts_enable_partial_match() {
-        // block=4, so after a 10-token prompt we insert at 4, 8, 10.
+    fn partial_match_narrows_to_the_full_shared_prefix() {
+        // One entry at the full prompt length; a partially-overlapping prompt
+        // hits at the WHOLE shared prefix (6), not a block boundary (the old
+        // per-boundary storage could only offer 4).
         let pc = PrefixCache::new(true, 16, 4, 4, 8192);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
 
         let tokens_a: Vec<u32> = (1..=10).collect();
         pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a);
-        assert_eq!(pc.entry_count("m"), 3);
+        assert_eq!(pc.entry_count("m"), 1);
 
-        // A different prompt that shares first 6 tokens should hit at 4
-        // (longest block boundary that is a prefix).
         let mut tokens_b: Vec<u32> = (1..=6).collect();
         tokens_b.extend_from_slice(&[99, 99, 99, 99]);
         let snap = pc.lookup("m", &tokens_b).expect("hit");
-        assert_eq!(snap.token_count, 4);
+        assert_eq!(snap.token_count, 6);
+        // The narrowed snapshot's tensors must actually be 6 positions long —
+        // hydration appends them verbatim.
+        for layer in snap.layers.iter().flatten() {
+            assert_eq!(layer.0.dims()[2], 6);
+            assert_eq!(layer.1.dims()[2], 6);
+        }
+    }
+
+    #[test]
+    fn one_snapshot_per_insert_even_with_many_block_boundaries() {
+        // Gotcha #312: this used to create one entry PER block boundary
+        // (3 here; 45 for a real 2.9k-token prompt), each an independent
+        // full-prefix KV copy — quadratic time and memory.
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 12);
+        let tokens: Vec<u32> = (1..=12).collect();
+        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        assert_eq!(pc.entry_count("m"), 1);
+        // The announce manifest still covers every block boundary.
+        assert_eq!(manifest.len(), 3);
+    }
+
+    #[test]
+    fn repeated_identical_insert_skips_the_copy() {
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let tokens: Vec<u32> = (1..=8).collect();
+
+        // req-a's KV is zeros (make_fake_kv); insert it.
+        make_fake_kv(&kv_store, "m", "req-a", 2, 8);
+        let m1 = pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+
+        // req-b holds DIFFERENT KV content (ones) for the same tokens. If the
+        // second insert re-snapshots, the cached tensors become ones; if it
+        // correctly skips (the prefix is already covered), they stay zeros.
+        {
+            let device = Device::Cpu;
+            let mut entry = kv_store.get_or_create("m", "req-b", 2);
+            for slot in entry.layers.iter_mut() {
+                let k = Tensor::ones((1usize, 1, 8, 4), DType::F32, &device).unwrap();
+                let v = Tensor::ones((1usize, 1, 8, 4), DType::F32, &device).unwrap();
+                let mut kv = LayerKv::with_dim(2, 4096);
+                kv.append(&k, &v).unwrap();
+                *slot = Some(kv);
+            }
+        }
+        let m2 = pc.insert_from_kv("m", "req-b", &kv_store, &tokens);
+
+        assert_eq!(pc.entry_count("m"), 1);
+        // The skip must still report the full manifest, or the caller stops
+        // announcing blocks it can serve.
+        assert_eq!(m1.len(), m2.len());
+        let lookup_tokens: Vec<u32> = (1..=10).collect();
+        let snap = pc.lookup("m", &lookup_tokens).expect("hit");
+        let (k, _) = snap.layers[0].as_ref().expect("layer");
+        let vals: Vec<f32> = k.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(
+            vals.iter().all(|v| *v == 0.0),
+            "second insert replaced the snapshot instead of skipping"
+        );
+    }
+
+    #[test]
+    fn growing_conversation_keeps_one_entry() {
+        // Turn 2's prompt extends turn 1's, so turn 1's entry is fully
+        // covered by the new one and must be pruned, not accumulated.
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 8);
+        pc.insert_from_kv("m", "req-a", &kv_store, &(1..=8).collect::<Vec<_>>());
+        make_fake_kv(&kv_store, "m", "req-b", 2, 12);
+        pc.insert_from_kv("m", "req-b", &kv_store, &(1..=12).collect::<Vec<_>>());
+
+        assert_eq!(pc.entry_count("m"), 1);
+        let snap = pc.lookup("m", &(1..=14).collect::<Vec<_>>()).expect("hit");
+        assert_eq!(snap.token_count, 12);
+    }
+
+    #[test]
+    fn identical_prompt_hits_at_len_minus_one() {
+        // Re-asking the exact cached prompt used to MISS (the entry could
+        // not leave a token to forward). Narrowing serves it at len - 1.
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 10);
+        let tokens: Vec<u32> = (1..=10).collect();
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+
+        let snap = pc.lookup("m", &tokens).expect("hit");
+        assert_eq!(snap.token_count, 9);
     }
 
     #[test]

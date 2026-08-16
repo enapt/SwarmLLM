@@ -1886,10 +1886,11 @@ async fn handle_generate(
         gen.model_id.0.as_str(),
     )?;
 
-    // Prefix-cache lookup: if a cached prefix is a strict prefix of this
-    // prompt, hydrate the request's KV with the snapshot and only forward
-    // the suffix. Try local first (free); on miss, probe cross-node (Item 8
-    // Phase 2b).
+    // Prefix-cache lookup: if a cached entry shares a long-enough prefix
+    // with this prompt (the entry is narrowed to the shared length when it
+    // is longer), hydrate the request's KV with the snapshot and only
+    // forward the suffix. Try local first (free); on miss, probe cross-node
+    // (Item 8 Phase 2b).
     let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache

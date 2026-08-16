@@ -170,7 +170,7 @@ enum Commands {
         /// Prompts longer than this (tokens) are not inserted (default 8192)
         #[arg(long, default_value = "8192")]
         prefix_cache_max_prompt_tokens: u32,
-        /// Block-alignment granularity for multi-point inserts (default 64)
+        /// Block granularity for the cross-node prefix-sharing manifest (default 64)
         #[arg(long, default_value = "64")]
         prefix_cache_block_tokens: u32,
         /// Minimum prefix tokens for cache to engage (default 32)
