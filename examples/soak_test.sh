@@ -46,6 +46,20 @@ if [ ! -f "$SRC/manifest.json" ]; then
     ls -1 ~/.local/share/swarmllm/models/ 2>/dev/null | sed 's/^/  /' >&2
     exit 1
 fi
+# Metadata alone is not a model. A dir can hold manifest + header with no shard
+# files, and a soak against it "works" perfectly: the node registers the model,
+# holds nothing, and the scheduler routes every request to whichever swarm peer
+# really holds the shards — so the run samples an idle daemon while putting
+# hours of load on somebody else's machine, and none of the code under test
+# executes. Observed 2026-08-16 (every request went to a LAN peer).
+if ! ls "$SRC"/shard_*.bin >/dev/null 2>&1; then
+    echo "Model at $SRC has metadata but NO shard files — nothing to soak locally." >&2
+    echo "Models with real shards on this machine:" >&2
+    for d in ~/.local/share/swarmllm/models/*/; do
+        ls "$d"shard_*.bin >/dev/null 2>&1 && basename "$d" | sed 's/^/  /' >&2
+    done
+    exit 1
+fi
 [ -x "$BINARY" ] || { echo "No binary at $BINARY" >&2; exit 1; }
 
 # Stop only OUR node, matched on its data dir in /proc/<pid>/environ. Never a
@@ -77,6 +91,18 @@ gpu_layers = 0
 bootstrap_peers = []
 disable_default_bootstrap = true
 enable_mdns = false
+# No bootstrap and no mDNS is NOT isolation on a machine with another node:
+# loopback discovery is unconditional (it probes 127.0.0.1 ports and exists
+# precisely for the mDNS-off case), so this node WILL connect to a live node
+# and, through it, the swarm. The private gossip id is what keeps it deaf to
+# the swarm's shard-holder gossip, so the scheduler never learns a remote
+# holder to route to. Same recipe as two_node_test.sh.
+gossip_network_id = "swarmllm-soak"
+
+[ui]
+# Headless run — and the spawned browser opener was a defunct child the worker
+# sampler miscounted as a model worker.
+open_browser_on_start = false
 CFG
 
 export SWARMLLM_NODE_DATA_DIR="$DATA"
@@ -94,12 +120,6 @@ for i in $(seq 1 60); do
 done
 KEY=$(cat "$DATA/api_key" 2>/dev/null)
 [ -n "$KEY" ] || { echo "no api key — did the node start?" >&2; tail -5 "$DATA/soak.log" >&2; exit 1; }
-
-END=$(( $(date +%s) + HOURS*3600 ))
-OK=0; FAIL=0; STOP=0
-echo "ts,elapsed_s,rss_kb,worker_rss_kb,threads,fds,workers,kv_used_mb,log_lines,ok,fail" > "$DATA/soak.csv"
-START=$(date +%s)
-
 # One request. Varies the prompt by index so a cache cannot make later requests
 # artificially cheap and hide a leak behind a fast path.
 fire() {
@@ -118,12 +138,20 @@ sample() {
     rss=$(awk '/VmRSS/{print $2}' /proc/$DAEMON_PID/status 2>/dev/null)
     threads=$(awk '/Threads/{print $2}' /proc/$DAEMON_PID/status 2>/dev/null)
     fds=$(ls /proc/$DAEMON_PID/fd 2>/dev/null | wc -l)
-    # Workers are children of the daemon; match by ppid, not by name, so this
-    # cannot pick up another node's worker on the same machine.
+    # Workers are children of the daemon carrying "model-worker" in their argv.
+    # The ppid match alone is not enough — the daemon has other children (a
+    # defunct browser-opener sat there for a whole run and was counted as a
+    # worker, RSS 0). The ppid keeps it from picking up another node's worker
+    # on the same machine; the argv match keeps it to actual workers.
     workers=0; wrss=0
-    for wpid in $(pgrep -P $DAEMON_PID 2>/dev/null); do
+    for wpid in $(pgrep -P $DAEMON_PID -f "model-worker" 2>/dev/null); do
         workers=$((workers+1))
-        wrss=$((wrss + $(awk '/VmRSS/{print $2}' /proc/$wpid/status 2>/dev/null || echo 0)))
+        # A worker can exit between the pgrep and the read, and then awk prints
+        # NOTHING while still exiting 0 — so `|| echo 0` never fires and the
+        # arithmetic gets an empty operand. Default after the fact instead.
+        local one
+        one=$(awk '/VmRSS/{print $2}' "/proc/$wpid/status" 2>/dev/null)
+        wrss=$((wrss + ${one:-0}))
     done
     # KV occupancy is not on any API surface — it is emitted as a debug line by
     # whichever store is the meaningful one (see the comments at both sites in
@@ -142,7 +170,43 @@ sample() {
         "$elapsed" "$((${rss:-0}/1024))" "$((${wrss:-0}/1024))" "${threads:-?}" "${fds:-?}" "$workers" "${kv:-?}" "$OK" "$FAIL"
 }
 
-sample
+OK=0; FAIL=0; STOP=0
+
+# Warm-up: wait until the model has loaded and answers a real request, so the
+# counters and the clock measure the soak rather than the load, and so the
+# guard below has a served request to judge.
+echo "waiting for the model to load and answer (a big model takes a minute or two)..."
+warm=""
+for _ in $(seq 1 100); do
+    [ "$STOP" -ne 0 ] && break
+    rc=$(fire 0)
+    [ "$rc" = "200" ] && { warm=1; break; }
+    sleep 3
+done
+if [ "$STOP" -ne 0 ]; then echo "stopped during warm-up"; stop_ours; exit 130; fi
+[ -n "$warm" ] || { echo "model never answered 200 during warm-up" >&2; tail -5 "$DATA/soak.log" >&2; stop_ours; exit 1; }
+
+# The failure this guards against is silent and total: a request served by a
+# peer returns 200, samples cleanly, and exercises none of the code under
+# test — while loading a machine that is somebody's. A Pipeline segment line
+# naming a foreign node is that failure happening. A locally-served request
+# takes the split fast path and assembles no pipeline at all, so on a healthy
+# soak this grep matches nothing.
+LOCAL_ID=$(curl -s -m 5 -H "Authorization: Bearer $KEY" "http://localhost:$PORT/v1/status" \
+           | grep -oE '"node_id" *: *"[0-9a-f]{16}"' | grep -oE '[0-9a-f]{16}')
+offtarget_lines() {
+    grep "Pipeline segment" "$DATA/soak.log" 2>/dev/null | grep -v "node=${LOCAL_ID:-__unknown__}"
+}
+if [ -n "$(offtarget_lines)" ]; then
+    echo "OFF-TARGET: requests are being served by a peer, not this node:" >&2
+    offtarget_lines | tail -3 >&2
+    stop_ours; exit 1
+fi
+
+END=$(( $(date +%s) + HOURS*3600 ))
+echo "ts,elapsed_s,rss_kb,worker_rss_kb,threads,fds,workers,kv_used_mb,log_lines,ok,fail" > "$DATA/soak.csv"
+START=$(date +%s)
+sample || echo '  (first sample failed, continuing)' >&2
 NEXT_SAMPLE=$(( $(date +%s) + SAMPLE_SECS ))
 N=0
 while [ "$(date +%s)" -lt "$END" ] && [ "$STOP" -eq 0 ]; do
@@ -157,11 +221,30 @@ while [ "$(date +%s)" -lt "$END" ] && [ "$STOP" -eq 0 ]; do
         rm -f "$f"
     done
     if [ "$(date +%s)" -ge "$NEXT_SAMPLE" ]; then
-        sample; NEXT_SAMPLE=$(( $(date +%s) + SAMPLE_SECS ))
+        sample || echo "  (sample failed, continuing)" >&2
+        # Re-check each sample: a mid-run failover to a peer is the same
+        # invalidation as starting off-target, just later.
+        if [ -n "$(offtarget_lines)" ]; then
+            echo "OFF-TARGET: a peer started serving these requests mid-run:" >&2
+            offtarget_lines | tail -3 >&2
+            STOP=2
+        fi
+        NEXT_SAMPLE=$(( $(date +%s) + SAMPLE_SECS ))
     fi
 done
+if [ "$STOP" = "2" ]; then
+    echo "loop ended: ABORTED — requests were being served by a peer (see above)" >&2
+elif [ "$STOP" -ne 0 ]; then
+    echo "loop ended: received a stop signal"
+elif [ "$(date +%s)" -ge "$END" ]; then
+    echo "loop ended: reached the ${HOURS}h deadline"
+else
+    echo "loop ended: UNEXPECTED — neither deadline nor signal" >&2
+fi
 
 sample
 echo "soak done: $OK ok, $FAIL failed over $(( ($(date +%s)-START)/60 )) min"
 echo "csv: $DATA/soak.csv"
 stop_ours
+[ "$STOP" = "2" ] && exit 1
+exit 0
