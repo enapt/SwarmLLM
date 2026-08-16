@@ -80,6 +80,7 @@ swarmllm/
 ├── python/        (swarmllm-client SDK)
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
+├── packaging/     (swarmllm.service + deb/{postinst,prerm} maintainer scripts — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
 ├── docs/book/     (mdBook documentation site)
 ├── vendor/        (patched upstream crates, all workspace-`exclude`d; every patch marked `SwarmLLM patch:`)
 │   ├── candle/                (k_quants::matmul tiled; cudarc dynamic-linking hardcode removed;
@@ -243,6 +244,14 @@ a PEER instead of this node (metadata-only model + unconditional loopback
 discovery, gotcha #311); `examples/soak_test.sh` now proves it is soaking THIS
 node and aborts otherwise. Plus: `load_peer_cache` announces once at startup
 instead of on every re-dial pass (141 false "restarted" log lines in 5 h).
+
+**Unreleased on main since the cut**: `7b38322c` — **the .deb upgrade itself ran
+`systemctl disable`** (prerm ignored its `$1` role), so every update silently
+undid the admin's enablement and left the node down; upgrades now
+stop-swap-restart and only a true removal disables. Found live updating the
+Proxmox node to .98; one transition release still runs the old prerm (gotcha
+#313). Also `e73bb167` (test-node cleanup no longer prefilters by process name;
+a renamed release artifact survived it).
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
