@@ -24,9 +24,18 @@ if [ ! -e /var/lib/swarmllm/config.toml ] && [ -f /etc/swarmllm/default.toml ]; 
     chmod 644 /var/lib/swarmllm/config.toml
 fi
 
-# Reload systemd and enable service
+# Reload systemd. On an upgrade ($2 = the previous version), restart the
+# service if prerm found it running — leaving the node down after every update
+# was the old behaviour. The admin's enable/disable choice is deliberately not
+# touched in either direction.
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
-    echo "SwarmLLM installed. Enable and start with:"
-    echo "  sudo systemctl enable --now swarmllm"
+    if [ -e /run/swarmllm/restart-after-upgrade ]; then
+        rm -f /run/swarmllm/restart-after-upgrade
+        systemctl start swarmllm 2>/dev/null || true
+        echo "SwarmLLM upgraded; service restarted."
+    elif [ -z "$2" ]; then
+        echo "SwarmLLM installed. Enable and start with:"
+        echo "  sudo systemctl enable --now swarmllm"
+    fi
 fi

@@ -2,6 +2,19 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+**Updating the Debian package no longer switches the service off.** Installing
+a new version over an old one ran the old version's cleanup as if the software
+were being removed, which disabled the background service — so the node did not
+come back the next time the machine rebooted, and sat stopped after every
+update until someone started it by hand. Removing the package still disables
+it; updating now restarts it and leaves the enable/disable choice alone.
+
+One transition note: the next update is still carried out by the previous
+version's cleanup script, so it will behave the old way one last time — after
+it, check `systemctl is-enabled swarmllm` and re-enable if needed.
+
 ## [0.3.98-alpha] — 2026-08-16
 
 **Writing a reply is 1.41x faster on processors without a graphics card**, for

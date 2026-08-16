@@ -1,8 +1,27 @@
 #!/bin/sh
 set -e
 
-# Stop service before removal
-if [ -d /run/systemd/system ]; then
-    systemctl stop swarmllm 2>/dev/null || true
-    systemctl disable swarmllm 2>/dev/null || true
-fi
+# $1 is "remove" on a true removal and "upgrade" when a newer version is being
+# installed over this one. Acting identically in both cases was a bug: every
+# upgrade ran `systemctl disable`, silently undoing the admin's enablement, so
+# the node quietly failed to come back at the machine's next reboot (observed
+# live, 2026-08-16). Disabling belongs to removal only.
+case "$1" in
+    remove)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop swarmllm 2>/dev/null || true
+            systemctl disable swarmllm 2>/dev/null || true
+        fi
+        ;;
+    upgrade|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            # Remember whether it was running so the new package's postinst can
+            # restart it, instead of leaving the node down until someone notices.
+            if systemctl is-active --quiet swarmllm 2>/dev/null; then
+                mkdir -p /run/swarmllm
+                touch /run/swarmllm/restart-after-upgrade
+            fi
+            systemctl stop swarmllm 2>/dev/null || true
+        fi
+        ;;
+esac
