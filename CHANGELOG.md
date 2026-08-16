@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.98-alpha] — 2026-08-16
 
 **Writing a reply is 1.41x faster on processors without a graphics card**, for
 most models released in the last couple of years — Llama 3.x, Qwen2.5, Mistral
@@ -17,6 +17,15 @@ unnecessary: the parts that share that memory can read it where it already sits.
 Measured on the same machine, three runs each: writing went from 4.71 to 6.63
 words per second, and reading a prompt was unchanged. Machines with a graphics
 card are unaffected — they already took a different route.
+
+Before release, the change ran for four hours of continuous questioning —
+3,474 answers, none failed, memory flat for the final two and a half hours — to
+make sure the speed does not come at the cost of stability.
+
+**The log no longer claims the node restarted when it did not.** A routine
+lookup announced "Loaded cached peers from last session" every time it ran —
+141 times in five hours on one live node — which read as a node stuck in a
+restart loop. It is now said once, at the actual start.
 
 ## [0.3.97-alpha] — 2026-08-15
 
