@@ -162,7 +162,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1861 lib tests passing + 11 ignored with `--features dev,claude-subscription` (1872 total); 1851 + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 27 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root; CI runs it explicitly since 2026-08-09), 9 in the vendored request-response patch (CI: path-triggered `.github/workflows/vendored.yml`; locally `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). End-to-end forward-pass bench (no daemon): `SWARM_BENCH_MODEL=<model shard dir> RAYON_NUM_THREADS=4 cargo run --release --no-default-features --features dev --example prefill_bench` — loads a real model from its shard directory and drives `SplitModel::forward` directly, so prompt-processing and decode changes can be A/B'd without chunking policy, batching or the API in the way. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. Attention-op bench: `examples/attn_bench.rs`. Quantized-matmul bench: `cargo run --release --no-default-features --features dev --example qmatmul_bench` — prices the kernel against batch size AND asserts the tiled path is bit-identical to the upstream ordering; it also sweeps rayon pool size. **Use min-of-N on an idle machine**: the same unchanged code path measured 0.42 ms and 0.97 ms across runs on the WSL2 test box. End-to-end smoke test (any binary, isolated node, never touches a running one): `examples/smoke_test.sh [binary] [port]` — starts, admin API, a setting applying without restart, reload response shape, non-empty inference, streaming, the Anthropic surface, and zero startup errors. Run it after a refactor: the test suite passing and the daemon still booting and serving are different questions. Isolated two-node cross-node test: `examples/two_node_test.sh [binary]` — one node holds the models, one holds none, both on a private gossip network so the scheduler cannot pick a public peer; asserts the reply is non-empty and that the server's `streamed_count` matches the client's `completion_tokens`. **Expect it to fail on a single multi-interface host** (the documented connection-churn case — it names that failure explicitly rather than implying a regression, and reproduces on released binaries); run it across two machines. Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons on ports 8890-8892 — deliberately NOT 8800, and it stops only its own nodes, because the old broad `killall swarmllm` took down whatever else was running) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1863 lib tests passing + 11 ignored with `--features dev,claude-subscription` (1874 total); 1853 + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 27 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root; CI runs it explicitly since 2026-08-09), 9 in the vendored request-response patch (CI: path-triggered `.github/workflows/vendored.yml`; locally `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). End-to-end forward-pass bench (no daemon): `SWARM_BENCH_MODEL=<model shard dir> RAYON_NUM_THREADS=4 cargo run --release --no-default-features --features dev --example prefill_bench` — loads a real model from its shard directory and drives `SplitModel::forward` directly, so prompt-processing and decode changes can be A/B'd without chunking policy, batching or the API in the way. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. Attention-op bench: `examples/attn_bench.rs`. Quantized-matmul bench: `cargo run --release --no-default-features --features dev --example qmatmul_bench` — prices the kernel against batch size AND asserts the tiled path is bit-identical to the upstream ordering; it also sweeps rayon pool size. **Use min-of-N on an idle machine**: the same unchanged code path measured 0.42 ms and 0.97 ms across runs on the WSL2 test box. End-to-end smoke test (any binary, isolated node, never touches a running one): `examples/smoke_test.sh [binary] [port]` — starts, admin API, a setting applying without restart, reload response shape, non-empty inference, streaming, the Anthropic surface, and zero startup errors. Run it after a refactor: the test suite passing and the daemon still booting and serving are different questions. Isolated two-node cross-node test: `examples/two_node_test.sh [binary]` — one node holds the models, one holds none, both on a private gossip network so the scheduler cannot pick a public peer; asserts the reply is non-empty and that the server's `streamed_count` matches the client's `completion_tokens`. **Expect it to fail on a single multi-interface host** (the documented connection-churn case — it names that failure explicitly rather than implying a regression, and reproduces on released binaries); run it across two machines. Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons on ports 8890-8892 — deliberately NOT 8800, and it stops only its own nodes, because the old broad `killall swarmllm` took down whatever else was running) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. Leak soak: `examples/soak_test.sh [binary]` (`HOURS=`, `MODEL=` env) — sustained inference against an ISOLATED node, sampling worker RSS / KV occupancy / threads / fds / ok-fail; it PROVES it is exercising this node (shard-file preflight, private `gossip_network_id`, aborts if a `Pipeline segment` line names a peer — no-bootstrap + no-mDNS is NOT isolation on a machine with a live node, loopback discovery is unconditional, gotcha #311); analyse with `examples/soak_report.sh`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -206,51 +206,42 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1861 lib (dev,claude-subscription) / 1851 (default) + 79 integration + 27 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-15 (post-v0.3.96 + the unreleased LocalOnly and model-id fixes). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1863 lib (dev,claude-subscription) / 1853 (default) + 79 integration + 27 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-16 (v0.3.98 preflight). Clippy clean default + features dev,claude-subscription + `--features llama` check.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.96-alpha (2026-08-15): a failure could not report itself
+### Latest — v0.3.98-alpha (2026-08-16): 1.41x faster CPU generation
 
-**Shipped 2026-08-15.** All four workflows green (CI, Docker, Release, Cache
-warm); 25 assets, not a draft. Verified on the DOWNLOADED CUDA artifact —
-sha256 match, smoke 8/8, and **all six fixes re-checked on it** — before the
-live node was updated (rollback: `~/.local/bin/swarmllm.0.3.95.bak`).
+**Cut 2026-08-16.** GQA decode on CPU no longer expands the KV cache with
+`repeat_kv` on every token — the query heads are regrouped as extra matmul rows
+against the unexpanded cache (`grouped_gqa_decode_attention` inside
+`standard_attention`; identical arithmetic, byte-equivalence pinned against the
+expanded path, MHA pinned byte-identical). Decode 4.71 → 6.63 tok/s on
+llama-3.2-3b; prefill unchanged; GPUs unaffected.
 
-**Six defects, one shape: an error's type is known in one place and a literal is
-written in another.** Each surface looked internally consistent; the bug is only
-visible by sending the same bad request two ways and comparing. The fix that
-generalises is never "correct this arm" but *make the classification reachable
-from here* — all six now end at `crate::error::classify_error`.
+This **reversed the CPU decode routing**: GQA decode had been sent to the fused
+kernel precisely because of the `repeat_kv` cost, and with it gone the same
+benchmark reports the opposite at every length (3-9x) — all CPU decode now takes
+standard. The control run reproduces the OLD verdict on reverted code, so the
+flip is attributable. CUDA GQA-decode routing rested on the same premise and is
+now a re-measure candidate (`docs/FUTURE_WORK.md`) — left as-is because GPUs
+already route to a fused kernel and this box cannot resolve small GPU deltas
+(#267).
 
-| surface | before | after |
-|---|---|---|
-| Anthropic **router** stream | `stop_reason:"end_turn"`, empty, HTTP 200 | `event: error` + real reason |
-| Anthropic **split** stream | `[inference failed: …]` as assistant TEXT + undefined `stop_reason:"error"` | `event: error` |
-| OpenAI stream | validation error typed `server_error` | `invalid_request_error` |
-| Responses `background` | every failure `internal_error` | classified |
-| network boundary | peer's validation error → `500` + peer charged | `400`, no penalty |
-| MCP `tools/call` | every failure `-32603` "tool broken" | `-32602` "fix the call" |
-
-The Anthropic streaming surface had **no error frame at all**, so a refused or
-broken request arrived as *the model choosing to say nothing* — a
-`PromptPrivacyUnavailable` refusal (the thing #295 exists to explain) reached the
-client as a clean empty turn while the reason sat in `node.log`. The network
-boundary lost the class the same way the worker boundary did (#299), and because
-`failure_is_penalty_worthy` never saw the `Validation` it exempts, **the peer was
-docked for the caller's mistake** — fixing the status fixed the billing, which is
-the tell that the lost class was the real defect.
-
-New choke points: `crate::error::classify_error` (one classification, HTTP +
-every stream), `reclassify_flattened_error` (recover a class across a boundary
-that carries no types), `AnthropicSseEvent::Error`. Gotchas #300-#305; full
-detail incl. what was probed and found CLEAN in
-`memory/round_log_0812_error_reporting.md`.
+**Validated by a 4-hour soak before release**: 3474/3474 requests ok, worker RSS
+byte-flat for the final 2.5 h, KV bounded (`memory/soak_0816_cpu_speedup.md`).
+The soak tooling itself was hardened first — its initial run silently exercised
+a PEER instead of this node (metadata-only model + unconditional loopback
+discovery, gotcha #311); `examples/soak_test.sh` now proves it is soaking THIS
+node and aborts otherwise. Plus: `load_peer_cache` announces once at startup
+instead of on every re-dial pass (141 false "restarted" log lines in 5 h).
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
+- **v0.3.97** (08-15): **models you own could not be reached** — a node that loaded a model with `-m` announced it under its DISPLAY NAME, invisible as a holder, phantom `shard_count: 0` entries everywhere (three id derivations, no two agreeing → `slugify_model_name`, #310); removing `shard_range` from the config did nothing (#306); loopback-only endpoints told remote admins to fetch a key they had already sent (`LocalOnly`, #309); manifest-less models no longer claim `available`; embeddings 501 not 503.
+- **v0.3.96** (08-12/15): **a failure could not report itself** — six defects, one shape: the error's type known in one place, a literal written in another (empty Anthropic streams, `[inference failed]` as assistant text, peers DOCKED for callers' mistakes). Fix = make classification reachable: `classify_error` (HTTP + both SSE encoders), `reclassify_flattened_error` (typeless boundaries), `AnthropicSseEvent::Error`. Gotchas #300-#305. `round_log_0812_error_reporting.md`.
 - **v0.3.93/.94** (08-11/12): **a new node could see the swarm's models and run NONE of them** — holders each rewrote a manifest's `publisher` to themselves to earn broadcast rights, erasing each other until nobody broadcast (81 registrations, 50 publishers, one model); the right predicate existed in the startup path, missing from the 30s timer → `manifests_to_gossip` (#296). Plus #295/#297/#298. `round_log_0811_retry_advice.md`.
 - **v0.3.92** (08-11): a model could be asked a question in ANOTHER model's format — `resolve_chat_template` returned the RESIDENT model's template on the non-split route (#294). `round_log_0810_kv_mirror.md`.
 - **v0.3.91** (08-10/11): **1.4x on long GQA conversations** via an f16 KV mirror — GQA-gated because **the MHA null control came out 3-8% SLOWER**; empty+charged replies from a routing node (#293). **GPU decode is LAUNCH-BOUND — do not size it from FLOPs.**

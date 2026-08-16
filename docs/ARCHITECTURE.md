@@ -686,19 +686,31 @@ that today needs only the display driver), and the 18 bf16 kernels removed
 ### Attention Kernel Selection
 
 `inference::layers::run_attention` picks per device AND per shape. The rule is
-measured, and it is **opposite for prefill and decode on both devices**:
+measured:
 
 | | prefill (`q_len > 1`) | decode (`q_len == 1`) |
 |---|---|---|
-| CPU | standard | fused if GQA, standard if MHA |
+| CPU | standard | standard (GQA takes the grouped no-copy path inside it) |
 | CUDA | flash | flash if GQA, standard if MHA |
 
-**CPU and CUDA now use the same decode rule**, for the same reason:
-`standard_attention` materializes the `repeat_kv` expansion every token, which is
-free when `n_head == n_kv_head` and grows with context when it is not. Shipping
-flash unconditionally would still have cost up to **25x per attention call** on
-MHA decode — candle-flash-attn has no split-KV kernel, so a single query row
-cannot fill the card.
+**CPU decode is standard for every shape** (since c4cc3b16, 2026-08-16).
+`standard_attention` used to materialize the `repeat_kv` expansion every token —
+free when `n_head == n_kv_head`, growing with context otherwise — and that cost
+is precisely why GQA decode was routed to the fused kernel. It no longer pays
+it: for `q_len == 1` it regroups the query heads as extra matmul rows against
+the unexpanded cache (`grouped_gqa_decode_attention` — identical arithmetic,
+zero copies, pinned byte-equivalent by test). Measured per attention call the
+grouped path beats both the old expanded path (3-9x) and the fused kernel
+(2-20x, kv 1024-8192); end to end it is **1.41x decode** on llama-3.2-3b
+(4.71 → 6.63 tok/s), validated by a 4-hour soak.
+
+**CUDA keeps flash for GQA decode.** Its measurement predates the grouped path
+and rested on the same `repeat_kv` premise, so the routing is a re-measure
+candidate (`docs/FUTURE_WORK.md`) — but GPUs already route GQA decode to a fused
+kernel, and this box cannot resolve small GPU deltas (gotcha #267). The MHA side
+is not in question: flash unconditionally would still cost up to **25x per
+attention call** on MHA decode — candle-flash-attn has no split-KV kernel, so a
+single query row cannot fill the card.
 
 **There is no context-length crossover, and re-introducing one needs a
 forward-pass measurement.** A `k_len >= 1024` threshold shipped on 2026-08-07,

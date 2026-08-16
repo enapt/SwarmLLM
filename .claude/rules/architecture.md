@@ -634,11 +634,31 @@ silently break at the wire if duplicated:
   `scale_matches_candle_division` pins that against candle itself rather than
   against the helper — an equivalence test where both sides call the same
   helper passes happily with the scale inverted.
-- **`inference::layers::cuda_decode_prefers_standard`** (2026-08-08) — MHA
-  decode takes standard, GQA decode takes flash **at every context length**;
-  prefill always flash. Same rule as the CPU path, for the same reason:
-  `standard_attention` rebuilds the `repeat_kv` expansion every token, free when
-  `n_head == n_kv_head` and growing with context otherwise.
+- **`inference::layers::standard_attention` grouped GQA decode** (c4cc3b16,
+  2026-08-16) — for `q_len == 1` with `n_kv_head < n_head`, standard attention
+  no longer expands the KV cache with `repeat_kv`; it reshapes the query heads
+  into extra matmul rows against the unexpanded cache
+  (`grouped_gqa_decode_attention`). Identical arithmetic — the reshape is valid
+  ONLY because `repeat_kv` numbers heads group-major (query head `h` belongs to
+  group `h / n_rep`); get that backwards and every head reads another group's
+  cache while still producing plausible logits, which is why
+  `grouping_query_heads_matches_expanding_kv_heads` compares against the
+  expanded path rather than asserting shapes. MHA is pinned byte-identical
+  (`mha_decode_is_unchanged`). This flipped the CPU decode routing: GQA decode
+  had been sent to the fused kernel precisely because of the `repeat_kv` cost,
+  and with it gone the same benchmark reports the opposite at every length
+  (3-9x) — so **all CPU decode now takes standard**, with the control run
+  reproducing the old verdict on the reverted code. 1.41x end-to-end CPU decode
+  on llama-3.2-3b; 4h-soak-validated (`soak_0816_cpu_speedup.md`).
+- **`inference::layers::cuda_decode_prefers_standard`** (2026-08-08) — on CUDA:
+  MHA decode takes standard, GQA decode takes flash **at every context length**;
+  prefill always flash. The GQA side rested on the same reason the CPU rule did —
+  `standard_attention` rebuilt the `repeat_kv` expansion every token — and that
+  premise changed with the grouped path above, so it is a re-measure candidate
+  (`docs/FUTURE_WORK.md`); it stands unchanged because GPUs already route GQA
+  decode to a fused kernel and this box cannot resolve a small GPU delta (#267).
+  The MHA side is not premise-dependent: flash has no split-KV kernel, one query
+  row cannot fill the card, up to 25x per call.
   **There is no crossover, and re-introducing one needs a FORWARD measurement,
   not a per-call one.** A 1024-token threshold shipped on 2026-08-07 from timing
   the attention call in isolation; measured end to end the next day it was wrong

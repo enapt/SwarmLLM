@@ -6890,9 +6890,11 @@ decode, and it turns on GQA*.
   its cost climbs with KV (0.22 → 9.42 ms) while flash's stays roughly flat.
 
 Shipped rule, in `cuda_decode_prefers_standard`: prefill always flash; decode
-flash only when GQA and `k_len >= 1024`. Pinned by unit tests that need no GPU,
-and by an assertion in the GPU benchmark that the dispatch is never materially
-slower than always-standard.
+standard for MHA, flash for GQA — originally behind a `k_len >= 1024` threshold,
+which a forward-pass measurement removed the next day (2026-08-08: flash won at
+every length; the threshold had come from timing the call in isolation, gotcha
+#266). Pinned by unit tests that need no GPU, and by an assertion in the GPU
+benchmark that the dispatch is never materially slower than always-standard.
 
 **Two things the re-enable turned up that had nothing to do with speed:**
 
@@ -6936,11 +6938,17 @@ as verification to whoever finds it next.
 
 **Still open:**
 
-- **The GQA decode crossover is measured on one card (sm_86) and two models.**
-  1024 is where llama-3.2's 3:1 GQA flips. A higher expansion ratio (Qwen2.5's
-  7:1, Llama-3.1-8B's 4:1) makes `repeat_kv` more expensive and should flip
-  *earlier*, so the constant is conservative for them — but that is reasoning,
-  not measurement. Re-run the benchmark on any new card before trusting it.
+- **Re-measure CUDA GQA-decode routing against the GROUPED standard path**
+  (c4cc3b16, 2026-08-16). The flash-beats-standard verdict for GQA decode was
+  taken against a `standard_attention` that expanded the KV cache with
+  `repeat_kv` every token. On CPU, removing that expansion (regrouping query
+  heads against the unexpanded cache) reversed the routing verdict at every
+  context length by 3-9x — and the grouped path is device-generic, so the CUDA
+  comparison is now unmade. It was left as-is deliberately: GPUs already route
+  GQA decode to a fused kernel, and the WSL2 box cannot resolve a GPU change
+  below ~25% (gotcha #267). When re-measuring: it must be a FORWARD measurement
+  (gotcha #266), on a card that can resolve it, against
+  `flash_vs_standard_attention_on_cuda`.
 - **Split-KV (FlashDecoding) kernels would remove the MHA-decode cliff**
   entirely and are the real fix; they are absent from candle-flash-attn 0.10.1.
   Upstream flash-attention has them (`flash_fwd_splitkv_*`). Adding them to the
