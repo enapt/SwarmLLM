@@ -212,7 +212,15 @@ Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_
 
 ### Latest — v0.3.98-alpha (2026-08-16): 1.41x faster CPU generation
 
-**Cut 2026-08-16.** GQA decode on CPU no longer expands the KV cache with
+**Shipped 2026-08-16.** All four workflows green; 25 assets, not a draft.
+Verified on the DOWNLOADED CUDA artifact — sha256 match, smoke 8/8, and the
+speedup itself re-measured on it: pure-decode 2.35 → 4.69 tok/s (2.0x) at
+~2868 tokens context vs the v0.3.97 release binary, CPU-forced, null-control
+pattern — before the live node was updated (rollback:
+`~/.local/bin/swarmllm.0.3.97.bak`). That verification also surfaced a
+PRE-EXISTING long-prompt stall (identical on v0.3.97 — see memory Open items).
+
+GQA decode on CPU no longer expands the KV cache with
 `repeat_kv` on every token — the query heads are regrouped as extra matmul rows
 against the unexpanded cache (`grouped_gqa_decode_attention` inside
 `standard_attention`; identical arithmetic, byte-equivalence pinned against the

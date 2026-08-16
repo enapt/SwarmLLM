@@ -64,11 +64,17 @@ fi
 
 # Stop only OUR node, matched on its data dir in /proc/<pid>/environ. Never a
 # bare `pkill -x swarmllm` — that killed the user's live node (gotcha #283).
+# And never PREFILTER by process name either: a downloaded release artifact is
+# named swarmllm-linux-x86_64-cuda, so `pgrep -x swarmllm` misses it and the
+# node survives holding the port and the db — which is exactly how an A/B
+# harness ended up talking to the wrong binary with a stale key (2026-08-16).
+# The daemon is the kill target; its worker exits with it.
 stop_ours() {
-    for p in $(pgrep -x swarmllm 2>/dev/null); do
-        if tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -q "^SWARMLLM_NODE_DATA_DIR=$DATA$"; then
-            kill "$p" 2>/dev/null || true
-        fi
+    local p
+    for p in /proc/[0-9]*; do
+        tr '\0' '\n' < "$p/environ" 2>/dev/null | grep -q "^SWARMLLM_NODE_DATA_DIR=$DATA$" || continue
+        grep -aq "model-worker" "$p/cmdline" 2>/dev/null && continue
+        kill "${p#/proc/}" 2>/dev/null || true
     done
 }
 trap 'echo; echo "stopping..."; STOP=1' INT TERM
