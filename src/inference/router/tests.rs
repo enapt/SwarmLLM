@@ -291,6 +291,21 @@ fn peer_unavailable_is_kept_out_of_the_transient_classifier() {
     assert!(super::is_transient_remote_failure(&SwarmError::Inference(
         "peer never acknowledged the request".into()
     )));
+
+    // The typed variant the remote-generate fast path raises for a silent
+    // peer must keep its single re-routed retry — reclassifying it away from
+    // `PipelineError` (for the 503) must not cost the retry.
+    assert!(super::is_transient_remote_failure(
+        &SwarmError::PeerUnresponsive(
+            "remote-generate: peer never acknowledged request_id=x (silent drop or disconnect)"
+                .into()
+        )
+    ));
+    assert!(super::is_transient_remote_failure(
+        &SwarmError::PeerUnresponsive(
+            "remote-generate timed out waiting for token (first=true)".into()
+        )
+    ));
 }
 
 /// The coordinator matches a peer's failure as TEXT off the wire, while the

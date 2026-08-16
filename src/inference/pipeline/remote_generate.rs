@@ -370,7 +370,12 @@ impl PipelineExecutor {
                     // made arrival and emission different events.
                     if stream.emitted() == 0 {
                         tracing::warn!(%request_id, "remote-generate: token channel closed before any token (likely send failure)");
-                        return Err(SwarmError::PipelineError(format!(
+                        // `PeerUnresponsive`, not `PipelineError`: the peer
+                        // went quiet, so the caller gets a 503 that invites
+                        // the retry that helps, and the peer is eligible for
+                        // the serve-failure penalty (`PipelineError` is
+                        // exempt as a local scheduling problem).
+                        return Err(SwarmError::PeerUnresponsive(format!(
                             "remote-generate: peer never acknowledged request_id={request_id} (silent drop or disconnect)"
                         )));
                     }
@@ -399,7 +404,9 @@ impl PipelineExecutor {
                         break;
                     }
                     self.shared_state.streaming_token_txs.remove(&request_id);
-                    return Err(SwarmError::PipelineError(format!(
+                    // Same reclassification as the never-acknowledged arm
+                    // above: the peer went quiet past its deadline.
+                    return Err(SwarmError::PeerUnresponsive(format!(
                         "remote-generate timed out waiting for token (first={first})"
                     )));
                 }

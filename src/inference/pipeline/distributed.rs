@@ -1433,7 +1433,12 @@ impl PipelineExecutor {
                     standby_nodes = ?self.assignment.standbys.iter().map(|s| format!("{}[{:?}]", s.node_id, s.layer_range)).collect::<Vec<_>>(),
                     "DIAG: NO standby available for failed segment — pipeline will fail"
                 );
-                Err(SwarmError::PipelineError(format!(
+                // `SegmentFailoverExhausted`, not `PipelineError`: 503, so
+                // the caller learns nothing is wrong with their request or
+                // this node — there was simply nobody free to take the
+                // segment over. See the variant's doc for why neither
+                // `ModelIncompleteInSwarm` nor `ServiceUnavailable` fits.
+                Err(SwarmError::SegmentFailoverExhausted(format!(
                     "Segment {failed_idx} failed with no standby available"
                 )))
             }

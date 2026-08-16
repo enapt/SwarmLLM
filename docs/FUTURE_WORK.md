@@ -8311,7 +8311,22 @@ quiet patch:
   tolerating `null` indefinitely — this reduces how often it happens, it does not
   eliminate it.
 
-## `peer never acknowledged` answers 500 after ~93 s (observed 2026-08-12)
+## `peer never acknowledged` answers 500 after ~93 s (observed 2026-08-12) — FIXED 2026-08-16
+
+**Both instances fixed.** The silent-peer pair (`peer never acknowledged` +
+`remote-generate timed out waiting for token`) now raise
+`SwarmError::PeerUnresponsive` → 503, keep their `is_transient_remote_failure`
+retry (the matcher keys on message substrings, which were preserved), survive
+the typeless boundaries via a `reclassify_flattened_error` marker, and are now
+penalty-eligible — as a `PipelineError` the silent peer inherited that
+variant's "local scheduling problem" exemption, so it was never docked despite
+"timeouts waiting on a peer" being the penalty's stated purpose. The
+no-standby case raises `SwarmError::SegmentFailoverExhausted` → 503, chosen
+over the plausible-looking alternatives deliberately: `ModelIncompleteInSwarm`
+would newly trigger `assembly_failed_for_lack_of_holders`' DHT wait (the
+holders are known — one just failed), and `ServiceUnavailable` would trigger
+the peer-blacklist retry; it stays penalty-exempt because the summary names no
+culprit. Original analysis kept below for context.
 
 A request for a model held only by an unreachable peer spends the retry budget and
 then fails:
@@ -8374,3 +8389,24 @@ over". It now also returns `skipped_outside_shard_range`, counting only shards
 that are actually ON DISK (every manifest lists shards a node was never going to
 hold, and counting those would drown the number that matters). Additive:
 `status`, `count` and `models_updated` are unchanged for existing clients.
+
+## Prefix-cache retention is count-capped, not byte-capped (2026-08-16)
+
+The #312 fix made `PrefixCache` store ONE snapshot per insert (at the full
+prompt length) instead of one per 64-token block boundary, which removed the
+`O(prompt²/block)` copy cost and the ~15 GB-per-request balloon. What remains
+is that the retention bound is `max_entries = 16` **entries per model**, and an
+entry's size scales with its prompt: at the 8192-token insert ceiling on a 3B
+model (~229 KB/token of f32 KV) one entry can reach ~1.9 GB, so 16 distinct
+long conversations could in principle retain ~30 GB. The covered-prefix
+pruning keeps a growing conversation at one entry, so the realistic exposure
+needs many *distinct* long prompts against one model on one worker — rare, but
+the cap does not express the thing that actually needs bounding (bytes).
+
+If this surfaces in practice: give `PrefixCache` a byte budget (sum of
+`token_count × bytes-per-token` per entry, evict LRU until under), defaulting
+to a fraction of system RAM or the KV headroom the loader already computes
+(`kv_budget`). Snapshot size is cheap to compute at insert (tensor
+elem_count × dtype size). Keep `max_entries` as a secondary cap — the flat
+lookup walk is linear in entries, and vLLM's equivalent (prefix block pool) is
+bounded by the same bytes-not-count logic.

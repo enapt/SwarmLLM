@@ -22,6 +22,39 @@ pub enum SwarmError {
     InsufficientCapacity(ModelId),
     #[error("Pipeline assembly failed: {0}")]
     PipelineError(String),
+    /// A peer took this request and then went silent — no acknowledgement, no
+    /// first token, no explicit failure — until the delivery watchdog gave up
+    /// (`RR_ACK_TIMEOUT_SECS` sweep, or the prompt-scaled first-token
+    /// deadline).
+    ///
+    /// Transient and NOT this node's bug, which is why it is its own variant:
+    /// as a `PipelineError` it answered `500 server_error` — a vanished peer
+    /// reported as a bug in the node the user was talking to — and inherited
+    /// `PipelineError`'s exemption from `failure_is_penalty_worthy`, so the
+    /// peer that went silent was never docked even though "timeouts waiting on
+    /// a peer" is exactly what that penalty exists for. The router retries a
+    /// fresh assembly once before this surfaces, so a caller seeing it has had
+    /// two attempts go quiet; a new request usually routes to a different
+    /// holder, which is what the hint says.
+    #[error("Peer unresponsive: {0}")]
+    PeerUnresponsive(String),
+    /// A peer serving one segment of a distributed pipeline failed
+    /// mid-request and no hot-standby covered its layer range, so the request
+    /// could not continue.
+    ///
+    /// 503, not 500: nothing is wrong with this node or with the caller's
+    /// request — there was nobody free to take the segment over (observed
+    /// live 2026-08-15 with two holders of a range, one busy; the manual
+    /// retry succeeded once the peer was idle). Deliberately NOT
+    /// `ModelIncompleteInSwarm`, whose variant makes
+    /// `assembly_failed_for_lack_of_holders` wait on DHT results — pointless
+    /// here, the holders are known and one just failed — and NOT
+    /// `ServiceUnavailable`, whose wording marks a PEER as unable to serve
+    /// and triggers the blacklist-retry. Credit attribution stays with the
+    /// underlying segment failure, never with this summary (it names no
+    /// culprit).
+    #[error("Segment failover exhausted: {0}")]
+    SegmentFailoverExhausted(String),
     #[error("Inference timeout after {0}s")]
     InferenceTimeout(u64),
     #[error("No model loaded")]
@@ -225,6 +258,12 @@ pub fn reclassify_flattened_error(message: &str) -> Option<SwarmError> {
     if let Some(d) = detail_after(message, "Service unavailable: ") {
         return Some(SwarmError::ServiceUnavailable(d));
     }
+    if let Some(d) = detail_after(message, "Peer unresponsive: ") {
+        return Some(SwarmError::PeerUnresponsive(d));
+    }
+    if let Some(d) = detail_after(message, "Segment failover exhausted: ") {
+        return Some(SwarmError::SegmentFailoverExhausted(d));
+    }
     None
 }
 
@@ -309,6 +348,21 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
         ),
         SwarmError::PipelineError(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
+            err.to_string(),
+            "server_error",
+        ),
+        // A peer going quiet is "this server couldn't serve it just now", not
+        // a bug in this server — the 503 invites the retry that actually
+        // helps (a fresh request usually routes to a different holder).
+        SwarmError::PeerUnresponsive(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "server_error",
+        ),
+        // Same reasoning for a mid-pipeline holder failure with nobody free
+        // to take the segment over.
+        SwarmError::SegmentFailoverExhausted(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
             err.to_string(),
             "server_error",
         ),
@@ -478,6 +532,19 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
              this will fix itself — try once more. If it fails the same way again, the \
              model is missing a piece: fetch it with `swarmllm get-model <name> --all`, \
              or pick a model marked as ready in the dashboard.",
+        ),
+        // Unlike `PipelineError`, this one is KNOWN to be transient — a peer
+        // took the work and went silent — so the hint can promise the retry
+        // branch without hedging.
+        SwarmError::PeerUnresponsive(_) => Some(
+            "Another computer in the swarm took this request and then stopped \
+             answering — it may have gone offline mid-request. Try again: a new \
+             request is usually routed to a different machine.",
+        ),
+        SwarmError::SegmentFailoverExhausted(_) => Some(
+            "A computer running part of this model failed mid-request, and no \
+             other machine was free to take over its part. This is usually \
+             momentary — try again, and the swarm will build a fresh route.",
         ),
         SwarmError::ModelIncompleteInSwarm { .. } => Some(
             "Part of this model isn't on any machine that's reachable right now. If a peer \
@@ -777,6 +844,58 @@ mod tests {
         })
         .into_response();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A peer going silent mid-request is a transient serve failure, not a bug
+    /// in this node: 503, not 500 — it wore `PipelineError`'s 500 until
+    /// 2026-08-16, telling monitoring the node the user talked to was broken.
+    /// The variant must also survive the typeless boundaries (worker IPC, the
+    /// wire), or a nested route re-flattens it back into a 500.
+    #[test]
+    fn a_silent_peer_is_service_unavailable_and_survives_flattening() {
+        let err = SwarmError::PeerUnresponsive(
+            "remote-generate: peer never acknowledged request_id=x (silent drop or disconnect)"
+                .into(),
+        );
+        let (status, _, _) = classify_error(&err);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let flattened = format!("Inference error: {err}");
+        match reclassify_flattened_error(&flattened) {
+            Some(SwarmError::PeerUnresponsive(d)) => {
+                assert!(d.contains("never acknowledged"))
+            }
+            other => panic!("expected PeerUnresponsive back, got {other:?}"),
+        }
+
+        // The hint may promise the retry branch — the cause is KNOWN to be
+        // transient — but it must actually advise retrying.
+        let hint = error_hint(&err).expect("transient peer failure needs a hint");
+        assert!(
+            hint.to_lowercase().contains("try again"),
+            "hint must advise the retry that helps: {hint}"
+        );
+    }
+
+    /// The second 500-shaped transient from the same report: a mid-pipeline
+    /// holder failure with no standby. Same contract — 503, survives
+    /// flattening, hint advises the retry.
+    #[test]
+    fn exhausted_failover_is_service_unavailable_and_survives_flattening() {
+        let err = SwarmError::SegmentFailoverExhausted(
+            "Segment 1 failed with no standby available".into(),
+        );
+        let (status, _, _) = classify_error(&err);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let flattened = format!("Inference error: {err}");
+        assert!(matches!(
+            reclassify_flattened_error(&flattened),
+            Some(SwarmError::SegmentFailoverExhausted(_))
+        ));
+
+        let hint = error_hint(&err).expect("transient failure needs a hint");
+        assert!(hint.to_lowercase().contains("try again"), "{hint}");
     }
 
     /// The generic pipeline hint covers causes we cannot tell apart, so it must

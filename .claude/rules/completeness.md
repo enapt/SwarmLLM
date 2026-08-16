@@ -51,6 +51,8 @@ The variant → status contract:
 - `SwarmError::ServiceUnavailable` → 503, *this server* can't serve (missing local binary, subprocess spawn/I/O failure, broken pipe, init timeout). Use for all subprocess lifecycle failures (R118-R119 cleanup).
 - `SwarmError::ProviderError {status, body}` → upstream returned an error OR upstream response couldn't be parsed (matches R119 translate.rs fix: parsing malformed upstream chat-completions response uses ProviderError, NOT Internal and NOT Validation, even though the upstream data passes through user-triggered code paths). Preserves upstream HTTP status.
 - `SwarmError::Internal` → actual bugs (500). Reach for it only when no external party can be blamed. Serializing our own well-typed struct failing is Internal; subprocess crashing is NOT.
+- `SwarmError::PeerUnresponsive` → 503, a peer took the request and went silent (ACK sweep or first-token deadline). Keeps the `is_transient_remote_failure` retry via preserved message substrings, and is penalty-ELIGIBLE — as a `PipelineError` the silent peer inherited that variant's penalty exemption (fixed 2026-08-16).
+- `SwarmError::SegmentFailoverExhausted` → 503, mid-pipeline holder failure with no standby. Deliberately NOT `ModelIncompleteInSwarm` (variant-matched by `assembly_failed_for_lack_of_holders` → pointless DHT wait) and NOT `ServiceUnavailable` (triggers the peer-blacklist retry); penalty-exempt because it names no culprit.
 
 Never use `Config` or `Internal` for request validation. When unsure between Internal vs ProviderError vs ServiceUnavailable, look at the surrounding code in the same function — it usually picks a clear pattern (translate.rs lines 549-559 use ProviderError, so the tool_call missing-field arms should too).
 

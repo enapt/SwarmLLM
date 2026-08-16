@@ -872,6 +872,9 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         | SwarmError::InsufficientCredits { .. }
         | SwarmError::InsufficientDisk { .. }
         | SwarmError::Database(_)
+        // Failover exhaustion is a summary naming no culprit — the segment
+        // failure that triggered it carries its own attribution.
+        | SwarmError::SegmentFailoverExhausted(_)
         | SwarmError::PipelineError(_) => false,
 
         // Everything else reaches the wire: network faults, timeouts waiting
@@ -917,7 +920,12 @@ mod tests {
         ));
 
         for e in [
-            SwarmError::PipelineError("Segment 1 failed with no standby available".into()),
+            // The typed variant this failure now wears (2026-08-16) must keep
+            // NOT waiting: the holders are known, one just failed — DHT
+            // results cannot change the verdict.
+            SwarmError::SegmentFailoverExhausted(
+                "Segment 1 failed with no standby available".into(),
+            ),
             SwarmError::PipelineError(
                 "Timed out waiting for segment result (30s, 6 layers)".into(),
             ),
@@ -970,6 +978,16 @@ mod tests {
             &SwarmError::PipelineError("no node available for layer 3".into()),
             true
         ));
+        assert!(
+            !failure_is_penalty_worthy(
+                &SwarmError::SegmentFailoverExhausted(
+                    "Segment 1 failed with no standby available".into()
+                ),
+                true
+            ),
+            "failover exhaustion names no culprit — attribution belongs to the \
+             segment failure that triggered it"
+        );
     }
 
     /// AllReduce splits by attribution, not by subsystem: a peer that puts
@@ -1024,6 +1042,14 @@ mod tests {
         ));
         assert!(failure_is_penalty_worthy(
             &SwarmError::InvalidSignature,
+            true
+        ));
+        // A peer that took the request and went silent is the canonical
+        // "timeout waiting on a peer". It escaped the penalty for as long as
+        // it was filed under `PipelineError` (exempt as a local scheduling
+        // problem).
+        assert!(failure_is_penalty_worthy(
+            &SwarmError::PeerUnresponsive("peer never acknowledged".into()),
             true
         ));
     }
