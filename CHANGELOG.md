@@ -4,6 +4,40 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.99-alpha] — 2026-08-16
+
+**Long questions no longer freeze the node for minutes on processor-only
+machines.** After reading a long prompt, the node saves a copy of the model's
+working memory so that later questions sharing the same beginning can skip the
+re-reading. It was saving that copy dozens of times over — one copy at every
+small step through the prompt, each holding everything before it — which for a
+question a few pages long meant copying roughly 15 GB of data per request. The
+result was a freeze of one to several minutes between reading the question and
+starting the answer, growing worse with every repeat as memory filled up
+(observed reaching 21 GB and pushing the machine into swap). It now saves one
+copy. Measured on a real node: asking the same long question again answered in
+4 seconds instead of two minutes or more, with memory flat across repeated
+requests. Two smaller wins came along: a follow-up that shares only part of a
+saved prompt now reuses everything the two have in common (previously only
+fixed-size steps), and asking the exact same question twice now reuses the
+saved memory at all — it previously never did.
+
+**A machine going quiet mid-request is now reported honestly.** When another
+computer in the swarm took a request and stopped answering — or failed partway
+through with nobody free to take over — the error said this node had an
+internal bug. It now says the service was temporarily unavailable and that
+trying again usually helps, because a fresh request is normally routed to a
+different machine. Monitoring tools read the situation correctly now, and a
+machine that goes silent mid-job affects its own standing in the swarm instead
+of escaping notice.
+
+**The `docker run` command from the README now works.** The Docker images were
+not publicly downloadable, and separately the `latest` label had never been
+published — every one of the 199 images ever built carried only a version
+number, so the documented command failed even for the images that existed. The
+images are now public, `latest` and `latest-cuda` exist and point at this
+release, and every future release updates them automatically.
+
 **Updating the Debian package no longer switches the service off.** Installing
 a new version over an old one ran the old version's cleanup as if the software
 were being removed, which disabled the background service — so the node did not
@@ -11,9 +45,9 @@ come back the next time the machine rebooted, and sat stopped after every
 update until someone started it by hand. Removing the package still disables
 it; updating now restarts it and leaves the enable/disable choice alone.
 
-One transition note: the next update is still carried out by the previous
+One transition note: this update is still carried out by the previous
 version's cleanup script, so it will behave the old way one last time — after
-it, check `systemctl is-enabled swarmllm` and re-enable if needed.
+updating, check `systemctl is-enabled swarmllm` and re-enable if needed.
 
 ## [0.3.98-alpha] — 2026-08-16
 
