@@ -8410,3 +8410,58 @@ to a fraction of system RAM or the KV headroom the loader already computes
 elem_count × dtype size). Keep `max_entries` as a secondary cap — the flat
 lookup walk is linear in entries, and vLLM's equivalent (prefix block pool) is
 bounded by the same bytes-not-count logic.
+
+## CUDA GQA-decode routing: the premise is dead, the answer is unresolved (2026-08-17)
+
+`inference::layers::cuda_decode_prefers_standard` sends **MHA decode to
+standard and GQA decode to flash at every context length**. The stated reason
+was that `standard_attention` rebuilt the `repeat_kv` expansion on every token —
+free for MHA, growing with context for GQA.
+
+**That reason no longer exists.** `grouped_gqa_decode_attention` (c4cc3b16,
+2026-08-16) regroups the query heads against the unexpanded cache instead, and
+it is gated on shape alone — `n_rep > 1 && q_len == 1`, with no device check —
+so CUDA GQA decode stopped paying the copy at the same moment CPU did. On the
+CPU side the same change flipped the routing verdict at every length (3-9x).
+The CUDA rule was flagged as a re-measure candidate for exactly this reason.
+
+**Re-measured, and it did not resolve.** llama-3.2-3b, RTX 3070, one binary with
+the arms selected by `SWARMLLM_FORCE_STANDARD_ATTN`, min-of-4 decode over 64
+tokens after a 1024- or 3072-token prefill:
+
+| context | flash (current) | standard (grouped) | ratio |
+|---|---|---|---|
+| ~1056 KV | 39.50 tok/s | 40.70 tok/s | 1.03x |
+| ~3104 KV | 34.79 tok/s | 40.00 tok/s | 1.15x |
+| ~3104 KV (repeat) | 36.49 tok/s | 38.78 tok/s | 1.06x |
+| ~3104 KV (repeat) | 35.50 tok/s | 38.93 tok/s | 1.10x |
+
+The **direction has flipped** — standard is ahead in all four pairs, and the gap
+grows with context, which is what removing an O(context) copy predicts. But
+6-15% sits inside this box's noise for a GPU change (gotcha #267: it cannot
+resolve below ~25%), and the three repeats at the same context disagree with one
+another by nearly as much as they differ from flash. **The routing is therefore
+left unchanged.** Flipping a kernel on a 10% reading from a machine that cannot
+resolve 25% would be a rerun of the 1024-token crossover that this rule already
+had to correct once (gotcha #255/#266).
+
+**The measurement is trustworthy as far as it goes.** Prefill — which the two
+arms also route differently — separated cleanly and reproducibly in flash's
+favour (1809 vs 865 tok/s at 3072 tokens), so `SWARMLLM_FORCE_STANDARD_ATTN`
+demonstrably changed the kernel and the decode null is a real null rather than a
+switch that failed to fire.
+
+**To close this**, run the same A/B on a GPU where a 10% delta is resolvable —
+a card with more headroom, or a quieter host than a WSL2 box sharing a laptop
+GPU with a desktop session. The two commands are:
+
+```bash
+SWARM_BENCH_MODEL=<3b shard dir> SWARM_BENCH_DEVICE=cuda \
+  SWARM_BENCH_PROMPT=3072 SWARM_BENCH_DECODE=64 SWARM_BENCH_REPS=4 \
+  cargo run --release --no-default-features --features dev,flash-attn --example prefill_bench
+# then the same with SWARMLLM_FORCE_STANDARD_ATTN=1
+```
+
+If standard wins by a resolvable margin, `cuda_decode_prefers_standard` becomes
+`q_len == 1` (all decode takes standard, matching the CPU rule), and the doc
+comment's measured table should be replaced rather than appended to.

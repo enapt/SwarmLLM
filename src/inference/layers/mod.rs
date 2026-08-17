@@ -1381,9 +1381,39 @@ fn attention_scores_block(
 /// on grounds of shape alone?
 ///
 /// **MHA decode takes standard; GQA decode takes flash at every context
-/// length.** That is the same rule the CPU path uses, for the same reason:
-/// `standard_attention` rebuilds the `repeat_kv` expansion every token, which
-/// is free when `n_head == n_kv_head` and grows with context when it does not.
+/// length.**
+///
+/// # The reason this rule was written no longer exists
+///
+/// It was: `standard_attention` rebuilds the `repeat_kv` expansion every token,
+/// free when `n_head == n_kv_head` and growing with context when it is not.
+/// `grouped_gqa_decode_attention` (c4cc3b16, 2026-08-16) removed that copy, and
+/// it is gated on shape alone — `n_rep > 1 && q_len == 1`, no device check — so
+/// CUDA GQA decode stopped paying it too. **The premise is dead; the rule is
+/// kept only because the re-measurement could not resolve the answer.**
+///
+/// Re-measured 2026-08-17 (llama-3.2-3b, RTX 3070, one binary, arms selected by
+/// `SWARMLLM_FORCE_STANDARD_ATTN`, min-of-4 decode over 64 tokens):
+///
+///     kv ~1056    flash 39.50   standard 40.70   1.03x to standard
+///     kv ~3104    flash 34.79   standard 40.00   1.15x
+///     kv ~3104    flash 36.49   standard 38.78   1.06x   (repeat)
+///     kv ~3104    flash 35.50   standard 38.93   1.10x   (repeat)
+///
+/// So the direction has **flipped** — standard is ahead in every pair, and the
+/// gap grows with context, which is what removing an O(context) copy predicts.
+/// But 6-15% is inside this box's noise for a GPU change (gotcha #267: it
+/// cannot resolve below ~25%), and the three repeats disagree with each other
+/// by nearly as much as they differ from flash. That is not a result, and
+/// flipping a kernel on it would repeat the mistake of the 1024-token crossover
+/// below. **Needs a machine that can resolve it**; see `docs/FUTURE_WORK.md`.
+///
+/// Control that the arms really differ: prefill, which both arms route
+/// differently, separated cleanly and reproducibly in flash's favour (1809 vs
+/// 865 tok/s at 3072 tokens). The decode null is a genuine null, not a switch
+/// that failed to take effect.
+///
+/// # The earlier correction, which still stands
 ///
 /// This replaced a 1024-token crossover below which GQA decode also took
 /// standard. That threshold came from timing the attention call in ISOLATION,
@@ -1398,7 +1428,9 @@ fn attention_scores_block(
 /// warm buffers and no competing traffic; inside a real forward it competes
 /// with everything else. **This is the third time a per-call measurement has
 /// mispredicted the right attention kernel (gotcha #255) — measure the
-/// forward, not the call.**
+/// forward, not the call.** Those figures predate the grouped path, so they
+/// price flash against standard-WITH-`repeat_kv` and no longer describe either
+/// arm of today's choice.
 ///
 /// Controls: at 2048 KV both arms were identical (31.09 vs 30.95 tok/s, both
 /// already flash), and MHA was identical to the decimal (38.90 both), so the
