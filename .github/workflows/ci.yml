@@ -399,3 +399,15 @@ jobs:
           # seconds instead of tens of minutes. Empty everywhere else, which
           # the build script reads as off.
           CANDLE_FLASH_ATTN_CHECK_ONLY: ${{ matrix.check_only && '1' || '' }}
+          # Points the flash-attn build script at an out-of-`target/` directory
+          # that DOES NOT EXIST yet, which is the only cheap coverage of the
+          # SwarmLLM patch that makes such a directory usable
+          # (vendor/candle-flash-attn/build.rs). The GPU builds depend on it —
+          # it is what keeps the 19 CUTLASS kernels alive between runs instead
+          # of rebuilding them for ~39 min on every release — and nothing else
+          # in CI compiles that crate, because compiling it is the cost being
+          # avoided. `build_dir` is resolved BEFORE the check-only early
+          # return, so this exercises the patch in seconds: upstream panicked
+          # with "Directory doesn't exists" on a path that was not already
+          # there, and a revert of the `create_dir_all` fails right here.
+          CANDLE_FLASH_ATTN_BUILD_DIR: ${{ matrix.check_only && format('{0}/.flash-attn-ci-probe', runner.temp) || '' }}

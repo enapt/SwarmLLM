@@ -24,6 +24,14 @@
 # So both workflows now call THIS action and nothing else. Divergence is not
 # guarded against, it is unrepresentable. Anything affecting the cached build
 # output belongs here, never in a caller.
+#
+# THERE ARE NOW TWO CACHES, and the same reasoning covers both. The second
+# holds the compiled flash-attention kernels (see the step below), and it is an
+# input to the release in exactly the way described above: object code warmed
+# on `main` is linked into a tagged binary. That is not a new class of trust —
+# rust-cache has always carried compiled dependencies into releases — but it is
+# the reason its key is derived from the kernel SOURCES and the toolkit that
+# compiles them rather than from anything looser.
 
 name: GPU build environment
 description: Toolchain, environment and build cache for GPU builds. The SINGLE definition shared by release.yml
@@ -51,6 +59,21 @@ inputs:
       the SDK's absolute path into CMakeCache.txt and only re-detects it when the
       cache variable is cleared. Bumping it must therefore invalidate the cache.
     default: '1.4.357.0'
+  cuda-linux-version:
+    description: >-
+      Pinned Linux CUDA toolkit version, as the apt package suffix. Callers do
+      not pass this — the default IS the single definition. Folded into the
+      flash-attention kernel cache key: those objects are produced by THIS
+      nvcc, and reusing them against a different toolkit is exactly the kind of
+      silent mismatch that shipped a release with no Windows GPU binary once
+      already (see the header).
+    default: '12-8'
+  cuda-windows-version:
+    description: >-
+      Pinned Windows CUDA toolkit version. Same reasoning as
+      `cuda-linux-version`; the format differs because the two installers take
+      different forms.
+    default: '12.4.0'
 runs:
   using: composite
   steps:
@@ -70,6 +93,64 @@ runs:
       shared-key: >-
         release-${{ inputs.target }}-${{ inputs.features }}-gpuarch4${{
         inputs.vulkan == 'true' && format('-vk{0}', inputs.vulkan-sdk-version) || '' }}
+  # The CUTLASS kernels, kept OUT of `target/` so they survive between runs.
+  #
+  # rust-cache deletes everything in `target/` belonging to a package whose
+  # manifest lives inside the repo, which our vendored crates do. So both GPU
+  # jobs restored a FULL cache hit and then recompiled all 19 flash-attn kernels
+  # regardless — measured on the v0.3.99 release: ~39 min of the 46-min Windows
+  # GPU build and ~27 min of the Linux CUDA one, every single time.
+  #
+  # `cudaforge`'s `BuildCache` already skips up-to-date kernels and validates by
+  # CONTENT HASH rather than mtime, so a directory restored from a tarball is
+  # accepted as fresh. It only needed somewhere to live that rust-cache does not
+  # own. A warm run now prints "All kernels up-to-date, skipping compilation".
+  #
+  # The key covers everything that changes the objects: the kernel sources, the
+  # build script that sets the nvcc flags, the target, and the SDK that compiles
+  # them. `-v1` is bumped by hand if the meaning changes without those doing —
+  # the same convention as `gpuarchN` above. Correctness does not depend on the
+  # key being perfect: `BuildCache` re-checks arch and args itself and rebuilds
+  # what it must, so a too-loose key costs a rebuild, never a wrong binary.
+  - name: Flash-attention kernel cache
+    if: inputs.cuda-linux == 'true' || inputs.cuda-windows == 'true'
+    uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+    with:
+      path: .flash-attn-build
+      key: >-
+        flash-attn-kernels-v1-${{ runner.os }}-${{ inputs.target }}-cuda${{
+        inputs.cuda-linux == 'true' && inputs.cuda-linux-version ||
+        inputs.cuda-windows-version }}-${{
+        hashFiles('vendor/candle-flash-attn/kernels/**',
+        'vendor/candle-flash-attn/build.rs') }}
+  - name: Point the flash-attn build at that directory
+    if: inputs.cuda-linux == 'true' || inputs.cuda-windows == 'true'
+    shell: bash
+    run: |
+      # Absolute, because the build script emits it verbatim as a
+      # `rustc-link-search` and cargo runs build scripts from the crate dir,
+      # not the workspace root.
+      dir="$GITHUB_WORKSPACE/.flash-attn-build"
+      mkdir -p "$dir"
+      echo "CANDLE_FLASH_ATTN_BUILD_DIR=$dir" >> "$GITHUB_ENV"
+
+      # Use the whole runner when kernels DO have to be compiled.
+      #
+      # cudaforge defaults to `thread_percentage(0.5)`, which on a 4-vCPU
+      # runner is two threads — the job logged "Using 2 threads for
+      # compilation" while half the machine sat idle. The 0.5 default is there
+      # to avoid hogging a developer's workstation; a CI runner has nothing
+      # else to do.
+      #
+      # Only the cold path pays this at all now that the kernels are cached, so
+      # the risk is bounded: if 4 concurrent nvcc processes exhaust the runner's
+      # 16 GB, it surfaces in cache-warm on `main`, not in a release. Revert by
+      # deleting this line.
+      # `nproc` is coreutils and present in Git Bash, but NUMBER_OF_PROCESSORS is
+      # the guaranteed answer on Windows. An empty value would be harmless
+      # (cudaforge falls back to its percentage) — this just makes it not happen.
+      threads="$(nproc 2>/dev/null || echo "${NUMBER_OF_PROCESSORS:-2}")"
+      echo "CUDAFORGE_THREADS=$threads" >> "$GITHUB_ENV"
   - name: Install system dependencies (Linux)
     if: runner.os == 'Linux'
     run: 'sudo apt-get update
@@ -87,34 +168,25 @@ runs:
     shell: bash
   - name: Install CUDA toolkit (Linux)
     if: inputs.cuda-linux == 'true'
-    run: '# R138 (closes R103 deferral): pin cuda-keyring .deb to a verified
-
-      # SHA256 so a compromised mirror or in-transit modification can''t
-
-      # land a tampered keyring on the release builder. Captured
-
-      # 2026-05-18 from the NVIDIA URL via direct wget. Kept in sync
-
-      # with the matching pin in .github/workflows/ci.yml.
-
-      CUDA_KEYRING_SHA256=d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df
-
-      wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-
-      echo "${CUDA_KEYRING_SHA256}  cuda-keyring_1.1-1_all.deb" | sha256sum -c -
-
-      sudo dpkg -i cuda-keyring_1.1-1_all.deb
-
-      sudo apt-get update
-
-      sudo apt-get install -y cuda-toolkit-12-8
-
-      echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
-
-      echo "CUDA_PATH=/usr/local/cuda-12.8" >> "$GITHUB_ENV"
-
-      '
     shell: bash
+    run: |
+      # R138 (closes R103 deferral): pin cuda-keyring .deb to a verified
+      # SHA256 so a compromised mirror or in-transit modification can't
+      # land a tampered keyring on the release builder. Captured
+      # 2026-05-18 from the NVIDIA URL via direct wget. Kept in sync
+      # with the matching pin in .github/workflows/ci.yml.
+      CUDA_KEYRING_SHA256=d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df
+      wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+      echo "${CUDA_KEYRING_SHA256}  cuda-keyring_1.1-1_all.deb" | sha256sum -c -
+      sudo dpkg -i cuda-keyring_1.1-1_all.deb
+      sudo apt-get update
+      # The apt package suffix is dash-separated (12-8), the install prefix is
+      # dot-separated (/usr/local/cuda-12.8). One input, both spellings.
+      apt_ver='${{ inputs.cuda-linux-version }}'
+      dir_ver="${apt_ver//-/.}"
+      sudo apt-get install -y "cuda-toolkit-${apt_ver}"
+      echo "/usr/local/cuda-${dir_ver}/bin" >> "$GITHUB_PATH"
+      echo "CUDA_PATH=/usr/local/cuda-${dir_ver}" >> "$GITHUB_ENV"
   - name: Install mold linker + select for Linux CUDA build
     if: inputs.cuda-linux == 'true'
     run: 'sudo apt-get install -y mold
@@ -123,11 +195,19 @@ runs:
 
       '
     shell: bash
+  # v0.2.36, up from v0.2.19. NOT a routine bump: the old version depends on
+  # `@actions/cache ^3.2.4`, which speaks GitHub's retired cache service v1 and
+  # is now answered with HTTP 400. The release log shows it plainly —
+  # "Failed to restore: Cache service responded with 400" — after which the
+  # action silently falls back to a full network install of the toolkit, ~5.6
+  # min on EVERY Windows GPU build. v0.2.36 ships `@actions/cache ^4.0.3`
+  # (service v2), so the cache works again. It also moves to Node 24, which the
+  # runner had started warning about.
   - name: Install CUDA toolkit (Windows)
     if: inputs.cuda-windows == 'true'
-    uses: Jimver/cuda-toolkit@4bd727d5619dc6fa323b1e76c3aa5dca94f5ec6d
+    uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
     with:
-      cuda: 12.4.0
+      cuda: ${{ inputs.cuda-windows-version }}
       method: network
       sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "nvrtc", "nvrtc_dev",
         "visual_studio_integration"]'

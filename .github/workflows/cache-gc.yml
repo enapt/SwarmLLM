@@ -30,9 +30,16 @@
 # GitHub's own 7-day sweep. This deletes those superseded generations,
 # keeping ONLY the newest entry per job.
 #
+# The same shape applies to the `flash-attn-kernels-*` caches added in
+# 2026-08-17: their key also ends in a content hash, so changing a kernel
+# source orphans the previous generation (~130 MB each, two platforms).
+# Small next to the rust caches, but this repo has measured 9.37 GB of
+# 10 GB, and the entry that gets evicted at the cap is the expensive one.
+#
 # Deliberately conservative:
-#   * Only `v0-rust-*` keys — rust-cache's own prefix. Anything else
-#     (e.g. the Vulkan SDK cache) is left alone.
+#   * Only `v0-rust-*` and `flash-attn-kernels-*` keys — both ours, both
+#     ending in a content hash. Anything else (the Vulkan SDK cache, the
+#     CUDA toolkit cache) is left alone.
 #   * A cache is deleted ONLY when a strictly newer one exists for the
 #     same job. A job with a single generation is never touched, so
 #     this can never delete a cache that is the current one.
@@ -64,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Delete superseded rust-cache generations
+      - name: Delete superseded cache generations
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -90,9 +97,14 @@ jobs:
           import csv, sys
           rows = list(csv.reader(open("caches.tsv"), delimiter="\t"))
           groups = {}
+          # Both cache families end in a content hash and are grouped by
+          # stripping it, so the same "keep the newest per group" rule works
+          # for each. Anything else (the Vulkan SDK cache, the CUDA toolkit
+          # cache) is still left strictly alone.
+          PREFIXES = ("v0-rust-", "flash-attn-kernels-")
           for created, size, key in rows:
-              if not key.startswith("v0-rust-"):
-                  continue  # not a rust-cache key — leave it alone
+              if not key.startswith(PREFIXES):
+                  continue  # not one of ours — leave it alone
               group = key.rsplit("-", 1)[0]
               groups.setdefault(group, []).append((created, int(size), key))
           for group, entries in groups.items():

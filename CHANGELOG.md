@@ -4,6 +4,49 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Credits no longer affect the service you get, and the dashboard no longer
+shows a balance.** They were never real: no credit had ever moved between two
+machines as payment for work, so each node's balance measured its own activity
+rather than anything it had done for anyone else. That number was nevertheless
+being acted on — a machine below a threshold was refused service outright, and
+a higher balance bought up to eight times the share of a busy node. Both are
+switched off. Every request now gets the same share, still capped so that one
+machine cannot crowd out the rest.
+
+The header badge, the Credits panel, the credit columns on the leaderboard and
+the "you earn credits" wording in setup are all gone. The leaderboard now ranks
+by how many pieces of models a machine is hosting, which is something it cannot
+claim without actually holding them. Accounting still runs internally, and the
+plan for building a real economy — with what would have to be true before any
+of it comes back — is written up in `docs/CREDITS_DESIGN.md`.
+
+**Advice attached to errors now appears in your own language.** When something
+goes wrong, the sentence telling you what to do about it was the one piece of
+the product that ignored your language setting entirely and always appeared in
+English. All of it is now translated across every language the dashboard
+supports. If a translation is ever missing, the English is shown rather than a
+blank or a placeholder.
+
+**Your own mistakes no longer appear in the log as this node breaking.**
+Sending a question longer than a model can accept was recorded as three
+separate errors when the model happened to live on another machine, and as a
+single warning when it lived on yours — the same mistake, logged differently
+depending on where the model was. Asking for a feature this build deliberately
+does not provide was recorded as a server error. Anyone reading the log to
+judge whether the software is working was being misled. Failures are now
+recorded at a level that reflects whose problem they are, with genuine faults
+still reported loudly.
+
+**Releases build much faster, so fixes reach you sooner.** Two things were
+being redone from scratch on every single release. The GPU attention kernels —
+around 39 minutes of the Windows GPU build and 27 of the Linux one — were
+stored somewhere that got wiped between runs, so they were recompiled every
+time despite a cache that reported a full hit. And the Windows CUDA toolkit
+install had been failing to restore from its cache for some time (the service
+it was asking had been retired), quietly falling back to a full download on
+each run. Both are fixed; neither affects the binaries produced.
+
+
 ## [0.3.99-alpha] — 2026-08-16
 
 **Long questions no longer freeze the node for minutes on processor-only

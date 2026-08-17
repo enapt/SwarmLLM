@@ -56,19 +56,68 @@ fn main() -> Result<()> {
     println!("cargo::rerun-if-changed=kernels/static_switch.h");
     println!("cargo::rerun-if-changed=kernels/hardware_info.h");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
-    let build_dir = match std::env::var("CANDLE_FLASH_ATTN_BUILD_DIR") {
+    // SwarmLLM patch: an EMPTY value means unset.
+    //
+    // `std::env::var` returns `Ok("")` for a variable that is present but
+    // empty, and CI sets exactly that — a matrix expression like
+    // `${{ matrix.check_only && '...' || '' }}` yields an empty string for
+    // every cell that does not want the override. Upstream's `Err(_)` arm does
+    // not catch it, so the override branch would run on an empty path and
+    // panic on every unrelated build. Filtering it here keeps the workflow
+    // expression simple and matches how the sibling
+    // `CANDLE_FLASH_ATTN_CHECK_ONLY` already behaves.
+    let build_dir_override = std::env::var("CANDLE_FLASH_ATTN_BUILD_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let build_dir = match build_dir_override.ok_or(()) {
         Err(_) =>
         {
             #[allow(clippy::redundant_clone)]
             out_dir.clone()
         }
+        // SwarmLLM patch: make an out-of-`target/` build dir usable on CI.
+        //
+        // This is the escape hatch that lets the 19 CUTLASS kernels survive
+        // between runs. `Swatinem/rust-cache` deletes everything in `target/`
+        // belonging to a package whose manifest lives inside the repo, and our
+        // vendored crates do — so every GPU job restored a FULL cache hit and
+        // then rebuilt all 19 kernels anyway: ~39 min of the 46-min Windows GPU
+        // build and ~27 min of the Linux CUDA one, on every release.
+        // `cudaforge`'s own `BuildCache` already knows how to skip them (it
+        // compares CONTENT hashes, not mtimes, so a restored tarball is fine) —
+        // it just needs its output to still be there.
+        //
+        // Two changes from upstream, both required for that to work:
+        //
+        //  * **Create the directory** rather than requiring it to pre-exist.
+        //    Upstream panics with "Directory doesn't exists" on a cold cache,
+        //    which is precisely the first run after this was introduced.
+        //  * **Do not canonicalize an already-absolute path.** On Windows
+        //    `canonicalize` returns an extended-length `\\?\C:\...` path, and
+        //    that string is emitted verbatim as `cargo::rustc-link-search`.
+        //    CI passes an absolute path, so there is nothing to resolve and
+        //    nothing gained by risking the prefix. A relative path still gets
+        //    canonicalized, which is what upstream's behaviour was for.
         Ok(build_dir) => {
             let path = PathBuf::from(build_dir);
-            path.canonicalize().expect(&format!(
-                "Directory doesn't exists: {} (the current directory is {})",
-                &path.display(),
-                std::env::current_dir()?.display()
-            ))
+            std::fs::create_dir_all(&path).unwrap_or_else(|e| {
+                panic!(
+                    "CANDLE_FLASH_ATTN_BUILD_DIR {} is not creatable: {e}",
+                    path.display()
+                )
+            });
+            if path.is_absolute() {
+                path
+            } else {
+                path.canonicalize().unwrap_or_else(|e| {
+                    panic!(
+                        "CANDLE_FLASH_ATTN_BUILD_DIR {} could not be resolved ({e}); \
+                         the current directory is {}",
+                        path.display(),
+                        std::env::current_dir().expect("cwd").display()
+                    )
+                })
+            }
         }
     };
 
@@ -118,7 +167,15 @@ fn main() -> Result<()> {
         .arg("--expt-extended-lambda")
         .arg("--use_fast_math")
         .arg("--verbose")
-        .thread_percentage(0.5); // Use up to 50% of available threads
+        // Upstream default: half the machine, so a build does not monopolise a
+        // developer's workstation.
+        //
+        // SwarmLLM note (not a patch — nothing here changes): `cudaforge` reads
+        // `CUDAFORGE_THREADS` and `RAYON_NUM_THREADS` AHEAD of this percentage,
+        // so CI raises it to the full runner without editing this file. See
+        // .github/actions/gpu-build-env. Anyone timing a cold kernel build
+        // should check that variable before concluding this line is the cause.
+        .thread_percentage(0.5);
 
     let mut is_target_msvc = false;
     if let Ok(target) = std::env::var("TARGET") {

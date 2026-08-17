@@ -1397,6 +1397,22 @@ mod tests {
         assert!(!is_newer_version("2.0.0", "1.99.99"));
     }
 
+    /// The patch number rolls past 99 at this release, and a string compare
+    /// would send every node the wrong way: "0.3.100" sorts BEFORE "0.3.99"
+    /// lexicographically, so an updater comparing text would decide the new
+    /// release is older and silently never offer it. The parse is numeric, so
+    /// it is right — this pins that it stays right, at the point where a
+    /// regression would first bite.
+    #[test]
+    fn a_three_digit_patch_is_newer_than_a_two_digit_one() {
+        assert!(is_newer_version("0.3.99-alpha", "0.3.100-alpha"));
+        assert!(!is_newer_version("0.3.100-alpha", "0.3.99-alpha"));
+        assert!(is_newer_version("0.3.100-alpha", "0.3.101-alpha"));
+        // And across the minor boundary, where the same trap exists.
+        assert!(is_newer_version("0.9.0", "0.10.0"));
+        assert!(!is_newer_version("0.10.0", "0.9.0"));
+    }
+
     #[test]
     fn semver_with_v_prefix() {
         // The tag is stripped of 'v' before calling is_newer_version

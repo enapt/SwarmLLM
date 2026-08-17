@@ -82,10 +82,17 @@ jobs:
     # installable on 24.04 at all.
     runs-on: ${{ matrix.runner }}
     # Raised from 120 when flash-attention-2 entered the `cuda` and
-    # `windows-gpu` features. candle-flash-attn's build script asks for only
-    # HALF the runner's threads (`thread_percentage(0.5)`, not passable through
-    # its API), which the run log confirms as "Using 2 threads" on a 4-vCPU
-    # runner.
+    # `windows-gpu` features, because candle-flash-attn's build script asked for
+    # only HALF the runner's threads — "Using 2 threads" on a 4-vCPU runner.
+    #
+    # THAT IS NO LONGER TRUE, and the reason is worth recording: this comment
+    # said the 50% split was "not passable through its API", which is correct
+    # about the Rust API and wrong about the crate. `cudaforge` reads
+    # `CUDAFORGE_THREADS` (and `RAYON_NUM_THREADS`) ahead of its own percentage,
+    # so the whole runner is usable without touching the vendored build script;
+    # the shared gpu-build-env action now sets it. Cold kernel builds should be
+    # roughly half the figures below. The generous timeout stays anyway, for the
+    # asymmetry argued at the end of this comment.
     #
     # MEASURED on the first cold run after the change (run 31150878312,
     # 2026-08-07), both cells compiling all 19 kernels from scratch:

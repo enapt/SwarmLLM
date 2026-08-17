@@ -85,3 +85,7 @@ untracked_docs/
 
 # Out-of-tree target dir for portable (docker/glibc-compat) builds
 /target-deb/
+
+# CI: CUTLASS kernel objects, kept out of target/ so they survive between
+# runs (see .github/actions/gpu-build-env). Local GPU builds create it too.
+.flash-attn-build/
