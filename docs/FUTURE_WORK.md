@@ -8465,3 +8465,53 @@ SWARM_BENCH_MODEL=<3b shard dir> SWARM_BENCH_DEVICE=cuda \
 If standard wins by a resolvable margin, `cuda_decode_prefers_standard` becomes
 `q_len == 1` (all decode takes standard, matching the CPU rule), and the doc
 comment's measured table should be replaced rather than appended to.
+
+## Release build time: what is left after the 2026-08-17 fix
+
+The 50-minute release was gated entirely by one job. Measured on run
+31947532610 (v0.3.99):
+
+| job | before |
+|---|---|
+| Windows x86_64 GPU | **53.5 min** ← the whole release waited on this |
+| Linux x86_64 CUDA | 32 min |
+| Windows x86_64 CPU | 16 min |
+| Windows x86_64 baseline | 15.6 min |
+| macOS aarch64 | 9.3 min |
+| Linux x86_64 (+baseline) | 8.1 / 7.4 min |
+
+Two causes were fixed (gotchas #318, #319): the CUTLASS kernels were rebuilt on
+every run despite a full cache hit, and the Windows CUDA toolkit had been
+failing to restore from its cache for months. Both were `warning` lines, never
+failures.
+
+**What that leaves.** The GPU jobs should land around 8-14 min, which makes
+**Windows CPU / baseline (~16 min) the new critical path**. That time is the
+`swarmllm` crate itself: `Swatinem/rust-cache` deliberately does not cache
+workspace members, so the top-level crate is compiled from scratch every run and
+always will be under this setup. A release therefore has a floor of roughly
+16-17 min without a different approach.
+
+**If that is still too slow**, the options, roughly in order of payoff per unit
+of risk:
+
+1. **`sccache` with a shared object store.** Caches individual compilation
+   units, including workspace members, so an unchanged module is not recompiled
+   even though its crate is. This is the only option that attacks the actual
+   remaining cost. Needs a backend (GitHub cache via `sccache --gha`, or S3-like
+   storage) and care that a cache hit can never produce a binary that differs
+   from a clean build.
+2. **Split the workspace.** Much of `swarmllm` changes rarely; moving stable
+   subsystems into their own crates would let rust-cache keep them, since it
+   caches dependencies. A large refactor for a build-time win, so only worth it
+   if the crate is being split for design reasons anyway.
+3. **Larger runners.** Windows builds are CPU-bound on 4 vCPU. Paid runners
+   would cut this roughly linearly and cost money instead of engineering time.
+4. **Drop a variant.** The baseline (pre-2013 CPU) Windows build exists for a
+   shrinking audience; if telemetry ever shows nobody downloads it, removing it
+   removes a whole cell from the critical path. Do not do this on a guess —
+   check the release asset download counts first.
+
+None of these is attempted. The 3x already obtained came from fixing two things
+that were quietly broken, which is a different and much cheaper category than
+making a correct build faster.
