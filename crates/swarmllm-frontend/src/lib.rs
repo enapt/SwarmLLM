@@ -155,6 +155,8 @@ fn mime_type_for(path: &str) -> &'static str {
         "image/png"
     } else if path.ends_with(".ico") {
         "image/x-icon"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
     } else {
         "application/octet-stream"
     }
@@ -183,5 +185,31 @@ mod tests {
         );
         assert_eq!(mime_type_for("index.html"), "text/html; charset=utf-8");
         assert_eq!(mime_type_for("data.json"), "application/json");
+        // Served as octet-stream a font still loads in every current browser,
+        // so a wrong type here fails silently rather than visibly — which is
+        // exactly why it is asserted.
+        assert_eq!(
+            mime_type_for("fonts/ibm-plex-mono-latin-400-normal.woff2"),
+            "font/woff2"
+        );
+    }
+
+    /// The bundled typefaces are the whole reason the dashboard renders the
+    /// same on every machine. Losing one silently falls back to a system font
+    /// and the regression looks like "it just looks a bit different".
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn bundled_fonts_are_embedded() {
+        for f in [
+            "fonts/ibm-plex-sans-latin-wght-normal.woff2",
+            "fonts/ibm-plex-mono-latin-400-normal.woff2",
+            "fonts/ibm-plex-mono-latin-600-normal.woff2",
+            "fonts/ibm-plex-mono-latin-700-normal.woff2",
+        ] {
+            assert!(
+                embedded_mode::FRONTEND_DIR.get_file(f).is_some(),
+                "{f} is referenced by style.css but is not embedded in the binary"
+            );
+        }
     }
 }
