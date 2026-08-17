@@ -81,6 +81,7 @@ swarmllm/
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
 ├── packaging/     (swarmllm.service + deb/{postinst,prerm} maintainer scripts — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
+├── docs/          (ARCHITECTURE, CREDITS_DESIGN, FUTURE_WORK, DIAGNOSTICS, REFERENCE_MODELS)
 ├── docs/book/     (mdBook documentation site)
 ├── vendor/        (patched upstream crates, all workspace-`exclude`d; every patch marked `SwarmLLM patch:`)
 │   ├── candle/                (k_quants::matmul tiled; cudarc dynamic-linking hardcode removed;
@@ -199,6 +200,10 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 - `docs/ARCHITECTURE.md` — **Primary reference** — current architecture, subsystems, protocols, security model
 - `docs/book/` — mdBook documentation site (getting started, API reference, architecture, troubleshooting)
 - `docs/DIAGNOSTICS.md` — DIAG: log instrumentation guide for debugging
+- `docs/CREDITS_DESIGN.md` — **read before touching credits.** Why the economy is
+  switched off, what is actually true today, the bilateral-settlement design, and
+  the exit criteria that must hold before any of it is switched back on
+- `docs/FUTURE_WORK.md` — deferred items with enough context to pick up cold
 - `.claude/rules/architecture.md` — invariants (SharedState, broadcast channels, scheduler oracle, centralised wire-format helpers)
 - `.claude/rules/diagnosis.md` — **read before blaming any change for any symptom, and before implementing anything non-trivial.** Rule 0: look up how the failure mode is solved elsewhere first — WireGuard's per-keypair replay counter and vLLM's Head-Room Admission each changed an implementation the same day. Then: baseline before blaming, verify the mechanism fired, check the test fails without the fix.
 - `.claude/agents/root-cause.md` — `Task(root-cause)` establishes CAUSED / NOT-CAUSED / UNDETERMINED for a suspected cause, and never proposes a fix. Use it before reverting or attributing, especially when the suspect is your own recent change.
@@ -207,56 +212,42 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1868 lib (dev,claude-subscription) / 1858 (default) + 79 integration + 27 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-16 (post-.98 issue-reduction round). Clippy clean default + features dev,claude-subscription + `--features llama` check.
+All 20 build phases complete. All subsystems wired — no stubs. **1874 lib (dev,claude-subscription) / 1864 (default) + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 29 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured suite-by-suite 2026-08-17 (post-.100). Clippy clean default + features dev,claude-subscription + `--features llama` check.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.98-alpha (2026-08-16): 1.41x faster CPU generation
+### Latest — v0.3.100-alpha (2026-08-17): credits switched off, releases 3x faster
 
-**Shipped 2026-08-16.** All four workflows green; 25 assets, not a draft.
-Verified on the DOWNLOADED CUDA artifact — sha256 match, smoke 8/8, and the
-speedup itself re-measured on it: pure-decode 2.35 → 4.69 tok/s (2.0x) at
-~2868 tokens context vs the v0.3.97 release binary, CPU-forced, null-control
-pattern — before the live node was updated (rollback:
-`~/.local/bin/swarmllm.0.3.97.bak`). That verification also surfaced a
-PRE-EXISTING long-prompt stall (identical on v0.3.97 — see memory Open items).
+Shipped, verified on the DOWNLOADED artifact (sha256, `--version`, smoke 8/8),
+whole swarm updated. Rollback `~/.local/bin/swarmllm.0.3.99.bak`.
+Detail: `memory/round_log_0817_honesty.md`.
 
-GQA decode on CPU no longer expands the KV cache with
-`repeat_kv` on every token — the query heads are regrouped as extra matmul rows
-against the unexpanded cache (`grouped_gqa_decode_attention` inside
-`standard_attention`; identical arithmetic, byte-equivalence pinned against the
-expanded path, MHA pinned byte-identical). Decode 4.71 → 6.63 tok/s on
-llama-3.2-3b; prefill unchanged; GPUs unaffected.
-
-This **reversed the CPU decode routing**: GQA decode had been sent to the fused
-kernel precisely because of the `repeat_kv` cost, and with it gone the same
-benchmark reports the opposite at every length (3-9x) — all CPU decode now takes
-standard. The control run reproduces the OLD verdict on reverted code, so the
-flip is attributable. CUDA GQA-decode routing rested on the same premise and is
-now a re-measure candidate (`docs/FUTURE_WORK.md`) — left as-is because GPUs
-already route to a fused kernel and this box cannot resolve small GPU deltas
-(#267).
-
-**Validated by a 4-hour soak before release**: 3474/3474 requests ok, worker RSS
-byte-flat for the final 2.5 h, KV bounded (`memory/soak_0816_cpu_speedup.md`).
-The soak tooling itself was hardened first — its initial run silently exercised
-a PEER instead of this node (metadata-only model + unconditional loopback
-discovery, gotcha #311); `examples/soak_test.sh` now proves it is soaking THIS
-node and aborts otherwise. Plus: `load_peer_cache` announces once at startup
-instead of on every re-dial pass (141 false "restarted" log lines in 5 h).
-
-**Unreleased on main since the cut**: `7b38322c` — **the .deb upgrade itself ran
-`systemctl disable`** (prerm ignored its `$1` role), so every update silently
-undid the admin's enablement and left the node down; upgrades now
-stop-swap-restart and only a true removal disables. Found live updating the
-Proxmox node to .98; one transition release still runs the old prerm (gotcha
-#313). Also `e73bb167` (test-node cleanup no longer prefilters by process name;
-a renamed release artifact survived it).
+- **Credits are DORMANT — they gate nothing** (see Key Design Decisions). They
+  were never real, yet were acted on: a `-1000` floor refused remote requesters
+  and the tier gave a high balance up to 8x the concurrency. Both off; dashboard
+  shows no balance; leaderboard ranks by shards hosted.
+  **`docs/CREDITS_DESIGN.md`** = design + exit criteria.
+- **Release builds 54 min → 16m29s** (Windows GPU 53.5 → 15m48s). Two causes,
+  both logged as `warning`, never red: rust-cache said `full match: true` and
+  rebuilt all 19 CUTLASS kernels anyway (it clears `target/` for repo-local
+  packages — vendored crates are), and `Jimver/cuda-toolkit` had been failing
+  its cache with `Cache service responded with 400` for months. Kernels now sit
+  outside `target/` in `.flash-attn-build`, cached on a content hash
+  (#318/#319; `docs/FUTURE_WORK.md` § "Release build time" for what's left).
+- **Log severity follows blame** — an over-long prompt logged 3 `ERROR` lines
+  when the model was peer-held, 1 `WARN` when local; a deliberate 501 logged
+  `ERROR Server error`. `error::failure_log_level` derives it from the status
+  `classify_error` already picked. **Error hints now translated in all 21
+  locales** — the only user-facing text that had no translation route.
+- **#313 CLOSED**: the `.deb` upgrade no longer disables the service (verified
+  on Proxmox .99→.100 — "service restarted", unit left `enabled` + `active`).
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
+- **v0.3.99** (08-16): long prompts stalled for MINUTES — `insert_from_kv` snapshotted at EVERY block boundary, O(prompt²) ≈ 15 GB copied per 2.9k-token request (repeats 115.5s→4.1s, #312); silent-peer 500s→503 (`PeerUnresponsive`/`SegmentFailoverExhausted`); Docker `latest` had NEVER been published (#314).
+- **v0.3.98** (08-16): **1.41x CPU generation** — GQA decode stopped expanding the KV cache with `repeat_kv` (`grouped_gqa_decode_attention`); this REVERSED the CPU decode-kernel routing at every length. 4h soak, 3474/3474 ok.
 - **v0.3.97** (08-15): **models you own could not be reached** — a node that loaded a model with `-m` announced it under its DISPLAY NAME, invisible as a holder, phantom `shard_count: 0` entries everywhere (three id derivations, no two agreeing → `slugify_model_name`, #310); removing `shard_range` from the config did nothing (#306); loopback-only endpoints told remote admins to fetch a key they had already sent (`LocalOnly`, #309); manifest-less models no longer claim `available`; embeddings 501 not 503.
 - **v0.3.96** (08-12/15): **a failure could not report itself** — six defects, one shape: the error's type known in one place, a literal written in another (empty Anthropic streams, `[inference failed]` as assistant text, peers DOCKED for callers' mistakes). Fix = make classification reachable: `classify_error` (HTTP + both SSE encoders), `reclassify_flattened_error` (typeless boundaries), `AnthropicSseEvent::Error`. Gotchas #300-#305. `round_log_0812_error_reporting.md`.
 - **v0.3.93/.94** (08-11/12): **a new node could see the swarm's models and run NONE of them** — holders each rewrote a manifest's `publisher` to themselves to earn broadcast rights, erasing each other until nobody broadcast (81 registrations, 50 publishers, one model); the right predicate existed in the startup path, missing from the 30s timer → `manifests_to_gossip` (#296). Plus #295/#297/#298. `round_log_0811_retry_advice.md`.
@@ -268,10 +259,8 @@ Read the named round log before re-deriving any of these.
 - **v0.3.85/.86/.87** (08-09): every defect was a claim nothing could contradict — batching NEVER engaged (0/156) → **2.4x** GPU; **a rescan on a timer undid the shard split**; credits never persisted (#278); **51 tests ran in NO automation.** `round_log_0808_night.md`.
 - **v0.3.82/.83** (08-07/08): CPU fused attention **+19%** prompt processing; CUDA decode routing corrected — the crossover came from timing the call in ISOLATION and was wrong at every length (**#266: measure the FORWARD**). KV reservation: a 100-token chat held 940 MB (#261). **⚠ #267: this box cannot resolve a GPU change below ~25%.** `round_log_0807_*.md`.
 - **v0.3.81** (08-06/07): **CPU inference measured, not guessed** — every guess was <2.5% COMBINED; **it was attention**, wrong in BOTH phases in opposite directions (#254-#256). Prefill 4571→640 ms. `round_log_0806_batching.md`.
-- **v0.3.78/.79** (08-06): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE, wrong date. All invisible; found by diffing against `tokenizers`/`jinja2` references built from the model's OWN vocab (#246-#253). **.79** shipped AVX2 — release binaries had candle's quantized kernels COMPILED OUT, **3.09x**. `round_log_0805_prompt_pipeline.md`.
-- **v0.3.60-.77** (08-02→05): **v0.3.72 our API key was being sent to strangers** — `forward_to_peer` forwarded the caller's `Authorization` verbatim; **nothing in that code changed, its PREMISE did** (#238). Concurrent requests failed outright on CPU-only nodes — invisible on GPU, total on CPU (#241). `round_log_0805_security.md`, `round_log_0803*.md`.
-- **v0.3.49-.59** (07-29→08-01): **SPM tokenizer CLOSED** — stale merge-queue entries mis-tokenised **64.9%** of inputs. **A hash cannot tell "wrong bytes" from "not all the bytes" — check `size_bytes` FIRST** (#203). `cargo test` overwrote a running node's API key (#226).
-- **v0.3.39-.46** (07-27→29): local replies took a **GPT-2 byte fallback** under a stale comment (#200) — **peer-served work is decoded on the SERVING side, so cross-node checks looked clean**. `current_exe()` returns `"…(deleted)"` once the binary is replaced (#188). **Timeouts must bound what actually varies** (#189/#190). `round_log_overnight_0728.md`.
+- **v0.3.78/.79** (08-06): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE, wrong date; all invisible, found by diffing against `tokenizers`/`jinja2` references built from the model's OWN vocab (#246-#253). **.79** shipped AVX2 — releases had candle's quantized kernels COMPILED OUT, **3.09x**. `round_log_0805_prompt_pipeline.md`.
+- **v0.3.39-.77** (07-27→08-05): **v0.3.72 our API key was being sent to strangers** — nothing in that code changed, its PREMISE did (#238); SPM tokenizer mis-tokenised **64.9%** of inputs (**a hash cannot tell "wrong bytes" from "not all the bytes" — check `size_bytes` FIRST**, #203); local replies took a GPT-2 byte fallback under a stale comment (#200). `round_log_0805_security.md`, `round_log_0803*.md`, `round_log_overnight_0728.md`.
 - **v0.3.15-.38** (07-23→28): **read #179 before touching connection selection** — a relay carrying an INBOUND connection is a bare `/p2p/<peer>`, counted as direct, and wins every send; **retraction alone is futile, the blacklist is REQUIRED**. `max_established_per_peer = 1` structurally disabled DCUtR (#163). `round_log_networking_audit.md`.
 - **R136-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT v1→v2, `--anchor`), request cancellation, `gpu_layers` plumbing, per-shard download backoff (#150-#160); SWARM-SPEC v0.1 cascade; `swarmpool://` invites v2; cross-pool routing.
 - **Pre-R136**: the 20 build phases. `docs/ARCHITECTURE.md` § phase history.

@@ -455,6 +455,50 @@ silently break at the wire if duplicated:
   `a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling` fails
   the build on a new literal.
 
+- **`crate::error::failure_log_level` + the `log_failure!` macro** (2026-08-17) —
+  the single answer to "how loudly should this failure be recorded in THIS
+  node's log". **Never pick `error!` vs `warn!` at a site that logs a
+  `SwarmError`.** The level is derived from the status `classify_error` already
+  had to choose, because that status IS the answer to whose mistake it was: 4xx
+  → Info, `501` → Info, other 5xx → Warn, 500 → Error. A new variant therefore
+  inherits a sensible level with no second decision to forget.
+  **Why it exists**: an over-long prompt produced three `ERROR` lines when the
+  model happened to be peer-held and one `WARN` when it was local — the same
+  user mistake at a different severity, decided by which machine held the model
+  — and a `501` for embeddings (deliberate, documented, answered with what to
+  use instead) logged `ERROR Server error`. `ERROR` means "this node is broken",
+  so the product was reporting its users' typos as its own faults (gotcha #316).
+  This is the logging-layer survivor of #300-#305: the HTTP surface had already
+  been taught to classify, and every site that *logged* still hardcoded a level.
+  **`classify_error` is pure and must stay pure** — it used to `tracing::error!`
+  from its catch-all, which meant merely *asking* it what level to use emitted
+  an ERROR of its own (gotcha #315). The full error is logged by whoever reports
+  the failure, from the original `SwarmError` rather than the genericised
+  message. Pin that behaviourally by counting emitted events, not by scanning
+  source for `tracing::` — the first attempt did the latter and tripped over the
+  comment explaining the removal.
+- **`crate::error::error_hint_with_key`** (2026-08-17) — returns the actionable
+  hint as a stable `(key, english)` pair, from ONE match arm. `error_hint` is a
+  thin view over it. The envelope carries `hint_key` beside the unchanged
+  English `hint`, and the dashboard looks up `error_hint.<key>`, falling back to
+  the English it was sent so nothing can ever render as a raw key name.
+  A separate `error_hint_key` function would be a second decision to keep in
+  step — this codebase's most-repeated defect — so they cannot drift here.
+  Adding a hint means adding its translation in all 21 locales;
+  `every_backend_hint_key_has_a_translation` fails the build both ways (a key
+  with no entry, and an entry no variant can emit).
+- **Credits are DORMANT — nothing may publish or act on a balance** (2026-08-17).
+  `MIN_BALANCE_FOR_INFERENCE = 0` and `credit::priority::calculate_tier` returns
+  `DORMANT_TIER` regardless of its arguments, so no balance affects who is
+  served or how fast; the leaderboard neither ranks by credits nor publishes
+  them. The figure is self-minted — no credit has ever moved between nodes as
+  payment for work — so acting on it meant rationing the product by a number
+  nobody can stand behind. `credits_stay_dormant` in `tests/repo_consistency.rs`
+  fails the build if that changes, and it scans the WHOLE of `api/identity.rs`
+  rather than the lines that were fixed: the leaderboard's *self* entry is built
+  by different code from its peer entries, so the first fix left the node still
+  publishing its own (gotcha #317). Design and exit criteria in
+  `docs/CREDITS_DESIGN.md`.
 - **`AnthropicSseEvent::Error`** (2026-08-12) — the ONLY way the Anthropic
   streaming surface reports a failure. Emit `event: error`; never write the
   reason into assistant content, and never invent a `stop_reason` for it.
@@ -930,6 +974,42 @@ So: **before removing anything an unused-warning points at, grep the file for
 one configuration. And after pushing a change that touches gated code, check
 the cache-warm run rather than assuming a green CI means the GPU builds work —
 `gh run list --workflow="Cache warm"`.
+
+### The CUTLASS kernels live OUTSIDE `target/` (2026-08-17)
+
+`candle-flash-attn`'s 19 kernels are built into `.flash-attn-build` (via
+`CANDLE_FLASH_ATTN_BUILD_DIR`, set by `.github/actions/gpu-build-env`) and cached
+separately from the Rust build cache.
+
+**Why, and the trap to remember**: `Swatinem/rust-cache` deletes everything in
+`target/` belonging to a package whose manifest is inside the repo — which every
+crate under `vendor/` is. So both GPU jobs restored a cache reporting
+`full match: true` and then recompiled all 19 kernels anyway, ~39 min of the
+Windows GPU build and ~27 of the Linux one, on every release, for months. Nothing
+ever went red; the only symptom was 39 minutes of silence in the log between the
+last `Compiling` line and the build script's output. **"Cache hit" is not "the
+slow thing was cached" — read the compile lines, not the restore line**
+(gotcha #318).
+
+It works because `cudaforge`'s own `BuildCache` skips up-to-date kernels by
+CONTENT HASH rather than mtime, so a directory restored from a tarball is
+accepted. A warm run logs `All kernels up-to-date, skipping compilation`; that
+line, plus `Cache restored from key: flash-attn-kernels-*`, is how you confirm
+the mechanism fired rather than inferring it from a faster wall clock.
+
+Two things a change here must preserve, both learned the hard way:
+
+- **Create the directory.** Upstream panics `Directory doesn't exists` unless the
+  override path already exists — i.e. on the very first run after introducing it.
+- **An empty env var is not an unset one.** `std::env::var` returns `Ok("")` for a
+  variable that is set but empty, and a matrix expression like
+  `${{ matrix.x && '…' || '' }}` yields exactly that for every cell that does not
+  want the override. The vendored build script filters empty explicitly.
+
+The CI `flash-attn` compile-check cell points the build script at a
+non-existent temp dir with `CANDLE_FLASH_ATTN_CHECK_ONLY=1`, which exercises this
+patch in ~50 s on every push — nothing else in CI compiles that crate, because
+compiling it is the cost being avoided.
 
 ## One invariant, N paths — the recurring bug of this codebase
 
