@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.100-alpha] — 2026-08-17
+
 **Credits no longer affect the service you get, and the dashboard no longer
 shows a balance.** They were never real: no credit had ever moved between two
 machines as payment for work, so each node's balance measured its own activity

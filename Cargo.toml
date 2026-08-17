@@ -14,7 +14,7 @@ exclude = [
 
 [package]
 name = "swarmllm"
-version = "0.3.99-alpha"
+version = "0.3.100-alpha"
 edition = "2021"
 default-run = "swarmllm"
 description = "Decentralized peer-to-peer LLM inference network"
@@ -207,9 +207,17 @@ flash-attn = ["candle-cuda", "dep:candle-flash-attn"]
 # which have since expired:
 #
 #   * "it adds ~60 min to CI and pushed Linux CUDA past 3h" — fixed three
-#     months later by `cache-warm.yml`, not by dropping the feature. The
-#     kernels land in `target/`, which rust-cache caches, so it is a one-time
-#     cost per cache key rather than a per-release one.
+#     months later by `cache-warm.yml`, not by dropping the feature, so it is
+#     a one-time cost per cache key rather than a per-release one.
+#
+#     The sentence that used to sit here — "the kernels land in `target/`,
+#     which rust-cache caches" — was FALSE, and believing it is what hid the
+#     cost for months. rust-cache deletes `target/` artifacts belonging to any
+#     package whose manifest is inside the repo, and candle-flash-attn is
+#     vendored, so the kernels were rebuilt on every release despite a cache
+#     that reported a full hit (~39 min Windows, ~27 min Linux; gotcha #318).
+#     They now live outside `target/` in `.flash-attn-build` with a cache of
+#     their own — see .github/actions/gpu-build-env.
 #   * "mostly an A100/H100 win" — backwards. FlashAttention's advantage comes
 #     from not round-tripping the attention matrix through HBM, so the SLOWER
 #     the memory the bigger the win; consumer Ampere benefits more than a
