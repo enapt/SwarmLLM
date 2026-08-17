@@ -55,16 +55,56 @@
       '</div>';
   }
 
-  // Per-shard *display* state. Local download progress is owned by the
-  // Downloads panel — never re-rendered inside the model card. The only
-  // "in-flight" hint here is gossip from OTHER nodes (peer_downloads), so
-  // users can still see the swarm is actively replicating.
-  function shardState(s) {
-    if (s.local && s.in_vram) return 'vram';
+  /**
+   * WHOSE MACHINE IS THIS SHARD ON — the single classifier every shard
+   * surface reads. One of: live | disk | moving | swarm | thin | absent.
+   *
+   * This is the question a P2P dashboard exists to answer, and it was being
+   * answered in two places that did not agree: the model card graded holders
+   * into `thin` (exactly one) vs `swarm` (two or more), while the coverage
+   * ribbon did the same with its own copy of the thresholds, and the list and
+   * matrix views used a third, coarser vocabulary that could not express
+   * "one host away from losing this" at all.
+   *
+   * Adding a state means adding it here and giving it a `--shard-<state>`
+   * colour; do NOT re-derive locality from `holders` at a call site.
+   * `shardState` below is the coarse view for the list and matrix, derived
+   * from this rather than computed alongside it.
+   */
+  function shardLocality(s) {
+    if (s.local && s.in_vram) return 'live';
     if (s.local) return 'disk';
-    if (s.peer_downloads && s.peer_downloads.length > 0) return 'gossip';
-    if ((s.holders || 0) > 0) return 'peer';
-    return 'missing';
+    if (s.peer_downloads && s.peer_downloads.length > 0) return 'moving';
+    var holders = s.holders || 0;
+    if (holders >= 2) return 'swarm';
+    if (holders === 1) return 'thin';
+    return 'absent';
+  }
+
+  // Per-shard *display* state for the list and matrix views, which do not
+  // distinguish a well-replicated shard from a single-host one. Local
+  // download progress is owned by the Downloads panel — never re-rendered
+  // inside the model card. The only "in-flight" hint here is gossip from
+  // OTHER nodes (peer_downloads), so users can still see the swarm is
+  // actively replicating.
+  function shardState(s) {
+    var loc = shardLocality(s);
+    return loc === 'live' ? 'vram'
+         : loc === 'disk' ? 'disk'
+         : loc === 'moving' ? 'gossip'
+         : loc === 'absent' ? 'missing'
+         : 'peer';   // swarm + thin both read as "a peer has it"
+  }
+
+  // Plain-language tooltip for one piece of the route strip. Says whose
+  // machine it is on first, because that is what the colour encodes.
+  function shardLocalityLabel(s, loc) {
+    if (loc === 'moving') {
+      var lead = s.peer_downloads && s.peer_downloads[0] ? (s.peer_downloads[0].progress_pct || 0) : 0;
+      return I18n.t('shard.loc.moving') + ' — ' + lead + '%';
+    }
+    if (loc === 'swarm') return I18n.t('shard.loc.swarm', { n: s.holders || 0 });
+    return I18n.t('shard.loc.' + loc);
   }
 
   function shardGlyph(state) {
@@ -355,22 +395,45 @@
       : buildShardList(m, shards, safeId);
   }
 
-  // Coverage ribbon for the expanded panel's right column — a compact strip
-  // colored by network replica count per shard. Reuses availability-bar semantics.
+  /**
+   * THE ROUTE STRIP — the model, drawn as the path a question takes through it.
+   *
+   * Left to right is not decoration: shard 0 turns your prompt into numbers and
+   * the last shard writes the reply, so the strip reads in the order the work
+   * actually happens. Colour says whose machine each piece is on, which is the
+   * one fact a peer-to-peer dashboard has that an ordinary one does not — and
+   * which the old 6px bar threw away by painting "yours" and "a stranger's" the
+   * same shade of blue.
+   *
+   * The `ask`/`reply` end caps appear in compact mode only. Expanded mode
+   * labels its own endpoints on the shard rows (`shard-row-endpoint`), and
+   * keeping the caps out of it leaves the strip's geometry alone next to the
+   * matrix. Segments stay equal-width rather than proportional to bytes: the
+   * matrix columns below are equal-width, and a strip that disagreed with them
+   * would be a worse lie than one that says nothing about size.
+   *
+   * Keeps the `availability-bar` class — `init.js` routes clicks on it to the
+   * expand/collapse handler.
+   */
   function buildCoverageRibbon(m, shards, safeId) {
     if (!shards || shards.length === 0) return '';
-    var html = '<div class="availability-bar shard-coverage-ribbon" data-coverage-ribbon="' + safeId +
+    var multi = shards.length > 1;
+    var html = '<div class="availability-bar shard-coverage-ribbon route-strip" data-coverage-ribbon="' + safeId +
       '" title="' + U.escapeHtml(I18n.t('shard.view.coverage_tip') || '') + '">';
+    if (multi) {
+      html += '<span class="route-cap route-cap-in" aria-hidden="true">' +
+        U.escapeHtml(I18n.t('shard.route.ask')) + '</span>';
+    }
     shards.forEach(function(s) {
-      var segClass = 'seg-missing';
-      if (s.local && s.in_vram) segClass = 'seg-active';
-      else if (s.local) segClass = 'seg-nominal';
-      else if (s.peer_downloads && s.peer_downloads.length > 0) segClass = 'seg-downloading';
-      else if ((s.holders || 0) >= 2) segClass = 'seg-peer';
-      else if ((s.holders || 0) === 1) segClass = 'seg-warning';
-      else segClass = 'seg-problem';
-      html += '<div class="avail-seg ' + segClass + '"></div>';
+      var loc = shardLocality(s);
+      var n = s.index === MMPROJ_SHARD_INDEX ? '★' : (s.index || 0) + 1;
+      html += '<div class="avail-seg" data-loc="' + loc + '" title="' +
+        U.escapeHtml(n + ' · ' + shardLocalityLabel(s, loc)) + '"></div>';
     });
+    if (multi) {
+      html += '<span class="route-cap route-cap-out" aria-hidden="true">' +
+        U.escapeHtml(I18n.t('shard.route.reply')) + '</span>';
+    }
     html += '</div>';
     return html;
   }
@@ -378,6 +441,8 @@
   App.dashboardShards = {
     MMPROJ_SHARD_INDEX: MMPROJ_SHARD_INDEX,
     buildProgressBar: buildProgressBar,
+    shardLocality: shardLocality,
+    shardLocalityLabel: shardLocalityLabel,
     shardState: shardState,
     shardGlyph: shardGlyph,
     shardStatusLabel: shardStatusLabel,

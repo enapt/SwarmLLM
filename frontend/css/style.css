@@ -1976,6 +1976,19 @@ label {
   min-width: 0; white-space: normal;
 }
 .node-compact .node-hw-cell.hw-cell-text { flex-direction: column; align-items: flex-start; gap: 2px; }
+
+/* Device cards — a processor and the memory that bounds it, in one box.
+   Three of them (CPU+RAM, GPU+VRAM, Disk) rather than five peer tiles. */
+.node-hw-cell.hw-cell-device { flex-direction: column; align-items: stretch; gap: 8px; }
+.hw-device-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hw-device-name {
+  white-space: normal; line-height: 1.3;
+  overflow-wrap: anywhere;   /* long adapter names must wrap, never overflow the card */
+}
+.hw-device-mem { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hw-device-mem .hw-cell-body { min-width: 0; }
+/* Disk serves both processors, so its head carries a note rather than a chip name. */
+.hw-device-storage .hw-device-name { color: var(--text-muted); font-size: var(--fs-2xs); }
 .node-compact .hw-cell-body { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 1px; }
 .node-compact .node-hw-label {
   font-size: var(--fs-2xs); text-transform: uppercase; letter-spacing: 0.08em;
@@ -2749,7 +2762,10 @@ kbd {
 .model-card-title-main { min-width: 0; display: flex; align-items: center; grid-column: 1; }
 .model-card-title-health { min-width: 0; display: flex; flex-direction: column; gap: 3px; grid-column: 2; }
 .model-card-title-health:empty { display: block; }
-.model-card-title-health .availability-bar { margin: 0; width: 100%; min-width: 0; }
+/* Capped so the strip stays a readable object rather than stretching to the
+   full card width, where eight pieces at 130px each stop reading as a route
+   and start reading as a segmented progress bar. */
+.model-card-title-health .availability-bar { margin: 0; width: 100%; max-width: 620px; min-width: 0; }
 @media (max-width: 899px) {
   .model-card { grid-template-columns: 1fr auto; }
   .model-card-title-main { grid-column: 1; }
@@ -4435,39 +4451,64 @@ textarea.pool-code-input { min-height: 4.5em; }
   border-bottom: none;
   padding-bottom: 4px;
 }
-/* Hide card-level availability bar in expanded mode — the coverage ribbon
-   inside .mce-right-head takes over. Use direct-child selector so nested
-   .shard-coverage-ribbon bars remain visible. */
-.model-card:not(.compact) > .availability-bar { display: none; }
 .shard-coverage-ribbon { margin: 0; }
 
-/* Availability bar — thin horizontal strip below title in compact mode */
+/* ---------------------------------------------------------------------------
+   The route strip — a model drawn as the path a question takes through it.
+
+   Left to right is the order the work happens: the first piece turns your
+   prompt into numbers, the last one writes the reply. Colour answers whose
+   machine each piece is on, which is the fact this dashboard has and an
+   ordinary one does not. Every value comes from the locality tokens in :root —
+   do not write a colour here.
+
+   It replaced a 6px strip that painted "on your machine" and "on a stranger's"
+   the same blue, so the one thing worth knowing was the one thing it hid.
+--------------------------------------------------------------------------- */
 .availability-bar {
-  display: flex; gap: 2px; height: 6px; margin: 0 14px 6px;
-  border-radius: var(--radius-sm); overflow: hidden; cursor: pointer;
+  display: flex; align-items: stretch; gap: 2px; height: 13px; margin: 0 14px 7px;
+  border-radius: var(--radius-sm); cursor: pointer;
   transition: height 0.15s, margin 0.15s;
 }
-.availability-bar:hover { height: 10px; }
+.availability-bar:hover { height: 17px; }
 .avail-seg {
-  flex: 1; min-width: 0; border-radius: var(--radius-xs);
-  transition: background 0.4s;
+  flex: 1; min-width: 3px; border-radius: var(--radius-xs);
+  transition: background 0.4s, border-color 0.4s;
 }
-/* Availability bar states — clear contrast, problems pop */
-.avail-seg.seg-nominal { background: rgba(34,197,94,0.4); border: 1px solid rgba(34,197,94,0.15); }
-.avail-seg.seg-active { background: rgba(163,230,53,0.65); border: 1px solid rgba(163,230,53,0.25); box-shadow: 0 0 8px rgba(163,230,53,0.3); }
-.avail-seg.seg-peer { background: rgba(59,130,246,0.4); border: 1px solid rgba(59,130,246,0.15); }
-.avail-seg.seg-downloading { background: var(--cyan); border: 1px solid transparent; animation: avail-pulse 2s ease-in-out infinite; }
-.avail-seg.seg-warning { background: var(--orange); border: 1px solid transparent; }
-.avail-seg.seg-problem { background: var(--red); border: 1px solid transparent; }
-.avail-seg.seg-missing { background: rgba(255,255,255,0.05); border: 1px dashed rgba(255,255,255,0.1); }
+
+/* Locality. Solid fill = this machine; outline = somewhere else; hatched =
+   nowhere. Fill-vs-outline carries the same split as the hue, so the strip
+   still reads without colour vision. */
+.avail-seg[data-loc="live"]   { background: color-mix(in srgb, var(--local-live) 82%, transparent); }
+.avail-seg[data-loc="disk"]   { background: color-mix(in srgb, var(--local-disk) 70%, transparent); }
+.avail-seg[data-loc="swarm"]  { background: color-mix(in srgb, var(--swarm) 28%, transparent); border: 1px solid color-mix(in srgb, var(--swarm) 55%, transparent); }
+.avail-seg[data-loc="moving"] { background: var(--inflight); animation: avail-pulse 2s ease-in-out infinite; }
+.avail-seg[data-loc="thin"]   { background: color-mix(in srgb, var(--at-risk) 30%, transparent); border: 1px solid color-mix(in srgb, var(--at-risk) 85%, transparent); }
+.avail-seg[data-loc="absent"] {
+  border: 1px solid color-mix(in srgb, var(--absent) 65%, transparent);
+  background: repeating-linear-gradient(45deg,
+    color-mix(in srgb, var(--absent) 30%, transparent) 0 3px, transparent 3px 6px);
+}
+
+/* End caps — "ask" enters at the left, "reply" leaves at the right. Compact
+   mode only: expanded mode labels its own endpoints on the shard rows, and
+   keeping the caps out of it leaves the strip's geometry alone beside the
+   matrix. */
+.route-cap {
+  flex: none; display: flex; align-items: center;
+  font-family: var(--font-mono); font-size: var(--fs-2xs); font-weight: 600;
+  letter-spacing: 0.04em; text-transform: lowercase;
+  color: var(--text-secondary); user-select: none;
+  line-height: 1;
+}
+.route-cap-in  { padding-right: 6px; }
+.route-cap-out { padding-left: 6px; justify-content: flex-end; }
+.model-card:not(.compact) .route-cap { display: none; }
+
 @keyframes avail-pulse {
   0%, 100% { opacity: 0.7; }
   50% { opacity: 1; }
 }
-[data-theme="light"] .avail-seg.seg-nominal { background: rgba(34,197,94,0.35); border-color: rgba(34,197,94,0.2); }
-[data-theme="light"] .avail-seg.seg-active { background: rgba(101,163,13,0.5); border-color: rgba(101,163,13,0.25); }
-[data-theme="light"] .avail-seg.seg-peer { background: rgba(59,130,246,0.4); border-color: rgba(59,130,246,0.2); }
-[data-theme="light"] .avail-seg.seg-missing { background: rgba(0,0,0,0.05); border-color: rgba(0,0,0,0.1); }
 
 /* Expand chevron — right-aligned, borderless, matches cloud card pattern */
 .model-expand-chevron {

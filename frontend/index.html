@@ -1059,36 +1059,50 @@
                   <span class="mono text-muted field-hint"><span id="version">v...</span> &middot; Up <span id="uptime">...</span></span>
                 </span>
               </div>
+              <!-- Grouped by the device that does the work, not by the kind of
+                   number. Memory is what decides whether a model fits, and each
+                   processor has its own: RAM bounds what the CPU can run, VRAM
+                   what the GPU can. Listing them as five peer tiles put each
+                   processor next to a memory figure that was not its own. -->
               <div class="node-hw-grid">
-                <div class="node-hw-cell hw-cell-text">
-                  <span class="node-hw-label"><span class="node-hw-icon">⚙</span><span data-i18n="dashboard.cpu_label">CPU</span></span>
-                  <span class="mono node-hw-value" id="node-cpu">...</span>
-                </div>
-                <div class="node-hw-cell hw-cell-text">
-                  <span class="node-hw-label"><span class="node-hw-icon">▪</span><span data-i18n="dashboard.gpu_label">GPU</span></span>
-                  <span class="mono node-hw-value" id="node-gpu" data-i18n="dashboard.detecting">Detecting...</span>
-                </div>
-                <div class="node-hw-cell hw-cell-gauge">
-                  <div class="hw-gauge" id="ram-gauge" style="--pct:0" data-pct="0"></div>
-                  <div class="hw-cell-body">
-                    <span class="node-hw-label"><span data-i18n="hw.ram">RAM</span></span>
-                    <span class="mono node-hw-value"><span id="ram-used">...</span> <span class="text-muted" id="ram-total">/ ...</span></span>
+                <div class="node-hw-cell hw-cell-device" id="hw-device-cpu">
+                  <div class="hw-device-head">
+                    <span class="node-hw-label"><span class="node-hw-icon">⚙</span><span data-i18n="dashboard.cpu_label">CPU</span></span>
+                    <span class="mono node-hw-value hw-device-name" id="node-cpu">...</span>
                   </div>
-                  <div class="progress-bar mini-bar hidden"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
-                </div>
-                <div class="node-hw-cell hw-cell-gauge">
-                  <div class="hw-gauge" id="disk-gauge" style="--pct:0" data-pct="0"></div>
-                  <div class="hw-cell-body">
-                    <span class="node-hw-label"><span data-i18n="dashboard.disk_label">Disk</span></span>
-                    <span class="mono node-hw-value"><span id="disk-used">...</span> <span class="text-muted" id="disk-total">/ ...</span></span>
+                  <div class="hw-device-mem">
+                    <div class="hw-gauge" id="ram-gauge" style="--pct:0" data-pct="0"></div>
+                    <div class="hw-cell-body">
+                      <span class="node-hw-label"><span data-i18n="hw.ram">RAM</span></span>
+                      <span class="mono node-hw-value"><span id="ram-used">...</span> <span class="text-muted" id="ram-total">/ ...</span></span>
+                    </div>
+                    <div class="progress-bar mini-bar hidden"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
                   </div>
-                  <div class="progress-bar mini-bar hidden"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
                 </div>
-                <div class="node-hw-cell hw-cell-gauge">
-                  <div class="hw-gauge" id="vram-gauge" style="--pct:0" data-pct="0"></div>
-                  <div class="hw-cell-body">
-                    <span class="node-hw-label"><span id="vram-label">VRAM</span></span>
-                    <span class="mono node-hw-value" id="node-vram">...</span>
+                <div class="node-hw-cell hw-cell-device" id="hw-device-gpu">
+                  <div class="hw-device-head">
+                    <span class="node-hw-label"><span class="node-hw-icon">▪</span><span data-i18n="dashboard.gpu_label">GPU</span></span>
+                    <span class="mono node-hw-value hw-device-name" id="node-gpu" data-i18n="dashboard.detecting">Detecting...</span>
+                  </div>
+                  <div class="hw-device-mem">
+                    <div class="hw-gauge" id="vram-gauge" style="--pct:0" data-pct="0"></div>
+                    <div class="hw-cell-body">
+                      <span class="node-hw-label"><span id="vram-label">VRAM</span></span>
+                      <span class="mono node-hw-value" id="node-vram">...</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="node-hw-cell hw-cell-device hw-device-storage" id="hw-device-disk">
+                  <div class="hw-device-head">
+                    <span class="node-hw-label"><span class="node-hw-icon">▤</span><span data-i18n="dashboard.disk_label">Disk</span></span>
+                    <span class="mono node-hw-value hw-device-name" id="disk-shared" data-i18n="hw.disk_shared">Shared by both</span>
+                  </div>
+                  <div class="hw-device-mem">
+                    <div class="hw-gauge" id="disk-gauge" style="--pct:0" data-pct="0"></div>
+                    <div class="hw-cell-body">
+                      <span class="mono node-hw-value"><span id="disk-used">...</span> <span class="text-muted" id="disk-total">/ ...</span></span>
+                    </div>
+                    <div class="progress-bar mini-bar hidden"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
                   </div>
                 </div>
               </div>

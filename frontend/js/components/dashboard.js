@@ -1108,26 +1108,6 @@
         var compositeBadgeHtml = '<span class="composite-badge ' + compositeBadgeClass + '" title="' + U.escapeHtml(compositeBadgeTitle) + '">' +
           '<span class="cb-dot"></span>' + U.escapeHtml(compositeBadgeLabel) + '</span>';
 
-        // --- Availability bar (compact shard strip) ---
-        var availBarHtml = '';
-        if (shards.length > 0) {
-          availBarHtml = '<div class="availability-bar" data-avail-bar="' + safeId + '" title="' + U.escapeHtml(I18n.t('dashboard.avail_bar_tip', { local: hostedShards, total: shardCount })) + '">';
-          shards.forEach(function(s) {
-            var segClass = 'seg-missing';
-            if (s.local && s.in_vram) segClass = 'seg-active';
-            else if (s.local) segClass = 'seg-nominal';
-            else if (s.peer_downloads && s.peer_downloads.length > 0) segClass = 'seg-downloading';
-            else if (s.holders > 0) {
-              segClass = (s.holders || 0) === 1 ? 'seg-warning' : 'seg-peer';
-            }
-            else segClass = 'seg-problem';
-            // Missing but no holders at all = problem
-            if (!s.local && (s.holders || 0) === 0) segClass = shardCount > 1 ? 'seg-problem' : 'seg-missing';
-            availBarHtml += '<div class="avail-seg ' + segClass + '"></div>';
-          });
-          availBarHtml += '</div>';
-        }
-
         // --- Detail badges (shown only in expanded mode) ---
         var detailBadgesHtml = '';
         var detailParts = [];
