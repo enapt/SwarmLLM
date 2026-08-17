@@ -4586,6 +4586,14 @@ textarea.pool-code-input { min-height: 4.5em; }
 .route-cap-out { padding-left: 6px; justify-content: flex-end; }
 .model-card:not(.compact) .route-cap { display: none; }
 
+/* Light theme separates the two local states the opposite way round, because
+   presence reads as MORE ink on white and as MORE light on near-black. Sharing
+   the dark theme's mixes put live at rgb(109,148,58) and disk at rgb(121,145,89)
+   — the same colour to any practical eye, so "loaded" and "on disk" became
+   indistinguishable in exactly the view that exists to tell them apart. */
+[data-theme="light"] .avail-seg[data-loc="live"] { background: var(--local-live); }
+[data-theme="light"] .avail-seg[data-loc="disk"] { background: color-mix(in srgb, var(--local-disk) 32%, transparent); }
+
 @keyframes avail-pulse {
   0%, 100% { opacity: 0.7; }
   50% { opacity: 1; }
