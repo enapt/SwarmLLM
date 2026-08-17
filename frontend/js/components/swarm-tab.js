@@ -61,8 +61,38 @@
     return U.formatModelDisplayName ? U.formatModelDisplayName(source) : source;
   }
 
-  // Build a single wishlist card. Returns a DocumentFragment.
-  function _renderEntry(entry) {
+  /**
+   * A why-tag carried by EVERY row explains nothing about any of them.
+   *
+   * The wishlist is seeded from HuggingFace trending filtered by a trusted
+   * publisher allowlist, so in practice `popular_on_hf` and `trusted_publisher`
+   * are true of the whole list — 33 rows each repeating the identical three
+   * chips, which is what made every card 138px tall to convey a model name.
+   * Tags shared by all rows are hoisted into one line above the list; each row
+   * keeps only what distinguishes it. With a mixed list nothing is shared and
+   * every tag stays where it was.
+   */
+  function _sharedTags(entries) {
+    if (!entries || entries.length < 2) return [];
+    var first = (entries[0].why_tags || []).slice();
+    if (first.length === 0) return [];
+    return first.filter(function (tag) {
+      return entries.every(function (e) {
+        return Array.isArray(e.why_tags) && e.why_tags.indexOf(tag) !== -1;
+      });
+    });
+  }
+
+  function _tagLabel(raw) {
+    var parsed = _parseTag(raw);
+    var label = I18n.t(parsed.key, parsed.params);
+    // Fallback to the key's last segment if i18n is missing — better than blank.
+    return label === parsed.key ? parsed.key.split('.').pop().replace(/_/g, ' ') : label;
+  }
+
+  // Build a single wishlist card. `shared` lists why-tags already stated once
+  // above the list, so the row does not repeat them.
+  function _renderEntry(entry, shared) {
     var tmpl = document.createElement('div');
     tmpl.className = 'wishlist-card';
     var statusClass = STATUS_CLASSES[entry.status] || 'wishlist-pill-blocked';
@@ -125,22 +155,18 @@
     }
     tmpl.appendChild(meta);
 
-    // Why-tags row — each tag is an i18n key (or key|var=val payload).
-    if (Array.isArray(entry.why_tags) && entry.why_tags.length > 0) {
+    // Why-tags row — each tag is an i18n key (or key|var=val payload). Tags
+    // hoisted into the shared line above the list are dropped here.
+    var ownTags = (Array.isArray(entry.why_tags) ? entry.why_tags : []).filter(function (t) {
+      return !shared || shared.indexOf(t) === -1;
+    });
+    if (ownTags.length > 0) {
       var tags = document.createElement('div');
       tags.className = 'wishlist-tags';
-      entry.why_tags.forEach(function (raw) {
-        var parsed = _parseTag(raw);
+      ownTags.forEach(function (raw) {
         var span = document.createElement('span');
         span.className = 'wishlist-tag';
-        // Fallback to raw key if i18n missing — better than blank.
-        var label = I18n.t(parsed.key, parsed.params);
-        if (label === parsed.key) {
-          // Last-ditch fallback so the user still sees something
-          // semi-meaningful even when an i18n entry is missing.
-          label = parsed.key.split('.').pop().replace(/_/g, ' ');
-        }
-        span.textContent = label;
+        span.textContent = _tagLabel(raw);
         tags.appendChild(span);
       });
       tmpl.appendChild(tags);
@@ -236,7 +262,20 @@
       empty.textContent = I18n.t('wishlist.empty');
       listEl.appendChild(empty);
     } else {
-      entries.forEach(function (e) { listEl.appendChild(_renderEntry(e)); });
+      var shared = _sharedTags(entries);
+      if (shared.length > 0) {
+        var note = document.createElement('div');
+        note.className = 'wishlist-shared-tags';
+        note.appendChild(document.createTextNode(I18n.t('wishlist.shared_prefix') + ' '));
+        shared.forEach(function (raw) {
+          var span = document.createElement('span');
+          span.className = 'wishlist-tag';
+          span.textContent = _tagLabel(raw);
+          note.appendChild(span);
+        });
+        listEl.appendChild(note);
+      }
+      entries.forEach(function (e) { listEl.appendChild(_renderEntry(e, shared)); });
     }
     if (metaEl && snapshot && snapshot.computed_at) {
       var ageSec = Math.max(0, Math.floor(Date.now() / 1000 - snapshot.computed_at));

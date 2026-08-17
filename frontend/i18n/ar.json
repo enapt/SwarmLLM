@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} من أصل {want} مستضيفين",
   "wishlist.meta_size": "الحجم: {size}",
   "wishlist.score_tip": "درجة الأولوية: {score} من 100",
+  "wishlist.shared_prefix": "جميع هذه النماذج:",
   "wishlist.status.aspirational": "قيد التنزيل",
   "wishlist.status.blocked": "بحاجة إلى مراجعة",
   "wishlist.status.candidate": "يمكن إضافته",

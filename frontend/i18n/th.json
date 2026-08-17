@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} จาก {want} โฮสต์",
   "wishlist.meta_size": "ขนาด: {size}",
   "wishlist.score_tip": "คะแนนลำดับความสำคัญ: {score} จาก 100",
+  "wishlist.shared_prefix": "ทั้งหมดนี้คือ:",
   "wishlist.status.aspirational": "กำลังดาวน์โหลด",
   "wishlist.status.blocked": "ต้องตรวจสอบ",
   "wishlist.status.candidate": "เพิ่มได้",

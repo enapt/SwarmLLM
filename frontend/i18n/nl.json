@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} van {want} hosts",
   "wishlist.meta_size": "Grootte: {size}",
   "wishlist.score_tip": "Prioriteitsscore: {score} van 100",
+  "wishlist.shared_prefix": "Deze zijn allemaal:",
   "wishlist.status.aspirational": "Wordt gedownload",
   "wishlist.status.blocked": "Controle nodig",
   "wishlist.status.candidate": "Kan worden toegevoegd",

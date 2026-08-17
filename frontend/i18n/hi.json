@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{want} में से {have} होस्ट",
   "wishlist.meta_size": "आकार: {size}",
   "wishlist.score_tip": "प्राथमिकता स्कोर: 100 में से {score}",
+  "wishlist.shared_prefix": "ये सभी हैं:",
   "wishlist.status.aspirational": "डाउनलोड हो रहा है",
   "wishlist.status.blocked": "समीक्षा की आवश्यकता",
   "wishlist.status.candidate": "जोड़ा जा सकता है",

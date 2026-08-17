@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} z {want} gospodarzy",
   "wishlist.meta_size": "Rozmiar: {size}",
   "wishlist.score_tip": "Priorytet: {score} na 100",
+  "wishlist.shared_prefix": "Wszystkie z nich są:",
   "wishlist.status.aspirational": "Pobieranie",
   "wishlist.status.blocked": "Wymaga sprawdzenia",
   "wishlist.status.candidate": "Można dodać",

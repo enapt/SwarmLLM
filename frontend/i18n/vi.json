@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} trong {want} người lưu trữ",
   "wishlist.meta_size": "Kích thước: {size}",
   "wishlist.score_tip": "Điểm ưu tiên: {score}/100",
+  "wishlist.shared_prefix": "Tất cả đều là:",
   "wishlist.status.aspirational": "Đang tải xuống",
   "wishlist.status.blocked": "Cần xem xét",
   "wishlist.status.candidate": "Có thể thêm",

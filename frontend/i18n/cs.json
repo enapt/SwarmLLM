@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} z {want} hostitelů",
   "wishlist.meta_size": "Velikost: {size}",
   "wishlist.score_tip": "Prioritní skóre: {score} ze 100",
+  "wishlist.shared_prefix": "Všechny tyto jsou:",
   "wishlist.status.aspirational": "Stahuje se",
   "wishlist.status.blocked": "Vyžaduje kontrolu",
   "wishlist.status.candidate": "Lze přidat",

@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} de {want} anfitriões",
   "wishlist.meta_size": "Tamanho: {size}",
   "wishlist.score_tip": "Pontuação de prioridade: {score} de 100",
+  "wishlist.shared_prefix": "Todos estes são:",
   "wishlist.status.aspirational": "Sendo baixado",
   "wishlist.status.blocked": "Precisa de revisão",
   "wishlist.status.candidate": "Pode ser adicionado",

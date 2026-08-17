@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} dari {want} host",
   "wishlist.meta_size": "Ukuran: {size}",
   "wishlist.score_tip": "Skor prioritas: {score} dari 100",
+  "wishlist.shared_prefix": "Semuanya adalah:",
   "wishlist.status.aspirational": "Sedang diunduh",
   "wishlist.status.blocked": "Perlu ditinjau",
   "wishlist.status.candidate": "Dapat ditambahkan",

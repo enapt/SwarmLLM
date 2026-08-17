@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{want}人中{have}人がホスト中",
   "wishlist.meta_size": "サイズ：{size}",
   "wishlist.score_tip": "優先スコア：100点中{score}点",
+  "wishlist.shared_prefix": "これらはすべて:",
   "wishlist.status.aspirational": "ダウンロード中",
   "wishlist.status.blocked": "確認が必要",
   "wishlist.status.candidate": "追加可能",

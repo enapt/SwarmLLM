@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{want}个中已有{have}个托管者",
   "wishlist.meta_size": "大小：{size}",
   "wishlist.score_tip": "优先级评分：{score}/100",
+  "wishlist.shared_prefix": "以下全部都是：",
   "wishlist.status.aspirational": "下载中",
   "wishlist.status.blocked": "需要审核",
   "wishlist.status.candidate": "可以添加",

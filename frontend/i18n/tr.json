@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{want} barındırandan {have} tanesi mevcut",
   "wishlist.meta_size": "Boyut: {size}",
   "wishlist.score_tip": "Öncelik puanı: 100 üzerinden {score}",
+  "wishlist.shared_prefix": "Bunların tümü:",
   "wishlist.status.aspirational": "İndiriliyor",
   "wishlist.status.blocked": "İnceleme gerekli",
   "wishlist.status.candidate": "Eklenebilir",

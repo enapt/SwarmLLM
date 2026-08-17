@@ -228,7 +228,13 @@
 .lang-dropdown .lang-flag-img { margin-right: 6px; }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { font-size: 14px; -webkit-font-smoothing: antialiased; }
+/* No font-size here on purpose. It used to be pinned to 14px, which silently
+   overrode whatever font size the reader had set in their browser — the one
+   accessibility control a person with poor eyesight is most likely to have
+   already found — and shrank every rem in the type scale to 87.5% of its
+   stated value, putting body text at 11.4px and the smallest labels at 8.75px.
+   Leaving it unset means 1rem is the reader's own preference, 16px by default. */
+html { -webkit-font-smoothing: antialiased; }
 
 body {
   font-family: var(--font-sans);
@@ -1339,15 +1345,32 @@ a:hover { color: var(--accent-hover); }
 .swarm-subview { padding-top: 8px; }
 
 .wishlist-list { display: flex; flex-direction: column; gap: 8px; }
+/* One row per model, not a four-row stack. The stack spent 138px on every
+   entry to carry a name, because the three rows under it said the same thing
+   on all 33 — the repeated ones are now hoisted into .wishlist-shared-tags
+   above the list and the rest reads across. */
 .wishlist-card {
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-left-width: 3px;
   border-radius: var(--radius-md);
-  padding: 10px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  padding: 7px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 14px;
+}
+/* Name+pill+heat on the first line, meta under it; tags and the action share
+   the right-hand column so the button always lands in the same place. */
+.wishlist-card .wishlist-card-header { grid-column: 1; }
+.wishlist-card .wishlist-card-meta   { grid-column: 1; }
+.wishlist-card .wishlist-tags        { grid-column: 2; grid-row: 1; justify-content: flex-end; }
+.wishlist-card .wishlist-cta         { grid-column: 2; grid-row: 2; justify-content: flex-end; }
+
+/* Stated once, above the list, instead of on every row. */
+.wishlist-shared-tags {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 4px; font-size: var(--fs-2xs); color: var(--text-muted);
 }
 .wishlist-card-hosting { border-left-color: rgba(46, 160, 67, 0.7); }
 .wishlist-card-serveable { border-left-color: rgba(56, 139, 253, 0.7); }
@@ -1402,15 +1425,24 @@ a:hover { color: var(--accent-hover); }
   color: var(--text-muted);
 }
 .wishlist-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+/* Quiet on purpose. These say why a model is on the list, and the reason is the
+   same for most of them — 19 of 33 on a real node carry an identical set — so
+   drawn as bordered pills they were the loudest thing on a row whose only
+   distinguishing content is the name. Muted text weight, and the pill reserved
+   for the status, which does vary. */
 .wishlist-tag {
   display: inline-block;
-  padding: 1px 7px;
-  border-radius: var(--radius);
-  background: rgba(125, 89, 229, 0.12);
-  border: 1px solid rgba(125, 89, 229, 0.25);
-  font-size: var(--fs-sm);
-  color: var(--text-primary);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+  border: 1px solid transparent;
+  font-size: var(--fs-2xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
+/* In the hoisted line the chips are the point, so they keep a little more
+   presence than the per-row repeats. */
+.wishlist-shared-tags .wishlist-tag { color: var(--text-primary); }
 .wishlist-cta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .wishlist-cta-label { font-size: var(--fs-md); }
 
@@ -1719,8 +1751,9 @@ a:hover { color: var(--accent-hover); }
       }
 
 @media (max-width: 480px) {
-  html { font-size: 15px; }
-
+  /* The 15px root that used to sit here made phones render LARGER than desktop,
+     which was only ever a workaround for the 14px desktop pin. With the root
+     unset both follow the reader's own setting, and a phone needs no override. */
   .tab-btn { padding: 8px 7px; font-size: var(--fs-sm); }
   .app-header .logo { font-size: var(--fs-lg); }
 
@@ -2742,7 +2775,13 @@ kbd {
    perfectly with content sections below. */
 .model-card {
   display: grid;
-  grid-template-columns: 260px 1fr auto;
+  /* 320px, not the old 260px: at 260 "Meta Llama 3.1 8B Instruct" lost its last
+     two words to an ellipsis, and the route strip beside it is capped anyway so
+     the space was going spare. Fixed rather than max-content because each card
+     is its own grid — sizing to content makes every card pick its own width and
+     the strips stop lining up as a column. Names longer than this still
+     ellipsize and keep their full text in the tooltip. */
+  grid-template-columns: 336px 1fr auto;
 }
 .model-card-title {
   display: grid;

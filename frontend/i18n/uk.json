@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} з {want} хостів",
   "wishlist.meta_size": "Розмір: {size}",
   "wishlist.score_tip": "Пріоритетний бал: {score} зі 100",
+  "wishlist.shared_prefix": "Усі вони:",
   "wishlist.status.aspirational": "Завантажується",
   "wishlist.status.blocked": "Потребує перевірки",
   "wishlist.status.candidate": "Можна додати",

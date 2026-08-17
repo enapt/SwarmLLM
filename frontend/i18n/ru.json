@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} из {want} хостов",
   "wishlist.meta_size": "Размер: {size}",
   "wishlist.score_tip": "Приоритет: {score} из 100",
+  "wishlist.shared_prefix": "Все они:",
   "wishlist.status.aspirational": "Скачивается",
   "wishlist.status.blocked": "Требует проверки",
   "wishlist.status.candidate": "Можно добавить",

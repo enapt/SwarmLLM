@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "호스트 {want}명 중 {have}명",
   "wishlist.meta_size": "크기: {size}",
   "wishlist.score_tip": "우선순위 점수: 100점 중 {score}점",
+  "wishlist.shared_prefix": "이들은 모두:",
   "wishlist.status.aspirational": "다운로드 중",
   "wishlist.status.blocked": "검토 필요",
   "wishlist.status.candidate": "추가 가능",

@@ -1290,6 +1290,7 @@
   "wishlist.meta_replicas_partial": "{have} av {want} värdar",
   "wishlist.meta_size": "Storlek: {size}",
   "wishlist.score_tip": "Prioritetspoäng: {score} av 100",
+  "wishlist.shared_prefix": "Alla dessa är:",
   "wishlist.status.aspirational": "Laddas ner",
   "wishlist.status.blocked": "Behöver granskas",
   "wishlist.status.candidate": "Kan läggas till",
