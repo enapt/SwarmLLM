@@ -202,20 +202,17 @@ pub async fn leaderboard(
     tracing::debug!(peer_count, limit, "DIAG: leaderboard query");
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
-    // Add self (always included)
+    // Add self (always included).
+    //
+    // This entry is built here rather than in the peer loop above, which is why
+    // dropping `credits`/`tier` from that loop was not enough on its own — the
+    // node's OWN row kept publishing both. Caught by calling the endpoint, not
+    // by reading the change.
     let self_id = state.shared_state.identity.node_id();
-    let (self_balance, self_tier) = {
-        let self_credit = state.shared_state.credits.credit_balance.read().await;
-        let balance = self_credit.balance;
-        let tier = crate::credit::priority::PriorityCalculator::tier_name(balance);
-        (balance, tier)
-    };
     let self_name = display_name(self_id, &state.shared_state.nickname_registry);
     entries.push(serde_json::json!({
         "node_id": format!("{self_id}"),
         "display_name": self_name,
-        "credits": self_balance,
-        "tier": self_tier,
         "trust_score": 1.0,
         "eligible": true,
         "is_self": true,
@@ -231,29 +228,26 @@ pub async fn leaderboard(
         }
 
         let peer_name = display_name(&peer.node_id, &state.shared_state.nickname_registry);
-        // Only a gossiped balance is real. This used to fall back to
-        // `trust_score * 5000.0` when no balance had been received — which,
-        // at the DEFAULT_TRUST of 0.5, rendered a confident "+2500 credits"
-        // for every peer we knew nothing about. The 2026-07-21 bug report
-        // chased that number as a ledger inconsistency: one node showed
-        // itself at -90 while its peer displayed +2500 for it. Neither
-        // figure was wrong about the ledger; the +2500 was never a ledger
-        // figure at all. A number the user cannot distinguish from a real
-        // balance must not be invented.
-        let balance = state
-            .shared_state
-            .credits
-            .peer_credit_balances
-            .get(&peer.node_id)
-            .map(|v| *v);
+        // No balance is read here any more — the leaderboard neither ranks by
+        // credits nor publishes them (`docs/CREDITS_DESIGN.md`).
+        //
+        // Worth keeping the reason the old lookup was written the way it was,
+        // for whoever restores it: only a GOSSIPED balance was ever real. It
+        // once fell back to `trust_score * 5000.0` when none had been received,
+        // which at the DEFAULT_TRUST of 0.5 rendered a confident "+2500
+        // credits" for every peer we knew nothing about. The 2026-07-21 bug
+        // report chased that number as a ledger inconsistency: one node showed
+        // itself at -90 while its peer displayed +2500 for it. Neither figure
+        // was wrong about the ledger; the +2500 was never a ledger figure at
+        // all. A number the user cannot distinguish from a real balance must
+        // not be invented.
         entries.push(serde_json::json!({
             "node_id": format!("{}", peer.node_id),
             "display_name": peer_name,
-            // null = "we have not received this peer's balance gossip yet".
-            // The dashboard renders it as an em dash rather than a number.
-            "credits": balance,
-            "balance_known": balance.is_some(),
-            "tier": balance.map(crate::credit::priority::PriorityCalculator::tier_name),
+            // `credits` and `tier` were published here until 2026-08-17.
+            // They are gone rather than merely hidden in the UI: the figure is
+            // self-minted, so publishing it invites anyone reading the API to
+            // treat it as a contribution measure (`docs/CREDITS_DESIGN.md`).
             "trust_score": peer.trust_score,
             "eligible": true,
             "is_self": false,
@@ -261,17 +255,27 @@ pub async fn leaderboard(
         }));
     }
 
-    // Sort by credits descending. Peers with no known balance sort last
-    // rather than being treated as zero — an unknown balance is not a claim
-    // that the peer has nothing.
-    entries.sort_by(
-        |a, b| match (a["credits"].as_i64(), b["credits"].as_i64()) {
-            (Some(ca), Some(cb)) => cb.cmp(&ca),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        },
-    );
+    // Sort by shards hosted, descending.
+    //
+    // This ranked by credits until 2026-08-17. That put a 1-2-3 podium on a
+    // number every node mints for itself and reconciles with nobody — a node
+    // that had only ever served ITSELF outranked one that had served the swarm
+    // (`docs/CREDITS_DESIGN.md` § 1). Shards hosted is not a perfect measure of
+    // contribution either, but it corresponds to something real: a node cannot
+    // claim a shard it does not hold and then serve requests for it.
+    //
+    // Ties break on trust score, so an established peer sorts above a brand new
+    // one holding the same count instead of the order being arbitrary.
+    entries.sort_by(|a, b| {
+        let shards = |e: &serde_json::Value| e["capability"]["shards_hosted"].as_u64().unwrap_or(0);
+        shards(b).cmp(&shards(a)).then_with(|| {
+            b["trust_score"]
+                .as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&a["trust_score"].as_f64().unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
     entries.truncate(limit);
 
     // Add rank

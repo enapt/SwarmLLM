@@ -2024,3 +2024,48 @@ fn every_backend_hint_key_has_a_translation() {
          never emits: {orphans:?}"
     );
 }
+
+/// While the credit economy is dormant, nothing may publish or act on a balance.
+///
+/// Three separate places did, and fixing two of them was not enough: the
+/// leaderboard's *self* entry is built by different code from its peer entries,
+/// so removing the fields from the peer loop left the node still publishing its
+/// own. That was caught by calling the endpoint, not by reading the change —
+/// this test is what makes the next one cheap to catch.
+///
+/// See `docs/CREDITS_DESIGN.md` for what has to be true before any of this
+/// comes back.
+#[test]
+fn credits_stay_dormant() {
+    let root = repo_root();
+
+    // 1. No balance floor. A remote requester below it was refused outright.
+    let ledger = std::fs::read_to_string(root.join("src/credit/ledger.rs")).expect("read ledger");
+    assert!(
+        ledger.contains("pub const MIN_BALANCE_FOR_INFERENCE: i64 = 0;"),
+        "MIN_BALANCE_FOR_INFERENCE is non-zero — a self-minted balance is \
+         refusing somebody inference (docs/CREDITS_DESIGN.md § 4)"
+    );
+
+    // 2. The tier is the same for everyone, so a balance buys no throughput.
+    let priority =
+        std::fs::read_to_string(root.join("src/credit/priority.rs")).expect("read priority");
+    assert!(
+        priority.contains("pub fn calculate_tier(_balance: i64, _network_percentile: f32)"),
+        "calculate_tier reads its arguments again — a balance is buying \
+         priority (docs/CREDITS_DESIGN.md § 4)"
+    );
+
+    // 3. The leaderboard neither ranks by credits nor publishes them. Checked
+    //    on the whole file so a NEW entry-construction path is caught too —
+    //    that is precisely how this one escaped the first fix.
+    let identity =
+        std::fs::read_to_string(root.join("src/api/identity.rs")).expect("read api/identity");
+    for field in ["\"credits\":", "\"tier\":", "\"balance_known\":"] {
+        assert!(
+            !identity.contains(field),
+            "src/api/identity.rs publishes {field} — the leaderboard must not \
+             expose a self-minted balance (docs/CREDITS_DESIGN.md § 4)"
+        );
+    }
+}

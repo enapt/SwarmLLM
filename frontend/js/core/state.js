@@ -12,8 +12,7 @@ window.App = {
     wsWasConnected: false,
     wsBannerTimer: null,
     pollTimers: [],
-    creditHistory: [],
-    statHistory: { peers: [], credits: [], requests: [], served: [], forwards: [], active: [] },
+    statHistory: { peers: [], requests: [], served: [], forwards: [], active: [] },
     _expandedModels: {},
     activeAcquisitions: {},
     _swarmModelSort: 'problems', // initialized below after App is defined, using App.MODEL_SORT_KEY

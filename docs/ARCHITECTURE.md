@@ -864,6 +864,17 @@ LoRA (Low-Rank Adaptation) adapters are supported via `src/model/lora.rs`:
 
 ## Credit System
 
+> **DORMANT as of 2026-08-17 — credits gate nothing.** Everything below still
+> runs and is still recorded, but `MIN_BALANCE_FOR_INFERENCE = 0` and
+> `calculate_tier` returns a constant, so no balance affects who gets served,
+> how fast, or what the dashboard shows; the leaderboard neither ranks by
+> credits nor publishes them. The reason is that credit has never moved between
+> nodes *as payment for work* — each node mints its own figure, so the books do
+> not reconcile and acting on them meant rationing the product by a number
+> nobody can stand behind. Read **`docs/CREDITS_DESIGN.md`** for the full
+> account, the bilateral-settlement design that would fix it, and the exit
+> criteria that must hold before any of this is switched back on.
+
 ```
 Earning (default rates, configurable per pool):
   +10 credits  per token served (balanced with consume side)

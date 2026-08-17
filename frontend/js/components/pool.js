@@ -1,6 +1,6 @@
 // ── Device Pool component ──
 // Manages the "My Devices" tab: create/join pool, invite codes, member list,
-// device nicknames, online status, per-device stats, credit split, leave.
+// device nicknames, online status, per-device stats, leave.
 
 (function () {
   'use strict';
@@ -212,7 +212,6 @@
       // Stats
       var el = function (id) { return document.getElementById(id); };
       if (el('pool-member-count')) el('pool-member-count').textContent = members.length;
-      if (el('pool-total-credits')) el('pool-total-credits').textContent = (data.total_lifetime_credits || 0).toLocaleString();
 
       // Aggregate VRAM
       var totalVram = 0;
@@ -260,7 +259,6 @@
 
         var idEl = row.querySelector('.pool-member-id');
         var joinedEl = row.querySelector('.pool-member-joined');
-        var creditsEl = row.querySelector('.pool-member-credits');
         var removeBtn = row.querySelector('.pool-member-remove-btn');
         var statusEl = row.querySelector('.pool-member-status');
         var statsEl = row.querySelector('.pool-member-stats-detail');
@@ -302,9 +300,6 @@
         if (joinedEl) joinedEl.textContent = m.joined_at
           ? I18n.t('pool.joined_prefix') + ' ' + m.joined_at.substring(0, 10)
           : '?';
-
-        // Credits
-        if (creditsEl) creditsEl.textContent = (m.credits_contributed || 0).toLocaleString();
 
         // Per-device stats (if available)
         if (statsEl && m.stats) {

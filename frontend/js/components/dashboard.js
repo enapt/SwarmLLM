@@ -813,58 +813,12 @@
           }
         }
       }
-      if (data.credits !== undefined) {
-        var bal, earned, spent;
-        if (typeof data.credits === 'object') {
-          bal = data.credits.balance;
-          earned = data.credits.lifetime_earned || 0;
-          spent = data.credits.lifetime_spent || 0;
-        } else {
-          bal = data.credits;
-          earned = 0;
-          spent = 0;
-        }
-        _trackStat('credits', bal, 'stat-credits');
-        var balEl = document.getElementById('credit-balance');
-        if (balEl) balEl.textContent = bal.toLocaleString();
-        // A negative balance needs its own explanation. Every other credit
-        // string talks about EARNING, so a new user — who goes negative on
-        // their first question, having consumed inference before sharing
-        // anything — sees a minus number next to BRONZE with nothing saying
-        // it is normal or that nothing is restricted. It is not: Bronze is
-        // the zero-or-negative tier, access is never gated, and the balance
-        // decays back toward zero on its own.
-        var headerCredits = document.querySelector('.header-credits');
-        if (headerCredits) {
-          var tip = I18n.t('dashboard.credits_header_tip', {
-            earned: earned.toLocaleString(),
-            spent: spent.toLocaleString()
-          });
-          if (bal < 0) tip += '\n\n' + I18n.t('dashboard.credits_negative_tip');
-          headerCredits.title = tip;
-        }
-        var creditCard = document.getElementById('stat-credits');
-        creditCard = creditCard && creditCard.closest('.stat-card');
-        if (creditCard) {
-          creditCard.title = bal < 0
-            ? I18n.t('dashboard.credits_negative_tip')
-            : I18n.t('dashboard.stat_credits_tip');
-        }
-        var prevBal = S.creditHistory.length > 0 ? S.creditHistory[S.creditHistory.length - 1]._bal : bal;
-        var delta = bal - prevBal;
-        var deltaEl = document.getElementById('credit-delta');
-        if (deltaEl) {
-          if (delta !== 0) {
-            deltaEl.textContent = (delta > 0 ? '+' : '') + delta.toLocaleString();
-            deltaEl.className = 'header-credits-delta mono ' + (delta > 0 ? 'text-green' : 'text-red');
-            deltaEl.classList.remove('flash'); void deltaEl.offsetWidth; deltaEl.classList.add('flash');
-          } else {
-            deltaEl.textContent = '';
-          }
-        }
-        S.creditHistory.push({ _bal: bal, v: delta });
-        if (S.creditHistory.length > 30) S.creditHistory.shift();
-      }
+      // The credit balance is deliberately not rendered. Every element this
+      // block used to write to is gone from the dashboard: the figure is
+      // self-minted and reconciled with nobody, so presenting it as earnings
+      // was a claim the product could not stand behind
+      // (`docs/CREDITS_DESIGN.md`). The daemon still reports `data.credits`
+      // and still keeps the books; nothing shows them to the user.
       if (data.requests_served !== undefined) _trackStat('served', data.requests_served, 'stat-served');
       if (data.requests_made !== undefined) _trackStat('requests', data.requests_made, 'stat-requests-made');
       if (data.forwards_served !== undefined) _trackStat('forwards', data.forwards_served, 'stat-forwards');

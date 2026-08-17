@@ -5870,8 +5870,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   white-space: nowrap;
 }
 .lb-place-rig { font-size: 0.78rem; margin-top: 2px; }
-.lb-place-credits { margin-top: 6px; font-size: 1.05rem; }
-.lb-place-tier { margin-top: 6px; }
 
 .lb-filters {
   display: flex;

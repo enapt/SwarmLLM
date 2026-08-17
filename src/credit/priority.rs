@@ -1,31 +1,35 @@
 use crate::types::PriorityTier;
 
-/// Calculate the priority tier for a node based on its balance and network percentile.
+/// The tier every request gets while the credit economy is dormant.
 ///
-/// Tier thresholds (from the spec):
-/// - Platinum: >= 90th percentile
-/// - Gold: >= 70th percentile
-/// - Silver: positive balance
-/// - Bronze: zero or negative balance
-pub fn calculate_tier(balance: i64, network_percentile: f32) -> PriorityTier {
-    // Balance must be positive for Gold/Platinum — a negative-balance node at the
-    // 90th percentile (when most peers have worse balances) should not get Platinum.
-    let tier = if balance > 0 && network_percentile >= 0.90 {
-        PriorityTier::Platinum
-    } else if balance > 0 && network_percentile >= 0.70 {
-        PriorityTier::Gold
-    } else if balance > 0 {
-        PriorityTier::Silver
-    } else {
-        PriorityTier::Bronze
-    };
-    tracing::debug!(
-        balance,
-        network_percentile,
-        tier = ?tier,
-        "DIAG: calculate_tier"
-    );
-    tier
+/// Silver rather than Gold deliberately: it keeps a per-requester concurrency
+/// cap (½ of `max_concurrent_requests`) so a single peer still cannot take the
+/// whole queue, which is the one thing the tier system was genuinely providing.
+/// Gold or Platinum would remove that isolation as a side effect of removing
+/// the economy.
+pub const DORMANT_TIER: PriorityTier = PriorityTier::Silver;
+
+/// The priority tier for a node. **Currently the same for everyone.**
+///
+/// This used to read the balance and a gossiped network percentile:
+/// Platinum ≥ 90th percentile, Gold ≥ 70th, Silver for any positive balance,
+/// Bronze otherwise. Combined with [`max_concurrent_for_tier`] that gave a
+/// high-balance node up to 8× the concurrency of a low-balance one.
+///
+/// It is flat because the balance driving it is **self-minted**: no credit has
+/// ever moved between two nodes, and nothing stopped a node inflating its own
+/// figure by serving itself (`docs/CREDITS_DESIGN.md` § 1). So the tier was not
+/// measuring contribution, it was measuring how much a node had done *for
+/// itself* — and then handing out real throughput for it.
+///
+/// The arguments are kept rather than deleted. They are what the real
+/// implementation consults, the call sites already compute them correctly, and
+/// removing them would mean reconstructing that plumbing later; the
+/// `_`-prefixes make the current behaviour impossible to misread as a bug.
+/// Restoring the mapping means restoring this body — and satisfying
+/// `docs/CREDITS_DESIGN.md` § 6 first.
+pub fn calculate_tier(_balance: i64, _network_percentile: f32) -> PriorityTier {
+    DORMANT_TIER
 }
 
 /// Utility for tier name resolution (used by admin API).
@@ -61,28 +65,52 @@ pub fn max_concurrent_for_tier(tier: PriorityTier, base_max: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// While the economy is dormant, a balance must buy nothing.
+    ///
+    /// These inputs are the ones that used to span the whole range — the top of
+    /// Platinum down to a deeply negative Bronze. All four now land on the same
+    /// tier, which is the property that matters: a node that has minted itself
+    /// a large number gets exactly the service a node with none does.
     #[test]
-    fn tier_calculation_platinum() {
-        assert_eq!(calculate_tier(10000, 0.95), PriorityTier::Platinum);
-        assert_eq!(calculate_tier(100, 0.90), PriorityTier::Platinum);
+    fn a_self_minted_balance_buys_no_priority() {
+        let across_the_old_range = [
+            (10_000_i64, 0.95_f32), // was Platinum
+            (5_000, 0.75),          // was Gold
+            (1, 0.5),               // was Silver
+            (0, 0.5),               // was Bronze
+            (-100, 0.3),            // was Bronze
+            (-10_000, 0.0),         // was Bronze
+        ];
+        for (balance, percentile) in across_the_old_range {
+            assert_eq!(
+                calculate_tier(balance, percentile),
+                DORMANT_TIER,
+                "balance {balance} / percentile {percentile} changed the tier — \
+                 credits are dormant and must not affect service \
+                 (docs/CREDITS_DESIGN.md)"
+            );
+        }
     }
 
+    /// The dormant tier must still cap one requester below the whole queue.
+    ///
+    /// Flattening the tiers removed the credit advantage; it must not also
+    /// remove the per-requester isolation, which is the one thing the tier
+    /// system was really providing. Gold or Platinum would have done exactly
+    /// that as a side effect.
     #[test]
-    fn tier_calculation_gold() {
-        assert_eq!(calculate_tier(5000, 0.75), PriorityTier::Gold);
-        assert_eq!(calculate_tier(100, 0.70), PriorityTier::Gold);
-    }
-
-    #[test]
-    fn tier_calculation_silver() {
-        assert_eq!(calculate_tier(1, 0.5), PriorityTier::Silver);
-        assert_eq!(calculate_tier(100, 0.3), PriorityTier::Silver);
-    }
-
-    #[test]
-    fn tier_calculation_bronze() {
-        assert_eq!(calculate_tier(0, 0.5), PriorityTier::Bronze);
-        assert_eq!(calculate_tier(-100, 0.3), PriorityTier::Bronze);
+    fn the_dormant_tier_still_isolates_one_requester() {
+        let base = 8;
+        let cap = max_concurrent_for_tier(DORMANT_TIER, base);
+        assert!(
+            cap < base,
+            "the dormant tier ({DORMANT_TIER:?}) lets one requester take the \
+             entire queue ({cap} of {base}) — pick a tier that still caps"
+        );
+        assert!(
+            cap >= 1,
+            "the cap must leave a requester able to make progress"
+        );
     }
 
     #[test]

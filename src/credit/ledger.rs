@@ -23,9 +23,23 @@ pub const RATE_INFERENCE_CONSUME: i64 = 10; // per token consumed — balanced w
 
 /// Minimum credit balance required to submit inference requests.
 /// Nodes below this floor have their requests rejected (not just deprioritized).
-/// Set to 0 to disable enforcement (permissive mode for small networks).
-/// Nodes can earn credits by hosting shards, serving inference, or seeding data.
-pub const MIN_BALANCE_FOR_INFERENCE: i64 = -1000;
+/// **0 disables enforcement**, which is what it is set to.
+///
+/// It was `-1000`, and that floor refused remote requesters outright with
+/// `InsufficientCredits` → HTTP 402. It is off because the balance it consulted
+/// is **self-minted and reconciled with nobody**: no credit has ever moved
+/// between two nodes, so a node's balance measures its own activity rather than
+/// value received from anyone (`docs/CREDITS_DESIGN.md` § 1). Refusing somebody
+/// service over a number like that is not a small inaccuracy — it is denying
+/// them the product on the strength of a figure we cannot stand behind, and a
+/// node driven negative by a bug or a burst of failed requests stayed refused
+/// with no recovery path.
+///
+/// Do not restore a non-zero floor until the exit criteria in
+/// `docs/CREDITS_DESIGN.md` § 6 hold — in particular, until a credit provably
+/// moves between two machines and a node cannot inflate its balance by serving
+/// itself.
+pub const MIN_BALANCE_FOR_INFERENCE: i64 = 0;
 
 /// Database tree name for credit data.
 pub const TREE_CREDITS: &str = "credits";
@@ -1279,18 +1293,26 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(Vec::new())),
         );
 
-        // No peers: default percentile
-        let tier = ledger.calculate_tier().await;
-        assert_eq!(tier, PriorityTier::Silver); // balance > 0, percentile 0.5
+        // The percentile machinery still runs — it is what the real
+        // implementation will consult — but while credits are dormant it must
+        // not change the tier. Previously this node went Silver → Platinum on
+        // the strength of out-earning ten peers, using a balance it had minted
+        // for itself (docs/CREDITS_DESIGN.md).
+        let no_peers = ledger.calculate_tier().await;
+        assert_eq!(no_peers, crate::credit::priority::DORMANT_TIER);
 
-        // Add peer balances: our 500 should be above most
+        // Our 500 is above all ten, which is percentile 1.0 — the input that
+        // used to buy the top tier.
         ledger.peer_balances().store(Arc::new(vec![
             100, 200, 300, 150, 250, 50, 400, 350, 180, 220,
         ]));
 
-        let tier = ledger.calculate_tier().await;
-        // 500 > all 10 peers, percentile = 1.0, so Platinum
-        assert_eq!(tier, PriorityTier::Platinum);
+        let out_earning_everyone = ledger.calculate_tier().await;
+        assert_eq!(
+            out_earning_everyone, no_peers,
+            "out-earning every peer changed this node's tier — a self-minted \
+             balance must buy nothing while credits are dormant"
+        );
     }
 
     #[tokio::test]

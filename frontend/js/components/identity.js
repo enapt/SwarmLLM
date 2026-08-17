@@ -59,7 +59,7 @@
       try {
         var resp = await App.authFetch('/api/identity/leaderboard?limit=50');
         if (!resp.ok) {
-          tbody.innerHTML = '<tr><td colspan="8" class="text-muted" style="text-align:center">' + U.escapeHtml(I18n.t('leaderboard.load_failed')) + '</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="6" class="text-muted" style="text-align:center">' + U.escapeHtml(I18n.t('leaderboard.load_failed')) + '</td></tr>';
           return;
         }
         var data = await resp.json();
@@ -67,7 +67,7 @@
         App.identity._populateLeaderboardFilters();
         App.identity.renderLeaderboard();
       } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-muted" style="text-align:center">' + U.escapeHtml(I18n.t('leaderboard.load_error', { error: e.message })) + '</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-muted" style="text-align:center">' + U.escapeHtml(I18n.t('leaderboard.load_error', { error: e.message })) + '</td></tr>';
       }
     },
 
@@ -164,12 +164,6 @@
             el.querySelector('.lb-place-name').textContent = pe.display_name;
             el.querySelector('.lb-place-name').title = pe.node_id;
             el.querySelector('.lb-place-rig').textContent = App.identity._rigLabel(pe.capability);
-            el.querySelector('.lb-place-credits').textContent =
-              (pe.credits === null || pe.credits === undefined) ? '\u2014' : pe.credits;
-            var pTier = el.querySelector('.lb-place-tier .tier-badge');
-            var pTierName = pe.tier || I18n.t('leaderboard.tier_default');
-            pTier.className = 'tier-badge ' + String(pTierName).toLowerCase().replace(/[^a-z]/g, '');
-            pTier.textContent = pTierName;
             podium.appendChild(el);
           }
         } else {
@@ -178,7 +172,7 @@
       }
 
       if (entries.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-muted" style="text-align:center;padding:24px">' +
+        tbody.innerHTML = '<tr><td colspan="6" class="text-muted" style="text-align:center;padding:24px">' +
           U.escapeHtml(I18n.t(App.identity._lbEntries.length ? 'leaderboard.no_match' : 'leaderboard.empty')) + '</td></tr>';
         return;
       }
@@ -228,22 +222,8 @@
         row.querySelector('.lb-shards').textContent =
           (c.shards_hosted === undefined || c.shards_hosted === null) ? '\u2014' : c.shards_hosted;
 
-        // `credits: null` means this peer's balance gossip hasn't arrived.
-        // Show an em dash — NOT 0, which would read as a real balance.
-        var creditsEl = row.querySelector('.lb-credits');
-        var tierEl = row.querySelector('.lb-tier');
-        if (e.credits === null || e.credits === undefined) {
-          creditsEl.textContent = '\u2014';
-          creditsEl.title = I18n.t('leaderboard.balance_unknown');
-          tierEl.className = 'tier-badge';
-          tierEl.textContent = '\u2014';
-          tierEl.title = I18n.t('leaderboard.balance_unknown');
-        } else {
-          creditsEl.textContent = e.credits;
-          var tierClass = (e.tier || 'silver').toLowerCase().replace(/[^a-z]/g, '');
-          tierEl.className = 'tier-badge ' + tierClass;
-          tierEl.textContent = e.tier || I18n.t('leaderboard.tier_default');
-        }
+        // Credits and tier are no longer shown or sent — the table ranks by
+        // shards hosted (`docs/CREDITS_DESIGN.md`).
         tbody.appendChild(row);
       }
     }

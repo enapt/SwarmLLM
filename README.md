@@ -129,7 +129,7 @@ Running a 70B-class model on your own normally requires a $10K+ GPU. With SwarmL
 
 **Who it's for.** Anyone who wants to chat with AI without paying subscription fees or sharing data with a cloud service. Also: developers who want local/private AI, teams who want to pool GPUs, researchers who need full-control model access, and anyone who wants to contribute spare compute to a public network.
 
-**Key properties.** End-to-end encrypted by default (X25519 + ChaCha20-Poly1305 with forward secrecy); no central server; zero-config peer discovery (mDNS, peer cache, invite codes, PEX, Kademlia DHT); single Rust binary (~33–50 MB); BitTorrent-inspired credit incentives; OpenAI + Anthropic + MCP compatible; shard-only — a node never needs the full model file. See [Capabilities](#capabilities) for the full list.
+**Key properties.** End-to-end encrypted by default (X25519 + ChaCha20-Poly1305 with forward secrecy); no central server; zero-config peer discovery (mDNS, peer cache, invite codes, PEX, Kademlia DHT); single Rust binary (~33–50 MB); OpenAI + Anthropic + MCP compatible; shard-only — a node never needs the full model file. See [Capabilities](#capabilities) for the full list.
 
 ## Networking & Privacy
 
@@ -167,7 +167,7 @@ Restricts your *outbound* inference to your device pool — your prompts never l
 | **Pool + LAN** | `private_mode_allow_lan = true` *(default in private mode)* | Pool + mDNS-discovered LAN peers |
 | **Offline** | `offline_mode = true` | Air-gapped: no internet, mDNS only |
 
-Private mode is one-way: your data stays private, but your nodes still serve the swarm (processing inference, hosting shards, earning credits). **Shard pinning** lets pool owners assign specific models to specific devices; auto-manage downloads pinned shards with highest priority and never prunes them. The **Coverage Dashboard** shows per-model availability and estimated download sizes to fill gaps.
+Private mode is one-way: your data stays private, but your nodes still serve the swarm (processing inference, hosting shards). **Shard pinning** lets pool owners assign specific models to specific devices; auto-manage downloads pinned shards with highest priority and never prunes them. The **Coverage Dashboard** shows per-model availability and estimated download sizes to fill gaps.
 
 ## Capabilities
 
@@ -202,8 +202,8 @@ Private mode is one-way: your data stays private, but your nodes still serve the
 
 ### Economy & operations
 
-- **Credits** — earn by serving inference, forwarding activations, hosting shards, seeding data, relaying. Priority tiers (Platinum / Gold / Silver / Bronze) enforced per-request.
-- **Pools** — cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitations.
+- **Credits** — internal accounting only, and **dormant**: no balance affects the service any node receives. See [`docs/CREDITS_DESIGN.md`](docs/CREDITS_DESIGN.md).
+- **Pools** — cryptographic nicknames, network leaderboard, multi-device grouping with dual-signature invitations.
 - **Auto-shard management** — VRAM-aware acquisition from HuggingFace and peers with popularity/rarity scoring; smart pruning auto-removes over-replicated shards.
 - **Web UI** — chat, model browser, shard visualization, first-run wizard, network map, leaderboard, compare page; mobile-responsive; 21 languages; light/dark/system theme.
 - **Fault tolerance** — JoinSet-based supervisor with restart-on-crash for all 12 subsystems; hot-standby failover; shard replication; atomic shard writes.
@@ -300,7 +300,7 @@ A single Rust binary running three simultaneous functions on the same port (8800
 
 | Component | Responsibility | Interface |
 |-----------|---------------|-----------|
-| P2P node | Peer discovery, shard hosting, distributed inference, credits | libp2p / TCP+QUIC |
+| P2P node | Peer discovery, shard hosting, distributed inference | libp2p / TCP+QUIC |
 | HTTP server | OpenAI + Anthropic + MCP + admin endpoints | `localhost:8800/v1/*` |
 | Web dashboard | Setup wizard, chat, models, network map, settings | `localhost:8800/admin` |
 
@@ -323,7 +323,7 @@ AcquisitionManager   UpdateChecker       HfWatcher
 
 Cargo workspace with 3 crates (`swarmllm`, `swarmllm-types`, `swarmllm-frontend`).
 
-### Node tiers & credit priority
+### Node tiers
 
 | Tier | Requirements | Role |
 |------|-------------|------|
@@ -331,12 +331,13 @@ Cargo workspace with 3 crates (`swarmllm`, `swarmllm-types`, `swarmllm-frontend`
 | Standard node | Partial VRAM/RAM, moderate bandwidth | Holds layer shards, joins pipelines |
 | Light node | Minimal resources | Primarily consumer, contributes bandwidth |
 
-Credits determine request priority. Everyone is served — Bronze just waits longer.
-
-- **Platinum** (top 10%) — near-instant
-- **Gold** (top 30%) — 1–3 second queue
-- **Silver** (positive balance) — 5–15 second queue
-- **Bronze** (zero/negative) — 30+ second queue, never locked out
+**Credits are dormant and gate nothing.** The node keeps internal accounting,
+but no balance affects the service anyone receives, and the dashboard does not
+present one. The reason is that credit has never actually moved between two
+nodes as payment for work — each node mints its own figure — so acting on it
+would mean rationing the product by a number nobody can stand behind. The full
+account of what exists, why it is off, and the design that would earn it a place
+is in [`docs/CREDITS_DESIGN.md`](docs/CREDITS_DESIGN.md).
 
 </details>
 
@@ -460,7 +461,7 @@ Full list: [Configuration Reference](https://enapt.github.io/SwarmLLM/configurat
 | GET | `/api/admin/stats` | Node statistics + hardware info |
 | GET | `/api/admin/models` | Model list with shard status |
 | GET | `/api/admin/peers` | Connected peers with latency / trust |
-| GET | `/api/admin/credits` | Credit balance and tier info |
+| GET | `/api/admin/credits` | Internal credit accounting (dormant — gates nothing) |
 | GET | `/api/admin/diagnostics` | Plain-text health report for a shell or a bug report |
 | GET | `/api/admin/performance` | Routes, per-segment timings, per-peer performance, hourly trend (JSON) |
 | GET | `/api/admin/ws` | WebSocket for live updates |
@@ -493,7 +494,7 @@ The Windows installer bundles GPU and CPU binaries plus a launcher that picks th
 | **Scale** | LAN + WAN + Tailscale (zero config) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
 | **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | None — peers can see prompts | None | Minimal (blockchain-level) |
 | **Privacy** | Encrypted by default + Private Mode + encrypted pipeline | Unencrypted ([per Petals wiki](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety)) | None between nodes | Subnet-dependent |
-| **Incentives** | Credit tiers (no token, no blockchain) | Name on monitor page | None | TAO token (real money) |
+| **Incentives** | None active (credits dormant; no token, no blockchain) | Name on monitor page | None | TAO token (real money) |
 | **Parallelism** | Pipeline + tensor (auto-detected LAN) | Pipeline | Tensor + pipeline | Subnet routing |
 | **Architectures** | **12** (DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5 SSM) | ~5 (Llama, Mixtral, Falcon, BLOOM) | ~5 (Llama, Mistral, Qwen, DeepSeek, LLaVA) | Any (subnet-defined) |
 | **Shard-only** | **Yes** (no full model download) | No (loads full blocks) | No | N/A |

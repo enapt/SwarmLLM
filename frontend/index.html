@@ -92,7 +92,7 @@
         <!-- Contribution — segmented control (replaces 3-stop slider) -->
         <div class="form-group mt-2">
           <label class="field-label" data-i18n="setup.resource_label">How much do you want to contribute?</label>
-          <p class="text-muted text-sm setup-resource-desc" data-i18n="setup.resource_desc">Let others use your compute to help run AI. You earn credits in return.</p>
+          <p class="text-muted text-sm setup-resource-desc" data-i18n="setup.resource_desc">Let others use your computer to help run AI models across the network.</p>
           <div class="segmented setup-contribution-segmented" data-bound-select="setup-contribution" role="radiogroup" data-i18n-aria-label="setup.contribution_aria" aria-label="Resource contribution level">
             <button type="button" class="segmented-btn" data-value="minimal" role="radio" aria-checked="false">
               <span class="segmented-title" data-i18n="setup.contrib_minimal">Minimal</span>
@@ -141,7 +141,7 @@
             <input type="checkbox" id="setup-auto-manage" checked>
             <span class="setup-toggle-content">
               <span class="setup-toggle-title" data-i18n="setup.auto_download_label">Auto-host model shards</span>
-              <span class="setup-toggle-desc" data-i18n="setup.auto_download_desc">Automatically host shards of popular models the network needs — under-replicated ones first, scoped to your VRAM and disk budget. Uses disk space and bandwidth. You can set limits in Settings.</span>
+              <span class="setup-toggle-desc" data-i18n="setup.auto_download_desc">SwarmLLM will automatically store and share pieces of popular AI models so your neighbours can use them. Uses some disk space and bandwidth — you can set limits in Settings.</span>
             </span>
           </label>
         </div>
@@ -205,7 +205,7 @@
             </div>
             <div class="setup-advanced-divider">
               <label class="field-label" for="setup-pool-code" data-i18n="setup.link_device">Link your other devices</label>
-              <p class="text-muted text-sm setup-section-desc" data-i18n="setup.link_device_desc">Paste the invite code from your main device to link this machine. Credits earned here will be combined with your main device.</p>
+              <p class="text-muted text-sm setup-section-desc" data-i18n="setup.link_device_desc">If you already have SwarmLLM running on another machine, enter the invite code to link this device to it.</p>
               <div class="flex gap-1">
                 <textarea id="setup-pool-code" rows="2" placeholder="swarmpool://..." class="flex-1 pool-code-input mono"></textarea>
                 <button class="btn btn-sm" id="setup-pool-join" data-i18n="pool.join">Link</button>
@@ -861,12 +861,6 @@
       <div class="node-info">
         <span class="pulse-dot"></span>
         <span class="mono" id="node-id" data-i18n-title="nav.node_id_title" title="Node ID">...</span>
-        <span class="tier-badge silver" id="tier-badge">...</span>
-        <span class="header-credits" data-i18n-title="dashboard.credits_title" title="Credits">
-          <span class="header-credits-icon" aria-hidden="true">◆</span>
-          <span class="mono" id="credit-balance">0</span>
-          <span class="header-credits-delta mono" id="credit-delta"></span>
-        </span>
       </div>
       <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" data-i18n-title="nav.shutdown" title="Stop SwarmLLM" data-i18n-aria-label="nav.shutdown" aria-label="Stop SwarmLLM">&#9211;</button>
     </div>
@@ -968,7 +962,7 @@
         <!-- Users can still use the full dashboard; inference charges go to the master -->
         <div class="slave-top-banner" id="slave-top-banner">
           <span class="slave-badge" data-i18n="pool.slave_badge">LINKED DEVICE</span>
-          <span class="text-muted" id="slave-banner-text" data-i18n="pool.slave_banner_text">Credits charged to your main device</span>
+          <span class="text-muted" id="slave-banner-text" data-i18n="pool.slave_banner_text">Linked to your main device</span>
           <button class="btn btn-sm btn-ghost" onclick="App.ui.switchTab('devices')" style="padding:2px 8px;font-size:0.78rem" data-i18n="pool.slave_manage">Manage</button>
         </div>
         <div class="container">
@@ -1006,14 +1000,6 @@
                 <div class="stat-sparkline" id="stat-peers-spark"></div>
               </div>
             </div>
-            <div class="stat-card" data-i18n-title="dashboard.stat_credits_tip" title="Credits earned by helping others run AI">
-              <div class="stat-icon green">&#9733;</div>
-              <div class="stat-body">
-                <div><span class="stat-value" id="stat-credits">0</span><span class="stat-trend trend-flat" id="stat-credits-trend"></span></div>
-                <div class="stat-label"><span data-i18n="dashboard.credits_title">Credits</span> <span class="stat-help" data-i18n-title="stats.credits_help" title="Earned by helping others, spent when you use the network">?</span></div>
-                <div class="stat-sparkline" id="stat-credits-spark"></div>
-              </div>
-            </div>
             <div class="stat-card" data-i18n-title="dashboard.stat_requests_tip" title="Chat requests sent from this node's API">
               <div class="stat-icon orange">&#9650;</div>
               <div class="stat-body">
@@ -1026,15 +1012,15 @@
               <div class="stat-icon purple">&#9889;</div>
               <div class="stat-body">
                 <div><span class="stat-value" id="stat-served">0</span><span class="stat-trend trend-flat" id="stat-served-trend"></span></div>
-                <div class="stat-label"><span data-i18n="stats.served">Served</span> <span class="stat-help" data-i18n-title="stats.served_help" title="Requests your computer handled for others (earns credits)">?</span></div>
+                <div class="stat-label"><span data-i18n="stats.served">Served</span> <span class="stat-help" data-i18n-title="stats.served_help" title="Requests your computer handled for other people">?</span></div>
                 <div class="stat-sparkline" id="stat-served-spark"></div>
               </div>
             </div>
-            <div class="stat-card" data-i18n-title="dashboard.stat_forwards_tip" title="Layer forward passes processed — earns credits">
+            <div class="stat-card" data-i18n-title="dashboard.stat_forwards_tip" title="Layer forward passes this node processed for the network">
               <div class="stat-icon teal">&#9881;</div>
               <div class="stat-body">
                 <div><span class="stat-value" id="stat-forwards">0</span><span class="stat-trend trend-flat" id="stat-forwards-trend"></span></div>
-                <div class="stat-label"><span data-i18n="stats.forwards">Forwards</span> <span class="stat-help" data-i18n-title="stats.forwards_help" title="Computations your computer did as part of the network (earns credits)">?</span></div>
+                <div class="stat-label"><span data-i18n="stats.forwards">Forwards</span> <span class="stat-help" data-i18n-title="stats.forwards_help" title="Computations your computer did as part of the network">?</span></div>
                 <div class="stat-sparkline" id="stat-forwards-spark"></div>
               </div>
             </div>
@@ -1589,14 +1575,12 @@
                   <th scope="col" data-i18n="leaderboard.region">Region</th>
                   <th scope="col" data-i18n="leaderboard.speed">Speed</th>
                   <th scope="col" data-i18n="leaderboard.shards">Shards</th>
-                  <th scope="col" data-i18n="dashboard.credits_title">Credits</th>
-                  <th scope="col" data-i18n="leaderboard.tier">Tier</th>
                 </tr>
               </thead>
               <tbody id="leaderboard-body">
-                <tr class="skeleton-row"><td colspan="8"><div class="skeleton-line" style="width:100%;height:12px"></div></td></tr>
-                <tr class="skeleton-row"><td colspan="8"><div class="skeleton-line" style="width:90%;height:12px"></div></td></tr>
-                <tr class="skeleton-row"><td colspan="8"><div class="skeleton-line" style="width:95%;height:12px"></div></td></tr>
+                <tr class="skeleton-row"><td colspan="6"><div class="skeleton-line" style="width:100%;height:12px"></div></td></tr>
+                <tr class="skeleton-row"><td colspan="6"><div class="skeleton-line" style="width:90%;height:12px"></div></td></tr>
+                <tr class="skeleton-row"><td colspan="6"><div class="skeleton-line" style="width:95%;height:12px"></div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1611,9 +1595,9 @@
           <div id="pool-no-pool" class="panel text-center" style="padding:40px 20px">
             <div class="empty-icon text-2xl mb-2">&#128187;</div>
             <h2 class="mb-1" data-i18n="pool.title">My Devices</h2>
-            <p class="text-muted" style="max-width:480px;margin:0 auto 20px" data-i18n="pool.description">Link your personal computers, laptops, and servers together. Inference across your own devices is free — no credits used. Credits earned by any of your machines are combined into one balance on your main device.</p>
+            <p class="text-muted" style="max-width:480px;margin:0 auto 20px" data-i18n="pool.description">Link your personal computers, laptops, and servers together. Inference across your own devices stays on your own hardware.</p>
             <p class="text-muted text-sm" style="max-width:480px;margin:0 auto 20px" data-i18n="pool.not_network">This is different from the SwarmLLM network — linking devices groups your own hardware, while the network connects you with other people.</p>
-            <p class="info-box info-box-warn" style="max-width:480px;margin:0 auto 12px" data-i18n="pool.personal_only">&#9888; Only link your own devices. Linked devices forward 100% of their credits to the main device. Do not share invite codes with other users — this is for your personal machines only.</p>
+            <p class="info-box info-box-warn" style="max-width:480px;margin:0 auto 12px" data-i18n="pool.personal_only">&#9888; Only link your own devices. A linked device shares its hardware with the main device and accepts work from it. Do not share invite codes with other users — this is for your personal machines only.</p>
 
             <div class="flex justify-center flex-wrap gap-2">
               <button class="btn btn-primary" id="pool-create-btn" data-i18n="pool.create_pool">Create Pool</button>
@@ -1696,15 +1680,9 @@
                   <div class="stat-label" data-i18n="pool.combined_vram">Combined VRAM</div>
                 </div>
               </div>
-              <div class="stat-card">
-                <div class="stat-body">
-                  <div class="stat-value" id="pool-total-credits">0</div>
-                  <div class="stat-label" data-i18n="pool.total_credits">Total Credits</div>
-                </div>
-              </div>
             </div>
 
-            <!-- Device name + Credit split (side by side) -->
+            <!-- Device name -->
             <div class="grid grid-2 mt-1">
               <!-- My device name -->
               <div class="panel">
@@ -1715,13 +1693,6 @@
                     <button class="btn btn-sm btn-primary" id="pool-save-name-btn" data-i18n="actions.save">Save</button>
                   </div>
                   <p class="text-muted" style="font-size:0.72rem;margin:4px 0 0" data-i18n="pool.name_hint">Give this device a recognizable name so you can tell your machines apart.</p>
-                </div>
-              </div>
-              <!-- Credit forwarding info -->
-              <div class="panel" id="pool-split-section" style="display:none">
-                <div class="panel-header"><h3 style="margin:0" data-i18n="pool.credit_forwarding">Credit Forwarding</h3></div>
-                <div class="panel-body" style="padding:12px">
-                  <p class="text-muted" style="font-size:0.82rem;margin:0" data-i18n="pool.forward_info">All credits earned by linked devices are automatically forwarded to this device (your main balance). Since these are all your machines, there's no split — 100% is consolidated here.</p>
                 </div>
               </div>
 
@@ -1868,8 +1839,6 @@
       <td class="lb-region"></td>
       <td class="mono lb-speed"></td>
       <td class="mono lb-shards"></td>
-      <td class="mono lb-credits"></td>
-      <td><span class="tier-badge lb-tier"></span></td>
     </tr>
   </template>
 
@@ -1878,8 +1847,6 @@
       <div class="lb-medal"></div>
       <div class="lb-place-name"></div>
       <div class="lb-place-rig text-muted"></div>
-      <div class="lb-place-credits mono"></div>
-      <div class="lb-place-tier"><span class="tier-badge"></span></div>
     </div>
   </template>
 
@@ -1917,8 +1884,6 @@
       </div>
       <div style="display:flex;align-items:center;gap:12px;flex-shrink:0">
         <div style="text-align:right">
-          <div class="pool-member-credits" style="font-size:0.9rem;font-weight:600;color:var(--green)"></div>
-          <div class="text-muted" style="font-size:0.7rem" data-i18n="dashboard.credits_title">credits</div>
         </div>
         <div class="pool-member-contribution" style="display:none;text-align:center;min-width:60px">
           <input type="range" class="pool-contrib-slider" min="0" max="100" value="100" style="width:56px;margin:0" data-i18n-title="settings.contribution_label" title="Contribution level">
