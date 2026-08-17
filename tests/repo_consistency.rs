@@ -1941,3 +1941,86 @@ fn a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling() {
          event instead, which is terminal and needs no stop_reason"
     );
 }
+
+/// Every hint key the backend can emit must have a translation entry.
+///
+/// The hints are the advice a user acts on when something goes wrong, and until
+/// 2026-08-17 they had no translation route at all — the dashboard ships 21
+/// locales and showed every one of these paragraphs in English. They travel now
+/// as a stable `hint_key` next to the English text, and the frontend looks up
+/// `error_hint.<key>`.
+///
+/// The failure this pins is silent and invisible to anyone testing in English:
+/// a new `SwarmError` variant gets a hint in `src/error.rs`, nobody adds the
+/// JSON entry, and the lookup falls back to the English the backend sent. It
+/// works — in English. Every other locale silently drops back to a language its
+/// reader may not speak, and nothing anywhere says so.
+///
+/// The sibling `all_locales_have_the_same_keys` check then extends this to the
+/// other 20 automatically.
+#[test]
+fn every_backend_hint_key_has_a_translation() {
+    let root = repo_root();
+    let src = std::fs::read_to_string(root.join("src/error.rs")).expect("read error.rs");
+
+    // The keys are the first element of each `Some((` pair in
+    // `error_hint_with_key`, which is the only place they are written.
+    let body = src
+        .split("pub fn error_hint_with_key")
+        .nth(1)
+        .expect("error_hint_with_key exists");
+    let body = body
+        .split("\npub fn error_hint")
+        .next()
+        .expect("error_hint follows it");
+
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    let mut rest = body;
+    while let Some(i) = rest.find("Some((") {
+        rest = &rest[i + "Some((".len()..];
+        let after = rest.trim_start();
+        if !after.starts_with('"') {
+            continue;
+        }
+        let inner = &after[1..];
+        let Some(end) = inner.find('"') else { continue };
+        keys.insert(inner[..end].to_string());
+    }
+    assert!(
+        keys.len() >= 20,
+        "expected the full hint set, found {} — has `error_hint_with_key` \
+         changed shape? {keys:?}",
+        keys.len()
+    );
+
+    let en: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("frontend/i18n/en.json")).expect("read en.json"),
+    )
+    .expect("en.json is not JSON");
+    let defined = en.as_object().expect("en.json is not an object");
+
+    let missing: Vec<String> = keys
+        .iter()
+        .map(|k| format!("error_hint.{k}"))
+        .filter(|k| !defined.contains_key(k))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "hint keys emitted by src/error.rs with no entry in frontend/i18n/en.json: \
+         {missing:?}\nAdd them to en.json and translate across all 21 locales — \
+         see .claude/rules/i18n.md."
+    );
+
+    // And the converse: an `error_hint.*` entry no backend variant can produce
+    // is dead weight carried in 21 files.
+    let orphans: Vec<&String> = defined
+        .keys()
+        .filter(|k| k.starts_with("error_hint."))
+        .filter(|k| !keys.contains(k.trim_start_matches("error_hint.")))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "frontend/i18n/en.json defines error_hint entries that src/error.rs \
+         never emits: {orphans:?}"
+    );
+}
