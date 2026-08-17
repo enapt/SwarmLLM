@@ -30,7 +30,8 @@ pub(super) async fn finalize_request(
     escrow_id: Option<uuid::Uuid>,
 ) {
     if let Err(ref e) = output {
-        tracing::error!(
+        crate::log_failure!(
+            e,
             request_id = %request.id,
             model = %request.model_id,
             error = %e,
@@ -722,7 +723,8 @@ pub(super) async fn execute_request(
             .await;
         }
         Err(ref e) => {
-            tracing::error!(
+            crate::log_failure!(
+                e,
                 request_id = %request.id,
                 schedule_ms,
                 execute_ms,

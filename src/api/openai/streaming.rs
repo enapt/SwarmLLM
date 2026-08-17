@@ -316,7 +316,8 @@ pub fn spawn_split_stream(
                     // log the SSE stream silently truncates with no operator-
                     // visible diagnostic — workers crashing mid-stream looked
                     // like a clean client disconnect.
-                    tracing::warn!(
+                    crate::log_failure!(
+                        &e,
                         error = %e,
                         model = %model_id,
                         request_id = %rid,
@@ -1220,7 +1221,7 @@ pub(super) async fn stream_response(
         let finish = match result {
             Ok(r) => r.finish_reason.as_str().to_string(),
             Err(ref e) => {
-                tracing::error!(error = %e, "DIAG: local stream generate_stream error");
+                crate::log_failure!(e, error = %e, "DIAG: local stream generate_stream error");
                 "stop".to_string()
             }
         };

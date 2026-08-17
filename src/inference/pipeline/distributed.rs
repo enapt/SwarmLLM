@@ -460,7 +460,8 @@ impl PipelineExecutor {
                     // a local-segment failure (which has no automatic
                     // failover; that's a deferred enhancement) or that
                     // failover itself returned an error.
-                    tracing::warn!(
+                    crate::log_failure!(
+                        &e,
                         request_id = %request_id,
                         error = %e,
                         seq_num,

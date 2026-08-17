@@ -718,10 +718,25 @@
   // are the only recovery direction non-technical users get when an
   // error surfaces (see src/error.rs::error_hint).
   // Usage: var msg = App.utils.extractErrorMessage(data, 'Fallback');
+  // Single place an API error becomes text a person reads.
+  //
+  // The backend sends `hint` (English prose) and, since the hints were given
+  // stable identifiers, `hint_key`. Prefer the translation for the key; fall
+  // back to the English the backend already sent when the key is unknown to
+  // this locale — the same shape activity events use. Without this the hints
+  // were the one piece of user-facing text that ignored the language setting
+  // entirely, in a dashboard that ships 21 of them.
   function extractErrorMessage(data, fallback) {
     if (data && data.error) {
       var msg = data.error.message || data.error || fallback;
       var hint = data.error.hint;
+      var key = data.error.hint_key;
+      if (typeof key === 'string' && key.length > 0) {
+        var lookup = 'error_hint.' + key;
+        var translated = I18n.t(lookup);
+        // I18n.t returns the key itself when it has no entry.
+        if (translated && translated !== lookup) hint = translated;
+      }
       if (typeof hint === 'string' && hint.length > 0 && typeof msg === 'string') {
         return msg + ' — ' + hint;
       }

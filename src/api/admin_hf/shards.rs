@@ -179,7 +179,16 @@ pub async fn hf_download_shards(
         crate::model::huggingface::probe_gguf_file(&repo_id, &filename, configured_shard_size)
             .await
             .map_err(|e| {
-                tracing::error!(error = %e, "HuggingFace probe failed");
+                // Consult the same predicate the status does, BEFORE choosing a
+                // level: a mistyped repo name is the caller's to fix, and
+                // recording their typo as `ERROR` tells an operator this node
+                // is broken. This site already knew the difference one line
+                // further down and logged first anyway.
+                if crate::model::huggingface::probe_failure_is_user_fixable(&e) {
+                    tracing::info!(error = %e, "HuggingFace probe: no such repo or file");
+                } else {
+                    tracing::warn!(error = %e, "HuggingFace probe failed");
+                }
                 let detail = crate::api::scrub_truncate_error(&e);
                 // A wrong repo name or filename is the caller's to fix, exactly
                 // as in probe.rs. This arm was missing here, so the endpoint

@@ -1027,7 +1027,8 @@ impl InferenceRouter {
             match &output {
                 Ok(_) => {}
                 Err(ref e) => {
-                    tracing::error!(
+                    crate::log_failure!(
+                        e,
                         request_id = %request.id,
                         model = %request.model_id,
                         elapsed_ms = elapsed.as_millis() as u64,

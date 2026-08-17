@@ -415,12 +415,16 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
         // SDK retry logic can distinguish 'try later' from a 500 bug.
         SwarmError::Network(_) => (StatusCode::BAD_GATEWAY, err.to_string(), "network_error"),
         _ => {
-            // Log the full error internally but return a generic message
-            // to avoid leaking internal paths, peer errors, or DB details.
-            tracing::error!(
-                error = %err,
-                "Internal server error"
-            );
+            // Return a generic message to avoid leaking internal paths, peer
+            // errors, or DB details. The FULL error is still recorded — by
+            // whoever logs this failure, from the original `SwarmError` rather
+            // than from this genericised string.
+            //
+            // This arm used to `tracing::error!` here. That made the
+            // classifier impure, and a classifier with a logging side effect
+            // cannot be consulted by a logging path without emitting a line of
+            // its own — which is exactly what `failure_log_level` below needs
+            // to do.
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "An internal error occurred".to_string(),
@@ -430,19 +434,98 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
     }
 }
 
+/// How loudly a failure deserves to be recorded in **this node's** log.
+///
+/// The answer is already implied by the status `classify_error` picks, because
+/// that status *is* the answer to "whose mistake was this". Deriving the level
+/// from it, rather than choosing one per call site, is what keeps an operator's
+/// log honest.
+///
+/// **Why this exists.** A caller's own too-long prompt was recorded as three
+/// separate `ERROR` lines when the model happened to be peer-held, and one
+/// `WARN` when it was local — the same user mistake, at a different severity,
+/// depending on which machine held the model. A `501` for embeddings (a
+/// deliberate, documented property of this build, answered with a helpful
+/// message) was logged as `ERROR Server error`. `ERROR` in a log means "this
+/// node is broken"; for a non-technical operator deciding whether to trust this
+/// software, reporting their own typo that way is worse than saying nothing.
+/// It is the logging-layer survivor of the class fixed at the HTTP surface in
+/// gotchas #300-#305.
+///
+/// Driving it off the status keeps it in lockstep by construction: a new
+/// `SwarmError` variant inherits a sensible level from the status it already
+/// had to choose, with no second decision to forget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureLevel {
+    /// Ours. A bug, or something genuinely broken on this node.
+    Error,
+    /// Real, but not a bug: a peer went quiet, an upstream provider failed,
+    /// capacity ran out. Worth an operator's attention, not an alarm.
+    Warn,
+    /// Working as designed — the caller's own mistake, or a deliberate policy
+    /// or build property. The response already told them; the log does not
+    /// need to shout about it.
+    Info,
+}
+
+/// Pick the log level for a failure. See [`FailureLevel`].
+pub fn failure_log_level(err: &SwarmError) -> FailureLevel {
+    let (status, _, _) = classify_error(err);
+
+    // The caller's mistake. Their response said so; this node is fine.
+    if status.is_client_error() {
+        return FailureLevel::Info;
+    }
+
+    match status {
+        // A deliberate property of this build, answered with a message that
+        // says what to do instead. Not a fault.
+        StatusCode::NOT_IMPLEMENTED => FailureLevel::Info,
+        // Genuinely ours: `Internal`, `Config` reaching a request path,
+        // `ShardIntegrity`, and the catch-all.
+        StatusCode::INTERNAL_SERVER_ERROR => FailureLevel::Error,
+        // Everything else in 5xx names an external party or a transient
+        // condition: a silent peer, an exhausted failover, a provider outage,
+        // a full disk. Real, but not this node malfunctioning.
+        _ => FailureLevel::Warn,
+    }
+}
+
+/// Record a failed request at the severity its cause deserves.
+///
+/// Takes the `SwarmError` first, then the ordinary `tracing` field/message
+/// syntax. Use this instead of picking `error!` / `warn!` at the call site —
+/// the level is not a call-site decision, for the reasons on [`FailureLevel`].
+///
+/// ```ignore
+/// log_failure!(e, request_id = %id, model = %m, "inference failed");
+/// ```
+#[macro_export]
+macro_rules! log_failure {
+    ($err:expr, $($rest:tt)*) => {{
+        match $crate::error::failure_log_level($err) {
+            $crate::error::FailureLevel::Error => tracing::error!($($rest)*),
+            $crate::error::FailureLevel::Warn => tracing::warn!($($rest)*),
+            $crate::error::FailureLevel::Info => tracing::info!($($rest)*),
+        }
+    }};
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let (status, message, error_type) = classify_error(&self.0);
-        // Log 5xx errors so they appear in tracing output (catch non-catch-all 5xx)
-        if status.is_server_error() && error_type != "server_error" {
-            tracing::error!(
-                status = status.as_u16(),
-                error = %message,
-                "Server error"
-            );
-        }
 
-        let hint = error_hint(&self.0);
+        // Record every failure the API returns, at the severity its cause
+        // deserves — see `FailureLevel`. Logs `self.0`, not `message`: the
+        // catch-all genericises the message to keep internals out of the
+        // response, so logging the message would record "An internal error
+        // occurred" and throw away the only copy of what actually happened.
+        crate::log_failure!(
+            &self.0,
+            status = status.as_u16(),
+            error = %self.0,
+            "API request failed"
+        );
 
         let mut error_obj = serde_json::json!({
             "message": message,
@@ -450,113 +533,148 @@ impl IntoResponse for ApiError {
             "param": null,
             "code": error_type
         });
-        if let Some(hint_text) = hint {
+        // `hint` stays exactly as it was — English prose, for API clients and
+        // for anything that cannot translate. `hint_key` is additive: it is
+        // what the dashboard looks up to show the same advice in the user's own
+        // language, and what a client can branch on without matching prose.
+        if let Some((key, hint_text)) = error_hint_with_key(&self.0) {
             error_obj["hint"] = serde_json::Value::String(hint_text.to_string());
+            error_obj["hint_key"] = serde_json::Value::String(key.to_string());
         }
 
         (status, Json(serde_json::json!({ "error": error_obj }))).into_response()
     }
 }
 
-/// Return an actionable hint for common error variants.
+/// Return an actionable hint for common error variants, as a stable
+/// `(key, english)` pair.
+///
 /// These are user-facing — no curl commands or API paths.
-pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
+///
+/// **Why both, from one function.** These hints were the only user-facing text
+/// in the product with no translation route at all: the dashboard ships 21
+/// locales and every one of them showed these paragraphs in English. The key is
+/// what lets the frontend translate them (`I18n.t("error_hint." + key)`, with
+/// the English carried alongside as the fallback), and what an API client can
+/// branch on instead of matching prose.
+///
+/// Returning the pair from a single match arm is deliberate. A separate
+/// `error_hint_key` function would be a second decision to keep in step, and
+/// this codebase's most-repeated defect is exactly that — one invariant
+/// implemented per path. Here they cannot drift: only one place knows either.
+pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static str)> {
     match err {
-        SwarmError::ModelNotAvailable(_) => Some(
+        SwarmError::ModelNotAvailable(_) => Some((
+            "model_not_available",
             "This model isn't available yet. Open the Models tab in the dashboard to browse \
              and download models, or wait for auto-manage to acquire it from the network.",
-        ),
-        SwarmError::NoModelLoaded => Some(
+        )),
+        SwarmError::NoModelLoaded => Some((
+            "no_model_loaded",
             "No model is loaded yet. Go to the dashboard and select a model to download, \
              or connect to more peers so models can be served from the network.",
-        ),
-        SwarmError::InsufficientCredits { .. } => Some(
+        )),
+        SwarmError::InsufficientCredits { .. } => Some((
+            "insufficient_credits",
             "Your credit balance is too low. Earn credits by hosting model shards \
              (happens automatically) or serving inference for other users. \
              Check your balance on the dashboard.",
-        ),
-        SwarmError::InsufficientCapacity(_) => Some(
+        )),
+        SwarmError::InsufficientCapacity(_) => Some((
+            "insufficient_capacity",
             "Not enough peers have the shards needed for this model. \
              Try again later as more peers come online, or download the model \
              shards yourself from the Models tab.",
-        ),
-        SwarmError::InsufficientDisk { .. } => Some(
+        )),
+        SwarmError::InsufficientDisk { .. } => Some((
+            "insufficient_disk",
             "Not enough disk space. Free up space or increase the storage limit \
              in Settings → Advanced → max_disk_mb.",
-        ),
-        SwarmError::Unauthorized(_) => Some(
+        )),
+        SwarmError::Unauthorized(_) => Some((
+            "unauthorized",
             "Authentication required. Your API key can be found on the dashboard \
              Settings page. Include it as a Bearer token in the Authorization header.",
-        ),
+        )),
         // Deliberately says nothing about API keys: the caller already has a
         // working one, and repeating the Unauthorized advice here is what sent
         // remote admins to re-copy a key that was never the problem.
         // Says why WITHOUT naming a mechanism: this covers replacing the
         // binary, downloading it, and shutting the node down, and "it writes to
         // that machine's disk" was false for the last one.
-        SwarmError::LocalOnly(_) => Some(
+        SwarmError::LocalOnly(_) => Some((
+            "local_only",
             "This one has to be done on the computer that is running SwarmLLM, \
              because it acts on that machine itself. Open the dashboard there \
              and try again — your API key is fine.",
-        ),
-        SwarmError::PeerNotFound(_) => Some(
+        )),
+        SwarmError::PeerNotFound(_) => Some((
+            "peer_not_found",
             "That peer is offline or unreachable. Check your internet connection \
              and try again later.",
-        ),
-        SwarmError::ShardIntegrity { .. } => Some(
+        )),
+        SwarmError::ShardIntegrity { .. } => Some((
+            "shard_integrity",
             "A model file was corrupted and will be re-downloaded automatically. \
              This is usually caused by an interrupted download — try again in a moment.",
-        ),
-        SwarmError::ShardIncomplete { .. } => Some(
+        )),
+        SwarmError::ShardIncomplete { .. } => Some((
+            "shard_incomplete",
             "A model file did not download completely and will be fetched again \
              automatically. This usually means the connection dropped part-way.",
-        ),
+        )),
         // `PipelineError` covers two causes needing OPPOSITE advice, and the
         // generic text asserted the wrong one. A tester was told "a peer went
         // offline mid-request" when the real cause was a piece of the model
         // missing locally that no peer could supply — so following the hint
         // means retrying for ever instead of fetching the piece. Reported
         // 2026-07-30.
-        SwarmError::PipelineError(msg) if msg.contains("No node available for layer") => Some(
+        SwarmError::PipelineError(msg) if msg.contains("No node available for layer") => Some((
+            "pipeline_missing_layer",
             "Part of this model isn't available — not on this machine, and not on any \
              connected peer. Fetch the whole model with `swarmllm get-model <name> --all`, \
              or wait for more peers to come online.",
-        ),
+        )),
         // The remaining pipeline failures are a mix of transient and permanent
         // causes, and we do not know which this one is. The old wording picked
         // the transient reading and stated it as fact — "a peer went offline …
         // try again" — so every permanent cause sent the user round a loop with
         // no exit. Say what is known, offer both branches, promise neither.
-        SwarmError::PipelineError(_) => Some(
+        SwarmError::PipelineError(_) => Some((
+            "pipeline_generic",
             "The route to run this model couldn't be put together. If a peer dropped out \
              this will fix itself — try once more. If it fails the same way again, the \
              model is missing a piece: fetch it with `swarmllm get-model <name> --all`, \
              or pick a model marked as ready in the dashboard.",
-        ),
+        )),
         // Unlike `PipelineError`, this one is KNOWN to be transient — a peer
         // took the work and went silent — so the hint can promise the retry
         // branch without hedging.
-        SwarmError::PeerUnresponsive(_) => Some(
+        SwarmError::PeerUnresponsive(_) => Some((
+            "peer_unresponsive",
             "Another computer in the swarm took this request and then stopped \
              answering — it may have gone offline mid-request. Try again: a new \
              request is usually routed to a different machine.",
-        ),
-        SwarmError::SegmentFailoverExhausted(_) => Some(
+        )),
+        SwarmError::SegmentFailoverExhausted(_) => Some((
+            "segment_failover_exhausted",
             "A computer running part of this model failed mid-request, and no \
              other machine was free to take over its part. This is usually \
              momentary — try again, and the swarm will build a fresh route.",
-        ),
-        SwarmError::ModelIncompleteInSwarm { .. } => Some(
+        )),
+        SwarmError::ModelIncompleteInSwarm { .. } => Some((
+            "model_incomplete_in_swarm",
             "Part of this model isn't on any machine that's reachable right now. If a peer \
              just dropped out this may fix itself shortly. Otherwise fetch the model with \
              `swarmllm get-model <name> --all`, or pick a model the dashboard marks as ready.",
-        ),
-        SwarmError::PromptPrivacyUnavailable { .. } => Some(
+        )),
+        SwarmError::PromptPrivacyUnavailable { .. } => Some((
+            "prompt_privacy_unavailable",
             "Prompt privacy keeps your prompt on this machine, which needs the model's \
              first part stored here — and it isn't. Either fetch it with \
              `swarmllm get-model <name>`, or turn prompt privacy off for this model to \
              let the swarm run it. Retrying as-is won't help.",
-        ),
+        )),
         // The only refusal that had no hint, and its message is the least
         // readable of them: "missing shards: [0, 1, 2, 3]" tells a non-technical
         // user nothing, and nothing else on screen says what to do about it.
@@ -566,21 +684,24 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
         // and the only one that changes where the user's prompts travel, so
         // offering it casually would trade someone's privacy for convenience
         // without telling them.
-        SwarmError::PrivateModeUnavailable { .. } => Some(
+        SwarmError::PrivateModeUnavailable { .. } => Some((
+            "private_mode_unavailable",
             "Private mode keeps your prompts on your own devices, and none of them has \
              all of this model. Either download it here with `swarmllm get-model <name>`, \
              or add the device that has it to your pool. You can also turn private mode \
              off in Settings — but then your prompts can be sent to other people's \
              machines to run.",
-        ),
-        SwarmError::InferenceTimeout(_) => Some(
+        )),
+        SwarmError::InferenceTimeout(_) => Some((
+            "inference_timeout",
             "The request took too long. Try a shorter prompt, reduce the max tokens, \
              or wait for a less busy time.",
-        ),
-        SwarmError::Config(_) => Some(
+        )),
+        SwarmError::Config(_) => Some((
+            "config",
             "There's a configuration issue. Check Settings in the dashboard \
              or review your config.toml file.",
-        ),
+        )),
         SwarmError::ProviderError { status, ref body } => {
             let lower = body.to_lowercase();
             let is_quota = *status == 402
@@ -594,25 +715,34 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
                 || lower.contains("credits")
                 || lower.contains("payment");
             if is_quota {
-                Some(
+                Some((
+                    "provider_quota",
                     "Your cloud provider credits may be exhausted or rate-limited. \
                      Top up your account on the provider's website, switch to a free-tier provider \
                      (DeepSeek, Groq, NVIDIA NIM), or use a local swarm model instead.",
-                )
+                ))
             } else if *status == 401 || *status == 403 {
-                Some(
+                Some((
+                    "provider_auth",
                     "Your API key appears to be invalid or revoked. \
                      Update it in Settings → Cloud Providers.",
-                )
+                ))
             } else {
-                Some(
+                Some((
+                    "provider_generic",
                     "The cloud provider returned an error. Try again, \
                      switch to a different model, or use a local swarm model.",
-                )
+                ))
             }
         }
         _ => None,
     }
+}
+
+/// The English hint text alone. Prefer [`error_hint_with_key`] where the key is
+/// useful (the HTTP envelope carries it so the dashboard can translate).
+pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
+    error_hint_with_key(err).map(|(_, text)| text)
 }
 
 #[cfg(test)]
@@ -623,6 +753,220 @@ mod tests {
     fn hint_for_model_not_available() {
         let err = SwarmError::ModelNotAvailable(ModelId("test-model".into()));
         assert!(error_hint(&err).unwrap().contains("Models tab"));
+    }
+
+    /// Every hint key must be distinct. Two variants sharing one key would show
+    /// the wrong translated advice for one of them while the English stayed
+    /// right — a divergence visible only to users not reading English, which is
+    /// the group this whole mechanism exists for.
+    #[test]
+    fn hint_keys_are_unique() {
+        let samples: Vec<SwarmError> = vec![
+            SwarmError::ModelNotAvailable(ModelId("m".into())),
+            SwarmError::NoModelLoaded,
+            SwarmError::InsufficientCredits {
+                balance: 0,
+                required: 1,
+            },
+            SwarmError::InsufficientCapacity(ModelId("m".into())),
+            SwarmError::InsufficientDisk {
+                need_mb: 1,
+                have_mb: 0,
+            },
+            SwarmError::Unauthorized("x".into()),
+            SwarmError::LocalOnly("x".into()),
+            SwarmError::PeerNotFound(NodeId([0u8; 32])),
+            SwarmError::ShardIntegrity {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            SwarmError::ShardIncomplete {
+                expected_bytes: 2,
+                actual_bytes: 1,
+            },
+            SwarmError::PipelineError("No node available for layer 3".into()),
+            SwarmError::PipelineError("something else".into()),
+            SwarmError::PeerUnresponsive("x".into()),
+            SwarmError::SegmentFailoverExhausted("x".into()),
+            SwarmError::ModelIncompleteInSwarm {
+                model_id: "m".to_string(),
+                layer: 3,
+            },
+            SwarmError::PromptPrivacyUnavailable {
+                model_id: "m".into(),
+            },
+            SwarmError::PrivateModeUnavailable {
+                model_id: "m".into(),
+                missing_shards: vec![0],
+            },
+            SwarmError::InferenceTimeout(1),
+            SwarmError::Config("x".into()),
+            SwarmError::ProviderError {
+                status: 429,
+                body: "quota".into(),
+            },
+            SwarmError::ProviderError {
+                status: 401,
+                body: "bad key".into(),
+            },
+            SwarmError::ProviderError {
+                status: 500,
+                body: "boom".into(),
+            },
+        ];
+
+        let mut seen = std::collections::HashSet::new();
+        for err in &samples {
+            let (key, text) = error_hint_with_key(err)
+                .unwrap_or_else(|| panic!("every sampled variant has a hint: {err}"));
+            assert!(
+                seen.insert(key),
+                "duplicate hint key {key:?} — two variants would share one translation"
+            );
+            assert!(
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "hint keys are lower_snake_case i18n identifiers, got {key:?}"
+            );
+            assert!(!text.is_empty(), "hint {key:?} has no English text");
+        }
+        assert_eq!(seen.len(), samples.len());
+    }
+
+    /// `error_hint` must stay a view of `error_hint_with_key`, never a second
+    /// copy of the text.
+    #[test]
+    fn the_english_hint_comes_from_the_keyed_one() {
+        let err = SwarmError::NoModelLoaded;
+        assert_eq!(error_hint(&err), error_hint_with_key(&err).map(|(_, t)| t));
+    }
+
+    /// A caller's own mistake is not this node breaking, and the log must not
+    /// say it is.
+    ///
+    /// The over-long prompt is the measured case (2026-08-17, live v0.3.99
+    /// node): it produced three `ERROR` lines when the model happened to be
+    /// peer-held and one `WARN` when it was local — the same user typo, at a
+    /// different severity, decided by which machine held the model.
+    #[test]
+    fn a_callers_mistake_is_not_logged_as_this_node_failing() {
+        for err in [
+            SwarmError::Validation("conversation is too long".into()),
+            SwarmError::InvalidNickname("bad".into()),
+            SwarmError::ModelNotAvailable(ModelId("nope".into())),
+            SwarmError::NotFound("nope".into()),
+            SwarmError::Unauthorized("no key".into()),
+            SwarmError::LocalOnly("loopback only".into()),
+        ] {
+            assert_eq!(
+                failure_log_level(&err),
+                FailureLevel::Info,
+                "a 4xx is the caller's mistake, not an error on this node: {err}"
+            );
+        }
+    }
+
+    /// A deliberate property of this build, answered with a message saying what
+    /// to do instead, logged as `ERROR Server error` on the live node.
+    #[test]
+    fn a_deliberate_refusal_is_not_an_error() {
+        assert_eq!(
+            failure_log_level(&SwarmError::NotImplemented("no embeddings".into())),
+            FailureLevel::Info,
+        );
+        // Policy refusals are configuration doing its job, not a fault. They
+        // are 503s, so they land on the Warn arm rather than Info — still not
+        // ERROR, which is the property that matters here.
+        for err in [
+            SwarmError::PrivateModeUnavailable {
+                model_id: "m".to_string(),
+                missing_shards: vec![],
+            },
+            SwarmError::PromptPrivacyUnavailable {
+                model_id: "m".to_string(),
+            },
+        ] {
+            assert_ne!(failure_log_level(&err), FailureLevel::Error, "{err}");
+        }
+    }
+
+    /// The converse: our own bugs must still be loud. A rule that only ever
+    /// quietens things would "fix" this by hiding real faults.
+    #[test]
+    fn our_own_faults_are_still_errors() {
+        for err in [
+            SwarmError::Internal("bug".into()),
+            SwarmError::Config("misconfigured".into()),
+            SwarmError::Inference("worker blew up".into()),
+        ] {
+            assert_eq!(failure_log_level(&err), FailureLevel::Error, "{err}");
+        }
+    }
+
+    /// A peer going quiet is real and worth seeing, but it is not this node
+    /// malfunctioning — it must sit between the two.
+    #[test]
+    fn someone_elses_fault_is_a_warning_not_an_error() {
+        for err in [
+            SwarmError::PeerUnresponsive("peer never acknowledged".into()),
+            SwarmError::SegmentFailoverExhausted("no standby".into()),
+            SwarmError::Network("upstream unreachable".into()),
+            SwarmError::ServiceUnavailable("worker restarting".into()),
+        ] {
+            assert_eq!(failure_log_level(&err), FailureLevel::Warn, "{err}");
+        }
+    }
+
+    /// `failure_log_level` consults `classify_error`, so the classifier must be
+    /// pure. It used to `tracing::error!` from its catch-all arm, which would
+    /// make merely *asking* what level to use emit an ERROR line of its own —
+    /// the precise thing this change removes.
+    ///
+    /// Asserted behaviourally, by counting emitted events, rather than by
+    /// scanning the source for `tracing::` — the first cut did the latter and
+    /// tripped over the comment that explains the removal.
+    #[test]
+    fn classifying_an_error_does_not_log() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Clone)]
+        struct Counter(Arc<AtomicUsize>);
+
+        impl tracing::subscriber::Subscriber for Counter {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+                tracing::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+            fn event(&self, _: &tracing::Event<'_>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn enter(&self, _: &tracing::Id) {}
+            fn exit(&self, _: &tracing::Id) {}
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let sub = Counter(count.clone());
+
+        tracing::subscriber::with_default(sub, || {
+            // The catch-all arm — the one that used to log — plus a couple of
+            // ordinary variants for good measure.
+            let _ = classify_error(&SwarmError::InvalidSignature);
+            let _ = classify_error(&SwarmError::Validation("too long".into()));
+            let _ = classify_error(&SwarmError::Internal("bug".into()));
+            // And the level helper itself, which is the actual caller at risk.
+            let _ = failure_log_level(&SwarmError::InvalidSignature);
+        });
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "classify_error must stay free of logging side effects — a logging \
+             path has to be able to call it without emitting a line of its own"
+        );
     }
 
     /// The caller's own mistake must never be reported as this server failing.
