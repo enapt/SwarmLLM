@@ -215,40 +215,54 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1904 lib (dev,claude-subscription) / 1894 (default) / 1895 (dev,candle-cuda) + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 29 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured 2026-08-18 (post quantized-embedding change). Clippy clean default + features dev,claude-subscription + `--features llama` check.
+All 20 build phases complete. All subsystems wired — no stubs. **1904 lib (dev,claude-subscription) / 1894 (default) / 1895 (dev,candle-cuda) + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 29 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured 2026-08-18 (post v0.3.102). Clippy clean on default, `dev,claude-subscription`, **`dev,candle-cuda --all-targets`** (the config that hides gated breakage, #264) and a `--features llama` check.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.100-alpha (2026-08-17): credits switched off, releases 3x faster
+### Latest — v0.3.101 / v0.3.102-alpha (2026-08-18): models need ~750 MB less, and machines say what they are
 
-Shipped, verified on the DOWNLOADED artifact (sha256, `--version`, smoke 8/8),
-whole swarm updated. Rollback `~/.local/bin/swarmllm.0.3.99.bak`.
-Detail: `memory/round_log_0817_honesty.md`.
+Two releases in one day, both verified on the DOWNLOADED artifact.
+Detail: `memory/round_log_0818_quantized_embedding.md`.
 
-- **Credits are DORMANT — they gate nothing** (see Key Design Decisions). They
-  were never real, yet were acted on: a `-1000` floor refused remote requesters
-  and the tier gave a high balance up to 8x the concurrency. Both off; dashboard
-  shows no balance; leaderboard ranks by shards hosted.
-  **`docs/CREDITS_DESIGN.md`** = design + exit criteria.
-- **Release builds 54 min → 16m29s** (Windows GPU 53.5 → 15m48s). Two causes,
-  both logged as `warning`, never red: rust-cache said `full match: true` and
-  rebuilt all 19 CUTLASS kernels anyway (it clears `target/` for repo-local
-  packages — vendored crates are), and `Jimver/cuda-toolkit` had been failing
-  its cache with `Cache service responded with 400` for months. Kernels now sit
-  outside `target/` in `.flash-attn-build`, cached on a content hash
-  (#318/#319; `docs/FUTURE_WORK.md` § "Release build time" for what's left).
-- **Log severity follows blame** — an over-long prompt logged 3 `ERROR` lines
-  when the model was peer-held, 1 `WARN` when local; a deliberate 501 logged
-  `ERROR Server error`. `error::failure_log_level` derives it from the status
-  `classify_error` already picked. **Error hints now translated in all 21
-  locales** — the only user-facing text that had no translation route.
-- **#313 CLOSED**: the `.deb` upgrade no longer disables the service (verified
-  on Proxmox .99→.100 — "service restarted", unit left `enabled` + `active`).
+- **Models need up to 750 MB less memory, CPU and GPU.** `token_embd.weight` is
+  read a row at a time out of the QUANTIZED table instead of being dequantized
+  whole at load (`inference::split::token_embedding`, backed by the vendored
+  `QTensor::gather_rows`). Measured on llama-3.2-3b: **754 MB off CPU peak RSS,
+  736 MiB off an RTX 3070**, against 751 predicted. Weight-tied models save the
+  FULL f16 copy — they held the tensor twice. Bit-identical, asserted by exact
+  equality on both devices.
+- **`GPU_ADMISSION_KV_CONTEXT`** — GPU admission may charge under the worst case
+  ONLY where a runtime check catches the difference (GPU has one, CPU does not).
+  Raising `max_seq_len_override` no longer costs a model its place on the card.
+  `DEFAULT_MAX_SEQ_LEN` 4096 → 8192: an agentic system prompt is ~5000 tokens and
+  did not fit AT ALL.
+- **Peer delegation** (`scheduler::delegation_target`) — a node whose GPU cannot
+  fit a model hands it to a nearby capable peer instead of falling back to its own
+  CPU. With prompt privacy on it builds the BOOMERANG instead (first+last local,
+  middle to the peer, encrypted) — privacy changes the shape, it does not veto the
+  peer. Verified on two nodes both ways.
+- **A machine's speed is measured, not assumed** (`inference::mem_bandwidth`) —
+  every CPU node advertised a hardcoded 1.70 tok/s; now measured (29.9 GB/s on
+  this laptop vs 50 assumed). `NodeCapability.cpu` names the processor, so a peer
+  without a card is no longer the bare word "CPU". Interop tested against the
+  released binary in both directions.
+- **Honesty fixes** — the dashboard no longer contradicts the daemon about whether
+  a model fits; `swarmllm bench` warms up before timing; the CPU tooltip no longer
+  promises credits.
+
+**Gotchas from this round: #326-#333.** Most load-bearing: **#328** (a single GPU
+A/B pair is worthless — within-arm spread 15-29%; find the measurement the machine
+CAN make), **#330/#333** (a gossiped field with no consumer is unverified — free
+VRAM was zero and CPU speed was a constant, swarm-wide, for as long as they existed),
+**#326** (candle's `as_t_slice` takes a `Cow` by value and returns a slice into it —
+`Cow::Owned` is a use-after-free), **#327** (`temperature: 0` + seed does NOT
+reproduce, so generated text cannot compare two inference paths here).
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
+- **v0.3.100** (08-17): credits switched OFF (they were enforced: a -1000 floor refused peers, tier gave 8x concurrency); error hints translated across 21 locales; log severity follows blame (#315-#317); release build 54 min → 16m29s (#318/#319). `round_log_0817_honesty.md`.
 - **v0.3.99** (08-16): long prompts stalled for MINUTES — `insert_from_kv` snapshotted at EVERY block boundary, O(prompt²) ≈ 15 GB copied per 2.9k-token request (repeats 115.5s→4.1s, #312); silent-peer 500s→503 (`PeerUnresponsive`/`SegmentFailoverExhausted`); Docker `latest` had NEVER been published (#314).
 - **v0.3.98** (08-16): **1.41x CPU generation** — GQA decode stopped expanding the KV cache with `repeat_kv` (`grouped_gqa_decode_attention`); this REVERSED the CPU decode-kernel routing at every length. 4h soak, 3474/3474 ok.
 - **v0.3.97** (08-15): **models you own could not be reached** — a node that loaded a model with `-m` announced it under its DISPLAY NAME, invisible as a holder, phantom `shard_count: 0` entries everywhere (three id derivations, no two agreeing → `slugify_model_name`, #310); removing `shard_range` from the config did nothing (#306); loopback-only endpoints told remote admins to fetch a key they had already sent (`LocalOnly`, #309); manifest-less models no longer claim `available`; embeddings 501 not 503.
@@ -259,9 +273,7 @@ Read the named round log before re-deriving any of these.
 - **v0.3.90** (08-10): **a GPU could not run ANY unquantized model** — F16/BF16/F32 loaded clean on CUDA then failed 100% of requests (#288-#290); verified with a null control. Also `max_model_len` on `/v1/models`, shard-delete guard.
 - **v0.3.89** (08-09/10): **replies from distant peers arrived SCRAMBLED** — each token an independent rr send, `token_id` hardcoded 0 at all five sites → `StreamReassembler` (#282). A "private network" shared PUBLIC gossip topics (#285); a fixed 10s ACK deadline killed a 6s peer (#284). **#283: `pkill -x swarmllm` killed the user's live node.** `round_log_0809_night.md`.
 - **v0.3.88** (08-09): **settings saved, said "ok", did nothing** — `state.config` is a boot snapshot, patched around FOUR times → **`SharedState::cfg()`** (#281). **Serving the swarm paid nothing and reported nothing** — accounting lived only on the LESS travelled path (#279/#280) → `record_peer_serve`.
-- **v0.3.85/.86/.87** (08-09): every defect was a claim nothing could contradict — batching NEVER engaged (0/156) → **2.4x** GPU; **a rescan on a timer undid the shard split**; credits never persisted (#278); **51 tests ran in NO automation.** `round_log_0808_night.md`.
-- **v0.3.82/.83** (08-07/08): CPU fused attention **+19%** prompt processing; CUDA decode routing corrected — the crossover came from timing the call in ISOLATION and was wrong at every length (**#266: measure the FORWARD**). KV reservation: a 100-token chat held 940 MB (#261). **⚠ #267: this box cannot resolve a GPU change below ~25%.** `round_log_0807_*.md`.
-- **v0.3.81** (08-06/07): **CPU inference measured, not guessed** — every guess was <2.5% COMBINED; **it was attention**, wrong in BOTH phases in opposite directions (#254-#256). Prefill 4571→640 ms. `round_log_0806_batching.md`.
+- **v0.3.81-.87** (08-06→09): the round where every defect was a claim nothing could contradict — batching NEVER engaged (0/156) → **2.4x** GPU; a timed rescan undid the shard split; CPU inference measured not guessed (**it was attention**, wrong in BOTH phases in opposite directions, #254-#256); CPU fused attention +19%; KV reservation held 940 MB for a 100-token chat (#261). **⚠ #266 measure the FORWARD, not the isolated call. ⚠ #267 this box cannot resolve a GPU change below ~25%.** `round_log_0808_night.md`, `round_log_0807_*.md`, `round_log_0806_batching.md`.
 - **v0.3.78/.79** (08-06): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE, wrong date; all invisible, found by diffing against `tokenizers`/`jinja2` references built from the model's OWN vocab (#246-#253). **.79** shipped AVX2 — releases had candle's quantized kernels COMPILED OUT, **3.09x**. `round_log_0805_prompt_pipeline.md`.
 - **v0.3.39-.77** (07-27→08-05): **v0.3.72 our API key was being sent to strangers** — nothing in that code changed, its PREMISE did (#238); SPM tokenizer mis-tokenised **64.9%** of inputs (**a hash cannot tell "wrong bytes" from "not all the bytes" — check `size_bytes` FIRST**, #203); local replies took a GPT-2 byte fallback under a stale comment (#200). `round_log_0805_security.md`, `round_log_0803*.md`, `round_log_overnight_0728.md`.
 - **v0.3.15-.38** (07-23→28): **read #179 before touching connection selection** — a relay carrying an INBOUND connection is a bare `/p2p/<peer>`, counted as direct, and wins every send; **retraction alone is futile, the blacklist is REQUIRED**. `max_established_per_peer = 1` structurally disabled DCUtR (#163). `round_log_networking_audit.md`.
