@@ -8593,33 +8593,56 @@ already knows within the first second of starting, so it is the dialer on every
 link; being undialled is the normal state of a perfectly reachable node, and no
 amount of waiting distinguishes it from a blocked one.
 
-### Why the obvious answer does not apply
+### The dial-back service already exists, and the anchor already runs it
 
-libp2p AutoNAT is exactly this service and the node already runs it — but it
-answers the **public-internet** question. It asks peers to dial our external
-address, so a home node behind an ordinary NAT is reported `Private` whether or
-not its LAN ports are open. The case the warning exists for is a WSL node whose
-**LAN** peers cannot reach it, and AutoNAT will say `Private` for the healthy and
-the broken node alike. Using it here would swap one false positive for another.
+**Corrected 2026-08-18** — an earlier draft of this entry treated a dial-back
+prober as something to be built. It is already built, on by default, and running:
+AutoNAT v2, client and server, both wired in `network/behaviour.rs` and gated by
+`network.enable_autonat` (default true). The anchor serves it like any other
+public node. Measured on this machine the same day: five probes in one run,
+**two of them served by the anchor**, each reporting `171.97.115.x` unreachable —
+after which the node activated a relay by itself.
+
+So the internet half of the question is answered and acted on today. A node
+behind NAT learns it is not directly reachable and routes around it.
+
+### Why that still cannot settle the WSL case
+
+AutoNAT deliberately **says nothing about a LAN address**, and the guard is not
+an oversight — `autonat_verdict` returns `Uninformative` for anything
+`multiaddr_is_internet_reachable` rejects, precisely because the unguarded
+version was a bug. This node's log carried 84 probe failures on addresses no
+remote server could ever have dialled (52 on `192.168.1.53`, 19 on `127.0.0.1`,
+7 on `10.255.255.254`, 6 link-local), each setting a false `Private` and
+reserving a relay circuit out of a pool the anchor caps at 64.
+
+That guard is correct and must stay. The anchor is not on your subnet; nothing
+on the internet can dial `192.168.1.69`. **Only a peer on the same LAN can test
+the LAN path**, which is the exact path the WSL firewall warning is about — a
+node whose neighbours two milliseconds away cannot open a connection to it, and
+which a relay in another country papers over at a large latency cost.
 
 ### What would actually settle it
 
-Ask a peer to dial us, on the address it already has for us, and tell us what
-happened. Sketch:
+Not a new protocol. The right shape is to let AutoNAT answer the one case its
+guard currently excludes for good reason elsewhere: **a probe whose server is
+itself on our subnet**. Dialling a private address is meaningless from the
+internet and meaningful from the same LAN, so the discrimination belongs in the
+verdict, not in a second mechanism.
 
-- A `ReachabilityProbeRequest` / `Response` pair on the existing
-  request_response protocol, gated on a new `features::` bit per the additive-
-  protocol rule.
-- Sent to a peer on the same subnet (we already classify LAN peers — see
-  `lan_peer_count`), because the claim being tested is about the LAN.
-- The peer opens a fresh connection to our advertised address and reports
-  success or the error. A refusal or a timeout is a real answer, unlike silence.
-- Rate-limit hard and only run it when the check is about to warn: this is a
-  diagnostic, not a heartbeat, and a probe every node runs against every peer is
-  a traffic amplifier.
+- Extend `autonat_verdict` with the server's vantage point, so a private
+  `tested_addr` probed by a server on the same subnet yields a real verdict
+  instead of `Uninformative`. Everything else keeps today's behaviour.
+- Only ask a LAN peer (we already classify them — see `lan_peer_count`), and
+  only when the check is about to warn: this is a diagnostic, not a heartbeat.
+- Keep the relay activation off this path. A failed LAN probe means "your
+  neighbours cannot reach you directly"; it must not be fed to
+  `try_activate_relay`, which is what the 84-failure bug did.
 
-The honest cost note: this is a new protocol message for a warning that now
-fires rarely and reads accurately. Worth doing when the reachability question
-comes up for a second reason — pool onboarding and invite codes both care
-whether a node is dialable, and `pool::invite::any_internet_reachable` currently
-answers it by inspecting addresses rather than by testing them.
+The honest cost note: this is a change to a verdict function rather than a new
+protocol — much cheaper than the first draft of this entry claimed — for a
+warning that now fires rarely and reads accurately. Worth doing when the
+reachability question comes up for a second reason, and it already has one: pool
+onboarding and invite codes both care whether a node is dialable, and
+`pool::invite::any_internet_reachable` answers it by inspecting addresses rather
+than by testing them.
