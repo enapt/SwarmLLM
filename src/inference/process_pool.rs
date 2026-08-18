@@ -1922,7 +1922,13 @@ impl ModelProcessPool {
                     .or_insert((std::time::Instant::now(), 1))
                     .1;
                 let cooldown = spawn_failure_cooldown(count);
-                tracing::error!(
+                // Severity from the classification, not from the call site:
+                // most of `spawn_worker`'s arms are `ServiceUnavailable`
+                // (socket bind, spawn, accept, init timeout), which is a 503
+                // and a WARN. Logging every one at ERROR reports ordinary
+                // transient spawn contention as this node being broken.
+                crate::log_failure!(
+                    &e,
                     model = %model_id,
                     consecutive_failures = count,
                     cooldown_secs = cooldown.as_secs(),

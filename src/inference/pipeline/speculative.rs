@@ -630,7 +630,11 @@ pub(super) async fn send_verify_batch(
     // the guard so we don't double-remove on drop.
     verify_guard.disarm();
     if let Some(NetworkFinishReason::Error(msg)) = &result.finish_reason {
-        return Err(SwarmError::Inference(msg.clone()));
+        // The peer's error crossed the wire as text, so its class has to be
+        // recovered before it reaches a caller — see the sibling in
+        // `pipeline::forward_verify_through_segments`.
+        return Err(crate::error::reclassify_flattened_error(msg)
+            .unwrap_or_else(|| SwarmError::Inference(msg.clone())));
     }
     if result.spec_logits.is_empty() {
         return Err(SwarmError::Inference(

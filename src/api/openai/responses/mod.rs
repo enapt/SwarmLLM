@@ -257,23 +257,38 @@ pub(super) const MAX_UPSTREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// Buffer a Chat Completions response body, parse it as JSON, and run
 /// the Responses-shaped translation. Used by both `create_response`
 /// (sync) and `run_background_inference` (background) which previously
-/// hand-rolled three separate `match`/error sites each. Returns a
-/// human-readable error string so each caller can wrap it into the
-/// error type their control flow uses (`ApiError`, `ResponseError`,
-/// etc.).
+/// hand-rolled three separate `match`/error sites each.
+///
+/// **Returns the typed error, not a string.** It used to flatten to a
+/// `String` "so each caller can wrap it into the error type their control flow
+/// uses" — but there is no wire or IPC hop here to lose the type at, and every
+/// failure arm of `chat_response_to_responses` is a `ProviderError` describing a
+/// malformed upstream chat-completions response. Flattening it meant the
+/// foreground caller re-wrapped it as `Internal` (500 `server_error`) and the
+/// background caller stamped `server_error` by hand, so the same malformed
+/// upstream response was reported as this server's own bug — while the step
+/// immediately before it in the identical pipeline correctly answered
+/// `upstream_error` via `classify_error_code`. Which of the two internal calls
+/// happened to raise it decided whose fault the caller was told it was.
 async fn buffer_and_translate_chat_response(
     body: axum::body::Body,
     req: &ResponsesRequest,
     response_id: &str,
     created_at: i64,
-) -> Result<ResponsesResponse, String> {
-    let bytes = to_bytes(body, MAX_UPSTREAM_BODY_BYTES)
-        .await
-        .map_err(|e| format!("buffer error: {e}"))?;
+) -> Result<ResponsesResponse, SwarmError> {
+    let bytes =
+        to_bytes(body, MAX_UPSTREAM_BODY_BYTES)
+            .await
+            .map_err(|e| SwarmError::ProviderError {
+                status: 502,
+                body: format!("buffer error: {e}"),
+            })?;
     let chat_value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse chat JSON: {e}"))?;
+        serde_json::from_slice(&bytes).map_err(|e| SwarmError::ProviderError {
+            status: 502,
+            body: format!("parse chat JSON: {e}"),
+        })?;
     translate::chat_response_to_responses(&chat_value, req, response_id, created_at)
-        .map_err(|e| e.to_string())
 }
 
 /// In-flight map of background response ids to their cancel flags.
@@ -564,12 +579,7 @@ pub async fn create_response(
     let created_at = chrono::Utc::now().timestamp();
     let resp = buffer_and_translate_chat_response(body, &req, &response_id, created_at)
         .await
-        .map_err(|msg| {
-            ApiError(SwarmError::Internal(format!(
-                "Chat→Responses translation failed (model={}): {msg}",
-                req.model
-            )))
-        })?;
+        .map_err(ApiError)?;
 
     // M7: persist the completed response when store=true (the OpenAI default).
     if req.store.unwrap_or(true) {
@@ -758,12 +768,18 @@ async fn run_background_inference(
     let chat_req = match translate::request_to_chat(&req, prior.as_ref()) {
         Ok(c) => c,
         Err(e) => {
+            // Not always the caller's fault: besides `Validation`, this can
+            // raise `ProviderError` when the STORED tool-call data from a
+            // previous response is malformed, and calling that an invalid
+            // request tells the caller to fix input they did not send.
+            let err = ApiError(e);
+            let code = stream::classify_error_code(&err);
             finalize(
                 ResponseStatus::Failed,
                 Vec::new(),
                 None,
                 ResponsesUsage::default(),
-                Some(ResponseError::new("invalid_request_error", e.to_string())),
+                Some(ResponseError::new(&code, err.0.to_string())),
             );
             return;
         }
@@ -834,13 +850,19 @@ async fn run_background_inference(
     .await
     {
         Ok(r) => r,
-        Err(msg) => {
+        Err(e) => {
+            // Classified for the same reason the chat-completions failure
+            // above is: the background caller never sees a status code, so
+            // this string is the only thing telling them whether the fault
+            // was theirs, ours, or the model provider's.
+            let err = ApiError(e);
+            let code = stream::classify_error_code(&err);
             finalize(
                 ResponseStatus::Failed,
                 Vec::new(),
                 None,
                 ResponsesUsage::default(),
-                Some(ResponseError::new("server_error", msg)),
+                Some(ResponseError::new(&code, err.0.to_string())),
             );
             return;
         }

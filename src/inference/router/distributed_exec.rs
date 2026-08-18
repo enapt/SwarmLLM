@@ -871,6 +871,11 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         | SwarmError::PrivateModeUnavailable { .. }
         | SwarmError::PromptPrivacyUnavailable { .. }
         | SwarmError::ModelIncompleteInSwarm { .. }
+        // Raised only when NO node anywhere holds the model's mmproj shard —
+        // a swarm-wide gap, the same shape as `InsufficientCapacity` and
+        // `ModelIncompleteInSwarm` above it. The peer serving the text segment
+        // of a multimodal pipeline has no part in it.
+        | SwarmError::VisionEncoderUnavailable(_)
         | SwarmError::InsufficientCredits { .. }
         | SwarmError::InsufficientDisk { .. }
         | SwarmError::Database(_)
@@ -989,6 +994,14 @@ mod tests {
             ),
             "failover exhaustion names no culprit — attribution belongs to the \
              segment failure that triggered it"
+        );
+        assert!(
+            !failure_is_penalty_worthy(
+                &SwarmError::VisionEncoderUnavailable(ModelId("llava".into())),
+                true
+            ),
+            "nobody in the swarm holding the vision encoder is a capacity gap, not \
+             a fault of whichever peer happened to serve the text segment"
         );
     }
 

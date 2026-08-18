@@ -342,9 +342,16 @@ pub(super) async fn forward_verify_through_segments(
         };
 
         if let Some(crate::types::NetworkFinishReason::Error(msg)) = &result.finish_reason {
-            return Err(SwarmError::Inference(format!(
-                "spec verify segment {idx}: {msg}"
-            )));
+            // Same recovery as the distributed and remote-generate siblings:
+            // the class does not survive the wire, and without it a peer's
+            // `Validation` is reported to the caller as this server breaking
+            // AND the peer is charged a serve-failure penalty for a mistake
+            // that was the caller's (gotcha #304).
+            return Err(
+                crate::error::reclassify_flattened_error(msg).unwrap_or_else(|| {
+                    SwarmError::Inference(format!("spec verify segment {idx}: {msg}"))
+                }),
+            );
         }
 
         if is_last {

@@ -786,8 +786,13 @@ pub async fn model_metadata(
         .map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
     let mut cursor = std::io::Cursor::new(&header_bytes);
     let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor).map_err(|e| {
-        ApiError(crate::error::SwarmError::Validation(format!(
-            "Failed to parse GGUF header (file may be corrupt): {e}"
+        // The caller supplied only a model id, already validated. A header this
+        // node downloaded earlier and cannot now parse is a local storage
+        // problem — 503 "this server can't serve", not a 400 telling the caller
+        // their request was malformed when nothing about it can fix this.
+        ApiError(crate::error::SwarmError::ServiceUnavailable(format!(
+            "the stored GGUF header for this model could not be read and may be \
+             corrupt — re-downloading the model will replace it: {e}"
         )))
     })?;
 
