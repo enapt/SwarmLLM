@@ -151,9 +151,14 @@ const DELEGATE_VRAM_MARGIN: f64 = 1.2;
 /// - **The peer is trusted enough to be shown the prompt**
 ///   ([`DELEGATE_MIN_TRUST`]).
 ///
-/// Prompt privacy is handled by the caller and is absolute: `encrypted_pipeline`
-/// means no peer may see the plaintext prompt, and delegation sends exactly
-/// that. It is checked before this is called.
+/// **Prompt privacy does not disqualify a peer here — it changes what is sent.**
+/// This function answers "is there a peer worth involving"; the caller decides
+/// the shape. With privacy off that is a whole-model hand-off. With privacy on
+/// it is the boomerang: embedding and sampling stay local, the peer runs the
+/// middle layers on encrypted activations and never sees the prompt or the
+/// sampled tokens. Refusing to involve a peer at all under privacy would leave
+/// the node on its CPU for no privacy gain, since the boomerang is exactly the
+/// mode `encrypted_pipeline` exists to provide.
 fn delegation_target<'a>(
     candidates: &'a [NodeCandidate],
     local_node_id: &NodeId,
@@ -210,6 +215,68 @@ fn delegation_target<'a>(
         );
     }
     None
+}
+
+/// Build the boomerang: embedding here, the middle layers on `peer`, sampling
+/// back here.
+///
+/// **Constructed rather than searched, for the same reason the whole-model
+/// hand-off is.** Asked to route this, the general search legitimately answers
+/// "run all of it locally": that satisfies the encrypted constraint (first and
+/// last segments are local) at zero network cost, and nothing in its cost model
+/// knows the local node is about to fall back to its CPU. Verified on two nodes
+/// on 2026-08-18 — skipping the local fast path alone produced
+/// `segments=1 node=<local> layer_start=0 layer_end=28`, which is not a
+/// boomerang. Teaching the search that local compute is expensive here is what
+/// the reverted `cbbed678` did, and it distorted every other route.
+///
+/// The split is deliberately lopsided: one layer at each end, everything else on
+/// the peer. The local segments exist to satisfy privacy — the first does the
+/// token embedding, the last the norm and output head — and every layer kept
+/// here is a layer running on the CPU we are trying to get off.
+///
+/// `None` when the model is too short to split three ways, or either side does
+/// not cover what it needs; the caller then keeps the request local.
+fn boomerang_assignment(
+    local: &NodeCandidate,
+    peer: &NodeCandidate,
+    num_layers: u32,
+) -> Option<Vec<PipelineSegment>> {
+    // Need a layer at each end and at least one in the middle.
+    if num_layers < 3 {
+        return None;
+    }
+    let covers = |c: &NodeCandidate, from: u32, to: u32| {
+        c.available_ranges.iter().any(|r| r.0 <= from && r.1 >= to)
+    };
+    // The local node must own both ends — that IS prompt privacy — and the peer
+    // must cover the middle it is being given.
+    if !local.can_be_first || !local.can_be_last {
+        return None;
+    }
+    if !covers(local, 0, 1) || !covers(local, num_layers - 1, num_layers) {
+        return None;
+    }
+    if !covers(peer, 1, num_layers - 1) {
+        return None;
+    }
+    Some(vec![
+        PipelineSegment {
+            node_id: local.node_id.clone(),
+            shard_id: local.shard_id.clone(),
+            layer_range: (0, 1),
+        },
+        PipelineSegment {
+            node_id: peer.node_id.clone(),
+            shard_id: peer.shard_id.clone(),
+            layer_range: (1, num_layers - 1),
+        },
+        PipelineSegment {
+            node_id: local.node_id.clone(),
+            shard_id: local.shard_id.clone(),
+            layer_range: (num_layers - 1, num_layers),
+        },
+    ])
 }
 
 /// Maximum number of GPUs in a tensor-parallel group. AllReduce communication
@@ -415,11 +482,24 @@ impl PipelineScheduler {
         // Holding every layer is not the same as being able to run them well.
         // Before taking the local fast path, check whether this node is about
         // to serve the model from its CPU because the model does not fit its
-        // GPU — and whether a nearby peer could simply run the whole thing.
+        // GPU — and whether a nearby peer could do better.
         //
-        // Deliberately skipped when prompt privacy is on: delegation sends the
-        // plaintext prompt, which is precisely what `encrypted_pipeline`
-        // promises will not leave this machine.
+        // Two ways it can, and prompt privacy decides which:
+        //
+        // - Privacy OFF: hand the peer the whole model. One segment, no
+        //   per-token network, the `remote_generate` fast path.
+        // - Privacy ON: the boomerang this node already knows how to build —
+        //   embedding and sampling stay here, the middle layers go to the peer
+        //   as encrypted activations. The peer never sees the prompt or the
+        //   sampled tokens, so the guarantee is kept in full.
+        //
+        // The second is what `encrypted_pipeline` is FOR, and the routing for
+        // it is already wired: `route_shortest_path` is passed
+        // `parallax_partial_ranges || encrypted`, which lets a peer holding the
+        // whole model be cut down to a middle segment. All that was missing is
+        // getting there — the local fast path below returns first, so a
+        // privacy-on node ran everything on its own CPU with an idle GPU peer
+        // beside it and no way to use it.
         let local_covers_everything = candidates.iter().any(|c| {
             c.node_id == *local_node_id
                 && c.available_ranges
@@ -435,30 +515,40 @@ impl PipelineScheduler {
                 pool.is_cpu_bound_for_lack_of_vram(model_id),
                 pool.estimated_gpu_mb(model_id).unwrap_or(0),
             ) {
-                // Prompt privacy outranks speed, always. Delegation sends the
-                // plaintext prompt, which is the one thing `encrypted_pipeline`
-                // promises will not happen — and it is ON BY DEFAULT for any
-                // model whose ends this node holds (`encrypted_pipeline_auto`),
-                // which is every model that can reach this decision at all.
-                //
-                // So this is the common outcome, not an edge case, and it is
-                // said out loud: the user is on the slow path, a faster one
-                // exists, and the setting that decides between them is named.
-                // Silently choosing either way would be worse — trading away a
-                // privacy guarantee they were given without asking, or leaving
-                // them on a six-minute prompt with no idea why.
                 if encrypted {
-                    tracing::info!(
-                        model = %model_id,
-                        peer = %peer.node_id,
-                        "This model does not fit our GPU and is running on the processor. \
-                         A nearby machine could run it on its graphics card, but prompt \
-                         privacy is on for this model, and handing the whole model over \
-                         would let that machine read the prompt. Turn off \
-                         inference.encrypted_pipeline for this model to use it"
-                    );
-                    // Fall through to the local fast path below, which is
-                    // exactly what should happen — privacy wins.
+                    // Boomerang. Skipping the local fast path is the whole
+                    // change: the distributed assembly below already forces the
+                    // first and last segments onto this node and already
+                    // enables partial ranges when `encrypted`, so it can cut
+                    // this peer's whole-model range down to the middle. The
+                    // peer sees encrypted hidden states and nothing else.
+                    //
+                    // Privacy is not traded away for speed here, and it must
+                    // never be: handing over the WHOLE model would let the peer
+                    // read the prompt, which is the one thing this setting
+                    // promises will not happen.
+                    let local_cand = candidates
+                        .iter()
+                        .find(|c| c.node_id == *local_node_id)
+                        .and_then(|l| boomerang_assignment(l, peer, num_layers));
+                    if let Some(segments) = local_cand {
+                        tracing::info!(
+                            model = %model_id,
+                            peer = %peer.node_id,
+                            peer_latency_ms = peer.latency_ms,
+                            middle = ?(1, num_layers - 1),
+                            "This model does not fit our GPU. Prompt privacy is on, so the \
+                             first and last layers stay here and a nearby peer runs the \
+                             middle — it sees encrypted activations, never the prompt"
+                        );
+                        return Ok(PipelineAssignment {
+                            request_id,
+                            segments,
+                            standbys: vec![],
+                            tp_groups: vec![],
+                            supports_speculative: true,
+                        });
+                    }
                 } else {
                     tracing::info!(
                         model = %model_id,

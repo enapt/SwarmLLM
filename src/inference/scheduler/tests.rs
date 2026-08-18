@@ -1438,3 +1438,77 @@ fn the_local_node_is_never_its_own_delegate() {
     let cands = vec![me];
     assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none());
 }
+
+/// Prompt privacy must NOT disqualify a peer. `delegation_target` answers "is
+/// there a peer worth involving"; the caller turns that into a whole-model
+/// hand-off or a boomerang. Refusing the peer here would strand a privacy-on
+/// node on its CPU for no privacy gain — the boomerang keeps the guarantee in
+/// full, because the peer only ever sees encrypted intermediate activations.
+#[test]
+fn privacy_is_the_callers_decision_not_a_peer_filter() {
+    let cands = vec![local_full_coverage(), willing_peer(0xBB, LAYERS)];
+    assert!(
+        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_some(),
+        "the peer is eligible regardless of privacy; the caller picks the shape"
+    );
+}
+
+/// The boomerang keeps both ends here and gives the peer everything between.
+/// Every layer left local is one running on the CPU we are trying to get off,
+/// so the split is deliberately lopsided.
+#[test]
+fn the_boomerang_keeps_both_ends_local_and_gives_the_peer_the_middle() {
+    let local = local_full_coverage();
+    let peer = willing_peer(0xBB, LAYERS);
+    let segs = super::boomerang_assignment(&local, &peer, LAYERS).expect("should build");
+    assert_eq!(segs.len(), 3);
+    assert_eq!(segs[0].node_id, local_id());
+    assert_eq!(segs[0].layer_range, (0, 1), "embedding stays here");
+    assert_eq!(segs[1].node_id, NodeId([0xBB; 32]));
+    assert_eq!(segs[1].layer_range, (1, LAYERS - 1), "peer runs the middle");
+    assert_eq!(segs[2].node_id, local_id());
+    assert_eq!(
+        segs[2].layer_range,
+        (LAYERS - 1, LAYERS),
+        "sampling stays here"
+    );
+    // Contiguous and complete: a gap would strand layers, an overlap would run
+    // them twice.
+    assert_eq!(segs[0].layer_range.1, segs[1].layer_range.0);
+    assert_eq!(segs[1].layer_range.1, segs[2].layer_range.0);
+    assert_eq!(segs[2].layer_range.1, LAYERS);
+}
+
+/// Prompt privacy is the WHOLE point of this shape, so a local node that cannot
+/// own both ends must not get one — better to run slowly than to leak.
+#[test]
+fn a_local_node_missing_an_end_gets_no_boomerang() {
+    let peer = willing_peer(0xBB, LAYERS);
+    for (first, last) in [(false, true), (true, false)] {
+        let mut local = local_full_coverage();
+        local.can_be_first = first;
+        local.can_be_last = last;
+        assert!(
+            super::boomerang_assignment(&local, &peer, LAYERS).is_none(),
+            "can_be_first={first} can_be_last={last} must not boomerang"
+        );
+    }
+}
+
+/// A peer that does not cover the middle cannot be given it.
+#[test]
+fn a_peer_missing_the_middle_gets_no_boomerang() {
+    let local = local_full_coverage();
+    let mut peer = willing_peer(0xBB, LAYERS);
+    peer.available_ranges = vec![(0, 2)]; // holds the start, not the middle
+    assert!(super::boomerang_assignment(&local, &peer, LAYERS).is_none());
+}
+
+/// Too short to split three ways — one layer each end leaves nothing between.
+#[test]
+fn a_model_too_short_to_split_gets_no_boomerang() {
+    let peer = willing_peer(0xBB, 2);
+    let mut local = local_full_coverage();
+    local.available_ranges = vec![(0, 2)];
+    assert!(super::boomerang_assignment(&local, &peer, 2).is_none());
+}

@@ -755,10 +755,20 @@ silently break at the wire if duplicated:
   layers unusable, priced out the good split (some layers here, rest on a peer 5 ms
   away) and picked a node in another country. Both outcomes here are a single
   segment. Do NOT reintroduce a penalty term — it distorts every other route.
-  **Prompt privacy outranks it absolutely**: delegation sends the plaintext prompt,
-  and `encrypted_pipeline_auto` is on by default for any model whose ends this node
-  holds — which is every model that can reach this decision — so the blocked case is
-  the COMMON one and is logged with the setting that changes it.
+  **Prompt privacy changes the SHAPE, it does not disqualify the peer.** With privacy
+  off the peer gets the whole model. With privacy on, `boomerang_assignment` keeps
+  layer 0 and the final layer local — the embedding and the sampling, which is what
+  the guarantee actually is — and gives the peer everything between, as encrypted
+  activations. Since `encrypted_pipeline_auto` is on by default for any model whose
+  ends this node holds, that is the COMMON path, not an edge case: treating privacy
+  as a veto stranded the default configuration on its CPU for no privacy gain.
+  **The boomerang is constructed, not searched, for the same reason.** Asked to route
+  it, the general search answers "all of it locally" — that satisfies the encrypted
+  constraint at zero network cost and nothing in its cost model knows this node is
+  about to fall back to its CPU. Verified 2026-08-18: merely standing the fast path
+  aside produced `segments=1 node=<local> layer_start=0 layer_end=28`. Teaching the
+  search that local compute is expensive here is what `cbbed678` did, and it
+  distorted every other route.
   Three things made it inert until it was run on real machines, all now fixed and
   all worth knowing before touching this: gotcha #329 (`would_fit_on_gpu` said yes
   for a model resident on the CPU), #330 (every node gossips zero free VRAM), #331
