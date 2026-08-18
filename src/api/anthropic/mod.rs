@@ -34,6 +34,10 @@ const MAX_TOKENS_HARD_CAP: u32 = 32768;
 /// only exists so a pathological body cannot be held in memory.
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
+/// The one route whose failures wear Anthropic's envelope. Kept next to the
+/// layer so the guard and the router cannot disagree about which path that is.
+const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages";
+
 /// Rewrite a failure on `/v1/messages` into the envelope Anthropic clients
 /// actually parse.
 ///
@@ -60,10 +64,23 @@ const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// shape, so the translation now lives where the response leaves the route
 /// rather than in any handler.
 ///
-/// **A layer rather than a handler-side error type, deliberately.** Not every
-/// failure here comes from the handler: `JsonBody`'s rejection for a missing
-/// `max_tokens` is produced by the extractor, before any handler code runs, and
-/// a wrapper error type could never reach it.
+/// **A layer rather than a handler-side error type, deliberately.** Most
+/// failures on this route never reach the handler: `JsonBody`'s rejection for a
+/// missing `max_tokens` comes from the extractor, and an unauthenticated or
+/// rate-limited request is refused before either. A wrapper error type could not
+/// reach any of them.
+///
+/// **It is therefore layered OUTSIDE auth and rate limiting**, not on the route.
+/// Layered on the route it sat inside both, so the single most likely failure a
+/// new user meets — a wrong API key — still came back in the OpenAI envelope.
+/// Anthropic reports authentication failures in its ordinary error shape, so
+/// that is the shape they must arrive in. Note this differs from MCP, whose
+/// authorization spec puts auth failures at the transport level (HTTP status
+/// plus `WWW-Authenticate`) and says nothing about the body — which is why
+/// `/mcp` is deliberately not given the same treatment.
+///
+/// Because it now sees every request, it checks the path FIRST and returns
+/// anything else untouched before reading a byte.
 ///
 /// Success responses are returned untouched and are never buffered — the
 /// streaming path is a 200 carrying an open SSE stream, and reading it here
@@ -72,8 +89,11 @@ pub async fn anthropic_error_envelope(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let is_anthropic_surface = req.uri().path() == ANTHROPIC_MESSAGES_PATH;
     let response = next.run(req).await;
-    if !(response.status().is_client_error() || response.status().is_server_error()) {
+    if !is_anthropic_surface
+        || !(response.status().is_client_error() || response.status().is_server_error())
+    {
         return response;
     }
     let (mut parts, body) = response.into_parts();

@@ -66,10 +66,21 @@ pub(crate) const MCP_MAX_TASK_ID_BYTES: usize = 256;
 
 /// POST /mcp — handles JSON-RPC requests and notifications.
 /// Per Streamable HTTP spec: notifications (no `id`) get HTTP 202 with no body.
+/// A `202 Accepted` with a genuinely empty body, which is what the Streamable
+/// HTTP transport requires for a notification: *"the server MUST return HTTP
+/// status code 202 Accepted with no body"*.
+///
+/// `Json(None::<T>)` does NOT do that — axum serializes the `Option`
+/// unconditionally, so it puts the four bytes `null` on the wire with a JSON
+/// content type. Harmless to most clients, but it is not "no body".
+fn accepted_no_body() -> axum::response::Response {
+    (StatusCode::ACCEPTED, axum::body::Body::empty()).into_response()
+}
+
 pub async fn handle_mcp(
     State(state): State<AppState>,
     body: axum::body::Bytes,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Parse the body here rather than via the `Json` extractor. The extractor
     // rejects malformed JSON with a plain-text 400 before any of this runs, but
     // JSON-RPC requires the reply to a bad body to be an error OBJECT carrying
@@ -79,7 +90,7 @@ pub async fn handle_mcp(
         Ok(r) => r,
         Err(boxed) => {
             let (status, resp) = *boxed;
-            return (status, Json(Some(resp)));
+            return (status, Json(resp)).into_response();
         }
     };
 
@@ -90,7 +101,7 @@ pub async fn handle_mcp(
         "initialize" => handle_initialize(req.id, &req.params),
         "notifications/initialized" | "notifications/cancelled" => {
             if is_notification {
-                return (StatusCode::ACCEPTED, Json(None));
+                return accepted_no_body();
             }
             JsonRpcResponse::success(req.id, json!({}))
         }
@@ -114,7 +125,7 @@ pub async fn handle_mcp(
         ),
         _ if is_notification => {
             // Unknown notification — silently accept per spec
-            return (StatusCode::ACCEPTED, Json(None));
+            return accepted_no_body();
         }
         _ => {
             // SEC: cap the reflected method string. The body is bounded by
@@ -139,7 +150,7 @@ pub async fn handle_mcp(
         }
     };
 
-    (StatusCode::OK, Json(Some(response)))
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// GET /mcp — SSE stream for server-initiated messages.
@@ -167,11 +178,28 @@ pub async fn handle_mcp_delete() -> impl IntoResponse {
 /// - A wrong `jsonrpc` value returned -32700 ("invalid JSON"), but the JSON
 ///   parsed fine; an unusable Request object is -32600.
 fn parse_jsonrpc_body(body: &[u8]) -> Result<JsonRpcRequest, Box<(StatusCode, JsonRpcResponse)>> {
-    let req: JsonRpcRequest = serde_json::from_slice(body).map_err(|e| {
+    // Two failures, two codes. `from_slice::<JsonRpcRequest>` cannot tell them
+    // apart — it returns the same error type for bytes that are not JSON at all
+    // and for perfectly good JSON of the wrong shape (a missing `method`, a
+    // top-level array, which is what a JSON-RPC batch looks like and which MCP
+    // removed in revision 2025-06-18). Collapsing both into -32700 says "your
+    // JSON is malformed" about a document that parsed cleanly. Parsing to
+    // `Value` first is what separates them.
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
         Box::new((
             StatusCode::BAD_REQUEST,
             // `id` is unknowable when the body did not parse; JSON-RPC says null.
             JsonRpcResponse::error(None, PARSE_ERROR, format!("Parse error: {e}")),
+        ))
+    })?;
+    let req: JsonRpcRequest = serde_json::from_value(value.clone()).map_err(|e| {
+        // The JSON is fine, the Request object is not. Recover the `id` if the
+        // document happens to carry a usable one, so a client can still match
+        // the reply to its call.
+        let id = value.get("id").filter(|v| !v.is_null()).cloned();
+        Box::new((
+            StatusCode::BAD_REQUEST,
+            JsonRpcResponse::error(id, INVALID_REQUEST, format!("Invalid Request: {e}")),
         ))
     })?;
     if req.jsonrpc != "2.0" {
@@ -392,10 +420,11 @@ mod jsonrpc_error_tests {
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["jsonrpc"], "2.0");
         assert_eq!(v["error"]["code"], PARSE_ERROR);
-        assert!(
-            v.get("id").is_none() || v["id"].is_null(),
-            "id must be null: {v}"
-        );
+        // Not "absent OR null" — the spec says the member is REQUIRED and MUST
+        // be Null when the id could not be determined, and the assertion used
+        // to accept either because the field was being skipped when absent.
+        assert!(v.get("id").is_some(), "id must be present: {v}");
+        assert!(v["id"].is_null(), "id must be null: {v}");
         assert!(v["error"]["message"]
             .as_str()
             .unwrap()
@@ -430,5 +459,59 @@ mod jsonrpc_error_tests {
         let req = parse_jsonrpc_body(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
             .unwrap();
         assert!(req.id.is_none());
+    }
+}
+
+#[cfg(test)]
+mod jsonrpc_conformance_tests {
+    use super::*;
+    use crate::api::mcp::types::INTERNAL_ERROR;
+
+    /// Valid JSON of the wrong shape is an **Invalid Request** (-32600), not a
+    /// **Parse error** (-32700). The distinction is JSON-RPC 2.0 §5's, and this
+    /// file's own doc comment already drew it — but only the wrong-`jsonrpc`
+    /// case implemented it, because `from_slice::<JsonRpcRequest>` returns the
+    /// same error type for "not JSON" and "not this shape".
+    #[test]
+    fn well_formed_json_of_the_wrong_shape_is_an_invalid_request() {
+        // A JSON-RPC batch: an array. MCP removed batching in 2025-06-18, so
+        // rejecting it is right; calling it a parse error is not.
+        let (_, resp) =
+            *parse_jsonrpc_body(br#"[{"jsonrpc":"2.0","method":"ping","id":1}]"#).unwrap_err();
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["error"]["code"], INVALID_REQUEST, "batch: {v}");
+
+        // A missing `method` — parses as JSON, unusable as a Request.
+        let (_, resp) = *parse_jsonrpc_body(br#"{"jsonrpc":"2.0","id":7}"#).unwrap_err();
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["error"]["code"], INVALID_REQUEST);
+        assert_eq!(
+            v["id"], 7,
+            "a recoverable id lets the client match the reply"
+        );
+    }
+
+    /// Bytes that are not JSON at all keep -32700 — the fix above must not have
+    /// swallowed the case the code was already getting right.
+    #[test]
+    fn genuinely_malformed_json_is_still_a_parse_error() {
+        let (_, resp) = *parse_jsonrpc_body(b"not json").unwrap_err();
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["error"]["code"], PARSE_ERROR);
+        assert!(v["id"].is_null());
+    }
+
+    /// Every Response carries `id`, as an explicit null when it is unknown.
+    #[test]
+    fn the_id_member_is_always_present() {
+        let v = serde_json::to_value(JsonRpcResponse::error(None, INTERNAL_ERROR, "x")).unwrap();
+        assert!(v.get("id").is_some() && v["id"].is_null());
+
+        let v = serde_json::to_value(JsonRpcResponse::success(
+            Some(serde_json::json!("abc")),
+            serde_json::json!({}),
+        ))
+        .unwrap();
+        assert_eq!(v["id"], "abc");
     }
 }

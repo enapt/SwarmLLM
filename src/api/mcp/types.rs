@@ -15,7 +15,13 @@ pub struct JsonRpcRequest {
 #[derive(Debug, Serialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Serialized even when absent, as an explicit `null`.
+    ///
+    /// JSON-RPC 2.0 §5 makes `id` REQUIRED on a Response object, and says that
+    /// when it could not be determined from the Request — a parse error, an
+    /// unusable Request object — it MUST be Null. Skipping it omitted the key
+    /// entirely on exactly those paths, so a client that expects a Response to
+    /// always carry an `id` did not find one.
     pub id: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
@@ -55,6 +61,14 @@ impl JsonRpcResponse {
     }
 }
 
+/// A tool result carrying one text block — the shape every MCP tool returns.
+pub(super) fn tool_text_result(id: Option<Value>, text: impl Into<String>) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({ "content": [{ "type": "text", "text": text.into() }] }),
+    )
+}
+
 // JSON-RPC error codes
 /// Invalid JSON was received — the body could not be parsed at all.
 pub(super) const PARSE_ERROR: i64 = -32700;
@@ -67,6 +81,11 @@ pub(super) const INVALID_PARAMS: i64 = -32602;
 pub(super) const INTERNAL_ERROR: i64 = -32603;
 /// Application-level error: resource unavailable (no models loaded).
 pub(super) const RESOURCE_UNAVAILABLE: i64 = -32000;
+/// A `uri` that is well-formed but names no resource this server has. The MCP
+/// resources spec names this code specifically, and it is a different situation
+/// from [`INVALID_PARAMS`], which says the caller's argument was malformed —
+/// asking correctly for something that is not here is not a malformed ask.
+pub(super) const RESOURCE_NOT_FOUND: i64 = -32002;
 
 /// The JSON-RPC code for a failure raised while serving a tool call.
 ///

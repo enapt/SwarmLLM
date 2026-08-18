@@ -657,5 +657,28 @@ async fn generation_routes_still_require_a_key() {
             401,
             "{path} answered without a key — the timeout-exempt routes lost the auth layer"
         );
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        if path == "/v1/messages" {
+            // A wrong key is the likeliest failure a new Claude Code user meets,
+            // and Anthropic reports it in its ordinary error shape. The envelope
+            // layer therefore has to sit OUTSIDE auth; on the route it sat
+            // inside, and this answered in the OpenAI shape.
+            assert_eq!(
+                body["type"], "error",
+                "an unauthenticated /v1/messages must still answer in Anthropic's \
+                 envelope — the error layer has fallen back inside the auth layer"
+            );
+            assert_eq!(body["error"]["type"], "authentication_error");
+        } else {
+            assert_eq!(
+                body["error"]["type"], "authentication_error",
+                "{path} must keep the OpenAI envelope"
+            );
+            assert!(
+                body.get("type").is_none(),
+                "{path} is not the Anthropic surface and must not be reshaped"
+            );
+        }
     }
 }

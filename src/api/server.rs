@@ -234,12 +234,7 @@ pub fn build_router(state: AppState) -> Router {
     let generation_routes = Router::new()
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/responses", post(openai::responses::create_response))
-        .route(
-            "/v1/messages",
-            post(anthropic::messages).layer(axum::middleware::from_fn(
-                anthropic::anthropic_error_envelope,
-            )),
-        )
+        .route("/v1/messages", post(anthropic::messages))
         .route(
             "/mcp",
             post(mcp::handle_mcp)
@@ -558,6 +553,14 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::rate_limit_middleware,
+        ))
+        // OUTSIDE auth and rate limiting, deliberately. Layered on the route
+        // itself it sat INSIDE both, so a Claude client sending a bad key —
+        // the most likely failure a new user hits — still got the OpenAI
+        // envelope back. It inspects the path and returns everything else
+        // untouched before reading a byte.
+        .layer(axum::middleware::from_fn(
+            anthropic::anthropic_error_envelope,
         ))
         // MUST be registered BEFORE the CORS layer. A `.layer()` does not wrap a
         // fallback added after it, so registering this last put it OUTSIDE CORS

@@ -5,7 +5,9 @@ use super::dispatch::{
     MCP_TASK_TIMEOUT,
 };
 use super::resources::mcp_peer_json;
-use super::types::{JsonRpcResponse, INTERNAL_ERROR, INVALID_PARAMS, RESOURCE_UNAVAILABLE};
+use super::types::{
+    tool_text_result, JsonRpcResponse, INTERNAL_ERROR, INVALID_PARAMS, RESOURCE_UNAVAILABLE,
+};
 use super::{MCP_MAX_MODEL_ID_BYTES, MCP_MAX_PROMPT_BYTES, MCP_MAX_TASK_ID_BYTES};
 use crate::api::server::AppState;
 use crate::api::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K};
@@ -139,17 +141,7 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
     )
     .await
     {
-        Ok(Ok(response)) => JsonRpcResponse::success(
-            id,
-            json!({
-                "content": [
-                    {
-                        "type": "text",
-                        "text": response.content
-                    }
-                ]
-            }),
-        ),
+        Ok(Ok(response)) => tool_text_result(id, response.content),
         Ok(Err(e)) => JsonRpcResponse::error(
             id,
             super::types::tool_error_code(&e.0),
@@ -209,16 +201,9 @@ async fn tool_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
         .map(|(id, name, source)| json!({ "id": id, "name": name, "source": source }))
         .collect();
 
-    JsonRpcResponse::success(
+    tool_text_result(
         id,
-        json!({
-            "content": [
-                {
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&models).unwrap_or_default()
-                }
-            ]
-        }),
+        serde_json::to_string_pretty(&models).unwrap_or_default(),
     )
 }
 
@@ -330,16 +315,9 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
         "results": results,
     });
 
-    JsonRpcResponse::success(
+    tool_text_result(
         id,
-        json!({
-            "content": [
-                {
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&summary).unwrap_or_default()
-                }
-            ]
-        }),
+        serde_json::to_string_pretty(&summary).unwrap_or_default(),
     )
 }
 
@@ -478,16 +456,9 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
         "results": results,
     });
 
-    JsonRpcResponse::success(
+    tool_text_result(
         id,
-        json!({
-            "content": [
-                {
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&summary).unwrap_or_default()
-                }
-            ]
-        }),
+        serde_json::to_string_pretty(&summary).unwrap_or_default(),
     )
 }
 
@@ -655,16 +626,9 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
         "results": results,
     });
 
-    JsonRpcResponse::success(
+    tool_text_result(
         id,
-        json!({
-            "content": [
-                {
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&summary).unwrap_or_default()
-                }
-            ]
-        }),
+        serde_json::to_string_pretty(&summary).unwrap_or_default(),
     )
 }
 
@@ -826,7 +790,11 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
     let (model_id, source, _) = match selected {
         Some(s) => s,
         None => {
-            return JsonRpcResponse::error(id, INTERNAL_ERROR, "No suitable model found for tier");
+            return JsonRpcResponse::error(
+                id,
+                RESOURCE_UNAVAILABLE,
+                "No suitable model found for tier",
+            );
         }
     };
 
@@ -849,7 +817,14 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
     .await;
 
     if let Some(err) = call.error {
-        return JsonRpcResponse::error(id, INTERNAL_ERROR, format!("Delegate failed: {err}"));
+        // Classified exactly as `chat`'s identical failure is. Hardcoding
+        // INTERNAL_ERROR here meant the SAME underlying failure — a model that
+        // does not exist, a prompt past the context — told the client "the tool
+        // is broken" through `delegate` and "fix your call" through `chat`.
+        let code = crate::error::reclassify_flattened_error(&err)
+            .map(|e| super::types::tool_error_code(&e))
+            .unwrap_or(INTERNAL_ERROR);
+        return JsonRpcResponse::error(id, code, format!("Delegate failed: {err}"));
     }
 
     let result = json!({
@@ -862,16 +837,9 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
         "latency_ms": call.elapsed_ms,
     });
 
-    JsonRpcResponse::success(
+    tool_text_result(
         id,
-        json!({
-            "content": [
-                {
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&result).unwrap_or_default()
-                }
-            ]
-        }),
+        serde_json::to_string_pretty(&result).unwrap_or_default(),
     )
 }
 
@@ -977,16 +945,9 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
         "credits": credits,
     });
 
-    JsonRpcResponse::success(
+    tool_text_result(
         id,
-        json!({
-            "content": [
-                {
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&node_info).unwrap_or_default()
-                }
-            ]
-        }),
+        serde_json::to_string_pretty(&node_info).unwrap_or_default(),
     )
 }
 

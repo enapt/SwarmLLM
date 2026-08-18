@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use super::tools::enumerate_models;
-use super::types::{JsonRpcResponse, INVALID_PARAMS};
+use super::types::{JsonRpcResponse, RESOURCE_NOT_FOUND};
 use crate::api::server::AppState;
 
 pub(super) fn handle_resources_list(id: Option<Value>) -> JsonRpcResponse {
@@ -43,7 +43,7 @@ pub(super) async fn handle_resources_read(
         "swarmllm://status" => resource_status(state, id).await,
         "swarmllm://models" => resource_models(state, id).await,
         "swarmllm://peers" => resource_peers(state, id).await,
-        _ => JsonRpcResponse::error(id, INVALID_PARAMS, format!("Unknown resource: {uri}")),
+        _ => JsonRpcResponse::error(id, RESOURCE_NOT_FOUND, format!("Unknown resource: {uri}")),
     }
 }
 

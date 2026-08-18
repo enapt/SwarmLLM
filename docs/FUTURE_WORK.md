@@ -8646,3 +8646,68 @@ reachability question comes up for a second reason, and it already has one: pool
 onboarding and invite codes both care whether a node is dialable, and
 `pool::invite::any_internet_reachable` answers it by inspecting addresses rather
 than by testing them.
+
+## MCP reports every tool failure as a protocol error, never `isError` (2026-08-18)
+
+**This one needs a product decision, not just an implementation.** It was found,
+scoped, implemented and then deliberately reverted — the reasoning is below so
+nobody re-derives it from scratch.
+
+### What the spec says
+
+MCP splits failures in two (modelcontextprotocol.io, server/tools, "Error
+Handling"):
+
+- **Protocol errors** — a JSON-RPC `error`: *"Unknown tools, Invalid arguments,
+  Server errors."*
+- **Tool execution errors** — reported *inside a successful result* with
+  `isError: true`: *"API failures, Invalid input data, Business logic errors."*
+
+`grep -rn "isError" src/api/mcp/` returns nothing. Every runtime failure in
+`tools.rs` is a JSON-RPC error: the router being unavailable, an inference call
+that ran and failed, a timeout, "no models available for research", "no suitable
+model found for tier", and a failed `delegate` call.
+
+### Why it might matter
+
+The two are handled differently at the client. A JSON-RPC error is the
+transport's business and the model driving the conversation may never see it; an
+`isError` result is *content the model reads*, so it can pick another model,
+shorten the prompt, or explain the problem. Under the current behaviour "no
+models are loaded yet" and "that peer timed out" — both ordinary, recoverable —
+arrive looking like a broken server.
+
+### Why it was not simply changed
+
+Three reasons, in increasing order of weight.
+
+1. **The spec's own categories are not clean.** "Server errors" is listed under
+   *protocol* errors, and "no inference router" is a server error by any reading.
+   The line between that and "business logic error" is a judgement call, not a
+   lookup.
+2. **It would delete a deliberate earlier fix.** `types::tool_error_code` exists
+   *because* every inference failure used to be `INTERNAL_ERROR`, so a model name
+   that did not exist and a prompt past the context both said "the server had an
+   internal error" (measured 2026-08-12). Its comment is explicit that a client
+   reads `-32603` as "the tool is broken" and `-32602` as "fix the call". Moving
+   those failures to `isError` makes that classification unreachable and hands
+   the distinction back to prose in a text block. That may well be the right
+   trade for an agentic client — but it IS a trade, and it undoes work that was
+   done for a measured reason.
+3. **It changes a shipped surface** with no way to verify against the clients
+   people actually point at this server.
+
+### What was fixed in the meantime
+
+The unambiguous half: `delegate` hardcoded `INTERNAL_ERROR` for a failed model
+call while `chat`'s identical failure went through `tool_error_code`. Same
+underlying failure, opposite advice to the client, decided only by which tool the
+caller used. `delegate` now classifies too.
+
+### If it is taken up
+
+Do it in one place — a `tool_failed_result(id, message)` constructor beside
+`tool_text_result` — so the seven call sites cannot diverge the way `chat`,
+`delegate` and `batch_prompts` already had. And decide explicitly what happens to
+`tool_error_code`: either it stays for the genuine server-fault arm, or it goes
+and the reasoning recorded at its definition goes with it.
