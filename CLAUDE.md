@@ -219,9 +219,9 @@ All 20 build phases complete. All subsystems wired — no stubs. **1904 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.101 / v0.3.102-alpha (2026-08-18): models need ~750 MB less, and machines say what they are
+### Latest — v0.3.101 / .102 / .103-alpha (2026-08-18): models need ~750 MB less, machines say what they are, + an h2 security patch
 
-Two releases in one day, both verified on the DOWNLOADED artifact.
+Three releases in one day, verified on the DOWNLOADED artifact. **.103 is a security patch only** — `h2` 0.4.13 → 0.4.16 for RUSTSEC-2026-0258 (unbounded empty DATA frames, published 08-17). It was caught by CI's `cargo audit` on the commit AFTER the .102 tag, so **.102 shipped vulnerable**; anyone on .102 or earlier should update.
 Detail: `memory/round_log_0818_quantized_embedding.md`.
 
 - **Models need up to 750 MB less memory, CPU and GPU.** `token_embd.weight` is
