@@ -4,6 +4,41 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.102-alpha] — 2026-08-18
+
+**Machines now say how fast they actually are, instead of guessing.** A machine
+without a graphics card reported its speed from a fixed assumption about memory —
+the same assumption for every machine — so an eight-channel server and a fanless
+mini-PC both told the network they could manage 1.70 words per second. Nothing
+could tell two such machines apart, and nothing could sensibly choose between
+them.
+
+Generating a word is limited by how fast a machine can read memory, so that is
+now measured: a large block is streamed once at startup and timed. On the laptop
+this was developed on it reports 29.9 GB/s against the 50 that was assumed, so
+the guess was two thirds high for an entirely ordinary machine. It costs a
+quarter of a second, once, on a background task.
+
+**Machines without a graphics card now say what they are.** A peer with a card
+has always been named in full — "NVIDIA GeForce RTX 3070 Laptop GPU" — while one
+without appeared as the bare word "CPU". Every such machine looked identical.
+Processors are now described the same way: model and core count, shown where the
+card would be, with the machine's speed alongside. Machines running an older
+version send nothing and keep the previous label, and the two versions were
+tested against each other in both directions before release.
+
+Together these make a question answerable that was not before: whether a machine
+without a graphics card is nevertheless much faster than yours. A model too big
+for your card can now be handed to such a machine, but only when it measures at
+least twice as quick — a narrow lead is not worth the handover.
+
+**Processor-only machines are no longer told they would earn more credits.** The
+tip shown to anyone running without a graphics card still ended by saying that
+machines with one earn more, which stopped being true when credits were switched
+off on 17 August. Corrected in all 21 languages, keeping the accurate half: a
+graphics card does answer faster.
+
+
 ## [0.3.101-alpha] — 2026-08-18
 
 **Models need up to 750 MB less memory, on both processors and graphics cards.**
