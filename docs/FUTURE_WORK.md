@@ -8711,3 +8711,29 @@ Do it in one place — a `tool_failed_result(id, message)` constructor beside
 `delegate` and `batch_prompts` already had. And decide explicitly what happens to
 `tool_error_code`: either it stays for the genuine server-fault arm, or it goes
 and the reasoning recorded at its definition goes with it.
+
+### `MCP-Protocol-Version` header: a MUST we are deliberately not following (2026-08-18)
+
+The Streamable HTTP transport says a client MUST send `MCP-Protocol-Version` on
+every request after `initialize`, and that a server receiving an unsupported
+value MUST answer `400`. SwarmLLM never reads the header, so it cannot satisfy
+that second MUST.
+
+**Implementing it as written would make things worse, not better.**
+`SUPPORTED_PROTOCOL_VERSIONS` runs 2024-11-05 to 2025-11-25. The current spec
+revision is 2026-07-28, so a client on the newest revision would send a header we
+do not list and be answered `400` — where today it connects and works, because
+the tool and resource surface is identical across all these revisions and the
+spec's own versioning page has new clients fall back to the handshake flow this
+server implements.
+
+So the honest sequence is: add the newer revisions (and `server/discover`, which
+2026-07-28 introduces) FIRST, and only then start enforcing the header. Enforcing
+it now would turn a working connection into a refused one to satisfy the letter
+of a rule whose purpose is compatibility.
+
+Related and also not done: notification suppression is a method-name allowlist
+rather than the spec's unconditional "a Request without an `id` gets no reply".
+The trigger is a client sending, say, `tools/call` with no `id`, which MCP itself
+forbids — so the current behaviour is merely more forgiving than the letter, and
+tightening it would only turn one broken-client symptom into another.
