@@ -345,7 +345,11 @@ pub async fn hf_download_shards(
         )
         .await
         {
-            tracing::error!(error = %e, "GGUF header download failed");
+            crate::log_at_level!(
+                crate::model::huggingface::hf_failure_log_level(&e),
+                error = %e,
+                "GGUF header download failed"
+            );
             if let Some(mut entry) = download_shared
                 .models
                 .acquisition_progress

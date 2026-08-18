@@ -503,7 +503,23 @@ pub fn failure_log_level(err: &SwarmError) -> FailureLevel {
 #[macro_export]
 macro_rules! log_failure {
     ($err:expr, $($rest:tt)*) => {{
-        match $crate::error::failure_log_level($err) {
+        $crate::log_at_level!($crate::error::failure_log_level($err), $($rest)*)
+    }};
+}
+
+/// Emit a `tracing` event at an already-decided [`FailureLevel`].
+///
+/// [`log_failure!`] is the form to reach for, because it derives the level from
+/// a `SwarmError` and so cannot be got wrong. This one exists for the surfaces
+/// whose errors are **strings all the way down** and have their own predicate
+/// for whose fault a failure was — the HuggingFace client is the case: it
+/// returns `Result<_, String>`, and `probe_failure_is_user_fixable` is where
+/// that surface decides. The point is still that ONE place decides and the call
+/// site only reports.
+#[macro_export]
+macro_rules! log_at_level {
+    ($level:expr, $($rest:tt)*) => {{
+        match $level {
             $crate::error::FailureLevel::Error => tracing::error!($($rest)*),
             $crate::error::FailureLevel::Warn => tracing::warn!($($rest)*),
             $crate::error::FailureLevel::Info => tracing::info!($($rest)*),

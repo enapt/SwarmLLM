@@ -51,6 +51,27 @@ pub fn probe_failure_is_user_fixable(message: &str) -> bool {
         || message.contains("has no file named")
 }
 
+/// How loudly a HuggingFace failure should be recorded in THIS node's log.
+///
+/// The same principle as `crate::error::failure_log_level`, for a surface that
+/// cannot use it: this client returns `Result<_, String>`, so there is no
+/// variant to classify and [`probe_failure_is_user_fixable`] is the only thing
+/// that knows whose mistake it was. A mistyped repo name is the user's, and
+/// `ERROR` means "this node is broken" — so every download of a name with a
+/// typo in it was reporting the typist's error as our fault.
+///
+/// Pair it with `crate::log_at_level!` so the call site reports and does not
+/// decide.
+pub fn hf_failure_log_level(message: &str) -> crate::error::FailureLevel {
+    if probe_failure_is_user_fixable(message) {
+        // Nothing is wrong here; someone asked for a repo that is not there.
+        crate::error::FailureLevel::Info
+    } else {
+        // A rate limit, an outage, a broken link: real, and not ours either.
+        crate::error::FailureLevel::Warn
+    }
+}
+
 pub async fn probe_gguf_file(
     repo_id: &str,
     filename: &str,
@@ -309,4 +330,39 @@ pub async fn download_tied_output_weight(
     );
 
     Ok(Some(dest_path))
+}
+
+#[cfg(test)]
+mod hf_failure_level_tests {
+    use super::{hf_failure_log_level, probe_failure_is_user_fixable};
+    use crate::error::FailureLevel;
+
+    /// `ERROR` in this log means "this node is broken". A repo name with a typo
+    /// in it is not that, and every HuggingFace download failure was logged at
+    /// that level regardless of cause — the same mistake `failure_log_level`
+    /// exists to prevent on the typed surfaces (gotcha #316).
+    #[test]
+    fn a_typo_in_a_repo_name_is_not_this_node_malfunctioning() {
+        let typo = "repo 'meta-llama/Llama-9' could not be read. Either the name is wrong \
+                    or it is gated";
+        assert!(probe_failure_is_user_fixable(typo));
+        assert_eq!(hf_failure_log_level(typo), FailureLevel::Info);
+
+        let missing_file = "repo has no file named model-q4.gguf";
+        assert_eq!(hf_failure_log_level(missing_file), FailureLevel::Info);
+    }
+
+    /// An outage or a rate limit is real and worth seeing, but it is not this
+    /// node's fault either — so it is a warning, never an error.
+    #[test]
+    fn an_upstream_failure_is_a_warning_not_an_error() {
+        for msg in [
+            "HTTP 429 Too Many Requests",
+            "connection timed out after 30s",
+            "HTTP 503 from huggingface.co",
+        ] {
+            assert!(!probe_failure_is_user_fixable(msg));
+            assert_eq!(hf_failure_log_level(msg), FailureLevel::Warn, "{msg}");
+        }
+    }
 }

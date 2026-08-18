@@ -146,7 +146,11 @@ pub async fn hf_download(
                 }
             }
             Err(e) => {
-                tracing::error!(error = %e, "HuggingFace download failed");
+                crate::log_at_level!(
+                    crate::model::huggingface::hf_failure_log_level(&e),
+                    error = %e,
+                    "HuggingFace download failed"
+                );
                 download_shared
                     .models
                     .set_acquisition_failed(&download_mid, e.clone());

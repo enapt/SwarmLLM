@@ -614,7 +614,8 @@ impl NetworkManager {
                     {
                         Ok(p) => p,
                         Err(e) => {
-                            tracing::error!(
+                            crate::log_failure!(
+                                &e,
                                 error = %e,
                                 %request_id,
                                 %node_id,

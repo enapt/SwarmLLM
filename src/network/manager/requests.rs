@@ -572,7 +572,8 @@ impl NetworkManager {
                         offset,
                         &data.data,
                     ) {
-                        tracing::error!(
+                        crate::log_failure!(
+                            &e,
                             model = %shard_id.model_id,
                             shard = shard_id.index,
                             error = %e,
@@ -672,7 +673,8 @@ impl NetworkManager {
                             .shard_store
                             .finalize_shard(&shard_id.model_id, shard_id.index)
                         {
-                            tracing::error!(
+                            crate::log_failure!(
+                                &e,
                                 model = %shard_id.model_id,
                                 shard = shard_id.index,
                                 error = %e,
@@ -760,8 +762,15 @@ impl NetworkManager {
                                 // honest node on a bad link.
                                 let incomplete =
                                     matches!(e, crate::error::SwarmError::ShardIncomplete { .. });
+                                // `incomplete` decides ATTRIBUTION (whether the
+                                // sender's trust is docked, below) and must stay.
+                                // The SEVERITY is a separate question and is
+                                // derived, so a third `verify_shard` outcome —
+                                // `ShardNotFound` is a 404, i.e. nobody's fault —
+                                // does not inherit this branch's ERROR.
                                 if incomplete {
-                                    tracing::warn!(
+                                    crate::log_failure!(
+                                        &e,
                                         model = %shard_id.model_id,
                                         shard = shard_id.index,
                                         peer = %peer,
@@ -770,7 +779,8 @@ impl NetworkManager {
                                          NOT penalising the sender"
                                     );
                                 } else {
-                                    tracing::error!(
+                                    crate::log_failure!(
+                                        &e,
                                         model = %shard_id.model_id,
                                         shard = shard_id.index,
                                         peer = %peer,
