@@ -1,11 +1,11 @@
 // ── Split model: loads only a range of layers from a GGUF ──
 
 use candle_core::{Device, Tensor};
-use candle_nn::Embedding;
 use candle_transformers::quantized_nn::RmsNorm;
 
 use crate::error::SwarmError;
 
+use super::token_embedding::TokenEmbedding;
 use super::{LayerVariant, ModelArch, QMatMul, SplitTokenizer};
 
 /// A partial transformer model that loads and runs only a specific range of layers.
@@ -13,7 +13,11 @@ use super::{LayerVariant, ModelArch, QMatMul, SplitTokenizer};
 /// Supports multiple architectures: Llama, Qwen2, Gemma 2, Phi-3, Mistral, Qwen 3.5.
 pub struct SplitModel {
     /// Token embedding table (only loaded by the first segment).
-    pub(super) tok_embeddings: Option<Embedding>,
+    ///
+    /// Quantized with rows read on demand where that is possible, dense
+    /// otherwise — see [`TokenEmbedding`]. Both answer `forward` identically,
+    /// so nothing below this field needs to know which it got.
+    pub(super) tok_embeddings: Option<TokenEmbedding>,
     /// Transformer layers for this segment's range.
     pub(super) layers: Vec<LayerVariant>,
     /// Final RMSNorm (only loaded by the last segment).

@@ -18,6 +18,7 @@ use crate::error::SwarmError;
 
 use super::model::SplitModel;
 use super::rope::{load_longrope_factors, precompute_freqs_cis, precompute_freqs_cis_longrope};
+use super::token_embedding::TokenEmbedding;
 use super::{
     Activation, DeepSeekMeta, DeltaNetWeights, FfnVariant, LayerVariant, LayerWeights, MlaWeights,
     Mlp, ModelArch, MoeFfn, MoeGatingFunc, MoeRoutingConfig, QMatMul, Qwen35AttnWeights,
@@ -39,8 +40,11 @@ pub(super) struct SplitLoadOptions<'a> {
     pub parallel_data: Option<&'a [u8]>,
 }
 
-/// Element type the token-embedding table is dequantized to, and therefore the
-/// type it is resident in for the whole life of the worker.
+/// Element type the token-embedding table is dequantized to.
+///
+/// Also the type an embedding LOOKUP returns, whether or not a dense table
+/// exists — `token_embedding::TokenEmbedding` returns this from both of its
+/// variants precisely so no call site has to know which it got.
 ///
 /// **The single source of truth for that dtype.** Three places have to agree:
 /// this loader (which allocates it), [`segment_weight_bytes`] (which subtracts
@@ -63,10 +67,13 @@ pub const EMBEDDING_DTYPE: candle_core::DType = candle_core::DType::F16;
 ///
 /// Only the segment's own layers count — a node holding layers 8..16 never
 /// allocates the others. `token_embd.weight` is charged at its **dequantized**
-/// size ([`EMBEDDING_DTYPE`]) because the loader dequantizes it
-/// (`Embedding::new` takes a dense tensor), which on a 128K-vocab model is
-/// several times its quantized size and is exactly the term a file-size-based
-/// estimate misses.
+/// size ([`EMBEDDING_DTYPE`]) when the loader dequantizes it (`Embedding::new`
+/// takes a dense tensor), which on a 128K-vocab model is several times its
+/// quantized size and is exactly the term a file-size-based estimate misses —
+/// and at its quantized size when `rows_on_demand` says the loader will read
+/// rows out of it instead. `rows_on_demand` MUST be the same answer
+/// `token_embedding::rows_on_demand_eligible` gives the loader, or this
+/// function prices an allocation that never happens.
 ///
 /// Used only to decide how much VRAM is left for the KV cache, so an
 /// over-estimate is the safe direction: it shortens context rather than
@@ -77,6 +84,7 @@ fn segment_weight_bytes(
     layer_end: usize,
     is_first: bool,
     is_last: bool,
+    rows_on_demand: bool,
 ) -> u64 {
     let tensor_bytes = |info: &gguf_file::TensorInfo| -> u64 {
         let elems = info.shape.elem_count() as u64;
@@ -108,17 +116,24 @@ fn segment_weight_bytes(
         }
     }
 
-    if is_first {
-        if let Some(info) = ct.tensor_infos.get("token_embd.weight") {
-            total = total.saturating_add(
-                info.shape.elem_count() as u64 * EMBEDDING_DTYPE.size_in_bytes() as u64,
-            );
+    // `token_embd.weight`, whose residency depends on which path the loader
+    // takes and on whether the model ties its LM head to it. Mirrors the
+    // allocation in `load_split_model` exactly; see the truth table there.
+    if let Some(info) = ct.tensor_infos.get("token_embd.weight") {
+        let tied = !ct.tensor_infos.contains_key("output.weight");
+        if is_first {
+            total = total.saturating_add(if rows_on_demand {
+                // Held quantized, rows dequantized as looked up.
+                tensor_bytes(info)
+            } else {
+                info.shape.elem_count() as u64 * EMBEDDING_DTYPE.size_in_bytes() as u64
+            });
         }
-    }
-    // A weight-tied model reuses token_embd as its LM head; on the last
-    // segment that tensor is resident as a quantized QMatMul as well.
-    if is_last && !ct.tensor_infos.contains_key("output.weight") {
-        if let Some(info) = ct.tensor_infos.get("token_embd.weight") {
+        // A weight-tied model reuses token_embd as its LM head. When this
+        // segment holds the embedding in quantized form the head SHARES that
+        // tensor and costs nothing extra; otherwise it is a second, quantized
+        // copy alongside the dequantized one.
+        if is_last && tied && !(is_first && rows_on_demand) {
             total = total.saturating_add(tensor_bytes(info));
         }
     }
@@ -423,7 +438,24 @@ impl SplitModel {
                 && cfg!(feature = "flash-attn");
             let per_token =
                 super::kv_budget::kv_bytes_per_token(seg_layers, k_elems, v_elems, mirrored);
-            let weight_bytes = segment_weight_bytes(&ct, layer_start, layer_end, is_first, is_last);
+            let rows_on_demand = ct
+                .tensor_infos
+                .get("token_embd.weight")
+                .is_some_and(|info| {
+                    super::token_embedding::rows_on_demand_eligible(
+                        &device,
+                        info.ggml_dtype,
+                        info.shape.dims(),
+                    )
+                });
+            let weight_bytes = segment_weight_bytes(
+                &ct,
+                layer_start,
+                layer_end,
+                is_first,
+                is_last,
+                rows_on_demand,
+            );
 
             // A missing nvidia-smi means "unknown", never "zero" — a budget
             // of zero would refuse every request, which is far worse than the
@@ -509,32 +541,68 @@ impl SplitModel {
             RmsNorm::from_qtensor(qtensor, eps).map_err(SwarmError::internal)
         };
 
-        // Load embedding table only for first segment
-        let tok_embeddings = if is_first {
-            let tok_embd = ct
-                .tensor(&mut file, "token_embd.weight", &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load embeddings: {e}")))?;
-            // Resident for the worker's whole life at EMBEDDING_DTYPE — on a
-            // large-vocabulary model this is the biggest single allocation the
-            // worker makes, so the narrower type is what decides whether a
-            // modest GPU can serve the model at all.
-            //
-            // On CUDA candle has a specialised f16 dequantize kernel for the
-            // QUANTIZED block types, so those avoid a transient f32 copy of the
-            // full table. An UNQUANTIZED GGUF (F16/BF16/F32 — what HuggingFace
-            // offers as the "F16" variant) has no such kernel and is converted
-            // via the host instead; see the `has_dequantize_kernel` patch in
-            // `vendor/candle/candle-core/src/quantized/cuda.rs`. Until that
-            // patch this line was the single reason a CUDA node could not serve
-            // an unquantized model at all: it loaded, then failed every request.
-            let tok_embd = tok_embd
-                .dequantize_f16(&device)
-                .map_err(SwarmError::internal)?;
-            debug_assert_eq!(tok_embd.dtype(), EMBEDDING_DTYPE);
-            Some(Embedding::new(tok_embd, embedding_length))
+        // Load embedding table only for first segment.
+        //
+        // Kept as an `Arc` so a weight-tied model can hand the SAME tensor to
+        // its LM head below instead of loading `token_embd.weight` a second
+        // time. That second load is why the tied models save more than the
+        // dequantized-vs-quantized difference alone.
+        let tok_embd_q: Option<std::sync::Arc<QTensor>> = if is_first {
+            Some(std::sync::Arc::new(
+                ct.tensor(&mut file, "token_embd.weight", &device)
+                    .map_err(|e| SwarmError::Internal(format!("Failed to load embeddings: {e}")))?,
+            ))
         } else {
             None
         };
+
+        let tok_embeddings = match &tok_embd_q {
+            None => None,
+            Some(q) => match TokenEmbedding::try_quantized(q, &device) {
+                // Rows read out of the quantized table as they are looked up —
+                // bit-identical to the dense path and several times smaller.
+                Some(e) => Some(e),
+                // Not eligible (non-CPU device, unquantized table, or a row
+                // that is not block-aligned): dequantize the whole table, as
+                // before.
+                //
+                // Resident for the worker's whole life at EMBEDDING_DTYPE — on
+                // a large-vocabulary model this is the biggest single
+                // allocation the worker makes, so the narrower type is what
+                // decides whether a modest GPU can serve the model at all.
+                //
+                // On CUDA candle has a specialised f16 dequantize kernel for
+                // the QUANTIZED block types, so those avoid a transient f32
+                // copy of the full table. An UNQUANTIZED GGUF (F16/BF16/F32 —
+                // what HuggingFace offers as the "F16" variant) has no such
+                // kernel and is converted via the host instead; see the
+                // `has_dequantize_kernel` patch in
+                // `vendor/candle/candle-core/src/quantized/cuda.rs`. Until that
+                // patch this line was the single reason a CUDA node could not
+                // serve an unquantized model at all: it loaded, then failed
+                // every request.
+                None => {
+                    let dense = q.dequantize_f16(&device).map_err(SwarmError::internal)?;
+                    debug_assert_eq!(dense.dtype(), EMBEDDING_DTYPE);
+                    Some(TokenEmbedding::Dense(Embedding::new(
+                        dense,
+                        embedding_length,
+                    )))
+                }
+            },
+        };
+
+        // The embedding table is the largest single allocation on a
+        // large-vocabulary model, and which path it took is the difference
+        // between fitting on a modest card and not. Say so, rather than
+        // leaving it to be inferred from total memory.
+        if let Some(emb) = &tok_embeddings {
+            tracing::info!(
+                rows_read_on_demand = matches!(emb, TokenEmbedding::Quantized(_)),
+                resident_mb = emb.resident_bytes() / (1024 * 1024),
+                "Loaded token embedding table"
+            );
+        }
 
         // Load output norm and LM head only for last segment
         let norm = if is_last {
@@ -547,11 +615,27 @@ impl SplitModel {
         };
 
         let output = if is_last {
-            let output_tensor = ct
-                .tensor(&mut file, "output.weight", &device)
-                .or_else(|_| ct.tensor(&mut file, "token_embd.weight", &device))
-                .map_err(|e| SwarmError::Internal(format!("Failed to load output head: {e}")))?;
-            Some(QMatMul::from_qtensor(output_tensor).map_err(SwarmError::internal)?)
+            match ct.tensor(&mut file, "output.weight", &device) {
+                // An untied model ships its own head.
+                Ok(t) => Some(QMatMul::from_qtensor(t).map_err(SwarmError::internal)?),
+                // Weight-tied: the head IS `token_embd.weight`. When this
+                // segment is also the first one we already hold that tensor, so
+                // share it rather than loading a second copy — on
+                // llama-3.2-3b that copy is 308 MB, and it was resident
+                // alongside a 751 MB dequantized one for every single-node run.
+                Err(_) => {
+                    let tied = match &tok_embd_q {
+                        Some(q) => std::sync::Arc::clone(q),
+                        None => std::sync::Arc::new(
+                            ct.tensor(&mut file, "token_embd.weight", &device)
+                                .map_err(|e| {
+                                    SwarmError::Internal(format!("Failed to load output head: {e}"))
+                                })?,
+                        ),
+                    };
+                    Some(QMatMul::from_arc(tied).map_err(SwarmError::internal)?)
+                }
+            }
         } else {
             None
         };

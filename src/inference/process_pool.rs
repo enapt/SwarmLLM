@@ -1327,9 +1327,22 @@ impl ModelProcessPool {
                 _ => None,
             });
 
+        // Shape-and-dtype half of "can the loader read embedding rows on
+        // demand"; each estimator applies the device half itself.
+        let embedding_gatherable = ct
+            .tensor_infos
+            .get("token_embd.weight")
+            .is_some_and(|info| {
+                crate::inference::split::table_supports_row_gather(
+                    info.ggml_dtype,
+                    info.shape.dims(),
+                )
+            });
+
         Some(VramFootprintInputs {
             quantized_weight_bytes: shard_bytes,
             unquantized_bytes_per_element,
+            embedding_gatherable,
             vocab_size: vocab,
             embedding_length: tensor_meta.embedding_length as u64,
             segment_layers: tensor_meta.block_count as u64,

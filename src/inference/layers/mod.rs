@@ -48,6 +48,18 @@ impl QMatMul {
         })
     }
 
+    /// Build over a tensor someone else also holds.
+    ///
+    /// Exists for weight tying: a tied model's LM head IS `token_embd.weight`,
+    /// and the first segment already holds that tensor for its embedding
+    /// lookup. Sharing the `Arc` keeps one copy where there were two.
+    pub(crate) fn from_arc(qtensor: std::sync::Arc<QTensor>) -> CandleResult<Self> {
+        let inner = candle_core::quantized::QMatMul::from_arc(qtensor)?;
+        Ok(Self {
+            inner: QMatMulInner::Standard(inner),
+        })
+    }
+
     /// Create a shared fused QMatMul that can be used by multiple FusedSlice variants.
     pub(crate) fn make_fused(
         qtensor: QTensor,

@@ -17,6 +17,7 @@ mod rope;
 mod shard_reader;
 #[cfg(test)]
 mod tests;
+mod token_embedding;
 
 // Re-export types from extracted modules so external `crate::inference::split::X` paths still work.
 pub(crate) use super::layers::{
@@ -50,6 +51,7 @@ pub use self::prefix_cache::{
     PrefixCache, KV_SNAPSHOT_MAGIC, KV_SNAPSHOT_VERSION,
 };
 pub use self::shard_reader::{resolve_tied_output, TiedOutputSource};
+pub(crate) use self::token_embedding::table_supports_row_gather;
 
 pub(crate) const DEFAULT_MAX_SEQ_LEN: usize = 4096;
 
