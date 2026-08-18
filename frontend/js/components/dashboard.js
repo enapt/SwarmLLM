@@ -2062,8 +2062,20 @@
           // Only claim "CPU" once the peer has actually reported a capability
           // (version is part of it) — otherwise we would label a peer we simply
           // have not heard from yet.
-          hwText = '<span title="' + U.escapeHtml(I18n.t('dashboard.peer_cpu_only_tip')) + '">\u2699 ' +
-            U.escapeHtml(I18n.t('dashboard.cpu_label')) + '</span>';
+          //
+          // Name the processor when the peer sent one, the same way a graphics
+          // card is named. "CPU" on its own said nothing — a fanless mini-PC
+          // and a sixteen-core server were indistinguishable, and one of them
+          // may be the fastest machine on the network. Older peers send no
+          // processor details and keep the bare label.
+          var cpuText = I18n.t('dashboard.cpu_label');
+          var cpuTip = I18n.t('dashboard.peer_cpu_only_tip');
+          if (p.cpu && p.cpu.name) {
+            cpuText = U.escapeHtml(p.cpu.name);
+            if (p.cpu.cores) cpuText += ' ' + U.escapeHtml(I18n.t('hw.cores', { cores: p.cpu.cores }));
+            cpuTip += ' \u2014 ' + p.cpu.name;
+          }
+          hwText = '<span title="' + U.escapeHtml(cpuTip) + '">\u2699 ' + cpuText + '</span>';
         }
         var metaParts = [verText, hwText].filter(Boolean);
         var gpu = metaParts.length

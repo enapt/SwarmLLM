@@ -5,7 +5,7 @@
 //! - [`identity`] — `SealedPrompt`, `NicknameRecord`, `NicknameGossip`
 //! - [`pool`] — Device-pool membership, invitations, gossip
 //! - [`model`] — `ModelManifest`, architecture/quantization, trust tracking
-//! - [`node`] — `NodeCapability`, `GpuInfo`, `NodeStats`, `PeerInfo`
+//! - [`node`] — `NodeCapability`, `GpuInfo`, `CpuInfo`, `NodeStats`, `PeerInfo`
 //! - [`credits`] — Credit ledger, priority tiers, transactions, gossip
 //! - [`inference`] — Inference requests, pipeline/TP, layer forward/result
 //! - [`network`] — `SwarmMessage`, `NetworkCommand`, wire-level structs
@@ -44,7 +44,7 @@ pub use network::{
     WishlistAnnouncement, WishlistAnnouncementEntry,
 };
 pub use node::{
-    features, ContributionLevel, GpuInfo, LatencyObservation, NodeCapability, NodeStats,
+    features, ContributionLevel, CpuInfo, GpuInfo, LatencyObservation, NodeCapability, NodeStats,
     PeerExchangeResponse, PeerInfo, PROTOCOL_VERSION,
 };
 pub use pool::{

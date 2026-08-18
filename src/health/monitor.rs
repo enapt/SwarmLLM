@@ -89,6 +89,30 @@ pub(crate) enum InboundCheck {
     Blocked,
 }
 
+/// This machine's processor, read once.
+///
+/// Cached because the answer cannot change while the process runs, and the
+/// capability it feeds is rebuilt every thirty seconds — `sysinfo` refreshing a
+/// CPU list on each of those would be pure waste.
+fn local_cpu_info() -> Option<crate::types::CpuInfo> {
+    static CPU: std::sync::OnceLock<Option<crate::types::CpuInfo>> = std::sync::OnceLock::new();
+    CPU.get_or_init(|| {
+        let sys = sysinfo::System::new_with_specifics(
+            sysinfo::RefreshKind::nothing().with_cpu(sysinfo::CpuRefreshKind::nothing()),
+        );
+        let cpus = sys.cpus();
+        let name = cpus.first()?.brand().trim().to_string();
+        if name.is_empty() {
+            return None;
+        }
+        Some(crate::types::CpuInfo {
+            name,
+            cores: cpus.len() as u32,
+        })
+    })
+    .clone()
+}
+
 /// Decide whether inbound connections are reaching this node.
 ///
 /// Split out from `maybe_warn_wsl_firewall` because the decision is the part
@@ -547,6 +571,7 @@ impl HealthMonitor {
             os: Some(std::env::consts::OS.to_string()),
             node_id: node_id.clone(),
             gpu: gpu_info,
+            cpu: local_cpu_info(),
             ram_total_mb,
             ram_available_mb,
             disk_available_mb,

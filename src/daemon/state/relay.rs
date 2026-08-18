@@ -890,6 +890,7 @@ mod tests {
         crate::types::NodeCapability {
             node_id: crate::types::NodeId([0u8; 32]),
             gpu: None,
+            cpu: None,
             ram_total_mb: 0,
             ram_available_mb: 0,
             disk_available_mb: 0,

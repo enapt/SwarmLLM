@@ -93,6 +93,18 @@ pub fn serialize_peer_to_json(
         "trust_score": peer.trust_score,
         "healthy": healthy,
         "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
+        // A peer without a graphics card used to be shown as the bare word
+        // "CPU", which said nothing: a fanless mini-PC and a sixteen-core
+        // server looked identical. The processor is the hardware doing the
+        // work on those machines, so it is named the same way a card is.
+        "cpu": peer.capability.as_ref().and_then(|c| c.cpu.as_ref().map(|c| serde_json::json!({
+            "name": c.name,
+            "cores": c.cores,
+        }))),
+        // What this peer reckons it can manage on a 7B model. Measured rather
+        // than assumed since 2026-08-18 for processor-only nodes, so it finally
+        // distinguishes one from another.
+        "est_tokens_per_sec": peer.capability.as_ref().map(|c| c.est_tokens_per_sec_7b),
         "version": peer_version,
         "uptime_seconds": uptime_seconds,
         "hosted_models": hosted_models,

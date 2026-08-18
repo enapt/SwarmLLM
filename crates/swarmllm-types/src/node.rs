@@ -43,6 +43,26 @@ pub mod features {
 pub struct NodeCapability {
     pub node_id: NodeId,
     pub gpu: Option<GpuInfo>,
+    /// What this node's processor is, for a node that has no graphics card —
+    /// and for one that does, since the processor still runs anything the card
+    /// cannot hold.
+    ///
+    /// A graphics card has been described in full since the beginning
+    /// ([`GpuInfo`]), while the processor had no representation at all, so a
+    /// peer without a card appeared in the dashboard as the bare word "CPU".
+    /// Every such machine looked identical to every other, from a fanless
+    /// mini-PC to a sixteen-core server.
+    ///
+    /// Carries the same kind of information the card already does, and no more.
+    /// Deliberately NOT the fingerprinting material the `os` field declines to
+    /// send: a processor model is the hardware doing the work, which is exactly
+    /// what a peer needs to judge, whereas an operating-system build number
+    /// identifies the install rather than the machine.
+    ///
+    /// `#[serde(default)]` → `None` from a node predating the field, which
+    /// renders as it always did rather than being guessed at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<CpuInfo>,
     pub ram_total_mb: u64,
     pub ram_available_mb: u64,
     pub disk_available_mb: u64,
@@ -128,6 +148,15 @@ pub struct NodeCapability {
 pub struct LatencyObservation {
     pub peer: NodeId,
     pub ms_per_layer: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CpuInfo {
+    /// Model as the operating system reports it, e.g.
+    /// "AMD Ryzen 7 5800H with Radeon Graphics".
+    pub name: String,
+    /// Logical processors visible to the machine.
+    pub cores: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
