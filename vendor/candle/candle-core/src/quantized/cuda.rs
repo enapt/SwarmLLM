@@ -636,6 +636,83 @@ impl QCudaStorage {
         storage.to_dtype(&crate::Layout::contiguous(elem_count), crate::DType::F16)
     }
 
+    /// SwarmLLM patch: gather whole rows out of this quantized buffer, on the
+    /// device, returning a new quantized buffer holding just those rows.
+    ///
+    /// **Why this has to exist here.** An embedding lookup reads at most
+    /// `seq_len` rows of a table that can be a gigabyte dequantized, so the
+    /// table is better kept quantized and read a row at a time. On CPU that
+    /// needs no new API — `QTensor::data()` is a zero-copy borrow, so the rows
+    /// can be sliced out and handed back through `QStorage::from_data`. On CUDA
+    /// `data()` copies the WHOLE table device-to-host, so the same approach
+    /// would move a gigabyte across PCIe on every decoded token. llama.cpp hit
+    /// exactly that shape: with the lookup off-device a Qwen3-1.7B decoded at
+    /// 6.18 ms/token against 1.72 once `k_get_rows_kq` existed.
+    ///
+    /// It needs no new kernel. Rows are contiguous and block-aligned, the
+    /// buffer is a flat `CudaSlice<u8>` whose padding is only ever TRAILING, so
+    /// gathering rows is `index_select` over a `[vocab, row_bytes]` view of the
+    /// bytes — and `is_u32_u8` is already instantiated in `candle-kernels`.
+    ///
+    /// `row_bytes` must be `hidden / block_size * type_size`; the caller owns
+    /// that arithmetic because it also owns the block-alignment check that makes
+    /// a row addressable at all.
+    pub fn gather_rows(
+        &self,
+        ids: &cudarc::driver::CudaSlice<u32>,
+        n_ids: usize,
+        vocab: usize,
+        row_bytes: usize,
+    ) -> Result<Self> {
+        if row_bytes == 0 {
+            crate::bail!("gather_rows: row_bytes must be non-zero")
+        }
+        if self.data.len < vocab * row_bytes {
+            crate::bail!(
+                "gather_rows: buffer holds {} bytes, {vocab} rows of {row_bytes} need {}",
+                self.data.len,
+                vocab * row_bytes
+            )
+        }
+        let dev = &self.device;
+        let out_bytes = n_ids * row_bytes;
+        // Same trailing padding every quantized buffer here carries, so the
+        // result can be fed to the dequantize kernels unchanged.
+        let padded_len = out_bytes + MATRIX_ROW_PADDING * self.dtype.type_size()
+            / self.dtype.block_size();
+        let out = unsafe { dev.alloc::<u8>(padded_len)? };
+
+        // `index_select` over the bytes: one "element" is one byte, the
+        // selected dimension is the row, and `right_size` is the row width.
+        let ids_dims = [n_ids];
+        let ids_strides = [1usize];
+        let info = dev.clone_htod(&[ids_dims.as_slice(), ids_strides.as_slice()].concat())?;
+        let func = dev.get_or_load_func("is_u32_u8", &candle_kernels::INDEXING)?;
+        let cfg = cudarc::driver::LaunchConfig::for_num_elems(out_bytes as u32);
+        let src = self.data.inner.slice(..self.data.len);
+        let mut builder = func.builder();
+        barg!(builder, out_bytes);
+        barg!(builder, ids_dims.len());
+        builder.arg(&info);
+        builder.arg(ids);
+        builder.arg(&src);
+        builder.arg(&out);
+        barg!(builder, 1usize); // left_size — nothing left of the row dimension
+        barg!(builder, vocab); // src_dim_size
+        barg!(builder, n_ids); // ids_dim_size
+        barg!(builder, row_bytes); // right_size — bytes per row
+        unsafe { builder.launch(cfg) }.w()?;
+
+        Ok(Self {
+            data: PaddedCudaSlice {
+                inner: out,
+                len: out_bytes,
+            },
+            dtype: self.dtype,
+            device: dev.clone(),
+        })
+    }
+
     pub fn quantize(&mut self, src: &CudaStorage) -> Result<()> {
         // Run the quantization on cpu.
         let src = match &src.slice {

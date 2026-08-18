@@ -32,19 +32,27 @@
 //! `quantized_rows_match_dequantizing_the_whole_table` asserts that rather than
 //! a tolerance, which is what makes this safe to enable by default.
 //!
-//! **The trap, and why [`TokenEmbedding::try_quantized`] refuses a non-CPU
-//! device.** The gather must stay where the table lives. `QTensor::data()` is a
-//! zero-copy borrow on CPU but a full device-to-host copy on CUDA, so the same
-//! code that saves memory on a CPU node would move the whole table across PCIe
-//! on every decode step. llama.cpp hit precisely this — with the lookup "kicked
+//! **The trap: the gather must stay where the table lives.** `QTensor::data()`
+//! is a zero-copy borrow on CPU but a full device-to-host copy on CUDA, so the
+//! CPU implementation reused on a GPU would move the whole table across PCIe on
+//! every decoded token. llama.cpp hit precisely this — with the lookup "kicked
 //! out of the graph" a Qwen3-1.7B decoded at 6.18 ms/token against 1.72 once it
-//! was done on-device. The CUDA path needs a device-side gather
-//! (`index_select` over a `[vocab, row_bytes]` U8 view, for which candle already
-//! ships the `is_u32_u8` kernel) and is deliberately not attempted here.
+//! was done on-device.
+//!
+//! So each device has its own gather, both behind `QTensor::gather_rows` (a
+//! vendored candle patch). CUDA runs `index_select` over a `[vocab, row_bytes]`
+//! byte view of the quantized buffer — no new kernel, because `is_u32_u8` is
+//! already instantiated in `candle-kernels` and the buffer's padding is only
+//! ever trailing, so rows are contiguous. Metal has no implementation and keeps
+//! the dense table.
+//!
+//! **The acceptance test for the CUDA half is decode rate, not memory.** The
+//! failure mode above frees exactly as much memory while being far slower, so a
+//! memory reading alone cannot tell the two apart.
 
 use std::sync::Arc;
 
-use candle_core::quantized::{QStorage, QTensor};
+use candle_core::quantized::QTensor;
 use candle_core::{Device, Tensor};
 use candle_nn::{Embedding, Module};
 
@@ -56,8 +64,8 @@ use super::loader::EMBEDDING_DTYPE;
 /// and the choice is invisible above this type.
 pub(crate) enum TokenEmbedding {
     /// The whole table, dequantized at load. Used for a GGUF that ships an
-    /// unquantized `token_embd.weight` (there is nothing to save), for a
-    /// row length that is not block-aligned, and for every non-CPU device.
+    /// unquantized `token_embd.weight` (there is nothing to save), for a row
+    /// length that is not block-aligned, and on Metal.
     Dense(Embedding),
     /// The table left quantized, with rows dequantized as they are looked up.
     Quantized(QuantizedRows),
@@ -74,16 +82,13 @@ impl TokenEmbedding {
         if !rows_on_demand_eligible(device, dtype, dims) {
             return None;
         }
-        let (vocab, hidden) = match *dims {
-            [vocab, hidden] => (vocab, hidden),
+        let hidden = match *dims {
+            [_vocab, hidden] => hidden,
             _ => return None,
         };
-        let row_bytes = hidden / dtype.block_size() * dtype.type_size();
         Some(Self::Quantized(QuantizedRows {
             table: Arc::clone(table),
-            vocab,
             hidden,
-            row_bytes,
         }))
     }
 
@@ -117,9 +122,10 @@ pub(crate) fn rows_on_demand_eligible(
     dtype: candle_core::quantized::GgmlDType,
     dims: &[usize],
 ) -> bool {
-    // The gather reads host bytes. On any other device that is a transfer of
-    // the whole table per lookup; see the module docs.
-    matches!(device, Device::Cpu) && table_supports_row_gather(dtype, dims)
+    // Metal has no gather implementation, so it keeps the dense table. CPU and
+    // CUDA each have one that stays on their own device.
+    let device_can_gather = matches!(device, Device::Cpu | Device::Cuda(_));
+    device_can_gather && table_supports_row_gather(dtype, dims)
 }
 
 /// `SWARMLLM_DENSE_EMBEDDING=1` restores the dequantize-the-whole-table
@@ -184,65 +190,42 @@ pub(crate) fn rows_are_block_aligned(hidden: usize, block_size: usize) -> bool {
 }
 
 /// A quantized `token_embd.weight`, read a row at a time.
+///
+/// Row addressing (byte offsets, bounds checks, block arithmetic) lives in
+/// `QTensor::gather_rows` rather than here, so the CPU and CUDA implementations
+/// cannot disagree about where a row is.
 pub(crate) struct QuantizedRows {
     table: Arc<QTensor>,
-    vocab: usize,
     hidden: usize,
-    /// Bytes one row occupies. Rows are contiguous and block-aligned, so a row
-    /// is the byte range `[id * row_bytes, (id + 1) * row_bytes)`.
-    row_bytes: usize,
 }
 
 impl QuantizedRows {
     fn forward(&self, ids: &Tensor) -> candle_core::Result<Tensor> {
         let id_shape = ids.dims().to_vec();
+        // GGUF token ids reach us as u32 or i64 depending on the caller, and the
+        // gather requires u32 on the table's own device — so normalise both
+        // rather than requiring the caller to.
         let flat = ids.flatten_all()?;
-        // GGUF token ids reach us as u32 or i64 depending on the caller; both
-        // are in range for a vocabulary, so normalise rather than requiring one.
-        let ids: Vec<u32> = match flat.dtype() {
-            candle_core::DType::U32 => flat.to_vec1::<u32>()?,
-            candle_core::DType::I64 => flat
-                .to_vec1::<i64>()?
-                .into_iter()
-                .map(|v| v as u32)
-                .collect(),
+        let flat = match flat.dtype() {
+            candle_core::DType::U32 => flat,
+            candle_core::DType::I64 => flat.to_dtype(candle_core::DType::U32)?,
             other => candle_core::bail!("embedding ids must be u32 or i64, got {other:?}"),
         };
+        let flat = flat.to_device(&self.table.device())?;
 
-        // Zero-copy on CPU — the whole point of refusing any other device.
-        let bytes = self.table.data()?;
-        let mut gathered = Vec::with_capacity(ids.len() * self.row_bytes);
-        for &id in &ids {
-            let id = id as usize;
-            if id >= self.vocab {
-                candle_core::bail!("token id {id} out of range for vocabulary {}", self.vocab);
-            }
-            let start = id * self.row_bytes;
-            gathered.extend_from_slice(&bytes[start..start + self.row_bytes]);
-        }
+        // One call for both devices. On CPU it slices rows out of a zero-copy
+        // borrow; on CUDA it runs `index_select` over a byte view of the
+        // quantized buffer, on the device — see the vendored
+        // `QTensor::gather_rows`. Doing the CUDA case the CPU way would copy the
+        // whole table host-ward on every lookup, which is the trap in the module
+        // docs above.
+        let rows = self.table.gather_rows(&flat)?;
 
-        // **`Cow::Borrowed`, never `Cow::Owned`.** `QStorage::from_data` reaches
-        // `as_t_slice`, which takes the `Cow` BY VALUE and returns a slice
-        // borrowed from it — so an owned `Vec` is dropped as that function
-        // returns and the `.to_vec()` behind it reads freed memory. Every
-        // caller inside candle passes a slice borrowed from the mmap'd GGUF, so
-        // the hazard never shows up there. Passing the owned buffer here
-        // produced plausible-looking embeddings that were quietly wrong, caught
-        // only because `quantized_rows_match_dequantizing_the_whole_table`
-        // compares against the dequantized table exactly.
-        //
-        // `gathered` therefore has to outlive the call, which is why it is a
-        // named binding rather than a temporary.
-        let storage = QStorage::from_data(
-            std::borrow::Cow::Borrowed(gathered.as_slice()),
-            &Device::Cpu,
-            self.table.dtype(),
-        )?;
-        let rows = QTensor::new(storage, (ids.len(), self.hidden))?;
         // `dequantize -> to_dtype(F16)` is exactly what `dequantize_f16` does on
-        // CPU; spelling it out keeps the equivalence visible at the site that
-        // depends on it.
-        let dense = rows.dequantize(&Device::Cpu)?.to_dtype(EMBEDDING_DTYPE)?;
+        // CPU, and CUDA has a native f16 kernel; going through `dequantize_f16`
+        // takes the better of the two per device without changing the result.
+        let dense = rows.dequantize_f16(&self.table.device())?;
+        debug_assert_eq!(dense.dtype(), EMBEDDING_DTYPE);
 
         let mut out_shape = id_shape;
         out_shape.push(self.hidden);
@@ -359,6 +342,53 @@ mod tests {
         assert!(rows_are_block_aligned(3584, 256));
         assert!(!rows_are_block_aligned(896, 256));
         assert!(!rows_are_block_aligned(0, 0));
+    }
+
+    /// The CUDA gather must meet the SAME standard as the CPU one: the rows it
+    /// returns are exactly what dequantizing the whole table and selecting
+    /// those rows returns.
+    ///
+    /// Compared per device, because `dequantize_f16` uses a native f16 kernel on
+    /// CUDA and a dequantize-then-cast on CPU. The property that matters is that
+    /// each device reproduces ITS OWN previous behaviour — that is what makes
+    /// this change invisible to a running node.
+    ///
+    /// Ignored without a GPU; run with `--ignored` on a CUDA machine.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn cuda_gathered_rows_match_dequantizing_the_whole_table() {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => return, // no CUDA device present; nothing to assert
+        };
+        for dtype in [GgmlDType::Q4K, GgmlDType::Q6K, GgmlDType::Q8_0] {
+            let vocab = 512;
+            let hidden = 256;
+            let data: Vec<f32> = (0..vocab * hidden)
+                .map(|i| (i % 97) as f32 * 0.01 - 0.5)
+                .collect();
+            let dense = Tensor::from_vec(data, (vocab, hidden), &device).unwrap();
+            let t = Arc::new(QTensor::quantize(&dense, dtype).unwrap());
+
+            let emb = TokenEmbedding::try_quantized(&t, &device)
+                .unwrap_or_else(|| panic!("{dtype:?} should take the quantized path on CUDA"));
+
+            // Deliberately unsorted, with a repeat and both endpoints — a
+            // gather that mixed up row offsets would still look plausible on a
+            // strictly increasing list.
+            let ids = Tensor::from_vec(vec![7u32, 0, 511, 7, 300, 1], (6,), &device).unwrap();
+            let got = emb.forward(&ids).unwrap();
+
+            let whole = t.dequantize_f16(&device).unwrap();
+            let want = whole.index_select(&ids, 0).unwrap();
+
+            assert_eq!(got.dims(), want.dims(), "{dtype:?} shape");
+            assert_eq!(
+                got.flatten_all().unwrap().to_vec1::<half::f16>().unwrap(),
+                want.flatten_all().unwrap().to_vec1::<half::f16>().unwrap(),
+                "{dtype:?} CUDA rows must be bit-identical to the dequantized table"
+            );
+        }
     }
 
     /// An id past the end of the vocabulary must be an error, not a read of

@@ -654,6 +654,78 @@ impl QTensor {
         self.storage.data()
     }
 
+    /// SwarmLLM patch: rows of a `[vocab, hidden]` quantized tensor, gathered
+    /// on whatever device the tensor lives on, returned still quantized.
+    ///
+    /// The caller dequantizes the (small) result, so an embedding lookup costs
+    /// `n_ids` rows instead of a resident copy of the whole table. See
+    /// `cuda::QCudaStorage::gather_rows` for why the CUDA half cannot simply
+    /// reuse the CPU one.
+    ///
+    /// `ids` must be U32 and on the same device. Rows must be a whole number of
+    /// quantization blocks — checked here, because a row that straddles a block
+    /// cannot be addressed and reading across the boundary would silently
+    /// return the wrong embedding.
+    pub fn gather_rows(&self, ids: &Tensor) -> Result<Self> {
+        let (vocab, hidden) = match *self.shape.dims() {
+            [v, h] => (v, h),
+            _ => crate::bail!("gather_rows expects a 2-D [vocab, hidden] tensor"),
+        };
+        let block = self.dtype().block_size();
+        if block == 0 || !hidden.is_multiple_of(block) {
+            crate::bail!(
+                "gather_rows: hidden {hidden} is not a whole number of {block}-element blocks"
+            )
+        }
+        let row_bytes = hidden / block * self.dtype().type_size();
+        let n_ids = ids.elem_count();
+        if ids.dtype() != crate::DType::U32 {
+            crate::bail!("gather_rows: ids must be u32, got {:?}", ids.dtype())
+        }
+        match &self.storage {
+            #[cfg(feature = "cuda")]
+            QStorage::Cuda(s) => {
+                let ids_storage = ids.storage();
+                let gathered = match &*ids_storage {
+                    Storage::Cuda(c) => match &c.slice {
+                        crate::cuda_backend::CudaStorageSlice::U32(sl) => {
+                            s.gather_rows(sl, n_ids, vocab, row_bytes)?
+                        }
+                        _ => crate::bail!("gather_rows: ids must be u32"),
+                    },
+                    _ => crate::bail!("gather_rows: ids must be on the same CUDA device"),
+                };
+                QTensor::new(QStorage::Cuda(gathered), (n_ids, hidden))
+            }
+            #[cfg(not(feature = "cuda"))]
+            QStorage::Cuda(_) => crate::bail!("gather_rows: not compiled with CUDA support"),
+            QStorage::Cpu(_) => {
+                // Zero-copy on CPU, so the rows can simply be sliced out.
+                let bytes = self.data()?;
+                let ids: Vec<u32> = ids.flatten_all()?.to_vec1()?;
+                let mut gathered = Vec::with_capacity(n_ids * row_bytes);
+                for &id in &ids {
+                    let id = id as usize;
+                    if id >= vocab {
+                        crate::bail!("gather_rows: id {id} out of range for vocabulary {vocab}")
+                    }
+                    let start = id * row_bytes;
+                    gathered.extend_from_slice(&bytes[start..start + row_bytes]);
+                }
+                // NOTE: `Cow::Borrowed`. `as_t_slice` takes the `Cow` by value
+                // and returns a slice borrowed from it, so an owned buffer is
+                // dropped before the read behind it happens.
+                let storage = QStorage::from_data(
+                    Cow::Borrowed(gathered.as_slice()),
+                    &Device::Cpu,
+                    self.dtype(),
+                )?;
+                QTensor::new(storage, (n_ids, hidden))
+            }
+            QStorage::Metal(_) => crate::bail!("gather_rows is not implemented for Metal"),
+        }
+    }
+
     pub fn indexed_moe_forward(&self, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
         match &self.storage {
             QStorage::Cuda(s) => match (&*x.storage(), &*ids.storage()) {

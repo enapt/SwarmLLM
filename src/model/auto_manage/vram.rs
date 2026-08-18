@@ -31,15 +31,17 @@ pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
 /// `inference::split::loader::EMBEDDING_DTYPE`; the two MUST agree, and
 /// `EMBEDDING_TABLE_BYTES_PER_ELEMENT` below is the copy of that fact used here.
 ///
-/// Since 2026-08-18 a **CPU** worker does not materialise it: it keeps the
-/// quantized table and reads rows as they are looked up
-/// (`inference::split::token_embedding`), so the term is absent from
-/// [`estimate_worker_ram_mb`] and present in [`estimate_worker_vram_mb`]. That
-/// is the one place the two estimators disagree about the model rather than
-/// about per-process overhead, and `embedding_gatherable` is what carries it.
-/// The KV cache is the second, and is bounded by `inference.max_seq_len_override`
-/// and the shipped default — and, for the GPU estimator only, capped again at
-/// [`GPU_ADMISSION_KV_CONTEXT`] (see `inference::split::kv_budget`).
+/// Since 2026-08-18 neither device materialises it: both keep the quantized
+/// table and read rows as they are looked up
+/// (`inference::split::token_embedding`), so the term is absent from both
+/// estimators whenever `embedding_gatherable` holds. It is still priced here
+/// because a table that cannot be gathered — unquantized, or a row that is not
+/// block-aligned — is still dequantized in full.
+///
+/// The KV cache is the other large term, bounded by
+/// `inference.max_seq_len_override` and the shipped default — and, for the GPU
+/// estimator only, capped again at [`GPU_ADMISSION_KV_CONTEXT`] (see
+/// `inference::split::kv_budget`).
 #[derive(Debug, Clone, Copy)]
 pub struct VramFootprintInputs {
     /// Sum of the shard bytes this worker will map. On-disk size.
@@ -74,10 +76,10 @@ pub struct VramFootprintInputs {
     /// Can `token_embd.weight` have its rows read on demand instead of being
     /// dequantized whole to [`EMBEDDING_TABLE_BYTES_PER_ELEMENT`]?
     ///
-    /// Shape and dtype only — the DEVICE half of that question is applied by
-    /// the two estimators below, which is why they now differ on more than
-    /// per-process overhead: the gather reads host memory, so it applies to a
-    /// CPU worker and not to a CUDA one. Decided by
+    /// Shape and dtype only. The DEVICE half of that question lives in
+    /// `rows_on_demand_eligible` — CPU and CUDA each have a gather that stays
+    /// on their own device, Metal does not — and both estimators here answer
+    /// the same way, so this is NOT a device-specific term. Decided by
     /// `inference::split::token_embedding::table_supports_row_gather`; do not
     /// re-derive it here. A disagreement between this figure and what the
     /// loader allocates is invisible until a node either refuses a model that
@@ -263,15 +265,19 @@ fn estimate_model_resident_bytes(
 /// model that would have fitted, while under-estimating costs a hard OOM and —
 /// until this release — a permanent fall back to the CPU.
 pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
-    // A CUDA worker never reads embedding rows on demand: the gather reads host
-    // bytes, so doing it per lookup would move the whole table across PCIe
-    // every decode step. See `token_embedding`.
+    // A CUDA worker reads embedding rows on demand too, through an on-device
+    // gather, so it no longer materialises the table either — 720 MB on
+    // meta-llama-3.1-8b. See `token_embedding`.
     //
     // The KV cache is charged at a capped context because a GPU worker has a
     // runtime head-room check that refuses gracefully if a conversation
     // outgrows it — see `GPU_ADMISSION_KV_CONTEXT`.
-    estimate_model_resident_bytes(i, false, i.effective_context.min(GPU_ADMISSION_KV_CONTEXT))
-        .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
+    estimate_model_resident_bytes(
+        i,
+        i.embedding_gatherable,
+        i.effective_context.min(GPU_ADMISSION_KV_CONTEXT),
+    )
+    .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
         / (1024 * 1024)
 }
 
@@ -866,15 +872,24 @@ mod footprint_tests {
     /// table is larger than the whole checkpoint.
     #[test]
     fn beats_the_file_size_multiple_on_a_large_vocabulary_model() {
-        let old = estimate_model_vram_mb(llama32_1b().quantized_weight_bytes);
-        let new = estimate_worker_vram_mb(&llama32_1b());
+        let i = llama32_1b();
+        let old = estimate_model_vram_mb(i.quantized_weight_bytes);
+        let new = estimate_worker_vram_mb(&i);
         assert!(new > old, "new {new} must exceed old {old}");
-        // The f16 embedding alone (128256 * 2048 * 2 = 501 MB) is still a large
-        // fraction of the 821 MB checkpoint, and entirely invisible to a
-        // file-size multiple.
+
+        // The claim being pinned is about a worker that MATERIALISES the table:
+        // the f16 embedding alone (128256 * 2048 * 2 = 501 MB) is a large
+        // fraction of the 821 MB checkpoint and entirely invisible to a
+        // file-size multiple. Asserted against the dense path, because since
+        // 2026-08-18 a gathering worker genuinely does not hold it — the gap
+        // narrowing there is the optimisation working, not the estimator
+        // regressing.
+        let dense = estimate_model_resident_bytes(&i, false, i.effective_context)
+            .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
+            / (1024 * 1024);
         assert!(
-            new - old > 500,
-            "the embedding term alone should dominate: {old} -> {new}"
+            dense - old > 500,
+            "the embedding term alone should dominate: {old} -> {dense}"
         );
     }
 
@@ -882,14 +897,30 @@ mod footprint_tests {
     /// charged to the segment that actually holds it.
     #[test]
     fn the_embedding_table_is_charged_to_the_first_segment_only() {
-        let first = estimate_worker_vram_mb(&llama32_1b());
+        // The dense path, where there is a table to charge. 128256*2048*2 = 501 MB.
+        let deq = |i: &VramFootprintInputs| {
+            estimate_model_resident_bytes(i, false, i.effective_context) / (1024 * 1024)
+        };
+        let first = deq(&llama32_1b());
         let mut middle = llama32_1b();
         middle.is_first = false;
-        let mid = estimate_worker_vram_mb(&middle);
-        // 128256 * 2048 * 2 = 501 MB
+        let mid = deq(&middle);
         assert!(
             (first - mid) > 450 && (first - mid) < 550,
             "first {first} minus middle {mid} should be ~501 MB"
+        );
+
+        // And with rows read on demand there is nothing extra to charge the
+        // first segment at all: the quantized bytes are already inside
+        // `quantized_weight_bytes`. That the two segments now cost the SAME is
+        // the saving, asserted so it cannot silently come back.
+        let g = |i: &VramFootprintInputs| {
+            estimate_model_resident_bytes(i, true, i.effective_context) / (1024 * 1024)
+        };
+        assert_eq!(
+            g(&llama32_1b()),
+            g(&middle),
+            "a gathering worker holds no dense table, so holding layer 0 costs no extra"
         );
     }
 
@@ -948,10 +979,13 @@ mod footprint_tests {
         at_cap.effective_context = GPU_ADMISSION_KV_CONTEXT;
         let capped = estimate_worker_vram_mb(&at_cap);
 
-        let uncapped_bytes =
-            estimate_model_resident_bytes(&at_cap, false, at_cap.effective_context)
-                .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
-                / (1024 * 1024);
+        let uncapped_bytes = estimate_model_resident_bytes(
+            &at_cap,
+            at_cap.embedding_gatherable,
+            at_cap.effective_context,
+        )
+        .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
+            / (1024 * 1024);
         assert_eq!(
             capped, uncapped_bytes,
             "at or below the cap the estimate must be untouched"
@@ -963,7 +997,15 @@ mod footprint_tests {
     #[test]
     fn a_small_model_is_not_grossly_over_estimated() {
         const MEASURED: u64 = 1145;
-        let est = estimate_worker_vram_mb(&tinyllama());
+        // Measured 2026-07-30 against a worker holding the DEQUANTIZED table,
+        // so the calibration is checked against that same path. A gathering
+        // worker really does use ~90 MB less on this model (125 MB f16 table
+        // against 35 MB quantized), so holding it to this constant would be
+        // holding it to a figure for different behaviour.
+        let i = tinyllama();
+        let est = estimate_model_resident_bytes(&i, false, i.effective_context)
+            .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
+            / (1024 * 1024);
         assert!(
             est >= MEASURED,
             "must not under-estimate ({est} < {MEASURED})"
@@ -1069,13 +1111,18 @@ mod footprint_tests {
     /// that are genuinely device-specific. If they disagree about anything
     /// else, one of the two budgets is wrong.
     ///
-    /// There are exactly TWO such terms, and the second arrived on 2026-08-18:
+    /// There are exactly TWO such terms:
     ///
     /// 1. Per-process overhead — a CPU worker establishes no device context.
-    /// 2. The embedding table. A CPU worker reads its rows out of the quantized
-    ///    table on demand; a CUDA worker cannot, because the gather reads host
-    ///    memory (see `inference::split::token_embedding`), so it still holds
-    ///    the whole table dequantized.
+    /// 2. The KV ceiling. A GPU worker charges a capped context because it has
+    ///    a runtime head-room check that refuses gracefully when a conversation
+    ///    outgrows the card; a CPU worker has none, so it prices the whole
+    ///    ceiling. See [`GPU_ADMISSION_KV_CONTEXT`].
+    ///
+    /// The embedding table is NOT one of them: both devices now read its rows
+    /// on demand. It was briefly device-specific, between the CPU gather
+    /// landing and the CUDA one, and that is exactly the kind of asymmetry this
+    /// test exists to force someone to declare.
     ///
     /// Stated as an equation rather than a tolerance so that adding a third
     /// device-specific term fails here and has to be declared.
@@ -1086,25 +1133,24 @@ mod footprint_tests {
         for i in [tinyllama(), llama32_1b(), phi35(), qwen05b_f16()] {
             let vram = estimate_worker_vram_mb(&i);
             let ram = estimate_worker_ram_mb(&i);
-            // The dense table the CUDA worker still carries and the CPU one
-            // no longer does. Zero when the table cannot be gathered, which is
-            // what makes the F16 checkpoint a control here: it must reproduce
-            // the old process-overhead-only relationship exactly.
-            let dense_table_mb = if i.embedding_gatherable {
-                i.vocab_size * i.embedding_length * EMBEDDING_TABLE_BYTES_PER_ELEMENT
-                    / (1024 * 1024)
-            } else {
-                0
-            };
+            // KV the CPU estimator prices and the GPU one does not, i.e. the
+            // context above the cap. Zero for every fixture at or below it,
+            // which is what makes those fixtures a control on the overhead
+            // term alone.
+            let uncapped = i
+                .effective_context
+                .saturating_sub(i.effective_context.min(GPU_ADMISSION_KV_CONTEXT));
+            let kv_gap_mb =
+                i.segment_layers * 2 * i.head_count_kv * i.head_dim * uncapped * 4 / (1024 * 1024);
             // Each estimator truncates its own total to MB, so the difference
             // of two rounded figures can sit 1 MB off the rounded difference.
-            // The terms being pinned are hundreds of MB, so a missing one is
-            // never mistaken for this.
-            let expected = overhead_mb + dense_table_mb;
+            // The terms being pinned are tens to hundreds of MB, so a missing
+            // one is never mistaken for this.
+            let expected = overhead_mb + kv_gap_mb;
             assert!(
                 vram.abs_diff(ram).abs_diff(expected) <= 1,
-                "the two may differ only by process overhead and the dense \
-                 embedding table: vram {vram} - ram {ram} vs expected {expected}"
+                "the two may differ only by process overhead and the uncapped \
+                 KV ceiling: vram {vram} - ram {ram} vs expected {expected}"
             );
         }
     }

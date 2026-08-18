@@ -28,6 +28,11 @@ impl QCudaStorage {
         Err(Error::NotCompiledWithCudaSupport)
     }
 
+    /// SwarmLLM patch: CUDA-only row gather; see `cuda.rs::gather_rows`.
+    pub fn gather_rows(&self, _ids: &(), _n_ids: usize, _v: usize, _rb: usize) -> Result<Self> {
+        Err(Error::NotCompiledWithCudaSupport)
+    }
+
     pub fn quantize(&mut self, _src: &CudaStorage) -> Result<()> {
         Err(Error::NotCompiledWithCudaSupport)
     }
