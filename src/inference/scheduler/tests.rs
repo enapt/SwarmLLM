@@ -257,6 +257,7 @@ fn greedy_assign_multi_range_candidate() {
             est_tokens_per_sec: 0.0,
             observed_latency_ms_per_layer: None,
             is_pool_member: false,
+            gpu_vram_available_mb: None,
         },
         NodeCandidate {
             node_id: NodeId([2u8; 32]),
@@ -275,6 +276,7 @@ fn greedy_assign_multi_range_candidate() {
             est_tokens_per_sec: 0.0,
             observed_latency_ms_per_layer: None,
             is_pool_member: false,
+            gpu_vram_available_mb: None,
         },
     ];
 
@@ -1092,6 +1094,7 @@ fn cost_cand(
         est_tokens_per_sec: 0.0,
         observed_latency_ms_per_layer: ms_per_layer,
         is_pool_member: false,
+        gpu_vram_available_mb: None,
     }
 }
 
@@ -1263,4 +1266,175 @@ fn a_faster_peer_wins_at_equal_distance_and_load() {
         PipelineScheduler::estimated_cost_per_layer(&fast, (0, 8), 0)
             < PipelineScheduler::estimated_cost_per_layer(&slow, (0, 8), 0)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Whole-model delegation: handing a model to a peer instead of falling back to
+// the local CPU. See `delegation_target` for why this is a two-way choice
+// rather than a price fed into the routing search.
+// ---------------------------------------------------------------------------
+
+/// A peer that could plausibly take a delegated model: nearby, measured,
+/// trusted, holds everything, and advertises a roomy GPU.
+fn willing_peer(byte: u8, layers: u32) -> NodeCandidate {
+    let mut c = cost_cand(
+        byte,
+        vec![(0, layers)],
+        super::ReachTier::DirectMeasured,
+        5,
+        0.0,
+        None,
+    );
+    c.gpu_vram_available_mb = Some(24_000);
+    c
+}
+
+const LAYERS: u32 = 28;
+/// A model needing 4 GB, against peers advertising 24 GB free.
+const MODEL_MB: u64 = 4_000;
+
+fn local_id() -> NodeId {
+    NodeId([0xAA; 32])
+}
+
+fn local_full_coverage() -> NodeCandidate {
+    let mut c = cost_cand(
+        0xAA,
+        vec![(0, LAYERS)],
+        super::ReachTier::Local,
+        0,
+        0.0,
+        None,
+    );
+    c.node_id = local_id();
+    c
+}
+
+#[test]
+fn a_full_gpu_hands_the_model_to_a_nearby_peer() {
+    let cands = vec![local_full_coverage(), willing_peer(0xBB, LAYERS)];
+    let picked = super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB);
+    assert_eq!(
+        picked.map(|c| c.node_id.clone()),
+        Some(NodeId([0xBB; 32])),
+        "a model that does not fit our GPU should go to a peer whose GPU it fits"
+    );
+}
+
+/// The condition that decides everything. A node that is not CPU-bound for
+/// lack of VRAM — its GPU fits the model, or it has no usable GPU, or the user
+/// asked for the CPU, or we simply could not tell — keeps the request. See
+/// `ModelProcessPool::is_cpu_bound_for_lack_of_vram`.
+#[test]
+fn a_healthy_local_gpu_keeps_the_request_here() {
+    let cands = vec![local_full_coverage(), willing_peer(0xBB, LAYERS)];
+    assert!(
+        super::delegation_target(&cands, &local_id(), LAYERS, false, MODEL_MB).is_none(),
+        "a node that is not CPU-bound for lack of VRAM must not delegate"
+    );
+}
+
+/// **The failure that caused the previous attempt to be reverted.** A machine
+/// holding the model sent the whole request to another country while a peer
+/// 5 ms away was available: five minutes, then failure. Distance is now a hard
+/// bound, not a term in a score that something else can outweigh.
+#[test]
+fn a_distant_peer_is_never_handed_the_model() {
+    let mut far = willing_peer(0xBB, LAYERS);
+    far.latency_ms = super::DELEGATE_MAX_LATENCY_MS + 1;
+    let cands = vec![local_full_coverage(), far];
+    assert!(
+        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none(),
+        "a peer beyond the latency bound must never be delegated to"
+    );
+}
+
+/// A relayed peer is reachable but not suitable: relaying a whole generation is
+/// not what that path is sized for, and an unmeasured latency is not a bound.
+#[test]
+fn only_a_directly_measured_peer_qualifies() {
+    for tier in [
+        super::ReachTier::DirectUnmeasured,
+        super::ReachTier::RelayedMeasured,
+        super::ReachTier::RelayedUnmeasured,
+    ] {
+        let mut p = willing_peer(0xBB, LAYERS);
+        p.reach = tier;
+        let cands = vec![local_full_coverage(), p];
+        assert!(
+            super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none(),
+            "{tier:?} must not be delegated to"
+        );
+    }
+}
+
+/// Delegation is whole-model or nothing. A peer holding part of the model is a
+/// candidate for the routing search, not for this — a split pays a round trip
+/// per token and measured slower every time it was tried.
+#[test]
+fn a_peer_holding_only_some_layers_is_not_a_delegate() {
+    let cands = vec![
+        local_full_coverage(),
+        willing_peer(0xBB, LAYERS - 1), // one layer short
+    ];
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none());
+}
+
+/// The peer's free VRAM is self-reported, so it is used only as a yes/no gate —
+/// and with a margin, because it is a moment out of date and our size estimate
+/// is for OUR placement. A peer with no GPU, or a tight one, keeps the request
+/// local where the outcome is merely slow.
+#[test]
+fn a_peer_without_room_to_spare_is_not_a_delegate() {
+    for free in [None, Some(0), Some(MODEL_MB), Some(MODEL_MB + 1)] {
+        let mut p = willing_peer(0xBB, LAYERS);
+        p.gpu_vram_available_mb = free;
+        let cands = vec![local_full_coverage(), p];
+        assert!(
+            super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none(),
+            "free={free:?} is not enough room for a {MODEL_MB} MB model"
+        );
+    }
+    // Comfortably above the margin, so it qualifies — otherwise the assertions
+    // above would pass for the wrong reason.
+    let mut ok = willing_peer(0xBB, LAYERS);
+    ok.gpu_vram_available_mb = Some((MODEL_MB as f64 * super::DELEGATE_VRAM_MARGIN) as u64 + 1);
+    let cands = vec![local_full_coverage(), ok];
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_some());
+}
+
+/// Delegation sends the plaintext prompt, so an unknown peer is not eligible.
+#[test]
+fn an_untrusted_peer_is_not_shown_the_prompt() {
+    let mut p = willing_peer(0xBB, LAYERS);
+    p.trust_score = super::DELEGATE_MIN_TRUST - 0.01;
+    let cands = vec![local_full_coverage(), p];
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none());
+}
+
+/// Without a size for the model there is nothing to check a peer's room
+/// against, and guessing is how the previous attempt went wrong.
+#[test]
+fn an_unknown_model_size_keeps_the_request_here() {
+    let cands = vec![local_full_coverage(), willing_peer(0xBB, LAYERS)];
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, 0).is_none());
+}
+
+/// With no peer able to help, the local node keeps the request and answers
+/// slowly. Answering slowly beats not answering — which is what excluding the
+/// local node outright would produce.
+#[test]
+fn with_no_willing_peer_the_request_stays_local() {
+    let cands = vec![local_full_coverage()];
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none());
+}
+
+/// Never to ourselves, however the candidate list is ordered.
+#[test]
+fn the_local_node_is_never_its_own_delegate() {
+    let mut me = local_full_coverage();
+    me.reach = super::ReachTier::DirectMeasured;
+    me.gpu_vram_available_mb = Some(80_000);
+    let cands = vec![me];
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none());
 }

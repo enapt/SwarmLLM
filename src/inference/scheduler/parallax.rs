@@ -474,6 +474,7 @@ mod tests {
             est_tokens_per_sec,
             observed_latency_ms_per_layer: None,
             is_pool_member: false,
+            gpu_vram_available_mb: None,
         }
     }
 

@@ -1393,9 +1393,21 @@ impl ModelProcessPool {
     /// with the admission gate, so the scheduler's view and the loader's view
     /// cannot drift apart and disagree about whether a request could have run.
     pub fn would_fit_on_gpu(&self, model_id: &ModelId) -> Option<bool> {
-        // Already resident means already charged: running it costs no new
-        // memory, whatever the budget currently says.
-        if self.workers.contains_key(model_id) {
+        // Already resident ON THE GPU means already charged: running it costs
+        // no new memory, whatever the budget currently says.
+        //
+        // **The residency check alone is not enough**, and answering it that
+        // way made this function contradict itself. A worker that was refused
+        // the GPU still lives in `workers` — it is running on the CPU — and
+        // holds no VRAM at all, so "already charged" is false for it. Observed
+        // live 2026-08-18: a node with a 400 MB budget reported `fits_on_gpu:
+        // true` for a 3138 MB model in the same breath as
+        // `cpu_placement_reason: not_enough_vram`, and a request that should
+        // have gone to a peer with room ran on that node's CPU instead.
+        //
+        // A CPU-resident worker therefore falls through to the estimate below,
+        // which is the right question for it: the VRAM is genuinely free.
+        if self.workers.contains_key(model_id) && self.cpu_reason(model_id).is_none() {
             return Some(true);
         }
         let budget = self
@@ -1424,6 +1436,35 @@ impl ModelProcessPool {
             0 => None,
             mb => Some(mb),
         }
+    }
+
+    /// Is this model going to run on our CPU *because it does not fit our GPU*,
+    /// on a node whose GPU otherwise works?
+    ///
+    /// The trigger for handing a whole model to a peer instead
+    /// (`scheduler::delegation_target`), and deliberately narrower than "is
+    /// this on the CPU". Two of the three ways a model lands on the CPU are NOT
+    /// degradations and must not cause work to be sent away:
+    ///
+    /// - `inference.gpu_layers = 0` is the user saying they want the CPU. A
+    ///   node cannot honour that by quietly using someone else's GPU.
+    /// - A GPU below this build's kernel floor means EVERY model runs on the
+    ///   CPU here. That is how the node works, not a fault of this model, and
+    ///   treating it as degradation would turn a serving node into a proxy for
+    ///   all of its traffic — a much larger change than this, and one the owner
+    ///   has not asked for.
+    ///
+    /// What is left is the case reported on 2026-08-17: a working GPU that this
+    /// particular model does not fit in.
+    pub fn is_cpu_bound_for_lack_of_vram(&self, model_id: &ModelId) -> bool {
+        if self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            return false;
+        }
+        #[cfg(feature = "candle-cuda")]
+        if !crate::daemon::gpu_support::local_gpu_is_supported() {
+            return false;
+        }
+        matches!(self.would_fit_on_gpu(model_id), Some(false))
     }
 
     /// The configured GPU memory budget in MB, or `None` when unset.

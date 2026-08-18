@@ -46,6 +46,170 @@ struct NodeCandidate {
     observed_latency_ms_per_layer: Option<f32>,
     /// True if this node is in our device pool (preferred for routing — free, trusted, low latency).
     is_pool_member: bool,
+    /// Free GPU memory this node last advertised, in MB. `None` when it has no
+    /// GPU, or has told us nothing.
+    ///
+    /// Self-reported, so it is only ever used to answer "could this peer
+    /// plausibly run the whole model on its GPU" — never to rank peers against
+    /// each other. See [`delegation_target`].
+    gpu_vram_available_mb: Option<u64>,
+}
+
+/// How far away a peer may be and still be handed a whole model, in ms.
+///
+/// The number that matters most here. A previous attempt at this (2026-08-03,
+/// reverted in `cbbed678`) sent a request to a machine in another country while
+/// one five milliseconds away was available: five minutes, then failure. This
+/// bounds the damage a wrong decision can do — a peer inside this budget is on
+/// the same LAN or metro, so being wrong about it costs a little latency rather
+/// than the request.
+///
+/// **Calibrated against measured values, 2026-08-18, not from network
+/// intuition.** This is `peer_registry.latency_ms`, an application-level health
+/// round trip, so it carries queueing and processing time and is far larger and
+/// noisier than a raw ping. Sampled on a live node:
+///
+/// | peers | observed |
+/// |---|---|
+/// | same machine / LAN | 2-134 ms (2-3 ms once idle) |
+/// | other continent | 447-484 ms |
+///
+/// 200 ms sits 1.5x above the worst local reading and 2.2x below the best
+/// remote one. The first attempt at this constant was 50 ms, which read as
+/// obviously generous for a LAN and in fact **excluded a peer on the same
+/// machine** whenever either node was busy — the feature would have shipped
+/// inert on exactly the loaded nodes that need it.
+const DELEGATE_MAX_LATENCY_MS: u32 = 200;
+
+/// Minimum trust before this node will hand a peer a whole prompt.
+///
+/// **Deliberately equal to `credit::trust::DEFAULT_TRUST`, and compared with
+/// `>=`.** A peer we have merely met sits exactly at the default, so a fresh
+/// pair of machines on one LAN — the case this whole path exists for — is
+/// eligible immediately. Anything stricter would make the feature inert on the
+/// setups that need it, which is a failure mode this codebase has shipped
+/// before. What it does exclude is a peer whose record has actually gone bad:
+/// a failed spot check costs 0.1, a signature violation 0.2.
+///
+/// A peer with no `peer_registry` entry at all scores 0.3 (`get_peer_metrics`)
+/// and is correctly refused — we would be sending a plaintext prompt to
+/// something we know nothing about.
+const DELEGATE_MIN_TRUST: f32 = crate::credit::trust::DEFAULT_TRUST;
+
+/// Headroom required on top of the model's estimated size before believing a
+/// peer can host it, as a multiplier.
+///
+/// The peer's free VRAM is self-reported and a moment out of date, and our size
+/// estimate is for OUR placement of the model. Requiring a clear margin rather
+/// than a bare fit keeps a borderline case on the local node, where the outcome
+/// is merely slow instead of a failed hand-off.
+const DELEGATE_VRAM_MARGIN: f64 = 1.2;
+
+/// Pick a peer to hand this whole model to, or `None` to run it here.
+///
+/// **This exists because holding every layer is not the same as being able to
+/// run them well.** The local fast path below takes any node with full coverage
+/// and runs the request there, whatever that costs — so a laptop whose GPU is
+/// too small for a model runs it on the CPU even with an idle GPU machine
+/// beside it on the same LAN. Measured by an external report on 2026-08-17: six
+/// and a half minutes of prompt processing, and the machine reaching its
+/// thermal warning, for a request a peer could have answered in seconds.
+///
+/// **How this differs from the attempt that was reverted**, which matters more
+/// than the conditions themselves. That version priced a full local node at
+/// `OUT_OF_ROOM_COST_PENALTY = 10_000` per layer and fell through to the
+/// general routing search. The penalty did not merely discourage running
+/// locally — it made local layers unusable, so the *split* that would have been
+/// best (some layers here, the rest on a peer 5 ms away) was priced out too, and
+/// the search picked a distant node holding everything. The failure was the
+/// consequence, not the trigger.
+///
+/// So this returns a peer or nothing. It never falls through to the search, and
+/// it never changes any cost the search sees. Both outcomes are a single
+/// segment: run the whole model here, or hand the whole model to one named peer.
+/// If nothing qualifies, the local fast path runs exactly as before.
+///
+/// Conditions, all required:
+///
+/// - **The local route is genuinely degraded** — we have a working GPU and
+///   this model does not fit it, so serving here means the CPU fallback. An
+///   unreadable estimate, no configured budget, a node told to use its CPU and
+///   a node with no usable GPU are all NOT degraded; see
+///   `ModelProcessPool::is_cpu_bound_for_lack_of_vram`, which owns that
+///   distinction. Declining to serve over a file we could not read would be
+///   worse than the problem being solved.
+/// - **The peer covers every layer.** This is a delegation, not a split. A
+///   split pays a network round trip per token and measured slower than a
+///   single remote segment every time it was tried (see `docs/FUTURE_WORK.md`).
+/// - **The peer can plausibly do better**: it advertises a GPU with room for
+///   the model plus [`DELEGATE_VRAM_MARGIN`]. Self-reported, which is why it is
+///   only ever a yes/no gate paired with the locality and trust bounds below,
+///   never a ranking signal.
+/// - **The peer is close and directly reachable** — see
+///   [`DELEGATE_MAX_LATENCY_MS`]. A relayed peer is excluded outright: relaying
+///   a whole generation is not what the relay path is sized for.
+/// - **The peer is trusted enough to be shown the prompt**
+///   ([`DELEGATE_MIN_TRUST`]).
+///
+/// Prompt privacy is handled by the caller and is absolute: `encrypted_pipeline`
+/// means no peer may see the plaintext prompt, and delegation sends exactly
+/// that. It is checked before this is called.
+fn delegation_target<'a>(
+    candidates: &'a [NodeCandidate],
+    local_node_id: &NodeId,
+    num_layers: u32,
+    local_is_cpu_bound_for_lack_of_vram: bool,
+    model_vram_mb: u64,
+) -> Option<&'a NodeCandidate> {
+    // Only a node with a working GPU that this model does not fit is degraded.
+    // `ModelProcessPool::is_cpu_bound_for_lack_of_vram` owns that distinction —
+    // a node told to use its CPU, or without a usable GPU, is working normally.
+    if !local_is_cpu_bound_for_lack_of_vram {
+        return None;
+    }
+    // Without a size for the model we cannot judge whether a peer has room,
+    // and guessing is how the previous attempt went wrong.
+    if model_vram_mb == 0 {
+        return None;
+    }
+    let needed = (model_vram_mb as f64 * DELEGATE_VRAM_MARGIN) as u64;
+
+    // `candidates` is already sorted pool-first, then reachability, then
+    // latency, so the first survivor is the nearest trusted one.
+    //
+    // Every rejection is logged. This decision has a lot of conditions, all of
+    // them invisible from outside, and "my fast machine is sitting idle" is
+    // exactly the question an operator will need answered — as will the next
+    // person to change this.
+    for c in candidates.iter().filter(|c| c.node_id != *local_node_id) {
+        let reason = if !c
+            .available_ranges
+            .iter()
+            .any(|r| r.0 == 0 && r.1 >= num_layers)
+        {
+            "does not hold every layer"
+        } else if !matches!(c.reach, ReachTier::DirectMeasured) {
+            "not directly reachable with a measured latency"
+        } else if c.latency_ms > DELEGATE_MAX_LATENCY_MS {
+            "too far away"
+        } else if c.trust_score < DELEGATE_MIN_TRUST {
+            "not trusted enough to be shown the prompt"
+        } else if !c.gpu_vram_available_mb.is_some_and(|free| free >= needed) {
+            "no graphics card with room to spare"
+        } else {
+            return Some(c);
+        };
+        tracing::debug!(
+            peer = %c.node_id,
+            reach = ?c.reach,
+            latency_ms = c.latency_ms,
+            trust = c.trust_score,
+            free_vram_mb = ?c.gpu_vram_available_mb,
+            needed_vram_mb = needed,
+            "Not handing this model to peer: {reason}"
+        );
+    }
+    None
 }
 
 /// Maximum number of GPUs in a tensor-parallel group. AllReduce communication
@@ -246,6 +410,80 @@ impl PipelineScheduler {
                 });
             }
             return Err(SwarmError::InsufficientCapacity(model_id.clone()));
+        }
+
+        // Holding every layer is not the same as being able to run them well.
+        // Before taking the local fast path, check whether this node is about
+        // to serve the model from its CPU because the model does not fit its
+        // GPU — and whether a nearby peer could simply run the whole thing.
+        //
+        // Deliberately skipped when prompt privacy is on: delegation sends the
+        // plaintext prompt, which is precisely what `encrypted_pipeline`
+        // promises will not leave this machine.
+        let local_covers_everything = candidates.iter().any(|c| {
+            c.node_id == *local_node_id
+                && c.available_ranges
+                    .iter()
+                    .any(|r| r.0 == 0 && r.1 >= num_layers)
+        });
+        if local_covers_everything {
+            let pool = &self.shared_state.model_process_pool;
+            if let Some(peer) = delegation_target(
+                &candidates,
+                local_node_id,
+                num_layers,
+                pool.is_cpu_bound_for_lack_of_vram(model_id),
+                pool.estimated_gpu_mb(model_id).unwrap_or(0),
+            ) {
+                // Prompt privacy outranks speed, always. Delegation sends the
+                // plaintext prompt, which is the one thing `encrypted_pipeline`
+                // promises will not happen — and it is ON BY DEFAULT for any
+                // model whose ends this node holds (`encrypted_pipeline_auto`),
+                // which is every model that can reach this decision at all.
+                //
+                // So this is the common outcome, not an edge case, and it is
+                // said out loud: the user is on the slow path, a faster one
+                // exists, and the setting that decides between them is named.
+                // Silently choosing either way would be worse — trading away a
+                // privacy guarantee they were given without asking, or leaving
+                // them on a six-minute prompt with no idea why.
+                if encrypted {
+                    tracing::info!(
+                        model = %model_id,
+                        peer = %peer.node_id,
+                        "This model does not fit our GPU and is running on the processor. \
+                         A nearby machine could run it on its graphics card, but prompt \
+                         privacy is on for this model, and handing the whole model over \
+                         would let that machine read the prompt. Turn off \
+                         inference.encrypted_pipeline for this model to use it"
+                    );
+                    // Fall through to the local fast path below, which is
+                    // exactly what should happen — privacy wins.
+                } else {
+                    tracing::info!(
+                        model = %model_id,
+                        peer = %peer.node_id,
+                        peer_latency_ms = peer.latency_ms,
+                        peer_free_vram_mb = ?peer.gpu_vram_available_mb,
+                        "This model does not fit our GPU, so a nearby peer runs the whole \
+                         of it instead of falling back to our CPU"
+                    );
+                    return Ok(PipelineAssignment {
+                        request_id,
+                        segments: vec![PipelineSegment {
+                            node_id: peer.node_id.clone(),
+                            shard_id: peer.shard_id.clone(),
+                            layer_range: (0, num_layers),
+                        }],
+                        // No standby. If this peer fails, the retry in
+                        // `dispatch_single` re-routes — and this node still holds
+                        // every layer, so the request can always come home.
+                        standbys: vec![],
+                        tp_groups: vec![],
+                        supports_speculative: true,
+                    });
+                }
+            }
         }
 
         // Fast path: if the local node has full layer coverage (0..num_layers),
@@ -605,6 +843,18 @@ impl PipelineScheduler {
             // carries no network component, which is correct: there isn't one.
             let observed_latency_ms_per_layer =
                 self.shared_state.observed_latency_ms_per_layer(&node_id);
+            let gpu_vram_available_mb = if node_id == *local_node_id {
+                // Never used for the local node — the loader's own admission
+                // check is the authority on whether WE can fit a model, and it
+                // knows what is already committed to live workers.
+                None
+            } else {
+                self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                    p.capability
+                        .as_ref()
+                        .and_then(|c| c.gpu.as_ref().map(|g| g.vram_available_mb))
+                })
+            };
             candidates.push(NodeCandidate {
                 node_id,
                 shard_id: first_shard_id,
@@ -619,6 +869,7 @@ impl PipelineScheduler {
                 est_tokens_per_sec,
                 observed_latency_ms_per_layer,
                 is_pool_member: is_pool,
+                gpu_vram_available_mb,
             });
         }
 

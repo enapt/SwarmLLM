@@ -36,6 +36,17 @@ use std::time::{Duration, Instant};
 pub enum WorkKind {
     Prefill,
     Decode,
+    /// A whole model run on the peer, one decode step's share of it.
+    ///
+    /// **Kept apart from [`WorkKind::Decode`] because the two measure different
+    /// things.** A mid-chain decode sample is a coordinator round trip: we send
+    /// activations, the peer computes its layers, it sends them back, once per
+    /// token. A delegated sample has no per-token round trip at all — the peer
+    /// holds the whole model and streams tokens out. Folding them into one EMA
+    /// would price a delegated run using a figure that carries a round trip it
+    /// will never pay, which is exactly how the delegated option came to be
+    /// systematically overcharged (see `docs/FUTURE_WORK.md`).
+    Delegated,
 }
 
 /// Weight given to the newest sample in each EMA. Responsive enough to follow
@@ -61,8 +72,12 @@ pub struct PeerSpeed {
     prefill_ms_per_layer_byte: Option<f32>,
     /// EMA of ms per layer for a single-token decode step.
     decode_ms_per_layer: Option<f32>,
+    /// EMA of ms per layer for one decode step of a WHOLE model run on the
+    /// peer — no per-token round trip. See [`WorkKind::Delegated`].
+    delegated_ms_per_layer: Option<f32>,
     prefill_samples: u32,
     decode_samples: u32,
+    delegated_samples: u32,
     updated_at: Instant,
 }
 
@@ -71,8 +86,10 @@ impl Default for PeerSpeed {
         Self {
             prefill_ms_per_layer_byte: None,
             decode_ms_per_layer: None,
+            delegated_ms_per_layer: None,
             prefill_samples: 0,
             decode_samples: 0,
+            delegated_samples: 0,
             updated_at: Instant::now(),
         }
     }
@@ -103,7 +120,7 @@ impl PeerSpeed {
                 }
                 segment_ms as f64 / (layers as f64 * activation_bytes as f64)
             }
-            WorkKind::Decode => segment_ms as f64 / layers as f64,
+            WorkKind::Decode | WorkKind::Delegated => segment_ms as f64 / layers as f64,
         } as f32;
         if !sample.is_finite() {
             return;
@@ -115,6 +132,10 @@ impl PeerSpeed {
                 &mut self.prefill_samples,
             ),
             WorkKind::Decode => (&mut self.decode_ms_per_layer, &mut self.decode_samples),
+            WorkKind::Delegated => (
+                &mut self.delegated_ms_per_layer,
+                &mut self.delegated_samples,
+            ),
         };
         *slot = Some(match *slot {
             Some(prev) => ALPHA * sample + (1.0 - ALPHA) * prev,
@@ -132,6 +153,7 @@ impl PeerSpeed {
                 self.prefill_ms_per_layer_byte? * layers as f32 * activation_bytes as f32
             }
             WorkKind::Decode => self.decode_ms_per_layer? * layers as f32,
+            WorkKind::Delegated => self.delegated_ms_per_layer? * layers as f32,
         };
         predicted.is_finite().then_some(predicted)
     }

@@ -310,6 +310,15 @@ impl PipelineExecutor {
         let mut matched_stop_seq: Option<String> = None;
         let mut token_logprobs: Vec<swarmllm_types::TokenLogProbEntry> = Vec::new();
         let mut first = true;
+        // Timing for the delegated-speed observation recorded at the end.
+        //
+        // This path measured NOTHING until 2026-08-18, and it is the path most
+        // single-model requests take — so a node whose traffic all went this
+        // way never learned a thing about its peers and only ever had figures
+        // gossiped to it second-hand. That blindness is what made the routing
+        // decision this feeds a guess rather than a measurement.
+        let sent_at = std::time::Instant::now();
+        let mut first_token_at: Option<std::time::Instant> = None;
 
         // Reassembly of an unordered stream — see `StreamReassembler`.
         let mut stream = StreamReassembler::new();
@@ -411,6 +420,9 @@ impl PipelineExecutor {
                     )));
                 }
             };
+            if first {
+                first_token_at = Some(std::time::Instant::now());
+            }
             first = false;
 
             if let Some(ref reason) = tok.finish_reason {
@@ -594,6 +606,34 @@ impl PipelineExecutor {
                  reporting and billing the delivered count"
             );
             completion_tokens = delivered;
+        }
+
+        // What this peer is actually worth when handed a whole model.
+        //
+        // Deliberately EXCLUDES the time to the first token: that is prefill
+        // plus any model load and queueing on the peer, and folding it in would
+        // make a peer look slow for being cold. What is left is the steady
+        // decode rate, divided by the tokens it produced and the layers it ran
+        // — the same shape as every other sample, so it composes with them.
+        //
+        // Needs at least two tokens: with one, `total - ttft` is zero and says
+        // nothing about decode speed at all.
+        if let Some(ttft) = first_token_at {
+            let steady = sent_at
+                .elapsed()
+                .saturating_sub(ttft.duration_since(sent_at));
+            let layers = segment.layer_range.1.saturating_sub(segment.layer_range.0);
+            if completion_tokens > 1 && layers > 0 {
+                let per_token_ms = steady.as_millis() as u64 / u64::from(completion_tokens - 1);
+                self.shared_state.record_peer_segment_latency(
+                    &segment.node_id,
+                    &self.request.model_id,
+                    crate::daemon::state::WorkKind::Delegated,
+                    per_token_ms,
+                    layers,
+                    0,
+                );
+            }
         }
 
         Ok(Some(InferenceOutput {
