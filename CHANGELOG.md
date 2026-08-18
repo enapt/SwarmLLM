@@ -4,6 +4,17 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.103-alpha] — 2026-08-18
+
+**Security: updates an HTTP/2 library with a newly published denial-of-service
+flaw.** A advisory published on 17 August against `h2` 0.4.13 describes a remote
+party being able to make a server hold unbounded empty data frames. SwarmLLM
+runs an HTTP server on every node, so this is worth taking promptly even though
+no exploitation has been observed. Updated to 0.4.16, which contains the fix.
+
+Nothing else changed. Anyone on 0.3.102 or earlier should update.
+
+
 ## [0.3.102-alpha] — 2026-08-18
 
 **Machines now say how fast they actually are, instead of guessing.** A machine
