@@ -359,6 +359,25 @@ silently break at the wire if duplicated:
   `gpu_layers` and OOM CPU-pinning), with
   `worker_ipc::permanent_gpu_failure` as the backstop for when the probe
   returned unknown.
+- **`model::auto_manage::vram::GPU_ADMISSION_KV_CONTEXT`** (2026-08-18) — the context
+  length GPU admission charges KV cache for, whatever the user configured.
+  **Admission may charge less than the worst case exactly where a runtime check
+  catches the difference, and nowhere else.** A GPU worker has one
+  (`kv_budget::claim_exceeds_headroom`, a 503 that re-routes); a CPU worker has none,
+  so `estimate_worker_ram_mb` still prices the whole ceiling and must keep doing so —
+  under-charging there means swapping, which degrades every request on the machine.
+  Why it exists: `inference.max_seq_len_override` is the only way to hold an agentic
+  client's system prompt (~5000 tokens of tool schema before the user speaks), and
+  raising it used to raise this charge in step, so the model stopped fitting the card
+  and was loaded on the CPU — measured at 396 s of prompt processing and a thermal
+  warning (external report 2026-08-17). Pre-paying at load bought nothing the runtime
+  check was not already enforcing.
+  **Deliberately NOT `DEFAULT_MAX_SEQ_LEN`.** That is a product default and moves with
+  the audience — it went 4096 → 8192 the same day — while this is a statement about a
+  typical working conversation. Tying them would mean raising the default silently
+  re-broke the case above. `raising_the_context_no_longer_costs_a_model_its_place_on_the_gpu`
+  and `the_cap_is_inert_at_the_context_it_was_derived_from` pin both halves.
+
 - **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
   admission check against it. The loader records `kv_headroom_bytes` on the
   model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward
@@ -781,16 +800,25 @@ silently break at the wire if duplicated:
   both a CPU and a CUDA worker; the `SWARMLLM_DENSE_EMBEDDING` override lives in THAT
   inner predicate so both callers inherit it, because putting it one level up left the
   estimator pricing a gather the loader was not doing.
-  **The device half is load-bearing, not incidental**: the gather reads host bytes
-  (`QTensor::data()` is a zero-copy borrow on CPU and a full device-to-host copy on
-  CUDA), so on a GPU it would move the whole table across PCIe every decode step —
-  llama.cpp measured that shape at 6.18 ms/token against 1.72 before `k_get_rows_kq`.
-  Worth 754 MB on llama-3.2-3b, measured; weight-tied models gain most because the
-  loader used to load that tensor TWICE, once dequantized for the lookup and once
-  quantized for the LM head, and now shares one `Arc<QTensor>` via `QMatMul::from_arc`.
+  **The gather must stay on the device holding the table.** `QTensor::data()` is a
+  zero-copy borrow on CPU and a full device-to-host copy on CUDA, so the CPU
+  implementation reused on a GPU would move the whole table across PCIe every decode
+  step — llama.cpp measured that shape at 6.18 ms/token against 1.72 before
+  `k_get_rows_kq`. Both devices therefore go through the vendored
+  `QTensor::gather_rows`: CPU slices rows out of the borrow, CUDA runs `index_select`
+  over a `[vocab, row_bytes]` byte view (no new kernel — `is_u32_u8` is already in
+  `candle-kernels`, and the quantized buffer's padding is only ever trailing, so rows
+  are contiguous). Metal has none and keeps the dense table.
+  Measured 754 MB on CPU and 736 MB on an RTX 3070, both llama-3.2-3b against a 751 MB
+  prediction. Weight-tied models gain most because the loader used to load that tensor
+  TWICE — once dequantized for the lookup, once quantized for the LM head — and now
+  shares one `Arc<QTensor>` via `QMatMul::from_arc`.
+  **Verify a change here with DECODE RATE, not memory**: the failure mode above frees
+  exactly as much memory while being far slower. The check that rules it out is
+  PREFILL — gathering 512 rows costs no more than gathering 1 would if each row made a
+  host trip, so unchanged prefill is positive evidence the gather stayed on-device.
   A new embedding path goes through `TokenEmbedding`, whose two variants both return
-  `EMBEDDING_DTYPE` so no call site can tell them apart. CUDA route sketched in
-  `docs/FUTURE_WORK.md`.
+  `EMBEDDING_DTYPE` so no call site can tell them apart.
 
 - **`model::huggingface::is_trusted_publisher`** (R141) — canonical
   curator-allowlist check for an HF `repo_id`. Splits on the first `/`
