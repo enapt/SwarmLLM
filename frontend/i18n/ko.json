@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "다운로드 전에 HuggingFace에서 {model}을(를) 확인하는 중",
   "activity.hf_source_discovered": "{model}의 HF 소스 발견됨",
   "activity.hf_sources_cap_reached": "발견된 모델 카탈로그가 가득 찼습니다 ({count}). 피어의 새 모델이 삭제되고 있습니다 — 설정에서 사용하지 않는 모델을 제거하여 공간을 확보하세요.",
-  "activity.inbound_blocked": "다른 컴퓨터가 이 노드에 연결할 수 없습니다. Windows 방화벽에서 포트를 허용해야 합니다. 정확한 명령은 로그를 확인하세요.",
+  "activity.inbound_blocked": "아직 다른 컴퓨터가 이 노드에 연결한 적이 없습니다. 연결되지 않는다면 Windows 방화벽에서 포트를 허용해야 합니다. 정확한 명령은 로그를 확인하세요.",
   "activity.inference_completed": "추론 완료: {model}",
   "activity.inference_failed": "추론 실패: {detail}",
   "activity.inference_request": "추론 요청: {model}",

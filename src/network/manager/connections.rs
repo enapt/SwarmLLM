@@ -148,9 +148,7 @@ impl NetworkManager {
             // distinguishes "reachable" from "silently dropping inbound".
             // Loopback is excluded: the dashboard's own browser would satisfy
             // it while proving nothing about the LAN.
-            self.shared_state
-                .observed_inbound_connection
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.shared_state.record_inbound_connection_observed();
         }
         // NETWORKING_PLAN Phase 1 — record DIRECT (non-relay-circuit)
         // connections so the relay send path can prefer the app-level relay over
@@ -641,8 +639,9 @@ impl NetworkManager {
         tracing::warn!(
             %peer,
             failures,
-            "Peer has not answered anything in a row — closing the connection so it \
-             stops being offered work; a re-dial is scheduled"
+            "Peer has not answered {} requests in a row — closing the connection so it \
+             stops being offered work; a re-dial is scheduled",
+            failures
         );
         // Triggers ConnectionClosed → registry eviction + jittered re-dial.
         let _ = self.swarm.disconnect_peer_id(peer);

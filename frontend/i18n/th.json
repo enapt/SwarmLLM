@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "กำลังตรวจสอบ {model} บน HuggingFace ก่อนดาวน์โหลด",
   "activity.hf_source_discovered": "ค้นพบ HF source สำหรับ {model}",
   "activity.hf_sources_cap_reached": "แคตตาล็อกโมเดลที่ค้นพบเต็มแล้ว ({count}) โมเดลใหม่จากเพียร์กำลังถูกทิ้ง — ลบโมเดลที่ไม่ใช้งานในการตั้งค่าเพื่อเพิ่มพื้นที่",
-  "activity.inbound_blocked": "เครื่องอื่นไม่สามารถเข้าถึงโหนดนี้ได้ ต้องอนุญาตพอร์ตของโหนดในไฟร์วอลล์ของ Windows — ดูคำสั่งที่ถูกต้องได้ในบันทึก",
+  "activity.inbound_blocked": "ยังไม่มีเครื่องอื่นเชื่อมต่อเข้ามาที่โหนดนี้ หากเครื่องอื่นเข้าถึงไม่ได้ ต้องอนุญาตพอร์ตของโหนดในไฟร์วอลล์ของ Windows — ดูคำสั่งที่ถูกต้องได้ในบันทึก",
   "activity.inference_completed": "การอนุมานเสร็จสิ้น: {model}",
   "activity.inference_failed": "การอนุมานล้มเหลว: {detail}",
   "activity.inference_request": "คำขออนุมาน: {model}",

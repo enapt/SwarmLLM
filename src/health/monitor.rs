@@ -39,12 +39,24 @@ pub struct HealthMonitor {
     wsl_firewall_warned: bool,
 }
 
-/// How long to wait before concluding that nothing can dial in.
+/// How long to wait before remarking that nothing has dialled in.
 ///
 /// Long enough that a node which has simply not been found yet is never
 /// accused of a firewall problem: mDNS answers in seconds, but a peer that has
 /// to come via the DHT or a bootstrap round can take minutes to dial back.
-const WSL_FIREWALL_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+///
+/// **Ten minutes was far too short, and the machine's own log said so.** On a
+/// run measured 2026-08-18 this check fired at 06:47 and a remote machine
+/// dialled in successfully at 07:41 — 64 minutes in, on a node whose inbound
+/// ports were open the whole time. An hour is scaled to that observation rather
+/// than to intuition. It cannot be scaled to cover the case entirely, because
+/// there is no length of silence that proves unreachability: a node dials every
+/// peer it already knows within the first second of starting, so it is the
+/// dialer on every link and may never be dialled back at all. That is what the
+/// persisted observation in `SharedState::observed_inbound_connection` is for,
+/// and it is why the message below reports what was seen instead of asserting a
+/// cause.
+const WSL_FIREWALL_GRACE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// How long a download tracking entry can sit unchanged before being treated
 /// as stalled. Generous enough to tolerate slow peers and HF rate limiting.
@@ -1215,6 +1227,23 @@ impl HealthMonitor {
     /// A node that simply has not met anyone yet is not evidence of a firewall,
     /// and warning during startup would reintroduce the false positive with
     /// extra steps.
+    ///
+    /// **And it did reintroduce it, which is why the evidence is now persisted
+    /// and the message no longer names a cause.** Making the observation
+    /// per-process left the check deciding a question about the machine's
+    /// firewall from whatever happened in one ten-minute window, and a reachable
+    /// node routinely sees nothing in that window: it dials every peer it
+    /// already knows within the first second of starting, so it is the dialer on
+    /// every link. Measured on this development machine 2026-08-18 — inbound
+    /// TCP open and verified by hand from a peer on the same subnet, 181 inbound
+    /// connections in the log's history, zero in a 9-hour run, and a run that
+    /// warned at 06:47 contradicted by its own inbound connection at 07:41.
+    /// Three of the four most recent runs warned; all three were wrong.
+    ///
+    /// So: silence is reported as silence. The remedy is still offered, because
+    /// when it IS a firewall this is the only thing that tells the user, but it
+    /// is offered against the condition they can actually check — whether other
+    /// machines say they cannot reach this one.
     fn maybe_warn_wsl_firewall(&mut self) {
         use std::sync::atomic::Ordering;
         if self.wsl_firewall_warned {
@@ -1250,11 +1279,13 @@ impl HealthMonitor {
             p2p_tcp = port + 10,
             quic_udp = port,
             peers = self.shared_state.connected_node_ids.len(),
-            "Other machines cannot reach this node — it has been connected for a while \
-             and nothing has ever dialled IN. Windows only asks to allow the firewall \
-             for apps it launches, never for a Linux program under WSL, so inbound is \
-             being dropped even though this node is on the LAN. Run this once in an \
-             Administrator PowerShell: \
+            "No other machine has ever opened a connection TO this node — every link it \
+             has was dialled outwards. That can simply mean nobody has needed to reach \
+             it yet, but it is also exactly what a blocked Windows firewall looks like: \
+             Windows only asks to allow apps it launches itself, never a Linux program \
+             under WSL, so inbound can be dropped silently while the node looks healthy \
+             from the inside. If other machines report they cannot reach this one, run \
+             this once in an Administrator PowerShell: \
              New-NetFirewallRule -DisplayName 'SwarmLLM P2P TCP' -Direction Inbound \
              -Protocol TCP -LocalPort {} -Action Allow ; \
              New-NetFirewallRule -DisplayName 'SwarmLLM P2P QUIC' -Direction Inbound \
@@ -1266,8 +1297,9 @@ impl HealthMonitor {
             crate::daemon::state::ActivityEvent::new(
                 "network",
                 "inbound_blocked",
-                "Other machines can't reach this node. Its ports need allowing through \
-                 the Windows firewall — see the log for the exact command."
+                "No other machine has connected to this node yet. If they can't reach \
+                 it, its ports need allowing through the Windows firewall — see the log \
+                 for the exact command."
                     .to_string(),
             )
             .with_toast("warning", 12000),

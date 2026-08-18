@@ -25,16 +25,36 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.pending_activation_chunks` — R139 Tier 4K. `DashMap<Uuid, ChunkAssemblyState>` on the ROOT SharedState (cross-cuts the RR-decrypt path in `network/manager/tensors.rs` and the persistent-stream reader in `network/pipeline_stream.rs`). Receiver-side assembly for STREAM-chunked activation forwards. Entry-locked insert via `state.try_assemble_chunked_forward(forward, sender_peer_bytes)`. Periodic stale-entry sweep wired to the HealthMonitor tick via `state.sweep_stale_chunk_assemblies(ttl_secs)`. Chunk-meta is bound into AAD via `build_layer_forward_aad`, so reorder/truncation/cross-transfer-substitution fail Poly1305 before reaching the assembly.
 - `state.listen_multiaddrs` — R140. `arc_swap::ArcSwap<Vec<String>>` on the ROOT SharedState (cross-cuts NetworkManager-writes and PoolManager-reads). Live snapshot of the swarm's reachable addresses, each terminated with `/p2p/<local_peer_id>`. Written by `NetworkManager::refresh_listen_multiaddrs()` (events.rs) on `NewListenAddr` / `ExpiredListenAddr` / `ListenerClosed` / `ExternalAddrConfirmed` / UPnP `NewExternalAddr` / `ExpiredExternalAddr`, plus once at startup after `listen_on()` (and after the `network.external_addresses` config override is added). **R143: the snapshot is the UNION of `swarm.listeners()` (bound sockets — private LAN on a NAT'd node) AND `swarm.external_addresses()` (UPnP-mapped / AutoNAT-confirmed / relay-circuit / manually-declared public addrs).** Without the union a NAT'd node's invite code silently shipped a LAN-only address. Built via the extracted, unit-tested `build_reachable_multiaddr_list(candidates, peer_id)` + `ensure_p2p_suffix` helpers; filtered through `addr_is_remotely_reachable` — keeps LAN + Tailscale CGN (100.64.0.0/10) + public, drops loopback / unspecified / link-local / IMDS. Read by `PoolManager::handle_generate_invite_code` when minting v2 `swarmpool://` codes; empty list → `SwarmError::ServiceUnavailable`. When the list has entries but NONE pass the stricter `pool::invite::any_internet_reachable` (public IP / DNS / relay-circuit — excludes LAN + CGN), invite generation still succeeds but emits a `pool`/`invite_lan_only` warning ActivityEvent so the user isn't handed a LAN-only code that dies over the internet.
 - `config.api.dashboard_trust_lan` — read via `SharedState::cfg()` (see below), never re-derived with `addr.ip().is_loopback()`. `api::dashboard_trust::classify` is the single answer to "may this request be handed the API key automatically?"; the sibling `dashboard_trust_overlay` is read the same way. Was a private `AtomicBool` mirror until 2026-08-09, folded into the live config when that became general.
-- `state.observed_inbound_connection` — `AtomicBool` on the ROOT SharedState.
-  Set once by `handle_connection_established` for the first non-loopback
-  connection where we are the LISTENER. **The only direct evidence that inbound
-  reaches this node**: outbound succeeds from behind almost anything, so a node
-  with peers, a real LAN address and clean logs can still be silently dropping
-  every inbound packet and look perfectly healthy from the inside. Read by the
-  WSL2 firewall check in `health::monitor`, which previously warned every
-  mirrored-mode node on every start whether or not anything was blocked. Any
-  future "are we reachable" question should use this rather than inferring from
-  peer count — having peers proves only that WE dialled successfully.
+- `state.observed_inbound_connection` — `AtomicBool` on the ROOT SharedState,
+  **persisted, and written only via `SharedState::record_inbound_connection_observed`**.
+  Set by `handle_connection_established` for a non-loopback connection where we
+  are the LISTENER. **The only direct evidence that inbound reaches this node**:
+  outbound succeeds from behind almost anything, so a node with peers, a real
+  LAN address and clean logs can still be silently dropping every inbound packet
+  and look perfectly healthy from the inside. Read by the WSL2 firewall check in
+  `health::monitor`. Any future "are we reachable" question should use this
+  rather than inferring from peer count — having peers proves only that WE
+  dialled successfully.
+  **It is seeded from the database at startup, and the persistence is the load-
+  bearing part.** The fact being recorded is a property of the machine's
+  network, and restarting the daemon does not reconfigure a firewall — so an
+  in-memory-only observation made the check re-decide that question every start
+  from whatever happened in the next few minutes. A reachable node routinely
+  sees nothing in that window: it dials every peer it already knows in the first
+  seconds of starting (10 connections inside 2 seconds, measured), so it is the
+  dialer on every link and may never be dialled back at all. The result
+  was a node telling its owner to run Administrator PowerShell firewall commands
+  it did not need. Measured 2026-08-18 on this development machine: inbound TCP
+  open and verified by hand from a peer on the same subnet, 181 inbound
+  connections across the log's history, **zero in a 9-hour run**, and a run that
+  warned at 06:47 contradicted by its own inbound connection at 07:41. Three of
+  the four most recent runs warned; all three were wrong (gotcha #335).
+  **There is no length of silence that proves unreachability**, so the grace
+  period is a noise control, not the fix, and the message reports what was
+  observed rather than naming a cause. A new check that wants to conclude
+  something about this machine's network must persist its evidence the same way;
+  an observation whose lifetime is shorter than the fact's cannot support the
+  claim.
 - **`SharedState::model_is_in_use` is the answer to "may I delete this model's
   files?"** — NOT `active_pipelines` on its own. That is the COORDINATOR's map of
   DISTRIBUTED assignments (gotcha #194) and holds nothing for peer-served work or

@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "Memeriksa {model} di HuggingFace sebelum mengunduh",
   "activity.hf_source_discovered": "Menemukan sumber HF untuk {model}",
   "activity.hf_sources_cap_reached": "Katalog model yang ditemukan penuh ({count}). Model baru dari peer dilewati — hapus model yang tidak digunakan di Pengaturan untuk membebaskan ruang.",
-  "activity.inbound_blocked": "Mesin lain tidak dapat menjangkau node ini. Port-nya perlu diizinkan di firewall Windows — lihat log untuk perintah persisnya.",
+  "activity.inbound_blocked": "Belum ada mesin lain yang terhubung ke node ini. Jika mereka tidak dapat menjangkaunya, port-nya perlu diizinkan di firewall Windows — lihat log untuk perintah persisnya.",
   "activity.inference_completed": "Inferensi selesai: {model}",
   "activity.inference_failed": "Inferensi gagal: {detail}",
   "activity.inference_request": "Permintaan inferensi: {model}",

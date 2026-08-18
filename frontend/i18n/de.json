@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "{model} wird vor dem Download auf HuggingFace geprüft",
   "activity.hf_source_discovered": "HF-Quelle für {model} entdeckt",
   "activity.hf_sources_cap_reached": "Der Katalog entdeckter Modelle ist voll ({count}). Neue Modelle von Peers werden verworfen — entferne ungenutzte Modelle in den Einstellungen, um Platz zu schaffen.",
-  "activity.inbound_blocked": "Andere Rechner können diesen Knoten nicht erreichen. Seine Ports müssen in der Windows-Firewall freigegeben werden — den genauen Befehl finden Sie im Protokoll.",
+  "activity.inbound_blocked": "Bisher hat sich noch kein anderer Rechner mit diesem Knoten verbunden. Falls er nicht erreichbar ist, müssen seine Ports in der Windows-Firewall freigegeben werden — den genauen Befehl findest du im Protokoll.",
   "activity.inference_completed": "Inferenz abgeschlossen: {model}",
   "activity.inference_failed": "Inferenz fehlgeschlagen: {detail}",
   "activity.inference_request": "Inferenzanfrage: {model}",

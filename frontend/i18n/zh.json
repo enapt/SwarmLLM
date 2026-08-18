@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "下载前正在 HuggingFace 上检查 {model}",
   "activity.hf_source_discovered": "为{model}发现HF源",
   "activity.hf_sources_cap_reached": "已发现的模型目录已满（{count}）。来自对等节点的新模型正在被丢弃——请在设置中删除未使用的模型以释放空间。",
-  "activity.inbound_blocked": "其他设备无法连接到此节点。需要在 Windows 防火墙中放行它的端口 — 具体命令见日志。",
+  "activity.inbound_blocked": "目前还没有其他机器连接到此节点。如果它们无法访问，需要在 Windows 防火墙中放行其端口——确切命令请查看日志。",
   "activity.inference_completed": "推理已完成：{model}",
   "activity.inference_failed": "推理失败：{detail}",
   "activity.inference_request": "推理请求：{model}",

@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "يجري التحقق من {model} على HuggingFace قبل التنزيل",
   "activity.hf_source_discovered": "تم اكتشاف مصدر HF لـ {model}",
   "activity.hf_sources_cap_reached": "كتالوج النماذج المكتشفة ممتلئ ({count}). يتم تجاهل النماذج الجديدة من الأقران — أزل النماذج غير المستخدمة في الإعدادات لتحرير مساحة.",
-  "activity.inbound_blocked": "لا يمكن للأجهزة الأخرى الوصول إلى هذه العقدة. يجب السماح بمنافذها في جدار حماية Windows — راجع السجل للاطلاع على الأمر الدقيق.",
+  "activity.inbound_blocked": "لم يتصل أي جهاز آخر بهذه العقدة حتى الآن. إذا تعذّر عليها الوصول، فيجب السماح بمنافذها في جدار حماية Windows — راجع السجل للاطلاع على الأمر الدقيق.",
   "activity.inference_completed": "اكتمل الاستدلال: {model}",
   "activity.inference_failed": "فشل الاستدلال: {detail}",
   "activity.inference_request": "طلب استدلال: {model}",

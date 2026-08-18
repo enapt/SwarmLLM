@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "Controllo di {model} su HuggingFace prima del download",
   "activity.hf_source_discovered": "Fonte HF scoperta per {model}",
   "activity.hf_sources_cap_reached": "Il catalogo dei modelli scoperti è pieno ({count}). I nuovi modelli dei peer vengono scartati — rimuovi i modelli inutilizzati nelle Impostazioni per liberare spazio.",
-  "activity.inbound_blocked": "Gli altri computer non riescono a raggiungere questo nodo. Le sue porte vanno consentite nel firewall di Windows: nel registro trovi il comando esatto.",
+  "activity.inbound_blocked": "Nessun'altra macchina si è ancora collegata a questo nodo. Se non riescono a raggiungerlo, occorre consentire le sue porte nel firewall di Windows: nel registro trovi il comando esatto.",
   "activity.inference_completed": "Inferenza completata: {model}",
   "activity.inference_failed": "Inferenza fallita: {detail}",
   "activity.inference_request": "Richiesta inferenza: {model}",

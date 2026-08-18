@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "Kontrollerar {model} på HuggingFace före nedladdning",
   "activity.hf_source_discovered": "HF-källa upptäckt för {model}",
   "activity.hf_sources_cap_reached": "Katalogen över upptäckta modeller är full ({count}). Nya modeller från jämlikar släpps — ta bort oanvända modeller i Inställningar för att frigöra utrymme.",
-  "activity.inbound_blocked": "Andra datorer kan inte nå den här noden. Dess portar måste tillåtas i Windows-brandväggen — se loggen för det exakta kommandot.",
+  "activity.inbound_blocked": "Ingen annan dator har anslutit till den här noden ännu. Om de inte når den måste dess portar tillåtas i Windows-brandväggen — se loggen för det exakta kommandot.",
   "activity.inference_completed": "Inferens klar: {model}",
   "activity.inference_failed": "Inferens misslyckades: {detail}",
   "activity.inference_request": "Inferensförfrågan: {model}",

@@ -4,6 +4,30 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A node no longer tells you your firewall is blocking connections when it
+isn't.** Nodes running under WSL could warn that other machines were unable to
+reach them, and hand out two Administrator PowerShell commands to fix it — on a
+machine that was perfectly reachable. The check asked whether any other machine
+had dialled in, and treated "no" as proof of a blocked firewall. It isn't: a node
+connects outwards to every peer it already knows within seconds of starting, so
+it is the one doing the dialling on every connection and may never be dialled
+back at all. On the machine where this was found, inbound connections were
+demonstrably working, the node's own history held 181 of them, and one run
+warned at 06:47 and then accepted an incoming connection at 07:41.
+
+Two things changed. The node now remembers that it has been reached
+successfully, instead of forgetting every time it restarts — whether a firewall
+lets connections through is a fact about the machine, and restarting the daemon
+does not alter it. And when it does have nothing to report, it says what it
+actually saw rather than naming a cause: the firewall instructions are still
+there, now offered against something you can check, which is whether other
+machines say they cannot reach you. It also waits an hour rather than ten
+minutes before mentioning it, because a genuine incoming connection was measured
+taking 64.
+
+Also fixed: a log line about an unresponsive peer was missing the number it was
+meant to report, and read "has not answered anything in a row".
+
 ## [0.3.103-alpha] — 2026-08-18
 
 **Security: updates an HTTP/2 library with a newly published denial-of-service

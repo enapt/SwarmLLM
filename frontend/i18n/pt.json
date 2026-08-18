@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "A verificar {model} no HuggingFace antes de transferir",
   "activity.hf_source_discovered": "Fonte HF descoberta para {model}",
   "activity.hf_sources_cap_reached": "O catálogo de modelos descobertos está cheio ({count}). Novos modelos de pares estão sendo descartados — remova modelos não utilizados em Configurações para liberar espaço.",
-  "activity.inbound_blocked": "Outras máquinas não conseguem alcançar este nó. É preciso liberar as portas dele no firewall do Windows — veja o registo para o comando exato.",
+  "activity.inbound_blocked": "Nenhuma outra máquina se ligou ainda a este nó. Se não conseguirem alcançá-lo, é preciso liberar as portas dele no firewall do Windows — veja o registo para o comando exato.",
   "activity.inference_completed": "Inferência concluída: {model}",
   "activity.inference_failed": "Inferência falhou: {detail}",
   "activity.inference_request": "Requisição de inferência: {model}",

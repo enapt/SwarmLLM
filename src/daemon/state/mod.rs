@@ -52,6 +52,13 @@ pub const MAX_RECENT_FAILURES: usize = 20;
 /// slow one against, and they are cheap (no strings beyond node ids).
 pub const MAX_RECENT_TRACES: usize = 50;
 
+/// Where the "a remote machine has successfully dialled us" observation is kept
+/// so it survives a restart. See [`SharedState::observed_inbound_connection`]
+/// for why it has to: the fact being recorded is a property of the machine's
+/// network, and the daemon restarting does not reconfigure a firewall.
+const INBOUND_REACHABILITY_TREE: &str = "network";
+const INBOUND_REACHABILITY_KEY: &str = "inbound_ever_observed";
+
 /// One failed inference, retained for `GET /api/admin/diagnostics`.
 #[derive(Debug, Clone)]
 pub struct RequestFailure {
@@ -366,20 +373,31 @@ pub struct SharedState {
     /// the pool invite-code generator so a freshly-minted code carries every
     /// address a remote peer might reach this node on.
     pub listen_multiaddrs: arc_swap::ArcSwap<Vec<String>>,
-    /// Whether any remote peer has ever successfully dialled US.
+    /// Whether any remote peer has ever successfully dialled US — **on this
+    /// machine, not merely during this run**.
     ///
     /// This is the only direct evidence that inbound connections reach this
     /// node: outbound works from behind almost anything, so a node with peers,
     /// a real address and clean logs can still be unreachable — and looks
-    /// perfectly healthy from the inside. Set once by
-    /// `handle_connection_established` for the first non-loopback connection
-    /// where we are the LISTENER, never cleared.
+    /// perfectly healthy from the inside. Written only via
+    /// [`SharedState::record_inbound_connection_observed`], from
+    /// `handle_connection_established`, for a non-loopback connection where we
+    /// are the LISTENER. Never cleared. Loopback is excluded because the
+    /// dashboard's own browser connection would otherwise satisfy it without
+    /// proving anything about the LAN.
     ///
-    /// Read by the WSL2 firewall check, which previously warned every mirrored-
-    /// mode node on every start whether or not anything was actually blocked —
-    /// telling people to run PowerShell commands they may already have run.
-    /// Loopback is excluded because the dashboard's own browser connection
-    /// would otherwise satisfy it without proving anything about the LAN.
+    /// **It is seeded from the database at startup, and that is the whole
+    /// point.** What the WSL2 firewall check wants to know is whether this
+    /// machine drops inbound packets, which survives a daemon restart; the
+    /// observation used to live only in memory, so every restart threw the
+    /// evidence away and the check re-derived its answer from whatever happened
+    /// in the next ten minutes. That is not enough time to see one: a node
+    /// dials every peer it already knows within the first second of starting,
+    /// so it is the dialer on every link and may never be dialled back at all.
+    /// Measured on this development machine 2026-08-18 — 181 inbound
+    /// connections across the log's history, none of them in a 9-hour run, and
+    /// an earlier run that warned at 06:47 was contradicted by an inbound
+    /// connection of its own at 07:41.
     pub observed_inbound_connection: std::sync::atomic::AtomicBool,
     /// When the most recent health ping went out, and with which nonce.
     ///
@@ -514,6 +532,35 @@ pub struct SharedState {
 }
 
 impl SharedState {
+    /// Record that a remote machine dialled us and it worked — the single way
+    /// [`SharedState::observed_inbound_connection`] is ever set.
+    ///
+    /// Persists on the false→true transition so the evidence outlives the
+    /// process. Do NOT store the flag directly: an in-memory-only observation
+    /// makes the reachability check re-derive, on every restart, an answer about
+    /// the machine's firewall from a ten-minute window in which a reachable node
+    /// routinely sees nothing.
+    ///
+    /// Exactly one write per machine, ever — after a restart the flag is already
+    /// seeded true and the transition cannot happen again — so this costs the
+    /// swarm event loop nothing on the ordinary path.
+    pub fn record_inbound_connection_observed(&self) {
+        if self
+            .observed_inbound_connection
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        if let Err(e) = self
+            .db
+            .put_json(INBOUND_REACHABILITY_TREE, INBOUND_REACHABILITY_KEY, &true)
+        {
+            // Losing this costs a false firewall warning on the next start, not
+            // correctness, so it is not worth failing a connection over.
+            tracing::debug!(error = %e, "Could not persist inbound-reachability observation");
+        }
+    }
+
     /// The config as it is **now** — use this for anything a user can change
     /// while the node is running.
     ///
@@ -857,7 +904,12 @@ impl SharedState {
             )),
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
             listen_multiaddrs: arc_swap::ArcSwap::from_pointee(Vec::new()),
-            observed_inbound_connection: std::sync::atomic::AtomicBool::new(false),
+            observed_inbound_connection: std::sync::atomic::AtomicBool::new(
+                db.get_json::<bool>(INBOUND_REACHABILITY_TREE, INBOUND_REACHABILITY_KEY)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false),
+            ),
             last_health_ping: parking_lot::Mutex::new(None),
             publicly_reachable: std::sync::atomic::AtomicBool::new(false),
             hole_punch_successes: AtomicU64::new(0),
@@ -2957,5 +3009,57 @@ mod live_config_tests {
         state.apply_live_config(updated);
 
         assert_eq!(state.contribution(), ContributionMode::Maximum);
+    }
+}
+
+#[cfg(test)]
+mod inbound_reachability_persistence_tests {
+    use crate::identity::Identity;
+    use crate::inference::executor::ModelExecutor;
+    use crate::storage::db::Database;
+    use std::sync::atomic::Ordering;
+    use tokio::sync::Mutex;
+
+    fn state_over(dir: &std::path::Path) -> std::sync::Arc<crate::daemon::SharedState> {
+        let db = Database::open(dir).unwrap();
+        let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// Whether inbound connections reach this machine is a fact about its
+    /// network, and restarting the daemon does not reconfigure a firewall.
+    ///
+    /// Holding the observation only in memory is what let the WSL firewall
+    /// check accuse a reachable node: each start it re-derived the answer from
+    /// the next few minutes, and a node that dials every peer it already knows
+    /// within the first second of starting is the dialer on every link, so it
+    /// can go hours without being dialled while being perfectly reachable.
+    #[test]
+    fn a_machine_that_has_been_dialled_still_knows_it_after_a_restart() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let first = state_over(temp.path());
+        assert!(
+            !first.observed_inbound_connection.load(Ordering::Relaxed),
+            "a node nothing has ever dialled must not start out believing otherwise"
+        );
+        first.record_inbound_connection_observed();
+        assert!(first.observed_inbound_connection.load(Ordering::Relaxed));
+        drop(first);
+
+        let restarted = state_over(temp.path());
+        assert!(
+            restarted
+                .observed_inbound_connection
+                .load(Ordering::Relaxed),
+            "the evidence must outlive the process that saw it"
+        );
     }
 }

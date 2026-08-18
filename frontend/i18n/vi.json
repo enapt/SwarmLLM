@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "Đang kiểm tra {model} trên HuggingFace trước khi tải xuống",
   "activity.hf_source_discovered": "Phát hiện nguồn HF cho {model}",
   "activity.hf_sources_cap_reached": "Danh mục mô hình đã khám phá đã đầy ({count}). Các mô hình mới từ các nút ngang hàng đang bị loại bỏ — xoá các mô hình không sử dụng trong Cài đặt để giải phóng dung lượng.",
-  "activity.inbound_blocked": "Các máy khác không thể kết nối tới nút này. Cần cho phép các cổng của nó trong tường lửa Windows — xem nhật ký để biết lệnh chính xác.",
+  "activity.inbound_blocked": "Chưa có máy nào khác kết nối đến nút này. Nếu chúng không thể truy cập, cần cho phép các cổng của nút trong tường lửa Windows — xem nhật ký để biết lệnh chính xác.",
   "activity.inference_completed": "Suy luận hoàn tất: {model}",
   "activity.inference_failed": "Suy luận thất bại: {detail}",
   "activity.inference_request": "Yêu cầu suy luận: {model}",

@@ -8579,3 +8579,47 @@ of risk:
 None of these is attempted. The 3x already obtained came from fixing two things
 that were quietly broken, which is a different and much cheaper category than
 making a correct build faster.
+
+## A node cannot test its own inbound reachability (2026-08-18, partial fix shipped)
+
+The WSL firewall warning was fixed by persisting the evidence and by reporting
+what was observed rather than naming a cause (gotcha #335, `.claude/rules/
+architecture.md` § `observed_inbound_connection`). What is still true is the
+thing underneath it: **this node has no way to find out whether other machines
+can open a connection to it.** All it can do is notice that none has.
+
+That gap is why the check could be wrong at all. A node dials every peer it
+already knows within the first second of starting, so it is the dialer on every
+link; being undialled is the normal state of a perfectly reachable node, and no
+amount of waiting distinguishes it from a blocked one.
+
+### Why the obvious answer does not apply
+
+libp2p AutoNAT is exactly this service and the node already runs it — but it
+answers the **public-internet** question. It asks peers to dial our external
+address, so a home node behind an ordinary NAT is reported `Private` whether or
+not its LAN ports are open. The case the warning exists for is a WSL node whose
+**LAN** peers cannot reach it, and AutoNAT will say `Private` for the healthy and
+the broken node alike. Using it here would swap one false positive for another.
+
+### What would actually settle it
+
+Ask a peer to dial us, on the address it already has for us, and tell us what
+happened. Sketch:
+
+- A `ReachabilityProbeRequest` / `Response` pair on the existing
+  request_response protocol, gated on a new `features::` bit per the additive-
+  protocol rule.
+- Sent to a peer on the same subnet (we already classify LAN peers — see
+  `lan_peer_count`), because the claim being tested is about the LAN.
+- The peer opens a fresh connection to our advertised address and reports
+  success or the error. A refusal or a timeout is a real answer, unlike silence.
+- Rate-limit hard and only run it when the check is about to warn: this is a
+  diagnostic, not a heartbeat, and a probe every node runs against every peer is
+  a traffic amplifier.
+
+The honest cost note: this is a new protocol message for a warning that now
+fires rarely and reads accurately. Worth doing when the reachability question
+comes up for a second reason — pool onboarding and invite codes both care
+whether a node is dialable, and `pool::invite::any_internet_reachable` currently
+answers it by inspecting addresses rather than by testing them.

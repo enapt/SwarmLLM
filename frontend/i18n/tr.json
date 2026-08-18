@@ -27,7 +27,7 @@
   "activity.hf_probe_started": "İndirmeden önce {model} HuggingFace üzerinde denetleniyor",
   "activity.hf_source_discovered": "{model} için HuggingFace kaynağı keşfedildi",
   "activity.hf_sources_cap_reached": "Keşfedilen model kataloğu dolu ({count}). Eşlerden gelen yeni modeller atılıyor — yer açmak için Ayarlar'dan kullanılmayan modelleri kaldırın.",
-  "activity.inbound_blocked": "Diğer makineler bu düğüme ulaşamıyor. Bağlantı noktalarına Windows güvenlik duvarında izin verilmeli — tam komut için günlüğe bakın.",
+  "activity.inbound_blocked": "Bu düğüme henüz başka bir makine bağlanmadı. Ulaşamıyorlarsa, bağlantı noktalarının Windows güvenlik duvarında izinli olması gerekir — tam komut için günlüğe bakın.",
   "activity.inference_completed": "Çıkarım tamamlandı: {model}",
   "activity.inference_failed": "Çıkarım başarısız: {detail}",
   "activity.inference_request": "Çıkarım isteği: {model}",
