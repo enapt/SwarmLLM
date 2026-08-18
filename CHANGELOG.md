@@ -4,6 +4,61 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.101-alpha] — 2026-08-18
+
+**Models need up to 750 MB less memory, on both processors and graphics cards.**
+Every model file stores its word table — the part that turns words into numbers —
+in compressed form, and SwarmLLM was unpacking the whole thing when the model
+loaded and keeping it unpacked for as long as the model stayed in memory. On a
+model with a large vocabulary it is the single biggest thing held. Looking a word
+up reads one row of it. Rows are now read straight out of the compressed table as
+they are needed.
+
+Measured on a real model: 754 MB less on a processor, 736 MB less on a graphics
+card. Models that share one table between reading words and choosing them gain
+most, because that table was being held twice. The answers are identical to
+before, exactly — not merely close.
+
+**Asking for longer conversations no longer pushes a model off your graphics
+card.** A coding assistant sends its whole tool list before you type anything —
+around 5000 words in one measured case — so the shipped limit of 4096 rejected
+its very first message and told the caller to send something shorter, which was
+not theirs to shorten. Raising the limit was the documented fix, and it quietly
+cost you the graphics card: the check deciding whether a model fits charged for
+the longest conversation you had allowed, so raising the limit made models stop
+fitting and they were loaded on the processor instead. One report measured that
+as six and a half minutes to read a single prompt, with the machine reaching its
+temperature warning.
+
+Memory for a conversation is taken as the conversation grows, and every step
+already checks the space it is about to use, so charging for the longest possible
+conversation up front bought nothing. The default conversation length is now
+8192. Anyone who never changed the setting is charged exactly what they were
+charged before.
+
+**A model too big for your graphics card can now run on a machine beside it.** A
+machine holding every part of a model ran the whole request itself, however badly
+that went — so a laptop whose card is too small ran on its processor with an idle,
+capable machine on the same network. Such a request is now handed to that machine
+instead.
+
+When prompt privacy is on, it still is: the first and last layers stay on your
+machine, so the words you typed and the words chosen in reply never leave it,
+while the layers in between run on the other machine as encrypted intermediate
+values. Verified across two machines — 26 of a model's 28 layers ran on the
+second one, with the prompt never leaving the first.
+
+**Smaller fixes.** The model list showed a memory estimate that could not be
+acted on, and disagreed on screen with the daemon's own reason for putting a
+model on the processor; it now reports the figure actually used, and the daemon's
+own answer to whether a model fits. `swarmllm bench` divided by the whole request,
+so a run that had to load the model first reported the loading time as generation
+speed — one run showed 1.3 tokens per second for something generating at about 5.
+It now loads the model before timing anything. Every machine had been telling the
+network it had no free graphics memory at all, a figure fixed at startup and never
+updated; nothing read it until now.
+
+
 ## [0.3.100-alpha] — 2026-08-17
 
 **Credits no longer affect the service you get, and the dashboard no longer
