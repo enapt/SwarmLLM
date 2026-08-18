@@ -25,6 +25,37 @@ machines say they cannot reach you. It also waits an hour rather than ten
 minutes before mentioning it, because a genuine incoming connection was measured
 taking 64.
 
+**Claude clients could not read an error from this server.** A failure on
+`/v1/messages` came back in the OpenAI error format, which Anthropic's own
+clients do not parse: it lacked the top-level marker they branch on, and named
+error types Anthropic does not define. A request refused for prompt privacy, for
+instance, came back labelled `prompt_privacy_error`. Errors on that endpoint now
+use Anthropic's format, with the type translated into its vocabulary. The
+translation already existed for streaming errors and simply had not been applied
+to the ordinary ones. Streaming replies are untouched, and the OpenAI endpoints
+are unchanged.
+
+**Three parts of the dashboard were silently doing nothing.** The status dots on
+the auto-manage and private-mode buttons had no ring, and the Master and Linked
+badges in the device list had no text colour, because each referred to a colour
+that was never defined — which in CSS discards the entire style rather than just
+that one value. Separately, a remote administrator who pasted a wrong API key
+into the unlock banner got no error message at all, because the code called a
+function that does not exist.
+
+**Failures now name the right culprit in five more places.** A peer that
+correctly rejected an over-long prompt during speculative decoding had its
+refusal reported as this server breaking, and was then penalised for a mistake
+that belonged to the caller. A model whose vision encoder no machine in the
+network holds penalised whichever peer happened to be serving the text. On the
+Responses API, a malformed reply from an upstream provider was reported as this
+server's own internal fault, and a request built from tool-call data stored
+during a PREVIOUS response was reported as though the caller had sent something
+invalid. A routine worker-restart backoff was logged as an error. And reading a
+stored model header that turns out to be corrupt answered "invalid request",
+blaming the caller for a damaged file on this machine; it now says the file may
+be corrupt and that re-downloading the model will replace it.
+
 Also fixed: a log line about an unresponsive peer was missing the number it was
 meant to report, and read "has not answered anything in a row". Two other log
 lines carried their own source indentation into the middle of the sentence.
