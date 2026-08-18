@@ -35,6 +35,23 @@ translation already existed for streaming errors and simply had not been applied
 to the ordinary ones. Streaming replies are untouched, and the OpenAI endpoints
 are unchanged.
 
+**A wrong API key was reported to Claude clients in a format they cannot
+read.** The fix above covered errors from the endpoint itself but not the ones
+raised before the request got that far — and a missing or mistyped key is the
+likeliest of those. It now uses Anthropic's format too. The MCP endpoint is
+deliberately left alone here: its own specification puts authentication failures
+at the HTTP level, which is already what this server does.
+
+**Four smaller fixes to the MCP endpoint**, all checked against the JSON-RPC and
+MCP specifications and confirmed against a running node: a request that is valid
+JSON but not a valid call is now reported as an invalid request rather than as
+unreadable JSON; every reply now carries the request identifier, as an explicit
+null when it could not be determined; acknowledging a notification no longer
+sends a stray four-byte body; and asking for a resource that does not exist is
+now reported as "not found" rather than as a malformed request. Separately, the
+`delegate` tool reported a failed model call as a broken tool where the `chat`
+tool reported the same failure as something the caller could fix.
+
 **Three parts of the dashboard were silently doing nothing.** The status dots on
 the auto-manage and private-mode buttons had no ring, and the Master and Linked
 badges in the device list had no text colour, because each referred to a colour
