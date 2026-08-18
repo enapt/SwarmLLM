@@ -2069,3 +2069,131 @@ fn credits_stay_dormant() {
         );
     }
 }
+
+/// Every `var(--x)` written without a fallback must name a property something
+/// actually defines.
+///
+/// CSS makes this failure silent and total: a `var()` reference to an undefined
+/// custom property with no fallback is invalid at computed-value time, so the
+/// **whole declaration** is dropped — not just that one value. There is no
+/// console warning and no visual clue beyond the styling simply not being there.
+///
+/// It has now shipped twice. On 2026-08-17 four properties were used and never
+/// defined (`--text` 18 times, `--bg-elevated` 12), which is why every Settings
+/// toggle knob was invisible and the Swarm tab had never once rendered as
+/// designed. On 2026-08-18 `--bg` and `--text` were still being used in four
+/// more places: the Master/Linked role badges in the pool list had no text
+/// colour, and the auto-manage and private-mode status dots in the header had no
+/// ring at all.
+///
+/// The direction of this check is deliberate. Used-but-undefined is a real bug
+/// every time; defined-but-unused is not, and a text search reports live things
+/// as orphans (gotcha #332). So this asserts only the safe direction.
+///
+/// `var(--x, fallback)` is excluded on purpose — it degrades rather than breaks,
+/// which is exactly what a fallback is for.
+#[test]
+fn every_css_custom_property_used_without_a_fallback_is_defined() {
+    let root = repo_root();
+
+    fn ident_at(bytes: &[u8], mut i: usize) -> Option<(String, usize)> {
+        if bytes.get(i) != Some(&b'-') || bytes.get(i + 1) != Some(&b'-') {
+            return None;
+        }
+        let start = i;
+        i += 2;
+        while matches!(bytes.get(i), Some(c) if c.is_ascii_alphanumeric() || *c == b'-' || *c == b'_')
+        {
+            i += 1;
+        }
+        Some((String::from_utf8_lossy(&bytes[start..i]).into_owned(), i))
+    }
+    fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
+        while matches!(bytes.get(i), Some(c) if c.is_ascii_whitespace()) {
+            i += 1;
+        }
+        i
+    }
+
+    let mut defined: BTreeSet<String> = BTreeSet::new();
+    let mut used: Vec<(String, String)> = Vec::new();
+
+    let mut stack = vec![root.join("frontend")];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !matches!(
+                p.extension().and_then(|s| s.to_str()),
+                Some("css") | Some("js") | Some("html")
+            ) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let b = text.as_bytes();
+            let where_ = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .into_owned();
+
+            for i in 0..b.len() {
+                // A definition: `--name:` — in a stylesheet rule or an inline style.
+                if let Some((name, after)) = ident_at(b, i) {
+                    if b.get(skip_ws(b, after)) == Some(&b':') {
+                        defined.insert(name);
+                        continue;
+                    }
+                }
+                // A definition set from script: setProperty('--name', ...).
+                if b[i..].starts_with(b"setProperty(") {
+                    let j = skip_ws(b, i + "setProperty(".len());
+                    let j = if matches!(b.get(j), Some(b'\'') | Some(b'"')) {
+                        j + 1
+                    } else {
+                        j
+                    };
+                    if let Some((name, _)) = ident_at(b, j) {
+                        defined.insert(name);
+                    }
+                    continue;
+                }
+                // A use with no fallback: `var(--name)` and nothing else.
+                if b[i..].starts_with(b"var(") {
+                    let j = skip_ws(b, i + "var(".len());
+                    if let Some((name, after)) = ident_at(b, j) {
+                        if b.get(skip_ws(b, after)) == Some(&b')') {
+                            used.push((name, where_.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        !used.is_empty() && !defined.is_empty(),
+        "the scan found nothing — the frontend layout must have moved, and a test \
+         that scans nothing passes for the wrong reason"
+    );
+
+    let missing: Vec<String> = used
+        .iter()
+        .filter(|(name, _)| !defined.contains(name))
+        .map(|(name, where_)| format!("{name} used in {where_}"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "CSS custom properties used with no fallback and never defined — every \
+         declaration referencing one is silently dropped in the browser:\n  {}",
+        missing.join("\n  ")
+    );
+}

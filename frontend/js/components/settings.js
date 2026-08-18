@@ -504,7 +504,7 @@
         } else {
           input.value = '';
           input.placeholder = I18n.t('settings.paste_key_rejected');
-          App.ui.showToast('error', I18n.t('settings.paste_key_rejected'));
+          App.notifications.showToast(I18n.t('settings.paste_key_rejected'), 'error');
         }
       });
       banner.appendChild(form);

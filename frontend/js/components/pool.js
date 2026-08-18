@@ -278,11 +278,11 @@
           if (isOwnerDevice) {
             roleBadge.textContent = I18n.t('pool.role_master');
             roleBadge.style.background = 'var(--green)';
-            roleBadge.style.color = 'var(--bg)';
+            roleBadge.style.color = 'var(--on-solid)';
           } else {
             roleBadge.textContent = I18n.t('pool.role_linked');
             roleBadge.style.background = 'var(--border)';
-            roleBadge.style.color = 'var(--text)';
+            roleBadge.style.color = 'var(--text-primary)';
           }
         }
 
