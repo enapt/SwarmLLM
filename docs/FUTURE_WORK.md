@@ -1657,9 +1657,19 @@ gotcha #327.
 >
 > See `## A node holding every shard monopolises the model (measured 2026-07-27)
 
-**Status: root-caused, not fixed.** Deliberately left for a deliberate change —
-this is core routing, and it should not be altered without an A/B across a real
-swarm.
+**Status: the degraded-local case is FIXED (2026-08-18); load-spreading is not.**
+
+A node that holds every layer and cannot fit the model on its GPU now hands the
+whole model to a nearby peer that can (`scheduler::delegation_target`), instead
+of falling back to its own CPU. Verified across two real nodes: routed away, the
+peer ran all 28 layers, answer in 10 s. See the commit for the three things that
+made it inert until it was tested on real machines (gotchas #329-#331).
+
+What remains open is the ORIGINAL complaint below — a node that holds everything
+and *can* run it still takes every request for that model, so load cannot be
+spread across holders and a faster peer cannot help a slower local node that is
+merely busy. That still needs the cost-model work described further down, and
+still should not be attempted without an A/B across a real swarm.
 
 ### Symptom
 
@@ -1811,8 +1821,15 @@ Verified after the three fixes above, with the flag forced on (LAN pair, GPU +
 **The fix is to record two distinct figures rather than one.** A peer needs
 `observed_midchain_ms_per_layer` (includes per-pass network — what
 `record_peer_segment_latency` already produces from `forward_through_segments`)
-and `observed_delegated_ms_per_layer` (pure remote compute). The second has no
-source today because **the `remote_generate` fast path never records anything** —
+and `observed_delegated_ms_per_layer` (pure remote compute).
+
+**The second half is DONE (2026-08-18):** `WorkKind::Delegated` is a separate EMA,
+recorded from the `remote_generate` fast path as
+`(total - ttft) / (completion_tokens - 1) / layers`, deliberately excluding
+time-to-first-token so a cold peer is not scored as a slow one. What remains is
+teaching `vertex_cost` to USE it for the delegated alternative — the routing
+search still prices that option with the mid-chain figure, and so still
+overcharges it. Historical note on why it had no source:
 `record_peer_segment_latency` has exactly one production caller, in the
 multi-segment path. That is also a self-reinforcing blindness worth fixing on its
 own: a node whose requests all take the fast path never learns a thing about its

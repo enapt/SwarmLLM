@@ -743,6 +743,28 @@ silently break at the wire if duplicated:
   dispatch's comment and in `docs/FUTURE_WORK.md`, and the benchmark
   asserts the dispatch never picks a kernel materially slower than
   always-standard.
+- **`inference::scheduler::delegation_target`** (2026-08-18) — the single decision
+  to hand a WHOLE model to a peer rather than run it on this node's CPU. Fires only
+  when `ModelProcessPool::is_cpu_bound_for_lack_of_vram` says we have a working GPU
+  this model does not fit, and only for a peer that holds every layer, is directly
+  reachable within `DELEGATE_MAX_LATENCY_MS`, is trusted at least as much as an
+  ordinary peer, and advertises GPU room with margin.
+  **It returns a peer or nothing, and never falls through to the routing search.**
+  That is the whole difference from the version reverted in `cbbed678`: that one
+  priced a full local node at 10,000/layer and let the DP decide, which made local
+  layers unusable, priced out the good split (some layers here, rest on a peer 5 ms
+  away) and picked a node in another country. Both outcomes here are a single
+  segment. Do NOT reintroduce a penalty term — it distorts every other route.
+  **Prompt privacy outranks it absolutely**: delegation sends the plaintext prompt,
+  and `encrypted_pipeline_auto` is on by default for any model whose ends this node
+  holds — which is every model that can reach this decision — so the blocked case is
+  the COMMON one and is logged with the setting that changes it.
+  Three things made it inert until it was run on real machines, all now fixed and
+  all worth knowing before touching this: gotcha #329 (`would_fit_on_gpu` said yes
+  for a model resident on the CPU), #330 (every node gossips zero free VRAM), #331
+  (the latency bound was calibrated against network intuition, not against what
+  `peer_registry.latency_ms` actually measures).
+
 - **`inference::router::distributed_exec::failure_is_penalty_worthy`**
   (R146) — gates `penalty_serve_failure` on (a) the assignment actually
   having had a remote segment and (b) the error not being locally
