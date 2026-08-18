@@ -1411,6 +1411,36 @@ impl ModelProcessPool {
         Some(self.vram_committed_mb().saturating_add(estimated) <= budget)
     }
 
+    /// This model's real GPU footprint in MB, or `None` when its geometry
+    /// cannot be read (no local shards, unreadable header).
+    ///
+    /// The figure the LOADER decides with. Exposed because the admin API used to
+    /// report `estimate_model_vram_mb` — `file_size * 1.15`, whose own doc says
+    /// it is 56% low on phi-3.5-mini-q4 and "useless as an admission decision" —
+    /// next to `cpu_placement_reason: not_enough_vram`, so the dashboard showed
+    /// a model comfortably fitting a card the daemon had just refused it on.
+    pub fn estimated_gpu_mb(&self, model_id: &ModelId) -> Option<u64> {
+        match self.estimate_gpu_footprint_mb(model_id) {
+            0 => None,
+            mb => Some(mb),
+        }
+    }
+
+    /// The configured GPU memory budget in MB, or `None` when unset.
+    ///
+    /// Admission compares against THIS, not against the card's total VRAM — so
+    /// anything reporting "will it fit" has to use the same number or it
+    /// contradicts the daemon.
+    pub fn vram_budget_mb(&self) -> Option<u64> {
+        match self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => None,
+            mb => Some(mb),
+        }
+    }
+
     /// Decide whether `model_id` may be loaded onto the GPU, and charge it if so.
     ///
     /// Called inside `spawn_lock`, which already serializes spawns, so the

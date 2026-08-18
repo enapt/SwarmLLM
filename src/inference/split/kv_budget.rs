@@ -34,11 +34,19 @@
 //! external GPU profiling shows the card sitting idle. Reported 2026-07-29
 //! as "GPU loads the model but never computes on it".
 //!
-//! So the loader asks this module what actually fits. The answer is capped to
-//! the declared context (never raised above what the model supports) and
-//! floored at [`MIN_AUTO_CONTEXT`] so a pathological budget cannot produce an
-//! unusable model. `inference.max_seq_len_override` still wins outright when
-//! set — this only supplies a sane default where there was none.
+//! **This module no longer shortens anyone's context, and must not start
+//! again.** It once did: a load-time clamp sized the context to what the card
+//! could hold, which shrank every user's conversation so that a single
+//! full-length one would fit, and bounded concurrency not at all. That clamp
+//! (`fit_context_to_budget`, `MIN_AUTO_CONTEXT`) was deleted on 2026-08-08 and
+//! this doc described it for ten days afterwards.
+//!
+//! What replaced it is [`claim_exceeds_headroom`]: the loader records
+//! [`kv_headroom_bytes`] on the model, and every forward checks the positions it
+//! is about to claim against that budget before claiming them, refusing with a
+//! `ServiceUnavailable` (503) that re-routes to a peer rather than growing into
+//! an OOM. So the ceiling is enforced per REQUEST, at the moment memory is
+//! actually taken, instead of being pre-paid by everyone at load.
 
 /// Fraction of free VRAM the weights plus KV cache may claim, in percent.
 ///

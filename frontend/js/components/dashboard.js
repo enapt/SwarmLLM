@@ -1333,15 +1333,24 @@
         configRows.push(['dashboard.info_mode', S._gpuInference ? I18n.t('dashboard.gpu_label') : I18n.t('dashboard.cpu_label')]);
         // VRAM fit — only when GPU mode; in CPU mode the Mode row already conveys this.
         if (m.estimated_vram_mb && S._gpuInference) {
-          var totalVram = (App.data.cache.stats && App.data.cache.stats.hardware && App.data.cache.stats.hardware.gpu_vram_mb) || 0;
+          // `fits_on_gpu` is the DAEMON's own verdict, judged against the
+          // configured GPU budget. Prefer it: this panel used to re-derive the
+          // answer from the card's TOTAL VRAM, which is a different and larger
+          // number than admission uses, so the dashboard could show a
+          // comfortable fit for a model the daemon had refused. Fall back to
+          // the ratio only when the daemon cannot answer (no budget set, or the
+          // model is held only by peers so there is no local geometry to read).
+          var budget = m.gpu_budget_mb || (App.data.cache.stats && App.data.cache.stats.hardware && App.data.cache.stats.hardware.gpu_vram_mb) || 0;
           var fitClass = 'fit-no', fitLabel = U.formatMB(m.estimated_vram_mb);
-          if (totalVram > 0) {
-            var ratio = m.estimated_vram_mb / totalVram;
+          if (m.fits_on_gpu === true) { fitClass = 'fit-yes'; fitLabel = '\u2713 ' + fitLabel; }
+          else if (m.fits_on_gpu === false) { fitClass = 'fit-no'; fitLabel = '\u2717 ' + fitLabel; }
+          else if (budget > 0) {
+            var ratio = m.estimated_vram_mb / budget;
             if (ratio <= 0.85) { fitClass = 'fit-yes'; fitLabel = '\u2713 ' + fitLabel; }
             else if (ratio <= 1.05) { fitClass = 'fit-tight'; fitLabel = '\u2248 ' + fitLabel; }
             else { fitClass = 'fit-no'; fitLabel = '\u2717 ' + fitLabel; }
           }
-          configRows.push(['hw.vram', '<span class="vram-fit ' + fitClass + '" title="' + U.escapeHtml(I18n.t('dashboard.vram_fit_tip', { est: U.formatMB(m.estimated_vram_mb), total: totalVram > 0 ? U.formatMB(totalVram) : '?' })) + '">' + fitLabel + '</span>']);
+          configRows.push(['hw.vram', '<span class="vram-fit ' + fitClass + '" title="' + U.escapeHtml(I18n.t('dashboard.vram_fit_tip', { est: U.formatMB(m.estimated_vram_mb), total: budget > 0 ? U.formatMB(budget) : '?' })) + '">' + fitLabel + '</span>']);
         }
         // Trust is rendered in the CONFIG section header (top-right), not as
         // a grid row — frees a cell and surfaces trust next to "Config".

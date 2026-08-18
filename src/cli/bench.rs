@@ -64,6 +64,30 @@ pub async fn run_bench(
         println!();
     }
 
+    // --- Warm-up: load the model before anything is timed ---
+    //
+    // `tokens_per_sec` is completion tokens over the WHOLE request, so when the
+    // model was not already resident the first run divides by generation time
+    // PLUS however long loading took. A reported 1.3 tok/s that was really ~5
+    // tok/s diluted by 9s of loading reads as a serious regression and is not
+    // one (reported 2026-08-17).
+    //
+    // Loading is a real cost, but it is a per-model cost paid once, not a
+    // throughput. Timing it as throughput answers a question nobody asked, and
+    // the answer depends on whether some earlier request happened to load the
+    // model — so the same command gives different numbers for reasons unrelated
+    // to what it claims to measure.
+    if !json_output {
+        println!("  warming up (loading the model, not timed)...");
+    }
+    let warmup =
+        run_one_blocking(&client, &base, &api_key, &model, prompt, 1, data_dir, port).await;
+    if let Err(e) = warmup {
+        // A failure here is the real request failing too; report it rather than
+        // letting the first timed iteration surface it with less context.
+        anyhow::bail!("warm-up request failed: {e}");
+    }
+
     // --- Sequential latency test ---
     let mut results: Vec<BenchResult> = Vec::new();
 

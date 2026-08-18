@@ -438,7 +438,21 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             None
         };
 
-        let estimated_vram = crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes);
+        // Prefer the figure the LOADER decides with, which reads the model's
+        // real geometry — vocabulary, context, KV heads — rather than scaling
+        // the file size by a flat 15%. The rough one remains the fallback for a
+        // model held only by peers, where there is no local header to read.
+        //
+        // They are not close: `estimate_model_vram_mb`'s own doc records it as
+        // 56% low on phi-3.5-mini-q4. Reporting it beside `cpu_placement_reason:
+        // not_enough_vram` told users a model fitted comfortably on a card the
+        // daemon had just refused to put it on, which is how one report came to
+        // reconstruct the real numbers by hand from `manifest.json`.
+        let model_id = crate::types::ModelId(m.id.0.clone());
+        let pool = &state.shared_state.model_process_pool;
+        let estimated_vram = pool.estimated_gpu_mb(&model_id).unwrap_or_else(|| {
+            crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes)
+        });
 
         let mut entry = build_model_json(
             &m.id.0,
@@ -464,6 +478,21 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             obj.insert(
                 "estimated_vram_mb".to_string(),
                 serde_json::json!(estimated_vram),
+            );
+            // The daemon's OWN answer to "would this run on the GPU here", and
+            // the budget it is judged against. The dashboard used to derive
+            // this itself by comparing the estimate against the card's TOTAL
+            // VRAM — but admission compares against the configured budget,
+            // which is smaller, so the two could disagree even with a correct
+            // estimate. `null` means unknowable (no budget set, or no local
+            // geometry), never "no".
+            obj.insert(
+                "fits_on_gpu".to_string(),
+                serde_json::json!(pool.would_fit_on_gpu(&model_id)),
+            );
+            obj.insert(
+                "gpu_budget_mb".to_string(),
+                serde_json::json!(pool.vram_budget_mb()),
             );
             obj.insert("acquisition".to_string(), serde_json::json!(acq_state));
             obj.insert(
