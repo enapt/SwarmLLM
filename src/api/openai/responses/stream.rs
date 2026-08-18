@@ -326,12 +326,16 @@ where
                     return;
                 }
             };
-            let message = parse_error_message(&bytes);
-            let code = if status_code.is_client_error() {
-                "invalid_request_error"
-            } else {
-                "upstream_error"
-            };
+            let (message, origin_type) = parse_error_envelope(&bytes);
+            // The origin classified this already; only fall back to the status
+            // when the body carried no type to read.
+            let code = origin_type.unwrap_or_else(|| {
+                if status_code.is_client_error() {
+                    "invalid_request_error".to_string()
+                } else {
+                    "upstream_error".to_string()
+                }
+            });
             let error = ResponseError::new(code, message);
             let failed = build_failed_response(
                 &original,
@@ -859,19 +863,24 @@ pub(super) fn classify_error_code(err: &ApiError) -> String {
     }
 }
 
-/// Extract the OpenAI-style `error.message` from a non-success chat
-/// response body, falling back to the raw body text.
-fn parse_error_message(bytes: &[u8]) -> String {
+/// Pull `(message, type)` out of a non-success chat response body.
+///
+/// The type is `None` when the body is not our envelope. **Read it rather than
+/// re-deriving one**: whatever produced that body already ran the failure
+/// through `classify_error`, so its `type` is the classified answer, and the
+/// alternative here was a two-way split on whether the status was 4xx — which
+/// cannot tell an authentication failure from a malformed request, and would
+/// call anything non-4xx an upstream error even when it was ours.
+fn parse_error_envelope(bytes: &[u8]) -> (String, Option<String>) {
     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
-        if let Some(msg) = v
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-        {
-            return msg.to_string();
+        if let Some(err) = v.get("error") {
+            if let Some(msg) = err.get("message").and_then(|m| m.as_str()) {
+                let ty = err.get("type").and_then(|t| t.as_str()).map(str::to_owned);
+                return (msg.to_string(), ty);
+            }
         }
     }
-    String::from_utf8_lossy(bytes).to_string()
+    (String::from_utf8_lossy(bytes).to_string(), None)
 }
 
 /// Build the minimal response object emitted with the `response.created` /
@@ -1019,19 +1028,19 @@ mod tests {
     #[test]
     fn parse_error_message_pulls_openai_shape() {
         let body = br#"{"error":{"message":"model not found","type":"invalid_request_error"}}"#;
-        assert_eq!(parse_error_message(body), "model not found");
+        assert_eq!(parse_error_envelope(body).0, "model not found");
     }
 
     #[test]
     fn parse_error_message_falls_back_to_raw_body() {
         let body = b"plain text 503";
-        assert_eq!(parse_error_message(body), "plain text 503");
+        assert_eq!(parse_error_envelope(body).0, "plain text 503");
     }
 
     #[test]
     fn parse_error_message_no_error_key_returns_raw() {
         let body = br#"{"foo":"bar"}"#;
-        assert_eq!(parse_error_message(body), r#"{"foo":"bar"}"#);
+        assert_eq!(parse_error_envelope(body).0, r#"{"foo":"bar"}"#);
     }
 
     #[test]
@@ -1088,5 +1097,35 @@ mod tests {
         buf.extend_from_slice(b"\ndata: [DONE]\n\n");
         let events = drain_sse_data_payloads(&mut buf);
         assert_eq!(events, vec!["{\"a\":1}".to_string(), "[DONE]".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod error_envelope_tests {
+    use super::parse_error_envelope;
+
+    /// The body already carries the classified type. Re-deriving one from the
+    /// status is a two-way split that cannot tell an authentication failure
+    /// from a malformed request, and would report anything non-4xx as an
+    /// upstream error even when the fault was ours.
+    #[test]
+    fn the_origins_own_classification_is_read_not_re_derived() {
+        let body = br#"{"error":{"message":"no key","type":"authentication_error"}}"#;
+        let (msg, ty) = parse_error_envelope(body);
+        assert_eq!(msg, "no key");
+        assert_eq!(ty.as_deref(), Some("authentication_error"));
+    }
+
+    /// No envelope, no type — the caller then falls back to the status, which
+    /// is all there is to go on.
+    #[test]
+    fn a_body_with_no_type_reports_none_so_the_caller_can_fall_back() {
+        let (msg, ty) = parse_error_envelope(b"plain text 503");
+        assert_eq!(msg, "plain text 503");
+        assert_eq!(ty, None);
+
+        let (msg, ty) = parse_error_envelope(br#"{"error":{"message":"m"}}"#);
+        assert_eq!(msg, "m");
+        assert_eq!(ty, None);
     }
 }
