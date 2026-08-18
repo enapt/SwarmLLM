@@ -1580,6 +1580,63 @@ Latency"](https://linkerd.io/2016/03/16/beyond-round-robin-load-balancing-for-la
 `PeakEwma.scala`](https://github.com/twitter/finagle/blob/9cc08d15216497bb03a1cafda96b7266cfbbcff1/finagle-core/src/main/scala/com/twitter/finagle/loadbalancer/PeakEwma.scala);
 [`tower::load::peak_ewma`](https://tower-rs.github.io/tower/src/tower/load/peak_ewma.rs.html).
 
+## Quantized embedding gather on CUDA (CPU shipped 2026-08-18)
+
+**Status: CPU done, GPU deliberately not attempted.**
+
+`token_embd.weight` is quantized in every GGUF. On a CPU worker its rows are now read
+out of the quantized table as they are looked up rather than dequantizing the whole
+thing at load (`inference::split::token_embedding`) — measured 754 MB off
+llama-3.2-3b's peak RSS, 3008 MB to 2255 MB, against 751 MB predicted from the header.
+Weight-tied models gain most because they held the tensor twice; the loader now shares
+one `Arc<QTensor>` between the lookup and the LM head.
+
+**A CUDA worker still dequantizes the whole table**, and that is where the remaining
+memory is: 720 MB on meta-llama-3.1-8b, ~748 MB on qwen2.5-coder-7b. On a 6 GB card
+that is the difference between a 7B model fitting and not (external report, 2026-08-17
+— that card's non-context footprint was ~5819 MB against 5790 MB usable, so it could
+not fit at *any* context length; removing the dense table brings it to ~5071 MB).
+
+**Why it was not done in the same pass.** The gather must run where the table lives.
+`QTensor::data()` is a zero-copy borrow on CPU but a full device-to-host copy on CUDA,
+so the CPU implementation reused on a GPU would move the whole table across PCIe every
+decode step. llama.cpp hit exactly this: with the lookup "kicked out of the graph" a
+Qwen3-1.7B decoded at 6.18 ms/token against 1.72 once `k_get_rows_kq` existed.
+
+**The route, which needs no new kernel.** candle's stock `candle-kernels` already
+instantiates `IS_OP(uint8_t, uint32_t, is_u32_u8)`, and the CUDA quantized buffer is a
+flat `CudaSlice<u8>` with only TRAILING padding (`MATRIX_ROW_PADDING` is added to the
+total, not per row), so row layout is contiguous. So:
+
+1. View the quantized buffer as a U8 tensor `[vocab, row_bytes]`.
+2. `index_select(ids, 0)` — stock `is_u32_u8` kernel, on device.
+3. Wrap the gathered bytes as quantized storage (they need the same trailing padding).
+4. `dequantize_f16` — existing kernel.
+
+Steps 1 and 3 need a small `vendor/candle` patch to expose the storage both ways; there
+is no `QTensor` API for it today. Gate on `table_supports_row_gather`, which already
+encodes ggml's `ne0 % QK_K == 0` requirement.
+
+**Acceptance test must be decode rate, not a memory reading.** The failure mode here is
+a silent per-token host round trip, which shows up as slower decode and not as more
+memory. A/B with `SWARMLLM_DENSE_EMBEDDING=1` on one binary.
+
+## `temperature: 0` with a fixed seed is not reproducible (found 2026-08-18)
+
+Same binary, same isolated node, same prompt, `temperature: 0, seed: 42` — two runs
+produce different wording. Both correct; `completion_tokens` identical. Reproduces on
+the CPU path with the embedding change absent, so it is pre-existing and unrelated.
+
+Users reasonably expect determinism at temperature 0, and several evaluation workflows
+depend on it. Not investigated: the likely candidates are rayon reduction order in the
+CPU pools (a float sum whose order varies run to run) and the `seed` field not reaching
+the sampler at all — check the second first, it is cheap and would be a plain wiring
+bug.
+
+**Until it is fixed, generated text cannot be used to compare two inference code
+paths.** That cost real time on 2026-08-18 and was only caught by a null control; see
+gotcha #327.
+
 ## Inference performance — research backlog (R135 brief)
 
 > **STATUS as of 2026-05-20 (post-R139):**

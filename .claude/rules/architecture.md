@@ -770,6 +770,28 @@ silently break at the wire if duplicated:
   agreement, so changing the semantics renames every user's models and goes red.
   A new surface that turns a name into an id calls this; it must never grow a
   second copy, and a raw display name is never a `ModelId`.
+- **`inference::split::token_embedding::rows_on_demand_eligible`** (2026-08-18) — the
+  single answer to "is this model's `token_embd.weight` held quantized with its rows
+  dequantized on lookup, or dequantized whole at load?". **Two places must agree**: the
+  loader, which allocates, and the footprint estimators, which decide whether the model
+  is admitted at all. A disagreement is invisible until a node either refuses a model
+  that would have fitted or is admitted and then runs out of memory — the same trap
+  `EMBEDDING_DTYPE` already carries a test for. `table_supports_row_gather` is the
+  device-independent half, for the estimators, which are built once and consulted for
+  both a CPU and a CUDA worker; the `SWARMLLM_DENSE_EMBEDDING` override lives in THAT
+  inner predicate so both callers inherit it, because putting it one level up left the
+  estimator pricing a gather the loader was not doing.
+  **The device half is load-bearing, not incidental**: the gather reads host bytes
+  (`QTensor::data()` is a zero-copy borrow on CPU and a full device-to-host copy on
+  CUDA), so on a GPU it would move the whole table across PCIe every decode step —
+  llama.cpp measured that shape at 6.18 ms/token against 1.72 before `k_get_rows_kq`.
+  Worth 754 MB on llama-3.2-3b, measured; weight-tied models gain most because the
+  loader used to load that tensor TWICE, once dequantized for the lookup and once
+  quantized for the LM head, and now shares one `Arc<QTensor>` via `QMatMul::from_arc`.
+  A new embedding path goes through `TokenEmbedding`, whose two variants both return
+  `EMBEDDING_DTYPE` so no call site can tell them apart. CUDA route sketched in
+  `docs/FUTURE_WORK.md`.
+
 - **`model::huggingface::is_trusted_publisher`** (R141) — canonical
   curator-allowlist check for an HF `repo_id`. Splits on the first `/`
   and case-insensitively matches the prefix against
