@@ -9,6 +9,7 @@ pub mod hedging;
 pub mod kv_cache;
 pub(crate) mod layers;
 pub mod local_embedder;
+pub mod mem_bandwidth;
 pub(crate) mod model_arch;
 pub mod model_worker;
 pub mod ngram_lookup;

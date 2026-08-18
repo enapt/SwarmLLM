@@ -482,8 +482,22 @@ impl HealthMonitor {
                 )
             })
             .unwrap_or_else(|| {
-                // CPU-only: assume ~50 GB/s DDR4/5 bandwidth
-                crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(50.0, false)
+                // CPU-only: measure what this machine's memory actually
+                // delivers, because generating a token is bandwidth-bound.
+                //
+                // This was a flat 50 GB/s for every machine, so every CPU node
+                // in the swarm advertised the identical 1.70 tokens/s whether it
+                // was an eight-channel server or a fanless mini-PC — nothing
+                // could tell them apart and nothing could route on the
+                // difference. Measured on the machine this was written on:
+                // 29.9 GB/s against the 50 assumed, i.e. the guess was 67% high
+                // for a perfectly ordinary laptop.
+                //
+                // Falls back to the old assumption when the measurement cannot
+                // be taken, which keeps a memory-starved node advertising
+                // something rather than nothing.
+                let gbps = crate::inference::mem_bandwidth::measured_gbps().unwrap_or(50.0);
+                crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(gbps, false)
             });
 
         // Top-N observed-latency snapshot, ordered by the trust we have in

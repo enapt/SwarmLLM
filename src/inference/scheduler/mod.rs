@@ -96,6 +96,23 @@ const DELEGATE_MAX_LATENCY_MS: u32 = 200;
 /// something we know nothing about.
 const DELEGATE_MIN_TRUST: f32 = crate::credit::trust::DEFAULT_TRUST;
 
+/// How much faster a peer must look before it is handed a model it will run on
+/// its PROCESSOR, as a multiple of what this node would manage.
+///
+/// A peer with a graphics card that fits the model is a clear improvement over
+/// our own processor fallback and needs no speed comparison. A peer that will
+/// also use its processor is not obviously better at all, so it has to prove a
+/// wide margin — wide enough that being wrong about it still leaves the request
+/// no worse off than staying here.
+///
+/// **This became possible to check honestly only on 2026-08-18.** Until then
+/// every processor-only node advertised `estimate_tokens_per_sec_7b(50.0,
+/// false)` — a hardcoded bandwidth assumption, so an eight-channel server and a
+/// fanless mini-PC both claimed exactly 1.70 tokens/s. Comparing those numbers
+/// would have been comparing a constant with itself.
+/// `inference::mem_bandwidth` measures the machine instead.
+const DELEGATE_MIN_CPU_SPEEDUP: f32 = 2.0;
+
 /// Headroom required on top of the model's estimated size before believing a
 /// peer can host it, as a multiplier.
 ///
@@ -141,10 +158,13 @@ const DELEGATE_VRAM_MARGIN: f64 = 1.2;
 /// - **The peer covers every layer.** This is a delegation, not a split. A
 ///   split pays a network round trip per token and measured slower than a
 ///   single remote segment every time it was tried (see `docs/FUTURE_WORK.md`).
-/// - **The peer can plausibly do better**: it advertises a GPU with room for
-///   the model plus [`DELEGATE_VRAM_MARGIN`]. Self-reported, which is why it is
-///   only ever a yes/no gate paired with the locality and trust bounds below,
-///   never a ranking signal.
+/// - **The peer can plausibly do better**, one of two ways: it advertises a GPU
+///   with room for the model plus [`DELEGATE_VRAM_MARGIN`], or it is at least
+///   [`DELEGATE_MIN_CPU_SPEEDUP`] times faster than this node's own processor.
+///   Both figures are self-reported, which is why each is only ever a yes/no
+///   gate paired with the locality and trust bounds below, never a ranking
+///   signal — and why the processor comparison demands a wide margin rather
+///   than a nose ahead.
 /// - **The peer is close and directly reachable** — see
 ///   [`DELEGATE_MAX_LATENCY_MS`]. A relayed peer is excluded outright: relaying
 ///   a whole generation is not what the relay path is sized for.
@@ -165,6 +185,7 @@ fn delegation_target<'a>(
     num_layers: u32,
     local_is_cpu_bound_for_lack_of_vram: bool,
     model_vram_mb: u64,
+    local_cpu_tokens_per_sec: f32,
 ) -> Option<&'a NodeCandidate> {
     // Only a node with a working GPU that this model does not fit is degraded.
     // `ModelProcessPool::is_cpu_bound_for_lack_of_vram` owns that distinction —
@@ -199,10 +220,18 @@ fn delegation_target<'a>(
             "too far away"
         } else if c.trust_score < DELEGATE_MIN_TRUST {
             "not trusted enough to be shown the prompt"
-        } else if !c.gpu_vram_available_mb.is_some_and(|free| free >= needed) {
-            "no graphics card with room to spare"
-        } else {
+        } else if c.gpu_vram_available_mb.is_some_and(|free| free >= needed) {
+            // A graphics card with room beats our processor fallback outright.
             return Some(c);
+        } else if local_cpu_tokens_per_sec > 0.0
+            && c.est_tokens_per_sec >= local_cpu_tokens_per_sec * DELEGATE_MIN_CPU_SPEEDUP
+        {
+            // No card, but a machine measurably faster than ours at the thing
+            // that limits generation — reading memory. Both figures come from
+            // `mem_bandwidth`, so this compares like with like.
+            return Some(c);
+        } else {
+            "no graphics card with room, and not clearly faster than our own processor"
         };
         tracing::debug!(
             peer = %c.node_id,
@@ -514,6 +543,13 @@ impl PipelineScheduler {
                 num_layers,
                 pool.is_cpu_bound_for_lack_of_vram(model_id),
                 pool.estimated_gpu_mb(model_id).unwrap_or(0),
+                // OUR processor speed, not our graphics card's: this only runs
+                // when the model does not fit the card, so the processor is
+                // what the request would actually get here.
+                crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(
+                    crate::inference::mem_bandwidth::measured_gbps().unwrap_or(0.0),
+                    false,
+                ),
             ) {
                 if encrypted {
                     // Boomerang. Skipping the local fast path is the whole

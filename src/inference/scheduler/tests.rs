@@ -1313,7 +1313,7 @@ fn local_full_coverage() -> NodeCandidate {
 #[test]
 fn a_full_gpu_hands_the_model_to_a_nearby_peer() {
     let cands = vec![local_full_coverage(), willing_peer(0xBB, LAYERS)];
-    let picked = super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB);
+    let picked = super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0);
     assert_eq!(
         picked.map(|c| c.node_id.clone()),
         Some(NodeId([0xBB; 32])),
@@ -1329,7 +1329,7 @@ fn a_full_gpu_hands_the_model_to_a_nearby_peer() {
 fn a_healthy_local_gpu_keeps_the_request_here() {
     let cands = vec![local_full_coverage(), willing_peer(0xBB, LAYERS)];
     assert!(
-        super::delegation_target(&cands, &local_id(), LAYERS, false, MODEL_MB).is_none(),
+        super::delegation_target(&cands, &local_id(), LAYERS, false, MODEL_MB, 0.0).is_none(),
         "a node that is not CPU-bound for lack of VRAM must not delegate"
     );
 }
@@ -1344,7 +1344,7 @@ fn a_distant_peer_is_never_handed_the_model() {
     far.latency_ms = super::DELEGATE_MAX_LATENCY_MS + 1;
     let cands = vec![local_full_coverage(), far];
     assert!(
-        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none(),
+        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0).is_none(),
         "a peer beyond the latency bound must never be delegated to"
     );
 }
@@ -1362,7 +1362,7 @@ fn only_a_directly_measured_peer_qualifies() {
         p.reach = tier;
         let cands = vec![local_full_coverage(), p];
         assert!(
-            super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none(),
+            super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0).is_none(),
             "{tier:?} must not be delegated to"
         );
     }
@@ -1377,7 +1377,7 @@ fn a_peer_holding_only_some_layers_is_not_a_delegate() {
         local_full_coverage(),
         willing_peer(0xBB, LAYERS - 1), // one layer short
     ];
-    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none());
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0).is_none());
 }
 
 /// The peer's free VRAM is self-reported, so it is used only as a yes/no gate —
@@ -1391,7 +1391,7 @@ fn a_peer_without_room_to_spare_is_not_a_delegate() {
         p.gpu_vram_available_mb = free;
         let cands = vec![local_full_coverage(), p];
         assert!(
-            super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none(),
+            super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0).is_none(),
             "free={free:?} is not enough room for a {MODEL_MB} MB model"
         );
     }
@@ -1400,7 +1400,7 @@ fn a_peer_without_room_to_spare_is_not_a_delegate() {
     let mut ok = willing_peer(0xBB, LAYERS);
     ok.gpu_vram_available_mb = Some((MODEL_MB as f64 * super::DELEGATE_VRAM_MARGIN) as u64 + 1);
     let cands = vec![local_full_coverage(), ok];
-    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_some());
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0).is_some());
 }
 
 /// Delegation sends the plaintext prompt, so an unknown peer is not eligible.
@@ -1409,7 +1409,7 @@ fn an_untrusted_peer_is_not_shown_the_prompt() {
     let mut p = willing_peer(0xBB, LAYERS);
     p.trust_score = super::DELEGATE_MIN_TRUST - 0.01;
     let cands = vec![local_full_coverage(), p];
-    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none());
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0).is_none());
 }
 
 /// Without a size for the model there is nothing to check a peer's room
@@ -1417,7 +1417,7 @@ fn an_untrusted_peer_is_not_shown_the_prompt() {
 #[test]
 fn an_unknown_model_size_keeps_the_request_here() {
     let cands = vec![local_full_coverage(), willing_peer(0xBB, LAYERS)];
-    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, 0).is_none());
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, 0, 0.0).is_none());
 }
 
 /// With no peer able to help, the local node keeps the request and answers
@@ -1426,7 +1426,7 @@ fn an_unknown_model_size_keeps_the_request_here() {
 #[test]
 fn with_no_willing_peer_the_request_stays_local() {
     let cands = vec![local_full_coverage()];
-    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none());
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0).is_none());
 }
 
 /// Never to ourselves, however the candidate list is ordered.
@@ -1436,7 +1436,7 @@ fn the_local_node_is_never_its_own_delegate() {
     me.reach = super::ReachTier::DirectMeasured;
     me.gpu_vram_available_mb = Some(80_000);
     let cands = vec![me];
-    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_none());
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0).is_none());
 }
 
 /// Prompt privacy must NOT disqualify a peer. `delegation_target` answers "is
@@ -1448,7 +1448,7 @@ fn the_local_node_is_never_its_own_delegate() {
 fn privacy_is_the_callers_decision_not_a_peer_filter() {
     let cands = vec![local_full_coverage(), willing_peer(0xBB, LAYERS)];
     assert!(
-        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB).is_some(),
+        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0).is_some(),
         "the peer is eligible regardless of privacy; the caller picks the shape"
     );
 }
@@ -1511,4 +1511,54 @@ fn a_model_too_short_to_split_gets_no_boomerang() {
     let mut local = local_full_coverage();
     local.available_ranges = vec![(0, 2)];
     assert!(super::boomerang_assignment(&local, &peer, 2).is_none());
+}
+
+/// A peer with no graphics card can still take the work — but only if it is
+/// measurably faster at the thing that limits generation. Until 2026-08-18
+/// there was no honest way to check this: every processor-only node advertised
+/// the same hardcoded 1.70 tokens/s, so the comparison would have been a
+/// constant against itself.
+#[test]
+fn a_clearly_faster_processor_peer_can_take_the_work() {
+    let mut peer = willing_peer(0xBB, LAYERS);
+    peer.gpu_vram_available_mb = None; // no card at all
+    peer.est_tokens_per_sec = 4.0;
+    let cands = vec![local_full_coverage(), peer];
+    // Ours is 1.0; theirs is 4x that.
+    assert!(
+        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 1.0).is_some(),
+        "a peer 4x faster should take it"
+    );
+}
+
+/// A nose ahead is not enough. Being wrong about a processor peer must leave
+/// the request no worse off than staying here, so the margin is wide.
+#[test]
+fn a_marginally_faster_processor_peer_does_not() {
+    let mut peer = willing_peer(0xBB, LAYERS);
+    peer.gpu_vram_available_mb = None;
+    peer.est_tokens_per_sec = 1.0 * super::DELEGATE_MIN_CPU_SPEEDUP - 0.01;
+    let cands = vec![local_full_coverage(), peer];
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 1.0).is_none());
+}
+
+/// With our own speed unknown there is nothing to compare against, so a peer
+/// without a card is refused rather than guessed at.
+#[test]
+fn an_unknown_local_speed_refuses_a_processor_peer() {
+    let mut peer = willing_peer(0xBB, LAYERS);
+    peer.gpu_vram_available_mb = None;
+    peer.est_tokens_per_sec = 999.0;
+    let cands = vec![local_full_coverage(), peer];
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0).is_none());
+}
+
+/// A card with room still wins without any speed comparison — it is a clear
+/// improvement over our processor fallback whatever the advertised rates say.
+#[test]
+fn a_card_with_room_needs_no_speed_comparison() {
+    let mut peer = willing_peer(0xBB, LAYERS);
+    peer.est_tokens_per_sec = 0.0; // says nothing about its speed
+    let cands = vec![local_full_coverage(), peer];
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 99.0).is_some());
 }
