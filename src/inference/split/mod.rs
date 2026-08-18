@@ -53,7 +53,35 @@ pub use self::prefix_cache::{
 pub use self::shard_reader::{resolve_tied_output, TiedOutputSource};
 pub(crate) use self::token_embedding::table_supports_row_gather;
 
-pub(crate) const DEFAULT_MAX_SEQ_LEN: usize = 4096;
+/// Context length served by default, for a model that declares at least this
+/// much. A model declaring less keeps its own figure.
+///
+/// **8192 since 2026-08-18, up from 4096, because 4096 could not hold an
+/// agentic client's opening message.** Those send their whole tool schema as a
+/// system prompt before the user has said anything — one measured at ~5000
+/// tokens — so the very first request failed with "Sequence length exceeds
+/// model context window", advising the caller to shorten a prompt that is not
+/// theirs to shorten. This project ships an MCP server, an Anthropic-compatible
+/// surface and a Claude Code integration, so that was the flagship path failing
+/// out of the box.
+///
+/// The obvious objection is memory, and it is answered in two places rather
+/// than by keeping the default small:
+///
+/// - A KV cache grows on demand (`layers::new_kv_cache`), so raising the
+///   ceiling costs nothing until a conversation actually gets long.
+/// - GPU admission is capped independently at
+///   `model::auto_manage::vram::GPU_ADMISSION_KV_CONTEXT`, so this raise does
+///   not re-price what a card must have free to load a model at all. That
+///   decoupling is deliberate: tying them would mean raising the default
+///   silently pushed models off GPUs, which is the exact failure the cap was
+///   added to end.
+///
+/// It DOES raise the CPU admission estimate, which prices the whole ceiling
+/// because nothing bounds a CPU worker at runtime. That is the safe direction —
+/// it refuses rather than swaps — and is why the raise is to 8192 and not
+/// higher. Users needing more set `inference.max_seq_len_override`.
+pub(crate) const DEFAULT_MAX_SEQ_LEN: usize = 8192;
 
 /// How long a conversation this node will actually serve for a model that
 /// declares `declared` tokens of context.
@@ -65,8 +93,8 @@ pub(crate) const DEFAULT_MAX_SEQ_LEN: usize = 4096;
 /// agree is how a node ends up charging for one context and serving another.
 ///
 /// An explicit `inference.max_seq_len_override` wins; otherwise the shipped
-/// default caps it, the way llama.cpp's `-c` defaults to 4096 rather than to
-/// whatever the model advertises. Neither can raise the figure above what the
+/// default caps it, the way llama.cpp's `-c` defaults to a fixed figure rather
+/// than to whatever the model advertises. Neither can raise the figure above what the
 /// model itself declares.
 ///
 /// Reported 2026-08-10: a client registered a 32k-capable model at its declared
@@ -112,7 +140,9 @@ mod effective_context_tests {
     use super::{effective_context_length_with, DEFAULT_MAX_SEQ_LEN};
 
     /// The shipped default caps a model that declares more, the way llama.cpp's
-    /// `-c` does. A 32k-capable model is served at 4096 unless asked otherwise.
+    /// `-c` does — a 32k-capable model is served at the default unless asked
+    /// otherwise. Asserted against the constant rather than a literal, so
+    /// changing the default is a one-line change and not a test hunt.
     #[test]
     fn a_long_context_model_is_capped_by_default() {
         assert_eq!(

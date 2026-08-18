@@ -37,8 +37,9 @@ pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
 /// [`estimate_worker_ram_mb`] and present in [`estimate_worker_vram_mb`]. That
 /// is the one place the two estimators disagree about the model rather than
 /// about per-process overhead, and `embedding_gatherable` is what carries it.
-/// The KV cache is the second, and is the one `inference.max_seq_len_override`
-/// and the 4096 default bound (see `inference::split::kv_budget`).
+/// The KV cache is the second, and is bounded by `inference.max_seq_len_override`
+/// and the shipped default — and, for the GPU estimator only, capped again at
+/// [`GPU_ADMISSION_KV_CONTEXT`] (see `inference::split::kv_budget`).
 #[derive(Debug, Clone, Copy)]
 pub struct VramFootprintInputs {
     /// Sum of the shard bytes this worker will map. On-disk size.
@@ -120,6 +121,40 @@ pub const CPU_PROCESS_OVERHEAD_BYTES: u64 = 256 * 1024 * 1024;
 /// make the CPU budget the stricter of the two, refusing loads that fit.
 const _: () = assert!(CPU_PROCESS_OVERHEAD_BYTES < CUDA_PROCESS_OVERHEAD_BYTES);
 
+/// Context length the GPU admission check charges KV cache for, however long a
+/// conversation the user has configured.
+///
+/// **Why admission may charge less than the worst case, and only here.** A KV
+/// cache no longer reserves its whole `max_seq_len` on first use — since
+/// 2026-08-07 it grows in quanta — and since 2026-08-08 every forward checks the
+/// positions it is about to claim against real free VRAM and refuses with a 503
+/// that re-routes to a peer (`inference::split::kv_budget`). So on a GPU the
+/// worst case is *enforced at the moment memory is taken*, and pre-paying for it
+/// at load buys nothing.
+///
+/// It costs a great deal, though. `inference.max_seq_len_override` is the only
+/// way to hold an agentic client's system prompt — those run to ~5000 tokens of
+/// tool schema before the conversation starts — and raising it used to raise
+/// this charge in step, so the model stopped fitting the card and was loaded on
+/// the CPU instead. An external report on 2026-08-17 measured that as 396
+/// seconds of prompt processing and a thermal warning, for a model that had been
+/// asked to support long conversations, not to reserve for them permanently.
+///
+/// 4096 was the shipped default context until 2026-08-18, so a user who never
+/// touched the setting is charged exactly what they were charged before: this
+/// changes admission ONLY for people who raised it, which is precisely the
+/// population it was breaking.
+///
+/// **Deliberately not [`crate::inference::split::DEFAULT_MAX_SEQ_LEN`].** That
+/// is a product default and moves when the product's audience changes; this is a
+/// statement about a typical working conversation. Tying them would mean raising
+/// the default silently re-broke the case above.
+///
+/// **The CPU estimator does NOT apply this cap**, because there is no runtime
+/// head-room check on a CPU worker to catch the difference — under-charging
+/// there would mean swapping, which degrades every request on the machine.
+pub const GPU_ADMISSION_KV_CONTEXT: u64 = 4096;
+
 /// Bytes per element of the token-embedding table, when it is held dequantized.
 ///
 /// **This must match what the loader actually allocates.** Where the loader
@@ -150,7 +185,11 @@ pub const EMBEDDING_TABLE_BYTES_PER_ELEMENT: u64 = 2;
 /// embedding rows out of the quantized table and never materialises it, and a
 /// CUDA worker cannot. Passed in rather than read off the inputs so each
 /// estimator states its own device's answer at the point of use.
-fn estimate_model_resident_bytes(i: &VramFootprintInputs, rows_on_demand: bool) -> u64 {
+fn estimate_model_resident_bytes(
+    i: &VramFootprintInputs,
+    rows_on_demand: bool,
+    kv_admission_context: u64,
+) -> u64 {
     const F32: u64 = 4;
     // Weights. A quantized checkpoint stays quantized on the device, so its
     // on-disk size is what it costs. An UNQUANTIZED one does not: candle's
@@ -186,27 +225,28 @@ fn estimate_model_resident_bytes(i: &VramFootprintInputs, rows_on_demand: bool) 
         );
     }
 
-    // KV cache: the WORST CASE, which is one conversation grown to the full
-    // effective context — [B, H, ctx, D] per layer, for K and V, as f32.
+    // KV cache — [B, H, ctx, D] per layer, for K and V, as f32, at
+    // `kv_admission_context`.
     //
-    // Since 2026-08-07 a cache no longer reserves that on its first append; it
-    // grows in quanta (`layers::new_kv_cache`), so a typical conversation holds
-    // a fraction of this. **Do NOT reduce this figure to match.** It is an
-    // ADMISSION decision: over-estimating costs a model that would have fitted,
-    // under-estimating costs a hard OOM part-way through a long conversation —
-    // and growth makes that failure LATER and less obvious, not less likely.
-    // The estimator was re-measured on 2026-08-03 at 5.1% high, erring safe,
-    // after an earlier claim that it was 2.3x pessimistic proved wrong.
+    // That is the full effective context on a CPU worker and CAPPED on a GPU
+    // one; see [`GPU_ADMISSION_KV_CONTEXT`] for why the two differ. The cap is
+    // the only place this estimator deliberately charges less than the worst
+    // case, and it is allowed to because a GPU worker has a runtime check that
+    // catches the difference.
     bytes = bytes.saturating_add(
         i.segment_layers
             .saturating_mul(2)
             .saturating_mul(i.head_count_kv)
             .saturating_mul(i.head_dim)
-            .saturating_mul(i.effective_context)
+            .saturating_mul(kv_admission_context)
             .saturating_mul(F32),
     );
 
-    // RoPE cos/sin tables, sized to the same context.
+    // RoPE cos/sin tables. Charged at the FULL context regardless, because
+    // unlike the KV cache these really are precomputed in full at load
+    // (`rope::precompute_freqs_cis`) — nothing grows them on demand and no
+    // runtime check bounds them. They are small (34 MB at 32k) but the reason
+    // they are not capped is the reason the KV cache can be.
     bytes = bytes.saturating_add(
         i.effective_context
             .saturating_mul(i.rope_dim.max(2) / 2)
@@ -226,7 +266,12 @@ pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
     // A CUDA worker never reads embedding rows on demand: the gather reads host
     // bytes, so doing it per lookup would move the whole table across PCIe
     // every decode step. See `token_embedding`.
-    estimate_model_resident_bytes(i, false).saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
+    //
+    // The KV cache is charged at a capped context because a GPU worker has a
+    // runtime head-room check that refuses gracefully if a conversation
+    // outgrows it — see `GPU_ADMISSION_KV_CONTEXT`.
+    estimate_model_resident_bytes(i, false, i.effective_context.min(GPU_ADMISSION_KV_CONTEXT))
+        .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
         / (1024 * 1024)
 }
 
@@ -237,7 +282,10 @@ pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
 /// exists because the GPU path's own fallback is "load it in system RAM
 /// instead": the more often that fires, the more weight lands here.
 pub fn estimate_worker_ram_mb(i: &VramFootprintInputs) -> u64 {
-    estimate_model_resident_bytes(i, i.embedding_gatherable)
+    // FULL context for the KV cache, deliberately: nothing bounds a CPU
+    // worker's cache at runtime, so this is the only place the ceiling is
+    // priced at all. See `GPU_ADMISSION_KV_CONTEXT`.
+    estimate_model_resident_bytes(i, i.embedding_gatherable, i.effective_context)
         .saturating_add(CPU_PROCESS_OVERHEAD_BYTES)
         / (1024 * 1024)
 }
@@ -845,17 +893,68 @@ mod footprint_tests {
         );
     }
 
-    /// Context length drives the KV term, which is what the 4096 default caps.
-    /// A 128k context must estimate far higher than the capped one.
+    /// Context length drives the KV term — on the CPU estimator, which prices
+    /// the whole ceiling because nothing bounds a CPU worker at runtime.
+    ///
+    /// A 128k context must estimate many GB higher there. This is the half of
+    /// the asymmetry that must NOT be capped: under-charging it means swapping.
     #[test]
-    fn context_length_moves_the_estimate() {
-        let capped = estimate_worker_vram_mb(&llama32_1b());
-        let mut uncapped = llama32_1b();
-        uncapped.effective_context = 131_072;
-        let full = estimate_worker_vram_mb(&uncapped);
+    fn context_length_moves_the_cpu_estimate() {
+        let short = estimate_worker_ram_mb(&llama32_1b());
+        let mut long = llama32_1b();
+        long.effective_context = 131_072;
+        let full = estimate_worker_ram_mb(&long);
         assert!(
-            full > capped + 7_000,
-            "131k context should add many GB over 4096: {capped} -> {full}"
+            full > short + 7_000,
+            "131k context should add many GB over 4096 on CPU: {short} -> {full}"
+        );
+    }
+
+    /// The GPU estimator caps the KV term at [`GPU_ADMISSION_KV_CONTEXT`], so
+    /// raising `max_seq_len_override` no longer costs a model its place on the
+    /// card. What remains context-dependent there is the RoPE table, which
+    /// really is precomputed in full — so the difference must be small and
+    /// non-zero, not zero.
+    ///
+    /// The failure this prevents is specific: an agentic client needs ~5000
+    /// tokens of context for its tool schema alone, raising it re-priced the
+    /// whole KV ceiling, the model no longer fitted and was loaded on the CPU,
+    /// and prompt processing went to 396 seconds (reported 2026-08-17).
+    #[test]
+    fn raising_the_context_no_longer_costs_a_model_its_place_on_the_gpu() {
+        let short = estimate_worker_vram_mb(&llama32_1b());
+        let mut long = llama32_1b();
+        long.effective_context = 131_072;
+        let full = estimate_worker_vram_mb(&long);
+
+        // KV at 131k for this model would be ~8 GB. It must not appear.
+        assert!(
+            full < short + 200,
+            "GPU estimate must not re-price the KV ceiling: {short} -> {full}"
+        );
+        // But RoPE genuinely does scale, so this is not simply ignoring context.
+        assert!(
+            full > short,
+            "the RoPE table still scales with context: {short} -> {full}"
+        );
+    }
+
+    /// A user who never touched `max_seq_len_override` must be charged exactly
+    /// what they were charged before the cap existed — the cap is only allowed
+    /// to change admission for people who raised the setting.
+    #[test]
+    fn the_cap_is_inert_at_the_context_it_was_derived_from() {
+        let mut at_cap = llama32_1b();
+        at_cap.effective_context = GPU_ADMISSION_KV_CONTEXT;
+        let capped = estimate_worker_vram_mb(&at_cap);
+
+        let uncapped_bytes =
+            estimate_model_resident_bytes(&at_cap, false, at_cap.effective_context)
+                .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
+                / (1024 * 1024);
+        assert_eq!(
+            capped, uncapped_bytes,
+            "at or below the cap the estimate must be untouched"
         );
     }
 

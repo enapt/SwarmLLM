@@ -369,9 +369,15 @@ impl SplitModel {
         // to avoid cryptic tensor dimension errors in attention.
         let total_seq = index_pos + seq_len;
         if total_seq > self.max_seq_len {
+            // Name the setting. "Reduce your prompt" is not an action the
+            // caller can always take — an agentic client's prompt is its tool
+            // schema, sent before the user has typed anything — and it points
+            // away from the one thing that does fix it.
             return Err(SwarmError::Validation(format!(
-                "Sequence length ({total_seq}) exceeds model context window ({}). \
-                 Reduce your prompt or max_tokens.",
+                "This conversation is {total_seq} tokens, longer than the {} this model \
+                 is currently set to serve. Raise it in Settings → Advanced → \
+                 max_seq_len_override (the model itself supports more), or send a \
+                 shorter prompt or a smaller max_tokens.",
                 self.max_seq_len
             )));
         }
