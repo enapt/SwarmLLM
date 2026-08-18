@@ -119,7 +119,8 @@ pub(super) async fn handle_remote_generate_request(
             tracing::error!(
                 %request_id,
                 error = %e,
-                "DIAG: could not queue the rejection back to the coordinator —                  it will see a silent timeout instead of a reason"
+                "DIAG: could not queue the rejection back to the coordinator — it will \
+                 see a silent timeout instead of a reason"
             );
         }
         return;
@@ -319,7 +320,9 @@ pub(super) async fn handle_remote_generate_request(
             %request_id,
             error = %e,
             was_error_reply = was_error,
-            "DIAG: could not queue the final token back to the coordinator —              it will time out with no reason. This node served the request; the              reply is what was lost"
+            "DIAG: could not queue the final token back to the coordinator — it will \
+             time out with no reason. This node served the request; the reply is what \
+             was lost"
         );
     }
 }
