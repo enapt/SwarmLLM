@@ -29,6 +29,96 @@ use types::{AnthropicContent, ContentBlock, MessagesRequest};
 /// for local inference and forwarded raw to upstream proxies.
 const MAX_TOKENS_HARD_CAP: u32 = 32768;
 
+/// Largest error body this layer will buffer before giving up and passing the
+/// response through untouched. Error envelopes are a few hundred bytes; the cap
+/// only exists so a pathological body cannot be held in memory.
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// Rewrite a failure on `/v1/messages` into the envelope Anthropic clients
+/// actually parse.
+///
+/// Our canonical envelope is OpenAI-shaped — `{"error": {...}}` with an
+/// OpenAI-flavoured `type` — because that is the older surface and
+/// [`crate::error::classify_error`] is its single source of truth. Anthropic's
+/// is different in two ways that matter to a client:
+///
+/// ```text
+/// {"type": "error", "error": {"type": "not_found_error", "message": "..."}}
+/// ```
+///
+/// The top-level `"type": "error"` is the discriminator SDKs branch on, and the
+/// inner `type` must come from Anthropic's own set — `invalid_request_error`,
+/// `authentication_error`, `permission_error`, `not_found_error`,
+/// `request_too_large`, `rate_limit_error`, `overloaded_error`, `api_error`.
+///
+/// [`sse::anthropic_error_type`] already did this translation, but **only on the
+/// streaming path** (gotcha #302). Measured against the live node 2026-08-18: a
+/// prompt-privacy refusal came back as `{"error": {"type":
+/// "prompt_privacy_error", ...}}` with no top-level `type` — a made-up type in
+/// the wrong envelope, which is the exact failure that gotcha warns about, on
+/// the sibling path. This is the codebase's recurring "one invariant, N paths"
+/// shape, so the translation now lives where the response leaves the route
+/// rather than in any handler.
+///
+/// **A layer rather than a handler-side error type, deliberately.** Not every
+/// failure here comes from the handler: `JsonBody`'s rejection for a missing
+/// `max_tokens` is produced by the extractor, before any handler code runs, and
+/// a wrapper error type could never reach it.
+///
+/// Success responses are returned untouched and are never buffered — the
+/// streaming path is a 200 carrying an open SSE stream, and reading it here
+/// would defeat streaming entirely.
+pub async fn anthropic_error_envelope(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let response = next.run(req).await;
+    if !(response.status().is_client_error() || response.status().is_server_error()) {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_ERROR_BODY_BYTES).await else {
+        // The body is gone either way at this point; an empty one with the
+        // original status still tells the client the request failed.
+        return (parts, axum::body::Body::empty()).into_response();
+    };
+    let Some(rewritten) = to_anthropic_error_body(&bytes) else {
+        return (parts, axum::body::Body::from(bytes)).into_response();
+    };
+    // The body changed length, so the old value would truncate it.
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    (parts, axum::body::Body::from(rewritten)).into_response()
+}
+
+/// Convert one canonical error body into Anthropic's, or `None` to leave it be.
+///
+/// Returning `None` for anything that is not our envelope is what keeps this
+/// safe to apply to a whole route: a failure that never went through
+/// `classify_error` passes through unchanged rather than being reshaped into a
+/// claim about its own type.
+fn to_anthropic_error_body(bytes: &[u8]) -> Option<Vec<u8>> {
+    let parsed: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let err = parsed.get("error")?.as_object()?;
+    let message = err.get("message")?.as_str()?;
+    let mapped = sse::anthropic_error_type(err.get("type").and_then(|t| t.as_str()).unwrap_or(""));
+
+    let mut inner = serde_json::Map::new();
+    inner.insert("type".into(), serde_json::Value::String(mapped.to_string()));
+    inner.insert(
+        "message".into(),
+        serde_json::Value::String(message.to_string()),
+    );
+    // The hint and its translation key are ours, not Anthropic's, and SDKs
+    // ignore fields they do not know. Dropping them would cost the caller the
+    // one part of the message that says what to do next.
+    for extra in ["hint", "hint_key"] {
+        if let Some(v) = err.get(extra) {
+            inner.insert(extra.into(), v.clone());
+        }
+    }
+    serde_json::to_vec(&serde_json::json!({ "type": "error", "error": inner })).ok()
+}
+
 // ---- Handler ----
 
 /// POST /v1/messages — Anthropic Messages API endpoint.
@@ -953,5 +1043,90 @@ mod tests {
         // default, and the cloud paths used to forward it verbatim.
         assert_eq!(route_model("sonnet"), ("claude-sonnet-5", true));
         assert_eq!(route_model("anthropic:opus"), ("claude-opus-4-8", true));
+    }
+}
+
+#[cfg(test)]
+mod anthropic_error_envelope_tests {
+    use super::to_anthropic_error_body;
+
+    fn convert(body: &str) -> Option<serde_json::Value> {
+        to_anthropic_error_body(body.as_bytes()).map(|b| serde_json::from_slice(&b).unwrap())
+    }
+
+    /// The two things an Anthropic client needs and our canonical envelope does
+    /// not carry: the top-level `"type": "error"` discriminator, and an inner
+    /// type drawn from Anthropic's own set.
+    ///
+    /// Measured on the live node 2026-08-18 — a prompt-privacy refusal reached
+    /// the caller as `{"error": {"type": "prompt_privacy_error", ...}}`, which
+    /// is a type Anthropic does not define, in an envelope it does not use.
+    /// `anthropic_error_type` already existed; only the streaming path called it
+    /// (gotcha #302).
+    #[test]
+    fn a_refusal_reaches_an_anthropic_client_in_anthropics_own_shape() {
+        let out = convert(
+            r#"{"error":{"code":"prompt_privacy_error","message":"Prompt privacy is on",
+                "param":null,"type":"prompt_privacy_error"}}"#,
+        )
+        .expect("our envelope must convert");
+
+        assert_eq!(out["type"], "error", "the discriminator SDKs branch on");
+        assert_eq!(
+            out["error"]["type"], "api_error",
+            "a type Anthropic does not define must become its generic server-side one, \
+             never be invented"
+        );
+        assert_eq!(out["error"]["message"], "Prompt privacy is on");
+    }
+
+    /// A type both APIs share keeps its name — the translation must not flatten
+    /// every failure into `api_error` and lose what actually went wrong.
+    #[test]
+    fn a_shared_type_survives_translation() {
+        let out = convert(
+            r#"{"error":{"code":"not_found_error","message":"Model not available",
+                "type":"not_found_error"}}"#,
+        )
+        .unwrap();
+        assert_eq!(out["error"]["type"], "not_found_error");
+
+        let out = convert(
+            r#"{"error":{"code":"invalid_request_error","message":"bad","type":"invalid_request_error"}}"#,
+        )
+        .unwrap();
+        assert_eq!(out["error"]["type"], "invalid_request_error");
+    }
+
+    /// The hint is the one part of the message that says what to do next, and it
+    /// is translated. Anthropic clients ignore fields they do not know, so there
+    /// is no reason to drop it.
+    #[test]
+    fn the_actionable_hint_and_its_translation_key_are_kept() {
+        let out = convert(
+            r#"{"error":{"code":"not_found_error","message":"Model not available",
+                "type":"not_found_error","hint":"Open the Models tab",
+                "hint_key":"model_not_available"}}"#,
+        )
+        .unwrap();
+        assert_eq!(out["error"]["hint"], "Open the Models tab");
+        assert_eq!(out["error"]["hint_key"], "model_not_available");
+    }
+
+    /// Anything that is not our envelope is left alone. The layer covers a whole
+    /// route, so a body that never went through `classify_error` must pass
+    /// through rather than be reshaped into a claim about its own type.
+    #[test]
+    fn a_body_that_is_not_ours_is_left_untouched() {
+        assert!(convert("not json at all").is_none());
+        assert!(convert(r#"{"detail":"something else"}"#).is_none());
+        assert!(
+            convert(r#"{"error":{"code":"x"}}"#).is_none(),
+            "no message means we cannot build a valid Anthropic error"
+        );
+        assert!(
+            convert(r#"{"error":"a bare string"}"#).is_none(),
+            "the error field must be an object"
+        );
     }
 }

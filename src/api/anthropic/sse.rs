@@ -83,7 +83,7 @@ pub(super) enum AnthropicSseEvent {
 /// through unchanged and everything else becomes `api_error`, which is
 /// Anthropic's generic server-side failure — never a made-up type, because an
 /// unknown one deserialises no better than the `"error"` stop_reason did.
-fn anthropic_error_type(error_type: &str) -> &'static str {
+pub(super) fn anthropic_error_type(error_type: &str) -> &'static str {
     match error_type {
         "invalid_request_error" => "invalid_request_error",
         "authentication_error" => "authentication_error",

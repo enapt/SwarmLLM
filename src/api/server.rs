@@ -234,7 +234,12 @@ pub fn build_router(state: AppState) -> Router {
     let generation_routes = Router::new()
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/responses", post(openai::responses::create_response))
-        .route("/v1/messages", post(anthropic::messages))
+        .route(
+            "/v1/messages",
+            post(anthropic::messages).layer(axum::middleware::from_fn(
+                anthropic::anthropic_error_envelope,
+            )),
+        )
         .route(
             "/mcp",
             post(mcp::handle_mcp)
