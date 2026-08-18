@@ -1244,6 +1244,13 @@ impl HealthMonitor {
     /// when it IS a firewall this is the only thing that tells the user, but it
     /// is offered against the condition they can actually check — whether other
     /// machines say they cannot reach this one.
+    ///
+    /// What that trades away, deliberately: a machine that was reachable and is
+    /// later blocked again — a rebuilt Windows install, a new security suite —
+    /// is never warned, because the observation is kept forever. That is the
+    /// right way round. This is an onboarding aid, and its own history says a
+    /// warning that cries wolf is worth less than one that occasionally misses:
+    /// it had already been narrowed once for exactly that reason.
     fn maybe_warn_wsl_firewall(&mut self) {
         use std::sync::atomic::Ordering;
         if self.wsl_firewall_warned {

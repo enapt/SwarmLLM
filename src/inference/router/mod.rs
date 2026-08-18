@@ -100,6 +100,26 @@ fn is_transient_remote_failure(err: &SwarmError) -> bool {
         || crate::inference::pipeline::remote_error_means_missing_shard(&msg)
 }
 
+/// Whether a request must be refused for want of credit.
+///
+/// `balance` is `None` when the wallet could not be read, which is a different
+/// fact from a balance of zero and must never be reported as one. The whole
+/// reason this is a function rather than three conditions inline is that the
+/// unknown case is the one an author reaches for `unwrap_or(0)` on, and that
+/// substitution is invisible at the call site: it picks the most damaging value
+/// the wallet could hold and then states it back to the user as their balance.
+///
+/// The contract is the spec's, unchanged since the router was written —
+/// *"Credit errors: degrade priority tier, never block"*. Degrading the tier on
+/// an unread balance is sanctioned; refusing the request on one is not.
+pub(crate) fn refuse_for_insufficient_credit(
+    is_local: bool,
+    balance: Option<i64>,
+    floor: i64,
+) -> bool {
+    !is_local && floor != 0 && balance.is_some_and(|b| b < floor)
+}
+
 const KV_CACHE_CLEANUP_INTERVAL_SECS: u64 = 30;
 /// Maximum depth of the inference request queue. Requests are rejected with 503 when full.
 const MAX_QUEUE_DEPTH: usize = 512;
@@ -348,13 +368,24 @@ impl InferenceRouter {
     ) {
         // Calculate priority tier from credit balance and network percentile.
         // Per spec: "Credit errors: degrade priority tier, never block"
-        let balance = {
-            if let Ok(bal) = self.shared_state.credits.credit_balance.try_read() {
-                bal.balance
-            } else {
-                0
-            }
-        };
+        //
+        // `None` means the balance could not be READ, which is not the same
+        // fact as a balance of zero and must not be reported as one. tokio's
+        // `RwLock` is writer-fair, so `try_read` fails whenever a writer is
+        // merely queued — an inbound credit gossip transaction, a penalty, an
+        // escrow expiry — and a wallet holding plenty is then indistinguishable
+        // from an empty one for the length of that tick.
+        let balance_read: Option<i64> = self
+            .shared_state
+            .credits
+            .credit_balance
+            .try_read()
+            .ok()
+            .map(|bal| bal.balance);
+        // Degrading the tier on an unread balance is what the spec line above
+        // sanctions, so ranking an unknown as the lowest is fair. Refusing the
+        // request on one is the half it forbids — see the floor check below.
+        let balance = balance_read.unwrap_or(0);
 
         // Compute network percentile from peer credit balances, cached at the
         // module-level PERCENTILE_CACHE_TTL_MS interval.
@@ -411,10 +442,11 @@ impl InferenceRouter {
         // Nodes below the floor must contribute (host shards, serve inference) before consuming.
         // Local API requests use NodeId([0;32]) as sentinel — always allow those from localhost.
         let is_local = request.requester == crate::types::NodeId([0u8; 32]);
-        if !is_local
-            && crate::credit::ledger::MIN_BALANCE_FOR_INFERENCE != 0
-            && balance < crate::credit::ledger::MIN_BALANCE_FOR_INFERENCE
-        {
+        if refuse_for_insufficient_credit(
+            is_local,
+            balance_read,
+            crate::credit::ledger::MIN_BALANCE_FOR_INFERENCE,
+        ) {
             tracing::warn!(
                 balance,
                 min = crate::credit::ledger::MIN_BALANCE_FOR_INFERENCE,

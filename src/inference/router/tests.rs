@@ -328,3 +328,36 @@ fn the_retry_and_the_blacklist_agree_on_what_counts() {
         "Validation error: max_tokens must be positive"
     ));
 }
+
+/// A wallet that could not be READ is not a wallet that is EMPTY.
+///
+/// `credit_balance` is a writer-fair `RwLock`, so `try_read` fails whenever a
+/// writer is merely queued — an inbound credit transaction, a penalty, an escrow
+/// expiry. The router used to substitute `0` for that, which is the single most
+/// damaging value the wallet could hold: the request was refused and the caller
+/// was told their balance was too low, from evidence that only said a lock was
+/// busy for an instant. The spec line above the read has always said credit
+/// errors degrade the tier and never block.
+#[test]
+fn an_unreadable_balance_never_refuses_the_request() {
+    use super::refuse_for_insufficient_credit;
+
+    // The case that regressed: floor active, balance unknown.
+    assert!(
+        !refuse_for_insufficient_credit(false, None, 100),
+        "an unread balance must fall through, not be counted as below the floor"
+    );
+
+    // A balance we actually read, and which is actually below the floor, still
+    // refuses — the fix must not disable the check it is protecting.
+    assert!(refuse_for_insufficient_credit(false, Some(99), 100));
+    assert!(!refuse_for_insufficient_credit(false, Some(100), 100));
+
+    // Local requests are never refused, read or not.
+    assert!(!refuse_for_insufficient_credit(true, Some(-5000), 100));
+    assert!(!refuse_for_insufficient_credit(true, None, 100));
+
+    // Credits are dormant: a zero floor gates nothing, whatever the balance.
+    assert!(!refuse_for_insufficient_credit(false, Some(-5000), 0));
+    assert!(!refuse_for_insufficient_credit(false, None, 0));
+}

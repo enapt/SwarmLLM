@@ -26,7 +26,18 @@ minutes before mentioning it, because a genuine incoming connection was measured
 taking 64.
 
 Also fixed: a log line about an unresponsive peer was missing the number it was
-meant to report, and read "has not answered anything in a row".
+meant to report, and read "has not answered anything in a row". Two other log
+lines carried their own source indentation into the middle of the sentence.
+
+**A request will no longer be refused because the credit balance could not be
+read at that instant.** The router read the wallet without waiting, and treated a
+momentary failure to read it as a balance of zero — which is the most damaging
+value it could have been, and was then reported back as though it were the
+account's real balance. Being unable to read something is not the same as knowing
+it is empty, and the router's own long-standing rule is that credit problems may
+lower a request's priority but must never block it. In practice nobody has hit
+this, because the minimum-balance floor is currently zero and the check it feeds
+never runs; it is fixed now so that it stays fixed if that floor is ever restored.
 
 ## [0.3.103-alpha] — 2026-08-18
 
