@@ -250,13 +250,24 @@ Detail: `memory/round_log_0818_quantized_embedding.md`.
   a model fits; `swarmllm bench` warms up before timing; the CPU tooltip no longer
   promises credits.
 
-**Gotchas from this round: #326-#333.** Most load-bearing: **#328** (a single GPU
+**Confirmed on the real swarm, not just the bench.** Four of five nodes now run
+.103 and report measured speeds: anchor EPYC-Milan (2c) **~0.31 tok/s**, Proxmox
+i5-10500T (6c) ~0.85, Oz i7-7700 (6c) ~0.92 — against the hardcoded **1.70** every
+one of them used to claim, so the old constant overstated the smallest by 5.5x.
+Nodes still on .100/.101 correctly show no processor details, which is the
+mixed-version fallback working live. **The `.deb` upgrade now restarts the service
+itself and leaves the unit enabled** — the long-standing "always `systemctl start`
+afterwards" instruction is obsolete (see `memory/env_proxmox_test_node.md`).
+
+**Gotchas from this round: #326-#334.** Most load-bearing: **#328** (a single GPU
 A/B pair is worthless — within-arm spread 15-29%; find the measurement the machine
 CAN make), **#330/#333** (a gossiped field with no consumer is unverified — free
 VRAM was zero and CPU speed was a constant, swarm-wide, for as long as they existed),
 **#326** (candle's `as_t_slice` takes a `Cow` by value and returns a slice into it —
 `Cow::Owned` is a use-after-free), **#327** (`temperature: 0` + seed does NOT
-reproduce, so generated text cannot compare two inference paths here).
+reproduce, so generated text cannot compare two inference paths here), **#334**
+(`cargo audit` runs in CI, NOT in Release — a tag can publish while the tree is
+vulnerable, and the failure lands on the NEXT commit wearing its title).
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
@@ -267,12 +278,7 @@ Read the named round log before re-deriving any of these.
 - **v0.3.98** (08-16): **1.41x CPU generation** — GQA decode stopped expanding the KV cache with `repeat_kv` (`grouped_gqa_decode_attention`); this REVERSED the CPU decode-kernel routing at every length. 4h soak, 3474/3474 ok.
 - **v0.3.97** (08-15): **models you own could not be reached** — a node that loaded a model with `-m` announced it under its DISPLAY NAME, invisible as a holder, phantom `shard_count: 0` entries everywhere (three id derivations, no two agreeing → `slugify_model_name`, #310); removing `shard_range` from the config did nothing (#306); loopback-only endpoints told remote admins to fetch a key they had already sent (`LocalOnly`, #309); manifest-less models no longer claim `available`; embeddings 501 not 503.
 - **v0.3.96** (08-12/15): **a failure could not report itself** — six defects, one shape: the error's type known in one place, a literal written in another (empty Anthropic streams, `[inference failed]` as assistant text, peers DOCKED for callers' mistakes). Fix = make classification reachable: `classify_error` (HTTP + both SSE encoders), `reclassify_flattened_error` (typeless boundaries), `AnthropicSseEvent::Error`. Gotchas #300-#305. `round_log_0812_error_reporting.md`.
-- **v0.3.93/.94** (08-11/12): **a new node could see the swarm's models and run NONE of them** — holders each rewrote a manifest's `publisher` to themselves to earn broadcast rights, erasing each other until nobody broadcast (81 registrations, 50 publishers, one model); the right predicate existed in the startup path, missing from the 30s timer → `manifests_to_gossip` (#296). Plus #295/#297/#298. `round_log_0811_retry_advice.md`.
-- **v0.3.92** (08-11): a model could be asked a question in ANOTHER model's format — `resolve_chat_template` returned the RESIDENT model's template on the non-split route (#294). `round_log_0810_kv_mirror.md`.
-- **v0.3.91** (08-10/11): **1.4x on long GQA conversations** via an f16 KV mirror — GQA-gated because **the MHA null control came out 3-8% SLOWER**; empty+charged replies from a routing node (#293). **GPU decode is LAUNCH-BOUND — do not size it from FLOPs.**
-- **v0.3.90** (08-10): **a GPU could not run ANY unquantized model** — F16/BF16/F32 loaded clean on CUDA then failed 100% of requests (#288-#290); verified with a null control. Also `max_model_len` on `/v1/models`, shard-delete guard.
-- **v0.3.89** (08-09/10): **replies from distant peers arrived SCRAMBLED** — each token an independent rr send, `token_id` hardcoded 0 at all five sites → `StreamReassembler` (#282). A "private network" shared PUBLIC gossip topics (#285); a fixed 10s ACK deadline killed a 6s peer (#284). **#283: `pkill -x swarmllm` killed the user's live node.** `round_log_0809_night.md`.
-- **v0.3.88** (08-09): **settings saved, said "ok", did nothing** — `state.config` is a boot snapshot, patched around FOUR times → **`SharedState::cfg()`** (#281). **Serving the swarm paid nothing and reported nothing** — accounting lived only on the LESS travelled path (#279/#280) → `record_peer_serve`.
+- **v0.3.88-.94** (08-09→12): four rounds where the fix was always "make the one right answer reachable" — a new node could see the swarm's models and run NONE of them (holders erased each other's `publisher` until nobody broadcast → `manifests_to_gossip`, #296); a model asked a question in ANOTHER model's format (#294); **settings saved, said "ok", did nothing** (`state.config` is a boot snapshot → **`SharedState::cfg()`**, #281); serving the swarm paid and reported nothing (accounting on the LESS travelled path → `record_peer_serve`, #279/#280); an f16 KV mirror for 1.4x on long GQA chats — **GQA-gated because the MHA null control came out SLOWER**; a GPU could not run ANY unquantized model (#288-#290); **replies from distant peers arrived SCRAMBLED** (`token_id` hardcoded 0 at all five sites → `StreamReassembler`, #282); a "private network" shared PUBLIC gossip topics (#285). **GPU decode is LAUNCH-BOUND — do not size it from FLOPs. ⚠ #283: `pkill -x swarmllm` killed the user's live node — kill by PID.** `round_log_0811_retry_advice.md`, `round_log_0810_kv_mirror.md`, `round_log_0809_night.md`.
 - **v0.3.81-.87** (08-06→09): the round where every defect was a claim nothing could contradict — batching NEVER engaged (0/156) → **2.4x** GPU; a timed rescan undid the shard split; CPU inference measured not guessed (**it was attention**, wrong in BOTH phases in opposite directions, #254-#256); CPU fused attention +19%; KV reservation held 940 MB for a 100-token chat (#261). **⚠ #266 measure the FORWARD, not the isolated call. ⚠ #267 this box cannot resolve a GPU change below ~25%.** `round_log_0808_night.md`, `round_log_0807_*.md`, `round_log_0806_batching.md`.
 - **v0.3.78/.79** (08-06): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE, wrong date; all invisible, found by diffing against `tokenizers`/`jinja2` references built from the model's OWN vocab (#246-#253). **.79** shipped AVX2 — releases had candle's quantized kernels COMPILED OUT, **3.09x**. `round_log_0805_prompt_pipeline.md`.
 - **v0.3.39-.77** (07-27→08-05): **v0.3.72 our API key was being sent to strangers** — nothing in that code changed, its PREMISE did (#238); SPM tokenizer mis-tokenised **64.9%** of inputs (**a hash cannot tell "wrong bytes" from "not all the bytes" — check `size_bytes` FIRST**, #203); local replies took a GPT-2 byte fallback under a stale comment (#200). `round_log_0805_security.md`, `round_log_0803*.md`, `round_log_overnight_0728.md`.
