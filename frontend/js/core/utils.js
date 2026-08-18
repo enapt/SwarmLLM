@@ -113,23 +113,6 @@
     el.className = 'tier-badge ' + tier.toLowerCase();
   }
 
-  function renderSparkline(containerId, data) {
-    var container = document.getElementById(containerId);
-    if (!container || !data || data.length === 0) return;
-    var hasActivity = data.some(function(v) { return v !== 0; });
-    if (!hasActivity) { container.innerHTML = '<span class="text-muted text-2xs">' + escapeHtml(I18n.t('dashboard.credit_activity_empty')) + '</span>'; return; }
-    var min = Math.min.apply(null, data);
-    var max = Math.max.apply(null, data);
-    var range = (max - min) || 1;
-    container.innerHTML = '';
-    data.forEach(function(val) {
-      var bar = document.createElement('div');
-      bar.className = 'bar';
-      bar.style.height = Math.max(2, ((val - min) / range) * 36) + 'px';
-      container.appendChild(bar);
-    });
-  }
-
   function getModelSource(modelId) {
     if (!modelId) return 'local';
     var match = S._modelDropdownData.find(function(m) { return m.id === modelId; });
@@ -996,7 +979,6 @@
     formatEta: formatEta,
     timeAgo: timeAgo,
     setTierBadge: setTierBadge,
-    renderSparkline: renderSparkline,
     getModelSource: getModelSource,
     formatModelDisplayName: formatModelDisplayName,
     applyMessageGrouping: applyMessageGrouping,
