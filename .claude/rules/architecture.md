@@ -743,6 +743,33 @@ silently break at the wire if duplicated:
   dispatch's comment and in `docs/FUTURE_WORK.md`, and the benchmark
   asserts the dispatch never picks a kernel materially slower than
   always-standard.
+- **`inference::mem_bandwidth::measured_gbps`** (2026-08-18) — what this machine's
+  memory actually delivers, measured once and cached. **The figure a processor-only
+  node advertises as its speed.** It was `estimate_tokens_per_sec_7b(50.0, false)` —
+  a hardcoded bandwidth for every machine — so every CPU node in the swarm quoted
+  the identical 1.70 tok/s whether it was an eight-channel server or a fanless
+  mini-PC. Nothing could tell two of them apart, which is why a delegation gate
+  comparing them would have been comparing a constant with itself. Measured 29.9
+  GB/s on the 5800H laptop this was written on, against the 50 assumed.
+  Buffer must exceed any last-level cache (256 MB) or it reports cache bandwidth;
+  min-of-3 because every error source is additive; reads at decode width, not
+  thread-per-core, so it ranks machines the way running a model does. Costs 254 ms
+  once, on the health-monitor task rather than the startup path.
+  **Adding a device class means giving it a real measurement, not a constant.**
+
+- **`NodeCapability.cpu`** (2026-08-18) — a processor described the way a graphics
+  card always has been. `GpuInfo` has existed since the beginning; the CPU had no
+  representation, so a peer without a card rendered as the bare word "CPU" and every
+  such machine looked identical. Additive and `#[serde(default)]`, per the
+  additive-protocol rule — verified in BOTH directions against the released
+  v0.3.101 binary: an older node ignores the new field with no deserialisation
+  failure, and a newer node reads `cpu: None` from an older one and falls back to
+  the old label. **A new capability field is not done until that pair has been run**;
+  the swarm is always mixed-version during a rollout.
+  Deliberately carries no more than the GPU already does — the `os` field's refusal
+  to send a build string is about identifying the INSTALL, whereas a processor model
+  identifies the hardware doing the work, which is what a peer needs to judge.
+
 - **`inference::scheduler::delegation_target`** (2026-08-18) — the single decision
   to hand a WHOLE model to a peer rather than run it on this node's CPU. Fires only
   when `ModelProcessPool::is_cpu_bound_for_lack_of_vram` says we have a working GPU
