@@ -8793,3 +8793,72 @@ rather than the spec's unconditional "a Request without an `id` gets no reply".
 The trigger is a client sending, say, `tools/call` with no `id`, which MCP itself
 forbids — so the current behaviour is merely more forgiving than the letter, and
 tightening it would only turn one broken-client symptom into another.
+
+## The scheduler picked the slowest and furthest of three holders (measured 2026-08-19)
+
+**First measurement ever taken with a second GPU in the swarm**, which is why this
+was not visible before: until 2026-08-19 the only GPU was the development machine,
+so there was never a fast remote holder to pass over.
+
+### What was measured
+
+Local baseline, `llama-3.2-3b-instruct-q4-k-m` on this node's RTX 3070, warmed
+first, three runs: **35.26 / 36.96 / 36.12 tok/s** (~5% spread).
+
+`llama-3.2-1b-instruct-q8-0` — held by three peers, none of them local — served
+end to end in **260.05 s for 60 completion tokens: 0.23 tok/s**. That is ~156x
+slower than the same box serving a *larger* model locally.
+
+The three candidates the scheduler had (`candidates_count=3`), with their gossiped
+capability and measured RTT:
+
+| node | advertised | latency | hardware |
+|---|---|---|---|
+| `96842635` | 0.82 tok/s | **79 ms** | i5-10500T, CPU only |
+| `bf7b3263` | **20.45 tok/s** | 545 ms | RTX 4050 Laptop |
+| `7c10ea04` | 1.26 tok/s | 637 ms | Ryzen 7 5700U, CPU only |
+
+**It chose `7c10ea04` — last on both axes — five times out of five.** Not a tie
+being broken badly: the alternatives were 16x faster, or 8x closer.
+
+### What is established about the mechanism, and what is not
+
+Established by reading the code:
+
+- `est_tokens_per_sec` **is** wired into the DP cost model
+  (`scheduler::mod.rs` populates it from the peer's gossiped
+  `NodeCapability.est_tokens_per_sec_7b`; `parallax::vertex_cost` consumes it).
+- `vertex_cost` has two mutually exclusive branches. With an observed per-layer
+  latency it uses that and **drops the network term entirely**; without one it
+  charges `2 * latency_ms` plus a static estimate derived from
+  `est_tokens_per_sec`.
+- `peer_speed` — the source of those observations — is `DashMap::new()` at
+  startup and is **not persisted**. This node had been restarted about an hour
+  before, and this was its first request for that model.
+
+**Not established: why it chose as it did.** The obvious story — that an
+incumbent with observations beats a newcomer that must pay a full round trip —
+does not survive the third point above, because nobody had observations on the
+first of those five requests. Working the documented cost model by hand for 16
+layers gives roughly 768 ms for `96842635`, 1114 ms for `bf7b3263` and 1671 ms
+for `7c10ea04`, i.e. it predicts the node that was actually chosen should have
+come **last**. So a factor not accounted for here is deciding it, and no theory
+should be written into the fix until that factor is identified.
+
+### The next diagnostic, concretely
+
+Run the node at `-v` and capture the per-candidate `vertex_cost` inputs for one
+assembly of this model: the four fields that matter are `latency_ms`,
+`est_tokens_per_sec`, `observed_latency_ms_per_layer` and `available_ranges`.
+The last is the first thing to rule out — `hosted_models` listing a model does
+not prove a peer holds every layer of it, and a candidate that cannot cover
+0..16 alone would be excluded from the single-segment solution regardless of how
+fast it is. That check was attempted here and there is no admin endpoint
+exposing per-shard holders, which is itself worth fixing for diagnosis.
+
+### Why this matters more than the number suggests
+
+`est_tokens_per_sec` only started meaning anything on 2026-08-18, when it stopped
+being a hardcoded 1.70 for every processor-only node (gotcha #330/#333). This
+swarm now spans **0.37 to 20.45 tok/s**, a 55x range, and this is the first
+evidence about whether routing actually exploits it. On this showing it does not.
