@@ -1665,6 +1665,37 @@ of falling back to its own CPU. Verified across two real nodes: routed away, the
 peer ran all 28 layers, answer in 10 s. See the commit for the three things that
 made it inert until it was tested on real machines (gotchas #329-#331).
 
+**External retest on v0.3.103 (2026-08-18) says it still does not fire for their
+setup, and they are right — for a reason worth writing down.** Their case is a
+GPU node whose GPU cannot fit the model, with an idle CPU-only peer on the LAN
+holding a full copy. `delegation_target` requires the receiving peer to advertise
+**GPU room with margin**, so a CPU-only peer is never a delegation target. That
+is deliberate — handing a model to a peer that will also run it on a processor
+is not obviously a win — but it means the fix above covers GPU→GPU only, and the
+"local coverage short-circuits before asking whether local execution is any good"
+complaint stands for GPU→CPU.
+
+**Their explanation of why is wrong, and the correction matters** because it
+would otherwise send someone hunting a bug that does not exist. They observed
+that a peer's `cpu` / `est_tokens_per_sec` fields appear only for machines
+without a graphics card, and concluded the .102 speed work is CPU-only-vs-CPU-only
+by construction. It is not: `health::monitor` sets `cpu: local_cpu_info()`
+unconditionally, and `est_tokens_per_sec_7b` is computed for a GPU node too, from
+its GPU memory bandwidth. Verified by reading both, 2026-08-18.
+
+The likelier reading of their data is in their own report: the entry for their
+GPU machine carried **no `gpu` field either**. All three absent together points at
+that peer's whole `NodeCapability` being missing rather than filtered — and
+`daemon/dispatch`'s `NodeCapabilityUpdate` handler is update-only
+(`if let Some(mut peer) = peer_registry.get_mut(..)`), so it cannot populate an
+entry that does not exist yet.
+
+**The discriminating check, if this comes up again**: in the CPU-only node's
+`/api/admin/peers`, does the GPU machine's entry show `gpu` populated with `cpu`
+missing (real gating), or all three missing together (absent capability)? Could
+not be settled here — every peer in this swarm is CPU-only, and all three do
+report `cpu` and `est_tokens_per_sec` correctly.
+
 What remains open is the ORIGINAL complaint below — a node that holds everything
 and *can* run it still takes every request for that model, so load cannot be
 spread across holders and a faster peer cannot help a slower local node that is
