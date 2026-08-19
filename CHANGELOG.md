@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.104-alpha] — 2026-08-19
+
 **A node no longer tells you your firewall is blocking connections when it
 isn't.** Nodes running under WSL could warn that other machines were unable to
 reach them, and hand out two Administrator PowerShell commands to fix it — on a
@@ -23,7 +25,7 @@ actually saw rather than naming a cause: the firewall instructions are still
 there, now offered against something you can check, which is whether other
 machines say they cannot reach you. It also waits an hour rather than ten
 minutes before mentioning it, because a genuine incoming connection was measured
-taking 64.
+arriving 64 minutes in.
 
 **Claude clients could not read an error from this server.** A failure on
 `/v1/messages` came back in the OpenAI error format, which Anthropic's own
