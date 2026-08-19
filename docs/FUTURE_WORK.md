@@ -1690,11 +1690,36 @@ that peer's whole `NodeCapability` being missing rather than filtered — and
 (`if let Some(mut peer) = peer_registry.get_mut(..)`), so it cannot populate an
 entry that does not exist yet.
 
-**The discriminating check, if this comes up again**: in the CPU-only node's
-`/api/admin/peers`, does the GPU machine's entry show `gpu` populated with `cpu`
-missing (real gating), or all three missing together (absent capability)? Could
-not be settled here — every peer in this swarm is CPU-only, and all three do
-report `cpu` and `est_tokens_per_sec` correctly.
+**SETTLED 2026-08-19.** Both of that reporter's machines joined this swarm, and
+a third-party node can now see the GPU one directly. Identified beyond doubt: the
+CPU-only peer reports `{"cores": 16, "name": "AMD Ryzen 7 5700U with Radeon
+Graphics"}` at `est_tokens_per_sec` 1.2573728…, matching the JSON quoted in the
+report to the digit, and both machines share one public address and one private
+subnet.
+
+The GPU machine's entry, read from an unrelated node:
+
+```
+gpu                : "NVIDIA GeForce RTX 4050 Laptop GPU"
+cpu                : {"cores": 16, "name": "AMD Ryzen 7 7435HS"}
+est_tokens_per_sec : 20.454545974731445
+```
+
+All three populated. So the fields are not GPU-gated — that much was already clear
+from the code — and the "whole capability missing" reading offered above is not
+what is happening *now* either.
+
+**What they almost certainly saw is the transient.** A peer's capability is absent
+until the next gossip round lands, roughly 30 seconds. Observed directly on this
+machine the same day: immediately after restarting the local node every peer
+showed `version: None` with no `cpu` and no `est_tokens_per_sec`, and all four
+filled in completely within a minute. Read during that window — which is exactly
+when someone checks, having just restarted a node to test something — a GPU
+machine's entry looks precisely as described.
+
+Worth noting for the entry above: this is also **the first GPU peer in this swarm
+other than the development machine**, so the GPU→GPU delegation route can now fire
+in the wild for the first time rather than only on a two-node bench.
 
 What remains open is the ORIGINAL complaint below — a node that holds everything
 and *can* run it still takes every request for that model, so load cannot be
