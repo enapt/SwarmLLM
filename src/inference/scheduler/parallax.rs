@@ -909,4 +909,36 @@ mod tests {
         assert_eq!(segs[1].node_id, NodeId([2u8; 32]));
         assert_eq!(segs[2].node_id, NodeId([3u8; 32]));
     }
+
+    /// Replay of the three real candidates from the live swarm, 2026-08-19.
+    ///
+    /// Measured: the scheduler chose the node that is LAST on both latency and
+    /// throughput, five times out of five, and the request came back at 0.23
+    /// tok/s against a 36 tok/s local baseline. This pins which term decides it.
+    /// A much faster remote must win over closer but slower ones.
+    ///
+    /// The three real candidates from the live swarm on 2026-08-19, the first
+    /// day this swarm had a second GPU: a 20.45 tok/s RTX 4050 at 455 ms
+    /// against an 0.82 tok/s node at 75 ms and a 1.26 tok/s node at 637 ms, all
+    /// three holding the whole 16-layer model.
+    ///
+    /// The DP gets this right, which is what makes it worth pinning: the live
+    /// router chose the 1.26 tok/s node five times out of five and the request
+    /// came back at 0.23 tok/s against a 36 tok/s local baseline. Since the cost
+    /// model prefers the GPU on these numbers, the divergence is in the inputs
+    /// it was given, not in this function — see `docs/FUTURE_WORK.md`.
+    #[test]
+    fn a_much_faster_remote_beats_closer_slower_ones() {
+        let local = crate::types::NodeId([9u8; 32]);
+        let near_slow = cand(1, vec![(0, 16)], 75, 0.0, true, true, 0.82);
+        let far_fast = cand(2, vec![(0, 16)], 455, 0.0, true, true, 20.45);
+        let far_slow = cand(3, vec![(0, 16)], 637, 0.0, true, true, 1.26);
+        let segs = route_shortest_path(16, &[near_slow, far_fast, far_slow], &local, false, true)
+            .expect("must route");
+        assert_eq!(segs.len(), 1, "one holder can serve the whole model");
+        assert_eq!(
+            segs[0].node_id.0[0], 2,
+            "a 25x faster peer must win despite being 6x further away"
+        );
+    }
 }

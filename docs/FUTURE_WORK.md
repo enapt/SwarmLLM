@@ -8845,6 +8845,57 @@ for `7c10ea04`, i.e. it predicts the node that was actually chosen should have
 come **last**. So a factor not accounted for here is deciding it, and no theory
 should be written into the fix until that factor is identified.
 
+### CAUSE FOUND 2026-08-19 — a gossiped observation overrides the measured speed
+
+Captured from a probe node's own scheduler, both candidates offering the whole
+model with both end-flags true:
+
+```
+bf7b3263 (RTX 4050)   est=20.45 tok/s  latency=446ms  observed_ms_per_layer=Some(1063.01)
+96842635 (i5-10500T)  est= 0.82 tok/s  latency= 10ms  observed_ms_per_layer=Some(  83.01)
+```
+
+`parallax::vertex_cost` prefers an observation over `est_tokens_per_sec` and, when
+it has one, **drops the network term entirely**. So the 16-layer cost is
+17,008 ms for the GPU against 1,328 ms for the processor node — a 13x margin for
+hardware that is 25x slower. The advertised speed is never consulted.
+
+**Two things make this worse than one bad sample.**
+
+*It is inherited, not earned.* The probe had been alive for minutes and had never
+sent that peer a single segment (`Pipeline segment ... bf7b3263` appears zero
+times in its log), yet it already held a 1063 ms/layer figure for it. Observations
+travel in `NodeCapability.observed_latencies` and are merged, trust-weighted, by
+the `NodeCapabilityUpdate` handler. **One node's bad measurement of a peer becomes
+every node's opinion of that peer.**
+
+*Nothing distinguishes a cold sample from a steady-state one.* A first request to
+a peer that must load the model pays that load, the prefill and the round trip,
+and all of it lands in the same per-layer average that later ranks it. At ~450 ms
+RTT a single cold request is enough to produce a figure like this.
+
+The result is a ratchet: a peer that was slow once is permanently modelled as
+slow, everywhere, and the faster it actually is the more work it loses.
+
+### What to fix, in order
+
+1. **Do not let an observation silently outrank a large advertised gap.** A peer
+   advertising 25x the throughput of its rival should not be ranked behind it on
+   a single inherited EMA. Either blend the two, or require a minimum sample
+   count before an observation displaces the static estimate.
+2. **Do not fold cold-start into the steady-state figure.** The first segment to
+   a peer that had to load the model is not evidence about its per-layer speed.
+   `peer_model_warm_at` already exists and records exactly when a peer's model
+   went warm; a sample taken before that should not enter the ranking EMA.
+3. **Reconsider inheriting observations at all**, or decay them much faster than
+   locally-earned ones. Trust-weighting bounds malice, not staleness, and a
+   figure measured by a node on another continent says little about the path from
+   here.
+4. Keep the candidate line at `info` (done). Without it none of the above was
+   visible, and there is still no admin endpoint exposing per-shard holders.
+
+### The earlier diagnostic, retained
+
 ### The next diagnostic, concretely
 
 Run the node at `-v` and capture the per-candidate `vertex_cost` inputs for one

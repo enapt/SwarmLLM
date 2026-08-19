@@ -999,15 +999,34 @@ impl PipelineScheduler {
             });
         }
 
-        // Log candidates for debugging
+        // At `info`, and for the same reason the parallax/greedy choice above is
+        // logged at `info`: nodes run at `info`, so anything at `debug` is
+        // invisible in every real log, and reasoning from its absence has
+        // already produced one wrong diagnosis (2026-08-03).
+        //
+        // This is the line that decides a routing question nothing else can
+        // answer. Measured 2026-08-19: with three holders of one model — 0.82
+        // tok/s at 75 ms, 20.45 tok/s at 455 ms, 1.26 tok/s at 637 ms — the
+        // router picked the last of those five times running, and the request
+        // came back at 0.23 tok/s against a 36 tok/s local baseline. Replaying
+        // those numbers through `route_shortest_path` picks the GPU, so the
+        // divergence is in these inputs; without them being visible there is no
+        // way to tell which one, and no admin endpoint exposes them either.
+        //
+        // Once per pipeline assembly, not per token, so it is affordable — the
+        // same cost argument the router-choice line already makes.
         for c in &candidates {
-            tracing::debug!(
+            tracing::info!(
                 node = %c.node_id,
                 ranges = ?c.available_ranges,
                 can_be_first = c.can_be_first,
                 can_be_last = c.can_be_last,
                 region_score = c.region_score,
-                "Pipeline candidate"
+                latency_ms = c.latency_ms,
+                est_tokens_per_sec = c.est_tokens_per_sec,
+                observed_ms_per_layer = ?c.observed_latency_ms_per_layer,
+                load = c.load,
+                "DIAG: pipeline candidate"
             );
         }
 
