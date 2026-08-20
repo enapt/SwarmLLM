@@ -865,6 +865,12 @@ impl PipelineExecutor {
                     .last()
                     .map(|h| h.node_id.clone())
                     .unwrap_or_else(|| segment.node_id.clone());
+                // "Is this the final segment" has to be asked of the node that
+                // ANSWERS, and a chained run answers from its tail. Asking it of
+                // the head means a run that ends at the last segment is not
+                // recognised as finishing the pipeline, and the coordinator
+                // walks off the end of the loop with the reply in its hand.
+                let run_is_last = idx + chain.len() == num_segments - 1;
 
                 let vision_for_wire = if idx == 0 && sequence_num == 0 {
                     precomputed_vision.clone()
@@ -1179,7 +1185,7 @@ impl PipelineExecutor {
                                     is_last,
                                 )
                                 .await?;
-                            if is_last {
+                            if run_is_last {
                                 return Ok(failover_result);
                             }
                             activations = failover_result.activations;
@@ -1228,7 +1234,7 @@ impl PipelineExecutor {
                                 seg_elapsed_ms as u32,
                                 result.activations.len() as u32,
                             );
-                            if is_last {
+                            if run_is_last {
                                 tracing::info!(
                                     request_id = %request_id,
                                     num_segments,

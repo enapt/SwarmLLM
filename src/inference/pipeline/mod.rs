@@ -1352,6 +1352,37 @@ mod chain_planning_tests {
         assert_eq!(hops[0].node_id, NodeId([2u8; 32]));
     }
 
+    /// A chained run finishes the pipeline when its TAIL is the last segment,
+    /// not when its head is. The coordinator asks that question to decide
+    /// whether it has the final answer in its hand, so getting it wrong is a
+    /// hang rather than an error: the reply arrives and is walked past.
+    #[test]
+    fn a_run_ending_at_the_last_segment_is_recognised_as_finishing() {
+        let segs = [seg(1, 0, 8), seg(2, 8, 16), seg(3, 16, 24)];
+        let num_segments = segs.len();
+
+        // Chaining all three from index 0: the head is segment 0, which is NOT
+        // the last, but the run ends at segment 2, which is.
+        let head = 0usize;
+        let hops = plan_chain(&segs, head, &LOCAL, all_can_chain, 8);
+        assert_eq!(hops.len(), 2);
+        assert_eq!(
+            head + hops.len(),
+            num_segments - 1,
+            "the run reaches the final segment"
+        );
+        assert_ne!(
+            head,
+            num_segments - 1,
+            "and the head alone does not, which is the bug"
+        );
+
+        // A run that stops short must NOT claim to finish the pipeline.
+        let short = plan_chain(&segs, head, &LOCAL, all_can_chain, 1);
+        assert_eq!(short.len(), 1);
+        assert_ne!(head + short.len(), num_segments - 1);
+    }
+
     #[test]
     fn nothing_is_chained_from_a_local_segment() {
         let segs = [seg(0, 0, 8), seg(1, 8, 16)];
