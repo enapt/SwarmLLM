@@ -163,10 +163,24 @@ latency at all**. Options, cheapest first:
 
 - Use `region_score` as a proxy: same region implies a cheap hop. Available now,
   crude.
-- Have peers gossip measured RTT to their own peers. `NodeCapability.
-  observed_latencies` already carries a per-peer figure, so the shape exists;
-  it currently carries ms-per-layer rather than RTT. Note gotcha #341's lesson
-  before trusting it: a figure another node measured describes *its* path.
+- Have peers gossip measured RTT to their own peers. `LatencyObservation` is
+  already `{ peer, ms_per_layer }` and already travels in every capability
+  announcement, so adding `rtt_ms: Option<u32>` beside it is additive in the
+  strict sense the protocol rule requires — an older node omits it, a newer one
+  reads `None` and falls back. Every node would then hold a gossiped view of the
+  inter-peer latency graph, which is exactly the edge weight the Parallax cost
+  model wants.
+
+  **And this is the one case where an inherited figure is the right figure**,
+  which is worth stating because it looks like a direct contradiction of the rule
+  added on 2026-08-20 (gotcha #341): only a figure THIS node measured may rank a
+  peer. That rule is about a quantity that describes *our* path — a stranger's
+  measurement of their route to a peer says nothing about ours, and acting on it
+  demoted a GPU behind a laptop CPU. Here the quantity being asked about **is**
+  their path: when deciding whether to ask peer A to hand its activations to peer
+  B, A's own measurement of A→B is the only honest source, and ours is
+  irrelevant. The rule is not "never trust a gossiped number", it is "never let a
+  gossiped number answer a question it is not about".
 - Measure the realised chain and learn, the way `peer_speed` does for segments.
 
 Until inter-peer latency is real, restrict chaining to peers the scheduler
