@@ -25,7 +25,7 @@ pub use credits::{
 pub use identity::{NicknameGossip, NicknameRecord, SealedPrompt};
 pub use ids::{Blake3Hash, ModelId, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 pub use inference::{
-    AllReduceOp, ChatMessage, ChunkAssemblyState, ChunkMeta, GenerateUsage, ImageData,
+    AllReduceOp, ChainHop, ChatMessage, ChunkAssemblyState, ChunkMeta, GenerateUsage, ImageData,
     InferenceError, InferenceRequest, LayerForward, LayerResult, NetworkFinishReason,
     PipelineAssignment, PipelineSegment, RemoteGenerateRequest, Role, SamplingParams,
     StreamingToken, TensorFormat, TensorParallelGroup, TensorParallelMeta, TokenLogProbEntry,

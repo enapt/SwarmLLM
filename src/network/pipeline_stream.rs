@@ -682,6 +682,7 @@ mod tests {
             layer_range: (0, 8),
             tp_meta: None,
             vision_embeddings: None,
+            next_hop: None,
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded: false,

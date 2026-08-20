@@ -30,8 +30,18 @@ pub mod features {
     /// key. A sender only relay-wraps tensors for a peer that advertises this bit.
     pub const TENSOR_RELAY: u64 = 1 << 1;
 
+    /// Understands `LayerForward.next_hop`: after computing its segment, this
+    /// node can forward the activations straight to the NEXT segment holder
+    /// rather than returning them to the coordinator.
+    ///
+    /// A coordinator only sets `next_hop` for a peer advertising this bit, so an
+    /// older node is simply never given one and keeps replying to the
+    /// coordinator — which is the existing behaviour and always correct, just
+    /// one round trip more expensive.
+    pub const PIPELINE_CHAIN: u64 = 1 << 2;
+
     /// The full feature set THIS build implements. Advertised by every node.
-    pub const ALL: u64 = RELAY | TENSOR_RELAY;
+    pub const ALL: u64 = RELAY | TENSOR_RELAY | PIPELINE_CHAIN;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

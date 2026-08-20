@@ -111,7 +111,46 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
         buf.extend_from_slice(&cm.total_chunks.to_le_bytes());
     }
 
+    // Optional: next-hop trailer (marker 0x06 + node_id(32) + layer_start(4 LE)
+    // + layer_end(4 LE)) — direct peer chaining. Tells the receiver to hand its
+    // output to the next segment holder instead of returning it here. Bound
+    // into AAD, so a peer cannot be redirected to a different node without
+    // failing authentication.
+    if let Some(ref hop) = forward.next_hop {
+        buf.push(0x06);
+        buf.extend_from_slice(&hop.node_id.0);
+        buf.extend_from_slice(&hop.layer_range.0.to_le_bytes());
+        buf.extend_from_slice(&hop.layer_range.1.to_le_bytes());
+    }
+
     Ok(buf)
+}
+
+/// Read a next-hop trailer at `cursor`, if one is present.
+///
+/// Shared by the plaintext and encrypted decoders so the two cannot disagree
+/// about the wire form — the divergence this codebase keeps being caught by.
+pub(crate) fn read_next_hop_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+) -> Option<crate::types::ChainHop> {
+    if data.len() < *cursor + 41 || data[*cursor] != 0x06 {
+        return None;
+    }
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&data[*cursor + 1..*cursor + 33]);
+    let start = u32::from_le_bytes(data[*cursor + 33..*cursor + 37].try_into().ok()?);
+    let end = u32::from_le_bytes(data[*cursor + 37..*cursor + 41].try_into().ok()?);
+    // A range that cannot be served is worse than no hop at all: the receiver
+    // would forward into nothing. Refuse it and let the result come home.
+    if end <= start {
+        return None;
+    }
+    *cursor += 41;
+    Some(crate::types::ChainHop {
+        node_id: crate::types::NodeId(id),
+        layer_range: (start, end),
+    })
 }
 
 /// Decode a binary tensor envelope back into a LayerForward.
@@ -335,6 +374,15 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     } else {
         None
     };
+    // The chunk-meta block reads without advancing, because it used to be the
+    // last trailer. It no longer is.
+    if chunk_meta.is_some() {
+        cursor += 9;
+    }
+
+    // Optional: next-hop trailer (0x06) — direct peer chaining.
+    let next_hop = read_next_hop_trailer(data, &mut cursor);
+    let _ = cursor;
 
     Ok(LayerForward {
         request_id,
@@ -346,6 +394,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         layer_range,
         tp_meta,
         vision_embeddings: None,
+        next_hop,
         sender_peer_bytes: None,
         requester_node_id: None,
         pre_embedded: tp_pre_embedded,
@@ -382,6 +431,7 @@ mod tests {
             layer_range: (0, 28),
             tp_meta: None,
             vision_embeddings: None,
+            next_hop: None,
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded: false,
@@ -691,5 +741,66 @@ mod tests {
         let bytes = encode_layer_forward(&orig).unwrap();
         let decoded = decode_layer_forward(&bytes).unwrap();
         assert!(decoded.chunk_meta.is_none());
+    }
+
+    /// The next-hop trailer survives a wire round trip, and its absence still
+    /// decodes — which is what every node predating chaining sends.
+    #[test]
+    fn next_hop_survives_a_round_trip_and_is_optional() {
+        let mut f = base_forward();
+        assert_eq!(f.next_hop, None, "the default is no hop");
+        let plain = encode_layer_forward(&f).expect("encode");
+        assert_eq!(
+            decode_layer_forward(&plain).expect("decode").next_hop,
+            None,
+            "a frame with no trailer decodes to no hop, as an older node sends"
+        );
+
+        f.next_hop = Some(crate::types::ChainHop {
+            node_id: crate::types::NodeId([7u8; 32]),
+            layer_range: (12, 24),
+        });
+        let wire = encode_layer_forward(&f).expect("encode");
+        let back = decode_layer_forward(&wire).expect("decode");
+        assert_eq!(back.next_hop, f.next_hop);
+    }
+
+    /// A hop must not coexist incorrectly with the trailer that precedes it.
+    /// Chunk-meta used to be last and read without advancing the cursor, so a
+    /// frame carrying both would have parsed the hop out of the wrong bytes.
+    #[test]
+    fn a_hop_decodes_correctly_after_a_chunk_meta_trailer() {
+        let mut f = base_forward();
+        f.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: 1,
+            total_chunks: 3,
+        });
+        f.next_hop = Some(crate::types::ChainHop {
+            node_id: crate::types::NodeId([9u8; 32]),
+            layer_range: (4, 8),
+        });
+        let wire = encode_layer_forward(&f).expect("encode");
+        let back = decode_layer_forward(&wire).expect("decode");
+        assert_eq!(back.chunk_meta, f.chunk_meta, "chunk meta still parses");
+        assert_eq!(back.next_hop, f.next_hop, "and the hop after it does too");
+    }
+
+    /// An empty or inverted layer range is refused rather than forwarded into
+    /// nothing. The receiver falls back to replying to the coordinator, which
+    /// costs one round trip and always works.
+    #[test]
+    fn a_nonsensical_hop_range_is_refused() {
+        for (a, b) in [(8u32, 8u32), (9, 4)] {
+            let mut buf = vec![0x06];
+            buf.extend_from_slice(&[3u8; 32]);
+            buf.extend_from_slice(&a.to_le_bytes());
+            buf.extend_from_slice(&b.to_le_bytes());
+            let mut cursor = 0usize;
+            assert!(
+                read_next_hop_trailer(&buf, &mut cursor).is_none(),
+                "range ({a},{b}) must be refused"
+            );
+            assert_eq!(cursor, 0, "a refused trailer must not consume bytes");
+        }
     }
 }

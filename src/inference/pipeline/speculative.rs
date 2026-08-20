@@ -136,6 +136,7 @@ impl PipelineExecutor {
                 model_id: segment.shard_id.model_id.clone(),
                 layer_range: segment.layer_range,
                 vision_embeddings: None,
+                next_hop: None,
                 sender_peer_bytes: None,
                 tp_meta: None,
                 requester_node_id: Some(self.shared_state.identity.node_id().0),

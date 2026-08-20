@@ -245,6 +245,20 @@ pub struct LayerForward {
     /// Shape: (num_image_tokens, hidden_dim) — typically (577, 4096) for LLaVA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_embeddings: Option<Vec<u8>>,
+    /// Where this segment's OUTPUT should go, when it should not come back here.
+    ///
+    /// `None` — the default and the behaviour of every node predating the field
+    /// — means "return a `LayerResult` to the coordinator", which is how every
+    /// hop worked before chaining and is always correct.
+    ///
+    /// `Some(hop)` asks the receiver to compute its layers and then hand the
+    /// activations straight to the next segment holder. That turns an
+    /// N-segment pipeline from N coordinator round trips per token into one
+    /// trip out, N-1 hops between peers, and one trip back.
+    ///
+    /// Only ever set for a peer advertising `features::PIPELINE_CHAIN`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_hop: Option<ChainHop>,
     /// Populated locally after receiving from the network — not serialized over the wire.
     /// Contains the libp2p PeerId bytes of the sender so we can route the result back.
     #[serde(skip)]
@@ -303,6 +317,23 @@ pub struct LayerForward {
     /// `is_final` is derived: `chunk_idx + 1 == total_chunks`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_meta: Option<ChunkMeta>,
+}
+
+/// The next segment in a chained pipeline: who computes it, and over which
+/// layers.
+///
+/// Deliberately carries the node id and NOT a network address. The receiver
+/// resolves it through its own peer registry, so a coordinator cannot use this
+/// field to make a serving node open a connection to an arbitrary host. If the
+/// receiver does not know the peer, it returns the result to the coordinator
+/// instead — one extra round trip, never a failure.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChainHop {
+    /// Who should compute the next segment.
+    pub node_id: NodeId,
+    /// The layer range that node is to run, so it can pick the right cached
+    /// segment without consulting the coordinator.
+    pub layer_range: (u32, u32),
 }
 
 /// Tier 4K — chunked activation transport metadata. Carried as the optional
@@ -666,6 +697,7 @@ mod chunk_assembly_tests {
             layer_range: (0, 8),
             tp_meta: None,
             vision_embeddings: None,
+            next_hop: None,
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded: false,

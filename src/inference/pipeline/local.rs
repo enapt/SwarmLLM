@@ -287,6 +287,7 @@ impl PipelineExecutor {
             layer_range: (layer_start as u32, layer_end as u32),
             tp_meta: None,
             vision_embeddings: precomputed_vision_bytes.map(|b| b.to_vec()),
+            next_hop: None,
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded,
