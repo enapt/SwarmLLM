@@ -22,6 +22,71 @@ use super::super::state::SharedState;
 
 /// Handle an inbound `RemoteGenerateRequest`. Returns immediately — the
 /// decode loop runs in a spawned task so the dispatch loop doesn't block.
+/// How many times a terminal frame is sent.
+///
+/// The last token of a reply — the one carrying `finish_reason`, whether that
+/// is "stop" or a precise refusal — is a single fire-and-forget send like every
+/// other token, and losing it is far more costly than losing a content token.
+/// The coordinator does not learn that the request ended; it waits out its whole
+/// deadline and then reports that the peer went silent. A tester saw exactly
+/// that: their node refused a request immediately and twice, with the memory
+/// figures in the message, and the caller waited 143 seconds and was told the
+/// machine may have gone offline.
+///
+/// Repeating it is safe because the receiver is idempotent here: the stream
+/// reassembler keys content tokens by id and recording the total twice is the
+/// same as recording it once, and a copy arriving after the coordinator has
+/// finished finds no channel and is dropped.
+const TERMINAL_TOKEN_SENDS: usize = 3;
+
+/// Compile-time invariants on the two constants above.
+///
+/// A single send is what made a precise refusal arrive as a 143-second silence,
+/// and repeats with no gap between them share the fate of whatever dropped the
+/// first — so both properties have to hold, and neither is worth a runtime test
+/// when the compiler can refuse the build instead. The upper bounds keep this
+/// cheap: it rides on every completed request, so the added traffic and the
+/// longest tail both stay small, and the repeats finish well inside any
+/// coordinator deadline.
+const _: () = {
+    assert!(TERMINAL_TOKEN_SENDS > 1);
+    assert!(TERMINAL_TOKEN_SENDS <= 5);
+    assert!(TERMINAL_TOKEN_RETRY_MS > 0);
+    assert!((TERMINAL_TOKEN_SENDS as u64 - 1) * TERMINAL_TOKEN_RETRY_MS <= 2_000);
+};
+
+/// Gap between terminal-frame repeats. Spread out rather than back to back,
+/// because three copies down the same path in the same instant share the fate
+/// of whatever dropped the first.
+const TERMINAL_TOKEN_RETRY_MS: u64 = 250;
+
+/// Send a terminal frame more than once, in the background.
+///
+/// The first send is on the caller's path so a channel failure is still
+/// reported where it happens; the repeats are spawned so a serving node never
+/// waits on them.
+fn resend_terminal_token(
+    network_tx: mpsc::Sender<NetworkCommand>,
+    target_peer_bytes: Vec<u8>,
+    token: swarmllm_types::StreamingToken,
+) {
+    tokio::spawn(async move {
+        for _ in 1..TERMINAL_TOKEN_SENDS {
+            tokio::time::sleep(std::time::Duration::from_millis(TERMINAL_TOKEN_RETRY_MS)).await;
+            if network_tx
+                .send(NetworkCommand::SendStreamingToken {
+                    target_peer_bytes: target_peer_bytes.clone(),
+                    token: token.clone(),
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+}
+
 pub(super) async fn handle_remote_generate_request(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
@@ -99,20 +164,26 @@ pub(super) async fn handle_remote_generate_request(
             model = %model_id,
             "RemoteGenerateRequest for a layer range this node cannot serve — sending error"
         );
+        let refusal = StreamingToken {
+            request_id,
+            token_id: 0,
+            finish_reason: Some(NetworkFinishReason::Error(
+                "model not hosted on target".into(),
+            )),
+            text: String::new(),
+            usage: None,
+            matched_stop_sequence: None,
+            logprob: None,
+        };
+        // A refusal is the frame most worth repeating: it is the ONLY thing the
+        // coordinator will ever hear about this request, and losing it turns an
+        // immediate, precise "I cannot serve this" into a silence the caller
+        // waits out and then blames on the peer going offline.
+        resend_terminal_token(network_tx.clone(), sender_bytes.clone(), refusal.clone());
         if let Err(e) = network_tx
             .send(NetworkCommand::SendStreamingToken {
                 target_peer_bytes: sender_bytes,
-                token: StreamingToken {
-                    request_id,
-                    token_id: 0,
-                    finish_reason: Some(NetworkFinishReason::Error(
-                        "model not hosted on target".into(),
-                    )),
-                    text: String::new(),
-                    usage: None,
-                    matched_stop_sequence: None,
-                    logprob: None,
-                },
+                token: refusal,
             })
             .await
         {
@@ -309,6 +380,8 @@ pub(super) async fn handle_remote_generate_request(
         final_token.finish_reason,
         Some(NetworkFinishReason::Error(_))
     );
+    let terminal_copy = final_token.clone();
+    let terminal_target = sender_bytes.clone();
     if let Err(e) = network_tx
         .send(NetworkCommand::SendStreamingToken {
             target_peer_bytes: sender_bytes,
@@ -324,7 +397,12 @@ pub(super) async fn handle_remote_generate_request(
              time out with no reason. This node served the request; the reply is what \
              was lost"
         );
+        return;
     }
+    // Losing THIS frame is the expensive one: the coordinator does not learn the
+    // request ended and waits out its whole deadline before reporting the peer
+    // silent. Send it more than once.
+    resend_terminal_token(network_tx, terminal_target, terminal_copy);
 }
 
 /// Can this node run `layer_range` of `model_id` on its own?
