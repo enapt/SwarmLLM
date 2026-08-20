@@ -132,6 +132,29 @@ The same fallback is the first-cut failover story: on any chain timeout, retry
 the request coordinator-relayed. No new failover machinery, and never worse than
 today. Petals' cache-restoring re-route is the better answer later.
 
+### 3.7 Most of the transport already exists
+
+Checked against the code rather than assumed, and this is the main reason the
+change is smaller than it looks:
+
+- **`NetworkCommand::SendTensor { target_peer_bytes, forward }` is generic.** It
+  is not coordinator-only; any part of the daemon holding `network_tx` can send a
+  `LayerForward` to any peer, and the serving path in
+  `daemon/dispatch/layer_forward.rs` already holds one. No new command is needed
+  to make a serving node forward onward.
+- **Sealing is already per-target.** `handle_send_tensor` resolves the target and
+  seals for it, so a hop sealed for peer *i+1* rather than for the coordinator
+  needs no new crypto.
+- **The NAT fallback is already implemented.** `try_relay_tensor` exists for
+  precisely the case where "the target is unreachable", and sends an
+  ephemeral-sealed relay instead. That is mitigation (2) of §3.5, already built
+  and already exercised.
+
+What is genuinely new is therefore small: the `next_hop` field and its feature
+bit, the branch in the serving handler, the coordinator awaiting the tail instead
+of looping, extending `build_layer_forward_aad`, and the scheduler preference
+below.
+
 ### 3.6 The scheduler
 
 This is the part with real unknowns. Chaining makes the paper's original edge cost
