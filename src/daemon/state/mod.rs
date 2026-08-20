@@ -205,6 +205,25 @@ impl PendingLayerResult {
     }
 }
 
+/// Where a request's reply tokens go, and who is allowed to send them.
+///
+/// The peer matters as much as the channel. A request that fails and is retried
+/// keeps its id, so a late token from the ABANDONED attempt is indistinguishable
+/// from one belonging to the live attempt if routing looks only at the id — and
+/// the abandoned attempt's terminal frame carries a failure, which would kill a
+/// healthy retry and blame whichever peer had just taken it over.
+///
+/// This is the same lesson `PendingLayerResult::awaiting` already encodes for
+/// activation results (gotcha #229, where an abandoned forward's late error
+/// consumed a standby's waiter and cost a request 181 seconds). The reply
+/// stream had the identical exposure and no such check.
+pub struct StreamingTokenSink {
+    pub tx: mpsc::Sender<crate::types::StreamingToken>,
+    /// The peer this attempt is being served by. A token from anyone else
+    /// belongs to an attempt that is over.
+    pub expected_peer: crate::types::NodeId,
+}
+
 pub struct SharedState {
     // Core infrastructure (accessed by nearly every subsystem)
     /// The config the daemon **booted with**. Correct for anything decided once
@@ -318,9 +337,9 @@ pub struct SharedState {
     pub split_model_index: DashMap<crate::types::ModelId, Vec<(usize, usize)>>,
     pub kv_cache_store: Arc<crate::inference::split::KvCacheStore>,
     pub gguf_meta: DashMap<crate::types::ModelId, crate::inference::split::GgufTensorMeta>,
-    /// Distributed streaming token routing (pipeline_id → sender).
+    /// Distributed streaming token routing (request_id → sink).
     /// Consumer: dispatch handler + health monitor cleanup. Producer: pipeline.rs.
-    pub streaming_token_txs: DashMap<uuid::Uuid, mpsc::Sender<crate::types::StreamingToken>>,
+    pub streaming_token_txs: DashMap<uuid::Uuid, StreamingTokenSink>,
     /// Coordinator-side waiters for remote segment results, keyed by
     /// `request_id`. The value records WHICH node the waiter expects to hear
     /// from — see `PendingLayerResult::awaiting`. Resolve through
@@ -3112,6 +3131,34 @@ mod pending_layer_result_tests {
             !pending.accepts(None),
             "and an unattributable payload still cannot"
         );
+    }
+
+    /// A request that fails and is retried keeps its id, so routing reply
+    /// tokens by id alone cannot tell the live attempt from the abandoned one.
+    /// The abandoned attempt's terminal frame carries a failure — and it is now
+    /// sent more than once, precisely so it is not lost — so without this check
+    /// it would kill a healthy retry and blame whichever peer had just taken
+    /// the request over.
+    ///
+    /// Same lesson as `PendingLayerResult::awaiting`, on the reply stream
+    /// rather than the activation path.
+    #[test]
+    fn a_reply_token_is_only_taken_from_the_peer_now_serving_the_request() {
+        let serving = NodeId([0xEE; 32]);
+        let abandoned = NodeId([0xDD; 32]);
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let sink = super::StreamingTokenSink {
+            tx,
+            expected_peer: serving.clone(),
+        };
+
+        let accepts = |sender: Option<&NodeId>| sender.is_some_and(|s| s == &sink.expected_peer);
+        assert!(accepts(Some(&serving)), "the peer serving this attempt");
+        assert!(
+            !accepts(Some(&abandoned)),
+            "a peer whose attempt is over must not feed the live one"
+        );
+        assert!(!accepts(None), "and an unattributable token cannot either");
     }
 }
 

@@ -455,10 +455,35 @@ pub(crate) async fn dispatch_network_messages(
                                         }
                                         // Clone the sender to drop the DashMap Ref (read lock) before
                                         // awaiting send() or calling remove() — avoids deadlock.
+                                        // Take the channel ONLY if this token
+                                        // belongs to the attempt currently in
+                                        // flight. A failed request keeps its id
+                                        // when it is retried, so a late token
+                                        // from the abandoned attempt looks
+                                        // identical to a live one if routing
+                                        // goes by id alone — and if that token
+                                        // is the abandoned attempt's terminal
+                                        // failure, it kills a healthy retry and
+                                        // blames whichever peer had just taken
+                                        // it over. Same lesson as
+                                        // `PendingLayerResult::awaiting`.
                                         let maybe_tx = shared_state
                                             .streaming_token_txs
                                             .get(&token.request_id)
-                                            .map(|r| r.clone());
+                                            .and_then(|r| {
+                                                if authenticated_sender
+                                                    .as_ref()
+                                                    .is_some_and(|s| s == &r.expected_peer)
+                                                {
+                                                    Some(r.tx.clone())
+                                                } else {
+                                                    tracing::debug!(
+                                                        request_id = %token.request_id,
+                                                        "streaming token from a peer this request is no longer being served by — dropping"
+                                                    );
+                                                    None
+                                                }
+                                            });
                                         if let Some(tx) = maybe_tx {
                                             // `try_send`, so a client that is not reading cannot
                                             // block the dispatch loop for every other request.

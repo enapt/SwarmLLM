@@ -288,9 +288,15 @@ impl PipelineExecutor {
         let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<crate::types::StreamingToken>(
             REMOTE_GENERATE_TOKEN_CHANNEL_CAP,
         );
-        self.shared_state
-            .streaming_token_txs
-            .insert(request_id, stream_tx);
+        self.shared_state.streaming_token_txs.insert(
+            request_id,
+            crate::daemon::state::StreamingTokenSink {
+                tx: stream_tx,
+                // A retry keeps the request id, so the peer is what
+                // distinguishes this attempt from the one it replaced.
+                expected_peer: segment.node_id.clone(),
+            },
+        );
 
         // Send the RemoteGenerateRequest.
         let msg = crate::types::SwarmMessage::RemoteGenerateRequest(RemoteGenerateRequest {

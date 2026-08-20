@@ -1084,7 +1084,7 @@ impl HealthMonitor {
             .shared_state
             .streaming_token_txs
             .iter()
-            .filter(|entry| entry.value().is_closed())
+            .filter(|entry| entry.value().tx.is_closed())
             .map(|entry| *entry.key())
             .collect();
         if !stale_stream.is_empty() {
