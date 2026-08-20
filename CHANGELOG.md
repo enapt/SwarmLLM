@@ -4,6 +4,53 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.106-alpha] — 2026-08-20
+
+**A short answer was being presented as the whole answer.** Asked for sixty
+words, a machine on the other side of the world produced all sixty, and three of
+them arrived. The reply was handed over as though the model had simply finished
+speaking — a normal completion, a clean result, no warning of any kind. Nothing
+distinguished it from a real answer.
+
+Replies now say when they were cut short. A short answer that lost words on the
+way is reported as a failure with the numbers in it, so you can see that three of
+sixty arrived rather than being left to wonder why the model was so brief.
+
+**And a busy machine now admits it is busy.** The figure a computer published
+about how much work it was doing counted only work it had started for itself.
+A machine answering other people's requests — which is the whole point of joining
+a swarm, and all a dedicated server ever does — reported that it was doing
+nothing, no matter how hard it was working. Every other machine saw an idle
+computer, kept sending it more, and had no way to notice it struggling. Its own
+dashboard said the same thing to its owner.
+
+Between those two, work is now shared out on the basis of what machines are
+actually doing.
+
+### Also in this release
+
+- **A dropped packet no longer convinces the swarm that a graphics card is
+  slow.** Replies that lost words in transit were being used to time the machine
+  that sent them, which recorded a fast card as roughly a hundred times slower
+  than it is — and since a measured figure outranks an advertised one, that sent
+  every request for the next ten minutes to slower hardware.
+- **Machines are now judged on whether their answers arrive, not only on how
+  fast they compute.** A connection that keeps losing replies is now something
+  the swarm can route around, in proportion to how often it loses them.
+- **A momentary hold-up no longer throws away the rest of a reply.** A computer
+  briefly falling behind while reading an answer discarded not one word but every
+  remaining word of it.
+- **Handing a whole model to one machine is priced correctly**, so that option
+  stops being passed over in favour of splitting a model up when splitting costs
+  more.
+- **A confusing message is fixed.** When a machine took a request and no reply
+  arrived, the advice said it may have gone offline. Sometimes it had not — it
+  had answered immediately and its answer was lost — so the wording now says what
+  was seen instead of guessing why, in all twenty-one languages.
+- **New setting, off by default:** `inference.shed_load_when_busy` lets a busy
+  machine offer work it could do itself to the rest of the swarm. It stays off
+  until the benefit is measured; see the configuration reference.
+
 ## [0.3.105-alpha] — 2026-08-20
 
 **Work now goes to the fastest machine that can do it, instead of one that was
