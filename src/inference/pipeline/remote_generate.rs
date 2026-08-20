@@ -639,6 +639,10 @@ impl PipelineExecutor {
         // Tokens went missing in transit. Remembered because it also disqualifies
         // this request as a speed measurement — see the sample below.
         let stream_was_truncated = completion_tokens > delivered;
+        // Captured BEFORE the clamp below overwrites it. Without this the
+        // truncation error read "3 of 3 tokens arrived", which is exactly the
+        // reassuring shape the whole change exists to stop.
+        let claimed_by_peer = completion_tokens;
         if completion_tokens > delivered {
             tracing::warn!(
                 %request_id,
@@ -708,9 +712,7 @@ impl PipelineExecutor {
         if stream_was_truncated {
             return Err(SwarmError::ReplyTruncated(format!(
                 "{} of {} tokens arrived from {}",
-                delivered,
-                completion_tokens.max(delivered),
-                segment.node_id
+                delivered, claimed_by_peer, segment.node_id
             )));
         }
 
