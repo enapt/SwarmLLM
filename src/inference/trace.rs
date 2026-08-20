@@ -686,6 +686,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::PeerUnresponsive(_) => "PeerUnresponsive",
         E::PipelineError(_) => "PipelineError",
         E::SegmentFailoverExhausted(_) => "SegmentFailoverExhausted",
+        E::ReplyTruncated(_) => "ReplyTruncated",
         E::PrivateModeUnavailable { .. } => "PrivateModeUnavailable",
         E::PromptPrivacyUnavailable { .. } => "PromptPrivacyUnavailable",
         E::ModelIncompleteInSwarm { .. } => "ModelIncompleteInSwarm",

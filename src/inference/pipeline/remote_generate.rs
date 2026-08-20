@@ -411,6 +411,8 @@ impl PipelineExecutor {
                         // the retry that helps, and the peer is eligible for
                         // the serve-failure penalty (`PipelineError` is
                         // exempt as a local scheduling problem).
+                        self.shared_state
+                            .record_peer_delivery(&segment.node_id, false);
                         return Err(SwarmError::PeerUnresponsive(format!(
                             "remote-generate: peer never acknowledged request_id={request_id} (silent drop or disconnect)"
                         )));
@@ -440,6 +442,16 @@ impl PipelineExecutor {
                         break;
                     }
                     self.shared_state.streaming_token_txs.remove(&request_id);
+                    // A delivery that yielded nothing usable. Recorded so the
+                    // router learns to prefer a peer whose answers arrive —
+                    // this is also how the peer's own terminal ERROR frame
+                    // going missing shows up, since that frame is a single
+                    // unacknowledged send like any other token. A tester saw
+                    // exactly that: a precise "needs more memory than my
+                    // budget allows" refusal, produced immediately and twice,
+                    // reaching the caller as a 143-second silence.
+                    self.shared_state
+                        .record_peer_delivery(&segment.node_id, false);
                     // Same reclassification as the never-acknowledged arm
                     // above: the peer went quiet past its deadline.
                     return Err(SwarmError::PeerUnresponsive(format!(
@@ -676,6 +688,31 @@ impl PipelineExecutor {
         // truncation no longer (wrongly) does so through the speed EMA.
         self.shared_state
             .record_peer_delivery(&segment.node_id, !stream_was_truncated);
+
+        // What arrived is not the reply that was generated, so it must not be
+        // handed over as one.
+        //
+        // This used to return the surviving prefix with `finish_reason: "stop"`
+        // — the model chose to stop after three tokens — which a client cannot
+        // distinguish from a real answer. Measured 2026-08-20: 3, 3 and 18
+        // tokens of 60, each reported as a clean completion.
+        //
+        // Safe to raise here in both modes, and the placement is the reason.
+        // The give-up arm breaks WITHOUT sending a terminal event to the
+        // caller's token channel, so nothing has been finished yet: a
+        // non-streaming caller gets an error instead of a short answer, and a
+        // streaming one gets the partial content it already received followed
+        // by an explicit error frame rather than a false ending. The variant is
+        // deliberately absent from `is_transient_remote_failure`, because that
+        // retry reuses this same token channel and would emit the reply twice.
+        if stream_was_truncated {
+            return Err(SwarmError::ReplyTruncated(format!(
+                "{} of {} tokens arrived from {}",
+                delivered,
+                completion_tokens.max(delivered),
+                segment.node_id
+            )));
+        }
 
         if let Some(ttft) = first_token_at {
             let steady = sent_at

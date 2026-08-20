@@ -55,6 +55,30 @@ pub enum SwarmError {
     /// culprit).
     #[error("Segment failover exhausted: {0}")]
     SegmentFailoverExhausted(String),
+    /// A peer produced the whole answer and part of it was lost on the way
+    /// here, so what arrived is not the reply that was generated.
+    ///
+    /// Every reply token is an independent fire-and-forget send with no
+    /// acknowledgement and no retransmission, so one drop truncates the answer
+    /// permanently — the reassembler may only release the consecutive run,
+    /// because emitting past a hole would silently reorder the reply. Measured
+    /// 2026-08-20: replies came back holding 3, 3 and 18 of 60 tokens.
+    ///
+    /// **This exists because the alternative was a lie.** Such a reply used to
+    /// be handed to the caller as a normal completion with
+    /// `finish_reason: "stop"` — i.e. the model chose to stop after three
+    /// tokens. A client cannot tell that from a real answer.
+    ///
+    /// 503, not 500: nothing is wrong with this node, with the caller's request,
+    /// or with the peer's hardware. Deliberately NOT `PeerUnresponsive`, whose
+    /// whole meaning is that a peer went quiet — here it answered in full and
+    /// the network dropped part of it, and blaming the peer for that is the
+    /// wrong-culprit mistake this project has made twice. Penalty-exempt for the
+    /// same reason, and deliberately NOT in `is_transient_remote_failure`: the
+    /// retry there reuses the caller's token channel, so retrying a streaming
+    /// request would emit its reply twice.
+    #[error("Reply truncated in transit: {0}")]
+    ReplyTruncated(String),
     #[error("Inference timeout after {0}s")]
     InferenceTimeout(u64),
     #[error("No model loaded")]
@@ -366,6 +390,13 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
             err.to_string(),
             "server_error",
         ),
+        // The peer answered in full; the network lost part of it. 503 invites
+        // the retry that helps, and a fresh request usually routes elsewhere.
+        SwarmError::ReplyTruncated(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "server_error",
+        ),
         SwarmError::Inference(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             err.to_string(),
@@ -666,11 +697,25 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
         // Unlike `PipelineError`, this one is KNOWN to be transient — a peer
         // took the work and went silent — so the hint can promise the retry
         // branch without hedging.
+        // Deliberately does NOT assert that the peer went offline. A tester
+        // reported this exact hint for a machine that was up and had answered
+        // immediately, twice, with a precise reason — its reply was lost on the
+        // way, and the terminal frame carrying it is a single unacknowledged
+        // send just like every content token. Naming a cause we cannot observe
+        // sends people to check the wrong thing.
         SwarmError::PeerUnresponsive(_) => Some((
             "peer_unresponsive",
-            "Another computer in the swarm took this request and then stopped \
-             answering — it may have gone offline mid-request. Try again: a new \
-             request is usually routed to a different machine.",
+            "Another computer in the swarm took this request and no reply \
+             arrived in time. It may have gone offline, or its answer may have \
+             been lost on the way. Try again: a new request is usually routed \
+             to a different machine.",
+        )),
+        SwarmError::ReplyTruncated(_) => Some((
+            "reply_truncated",
+            "Part of the answer was lost travelling back from the computer that \
+             produced it, so what arrived was incomplete and has not been shown \
+             as if it were the whole reply. Try again: a new request is usually \
+             routed to a different machine.",
         )),
         SwarmError::SegmentFailoverExhausted(_) => Some((
             "segment_failover_exhausted",

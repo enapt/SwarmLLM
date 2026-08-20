@@ -857,7 +857,11 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         // server can't serve" (worker died, subprocess spawn failed, GPU OOM);
         // `Internal` is our own bug; the rest are scheduling/config problems
         // that a peer has no part in.
-        SwarmError::ServiceUnavailable(_)
+        // The peer computed the whole answer correctly and the network lost
+        // part of it on the way back. Nobody's hardware or conduct is at
+        // fault, so nobody is docked.
+        SwarmError::ReplyTruncated(_)
+        | SwarmError::ServiceUnavailable(_)
         | SwarmError::NotImplemented(_)
         | SwarmError::LocalOnly(_)
         | SwarmError::Internal(_)
@@ -894,6 +898,41 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
 
 #[cfg(test)]
 mod tests {
+    /// A reply the network chopped up must not be reported as a completion,
+    /// must not blame the peer, and must not be retried through the caller's
+    /// token channel.
+    ///
+    /// Each of those three was a live defect or a live hazard. It used to be
+    /// handed over as `finish_reason: "stop"` — the model chose to stop after
+    /// three tokens — which a client cannot distinguish from a real answer.
+    #[test]
+    fn a_truncated_reply_blames_nobody_and_is_not_retried() {
+        let err = crate::error::SwarmError::ReplyTruncated("3 of 60 tokens arrived".into());
+
+        assert!(
+            !super::failure_is_penalty_worthy(&err, true),
+            "the peer generated the whole answer; the path lost it, so nobody is docked"
+        );
+
+        // Retrying reuses the caller's token channel, so a streaming request
+        // would emit its reply twice. This must stay out of that set.
+        assert!(
+            !crate::inference::router::is_transient_remote_failure(&err),
+            "retrying a truncated stream would emit the reply twice"
+        );
+
+        // Reported as "this could not be served", not as a bug in this node.
+        let (status, _msg, kind) = crate::error::classify_error(&err);
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(kind, "server_error");
+
+        // And it must carry advice, since the user can act on it.
+        assert!(
+            crate::error::error_hint_with_key(&err).is_some(),
+            "a failure the user can retry must say so"
+        );
+    }
+
     use super::*;
     use crate::types::ModelId;
 
