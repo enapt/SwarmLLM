@@ -72,7 +72,12 @@ fi
 stop_ours() {
     local p
     for p in /proc/[0-9]*; do
-        tr '\0' '\n' < "$p/environ" 2>/dev/null | grep -q "^SWARMLLM_NODE_DATA_DIR=$DATA$" || continue
+        # The redirection is what fails on a process this user cannot read, and
+        # it happens in the shell BEFORE `tr` runs — so `2>/dev/null` on `tr`
+        # never suppressed it and every run printed a screen of "Permission
+        # denied" for system processes. Group the redirect with the command.
+        { tr '\0' '\n' < "$p/environ"; } 2>/dev/null \
+            | grep -q "^SWARMLLM_NODE_DATA_DIR=$DATA$" || continue
         grep -aq "model-worker" "$p/cmdline" 2>/dev/null && continue
         kill "${p#/proc/}" 2>/dev/null || true
     done
