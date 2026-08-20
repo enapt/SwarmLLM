@@ -4,6 +4,38 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.105-alpha] — 2026-08-20
+
+**Work now goes to the fastest machine that can do it, instead of one that was
+measured badly once.** Asked for a model held by three different machines, a node
+sent the request to the slowest and furthest of them — a laptop processor — while
+a machine with a graphics card holding the same model sat idle. It did that every
+time. The reply came back at about a quarter of a word per second, where the same
+computer serves a larger model locally at thirty-six.
+
+Two causes, both fixed.
+
+A machine could be judged on a measurement taken by somebody else. Those figures
+are shared between machines so a newcomer has something to go on, but they
+describe the network path between two *other* computers, and they were being
+trusted ahead of what the machine itself reports about its hardware. One
+unlucky measurement anywhere in the network became everyone's opinion of that
+machine, and the faster it actually was, the more work it lost. A shared figure
+is now treated as the hint it is: only a measurement taken here can rank a peer,
+which is the rule already used for deciding how long to wait for one.
+
+And the very first request to a machine was being used to judge its speed. That
+request pays for loading the model as well as running it, so it can be an order
+of magnitude slower than the same machine a minute later — and that one slow
+number then decided its ranking from then on. Loading time no longer counts as
+running speed. It is still used to decide how long to wait, where erring on the
+generous side is safe.
+
+Also: the log line recording which machines were considered for a request, and
+why one was chosen, is now visible in normal operation. It was previously only
+emitted in debug mode, which meant the information needed to diagnose exactly
+this problem was absent from every real log.
+
 ## [0.3.104-alpha] — 2026-08-19
 
 **A node no longer tells you your firewall is blocking connections when it
