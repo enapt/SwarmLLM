@@ -91,11 +91,15 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // the activations are sealed, but the routing decision would not be
     // authenticated, and a chained pipeline is exactly a routing decision made
     // by somebody else.
-    if let Some(ref hop) = forward.next_hop {
+    if !forward.chain.is_empty() {
+        let n = forward.chain.len().min(u8::MAX as usize);
         aad.push(0x06);
-        aad.extend_from_slice(&hop.node_id.0);
-        aad.extend_from_slice(&hop.layer_range.0.to_le_bytes());
-        aad.extend_from_slice(&hop.layer_range.1.to_le_bytes());
+        aad.push(n as u8);
+        for hop in forward.chain.iter().take(n) {
+            aad.extend_from_slice(&hop.node_id.0);
+            aad.extend_from_slice(&hop.layer_range.0.to_le_bytes());
+            aad.extend_from_slice(&hop.layer_range.1.to_le_bytes());
+        }
     }
 
     aad
@@ -201,11 +205,15 @@ pub fn encode_layer_forward_encrypted(
     // + layer_end(4 LE)). Mirrors the plaintext encoder, and must be emitted
     // here too or the receiver reconstructs a different AAD and every chained
     // encrypted forward fails to open.
-    if let Some(ref hop) = forward.next_hop {
+    if !forward.chain.is_empty() {
+        let n = forward.chain.len().min(u8::MAX as usize);
         buf.push(0x06);
-        buf.extend_from_slice(&hop.node_id.0);
-        buf.extend_from_slice(&hop.layer_range.0.to_le_bytes());
-        buf.extend_from_slice(&hop.layer_range.1.to_le_bytes());
+        buf.push(n as u8);
+        for hop in forward.chain.iter().take(n) {
+            buf.extend_from_slice(&hop.node_id.0);
+            buf.extend_from_slice(&hop.layer_range.0.to_le_bytes());
+            buf.extend_from_slice(&hop.layer_range.1.to_le_bytes());
+        }
     }
 
     Ok(buf)
@@ -420,7 +428,7 @@ pub fn decode_layer_forward_encrypted(
 
     // Next-hop trailer (0x06). Read through the same helper the plaintext
     // decoder uses, so the two wire readers cannot drift apart.
-    let next_hop = super::layer_forward::read_next_hop_trailer(data, &mut cursor);
+    let chain = super::layer_forward::read_chain_trailer(data, &mut cursor);
     let _ = cursor;
 
     let forward = LayerForward {
@@ -433,7 +441,7 @@ pub fn decode_layer_forward_encrypted(
         layer_range: (layer_start, layer_end),
         tp_meta,
         vision_embeddings: None,
-        next_hop,
+        chain,
         sender_peer_bytes: None,
         requester_node_id: None,
         pre_embedded: tp_pre_embedded,
@@ -471,7 +479,7 @@ mod tests {
             layer_range: (4, 12),
             tp_meta: None,
             vision_embeddings: None,
-            next_hop: None,
+            chain: Vec::new(),
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded: false,
@@ -713,14 +721,14 @@ mod tests {
     #[test]
     fn encrypted_envelope_preserves_next_hop() {
         let mut orig = base_forward();
-        orig.next_hop = Some(crate::types::ChainHop {
+        orig.chain = vec![crate::types::ChainHop {
             node_id: crate::types::NodeId([5u8; 32]),
             layer_range: (16, 32),
-        });
+        }];
         let sealed = vec![0u8; 256];
         let bytes = encode_layer_forward_encrypted(&orig, sealed.clone()).unwrap();
         let (decoded, sealed_out, _aad) = decode_layer_forward_encrypted(&bytes).unwrap();
-        assert_eq!(decoded.next_hop, orig.next_hop);
+        assert_eq!(decoded.chain, orig.chain);
         assert_eq!(sealed_out, sealed);
     }
 
@@ -731,18 +739,18 @@ mod tests {
     #[test]
     fn aad_authenticates_the_next_hop() {
         let mut a = base_forward();
-        a.next_hop = Some(crate::types::ChainHop {
+        a.chain = vec![crate::types::ChainHop {
             node_id: crate::types::NodeId([1u8; 32]),
             layer_range: (8, 16),
-        });
+        }];
         let aad_a = build_layer_forward_aad(&a);
 
         // Redirected to a different node.
         let mut b = a.clone();
-        b.next_hop = Some(crate::types::ChainHop {
+        b.chain = vec![crate::types::ChainHop {
             node_id: crate::types::NodeId([2u8; 32]),
             layer_range: (8, 16),
-        });
+        }];
         assert_ne!(
             aad_a,
             build_layer_forward_aad(&b),
@@ -751,10 +759,10 @@ mod tests {
 
         // Same node, different layers — also a routing change.
         let mut c = a.clone();
-        c.next_hop = Some(crate::types::ChainHop {
+        c.chain = vec![crate::types::ChainHop {
             node_id: crate::types::NodeId([1u8; 32]),
             layer_range: (8, 24),
-        });
+        }];
         assert_ne!(
             aad_a,
             build_layer_forward_aad(&c),
@@ -764,7 +772,7 @@ mod tests {
         // And stripping the hop entirely, which would silently turn a chained
         // forward back into one that replies to the coordinator.
         let mut d = a.clone();
-        d.next_hop = None;
+        d.chain = Vec::new();
         assert_ne!(
             aad_a,
             build_layer_forward_aad(&d),

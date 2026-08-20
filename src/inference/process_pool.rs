@@ -2334,7 +2334,7 @@ impl ModelProcessPool {
             layer_range,
             tp_meta,
             vision_embeddings,
-            next_hop: _,
+            chain: _,
             sender_peer_bytes: _,
             requester_node_id,
             pre_embedded,
@@ -2522,7 +2522,7 @@ impl ModelProcessPool {
                 // rather than forward anything — any non-None value would
                 // imply a scheduler bug.
                 vision_embeddings: _,
-                next_hop: _,
+                chain: _,
                 sender_peer_bytes: _,
                 requester_node_id,
                 pre_embedded,

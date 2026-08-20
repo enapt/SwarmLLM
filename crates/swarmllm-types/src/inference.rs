@@ -245,20 +245,28 @@ pub struct LayerForward {
     /// Shape: (num_image_tokens, hidden_dim) — typically (577, 4096) for LLaVA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_embeddings: Option<Vec<u8>>,
-    /// Where this segment's OUTPUT should go, when it should not come back here.
+    /// The REST of the pipeline after this segment, in order.
     ///
-    /// `None` — the default and the behaviour of every node predating the field
-    /// — means "return a `LayerResult` to the coordinator", which is how every
-    /// hop worked before chaining and is always correct.
+    /// Empty — the default, and what every node predating the field sends —
+    /// means "return a `LayerResult` to the coordinator", which is how every hop
+    /// worked before chaining and is always correct.
     ///
-    /// `Some(hop)` asks the receiver to compute its layers and then hand the
-    /// activations straight to the next segment holder. That turns an
-    /// N-segment pipeline from N coordinator round trips per token into one
-    /// trip out, N-1 hops between peers, and one trip back.
+    /// Non-empty asks the receiver to compute its layers and hand the
+    /// activations straight to `chain[0]`, passing `chain[1..]` along with them.
+    /// That turns an N-segment pipeline from N coordinator round trips per token
+    /// into one trip out, N-1 hops between peers, and one trip back.
+    ///
+    /// **The whole remainder rather than just the next hop**, because a single
+    /// hop only helps a two-segment pipeline: the second node would not know its
+    /// own successor and would have to come back here, which is most of the cost
+    /// again. Carrying the remainder makes the coordinator's round trips
+    /// independent of chain length, which is the entire point for a model
+    /// spread over many shards. It costs ~40 bytes per remaining hop against
+    /// activations measured in kilobytes.
     ///
     /// Only ever set for a peer advertising `features::PIPELINE_CHAIN`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_hop: Option<ChainHop>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<ChainHop>,
     /// Populated locally after receiving from the network — not serialized over the wire.
     /// Contains the libp2p PeerId bytes of the sender so we can route the result back.
     #[serde(skip)]
@@ -319,8 +327,7 @@ pub struct LayerForward {
     pub chunk_meta: Option<ChunkMeta>,
 }
 
-/// The next segment in a chained pipeline: who computes it, and over which
-/// layers.
+/// One segment of a chained pipeline: who computes it, and over which layers.
 ///
 /// Deliberately carries the node id and NOT a network address. The receiver
 /// resolves it through its own peer registry, so a coordinator cannot use this
@@ -697,7 +704,7 @@ mod chunk_assembly_tests {
             layer_range: (0, 8),
             tp_meta: None,
             vision_embeddings: None,
-            next_hop: None,
+            chain: Vec::new(),
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded: false,

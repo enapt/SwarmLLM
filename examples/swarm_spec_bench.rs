@@ -492,7 +492,7 @@ fn make_bench_forward(activations: Vec<u8>) -> LayerForward {
         layer_range: (0, 16),
         tp_meta: None,
         vision_embeddings: None,
-        next_hop: None,
+        chain: Vec::new(),
         sender_peer_bytes: None,
         requester_node_id: None,
         pre_embedded: false,
