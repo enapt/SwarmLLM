@@ -326,7 +326,7 @@ impl HealthMonitor {
     async fn send_health_ping(&self, nonce: u64) {
         let timestamp = crate::types::unix_now_secs();
 
-        let active_request_count = self.shared_state.active_pipelines.len() as u32;
+        let active_request_count = self.shared_state.active_inference_load();
         let node_id = Some(self.shared_state.identity.node_id().clone());
         let msg = SwarmMessage::HealthPing {
             nonce,

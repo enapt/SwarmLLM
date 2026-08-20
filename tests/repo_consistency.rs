@@ -2197,3 +2197,91 @@ fn every_css_custom_property_used_without_a_fallback_is_defined() {
         missing.join("\n  ")
     );
 }
+
+/// A node's advertised load must come from `SharedState::active_inference_load`,
+/// never from `active_pipelines.len()`.
+///
+/// `active_pipelines` is the *coordinator's* map. `src/daemon/state/mod.rs`
+/// documents this explicitly — "a node answering a peer's `RemoteGenerateRequest`
+/// or `LayerForward` never appears in it, so anything that consults only
+/// `active_pipelines` believes a pure-server node is doing nothing" — and the
+/// health ping, the health pong and the scheduler's own local candidate each did
+/// exactly that anyway. The doc comment had been there for weeks.
+///
+/// The effect was the opposite of load balancing, and worst on the most useful
+/// node in a swarm: a machine that only serves advertises a load of zero
+/// forever, so every coordinator sees it idle, keeps choosing it, and never
+/// observes it saturating. Measured 2026-08-20 with one GPU peer present.
+///
+/// This is enforced rather than documented because documenting it is precisely
+/// what failed.
+#[test]
+fn advertised_load_counts_every_kind_of_work() {
+    let root = repo_root();
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                if let Ok(t) = std::fs::read_to_string(&p) {
+                    sources.push((p, t));
+                }
+            }
+        }
+    }
+
+    let mut offenders: Vec<String> = Vec::new();
+    for (path, text) in &sources {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        // The helper itself is allowed to say why it does NOT use this map, and
+        // `update_restart` asks a different question — "is anything in flight at
+        // all", where either map answering yes is enough to defer a restart.
+        if rel == "src/daemon/state/mod.rs" || rel == "src/update_restart.rs" {
+            continue;
+        }
+        // The diagnostics dump prints BOTH maps side by side on purpose, so an
+        // operator can see them disagree. Collapsing it into the helper would
+        // destroy the comparison it exists to make.
+        let raw_comparison_is_the_point =
+            rel == "src/api/admin.rs" && text.contains("in_flight: {} traces, {} pipelines");
+        for (i, line) in text.lines().enumerate() {
+            let l = line.trim();
+            if l.starts_with("//") || l.starts_with("///") {
+                continue;
+            }
+            if l.contains("active_pipelines.len()") {
+                if raw_comparison_is_the_point && l.contains("ss.active_pipelines.len()") {
+                    continue;
+                }
+                // Reporting the map under its own name is honest and stays
+                // allowed — a `tracing` field spelled `active_pipelines = ...`
+                // claims to be the coordinator's map and is. What this test
+                // forbids is the map standing in for something broader, which
+                // is always spelled as a different word: `load`,
+                // `active_request_count`, `active_requests`.
+                if l.contains("active_pipelines =") {
+                    continue;
+                }
+                offenders.push(format!("{rel}:{}: {l}", i + 1));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "a load figure is being derived from `active_pipelines.len()`, which \
+         cannot see work this node does for peers or on its local fast path.\n\
+         Use `SharedState::active_inference_load()`.\n{}",
+        offenders.join("\n")
+    );
+}

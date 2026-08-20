@@ -920,7 +920,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "requests_served": state.shared_state.metrics.requests_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
         "forwards_served": state.shared_state.metrics.forwards_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
         "requests_made": requests_made,
-        "active_requests": state.shared_state.active_pipelines.len(),
+        "active_requests": state.shared_state.active_inference_load(),
         "hosted_shards": hosted_shards,
         "credits": credit_json,
         "hardware": hardware,

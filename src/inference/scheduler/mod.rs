@@ -921,7 +921,11 @@ impl PipelineScheduler {
             // directly. For remote nodes, take the max of health-ping report and local
             // pipeline tracking (health pings can be stale by up to ~5s).
             let active_load = if &node_id == local_node_id {
-                self.shared_state.active_pipelines.len() as f32
+                // Everything this node is doing, not just what the router
+                // assembled — a local split fast-path reply and a segment
+                // served for a peer both occupy the same GPU. See
+                // `SharedState::active_inference_load`.
+                self.shared_state.active_inference_load() as f32
             } else {
                 let health_ping_load = self
                     .shared_state

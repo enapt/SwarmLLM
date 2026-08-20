@@ -122,6 +122,19 @@ pub(super) async fn handle_layer_forward(
     let tp_meta = forward.tp_meta.clone();
     let requester_node_id = forward.requester_node_id;
 
+    // Mark the model busy for as long as this segment is computing.
+    //
+    // `record_peer_serve` below records that the work HAPPENED; this records
+    // that it is happening NOW, which is a different question and the one
+    // `active_inference_load` needs. Serving a segment was the one kind of work
+    // nothing counted at all: a node could be running segments back to back for
+    // the whole swarm and still advertise a load of zero, so every coordinator
+    // kept sending it more.
+    //
+    // RAII, so the count survives the several early returns below (worker
+    // failure, and the TP branch's encoding failures).
+    let _serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
+
     // Route forward pass to subprocess via process pool
     let result = shared_state.model_process_pool.forward(forward).await;
 

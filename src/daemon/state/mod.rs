@@ -1631,6 +1631,39 @@ impl SharedState {
             .and_then(|s| s.ranking_ms_per_layer())
     }
 
+    /// How many inference requests this node is working on **right now** — the
+    /// single answer to "how busy am I", for our own router and for every peer.
+    ///
+    /// This is the only number that spreads work across a swarm, so it has to
+    /// count all of the work, not one kind of it. Both halves matter:
+    ///
+    /// - `active_traces` — everything this node originated, whether it went
+    ///   through the router or took the local split fast path. `active_pipelines`
+    ///   covers only the first, which is why it is not used here.
+    /// - `serving_models` — everything this node is computing for other peers,
+    ///   whole models and pipeline segments alike.
+    ///
+    /// **Do not compute a load figure from `active_pipelines.len()`.** That map
+    /// is the *coordinator's* view — this file already documents, thirty lines
+    /// up, that "a node answering a peer's `RemoteGenerateRequest` or
+    /// `LayerForward` never appears in it, so anything that consults only
+    /// `active_pipelines` believes a pure-server node is doing nothing". The
+    /// health ping, the health pong and the scheduler's own local candidate all
+    /// did exactly that, so the figure a node advertised as its load was blind
+    /// to three of the four kinds of work it can be doing.
+    ///
+    /// The consequence was the opposite of load balancing, and it fell hardest
+    /// on the most useful node in a swarm: a machine that only ever serves —
+    /// which is what a dedicated GPU node is — appeared **permanently idle** to
+    /// everyone. Every coordinator's cost model saw `load = 0`, kept choosing
+    /// it, and had no way to observe it saturating. Measured 2026-08-20 with one
+    /// GPU peer in the swarm.
+    pub fn active_inference_load(&self) -> u32 {
+        let originated = self.active_traces.len() as u32;
+        let served: u32 = self.serving_models.iter().map(|e| e.in_flight).sum();
+        originated.saturating_add(served)
+    }
+
     /// What we have measured of this peer running a **whole model** for us, per
     /// layer, in ms. `None` when we have never delegated to it.
     ///

@@ -1527,7 +1527,7 @@ pub(crate) async fn dispatch_network_messages(
 
                                         // Respond with a pong containing our own load
                                         let ts = crate::types::unix_now_secs();
-                                        let our_load = shared_state.active_pipelines.len() as u32;
+                                        let our_load = shared_state.active_inference_load();
                                         let our_id = Some(shared_state.identity.node_id().clone());
                                         let pong = SwarmMessage::HealthPong {
                                             nonce,

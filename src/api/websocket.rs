@@ -601,7 +601,11 @@ async fn build_stats_message(state: &SharedState) -> String {
         "pool_peers": pool_peers,
         "remote_peers": remote_peers,
         "credits": credit_json,
-        "active_requests": state.active_pipelines.len(),
+        // Everything this node is doing, including what it is computing for
+        // peers. Reading `active_pipelines` here told the operator of a
+        // dedicated server node that it was handling nothing, however hard it
+        // was working — see `SharedState::active_inference_load`.
+        "active_requests": state.active_inference_load(),
         // Per-request progress for anything still pre-first-token. Rides the
         // existing 2s stats tick rather than a new message type — the cadence
         // suits a progress bar and there are deliberately only five WS types.

@@ -1490,6 +1490,53 @@ mod tests {
         state
     }
 
+    /// The figure a node advertises as its load must count work it is doing
+    /// FOR PEERS, not only work it started itself.
+    ///
+    /// A dedicated server — which is what a useful GPU node in a swarm is —
+    /// originates nothing, so `active_pipelines` is empty however hard it is
+    /// working. It advertised that emptiness as its load, so every coordinator
+    /// in the swarm saw it as permanently idle, kept routing to it, and had no
+    /// way to notice it saturating. The one signal that spreads work could not
+    /// see the work.
+    #[test]
+    fn a_node_serving_peers_does_not_advertise_itself_as_idle() {
+        let state = serving_test_state();
+        let a = crate::types::ModelId("a".into());
+        let b = crate::types::ModelId("b".into());
+
+        assert_eq!(state.active_inference_load(), 0, "genuinely idle");
+
+        let g1 = ServingGuard::new(&state, a.clone());
+        assert_eq!(
+            state.active_inference_load(),
+            1,
+            "serving one peer request is not idle"
+        );
+
+        let g2 = ServingGuard::new(&state, a.clone());
+        let g3 = ServingGuard::new(&state, b.clone());
+        assert_eq!(
+            state.active_inference_load(),
+            3,
+            "load must sum across concurrent requests and across models"
+        );
+
+        drop(g2);
+        drop(g3);
+        assert_eq!(
+            state.active_inference_load(),
+            1,
+            "finished work stops counting"
+        );
+        drop(g1);
+        assert_eq!(
+            state.active_inference_load(),
+            0,
+            "a node that has finished serving is idle again"
+        );
+    }
+
     /// A node that only ever answers OTHER people's requests must not read as
     /// idle. Before 2026-07-28 it did: `active_pipelines` is the coordinator's
     /// map and never contains peer-served work, so the hard-unload ceiling
