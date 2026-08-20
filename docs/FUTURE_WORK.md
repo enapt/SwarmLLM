@@ -9034,3 +9034,81 @@ consumer is unverified — with the twist that here it was a *measurement* rathe
 than an announcement, so nothing was wrong with the number. It simply had nowhere
 to go, and the routing consequence was invisible because the wrong-shaped figure
 silently stood in for it.
+
+## The reply stream has no reliability layer, so concurrency truncates answers (measured 2026-08-20)
+
+**This is the blocker for using more than one machine at a time.** It is not a
+routing problem and no cost-model change reaches it.
+
+### What was measured
+
+Eight concurrent 60-token requests, coordinator on a home connection, holders
+including an RTX 4050 about 450 ms away. Three of the requests served by that
+card returned **3, 3 and 18 tokens** instead of 60, after 22 s, 79 s and 81 s —
+and every one of them was reported to the caller as a successful completion,
+with `outcome=ok` in the trace and `finish_reason: "stop"` on the wire. The
+client is told the model chose to stop after three tokens.
+
+The daemon knows. It logs `remote-generate: gave up on tokens that never
+arrived — returning what did`, with `emitted=3 missing=57`, immediately followed
+by `peer reported more tokens than were delivered`. The peer generated the whole
+answer; the network lost it.
+
+### Why it happens
+
+Every `StreamingToken` is an **independent `request_response` send** — one
+substream per token, fire and forget. There is no acknowledgement, no
+retransmission, and no sequencing beyond the `token_id` the reassembler uses to
+detect the gap it cannot fill. libp2p rr is documented elsewhere in this
+codebase as silently dropping sends under load (it is why `RR_ACK_TIMEOUT_SECS`
+exists on the request side). Under concurrency the drop rate rises, and one lost
+token truncates the reply permanently, because `StreamReassembler` may only
+release the consecutive run — emitting past a hole would silently reorder the
+answer, which is worse.
+
+So the failure scales with exactly the thing we want to scale: the more
+concurrent streams a swarm carries, the shorter its answers get.
+
+`inference.persistent_pipeline_stream` exists and would be the obvious remedy,
+but it covers only the **activation forward** path in `pipeline/distributed.rs`.
+The token *return* path has no equivalent and is always per-token rr.
+
+### Fixed already, because it made the damage compound
+
+A truncated stream was being recorded as a measurement of the peer's speed. Both
+halves of that arithmetic are corrupted in the same direction — elapsed time
+inflated by the give-up deadline, token count collapsed by the loss — so the
+division produced 345 ms/layer for a card that had measured 3.1 ms/layer on the
+same model minutes earlier. Since a delegated observation outranks a peer's
+advertised speed, **a transport failure demoted the swarm's only GPU behind a
+laptop CPU** for the ten minutes such a figure takes to expire, and every request
+in that window was routed to slower hardware. `delegated_sample_is_usable` now
+refuses those samples.
+
+That fix stops the amplification. It does not stop the truncation.
+
+### The options, in increasing order of work
+
+1. **Report it honestly.** A reply that lost 57 of 60 tokens is not a success and
+   must not claim `finish_reason: "stop"`. Treating it as a transient remote
+   failure would let the existing `is_transient_remote_failure` machinery
+   re-route to another holder, which is strictly better for the user than three
+   words. The hesitation is load amplification: retries are triggered by exactly
+   the congestion that caused the loss, so this wants a cap, and a cap is a
+   constant that needs justifying. A partial answer that is *labelled* partial
+   may be the cheaper honest step.
+2. **Acknowledge and retransmit tokens.** The reassembler already knows precisely
+   which ids are missing — `missing()` is computed and logged. A NACK naming the
+   gap, answered from a small send-side buffer, would recover the common case of
+   one or two dropped tokens without a transport change. Additive, and gateable
+   on a feature bit per the protocol-evolution rule.
+3. **Carry the reply on a persistent stream**, as the activation path already
+   can. Largest change, and the one that removes the failure mode rather than
+   compensating for it.
+
+### Do not conclude a peer is slow from this
+
+Any future measurement of a remote peer under concurrency must check for
+truncation first. Three separate figures in one afternoon said the RTX 4050 was
+the slowest node in the swarm; all three were the network losing tokens, and the
+same card measured 20.0 tok/s sequentially against its advertised 20.45.

@@ -20,6 +20,33 @@ use crate::types::{NetworkCommand, NetworkFinishReason, RemoteGenerateRequest};
 
 use super::PipelineExecutor;
 
+/// May this completed request be used as a measurement of the peer's speed?
+///
+/// Extracted so the rule is testable without a network: the decision is made
+/// deep inside a streaming loop, and every input that decides it is already
+/// known by the time the reply is assembled.
+///
+/// A truncated stream is disqualified, and taking such a sample is worse than
+/// taking none. Both halves of the arithmetic are corrupted in the same
+/// direction — the elapsed time includes the deadline spent waiting for tokens
+/// that never came, while the token count is the truncated one — so the
+/// division yields the give-up timeout over the handful that survived rather
+/// than a decode rate.
+///
+/// Measured live 2026-08-20: three requests to an RTX 4050 lost tokens in
+/// transit and returned 3, 3 and 18 of 60. Those recorded the card at 345
+/// ms/layer against the 3.1 it had measured minutes earlier on the same model,
+/// and since a delegated observation outranks a peer's advertised speed, it
+/// demoted the swarm's only GPU behind a laptop CPU for the ten minutes such a
+/// figure takes to expire. A transport failure was being recorded as a fact
+/// about the hardware.
+///
+/// The single-token case is excluded for the older reason: with one token
+/// `total - ttft` is zero and says nothing about decode speed at all.
+fn delegated_sample_is_usable(truncated: bool, completion_tokens: u32, layers: u32) -> bool {
+    !truncated && completion_tokens > 1 && layers > 0
+}
+
 /// Burst budget for one full generation before backpressure applies to the
 /// remote-generate token stream. Sized to comfortably hold a long completion's
 /// worth of tokens without blocking the inbound dispatch task.
@@ -597,6 +624,9 @@ impl PipelineExecutor {
         // Clamping down only. A peer under-reporting is its own problem and not
         // one to paper over by inventing usage the caller cannot see.
         let delivered = stream.emitted();
+        // Tokens went missing in transit. Remembered because it also disqualifies
+        // this request as a speed measurement — see the sample below.
+        let stream_was_truncated = completion_tokens > delivered;
         if completion_tokens > delivered {
             tracing::warn!(
                 %request_id,
@@ -618,12 +648,34 @@ impl PipelineExecutor {
         //
         // Needs at least two tokens: with one, `total - ttft` is zero and says
         // nothing about decode speed at all.
+        // A truncated stream is not a speed measurement, and taking one is worse
+        // than taking none.
+        //
+        // Both halves of the arithmetic are corrupted, in the same direction.
+        // The elapsed time includes the deadline we spent waiting for tokens
+        // that never came, and the token count is the truncated one we clamped
+        // to just above — so a division meant to yield "ms per token of steady
+        // decoding" instead yields the give-up timeout divided by the handful
+        // that survived.
+        //
+        // Measured live 2026-08-20: three requests to an RTX 4050 lost their
+        // tokens in transit and returned 3, 3 and 18 of 60. That recorded the
+        // card at **345 ms/layer** — against the 3.1 ms/layer the same peer had
+        // measured minutes earlier on the same model — and since a delegated
+        // observation outranks a peer's advertised speed, it demoted the only
+        // GPU in the swarm behind a laptop CPU for the ten minutes the figure
+        // takes to expire. A transport failure was being recorded as a fact
+        // about the hardware.
+        //
+        // Same family as the cold-sample rule above it: a cold sample is a load
+        // time wearing a compute figure's clothes, and this is a timeout wearing
+        // the same disguise.
         if let Some(ttft) = first_token_at {
             let steady = sent_at
                 .elapsed()
                 .saturating_sub(ttft.duration_since(sent_at));
             let layers = segment.layer_range.1.saturating_sub(segment.layer_range.0);
-            if completion_tokens > 1 && layers > 0 {
+            if delegated_sample_is_usable(stream_was_truncated, completion_tokens, layers) {
                 let per_token_ms = steady.as_millis() as u64 / u64::from(completion_tokens - 1);
                 self.shared_state.record_peer_segment_latency(
                     &segment.node_id,
@@ -968,5 +1020,34 @@ mod stream_reassembly_tests {
             1,
             "token 2 is held, never emitted out of order"
         );
+    }
+
+    /// A reply that lost tokens in transit must not set the peer's speed. This
+    /// is the fix for a live incident: a transport failure recorded an RTX 4050
+    /// at 345 ms/layer against its real 3.1, which demoted the swarm's only GPU
+    /// behind a laptop CPU until the figure expired.
+    #[test]
+    fn a_truncated_stream_is_not_a_speed_measurement() {
+        assert!(
+            !super::delegated_sample_is_usable(true, 60, 16),
+            "a stream that lost tokens must not be measured, however many arrived"
+        );
+        assert!(
+            !super::delegated_sample_is_usable(true, 3, 16),
+            "the badly truncated case is the one that poisoned the EMA"
+        );
+        assert!(
+            super::delegated_sample_is_usable(false, 60, 16),
+            "an intact reply is exactly what we want to measure"
+        );
+    }
+
+    /// The pre-existing guards still hold: one token cannot describe a decode
+    /// rate, and a zero-layer segment cannot be normalised.
+    #[test]
+    fn a_sample_still_needs_more_than_one_token_and_some_layers() {
+        assert!(!super::delegated_sample_is_usable(false, 1, 16));
+        assert!(!super::delegated_sample_is_usable(false, 0, 16));
+        assert!(!super::delegated_sample_is_usable(false, 60, 0));
     }
 }
