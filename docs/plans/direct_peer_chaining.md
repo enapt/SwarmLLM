@@ -4,6 +4,42 @@
 end-to-end validation incomplete. This document is the case for doing it, the
 prior art it rests on, the design, and what is still unproven.
 
+### Six defects, all found by review rather than by running it (2026-08-21)
+
+Worth listing, because the pattern is consistent: every one is silent. None
+produces an error at the point it goes wrong; each either hangs the request or
+returns a plausible-looking wrong answer.
+
+1. **The tail replied to its predecessor, not the coordinator.** A segment
+   answered whoever sent it the activations. Mid-chain that node has handed the
+   work on and is not waiting. Every chained request would have hung.
+2. **`is_last` was asked of the head.** A run whose tail is the final segment was
+   not recognised as finishing the pipeline, so the answer arrived and was walked
+   past.
+3. **Chaining was gated on `generated_ids.is_empty()`** — a value that
+   accumulates the completion, so it is true only before the prompt pass. The
+   feature was disabled for the entire per-token phase, which is where the round
+   trips are and the only reason it exists. The right question is whether the
+   sampler will NEED those ids: `frequency_penalty != 0 || presence_penalty != 0`.
+4. **A hop that could not forward returned its own activations.** They cover only
+   its layers, and the coordinator has already skipped the rest of the run — so a
+   partial tensor of entirely plausible size would be fed onward as though the
+   whole chain had computed it. It now sends an error.
+5. **A rejected result could skip work nothing had done.** The run was marked
+   complete when a reply arrived, before the check that can still reject it for a
+   wrong activation shape; that failover replaces one holder, so the loop resumed
+   past hops nothing had computed.
+6. **Any hop's failure report was discarded.** The waiter is pinned to the tail,
+   so a report from anywhere else — including the head, which the pin no longer
+   covers once a chain is planned — was dropped as belonging to a request no
+   longer waiting on it, and the request sat until its deadline. Every node of
+   the run may now report.
+
+A seventh, in the terminal-frame repeat added alongside: a stale copy from an
+abandoned attempt could land in a retry of the same request id and kill it. The
+reply stream now records which peer the current attempt is being served by. See
+gotchas #349 and #350.
+
 ### Validation as it stands (2026-08-20)
 
 Unit level: 11 tests, including that a local segment ends a run — which is what
