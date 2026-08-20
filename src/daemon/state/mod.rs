@@ -173,12 +173,14 @@ impl Drop for ServingGuard {
 pub struct PendingLayerResult {
     pub tx: tokio::sync::oneshot::Sender<crate::types::LayerResult>,
     pub awaiting: Option<crate::types::NodeId>,
-    /// The other nodes of a chained run, which may also answer.
+    /// Every node of a chained run — including the head — any of which may
+    /// report a failure.
     ///
     /// A chain is handed over in one message and normally answers from its
-    /// tail, which is what `awaiting` pins. But a hop part-way along that
-    /// cannot reach ITS successor has to say so, and that report comes from a
-    /// node the coordinator never sent to — so without this it would be
+    /// tail, which is what `awaiting` pins. But ANY hop that cannot reach its
+    /// successor has to say so — including the head, which `awaiting` no longer
+    /// covers once a chain is planned — and for every hop but the head that
+    /// report comes from a node the coordinator never sent to — so without this it would be
     /// discarded as "a result from a node this request is no longer waiting
     /// on", and the request would sit until its deadline expired rather than
     /// failing in the fraction of a second it took to find out.
@@ -3110,18 +3112,25 @@ mod pending_layer_result_tests {
     /// whole deadline instead of failing in the moment it took to find out.
     #[test]
     fn a_hop_partway_along_a_chain_can_report_a_failure() {
+        let head = NodeId([1u8; 32]);
         let tail = NodeId([9u8; 32]);
         let middle = NodeId([5u8; 32]);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let pending = PendingLayerResult {
             tx,
             awaiting: Some(tail.clone()),
-            chain_members: vec![middle.clone(), tail.clone()],
+            chain_members: vec![head.clone(), middle.clone(), tail.clone()],
         };
         assert!(pending.accepts(Some(&tail)), "the tail answers normally");
         assert!(
             pending.accepts(Some(&middle)),
             "and a hop along the way can report a failure"
+        );
+        assert!(
+            pending.accepts(Some(&head)),
+            "and so can the head, which `awaiting` no longer covers once a \
+             chain is planned — leaving it out would keep the hang for a run \
+             of two, which is the most common chain there is"
         );
         assert!(
             !pending.accepts(Some(&NodeId([7u8; 32]))),

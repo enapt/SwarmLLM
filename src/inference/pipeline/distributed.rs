@@ -954,7 +954,16 @@ impl PipelineExecutor {
                         awaiting: Some(awaiting_node.clone()),
                         // Any hop of the run may report a failure it cannot
                         // recover from; see `PendingLayerResult::chain_members`.
-                        chain_members: chain.iter().map(|h| h.node_id.clone()).collect(),
+                        //
+                        // Includes the HEAD, which `awaiting` does not cover
+                        // once a chain is planned — that pins the tail. A head
+                        // that cannot reach its successor has exactly the same
+                        // problem as a hop part-way along, and leaving it out
+                        // would have kept the hang this is here to prevent for
+                        // the most common chain of all: a run of two.
+                        chain_members: std::iter::once(segment.node_id.clone())
+                            .chain(chain.iter().map(|h| h.node_id.clone()))
+                            .collect(),
                     },
                 );
                 // NOTE: the dsd.rs / speculative.rs PendingLayerResultGuard
