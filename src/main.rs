@@ -170,6 +170,9 @@ enum Commands {
         /// Prompts longer than this (tokens) are not inserted (default 8192)
         #[arg(long, default_value = "8192")]
         prefix_cache_max_prompt_tokens: u32,
+        /// Max megabytes of prefix KV retained per model, 0 for no byte bound (default 2048)
+        #[arg(long, default_value = "2048")]
+        prefix_cache_max_mb: u32,
         /// Block granularity for the cross-node prefix-sharing manifest (default 64)
         #[arg(long, default_value = "64")]
         prefix_cache_block_tokens: u32,
@@ -408,6 +411,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             prefix_cache_enabled,
             prefix_cache_max_entries,
             prefix_cache_max_prompt_tokens,
+            prefix_cache_max_mb,
             prefix_cache_block_tokens,
             prefix_cache_min_tokens,
             swift_self_speculative,
@@ -432,6 +436,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
                 enabled: prefix_cache_enabled,
                 max_entries: prefix_cache_max_entries as usize,
                 max_prompt_tokens: prefix_cache_max_prompt_tokens as usize,
+                max_bytes: prefix_cache_max_mb as usize * 1024 * 1024,
                 block_tokens: prefix_cache_block_tokens as usize,
                 min_tokens: prefix_cache_min_tokens as usize,
             };

@@ -963,6 +963,7 @@ impl SharedState {
             state.config.inference.prefix_cache_max_prompt_tokens,
             state.config.inference.prefix_cache_block_tokens,
             state.config.inference.prefix_cache_min_tokens,
+            state.config.inference.prefix_cache_max_mb,
         );
         state.model_process_pool.set_swift_config(
             state.config.inference.swift_self_speculative,

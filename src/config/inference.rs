@@ -403,6 +403,22 @@ pub struct InferenceConfig {
     /// this low if you have many distinct models loaded. Default 16.
     #[serde(default = "default_prefix_cache_max_entries")]
     pub prefix_cache_max_entries: u32,
+    /// Maximum megabytes of prefix KV retained per model. 0 disables the byte
+    /// bound.
+    ///
+    /// The retention bound that expresses memory. `prefix_cache_max_entries`
+    /// caps how many entries are held, which says nothing about how much they
+    /// weigh: an entry scales with its prompt, so at the insert ceiling on a
+    /// 3B model one can reach about 1.9 GB and sixteen distinct long
+    /// conversations could retain about 30 GB. Covered-prefix pruning keeps a
+    /// growing conversation to one entry, so reaching that needs many DISTINCT
+    /// long prompts against one model — rare, but nothing prevented it.
+    ///
+    /// 2048 MB is deliberately generous: this cache exists to avoid re-running
+    /// prefill, which is the expensive half of a long request, and the bound is
+    /// here to stop an unbounded case rather than to keep the cache small.
+    #[serde(default = "default_prefix_cache_max_mb")]
+    pub prefix_cache_max_mb: u32,
     /// Prompts longer than this many tokens are NOT inserted into the
     /// prefix cache (too memory-heavy). Lookups still run against the
     /// existing cache. Default 8192.
@@ -583,6 +599,10 @@ fn default_batched_prefill_forward() -> bool {
 
 fn default_tp_max_latency_ms() -> u32 {
     10
+}
+
+fn default_prefix_cache_max_mb() -> u32 {
+    2048
 }
 
 fn default_prefix_cache_max_entries() -> u32 {
@@ -1049,6 +1069,7 @@ impl Default for InferenceConfig {
             tp_max_latency_ms: default_tp_max_latency_ms(),
             prefix_cache_enabled: true,
             prefix_cache_max_entries: default_prefix_cache_max_entries(),
+            prefix_cache_max_mb: default_prefix_cache_max_mb(),
             prefix_cache_max_prompt_tokens: default_prefix_cache_max_prompt_tokens(),
             prefix_cache_block_tokens: default_prefix_cache_block_tokens(),
             prefix_cache_min_tokens: default_prefix_cache_min_tokens(),

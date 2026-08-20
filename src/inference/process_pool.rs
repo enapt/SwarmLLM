@@ -832,6 +832,7 @@ pub struct ModelProcessPool {
     prefix_cache_enabled: std::sync::atomic::AtomicBool,
     prefix_cache_max_entries: std::sync::atomic::AtomicU32,
     prefix_cache_max_prompt_tokens: std::sync::atomic::AtomicU32,
+    prefix_cache_max_mb: std::sync::atomic::AtomicU32,
     prefix_cache_block_tokens: std::sync::atomic::AtomicU32,
     prefix_cache_min_tokens: std::sync::atomic::AtomicU32,
     /// SWIFT (arxiv 2410.06916) self-speculative decoding settings applied
@@ -953,6 +954,7 @@ impl ModelProcessPool {
             prefix_cache_enabled: std::sync::atomic::AtomicBool::new(true),
             prefix_cache_max_entries: std::sync::atomic::AtomicU32::new(16),
             prefix_cache_max_prompt_tokens: std::sync::atomic::AtomicU32::new(8192),
+            prefix_cache_max_mb: std::sync::atomic::AtomicU32::new(2048),
             prefix_cache_block_tokens: std::sync::atomic::AtomicU32::new(64),
             prefix_cache_min_tokens: std::sync::atomic::AtomicU32::new(32),
             swift_self_speculative: std::sync::atomic::AtomicBool::new(false),
@@ -1745,11 +1747,13 @@ impl ModelProcessPool {
         max_prompt_tokens: u32,
         block_tokens: u32,
         min_tokens: u32,
+        max_mb: u32,
     ) {
         use std::sync::atomic::Ordering;
         self.prefix_cache_enabled.store(enabled, Ordering::Relaxed);
         self.prefix_cache_max_entries
             .store(max_entries, Ordering::Relaxed);
+        self.prefix_cache_max_mb.store(max_mb, Ordering::Relaxed);
         self.prefix_cache_max_prompt_tokens
             .store(max_prompt_tokens, Ordering::Relaxed);
         self.prefix_cache_block_tokens
@@ -2096,6 +2100,8 @@ impl ModelProcessPool {
                     .load(Ordering::Relaxed)
                     .to_string(),
             );
+            args.push("--prefix-cache-max-mb".to_string());
+            args.push(self.prefix_cache_max_mb.load(Ordering::Relaxed).to_string());
             args.push("--prefix-cache-block-tokens".to_string());
             args.push(
                 self.prefix_cache_block_tokens

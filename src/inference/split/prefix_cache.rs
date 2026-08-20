@@ -134,6 +134,25 @@ pub struct KvSnapshot {
     pub max_seq_len: usize,
 }
 
+impl KvSnapshot {
+    /// Bytes of device memory this snapshot holds.
+    ///
+    /// The number the retention bound actually needs. An entry's size scales
+    /// with its prompt, so a count of entries says nothing useful about
+    /// memory: at the insert ceiling on a 3B model one entry can reach about
+    /// 1.9 GB, and sixteen of them about 30 GB.
+    pub fn bytes(&self) -> usize {
+        self.layers
+            .iter()
+            .flatten()
+            .map(|(k, v)| {
+                k.elem_count() * k.dtype().size_in_bytes()
+                    + v.elem_count() * v.dtype().size_in_bytes()
+            })
+            .sum()
+    }
+}
+
 struct Entry {
     tokens: Vec<u32>,
     snapshot: Arc<KvSnapshot>,
@@ -169,7 +188,21 @@ pub struct PrefixCache {
     clock: AtomicU64,
     /// Maximum entries retained per model. Older entries (by `last_hit`)
     /// are evicted when the cap is exceeded.
+    ///
+    /// A SECONDARY bound. It caps the linear lookup walk, not memory — see
+    /// `max_bytes`, which is the one that expresses what actually needs
+    /// bounding.
     max_entries: usize,
+    /// Maximum bytes of KV retained per model, or 0 for no byte bound.
+    ///
+    /// The bound that matters. Entry size scales with prompt length, so a
+    /// count cap does not express memory at all: at the insert ceiling on a 3B
+    /// model a single entry can reach about 1.9 GB, and sixteen distinct long
+    /// conversations against one model could in principle retain about 30 GB.
+    /// Covered-prefix pruning keeps a growing conversation to one entry, so
+    /// reaching that needs many DISTINCT long prompts — rare, but nothing
+    /// prevented it.
+    max_bytes: usize,
     /// Minimum prefix length (tokens) below which lookups return miss and
     /// inserts are skipped. Avoids caching trivial prompts.
     min_tokens: usize,
@@ -193,6 +226,7 @@ impl PrefixCache {
         block_tokens: usize,
         min_tokens: usize,
         max_prompt_tokens: usize,
+        max_bytes: usize,
     ) -> Self {
         Self {
             inner: RwLock::new(Inner {
@@ -200,6 +234,7 @@ impl PrefixCache {
             }),
             clock: AtomicU64::new(0),
             max_entries,
+            max_bytes,
             min_tokens,
             max_prompt_tokens,
             block_tokens,
@@ -449,11 +484,31 @@ impl PrefixCache {
             last_hit: AtomicU64::new(tick),
         });
 
-        // Evict LRU until within cap.
+        // Evict LRU until within both caps.
+        //
+        // Count first, because it is cheap and bounds the linear lookup walk.
+        // Then bytes, which is the bound that expresses memory: entries are
+        // sized by their prompt, so staying under sixteen of them says nothing
+        // about how much is being held.
         if bucket.len() > self.max_entries {
             bucket.sort_by_key(|e| e.last_hit.load(Ordering::Relaxed));
             let drop_count = bucket.len() - self.max_entries;
             bucket.drain(..drop_count);
+        }
+        if self.max_bytes > 0 {
+            let mut total: usize = bucket.iter().map(|e| e.snapshot.bytes()).sum();
+            if total > self.max_bytes {
+                bucket.sort_by_key(|e| e.last_hit.load(Ordering::Relaxed));
+                // Never evict everything: the entry just inserted is the most
+                // recently used, and dropping it would mean this prefill paid
+                // to snapshot itself and kept nothing. A single entry over
+                // budget is a signal to lower `prefix_cache_max_prompt_tokens`,
+                // not a reason to hold nothing at all.
+                while total > self.max_bytes && bucket.len() > 1 {
+                    let dropped = bucket.remove(0);
+                    total = total.saturating_sub(dropped.snapshot.bytes());
+                }
+            }
         }
 
         let entry_count = bucket.len();
@@ -605,6 +660,20 @@ impl PrefixCache {
             .read()
             .ok()
             .and_then(|i| i.per_model.get(model_key).map(|v| v.len()))
+            .unwrap_or(0)
+    }
+
+    /// Bytes of KV currently held for a model. The figure the byte budget
+    /// bounds, and the one a count of entries cannot express.
+    pub fn bytes_held(&self, model_key: &str) -> usize {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|i| {
+                i.per_model
+                    .get(model_key)
+                    .map(|b| b.iter().map(|e| e.snapshot.bytes()).sum())
+            })
             .unwrap_or(0)
     }
 }
@@ -999,19 +1068,19 @@ mod tests {
 
     #[test]
     fn lookup_miss_when_disabled() {
-        let pc = PrefixCache::new(false, 8, 32, 8, 8192);
+        let pc = PrefixCache::new(false, 8, 32, 8, 8192, 0);
         assert!(pc.lookup("m", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).is_none());
     }
 
     #[test]
     fn lookup_miss_below_min_tokens() {
-        let pc = PrefixCache::new(true, 8, 32, 8, 8192);
+        let pc = PrefixCache::new(true, 8, 32, 8, 8192, 0);
         assert!(pc.lookup("m", &[1, 2, 3]).is_none());
     }
 
     #[test]
     fn insert_and_lookup_exact_prefix() {
-        let pc = PrefixCache::new(true, 8, 0, 4, 8192);
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
 
@@ -1030,7 +1099,7 @@ mod tests {
         // One entry at the full prompt length; a partially-overlapping prompt
         // hits at the WHOLE shared prefix (6), not a block boundary (the old
         // per-boundary storage could only offer 4).
-        let pc = PrefixCache::new(true, 16, 4, 4, 8192);
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
 
@@ -1055,7 +1124,7 @@ mod tests {
         // Gotcha #312: this used to create one entry PER block boundary
         // (3 here; 45 for a real 2.9k-token prompt), each an independent
         // full-prefix KV copy — quadratic time and memory.
-        let pc = PrefixCache::new(true, 16, 4, 4, 8192);
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
@@ -1067,7 +1136,7 @@ mod tests {
 
     #[test]
     fn repeated_identical_insert_skips_the_copy() {
-        let pc = PrefixCache::new(true, 16, 4, 4, 8192);
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         let tokens: Vec<u32> = (1..=8).collect();
 
@@ -1109,7 +1178,7 @@ mod tests {
     fn growing_conversation_keeps_one_entry() {
         // Turn 2's prompt extends turn 1's, so turn 1's entry is fully
         // covered by the new one and must be pruned, not accumulated.
-        let pc = PrefixCache::new(true, 16, 4, 4, 8192);
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
         pc.insert_from_kv("m", "req-a", &kv_store, &(1..=8).collect::<Vec<_>>());
@@ -1125,7 +1194,7 @@ mod tests {
     fn identical_prompt_hits_at_len_minus_one() {
         // Re-asking the exact cached prompt used to MISS (the entry could
         // not leave a token to forward). Narrowing serves it at len - 1.
-        let pc = PrefixCache::new(true, 16, 4, 4, 8192);
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens: Vec<u32> = (1..=10).collect();
@@ -1137,7 +1206,7 @@ mod tests {
 
     #[test]
     fn miss_when_no_shared_prefix() {
-        let pc = PrefixCache::new(true, 8, 0, 4, 8192);
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens_a: Vec<u32> = (1..=10).collect();
@@ -1149,7 +1218,7 @@ mod tests {
 
     #[test]
     fn hydrate_copies_snapshot_into_kv_store() {
-        let pc = PrefixCache::new(true, 8, 0, 4, 8192);
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens: Vec<u32> = (1..=10).collect();
@@ -1210,7 +1279,7 @@ mod tests {
     #[test]
     fn insert_from_kv_returns_block_manifest() {
         // block=4 → 12 tokens → 3 blocks
-        let pc = PrefixCache::new(true, 8, 4, 4, 8192);
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
@@ -1227,7 +1296,7 @@ mod tests {
         // Two entries whose tokens share a 4-token prefix. They each insert
         // their own snapshot, but the chained hash for the shared block is
         // identical → manifest must dedup.
-        let pc = PrefixCache::new(true, 8, 4, 4, 8192);
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
         make_fake_kv(&kv_store, "m", "req-b", 2, 8);
@@ -1248,7 +1317,7 @@ mod tests {
 
     #[test]
     fn enumerate_manifest_zero_block_size_is_empty() {
-        let pc = PrefixCache::new(true, 8, 0, 4, 8192);
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
         let _ = pc.insert_from_kv("m", "req-a", &kv_store, &(1..=8).collect::<Vec<_>>());
@@ -1385,7 +1454,7 @@ mod tests {
     #[test]
     fn export_snapshot_bytes_roundtrips_to_hashed_block() {
         // block=4 so a 12-token prompt inserts hashes at 4, 8, 12.
-        let pc = PrefixCache::new(true, 8, 4, 4, 8192);
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
@@ -1473,7 +1542,7 @@ mod tests {
 
     #[test]
     fn export_snapshot_bytes_miss_on_unknown_hash() {
-        let pc = PrefixCache::new(true, 8, 4, 4, 8192);
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
         let tokens: Vec<u32> = (1..=8).collect();
@@ -1508,7 +1577,7 @@ mod tests {
 
     #[test]
     fn lru_eviction_drops_oldest() {
-        let pc = PrefixCache::new(true, 2, 0, 4, 8192);
+        let pc = PrefixCache::new(true, 2, 0, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
 
         for (i, req) in ["r1", "r2", "r3"].iter().enumerate() {
@@ -1518,5 +1587,66 @@ mod tests {
         }
 
         assert_eq!(pc.entry_count("m"), 2);
+    }
+
+    /// The bound that actually expresses memory. Counting entries says nothing
+    /// about how much is held, because an entry is sized by its prompt: at the
+    /// insert ceiling on a 3B model one can reach about 1.9 GB, so sixteen
+    /// distinct long conversations could retain about 30 GB while never
+    /// exceeding a cap of sixteen.
+    #[test]
+    fn the_byte_budget_evicts_even_when_the_entry_count_is_fine() {
+        // Room for plenty of entries, but only enough bytes for a couple.
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "probe", 2, 10);
+        let one = {
+            let pc = PrefixCache::new(true, 64, 0, 4, 8192, 0);
+            pc.insert_from_kv("m", "probe", &kv_store, &(0u32..10).collect::<Vec<_>>());
+            pc.bytes_held("m")
+        };
+        assert!(one > 0, "a snapshot must weigh something");
+
+        let pc = PrefixCache::new(true, 64, 0, 4, 8192, one * 2);
+        for (i, req) in ["r1", "r2", "r3", "r4", "r5"].iter().enumerate() {
+            make_fake_kv(&kv_store, "m", req, 2, 10);
+            let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
+            pc.insert_from_kv("m", req, &kv_store, &tokens);
+        }
+        assert!(
+            pc.entry_count("m") < 5,
+            "the byte budget must evict even though the entry cap was never reached"
+        );
+        assert!(
+            pc.bytes_held("m") <= one * 2,
+            "held bytes must stay within budget, got {}",
+            pc.bytes_held("m")
+        );
+    }
+
+    /// Never evict down to nothing. The entry just inserted is the most
+    /// recently used, and dropping it would mean the prefill paid to snapshot
+    /// itself and kept nothing at all. A single entry over budget is a reason
+    /// to lower the insert ceiling, not to hold nothing.
+    #[test]
+    fn a_budget_smaller_than_one_entry_still_keeps_that_entry() {
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let pc = PrefixCache::new(true, 64, 0, 4, 8192, 1);
+        make_fake_kv(&kv_store, "m", "r1", 2, 10);
+        pc.insert_from_kv("m", "r1", &kv_store, &(0u32..10).collect::<Vec<_>>());
+        assert_eq!(pc.entry_count("m"), 1);
+    }
+
+    /// A zero budget means no byte bound, which is what every existing caller
+    /// and every other test relies on.
+    #[test]
+    fn a_zero_budget_is_unbounded() {
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let pc = PrefixCache::new(true, 64, 0, 4, 8192, 0);
+        for (i, req) in ["r1", "r2", "r3", "r4"].iter().enumerate() {
+            make_fake_kv(&kv_store, "m", req, 2, 10);
+            let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
+            pc.insert_from_kv("m", req, &kv_store, &tokens);
+        }
+        assert_eq!(pc.entry_count("m"), 4);
     }
 }

@@ -62,6 +62,8 @@ pub struct PrefixCacheConfig {
     pub enabled: bool,
     pub max_entries: usize,
     pub max_prompt_tokens: usize,
+    /// Maximum bytes of KV retained per model. 0 disables the byte bound.
+    pub max_bytes: usize,
     pub block_tokens: usize,
     pub min_tokens: usize,
 }
@@ -72,6 +74,7 @@ impl Default for PrefixCacheConfig {
             enabled: true,
             max_entries: 16,
             max_prompt_tokens: 8192,
+            max_bytes: 2048 * 1024 * 1024,
             block_tokens: 64,
             min_tokens: 32,
         }
@@ -218,6 +221,7 @@ pub async fn run_worker(
         prefix_cfg.block_tokens,
         prefix_cfg.min_tokens,
         prefix_cfg.max_prompt_tokens,
+        prefix_cfg.max_bytes,
     ));
     tracing::info!(
         enabled = prefix_cfg.enabled,

@@ -125,6 +125,7 @@ booted with.
 |---|---|---|---|
 | `prefix_cache_enabled` | boolean | `true` | Reuse prefill KV across requests sharing a prompt prefix — covers both multi-turn and the same system prompt from different users |
 | `prefix_cache_max_entries` | integer | `16` | Cached prefix snapshots retained per model |
+| `prefix_cache_max_mb` | integer | `2048` | Max megabytes of prefix KV retained per model, `0` for no byte bound. This is the bound that expresses memory: `prefix_cache_max_entries` caps how many entries are kept, which says nothing about their weight, since an entry scales with its prompt. At the insert ceiling on a 3B model one entry can reach ~1.9 GB, so sixteen distinct long conversations could retain ~30 GB without ever exceeding the count cap |
 | `prefix_cache_max_prompt_tokens` | integer | `8192` | Prompts longer than this are not inserted |
 | `prefix_cache_block_tokens` | integer | `64` | Block alignment for the chained-hash manifest, and the granularity of a partial hit |
 | `prefix_cache_min_tokens` | integer | `32` | Shortest prefix worth caching |
