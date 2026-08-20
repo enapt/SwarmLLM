@@ -4,6 +4,45 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.107-alpha] — 2026-08-21
+
+**Your machine gets more done when several people are asking at once.** Requests
+now run through the model together instead of one after another, which shares the
+expensive part — reading the model's weights — across all of them rather than
+paying it for each. On a graphics card with twelve people waiting, that is about
+16% more work from the same hardware, and it costs nothing when only one person
+is asking. It was switched off before, described as the safe option, and had been
+left that way for a long time.
+
+**And a groundwork release for large models.** Today, when a model is spread
+across several machines, every step of the answer travels back to your computer
+before going on to the next machine — so a model split eight ways costs eight
+round trips for every word it writes. That is backwards for exactly the models a
+swarm exists to run, since a bigger model needs more machines.
+
+Machines can now pass the work directly to each other instead, which costs one
+trip out and one back however many are involved. It is **off by default** while it
+is proven on real hardware, and turning it on cannot make things worse: anything
+it cannot do falls back to the way it works today. Prompt privacy is unaffected,
+because your own machine still holds the first and last pieces.
+
+If you would like to help test it, set `pipeline_chaining = true` under
+`[inference]` on machines that hold parts of the same model.
+
+### Also in this release
+
+- **A correction.** An earlier note in this release's development claimed
+  batching gave 40% more throughput. It did not — that number came from a flaw in
+  our own benchmark, which has been fixed. The real figures are above, and the
+  benchmark now refuses to compare runs that are not comparable.
+- Two faults in the new machine-to-machine path were found and fixed before
+  release: a result being sent back to the wrong machine, and the last machine in
+  a chain not being recognised as having finished. Both would have caused a
+  request to hang rather than fail, which is worse.
+- The test harness for split models was quietly measuring the wrong computer —
+  it could see a machine on the same network that held the whole model, and sent
+  everything there. Any earlier result from it is suspect.
+
 ## [0.3.106-alpha] — 2026-08-20
 
 **A short answer was being presented as the whole answer.** Asked for sixty
