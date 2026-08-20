@@ -269,6 +269,7 @@ fn greedy_assign_multi_range_candidate() {
             region_score: 1.0,
             est_tokens_per_sec: 0.0,
             observed_latency_ms_per_layer: None,
+            observed_delegated_ms_per_layer: None,
             is_pool_member: false,
             gpu_vram_available_mb: None,
         },
@@ -288,6 +289,7 @@ fn greedy_assign_multi_range_candidate() {
             region_score: 0.7,
             est_tokens_per_sec: 0.0,
             observed_latency_ms_per_layer: None,
+            observed_delegated_ms_per_layer: None,
             is_pool_member: false,
             gpu_vram_available_mb: None,
         },
@@ -1115,6 +1117,7 @@ fn cost_cand(
         region_score: 1.0,
         est_tokens_per_sec: 0.0,
         observed_latency_ms_per_layer: ms_per_layer,
+        observed_delegated_ms_per_layer: None,
         is_pool_member: false,
         gpu_vram_available_mb: None,
     }

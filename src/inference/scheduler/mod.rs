@@ -44,6 +44,15 @@ struct NodeCandidate {
     /// `forward_through_segments` hops. Used by the Parallax routing DP to
     /// replace the static capability estimate with live signal when available.
     observed_latency_ms_per_layer: Option<f32>,
+    /// Observed per-layer latency EMA (ms/layer) for whole models this peer has
+    /// run for us end to end — the *delegated* shape, carrying no per-token
+    /// round trip. `None` for the local node and for any peer we have never
+    /// delegated to. Populated from `state.observed_delegated_ms_per_layer`.
+    ///
+    /// Kept apart from `observed_latency_ms_per_layer` because substituting one
+    /// for the other is a measured mis-pricing, not a rounding error; see
+    /// `parallax::vertex_cost`.
+    observed_delegated_ms_per_layer: Option<f32>,
     /// True if this node is in our device pool (preferred for routing — free, trusted, low latency).
     is_pool_member: bool,
     /// Free GPU memory this node last advertised, in MB. `None` when it has no
@@ -969,6 +978,14 @@ impl PipelineScheduler {
             // carries no network component, which is correct: there isn't one.
             let observed_latency_ms_per_layer =
                 self.shared_state.observed_latency_ms_per_layer(&node_id);
+            // Deliberately `None` for the local node: there is no such thing as
+            // delegating to ourselves, and a local segment pays no network at
+            // all, so the whole distinction this figure exists to draw is moot.
+            let observed_delegated_ms_per_layer = if &node_id == local_node_id {
+                None
+            } else {
+                self.shared_state.observed_delegated_ms_per_layer(&node_id)
+            };
             let gpu_vram_available_mb = if node_id == *local_node_id {
                 // Never used for the local node — the loader's own admission
                 // check is the authority on whether WE can fit a model, and it
@@ -994,6 +1011,7 @@ impl PipelineScheduler {
                 region_score,
                 est_tokens_per_sec,
                 observed_latency_ms_per_layer,
+                observed_delegated_ms_per_layer,
                 is_pool_member: is_pool,
                 gpu_vram_available_mb,
             });
@@ -1025,6 +1043,7 @@ impl PipelineScheduler {
                 latency_ms = c.latency_ms,
                 est_tokens_per_sec = c.est_tokens_per_sec,
                 observed_ms_per_layer = ?c.observed_latency_ms_per_layer,
+                observed_delegated_ms_per_layer = ?c.observed_delegated_ms_per_layer,
                 load = c.load,
                 "DIAG: pipeline candidate"
             );

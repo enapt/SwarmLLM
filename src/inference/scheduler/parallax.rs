@@ -112,42 +112,92 @@ pub(super) const BASELINE_LAYER_COUNT: f32 = 32.0;
 /// 2. Static `est_tokens_per_sec` capability estimate when no observations exist.
 /// 3. `UNKNOWN_COMPUTE_MS` when neither is available — deliberately non-zero,
 ///    because a free unmeasured candidate outranks every measured one.
-fn vertex_cost(c: &NodeCandidate, range: (u32, u32), local: &NodeId) -> VertexCost {
+fn vertex_cost(
+    c: &NodeCandidate,
+    range: (u32, u32),
+    local: &NodeId,
+    num_layers: u32,
+) -> VertexCost {
     let is_local = &c.node_id == local;
     let layers = (range.1 - range.0) as f32;
-    // A segment that does not start at layer 0 is entered from the previous
-    // segment, so the coordinator round-trips into it for EVERY token. A
-    // segment starting at 0 is either local, or the delegated whole-model case
-    // that pays its network once for the entire request.
-    let entered_per_token = range.0 != 0;
+    // The one shape that escapes per-token network: a remote peer covering the
+    // WHOLE model. That is delegated in a single message and decodes remotely,
+    // streaming tokens back, so the coordinator round-trips into it once for the
+    // entire request.
+    //
+    // Every other remote segment is entered once per token, including one that
+    // starts at layer 0. The coordinator drives each hop, so after sampling
+    // token t it must hand the new token back to the first segment — a remote
+    // 0..k of a split pays the round trip exactly as a mid-chain segment does.
+    // This used to be keyed on `range.0 != 0`, which charged a remote first
+    // segment its network ONCE and so quietly subsidised splitting: the routing
+    // model could not see most of the cost of the boundary it was choosing.
+    let covers_whole_model = range.0 == 0 && range.1 == num_layers;
+    let delegated_whole_model = !is_local && covers_whole_model;
+    let entered_per_token = !is_local && !covers_whole_model;
+
+    // Pick the observation measured on the shape being priced, and never
+    // substitute one for the other.
+    //
+    // A mid-chain decode sample carries the coordinator's round trip amortised
+    // over whatever layers that segment owned; a delegated sample carries none.
+    // Reusing the mid-chain figure for a delegated vertex therefore charges a
+    // round trip several times over for a trip that vertex never makes —
+    // measured at ~2.7x for a 16-layer delegation priced from a 6-layer
+    // observation, and the reason the router kept choosing a split that ran
+    // 11.2s where delegating ran 11.2s → 17.8s the other way.
+    //
+    // Where the delegated figure is missing, the mid-chain one is still used —
+    // as an UPPER BOUND, which is what it honestly is. It contains everything
+    // the delegated cost contains plus a round trip, so a peer it says is slow
+    // really is slow, and the error is in the safe direction.
+    //
+    // Discarding it and falling through to the static estimate was tried and is
+    // worse: a peer measured at 107 ms/layer would be re-priced at the
+    // `UNKNOWN_COMPUTE_MS` prior of 25, so a candidate we have measured and
+    // found slow would outrank one we know nothing about. That is the exact
+    // failure that constant was raised from 0 to prevent, reintroduced through
+    // a different door — four existing tests caught it.
+    //
+    // The overcharge is therefore bounded and self-correcting: it applies only
+    // until this peer serves one delegated request, after which the
+    // right-shaped figure takes over. `partial_ranges` is off by default, so a
+    // single holder is routed the whole model and earns that sample on its
+    // first request.
+    let observation = if delegated_whole_model {
+        c.observed_delegated_ms_per_layer
+            .or(c.observed_latency_ms_per_layer)
+    } else {
+        c.observed_latency_ms_per_layer
+    };
+
     // When we have an observed per-layer latency, it already includes the peer's
     // segment wall-clock round-trip (compute + peer-side load). Fold the whole
     // `segment_ms` into `compute_ms` and skip the static `2 * latency_ms` network
     // term to avoid double-counting. When we don't have an observation yet, use
     // the traditional two-part cost (network + static compute estimate).
-    let (base_network_ms, per_layer_ms) =
-        if let Some(obs_per_layer) = c.observed_latency_ms_per_layer {
-            (0.0, obs_per_layer)
+    let (base_network_ms, per_layer_ms) = if let Some(obs_per_layer) = observation {
+        (0.0, obs_per_layer)
+    } else {
+        let network = if is_local {
+            0.0
         } else {
-            let network = if is_local {
-                0.0
-            } else {
-                2.0 * c.latency_ms as f32
-            };
-            let per_layer = if c.est_tokens_per_sec > 0.0 {
-                // Very rough: layer_compute_ms ≈ layers / (est_tokens_per_sec * some_constant).
-                // est_tokens_per_sec is a whole-model throughput estimate for a 7B Q4 model;
-                // per-layer contribution is 1/num_layers of that. We conservatively use
-                // `1000.0 / est_tokens_per_sec` as the per-token-whole-model compute cost,
-                // then scale by the fraction of layers this segment owns. Assumes 32 layers
-                // as the baseline; adjust here if we want arch-aware scaling later.
-                let whole_model_ms = 1000.0 / c.est_tokens_per_sec;
-                whole_model_ms / BASELINE_LAYER_COUNT
-            } else {
-                UNKNOWN_COMPUTE_MS
-            };
-            (network, per_layer)
+            2.0 * c.latency_ms as f32
         };
+        let per_layer = if c.est_tokens_per_sec > 0.0 {
+            // Very rough: layer_compute_ms ≈ layers / (est_tokens_per_sec * some_constant).
+            // est_tokens_per_sec is a whole-model throughput estimate for a 7B Q4 model;
+            // per-layer contribution is 1/num_layers of that. We conservatively use
+            // `1000.0 / est_tokens_per_sec` as the per-token-whole-model compute cost,
+            // then scale by the fraction of layers this segment owns. Assumes 32 layers
+            // as the baseline; adjust here if we want arch-aware scaling later.
+            let whole_model_ms = 1000.0 / c.est_tokens_per_sec;
+            whole_model_ms / BASELINE_LAYER_COUNT
+        } else {
+            UNKNOWN_COMPUTE_MS
+        };
+        (network, per_layer)
+    };
 
     // Compute is per forward pass, and a request is many passes. Scaling every
     // candidate by the same factor leaves their relative order untouched, but it
@@ -155,10 +205,9 @@ fn vertex_cost(c: &NodeCandidate, range: (u32, u32), local: &NodeId) -> VertexCo
     // two can be compared at all.
     let compute_ms = per_layer_ms * layers * ASSUMED_FORWARD_PASSES;
 
-    // The asymmetry the model was missing. A segment entered mid-chain is
-    // round-tripped into for every token; a segment starting at layer 0 pays its
-    // network once, because it is either local or the delegated whole-model case
-    // that decodes remotely on its own.
+    // The asymmetry the model was missing. Every remote segment short of the
+    // whole model is round-tripped into for every token; only a delegated whole
+    // model pays its network once, because it decodes remotely on its own.
     let network_ms = if entered_per_token {
         base_network_ms * ASSUMED_FORWARD_PASSES
     } else {
@@ -261,7 +310,7 @@ pub(super) fn route_shortest_path(
             vertices.push(Vertex {
                 cand_idx,
                 range,
-                cost_ms: vertex_cost(c, range, local_node_id).total(),
+                cost_ms: vertex_cost(c, range, local_node_id, num_layers).total(),
             });
         };
         // The whole range is always available, so a chain that was routable
@@ -473,6 +522,7 @@ mod tests {
             region_score: 1.0,
             est_tokens_per_sec,
             observed_latency_ms_per_layer: None,
+            observed_delegated_ms_per_layer: None,
             is_pool_member: false,
             gpu_vram_available_mb: None,
         }
@@ -512,8 +562,8 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let wide = cand(1, vec![(0, 16)], 0, 0.0, true, true, 0.0);
         let narrow = cand(2, vec![(0, 4)], 0, 0.0, true, true, 0.0);
-        let cw = vertex_cost(&wide, (0, 16), &local).total();
-        let cn = vertex_cost(&narrow, (0, 4), &local).total();
+        let cw = vertex_cost(&wide, (0, 16), &local, 16).total();
+        let cn = vertex_cost(&narrow, (0, 4), &local, 16).total();
         assert!(cw > 0.0, "an unmeasured candidate must not be free");
         assert!(
             cw > cn,
@@ -529,32 +579,117 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let measured_fast = cand_with_obs(cand(1, vec![(0, 16)], 0, 0.0, true, true, 0.0), 1.0);
         let unmeasured = cand(2, vec![(0, 16)], 0, 0.0, true, true, 0.0);
-        let cm = vertex_cost(&measured_fast, (0, 16), &local).total();
-        let cu = vertex_cost(&unmeasured, (0, 16), &local).total();
+        let cm = vertex_cost(&measured_fast, (0, 16), &local, 16).total();
+        let cu = vertex_cost(&unmeasured, (0, 16), &local, 16).total();
         assert!(cm < cu, "measured-fast {cm} should beat unmeasured {cu}");
     }
 
-    /// A segment entered mid-chain is round-tripped into once per token, while a
-    /// segment starting at layer 0 pays its network once for the whole request.
-    /// Charging both the same is what made the router pick a split that measured
-    /// 11.2s -> 17.8s on a real LAN pair.
+    /// A remote segment is round-tripped into once per token, while a remote
+    /// peer running the WHOLE model is delegated in one message and pays its
+    /// network once. Charging both the same is what made the router pick a split
+    /// that measured 11.2s -> 17.8s on a real LAN pair.
     #[test]
     fn a_mid_chain_segment_pays_network_per_token() {
         let local = NodeId([9u8; 32]);
         let remote = cand(2, vec![(0, 16)], 20, 0.0, true, true, 0.0);
-        // Same candidate, same width, differing only in whether it starts the chain.
-        let as_source = vertex_cost(&remote, (0, 8), &local);
-        let as_mid_chain = vertex_cost(&remote, (8, 16), &local);
+        // Same candidate, differing only in whether it runs the whole model.
+        let delegated = vertex_cost(&remote, (0, 16), &local, 16);
+        let as_mid_chain = vertex_cost(&remote, (8, 16), &local, 16);
         assert!(
-            as_mid_chain.network_ms > as_source.network_ms,
+            as_mid_chain.network_ms > delegated.network_ms,
             "mid-chain network {} must exceed delegated {}",
             as_mid_chain.network_ms,
-            as_source.network_ms
+            delegated.network_ms
         );
         assert_eq!(
             as_mid_chain.network_ms,
-            as_source.network_ms * ASSUMED_FORWARD_PASSES,
+            delegated.network_ms * ASSUMED_FORWARD_PASSES,
             "mid-chain network should scale by the assumed pass count"
+        );
+    }
+
+    /// A remote segment starting at layer 0 but NOT covering the whole model is
+    /// still entered once per token: the coordinator samples each token and
+    /// hands it back to the first segment. Charging that segment its network
+    /// once — which keying on `range.0 != 0` did — subsidised splitting by
+    /// hiding most of the cost of the boundary being chosen.
+    #[test]
+    fn a_remote_first_segment_of_a_split_still_pays_per_token() {
+        let local = NodeId([9u8; 32]);
+        let remote = cand(2, vec![(0, 16)], 20, 0.0, true, true, 0.0);
+        let first_of_split = vertex_cost(&remote, (0, 8), &local, 16);
+        let whole_model = vertex_cost(&remote, (0, 16), &local, 16);
+        assert_eq!(
+            first_of_split.network_ms,
+            whole_model.network_ms * ASSUMED_FORWARD_PASSES,
+            "a remote 0..8 of a 16-layer model is not a delegation and must pay \
+             the round trip per token"
+        );
+    }
+
+    /// The delegated shape is priced by the delegated observation, and a
+    /// mid-chain shape by the mid-chain one. Substituting either for the other
+    /// is a measured mis-pricing: a mid-chain figure carries a round trip
+    /// amortised over that segment's layers, and reusing it for a whole-model
+    /// delegation charges that trip several times over for a trip the
+    /// delegation never makes.
+    #[test]
+    fn each_shape_is_priced_by_the_observation_measured_on_it() {
+        let local = NodeId([9u8; 32]);
+        let mut c = cand(2, vec![(0, 16)], 20, 0.0, true, true, 0.0);
+        // Expensive mid-chain (carries a per-token round trip), cheap delegated.
+        c.observed_latency_ms_per_layer = Some(100.0);
+        c.observed_delegated_ms_per_layer = Some(10.0);
+
+        let delegated = vertex_cost(&c, (0, 16), &local, 16);
+        let mid_chain = vertex_cost(&c, (8, 16), &local, 16);
+
+        assert_eq!(
+            delegated.compute_ms,
+            10.0 * 16.0 * ASSUMED_FORWARD_PASSES,
+            "the whole-model vertex must use the delegated coefficient"
+        );
+        assert_eq!(
+            mid_chain.compute_ms,
+            100.0 * 8.0 * ASSUMED_FORWARD_PASSES,
+            "the mid-chain vertex must use the mid-chain coefficient"
+        );
+    }
+
+    /// Earning a delegated sample must actually change the price. Until one
+    /// exists the mid-chain figure stands in as an upper bound — deliberately,
+    /// since dropping it would re-price a known-slow peer at the unknown prior
+    /// — and the first delegated request replaces it with the right-shaped
+    /// number. Without this the coefficient would be collected and ignored,
+    /// which is the state this fix ends.
+    #[test]
+    fn a_delegated_sample_corrects_the_mid_chain_upper_bound() {
+        let local = NodeId([9u8; 32]);
+        // The live RTX 4050 shape: a mid-chain observation an order of
+        // magnitude worse than what the card actually delivers delegated.
+        let mut c = cand(2, vec![(0, 16)], 500, 0.0, true, true, 20.0);
+        c.observed_latency_ms_per_layer = Some(1063.0);
+
+        c.observed_delegated_ms_per_layer = None;
+        let bounded = vertex_cost(&c, (0, 16), &local, 16);
+        assert_eq!(
+            bounded.compute_ms,
+            1063.0 * 16.0 * ASSUMED_FORWARD_PASSES,
+            "with no delegated sample the mid-chain figure stands in"
+        );
+
+        c.observed_delegated_ms_per_layer = Some(60.0);
+        let corrected = vertex_cost(&c, (0, 16), &local, 16);
+        assert_eq!(
+            corrected.compute_ms,
+            60.0 * 16.0 * ASSUMED_FORWARD_PASSES,
+            "a delegated sample must take over from the upper bound"
+        );
+        assert!(
+            corrected.total() < bounded.total(),
+            "correcting the overcharge must make delegation cheaper: {} vs {}",
+            corrected.total(),
+            bounded.total()
         );
     }
 
@@ -564,8 +699,8 @@ mod tests {
         let local = NodeId([1u8; 32]);
         let mut c = cand(1, vec![(0, 16)], 50, 0.0, true, true, 0.0);
         c.node_id = local.clone();
-        assert_eq!(vertex_cost(&c, (0, 8), &local).network_ms, 0.0);
-        assert_eq!(vertex_cost(&c, (8, 16), &local).network_ms, 0.0);
+        assert_eq!(vertex_cost(&c, (0, 8), &local, 16).network_ms, 0.0);
+        assert_eq!(vertex_cost(&c, (8, 16), &local, 16).network_ms, 0.0);
     }
 
     /// With the per-token term in place, a split onto a peer that is only

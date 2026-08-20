@@ -234,6 +234,40 @@ impl PeerSpeed {
             .map(|c| c * NOMINAL_DECODE_ACTIVATION_BYTES as f32)
     }
 
+    /// Per-layer cost of running a **whole model** on this peer, in ms — the
+    /// delegated shape, with no per-token round trip in it.
+    ///
+    /// Separate from [`Self::ranking_ms_per_layer`] on purpose, and the two must
+    /// not substitute for each other. A mid-chain decode sample carries the
+    /// coordinator's round trip amortised over however many layers that segment
+    /// happened to own; reusing it to price a delegated run charges that round
+    /// trip several times over for a trip the delegated run never makes. Measured
+    /// at roughly 2.7x for a 16-layer delegation priced from a 6-layer mid-chain
+    /// observation, which is why the router kept preferring a split that ran
+    /// 11.2s → 17.8s.
+    ///
+    /// Expires on the same clock as ranking, and for the same reason: an EMA with
+    /// no decay that is only updated when we route to a peer would freeze a peer
+    /// at one bad sample and then never re-measure it.
+    ///
+    /// Like ranking, this returns only a figure **this node measured**. Gossip
+    /// cannot seed it — `merge_ranking_sample` writes the decode coefficient and
+    /// never touches this one — but the sample count is checked anyway so the
+    /// rule holds by construction rather than by where a caller happens to write.
+    pub fn delegated_ms_per_layer(&self) -> Option<f32> {
+        if self.updated_at.elapsed() >= RANKING_STALE_AFTER {
+            return None;
+        }
+        if self.delegated_samples == 0 {
+            return None;
+        }
+        self.delegated_ms_per_layer
+    }
+
+    pub fn delegated_samples(&self) -> u32 {
+        self.delegated_samples
+    }
+
     /// Fold in a per-layer figure that another node gossiped to us, weighted
     /// by how much we trust the reporter.
     ///

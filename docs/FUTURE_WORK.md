@@ -1882,10 +1882,28 @@ and `observed_delegated_ms_per_layer` (pure remote compute).
 **The second half is DONE (2026-08-18):** `WorkKind::Delegated` is a separate EMA,
 recorded from the `remote_generate` fast path as
 `(total - ttft) / (completion_tokens - 1) / layers`, deliberately excluding
-time-to-first-token so a cold peer is not scored as a slow one. What remains is
-teaching `vertex_cost` to USE it for the delegated alternative — the routing
-search still prices that option with the mid-chain figure, and so still
-overcharges it. Historical note on why it had no source:
+time-to-first-token so a cold peer is not scored as a slow one.
+
+**RESOLVED 2026-08-20 — `vertex_cost` now uses it.** A whole-model remote vertex
+is priced by `observed_delegated_ms_per_layer`; every other vertex keeps the
+mid-chain figure. Until a peer has served one delegated request the mid-chain
+figure still stands in, **deliberately** — it is an honest upper bound (it
+contains everything the delegated cost contains, plus a round trip), and
+discarding it was tried and is worse: a peer measured at 107 ms/layer got
+re-priced at the `UNKNOWN_COMPUTE_MS` prior of 25, so a candidate we had measured
+and found slow outranked one we knew nothing about. That is the failure that
+constant was raised from 0 to prevent, arriving through a different door; four
+existing tests caught it. The overcharge is therefore bounded and self-correcting.
+
+The same change fixed a second mis-pricing found while reading the predicate.
+`entered_per_token` was `range.0 != 0`, which charged a **remote first segment of
+a split** its network only once. The coordinator drives every hop, so after
+sampling each token it hands the new token back to segment 0 — a remote `0..k`
+pays the round trip exactly as a mid-chain segment does. Splitting was being
+quietly subsidised: the model could not see most of the cost of the boundary it
+was choosing. The predicate is now "remote and not covering the whole model".
+
+Historical note on why it had no source:
 `record_peer_segment_latency` has exactly one production caller, in the
 multi-segment path. That is also a self-reinforcing blindness worth fixing on its
 own: a node whose requests all take the fast path never learns a thing about its
@@ -8990,74 +9008,29 @@ being a hardcoded 1.70 for every processor-only node (gotcha #330/#333). This
 swarm now spans **0.37 to 20.45 tok/s**, a 55x range, and this is the first
 evidence about whether routing actually exploits it. On this showing it does not.
 
-## The delegated route measures a peer and then cannot use the measurement (found 2026-08-20)
+## The delegated route measures a peer and then cannot use the measurement (found 2026-08-20, RESOLVED same day)
 
-Found while confirming the routing fix above, and it is the second, independent
+Found while confirming the routing fix above, and it was the second, independent
 reason the observation column read `None` after five good segments to the same
-peer: on that route it can never read anything else.
+peer: on that route nothing could ever be read.
 
-### The shape
+`WorkKind::Delegated` had **one production writer and no production reader.**
+Written at `inference::pipeline::remote_generate` — the whole-model,
+single-segment route, i.e. what a coordinator uses whenever one peer can cover
+every layer, and what served all five requests in the confirmation above at up to
+20 tok/s. It landed in `PeerSpeed::delegated_ms_per_layer`, reachable only
+through `predict_ms(WorkKind::Delegated, ..)`, and the only production caller of
+`predict_ms` is `SegmentBudget::for_forward`, which is passed `Prefill` or
+`Decode` at every call site. `ranking_ms_per_layer` never consulted it. So this
+node timed an RTX 4050 five times, stored the result, and could not let it
+influence any decision it would ever make.
 
-`WorkKind::Delegated` has **one production writer and no production reader.**
-
-- Written at `inference::pipeline::remote_generate` — the whole-model,
-  single-segment route, i.e. what a coordinator uses whenever one peer can cover
-  every layer. That is the common remote route, and it served all five requests
-  in the confirmation above at up to 20 tok/s.
-- It lands in `PeerSpeed::delegated_ms_per_layer`, which is readable only through
-  `predict_ms(WorkKind::Delegated, ..)`.
-- `ranking_ms_per_layer` consults decode, then falls back to prefill. It never
-  consults delegated.
-- The only production caller of `predict_ms` is `SegmentBudget::for_forward`,
-  which is passed `Prefill` or `Decode` at every one of its call sites. Nothing
-  ever asks for the delegated kind.
-
-So this node timed an RTX 4050 five times, stored the result, and cannot let it
-influence any decision it will ever make.
-
-### Why it matters
-
-On the delegated route the peer's **advertised** speed is the only input, now and
-permanently. There is no feedback loop: a peer that advertises 20 tok/s and
-delivers 2 — overloaded, thermally throttled, or simply wrong about itself — is
-chosen again every time, and the evidence to know better is collected and
-discarded on each of those requests.
-
-Today that is benign, arguably lucky: the advertised figures became real
-measurements on 2026-08-18, and the fallback they feed is what routed correctly
-above. The exposure is that the correctness of every delegated route now rests
-entirely on peers describing themselves accurately, with nothing downstream able
-to notice when one does not.
-
-This is the shape of gotcha #330/#333 — a field with no consumer is unverified —
-with the twist that here it is a *measurement* rather than an announcement, so
-nothing is wrong with the number. It simply has nowhere to go.
-
-### Why it is not a one-line change
-
-Feeding `delegated_ms_per_layer` into the ranking slot would be wrong. Delegated
-ms/layer and decode ms/layer measure different things: the delegated figure has
-no per-token network round trip in it, because the peer runs every layer locally
-and streams tokens back, while a pipelined decode segment crosses the network per
-token. Delegated is therefore systematically cheaper per layer for the same
-hardware. Ranking the two against each other in one slot would under-price every
-peer we have delegated to relative to peers we have only pipelined through — the
-same apples/oranges hazard that `ActivationUnits` already exists to prevent on
-the prefill coefficient.
-
-The honest options, none of them free:
-
-1. **Rank delegated candidates by the delegated coefficient and pipelined ones by
-   decode**, keeping the slots separate. Correct in units, but the scheduler
-   compares whole-model candidates against split ones in the same DP, so the two
-   costs still meet.
-2. **Convert between them** by adding back a modelled per-token round trip. Needs
-   a constant nobody can justify yet — the objection that kept blending and
-   decay out of the fix above.
-3. **Use it only as a sanity check on the advertised figure**, not for ranking:
-   flag or down-weight a peer whose delivered rate is persistently far below what
-   it claims. This gets the missing feedback loop without putting an
-   incommensurable number into the cost model, and is the cheapest of the three.
-
-Option 3 looks right, but it is a design call rather than a repair, so it is
-written down rather than guessed at.
+**This was the unfinished half of a much older item** — see "Cost-model work done
+2026-07-27, and the ONE piece still missing" above, which named the fix and
+carries the measurements that motivate it. Resolved there; this section is kept
+only because the "collected and never read" framing is the one that makes the
+class of bug recognisable. It is the shape of gotcha #330/#333 — a field with no
+consumer is unverified — with the twist that here it was a *measurement* rather
+than an announcement, so nothing was wrong with the number. It simply had nowhere
+to go, and the routing consequence was invisible because the wrong-shaped figure
+silently stood in for it.

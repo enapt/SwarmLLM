@@ -1631,6 +1631,20 @@ impl SharedState {
             .and_then(|s| s.ranking_ms_per_layer())
     }
 
+    /// What we have measured of this peer running a **whole model** for us, per
+    /// layer, in ms. `None` when we have never delegated to it.
+    ///
+    /// The companion to [`Self::observed_latency_ms_per_layer`], which carries a
+    /// per-token round trip that a delegated run does not pay. The scheduler
+    /// picks between them by the shape of the vertex it is pricing; see
+    /// `scheduler::parallax::vertex_cost`.
+    pub fn observed_delegated_ms_per_layer(&self, node_id: &crate::types::NodeId) -> Option<f32> {
+        self.metrics
+            .peer_speed
+            .get(node_id)
+            .and_then(|s| s.delegated_ms_per_layer())
+    }
+
     /// Item 8 Phase 2: longest-prefix cross-node cache lookup. Walks the
     /// chained BLAKE3 manifest of `prompt_tokens` at `block_size` granularity
     /// from longest → shortest, returning the first `(peer, block_hash,
