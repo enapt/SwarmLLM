@@ -1249,3 +1249,150 @@ mod failover_retarget_tests {
         }
     }
 }
+
+/// How far can we chain, starting at segment `idx`?
+///
+/// Returns the ordered hops to hand to segment `idx` — that is,
+/// `segments[idx+1 ..= j]` for the longest run of consecutive segments that can
+/// pass activations to each other directly. Empty means "send this one the old
+/// way and wait for it to come home", which is always correct.
+///
+/// **Only a run of consecutive REMOTE segments can be chained**, and that is
+/// what makes prompt privacy survive: with `encrypted_pipeline` the coordinator
+/// holds the first and last segments itself, so the run is the middle, the ends
+/// stay here, and no remote node ever sees the prompt or the sampled token. A
+/// local segment simply ends the run.
+///
+/// Every hop must advertise `features::PIPELINE_CHAIN`, because a node without
+/// it ignores the field and returns its result here — which is correct but
+/// would leave the coordinator waiting on the wrong node.
+pub(crate) fn plan_chain(
+    segments: &[crate::types::PipelineSegment],
+    idx: usize,
+    local_node: &crate::types::NodeId,
+    can_chain: impl Fn(&crate::types::NodeId) -> bool,
+    max_hops: usize,
+) -> Vec<crate::types::ChainHop> {
+    if max_hops == 0 || idx >= segments.len() {
+        return Vec::new();
+    }
+    // The segment we are about to send to must itself be a remote node that can
+    // forward; otherwise there is nothing to chain FROM.
+    let head = &segments[idx];
+    if head.node_id == *local_node || !can_chain(&head.node_id) {
+        return Vec::new();
+    }
+    let mut hops = Vec::new();
+    for seg in segments.iter().skip(idx + 1) {
+        if seg.node_id == *local_node || !can_chain(&seg.node_id) {
+            break;
+        }
+        // A hop that does not begin where the previous one ended is not a
+        // pipeline — refuse rather than forward activations into a gap.
+        let prev_end = hops
+            .last()
+            .map(|h: &crate::types::ChainHop| h.layer_range.1)
+            .unwrap_or(head.layer_range.1);
+        if seg.layer_range.0 != prev_end {
+            break;
+        }
+        hops.push(crate::types::ChainHop {
+            node_id: seg.node_id.clone(),
+            layer_range: seg.layer_range,
+        });
+        if hops.len() >= max_hops {
+            break;
+        }
+    }
+    hops
+}
+
+#[cfg(test)]
+mod chain_planning_tests {
+    use super::plan_chain;
+    use crate::types::{ModelId, NodeId, PipelineSegment, ShardId};
+
+    fn seg(node: u8, start: u32, end: u32) -> PipelineSegment {
+        PipelineSegment {
+            node_id: NodeId([node; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            },
+            layer_range: (start, end),
+        }
+    }
+
+    const LOCAL: NodeId = NodeId([0u8; 32]);
+    fn all_can_chain(_: &NodeId) -> bool {
+        true
+    }
+
+    /// The whole point: a run of remote segments is handed over once, so the
+    /// coordinator's round trips stop scaling with the number of shards.
+    #[test]
+    fn a_run_of_remote_segments_is_chained_in_order() {
+        let segs = [seg(1, 0, 8), seg(2, 8, 16), seg(3, 16, 24)];
+        let hops = plan_chain(&segs, 0, &LOCAL, all_can_chain, 8);
+        assert_eq!(hops.len(), 2, "two nodes follow the head");
+        assert_eq!(hops[0].node_id, NodeId([2u8; 32]));
+        assert_eq!(hops[1].node_id, NodeId([3u8; 32]));
+        assert_eq!(hops[1].layer_range, (16, 24));
+    }
+
+    /// Prompt privacy survives chaining because a local segment ends the run.
+    /// With `encrypted_pipeline` the coordinator holds the first and last
+    /// segments, so the ends stay here and only the middle is chained.
+    #[test]
+    fn a_local_segment_ends_the_run_so_the_boomerang_still_holds() {
+        // local, remote, remote, local — the privacy-preserving shape.
+        let segs = [seg(0, 0, 4), seg(1, 4, 12), seg(2, 12, 20), seg(0, 20, 24)];
+        let hops = plan_chain(&segs, 1, &LOCAL, all_can_chain, 8);
+        assert_eq!(hops.len(), 1, "the run stops before the local tail");
+        assert_eq!(hops[0].node_id, NodeId([2u8; 32]));
+    }
+
+    #[test]
+    fn nothing_is_chained_from_a_local_segment() {
+        let segs = [seg(0, 0, 8), seg(1, 8, 16)];
+        assert!(plan_chain(&segs, 0, &LOCAL, all_can_chain, 8).is_empty());
+    }
+
+    #[test]
+    fn the_last_segment_has_nobody_to_chain_to() {
+        let segs = [seg(1, 0, 8), seg(2, 8, 16)];
+        assert!(plan_chain(&segs, 1, &LOCAL, all_can_chain, 8).is_empty());
+    }
+
+    /// A node that does not advertise the feature ignores the field and replies
+    /// to the coordinator, so chaining THROUGH it would leave us waiting on the
+    /// wrong node. The run stops at it.
+    #[test]
+    fn a_peer_without_the_feature_ends_the_run() {
+        let segs = [seg(1, 0, 8), seg(2, 8, 16), seg(3, 16, 24)];
+        let hops = plan_chain(&segs, 0, &LOCAL, |n| n.0[0] != 3, 8);
+        assert_eq!(hops.len(), 1, "stops before the node that cannot chain");
+        assert_eq!(hops[0].node_id, NodeId([2u8; 32]));
+
+        // And the head itself must be able to forward.
+        assert!(plan_chain(&segs, 0, &LOCAL, |n| n.0[0] != 1, 8).is_empty());
+    }
+
+    /// Layers must be contiguous. A gap means the activations would be fed to a
+    /// segment expecting different inputs, which produces a confident wrong
+    /// answer rather than an error.
+    #[test]
+    fn a_gap_in_the_layer_ranges_ends_the_run() {
+        let segs = [seg(1, 0, 8), seg(2, 12, 20)];
+        assert!(plan_chain(&segs, 0, &LOCAL, all_can_chain, 8).is_empty());
+    }
+
+    #[test]
+    fn the_hop_count_is_bounded() {
+        let segs: Vec<_> = (1u8..=6)
+            .map(|i| seg(i, (i as u32 - 1) * 4, i as u32 * 4))
+            .collect();
+        assert_eq!(plan_chain(&segs, 0, &LOCAL, all_can_chain, 2).len(), 2);
+        assert!(plan_chain(&segs, 0, &LOCAL, all_can_chain, 0).is_empty());
+    }
+}

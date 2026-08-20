@@ -48,6 +48,34 @@ pub struct InferenceConfig {
     /// Enable speculative decoding when a valid draft-target model pair is available.
     #[serde(default)]
     pub speculative_decoding: bool,
+    /// Chain consecutive remote pipeline segments peer to peer instead of
+    /// returning every hop to this node.
+    ///
+    /// Today an N-segment pipeline costs the coordinator N round trips per
+    /// token, because the activations come home between every pair of hops. A
+    /// chained run costs one trip out and one trip back however long it is, so
+    /// the per-token network cost stops scaling with the number of shards —
+    /// which is the case a swarm exists for. Petals runs a 176B model over
+    /// fourteen internet-distributed machines this way.
+    ///
+    /// Prompt privacy is unaffected: a local segment ends a chain, so with
+    /// `encrypted_pipeline` the first and last segments stay here and only the
+    /// middle is chained.
+    ///
+    /// **Off by default while it is unproven on real hardware.** Every reason
+    /// not to chain falls back to the existing behaviour rather than failing,
+    /// so the risk is contained, but it has not yet been measured end to end.
+    /// See `docs/plans/direct_peer_chaining.md`.
+    #[serde(default)]
+    pub pipeline_chaining: bool,
+    /// Longest run of peer-to-peer hops to build in one chain.
+    ///
+    /// Bounds how much of a request rides on nobody checking in: the
+    /// coordinator hears nothing between handing a chain over and its tail
+    /// reporting back, so a longer chain means a slower failure. Eight covers
+    /// any pipeline this project has produced.
+    #[serde(default = "default_max_chain_hops")]
+    pub max_chain_hops: u32,
     /// Let a busy node hand a request it COULD serve locally to the router, so
     /// a peer can take it instead.
     ///
@@ -801,6 +829,10 @@ fn default_shed_load_threshold() -> u32 {
     4
 }
 
+fn default_max_chain_hops() -> u32 {
+    8
+}
+
 /// SWARM-SPEC Layer 0: default activation compression to ON. Saves
 /// ~50-70% wire bandwidth on multi-segment pipelines with negligible
 /// quality impact (group-32 Q8_0 — see `inference/quant.rs`).
@@ -936,6 +968,8 @@ impl Default for InferenceConfig {
             gpu_layers: default_gpu_layers(),
             kv_cache_ttl_secs: default_kv_cache_ttl(),
             speculative_decoding: false,
+            pipeline_chaining: false,
+            max_chain_hops: default_max_chain_hops(),
             shed_load_when_busy: false,
             shed_load_threshold: default_shed_load_threshold(),
             persistent_pipeline_stream: false,

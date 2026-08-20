@@ -1712,6 +1712,26 @@ impl SharedState {
             .observe_delivery(intact);
     }
 
+    /// Does this peer understand a chained pipeline forward?
+    ///
+    /// A node without the bit ignores the field and returns its result to the
+    /// coordinator, which is correct in itself but would leave the coordinator
+    /// waiting on a node that is never going to answer — so a chain must never
+    /// be routed through one. Unknown counts as no, which costs a round trip
+    /// and always works.
+    pub fn peer_supports_pipeline_chain(&self, node_id: &crate::types::NodeId) -> bool {
+        self.peer_registry
+            .get(node_id)
+            .and_then(|p| p.capability.as_ref().map(|c| c.features))
+            .map(|f| {
+                swarmllm_types::node::features::supports(
+                    f,
+                    swarmllm_types::node::features::PIPELINE_CHAIN,
+                )
+            })
+            .unwrap_or(false)
+    }
+
     /// How much more work it takes, in expectation, to get one intact answer
     /// out of this peer. 1.0 when the path has been reliable or is unmeasured.
     pub fn peer_expected_attempts(&self, node_id: &crate::types::NodeId) -> f32 {

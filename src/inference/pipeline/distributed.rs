@@ -651,7 +651,14 @@ impl PipelineExecutor {
         let num_segments = self.assignment.segments.len();
         let pipeline_start = std::time::Instant::now();
 
+        // How far a chained run has already carried us. When a run of remote
+        // segments is handed over in one message, its tail reports back here
+        // and the segments in between must not be sent to again.
+        let mut chained_through = 0usize;
         for idx in 0..num_segments {
+            if idx < chained_through {
+                continue;
+            }
             let is_last = idx == num_segments - 1;
             let segment = &self.assignment.segments[idx];
 
@@ -827,6 +834,38 @@ impl PipelineExecutor {
             } else {
                 // Only clone activations when sending over the network
                 // T17: Attach vision embeddings on first forward (seq_num==0, first segment)
+                // Direct peer chaining: how many segments after this one can
+                // take the activations straight from their predecessor?
+                //
+                // Empty unless the operator enabled it, and empty for anything
+                // the planner refuses — a local segment, a peer without the
+                // feature, a gap in the layer ranges. Empty means every line
+                // below behaves exactly as it did before chaining existed.
+                let chain: Vec<crate::types::ChainHop> =
+                    if self.shared_state.cfg().inference.pipeline_chaining
+                        && generated_ids.is_empty()
+                    {
+                        let st = &self.shared_state;
+                        super::plan_chain(
+                            &self.assignment.segments,
+                            idx,
+                            st.identity.node_id(),
+                            |n| st.peer_supports_pipeline_chain(n),
+                            self.shared_state.cfg().inference.max_chain_hops as usize,
+                        )
+                    } else {
+                        // `generated_ids` are needed by the segment that samples,
+                        // and they travel with the coordinator's own forward. In a
+                        // chain that forward is built on a serving node, which does
+                        // not have them — so a request carrying penalties is not
+                        // chained rather than silently losing them.
+                        Vec::new()
+                    };
+                let awaiting_node = chain
+                    .last()
+                    .map(|h| h.node_id.clone())
+                    .unwrap_or_else(|| segment.node_id.clone());
+
                 let vision_for_wire = if idx == 0 && sequence_num == 0 {
                     precomputed_vision.clone()
                 } else {
@@ -841,7 +880,7 @@ impl PipelineExecutor {
                     model_id: segment.shard_id.model_id.clone(),
                     layer_range: segment.layer_range,
                     vision_embeddings: vision_for_wire,
-                    chain: Vec::new(),
+                    chain: chain.clone(),
                     sender_peer_bytes: None,
                     tp_meta: None,
                     // Pipeline sealing: attach our node ID so the final segment
@@ -886,11 +925,14 @@ impl PipelineExecutor {
                     request_id,
                     crate::daemon::state::PendingLayerResult {
                         tx,
-                        // Pin to this segment's node. If this forward times out
-                        // and we fail over, the abandoned forward's late error
-                        // is attributed to THIS node and must not resolve the
-                        // standby's waiter.
-                        awaiting: Some(segment.node_id.clone()),
+                        // Pin to whichever node will actually answer. Without a
+                        // chain that is this segment's node; with one it is the
+                        // tail, because the hops in between hand the
+                        // activations along and never report here. If this
+                        // forward times out and we fail over, the abandoned
+                        // forward's late error is attributed to THAT node and
+                        // must not resolve the standby's waiter.
+                        awaiting: Some(awaiting_node.clone()),
                     },
                 );
                 // NOTE: the dsd.rs / speculative.rs PendingLayerResultGuard
@@ -1026,7 +1068,14 @@ impl PipelineExecutor {
                     ));
                 }
 
-                let num_layers = segment.layer_range.1 - segment.layer_range.0;
+                // The deadline covers everything we handed over in one
+                // message: a chained run reports back only from its tail, so
+                // budgeting for one segment would time out a healthy chain.
+                let num_layers = chain
+                    .last()
+                    .map(|h| h.layer_range.1)
+                    .unwrap_or(segment.layer_range.1)
+                    - segment.layer_range.0;
                 let budget = super::local::SegmentBudget::for_forward(
                     &self.shared_state,
                     &segment.node_id,
@@ -1052,6 +1101,42 @@ impl PipelineExecutor {
                     budget,
                 )
                 .await;
+
+                // A chained run tells us that something went wrong but not
+                // WHICH hop it was, so replacing this segment's holder would be
+                // a guess — and a wrong guess re-sends the whole run to the
+                // same nodes that just failed. Fail the request instead and let
+                // the router retry with a fresh assembly, which is honest and
+                // costs one retry rather than a wrong repair.
+                //
+                // `PeerUnresponsive` because it is transient and not this
+                // node's fault, and because the router already knows to re-route
+                // it. Nothing here can name a culprit, so nothing is penalised.
+                if !chain.is_empty() {
+                    let failed = match &result {
+                        Err(e) => Some(e.to_string()),
+                        Ok(r) => match &r.finish_reason {
+                            Some(NetworkFinishReason::Error(m)) => Some(m.clone()),
+                            _ => None,
+                        },
+                    };
+                    if let Some(reason) = failed {
+                        self.shared_state.pending_layer_results.remove(&request_id);
+                        tracing::warn!(
+                            request_id = %request_id,
+                            segment = idx,
+                            hops = chain.len(),
+                            head = %segment.node_id,
+                            tail = %awaiting_node,
+                            error = %reason,
+                            "chained run failed — retrying the request unchained"
+                        );
+                        return Err(SwarmError::PeerUnresponsive(format!(
+                            "chained pipeline of {} hops failed: {reason}",
+                            chain.len() + 1
+                        )));
+                    }
+                }
 
                 match result {
                     Ok(result) => {
@@ -1100,7 +1185,18 @@ impl PipelineExecutor {
                             activations = failover_result.activations;
                         } else {
                             let seg_elapsed_ms = segment_start.elapsed().as_millis() as u64;
-                            let seg_layers = segment.layer_range.1 - segment.layer_range.0;
+                            // A chained run answered for every segment it
+                            // covered, so the loop must not send to them again.
+                            chained_through = idx + 1 + chain.len();
+                            // The measurement covers the whole run — one send,
+                            // one reply, however many nodes were between. Charge
+                            // it to the head, over the layers actually run,
+                            // rather than pretending we timed one segment.
+                            let seg_layers = chain
+                                .last()
+                                .map(|h| h.layer_range.1)
+                                .unwrap_or(segment.layer_range.1)
+                                - segment.layer_range.0;
                             self.shared_state.record_peer_segment_latency(
                                 &segment.node_id,
                                 &segment.shard_id.model_id,
