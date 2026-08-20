@@ -1,7 +1,41 @@
 # Direct peer chaining for distributed inference
 
-**Status:** research complete, not implemented. This document is the case for
-doing it, the prior art it rests on, and the design that follows.
+**Status: implemented and off by default** (`inference.pipeline_chaining`),
+end-to-end validation incomplete. This document is the case for doing it, the
+prior art it rests on, the design, and what is still unproven.
+
+### Validation as it stands (2026-08-20)
+
+Unit level: 11 tests, including that a local segment ends a run — which is what
+makes prompt privacy survive — that a peer without the feature bit ends it, that
+a gap in the layer ranges ends it, and that redirecting or stripping a hop
+changes the sealed message's associated data so it cannot be tampered with.
+
+On real nodes, using `examples/3node_sharded_setup.sh` with a coordinator
+holding no model and two nodes holding consecutive halves of llama-3.2-3b: the
+coordinator planned a genuine two-segment split (layers 0-12 and 12-28), sent one
+forward carrying the chain, and the head **received it, computed its layers and
+handed the activations straight to the tail** — logged on both sides, with no
+outbound failure.
+
+**The tail never received them, and this host cannot show whether that is
+chaining's fault.** The same machine failed the *unchained* control too, at an
+earlier hop, and logged 112 connection closures during the run. That is the
+condition documented above under "Connection churn on multi-interface hosts":
+libp2p routing a tensor forward to a stale connection and silently dropping it.
+A single WSL2 host advertising a NAT gateway, a link-local address, a Docker
+bridge and a LAN address is exactly the case that entry describes.
+
+So: the plan, the send, the receive, the compute and the onward hand-off are all
+demonstrated. Delivery of the final hop is not, on a host that cannot deliver an
+unchained one either. **It needs two real machines before the flag defaults on.**
+
+A defect in the harness was found and fixed on the way: it disabled bootstrap
+but never set a private gossip network, and loopback discovery is unconditional
+(gotcha #311). All three nodes found the live node next door, which holds the
+whole model, and every request was delegated to it — the log said `segments=1`
+and the split being measured never ran. Every earlier result from that script on
+a machine also running a node is suspect for the same reason.
 
 **Why it matters:** the per-token network cost of a distributed request
 currently grows *linearly with the number of shards*. That is backwards for a

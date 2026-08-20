@@ -137,6 +137,19 @@ enabled = false
 [network]
 bootstrap_peers = []
 disable_default_bootstrap = true
+# Loopback discovery is unconditional, so disabling bootstrap is NOT isolation
+# on a machine that is also running a real node (gotcha #311). Without a private
+# gossip network these three found the live node next door, which holds the
+# whole model, and every request was delegated to it — the log said
+# `segments=1` and the split being measured never ran at all.
+gossip_network_id = "swarmllm-sharded-bench"
+
+[inference]
+# Chaining is the reason this layout exists — a coordinator with no model and
+# two nodes holding consecutive halves is the smallest pipeline where handing a
+# run over peer to peer does anything at all. Set SWARM_BENCH_CHAIN=false to
+# measure the same split the old way for comparison.
+pipeline_chaining = ${SWARM_BENCH_CHAIN:-true}
 CFG
 done
 
