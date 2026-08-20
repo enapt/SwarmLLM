@@ -537,7 +537,8 @@ pub async fn chat_completions(
     // avoiding template mismatch (e.g. `<|assistant|>` prefix leak) and the unnecessary
     // loaded_model_info.read().await before the split path.
     let requested_mid = crate::types::ModelId(req.model.clone());
-    let has_local_split_model = state.shared_state.has_complete_split_model(&requested_mid);
+    let has_local_split_model = state.shared_state.has_complete_split_model(&requested_mid)
+        && !state.shared_state.should_offer_work_to_the_swarm();
 
     if has_local_split_model {
         // Echo the model the client actually requested (`req.model`), NOT the

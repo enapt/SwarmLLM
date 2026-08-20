@@ -1664,6 +1664,28 @@ impl SharedState {
         originated.saturating_add(served)
     }
 
+    /// Should a request this node COULD serve locally be offered to the router
+    /// instead, so a peer can take it?
+    ///
+    /// The single answer for every API surface. There are two independent fast
+    /// paths — OpenAI and Anthropic — and a rule implemented in one of them is
+    /// the recurring defect of this codebase, so both ask here.
+    ///
+    /// Answers `false` unless the operator turned `shed_load_when_busy` on AND
+    /// this node is already carrying `shed_load_threshold` requests. Read live
+    /// through `cfg()`, so both settings take effect without a restart.
+    ///
+    /// Why it exists: a node holding a complete model serves it locally without
+    /// consulting the router at all, so eight concurrent requests all stayed on
+    /// one GPU — 36 tok/s per request falling to 7.5 — while a peer advertising
+    /// 20 tok/s sat idle. See `InferenceConfig::shed_load_when_busy` for what
+    /// must be measured before this becomes a default.
+    pub fn should_offer_work_to_the_swarm(&self) -> bool {
+        let cfg = self.cfg();
+        cfg.inference.shed_load_when_busy
+            && self.active_inference_load() >= cfg.inference.shed_load_threshold
+    }
+
     /// What we have measured of this peer running a **whole model** for us, per
     /// layer, in ms. `None` when we have never delegated to it.
     ///

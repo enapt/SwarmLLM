@@ -278,7 +278,8 @@ pub async fn messages(
     // Fast path: if we have a complete local split model for the REQUESTED model, generate directly.
     // Match by model ID — not just "any loaded model" (compare sends different model IDs).
     let requested_mid = crate::types::ModelId(model.clone());
-    let has_local_split_model = state.shared_state.has_complete_split_model(&requested_mid);
+    let has_local_split_model = state.shared_state.has_complete_split_model(&requested_mid)
+        && !state.shared_state.should_offer_work_to_the_swarm();
 
     tracing::debug!(
         request_id = %request_id,

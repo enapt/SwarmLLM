@@ -1490,6 +1490,55 @@ mod tests {
         state
     }
 
+    /// Both API surfaces must ask the same question about shedding load. A rule
+    /// implemented on one path and forgotten on the other is this codebase's
+    /// most repeated defect, and there are two fast paths here — OpenAI and
+    /// Anthropic — that look nothing alike.
+    #[test]
+    fn shedding_load_is_off_until_a_node_is_actually_busy() {
+        let state = serving_test_state();
+
+        // Default: never shed, however busy. The feature is opt-in because the
+        // benefit is unmeasured — see `InferenceConfig::shed_load_when_busy`.
+        assert!(!state.should_offer_work_to_the_swarm());
+        let guards: Vec<_> = (0..8)
+            .map(|i| ServingGuard::new(&state, crate::types::ModelId(format!("m{i}"))))
+            .collect();
+        assert_eq!(state.active_inference_load(), 8);
+        assert!(
+            !state.should_offer_work_to_the_swarm(),
+            "off by default means off, even under load"
+        );
+        drop(guards);
+
+        // Turned on, it still waits for a real queue: one request in flight is
+        // not busy, because that is exactly the gap batching fills.
+        let mut cfg = (**state.cfg()).clone();
+        cfg.inference.shed_load_when_busy = true;
+        cfg.inference.shed_load_threshold = 4;
+        state.live_config.store(std::sync::Arc::new(cfg));
+
+        assert!(
+            !state.should_offer_work_to_the_swarm(),
+            "idle keeps its work"
+        );
+        let g: Vec<_> = (0..3)
+            .map(|i| ServingGuard::new(&state, crate::types::ModelId(format!("n{i}"))))
+            .collect();
+        assert!(
+            !state.should_offer_work_to_the_swarm(),
+            "below the threshold keeps its work"
+        );
+        let g4 = ServingGuard::new(&state, crate::types::ModelId("n3".into()));
+        assert!(
+            state.should_offer_work_to_the_swarm(),
+            "at the threshold, the router gets to compare"
+        );
+        drop(g4);
+        drop(g);
+        assert!(!state.should_offer_work_to_the_swarm(), "and it recovers");
+    }
+
     /// The figure a node advertises as its load must count work it is doing
     /// FOR PEERS, not only work it started itself.
     ///

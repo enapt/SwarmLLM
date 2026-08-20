@@ -460,14 +460,52 @@ pub(crate) async fn dispatch_network_messages(
                                             .get(&token.request_id)
                                             .map(|r| r.clone());
                                         if let Some(tx) = maybe_tx {
-                                            // Use try_send to avoid blocking the dispatch loop
-                                            // if the client isn't consuming fast enough.
-                                            if tx.try_send(token.clone()).is_err() {
-                                                tracing::debug!(
-                                                    request_id = %token.request_id,
-                                                    "Streaming token channel closed or full"
-                                                );
-                                                shared_state.streaming_token_txs.remove(&token.request_id);
+                                            // `try_send`, so a client that is not reading cannot
+                                            // block the dispatch loop for every other request.
+                                            //
+                                            // **Full and closed are opposite situations and used to
+                                            // be handled identically.** A closed channel means the
+                                            // request is over and the entry should go. A full one
+                                            // means the consumer is momentarily behind — and
+                                            // removing the channel for that discarded not one
+                                            // token but EVERY REMAINING TOKEN of the reply, since
+                                            // each later one then finds no sender and is dropped
+                                            // silently. A moment of backpressure truncated the
+                                            // whole answer.
+                                            //
+                                            // Order does not matter here: `StreamReassembler`
+                                            // sequences by `token_id`, so handing a delayed token
+                                            // to a task to deliver cannot reorder the reply. That
+                                            // is what makes recovering it safe rather than merely
+                                            // less bad.
+                                            match tx.try_send(token.clone()) {
+                                                Ok(()) => {}
+                                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                                    shared_state.streaming_token_txs.remove(&token.request_id);
+                                                }
+                                                Err(tokio::sync::mpsc::error::TrySendError::Full(tok)) => {
+                                                    // At `warn`: nodes run at `info`, so the
+                                                    // `debug!` this replaces was invisible in
+                                                    // every real log — and it was the one line
+                                                    // that could have said whether a truncated
+                                                    // reply was the network losing packets or
+                                                    // this node dropping them.
+                                                    tracing::warn!(
+                                                        request_id = %token.request_id,
+                                                        token_id = tok.token_id,
+                                                        "streaming token channel full — consumer is behind, delivering out of band"
+                                                    );
+                                                    tokio::spawn(async move {
+                                                        // Bounded, so a vanished consumer cannot
+                                                        // strand this task forever.
+                                                        let _ = tx
+                                                            .send_timeout(
+                                                                tok,
+                                                                std::time::Duration::from_secs(10),
+                                                            )
+                                                            .await;
+                                                    });
+                                                }
                                             }
                                         }
                                     }

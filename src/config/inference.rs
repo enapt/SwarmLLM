@@ -48,6 +48,38 @@ pub struct InferenceConfig {
     /// Enable speculative decoding when a valid draft-target model pair is available.
     #[serde(default)]
     pub speculative_decoding: bool,
+    /// Let a busy node hand a request it COULD serve locally to the router, so
+    /// a peer can take it instead.
+    ///
+    /// A node holding a complete model serves it locally, unconditionally and
+    /// without consulting the router at all. Measured 2026-08-20: eight
+    /// concurrent requests all stayed on the local GPU, per-request throughput
+    /// falling from 36 to 7.5 tok/s, while a peer advertising 20 tok/s sat
+    /// idle. No cost-model change can reach that, because nothing asks the
+    /// question.
+    ///
+    /// **Off by default, and it should stay off until two things are
+    /// measured.** First, whether shedding actually wins: aggregate throughput
+    /// kept RISING with concurrency on one GPU (30.8 → 49.5 → 59.0 tok/s at
+    /// N=2/4/8) because batching works, so a node degrading per-request is not
+    /// the same as a node that should stop taking work — and a WAN peer adds a
+    /// round trip per request that may cost more than it saves. Second, the
+    /// prompt path: the local fast path and the router build prompts through
+    /// different code, which is the divergence behind gotchas #169 and #171,
+    /// and it cannot be checked by comparing generated text here because
+    /// `temperature: 0` plus a seed does not reproduce on this codebase
+    /// (gotcha #327). Compare the rendered prompt, not the answer.
+    #[serde(default)]
+    pub shed_load_when_busy: bool,
+    /// How many requests this node must already be working on before
+    /// `shed_load_when_busy` lets one go to the router.
+    ///
+    /// One in flight is not busy — the second request shares a GPU that is
+    /// mostly idle between token launches, which is the case batching exists to
+    /// exploit. The default only starts offering work away once a node is
+    /// carrying a real queue.
+    #[serde(default = "default_shed_load_threshold")]
+    pub shed_load_threshold: u32,
     /// Use a persistent libp2p bidirectional stream per pipeline session for
     /// distributed inference instead of the per-token request_response path.
     /// Off by default until validated. See `docs/plans/archive/distributed_inference_speedup.md`.
@@ -765,6 +797,10 @@ fn default_speculative_gamma() -> u32 {
     4
 }
 
+fn default_shed_load_threshold() -> u32 {
+    4
+}
+
 /// SWARM-SPEC Layer 0: default activation compression to ON. Saves
 /// ~50-70% wire bandwidth on multi-segment pipelines with negligible
 /// quality impact (group-32 Q8_0 — see `inference/quant.rs`).
@@ -900,6 +936,8 @@ impl Default for InferenceConfig {
             gpu_layers: default_gpu_layers(),
             kv_cache_ttl_secs: default_kv_cache_ttl(),
             speculative_decoding: false,
+            shed_load_when_busy: false,
+            shed_load_threshold: default_shed_load_threshold(),
             persistent_pipeline_stream: false,
             streaming_chunked_send: false,
             streaming_chunk_size_bytes: default_streaming_chunk_size_bytes(),

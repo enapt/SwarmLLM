@@ -169,6 +169,8 @@ booted with.
 | `prefill_target_ms` | integer | `100` | Wall-time budget for one tick of prompt processing **while more than one request is active** — the same limit as `prefill_chunk_tokens` but expressed in what a waiting request actually feels |
 | `encrypted_pipeline_auto` | boolean | `true` | Turn prompt privacy on automatically for any model where this node holds both the first and last shard, which is the only condition under which it can work. An explicit per-model or global `encrypted_pipeline` setting always wins |
 | `parallax_partial_ranges` | boolean | `false` | Let the router use only PART of a node's shard range, so a node holding a whole model can serve just one end of it. Off by default: the cost model charges a remote hop once per segment rather than per token, so it cannot see the round-trip penalty and over-splits |
+| `shed_load_when_busy` | boolean | `false` | Let a busy node hand a request it could serve locally to the router, so a peer can take it. A node holding a complete model otherwise serves it locally without consulting the router at all: measured 2026-08-20, eight concurrent requests all stayed on one GPU (36 → 7.5 tok/s per request) while a peer advertising 20 tok/s sat idle. Off by default because the benefit is unproven — aggregate throughput kept RISING with concurrency on that GPU, so degrading per-request is not the same as needing to stop taking work |
+| `shed_load_threshold` | integer | `4` | How many requests must already be in flight before `shed_load_when_busy` offers one to the router. One in flight is not busy: the second request shares a GPU that is mostly idle between token launches, which is what batching exploits |
 
 ## `[logging]` — Log Output
 
