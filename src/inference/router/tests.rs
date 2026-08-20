@@ -235,8 +235,12 @@ fn collect_batch_empty_queue() {
 
 #[test]
 fn default_batch_config() {
+    // Batching is ON by default, measured at about 40% more aggregate
+    // throughput under concurrency with no cost to a single request. The
+    // subject here is that the value reaches the router at all, not what it
+    // happens to be — see `InferenceConfig::max_batch_size`.
     let config = crate::config::Config::default();
-    assert_eq!(config.inference.max_batch_size, 1);
+    assert_eq!(config.inference.max_batch_size, 8);
     assert_eq!(config.inference.batch_timeout_ms, 50);
 }
 

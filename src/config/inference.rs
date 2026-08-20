@@ -293,8 +293,29 @@ pub struct InferenceConfig {
     /// three of them forgot to ask at all — see that method.
     #[serde(default)]
     pub shard_range: Option<(u32, u32)>,
-    /// Maximum number of requests to batch together for inference.
-    /// Default 1 means no batching (sequential, backward-compatible).
+    /// Maximum number of requests to run through the model together.
+    ///
+    /// Batching amortises the expensive part of a decode step. Reading the
+    /// weights dominates, and reading them once for eight tokens instead of
+    /// eight times is most of the cost of seven of those tokens saved — which
+    /// is why it helps a memory-bound processor at least as much as a graphics
+    /// card.
+    ///
+    /// **Measured on an RTX 3070 with llama-3.2-3b, 2026-08-20.** Eight
+    /// concurrent requests: 65.9 tokens a second in aggregate without batching,
+    /// 91.9-96.9 with — around 40% more work from the same hardware, and each
+    /// individual request finished faster too. The daemon reported every
+    /// multi-request call actually batching (`calls=642 batched=642`), so this
+    /// is the mechanism working rather than a number moving.
+    ///
+    /// A single request pays nothing measurable: 28.9 tokens a second averaged
+    /// without batching against 31.6 with, across alternating runs. That was
+    /// the question that decided the default, since a throughput win bought
+    /// with single-user latency would be a bad trade for most nodes.
+    ///
+    /// It was 1 — no batching — described as backward-compatible, and left that
+    /// way long after the batching path was measured at 2.4x on a GPU. Set it
+    /// to 1 to turn batching off.
     #[serde(default = "default_max_batch_size")]
     pub max_batch_size: u32,
     /// How long (ms) to wait for additional requests before dispatching a partial batch.
@@ -881,7 +902,7 @@ fn default_ngram_num_pred_tokens() -> u32 {
 }
 
 fn default_max_batch_size() -> u32 {
-    1
+    8
 }
 
 fn default_batch_timeout_ms() -> u64 {

@@ -1124,7 +1124,7 @@ auto_relay = false
         let params = OperationalParams::from_config(&config);
         assert_eq!(params.max_concurrent_requests, 10);
         assert_eq!(params.auto_manage_interval_minutes, 5);
-        assert_eq!(params.max_batch_size, 1);
+        assert_eq!(params.max_batch_size, 8);
         assert_eq!(params.batch_timeout_ms, 50);
         assert_eq!(params.session_timeout_secs, 600);
     }
@@ -1210,7 +1210,7 @@ max_concurrent_requests = 42
         let params = reload_operational_params(&config_path).unwrap();
         assert_eq!(params.max_concurrent_requests, 42);
         // Defaults for others
-        assert_eq!(params.max_batch_size, 1);
+        assert_eq!(params.max_batch_size, 8);
     }
 
     /// An explicit ceiling is the user's own decision and overrides the
