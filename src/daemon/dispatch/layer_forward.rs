@@ -359,16 +359,62 @@ pub(super) async fn handle_layer_forward(
         }
     }
 
-    // Send back as a separate request to the originating peer
+    // Send the result to whoever is WAITING for it, which is not always
+    // whoever sent it to us.
+    //
+    // On an unchained forward those are the same node and this changes nothing.
+    // In a chain they are not: our predecessor handed us the activations and is
+    // no longer involved, while the coordinator is waiting on the tail. Replying
+    // to the sender would send the answer to a node that is not expecting it,
+    // and the request would hang until the coordinator's deadline — which is
+    // exactly what a chained request would have done.
+    //
+    // `requester_node_id` is the coordinator: it is already on the forward so
+    // the last segment can seal the result for that node's key, which is the
+    // same "who asked for this" question. If we cannot resolve it — a peer we
+    // have no route to — the sender is the best remaining guess and is right
+    // for every unchained forward.
+    // `resolve_connected_peer_id_bytes`, not the ungated resolver: a
+    // `LayerResult` is a direct send, and the peer-id map is deliberately kept
+    // across disconnects, so the ungated one hands back targets the send path
+    // can only drop (gotcha #220). Not connected means fall back to the sender,
+    // which is correct for every unchained forward and no worse than before.
+    let reply_to = reply_target(requester_node_id, &local_node_id, sender_peer_bytes, |n| {
+        shared_state.resolve_connected_peer_id_bytes(n)
+    });
+
     if let Err(e) = network_tx
         .send(NetworkCommand::SendTensorResult {
-            target_peer_bytes: sender_peer_bytes,
+            target_peer_bytes: reply_to,
             result,
         })
         .await
     {
         tracing::warn!(error = %e, "Failed to send LayerResult back to peer");
     }
+}
+
+/// Who should receive this segment's result?
+///
+/// Extracted so the rule is testable without a network, because getting it
+/// wrong is silent: the answer goes to a node that is not waiting for it and
+/// the request hangs until the coordinator's deadline.
+///
+/// Whoever sent us the activations is not always whoever is waiting for the
+/// answer. On an unchained forward they are the same node. In a chain the
+/// predecessor handed the work along and is done, while the coordinator is
+/// waiting on the tail — so the result must go to the requester.
+fn reply_target(
+    requester_node_id: Option<[u8; 32]>,
+    local_node_id: &crate::types::NodeId,
+    sender_peer_bytes: Vec<u8>,
+    resolve: impl Fn(&crate::types::NodeId) -> Option<Vec<u8>>,
+) -> Vec<u8> {
+    requester_node_id
+        .map(crate::types::NodeId)
+        .filter(|n| n != local_node_id)
+        .and_then(|n| resolve(&n))
+        .unwrap_or(sender_peer_bytes)
 }
 
 /// Should this segment hand its output onward rather than return it?
@@ -587,5 +633,60 @@ mod chaining_tests {
         // That is what a failure looks like. Passing it on would turn one
         // node's problem into a silent wrong answer several hops away.
         assert!(!chaining_applies(&hop(), false, true));
+    }
+
+    use super::reply_target;
+
+    /// The bug this prevents: in a chain the previous hop hands the work along
+    /// and stops caring, while the coordinator waits on the tail. Replying to
+    /// the sender sends the answer to a node that is not expecting it, and the
+    /// request hangs until the deadline.
+    #[test]
+    fn the_tail_of_a_chain_answers_the_coordinator_not_its_predecessor() {
+        let coordinator = NodeId([9u8; 32]);
+        let me = NodeId([3u8; 32]);
+        let predecessor_bytes = b"previous-hop".to_vec();
+
+        let to = reply_target(Some(coordinator.0), &me, predecessor_bytes.clone(), |n| {
+            (n == &coordinator).then(|| b"coordinator".to_vec())
+        });
+        assert_eq!(to, b"coordinator".to_vec());
+    }
+
+    /// An unchained forward is unaffected: sender and requester are the same
+    /// node, so this resolves to where the result already went.
+    #[test]
+    fn an_unchained_forward_still_answers_its_sender() {
+        let coordinator = NodeId([9u8; 32]);
+        let me = NodeId([3u8; 32]);
+        let to = reply_target(Some(coordinator.0), &me, b"sender".to_vec(), |_| {
+            Some(b"coordinator".to_vec())
+        });
+        // Same node either way — the point is that resolving does not break it.
+        assert_eq!(to, b"coordinator".to_vec());
+    }
+
+    /// A coordinator we have no live route to falls back to the sender, which
+    /// is right for every unchained forward and no worse than before.
+    #[test]
+    fn an_unreachable_requester_falls_back_to_the_sender() {
+        let me = NodeId([3u8; 32]);
+        let to = reply_target(Some([9u8; 32]), &me, b"sender".to_vec(), |_| None);
+        assert_eq!(to, b"sender".to_vec());
+
+        // And a forward with no requester at all — an older node — is unchanged.
+        let to = reply_target(None, &me, b"sender".to_vec(), |_| Some(b"x".to_vec()));
+        assert_eq!(to, b"sender".to_vec());
+    }
+
+    /// Never address ourselves. A forward claiming we are our own coordinator
+    /// would otherwise loop the result back into this node.
+    #[test]
+    fn a_forward_naming_us_as_the_requester_replies_to_the_sender() {
+        let me = NodeId([3u8; 32]);
+        let to = reply_target(Some(me.0), &me, b"sender".to_vec(), |_| {
+            Some(b"self".to_vec())
+        });
+        assert_eq!(to, b"sender".to_vec());
     }
 }
