@@ -173,6 +173,19 @@ impl Drop for ServingGuard {
 pub struct PendingLayerResult {
     pub tx: tokio::sync::oneshot::Sender<crate::types::LayerResult>,
     pub awaiting: Option<crate::types::NodeId>,
+    /// The other nodes of a chained run, which may also answer.
+    ///
+    /// A chain is handed over in one message and normally answers from its
+    /// tail, which is what `awaiting` pins. But a hop part-way along that
+    /// cannot reach ITS successor has to say so, and that report comes from a
+    /// node the coordinator never sent to — so without this it would be
+    /// discarded as "a result from a node this request is no longer waiting
+    /// on", and the request would sit until its deadline expired rather than
+    /// failing in the fraction of a second it took to find out.
+    ///
+    /// Empty for every unchained request, which is every request unless
+    /// `inference.pipeline_chaining` is on.
+    pub chain_members: Vec<crate::types::NodeId>,
 }
 
 impl PendingLayerResult {
@@ -184,7 +197,9 @@ impl PendingLayerResult {
     pub fn accepts(&self, sender: Option<&crate::types::NodeId>) -> bool {
         match (&self.awaiting, sender) {
             (None, _) => true,
-            (Some(expected), Some(actual)) => expected == actual,
+            (Some(expected), Some(actual)) => {
+                expected == actual || self.chain_members.iter().any(|n| n == actual)
+            }
             (Some(_), None) => false,
         }
     }
@@ -2986,6 +3001,7 @@ mod pending_layer_result_tests {
             PendingLayerResult {
                 tx,
                 awaiting: Some(node_b.clone()),
+                chain_members: Vec::new(),
             },
         );
 
@@ -3028,6 +3044,7 @@ mod pending_layer_result_tests {
             PendingLayerResult {
                 tx,
                 awaiting: Some(node.clone()),
+                chain_members: Vec::new(),
             },
         );
 
@@ -3044,7 +3061,11 @@ mod pending_layer_result_tests {
     #[test]
     fn an_unpinned_waiter_accepts_any_sender() {
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        let pending = PendingLayerResult { tx, awaiting: None };
+        let pending = PendingLayerResult {
+            tx,
+            awaiting: None,
+            chain_members: Vec::new(),
+        };
         assert!(pending.accepts(None));
         assert!(pending.accepts(Some(&NodeId([1u8; 32]))));
     }
@@ -3057,10 +3078,40 @@ mod pending_layer_result_tests {
         let pending = PendingLayerResult {
             tx,
             awaiting: Some(NodeId([2u8; 32])),
+            chain_members: Vec::new(),
         };
         assert!(!pending.accepts(None));
         assert!(!pending.accepts(Some(&NodeId([3u8; 32]))));
         assert!(pending.accepts(Some(&NodeId([2u8; 32]))));
+    }
+    /// A chained run is pinned to its tail, because that is who normally
+    /// answers. But a hop part-way along that cannot reach its own successor
+    /// has to be able to report it — and that report comes from a node the
+    /// coordinator never sent to. Refusing it means the request waits out its
+    /// whole deadline instead of failing in the moment it took to find out.
+    #[test]
+    fn a_hop_partway_along_a_chain_can_report_a_failure() {
+        let tail = NodeId([9u8; 32]);
+        let middle = NodeId([5u8; 32]);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let pending = PendingLayerResult {
+            tx,
+            awaiting: Some(tail.clone()),
+            chain_members: vec![middle.clone(), tail.clone()],
+        };
+        assert!(pending.accepts(Some(&tail)), "the tail answers normally");
+        assert!(
+            pending.accepts(Some(&middle)),
+            "and a hop along the way can report a failure"
+        );
+        assert!(
+            !pending.accepts(Some(&NodeId([7u8; 32]))),
+            "but a node with no part in this run still cannot"
+        );
+        assert!(
+            !pending.accepts(None),
+            "and an unattributable payload still cannot"
+        );
     }
 }
 

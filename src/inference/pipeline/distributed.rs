@@ -841,26 +841,39 @@ impl PipelineExecutor {
                 // the planner refuses — a local segment, a peer without the
                 // feature, a gap in the layer ranges. Empty means every line
                 // below behaves exactly as it did before chaining existed.
-                let chain: Vec<crate::types::ChainHop> =
-                    if self.shared_state.cfg().inference.pipeline_chaining
-                        && generated_ids.is_empty()
-                    {
-                        let st = &self.shared_state;
-                        super::plan_chain(
-                            &self.assignment.segments,
-                            idx,
-                            st.identity.node_id(),
-                            |n| st.peer_supports_pipeline_chain(n),
-                            self.shared_state.cfg().inference.max_chain_hops as usize,
-                        )
-                    } else {
-                        // `generated_ids` are needed by the segment that samples,
-                        // and they travel with the coordinator's own forward. In a
-                        // chain that forward is built on a serving node, which does
-                        // not have them — so a request carrying penalties is not
-                        // chained rather than silently losing them.
-                        Vec::new()
-                    };
+                // `generated_ids` is NOT the right question, though it reads
+                // like it: it accumulates the completion so far, so it is empty
+                // only before the prompt pass and non-empty for every decode
+                // step after. Gating on it disabled chaining for the whole
+                // per-token phase — which is where the round trips are, and the
+                // only reason this exists. What matters is whether the sampler
+                // will NEED those ids, which is the condition
+                // `apply_repetition_penalties` itself uses.
+                let needs_generated_ids = self.request.sampling_params.frequency_penalty != 0.0
+                    || self.request.sampling_params.presence_penalty != 0.0;
+                let chain: Vec<crate::types::ChainHop> = if self
+                    .shared_state
+                    .cfg()
+                    .inference
+                    .pipeline_chaining
+                    && !needs_generated_ids
+                {
+                    let st = &self.shared_state;
+                    super::plan_chain(
+                        &self.assignment.segments,
+                        idx,
+                        st.identity.node_id(),
+                        |n| st.peer_supports_pipeline_chain(n),
+                        self.shared_state.cfg().inference.max_chain_hops as usize,
+                    )
+                } else {
+                    // `generated_ids` are needed by the segment that samples,
+                    // and they travel with the coordinator's own forward. In a
+                    // chain that forward is built on a serving node, which does
+                    // not have them — so a request carrying penalties is not
+                    // chained rather than silently losing them.
+                    Vec::new()
+                };
                 let awaiting_node = chain
                     .last()
                     .map(|h| h.node_id.clone())
@@ -939,6 +952,9 @@ impl PipelineExecutor {
                         // forward's late error is attributed to THAT node and
                         // must not resolve the standby's waiter.
                         awaiting: Some(awaiting_node.clone()),
+                        // Any hop of the run may report a failure it cannot
+                        // recover from; see `PendingLayerResult::chain_members`.
+                        chain_members: chain.iter().map(|h| h.node_id.clone()).collect(),
                     },
                 );
                 // NOTE: the dsd.rs / speculative.rs PendingLayerResultGuard
@@ -1193,7 +1209,18 @@ impl PipelineExecutor {
                             let seg_elapsed_ms = segment_start.elapsed().as_millis() as u64;
                             // A chained run answered for every segment it
                             // covered, so the loop must not send to them again.
-                            chained_through = idx + 1 + chain.len();
+                            //
+                            // Set only for a reply that is actually going to be
+                            // used. The activation-shape check below can still
+                            // reject this result and fail over — and that
+                            // failover replaces only THIS segment's holder,
+                            // producing activations for this segment's layers
+                            // alone. Committing the skip before that point
+                            // would let the loop resume past hops that were
+                            // never recomputed, feeding a partial tensor
+                            // forward as though the whole chain had run: a
+                            // wrong answer rather than an error.
+                            let chain_covered = idx + 1 + chain.len();
                             // The measurement covers the whole run — one send,
                             // one reply, however many nodes were between. Charge
                             // it to the head, over the layers actually run,
@@ -1286,11 +1313,19 @@ impl PipelineExecutor {
                                         is_last,
                                     )
                                     .await?;
+                                // The standby covered THIS segment only, so
+                                // the rest of the run still has to be done. Do
+                                // not commit the skip, and ask the ordinary
+                                // per-segment question about finishing rather
+                                // than the run's.
                                 if is_last {
                                     return Ok(failover_result);
                                 }
                                 activations = failover_result.activations;
                             } else {
+                                // The chain's answer is accepted, so the
+                                // segments it covered are genuinely done.
+                                chained_through = chain_covered;
                                 activations = result.activations;
                             }
                         }
@@ -1438,6 +1473,7 @@ impl PipelineExecutor {
                         // `request_id` and would otherwise resolve THIS waiter,
                         // discarding the standby's real result.
                         awaiting: Some(backup.node_id.clone()),
+                        chain_members: Vec::new(),
                     },
                 );
                 let mut pending_guard = super::PendingLayerResultGuard::new(

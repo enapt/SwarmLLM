@@ -95,7 +95,13 @@ pub(super) fn register_pending_layer_result(
     let (tx, rx) = tokio::sync::oneshot::channel();
     map.insert(
         request_id,
-        crate::daemon::state::PendingLayerResult { tx, awaiting },
+        crate::daemon::state::PendingLayerResult {
+            tx,
+            awaiting,
+            // This helper serves the speculative and DSD paths, which never
+            // chain — they build their own forwards and drive them per token.
+            chain_members: Vec::new(),
+        },
     );
     let guard = PendingLayerResultGuard::new(map, request_id);
     Ok((rx, guard))

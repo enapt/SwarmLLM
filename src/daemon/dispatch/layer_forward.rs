@@ -335,9 +335,18 @@ pub(super) async fn handle_layer_forward(
                         // coordinator must be told rather than left waiting for
                         // its whole deadline.
                         tracing::warn!(error = %e, request_id = %request_id, "chained send failed");
+                        // To the COORDINATOR, not to whoever handed us the
+                        // work: mid-chain our predecessor is not waiting for
+                        // anything and would simply drop this.
+                        let reply_to = reply_target(
+                            requester_node_id,
+                            &local_node_id,
+                            sender_peer_bytes,
+                            |n| shared_state.resolve_connected_peer_id_bytes(n),
+                        );
                         send_error_result(
                             &network_tx,
-                            &sender_peer_bytes,
+                            &reply_to,
                             request_id,
                             "chained forward could not be sent",
                         )
@@ -346,14 +355,34 @@ pub(super) async fn handle_layer_forward(
                     return;
                 }
                 None => {
-                    // Not connected to the next hop. Returning the result costs
-                    // the coordinator one round trip and it can relay onward
-                    // itself, which is exactly the pre-chaining behaviour.
-                    tracing::debug!(
+                    // Not connected to the next hop, so this run cannot
+                    // continue. Say so — do NOT fall through and return our
+                    // activations.
+                    //
+                    // They cover only OUR layers, and the coordinator has
+                    // already skipped past the rest of the run on the
+                    // assumption the chain would carry them. Handing back a
+                    // partial tensor of an entirely plausible size would be
+                    // fed to whatever comes after the run as though the whole
+                    // chain had computed it: a confident wrong answer instead
+                    // of an error. An error costs one retry, unchained.
+                    tracing::warn!(
                         request_id = %request_id,
                         next = %next.node_id,
-                        "next hop unreachable — returning result to the coordinator"
+                        "next hop unreachable — failing the chained run"
                     );
+                    let reply_to =
+                        reply_target(requester_node_id, &local_node_id, sender_peer_bytes, |n| {
+                            shared_state.resolve_connected_peer_id_bytes(n)
+                        });
+                    send_error_result(
+                        &network_tx,
+                        &reply_to,
+                        request_id,
+                        "chained run could not reach the next segment",
+                    )
+                    .await;
+                    return;
                 }
             }
         }
