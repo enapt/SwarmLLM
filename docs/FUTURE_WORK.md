@@ -8912,6 +8912,47 @@ inherited figures. Both need a tuning constant nobody can justify yet, and the
 narrower rule above removes the harm without one. Revisit if a case appears where
 an inherited figure would genuinely have helped.
 
+### Confirmed end to end on the live swarm, 2026-08-20
+
+The fix above was verified by its inputs — the peer that a fresh probe had ranked
+with a gossiped figure reported no observation afterwards. That is not the same
+as the request arriving somewhere better, so the reproduction was re-run in full
+on the released v0.3.105-alpha binary once the RTX 4050 came back, with the same
+three holders of `llama-3.2-1b-instruct-q8-0` and the same box that produced the
+0.23 tok/s figure.
+
+**Five out of five now go to the GPU**, where five out of five previously went to
+the 1.31 tok/s processor node. 60 completion tokens each:
+
+| run | wall | served by | tok/s |
+|---|---|---|---|
+| 1 | 8.45 s | `bf7b3263` RTX 4050 | 8.2 |
+| 2 | 4.21 s | `bf7b3263` | 19.3 |
+| 3 | 5.08 s | `bf7b3263` | 15.1 |
+| 4 | 4.32 s | `bf7b3263` | 18.6 |
+| 5 | 4.13 s | `bf7b3263` | 20.0 |
+
+Run 1 carries the peer's model load; the steady state settles on **20.0 tok/s
+against the 20.45 it advertises**, which is independent evidence that the
+advertised figure — measured rather than assumed only since 2026-08-18 — is
+honest enough to route on. Against yesterday's 0.23 tok/s that is **87x**.
+
+The strongest single piece of evidence is which peer it passed over. The GPU had
+the **worst** round trip of the three on every run (2107 / 1348 / 1348 / 1697 /
+1697 ms against the LAN node's 91 / 80 / 80 / 410 / 410 ms) and was chosen
+anyway. Nothing but the advertised speed can produce that ordering, which is
+precisely the fallback path the fix restores.
+
+**What this run does NOT establish**, and the reason matters more than the gap:
+`observed_ms_per_layer=None` for all three candidates is consistent with the new
+guard, but it is not proof the guard fired. Both Belgium nodes had restarted
+minutes earlier and `peer_speed` is not persisted, so the swarm's pool of
+gossipable observations may simply have been empty. Two things would have settled
+it and neither exists: the merge site logs at `debug` (nodes run at `info` — the
+same trap as 2026-08-03), and nothing exposes a coefficient that was seeded but
+is being refused for ranking. An admin surface for the routing inputs is already
+item 4 below; this is the second time its absence has cost a diagnosis.
+
 ### What was proposed, in order
 
 1. **Do not let an observation silently outrank a large advertised gap.** A peer
@@ -8948,3 +8989,75 @@ exposing per-shard holders, which is itself worth fixing for diagnosis.
 being a hardcoded 1.70 for every processor-only node (gotcha #330/#333). This
 swarm now spans **0.37 to 20.45 tok/s**, a 55x range, and this is the first
 evidence about whether routing actually exploits it. On this showing it does not.
+
+## The delegated route measures a peer and then cannot use the measurement (found 2026-08-20)
+
+Found while confirming the routing fix above, and it is the second, independent
+reason the observation column read `None` after five good segments to the same
+peer: on that route it can never read anything else.
+
+### The shape
+
+`WorkKind::Delegated` has **one production writer and no production reader.**
+
+- Written at `inference::pipeline::remote_generate` — the whole-model,
+  single-segment route, i.e. what a coordinator uses whenever one peer can cover
+  every layer. That is the common remote route, and it served all five requests
+  in the confirmation above at up to 20 tok/s.
+- It lands in `PeerSpeed::delegated_ms_per_layer`, which is readable only through
+  `predict_ms(WorkKind::Delegated, ..)`.
+- `ranking_ms_per_layer` consults decode, then falls back to prefill. It never
+  consults delegated.
+- The only production caller of `predict_ms` is `SegmentBudget::for_forward`,
+  which is passed `Prefill` or `Decode` at every one of its call sites. Nothing
+  ever asks for the delegated kind.
+
+So this node timed an RTX 4050 five times, stored the result, and cannot let it
+influence any decision it will ever make.
+
+### Why it matters
+
+On the delegated route the peer's **advertised** speed is the only input, now and
+permanently. There is no feedback loop: a peer that advertises 20 tok/s and
+delivers 2 — overloaded, thermally throttled, or simply wrong about itself — is
+chosen again every time, and the evidence to know better is collected and
+discarded on each of those requests.
+
+Today that is benign, arguably lucky: the advertised figures became real
+measurements on 2026-08-18, and the fallback they feed is what routed correctly
+above. The exposure is that the correctness of every delegated route now rests
+entirely on peers describing themselves accurately, with nothing downstream able
+to notice when one does not.
+
+This is the shape of gotcha #330/#333 — a field with no consumer is unverified —
+with the twist that here it is a *measurement* rather than an announcement, so
+nothing is wrong with the number. It simply has nowhere to go.
+
+### Why it is not a one-line change
+
+Feeding `delegated_ms_per_layer` into the ranking slot would be wrong. Delegated
+ms/layer and decode ms/layer measure different things: the delegated figure has
+no per-token network round trip in it, because the peer runs every layer locally
+and streams tokens back, while a pipelined decode segment crosses the network per
+token. Delegated is therefore systematically cheaper per layer for the same
+hardware. Ranking the two against each other in one slot would under-price every
+peer we have delegated to relative to peers we have only pipelined through — the
+same apples/oranges hazard that `ActivationUnits` already exists to prevent on
+the prefill coefficient.
+
+The honest options, none of them free:
+
+1. **Rank delegated candidates by the delegated coefficient and pipelined ones by
+   decode**, keeping the slots separate. Correct in units, but the scheduler
+   compares whole-model candidates against split ones in the same DP, so the two
+   costs still meet.
+2. **Convert between them** by adding back a modelled per-token round trip. Needs
+   a constant nobody can justify yet — the objection that kept blending and
+   decay out of the fix above.
+3. **Use it only as a sanity check on the advertised figure**, not for ranking:
+   flag or down-weight a peer whose delivered rate is persistently far below what
+   it claims. This gets the missing feedback loop without putting an
+   incommensurable number into the cost model, and is the cheapest of the three.
+
+Option 3 looks right, but it is a design call rather than a repair, so it is
+written down rather than guessed at.
