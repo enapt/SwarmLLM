@@ -10,7 +10,7 @@ use super::seal_layer_result;
 pub(super) async fn handle_layer_forward(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
-    forward: crate::types::LayerForward,
+    mut forward: crate::types::LayerForward,
 ) {
     let request_id = forward.request_id;
     let sender_peer_bytes = match forward.sender_peer_bytes {
@@ -121,6 +121,12 @@ pub(super) async fn handle_layer_forward(
     // Capture TP metadata and requester_node_id before moving forward into the process pool
     let tp_meta = forward.tp_meta.clone();
     let requester_node_id = forward.requester_node_id;
+    // The rest of the pipeline after us, if the coordinator chained this
+    // request. Captured here for the same reason as the two above: `forward` is
+    // moved into the worker pool below.
+    let chain = std::mem::take(&mut forward.chain);
+    let sequence_num = forward.sequence_num;
+    let index_pos = forward.index_pos;
 
     // Mark the model busy for as long as this segment is computing.
     //
@@ -254,6 +260,105 @@ pub(super) async fn handle_layer_forward(
         seal_layer_result(&mut result, requester_node_id.as_ref());
     }
 
+    // Direct peer chaining: hand our output to the next segment instead of
+    // returning it to the coordinator.
+    //
+    // Every hop that comes home costs the coordinator a round trip, so an
+    // N-segment pipeline pays N of them per token. Passing the activations
+    // sideways makes that one trip out and one trip back however long the chain
+    // is — the difference between a many-shard model being usable and not.
+    //
+    // Falling back to the coordinator is always correct and never an error: if
+    // we do not know the next node, this is a tensor-parallel forward, or the
+    // range is not ours to hand on, the result simply comes home and the
+    // request costs what it used to.
+    if chaining_applies(&chain, tp_meta.is_some(), result.activations.is_empty()) {
+        if let Some(next) = chain.first() {
+            match shared_state.resolve_connected_peer_id_bytes(&next.node_id) {
+                Some(next_peer_bytes) => {
+                    let onward = crate::types::LayerForward {
+                        request_id,
+                        sequence_num,
+                        index_pos,
+                        activations: result.activations,
+                        format: crate::types::TensorFormat::FP32,
+                        model_id: model_id.clone(),
+                        layer_range: next.layer_range,
+                        tp_meta: None,
+                        vision_embeddings: None,
+                        chain: chain[1..].to_vec(),
+                        sender_peer_bytes: None,
+                        requester_node_id,
+                        // Matches what the coordinator sends a mid-chain
+                        // segment, and deliberately so. That path sets
+                        // `pre_embedded && idx == 0` — false for every segment
+                        // after the first, because a receiver infers hidden
+                        // states from a layer range that does not start at
+                        // zero, which a chained hop never does. Setting it true
+                        // here would make a chained forward differ from the
+                        // relayed one it replaces, for the same work.
+                        pre_embedded: false,
+                        // Only the LAST segment samples, and only it needs the
+                        // decoded-so-far ids for frequency/presence penalties.
+                        // We do not have them: the coordinator sends them with
+                        // the final segment's forward, and in a chain that
+                        // forward is built here rather than there. The
+                        // coordinator must therefore not chain a request that
+                        // has penalties set. That is a constraint on whoever
+                        // builds the chain, stated here because this is where
+                        // it would silently go wrong.
+                        generated_ids: Vec::new(),
+                        // The coordinator sends `None` to every segment, so a
+                        // chained hop does the same. LoRA requests do not take
+                        // this path at all.
+                        adapter_id: None,
+                        draft_tokens: Vec::new(),
+                        spec_logits_requested: false,
+                        truncate_kv_to: None,
+                        chunk_meta: None,
+                    };
+                    tracing::info!(
+                        request_id = %request_id,
+                        next = %next.node_id,
+                        next_layers = ?next.layer_range,
+                        remaining = chain.len() - 1,
+                        "DIAG: chaining activations to the next segment"
+                    );
+                    if let Err(e) = network_tx
+                        .send(NetworkCommand::SendTensor {
+                            target_peer_bytes: next_peer_bytes,
+                            forward: onward,
+                        })
+                        .await
+                    {
+                        // The activations are gone with the failed send, so the
+                        // coordinator must be told rather than left waiting for
+                        // its whole deadline.
+                        tracing::warn!(error = %e, request_id = %request_id, "chained send failed");
+                        send_error_result(
+                            &network_tx,
+                            &sender_peer_bytes,
+                            request_id,
+                            "chained forward could not be sent",
+                        )
+                        .await;
+                    }
+                    return;
+                }
+                None => {
+                    // Not connected to the next hop. Returning the result costs
+                    // the coordinator one round trip and it can relay onward
+                    // itself, which is exactly the pre-chaining behaviour.
+                    tracing::debug!(
+                        request_id = %request_id,
+                        next = %next.node_id,
+                        "next hop unreachable — returning result to the coordinator"
+                    );
+                }
+            }
+        }
+    }
+
     // Send back as a separate request to the originating peer
     if let Err(e) = network_tx
         .send(NetworkCommand::SendTensorResult {
@@ -264,6 +369,39 @@ pub(super) async fn handle_layer_forward(
     {
         tracing::warn!(error = %e, "Failed to send LayerResult back to peer");
     }
+}
+
+/// Should this segment hand its output onward rather than return it?
+///
+/// Extracted so the rule is testable without a worker or a network, and so the
+/// three disqualifiers are stated in one place rather than as a condition that
+/// grows a clause at a time.
+///
+/// Every "no" here is a fallback to returning the result to the coordinator,
+/// which is the pre-chaining behaviour: correct, one round trip more expensive,
+/// and never an error.
+fn chaining_applies(
+    chain: &[crate::types::ChainHop],
+    is_tensor_parallel: bool,
+    activations_empty: bool,
+) -> bool {
+    // Nobody after us: we ARE the last segment, so the result goes home.
+    if chain.is_empty() {
+        return false;
+    }
+    // A tensor-parallel forward is one slice of a layer that has to be
+    // all-reduced with its siblings by the coordinator before it means
+    // anything. There is nothing to hand on.
+    if is_tensor_parallel {
+        return false;
+    }
+    // Nothing to forward. An empty activation is how a failure or a
+    // control-only forward looks, and passing it down the chain would turn one
+    // node's problem into a silent wrong answer several hops away.
+    if activations_empty {
+        return false;
+    }
+    true
 }
 
 /// Send a sanitized error `LayerResult` back to the originating peer when
@@ -410,5 +548,44 @@ mod layer_range_tests {
     fn a_model_with_no_layers_admits_nothing() {
         assert!(!layer_range_is_valid(0, 1, 0));
         assert!(!layer_range_is_valid(0, 0, 0));
+    }
+}
+
+#[cfg(test)]
+mod chaining_tests {
+    use super::chaining_applies;
+    use crate::types::{ChainHop, NodeId};
+
+    fn hop() -> Vec<ChainHop> {
+        vec![ChainHop {
+            node_id: NodeId([1u8; 32]),
+            layer_range: (8, 16),
+        }]
+    }
+
+    #[test]
+    fn a_segment_with_somebody_after_it_hands_its_output_on() {
+        assert!(chaining_applies(&hop(), false, false));
+    }
+
+    /// Each disqualifier falls back to returning the result to the
+    /// coordinator, which always works. None of them is an error.
+    #[test]
+    fn the_last_segment_returns_its_result() {
+        assert!(!chaining_applies(&[], false, false));
+    }
+
+    #[test]
+    fn a_tensor_parallel_slice_is_never_chained() {
+        // One slice of a layer means nothing until the coordinator all-reduces
+        // it with its siblings.
+        assert!(!chaining_applies(&hop(), true, false));
+    }
+
+    #[test]
+    fn an_empty_activation_is_not_forwarded() {
+        // That is what a failure looks like. Passing it on would turn one
+        // node's problem into a silent wrong answer several hops away.
+        assert!(!chaining_applies(&hop(), false, true));
     }
 }
