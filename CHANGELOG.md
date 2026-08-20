@@ -39,6 +39,17 @@ If you would like to help test it, set `pipeline_chaining = true` under
   release: a result being sent back to the wrong machine, and the last machine in
   a chain not being recognised as having finished. Both would have caused a
   request to hang rather than fail, which is worse.
+- **A refusal no longer arrives as a silence.** The last message of a reply —
+  whether that is "finished" or a precise reason a machine could not help — was
+  sent once, and losing it meant your computer waited out its whole deadline and
+  then reported that the other machine had gone offline. A tester watched their
+  node refuse a request immediately, twice, with the exact numbers, while the
+  caller sat for 143 seconds and was told something untrue. That message is now
+  repeated.
+- **The prefix cache is bounded by memory rather than by a count.** It kept up to
+  sixteen saved conversations per model, but a saved conversation is as big as
+  the conversation — so sixteen long ones could hold far more memory than anyone
+  intended. It now has a size budget as well.
 - The test harness for split models was quietly measuring the wrong computer —
   it could see a machine on the same network that held the whole model, and sent
   everything there. Any earlier result from it is suspect.
