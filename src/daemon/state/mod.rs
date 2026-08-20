@@ -1323,17 +1323,21 @@ impl SharedState {
         layers: u32,
         activation_bytes: usize,
     ) {
+        // Was the model already resident when this segment ran? Read it BEFORE
+        // marking it warm below — otherwise every sample looks warm, including
+        // the very first one, which is the one that paid to load the model.
+        let key = (node_id.clone(), model_id.clone());
+        let was_warm = self.metrics.peer_model_warm_at.contains_key(&key);
         self.metrics
             .peer_speed
             .entry(node_id.clone())
             .or_default()
-            .observe(kind, segment_ms, layers, activation_bytes);
+            .observe(kind, segment_ms, layers, activation_bytes, was_warm);
         // This peer has now demonstrably got the model resident, so the next
         // forward does not need the cold-load allowance.
-        self.metrics.peer_model_warm_at.insert(
-            (node_id.clone(), model_id.clone()),
-            std::time::Instant::now(),
-        );
+        self.metrics
+            .peer_model_warm_at
+            .insert(key, std::time::Instant::now());
     }
 
     /// Predicted wall-clock ms for a segment of this shape on this peer, or

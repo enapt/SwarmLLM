@@ -8877,7 +8877,42 @@ RTT a single cold request is enough to produce a figure like this.
 The result is a ratchet: a peer that was slow once is permanently modelled as
 slow, everywhere, and the faster it actually is the more work it loses.
 
-### What to fix, in order
+### RESOLVED 2026-08-20
+
+Two changes, both in `daemon::state::peer_speed`, both red-green verified.
+
+**An inherited figure no longer ranks a peer.** `merge_ranking_sample` seeds the
+decode coefficient from gossip without touching the sample count, so
+`decode_samples == 0` already distinguished "a stranger's number" from one we
+earned. `ranking_ms_per_layer` now requires our own sample. The value is still
+stored, so anything wanting the hint can have it — it simply cannot outrank the
+peer's advertised speed any more.
+
+This is the rule the prefill coefficient has followed since it was written:
+gossip deliberately cannot seed it, because *"a figure we did not measure
+ourselves must not be able to shorten how long we are willing to wait for a
+peer."* Ranking had the identical exposure and no guard, and the consequence was
+worse — a bad timeout costs one request, a bad ranking costs every future one.
+
+**A cold segment no longer sets the ranking figure.** `record_peer_segment_latency`
+recorded the sample and *then* marked the peer's model warm, so the first
+segment — the one that paid to load the model — always looked like a warm
+measurement. It now reads the warm state first and passes it to `observe`, which
+skips the decode/delegated coefficient when cold. The prefill coefficient still
+takes cold samples, because that sizes how long we are willing to wait and being
+pessimistic there is safe.
+
+With the live numbers, the GPU is now priced by its advertised 20.45 tok/s plus
+our own round trip (~916 ms over 16 layers) instead of an inherited 1063 ms/layer
+(~17,008 ms), so it wins — which is what `route_shortest_path` already did
+correctly when given honest inputs.
+
+**Not done, deliberately:** items 1 and 3 below asked for a blend or a decay of
+inherited figures. Both need a tuning constant nobody can justify yet, and the
+narrower rule above removes the harm without one. Revisit if a case appears where
+an inherited figure would genuinely have helped.
+
+### What was proposed, in order
 
 1. **Do not let an observation silently outrank a large advertised gap.** A peer
    advertising 25x the throughput of its rival should not be ranked behind it on

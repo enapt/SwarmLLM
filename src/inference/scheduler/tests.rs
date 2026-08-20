@@ -13,6 +13,19 @@ fn make_shared_state() -> Arc<SharedState> {
 
 /// Model id for peer-speed tests. The speed map is keyed by node; the model
 /// only marks the (peer, model) pair warm, which these tests don't assert on.
+/// Mark a (peer, model) pair as already having the model resident.
+///
+/// The first segment to a pair is COLD — it paid to load the model — and no
+/// longer feeds the ranking figure, so tests about the EMA arithmetic have to
+/// say the peer is warm. Done directly rather than with a warm-up sample, which
+/// would perturb the very numbers these tests assert.
+fn mark_model_warm(state: &std::sync::Arc<crate::daemon::SharedState>, node: &NodeId) {
+    state.metrics.peer_model_warm_at.insert(
+        (node.clone(), speed_test_model()),
+        std::time::Instant::now(),
+    );
+}
+
 fn speed_test_model() -> ModelId {
     ModelId("peer-speed-test-model".into())
 }
@@ -866,6 +879,7 @@ fn peer_segment_latency_ema_math() {
     // Verify the EMA formula: new = 0.3 * sample + 0.7 * old.
     let state = make_shared_state();
     let node = NodeId([7u8; 32]);
+    mark_model_warm(&state, &node);
     // First sample: 20 ms over 4 layers → 5 ms/layer. No prior → EMA = 5.
     state.record_peer_segment_latency(
         &node,
@@ -922,6 +936,7 @@ fn merge_peer_segment_latency_zero_trust_is_noop() {
     // direction — neither seeding a new entry nor moving an existing one.
     let state = make_shared_state();
     let node = NodeId([11u8; 32]);
+    mark_model_warm(&state, &node);
 
     // No entry yet + weight 0 → no insert.
     state.merge_peer_segment_latency(&node, 100.0, 0.0);
@@ -953,17 +968,22 @@ fn merge_peer_segment_latency_below_seed_threshold_skips_insert() {
     let state = make_shared_state();
     let stranger = NodeId([12u8; 32]);
 
+    // Asserted on whether an ENTRY was seeded, not through
+    // `observed_latency_ms_per_layer`: ranking deliberately no longer surfaces a
+    // figure this node never measured, so a purely gossiped value reads as None
+    // there however well-trusted the reporter. The seeding rule under test is
+    // unchanged.
     state.merge_peer_segment_latency(&stranger, 500.0, 0.1);
-    assert!(state.observed_latency_ms_per_layer(&stranger).is_none());
+    assert!(!state.metrics.peer_speed.contains_key(&stranger));
 
     state.merge_peer_segment_latency(&stranger, 500.0, 0.29);
-    assert!(state.observed_latency_ms_per_layer(&stranger).is_none());
+    assert!(!state.metrics.peer_speed.contains_key(&stranger));
 
     // Exactly at the threshold seeds.
     state.merge_peer_segment_latency(&stranger, 500.0, 0.3);
-    assert_eq!(
-        state.observed_latency_ms_per_layer(&stranger).unwrap(),
-        500.0
+    assert!(
+        state.metrics.peer_speed.contains_key(&stranger),
+        "at the threshold the entry must be created"
     );
 }
 
@@ -973,6 +993,7 @@ fn merge_peer_segment_latency_trust_weighted_ema() {
     // the EMA more than foreign samples from less-trusted peers.
     let state = make_shared_state();
     let node = NodeId([13u8; 32]);
+    mark_model_warm(&state, &node);
 
     // Start with a direct sample of 10 ms/layer (20 ms over 2 layers).
     state.record_peer_segment_latency(
@@ -998,6 +1019,7 @@ fn merge_peer_segment_latency_trust_weighted_ema() {
     // Reset and try with weight 0.5 →
     // effective_α = 0.15, EMA = 0.15*100 + 0.85*10 = 23.5.
     let state2 = make_shared_state();
+    mark_model_warm(&state2, &node);
     state2.record_peer_segment_latency(
         &node,
         &speed_test_model(),
