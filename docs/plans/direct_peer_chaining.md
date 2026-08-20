@@ -132,7 +132,7 @@ The same fallback is the first-cut failover story: on any chain timeout, retry
 the request coordinator-relayed. No new failover machinery, and never worse than
 today. Petals' cache-restoring re-route is the better answer later.
 
-### 3.7 Most of the transport already exists
+### 3.6 Most of the transport already exists
 
 Checked against the code rather than assumed, and this is the main reason the
 change is smaller than it looks:
@@ -155,7 +155,7 @@ bit, the branch in the serving handler, the coordinator awaiting the tail instea
 of looping, extending `build_layer_forward_aad`, and the scheduler preference
 below.
 
-### 3.6 The scheduler
+### 3.7 The scheduler
 
 This is the part with real unknowns. Chaining makes the paper's original edge cost
 — `rtt(peer_A, peer_B)` — the correct model, and **we do not measure inter-peer
