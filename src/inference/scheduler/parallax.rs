@@ -215,10 +215,30 @@ fn vertex_cost(
     };
 
     let load_ms = c.load * LOAD_COMPENSATOR_MS;
+
+    // Scale the whole vertex by how many attempts it takes to get one intact
+    // answer out of this peer.
+    //
+    // Not a tuning knob: if a fraction `p` of replies from a peer arrive whole,
+    // then one whole reply costs `1/p` of everything — network, compute and
+    // queueing alike, since a lost reply wastes all three. A reliable or
+    // unmeasured path multiplies by 1 and nothing changes.
+    //
+    // This exists because the previous thing steering traffic away from a lossy
+    // link was an accident: a truncated stream poisoned the peer's SPEED, which
+    // was wrong about why (a network fault read as slow hardware) and right
+    // about where not to send work. Removing the mis-attribution removed the
+    // avoidance with it, so the avoidance is now stated deliberately, in the
+    // one term that can express it honestly.
+    let attempts = if c.expected_attempts.is_finite() && c.expected_attempts >= 1.0 {
+        c.expected_attempts
+    } else {
+        1.0
+    };
     VertexCost {
-        network_ms,
-        compute_ms,
-        load_ms,
+        network_ms: network_ms * attempts,
+        compute_ms: compute_ms * attempts,
+        load_ms: load_ms * attempts,
     }
 }
 
@@ -523,6 +543,7 @@ mod tests {
             est_tokens_per_sec,
             observed_latency_ms_per_layer: None,
             observed_delegated_ms_per_layer: None,
+            expected_attempts: 1.0,
             is_pool_member: false,
             gpu_vram_available_mb: None,
         }
@@ -690,6 +711,81 @@ mod tests {
             "correcting the overcharge must make delegation cheaper: {} vs {}",
             corrected.total(),
             bounded.total()
+        );
+    }
+
+    /// A path that loses replies must cost more, in proportion to how often it
+    /// loses them — and a reliable or unmeasured path must cost exactly what it
+    /// did before.
+    ///
+    /// This is the deliberate replacement for an accident. A truncated stream
+    /// used to poison the peer's SPEED figure, which was wrong about why (a
+    /// network fault recorded as slow hardware) but right about where not to
+    /// send work. Removing the mis-attribution removed the avoidance with it.
+    #[test]
+    fn a_lossy_path_costs_more_in_proportion_to_its_losses() {
+        let local = NodeId([9u8; 32]);
+        let mut reliable = cand(2, vec![(0, 16)], 20, 0.0, true, true, 5.0);
+        reliable.expected_attempts = 1.0;
+        let baseline = vertex_cost(&reliable, (0, 16), &local, 16).total();
+
+        // Half the replies arrive whole: two attempts per usable answer.
+        let mut lossy = reliable.clone();
+        lossy.expected_attempts = 2.0;
+        let doubled = vertex_cost(&lossy, (0, 16), &local, 16).total();
+        assert_eq!(
+            doubled,
+            baseline * 2.0,
+            "a path delivering half the replies must cost twice as much"
+        );
+
+        // The measured case: 3 tokens of 60 arriving, clamped at 20x.
+        let mut terrible = reliable.clone();
+        terrible.expected_attempts = 20.0;
+        assert_eq!(
+            vertex_cost(&terrible, (0, 16), &local, 16).total(),
+            baseline * 20.0
+        );
+    }
+
+    /// A nonsensical multiplier must not corrupt the route. Below 1.0 would
+    /// make a lossy peer CHEAPER than a perfect one, which is the opposite of
+    /// the point, and a non-finite value would poison the whole DP.
+    #[test]
+    fn an_impossible_reliability_figure_is_ignored() {
+        let local = NodeId([9u8; 32]);
+        let mut c = cand(2, vec![(0, 16)], 20, 0.0, true, true, 5.0);
+        c.expected_attempts = 1.0;
+        let baseline = vertex_cost(&c, (0, 16), &local, 16).total();
+
+        for bad in [0.0f32, 0.5, -3.0, f32::NAN, f32::INFINITY] {
+            c.expected_attempts = bad;
+            let got = vertex_cost(&c, (0, 16), &local, 16).total();
+            assert_eq!(got, baseline, "multiplier {bad} must be ignored, got {got}");
+        }
+    }
+
+    /// End to end: a fast peer on a path that eats most of its replies must
+    /// lose to a slower peer that actually delivers. This is the live case —
+    /// an RTX 4050 returning 3 tokens of 60 while a LAN CPU returned all of
+    /// them.
+    #[test]
+    fn a_reliable_slow_peer_beats_a_fast_one_that_loses_replies() {
+        let local = NodeId([1u8; 32]);
+        // Fast, distant, and losing 95% of replies.
+        let mut fast_lossy = cand(2, vec![(0, 16)], 500, 0.0, true, true, 20.0);
+        fast_lossy.expected_attempts = 20.0;
+        // A quarter the throughput, on the LAN, delivering everything.
+        let mut slow_reliable = cand(3, vec![(0, 16)], 1, 0.0, true, true, 5.0);
+        slow_reliable.expected_attempts = 1.0;
+
+        let segs = route_shortest_path(16, &[fast_lossy, slow_reliable], &local, false, false)
+            .expect("a route must exist");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(
+            segs[0].node_id,
+            NodeId([3u8; 32]),
+            "a peer that delivers must beat a faster one that does not"
         );
     }
 

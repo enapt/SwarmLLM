@@ -1678,6 +1678,28 @@ impl SharedState {
             .and_then(|s| s.delegated_ms_per_layer())
     }
 
+    /// Record whether one completed reply from this peer arrived intact.
+    ///
+    /// Called for every finished remote generation, truncated or not — a
+    /// reliability figure built only from successes measures nothing.
+    pub fn record_peer_delivery(&self, node_id: &crate::types::NodeId, intact: bool) {
+        self.metrics
+            .peer_speed
+            .entry(node_id.clone())
+            .or_default()
+            .observe_delivery(intact);
+    }
+
+    /// How much more work it takes, in expectation, to get one intact answer
+    /// out of this peer. 1.0 when the path has been reliable or is unmeasured.
+    pub fn peer_expected_attempts(&self, node_id: &crate::types::NodeId) -> f32 {
+        self.metrics
+            .peer_speed
+            .get(node_id)
+            .map(|s| s.expected_attempts_multiplier())
+            .unwrap_or(1.0)
+    }
+
     /// Item 8 Phase 2: longest-prefix cross-node cache lookup. Walks the
     /// chained BLAKE3 manifest of `prompt_tokens` at `block_size` granularity
     /// from longest → shortest, returning the first `(peer, block_hash,

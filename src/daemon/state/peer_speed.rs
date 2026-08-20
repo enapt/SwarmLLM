@@ -1,4 +1,11 @@
-//! What we have learned about how fast each peer actually computes.
+//! What we have learned about how fast each peer actually computes, and how
+//! reliably the path to it delivers.
+//!
+//! Those are two different questions and the answers must not be mixed. Speed
+//! is a property of the peer's hardware; delivery is a property of the link
+//! between here and there. Folding a delivery failure into a speed figure is
+//! what recorded an RTX 4050 at 345 ms/layer against the 3.1 it had measured
+//! minutes earlier — see `delivery_intact_ratio`.
 //!
 //! # Why prefill and decode are tracked separately
 //!
@@ -65,7 +72,17 @@ const ALPHA: f32 = 0.3;
 /// below the timescale over which hardware actually changes.
 const RANKING_STALE_AFTER: Duration = Duration::from_secs(600);
 
-/// Observed compute speed of one peer, as two separately-normalised EMAs.
+/// How much of a reply may go missing before a peer is priced as unreliable.
+///
+/// Bounds the penalty rather than letting a run of losses price a peer out
+/// permanently: at this floor the multiplier is 20x, which is already decisive
+/// against any competitor, and a peer that recovers climbs back out. Without a
+/// floor a ratio of zero is an infinite cost, and infinity is not a number a
+/// peer can ever come back from.
+const MIN_INTACT_DELIVERY_RATIO: f32 = 0.05;
+
+/// Observed compute speed of one peer, plus how reliably the path to it
+/// actually delivers.
 #[derive(Debug, Clone)]
 pub struct PeerSpeed {
     /// EMA of ms per (layer × activation byte) during prefill.
@@ -79,6 +96,33 @@ pub struct PeerSpeed {
     decode_samples: u32,
     delegated_samples: u32,
     updated_at: Instant,
+    /// EMA over "did this reply arrive intact", 1.0 = nothing lost.
+    ///
+    /// **This measures the PATH, not the hardware.** Every `StreamingToken` is
+    /// an independent fire-and-forget send with no acknowledgement and no
+    /// retransmission, so one drop truncates a reply permanently — the
+    /// reassembler may only release the consecutive run. Measured 2026-08-20:
+    /// all six losses in a session were on peers 450-650 ms away and none on
+    /// the peer at 1 ms, despite that one serving more requests.
+    ///
+    /// Kept apart from the speed coefficients because a lossy link says nothing
+    /// about how fast a peer computes — conflating them is what recorded an RTX
+    /// 4050 at 345 ms/layer against its real 3.1. Kept apart from trust because
+    /// **nobody is at fault**: the peer generated the whole answer and we asked
+    /// for it correctly; the path between lost it. Docking a peer's reputation
+    /// for that is the wrong-culprit mistake this codebase has made twice.
+    ///
+    /// Starts optimistic at 1.0 and needs no minimum sample count: with
+    /// `ALPHA` at 0.3 a single loss moves it to 0.7, a 1.4x penalty, which is a
+    /// nudge rather than a verdict, and a genuinely lossy path converges down
+    /// fast.
+    delivery_intact_ratio: f32,
+    delivery_samples: u32,
+    /// Separate from `updated_at` on purpose. A truncated stream records a
+    /// delivery sample but deliberately records NO speed sample, so sharing one
+    /// timestamp would let losses keep a stale speed figure alive for as long
+    /// as they kept arriving.
+    delivery_updated_at: Instant,
 }
 
 impl Default for PeerSpeed {
@@ -91,6 +135,9 @@ impl Default for PeerSpeed {
             decode_samples: 0,
             delegated_samples: 0,
             updated_at: Instant::now(),
+            delivery_intact_ratio: 1.0,
+            delivery_samples: 0,
+            delivery_updated_at: Instant::now(),
         }
     }
 }
@@ -266,6 +313,52 @@ impl PeerSpeed {
 
     pub fn delegated_samples(&self) -> u32 {
         self.delegated_samples
+    }
+
+    /// Record whether one completed reply from this peer arrived intact.
+    ///
+    /// Binary rather than the fraction delivered, because a truncated answer is
+    /// a failed answer whether it lost two tokens or fifty-seven — the caller
+    /// cannot use either.
+    pub fn observe_delivery(&mut self, intact: bool) {
+        let sample = if intact { 1.0 } else { 0.0 };
+        self.delivery_intact_ratio = ALPHA * sample + (1.0 - ALPHA) * self.delivery_intact_ratio;
+        self.delivery_samples = self.delivery_samples.saturating_add(1);
+        self.delivery_updated_at = Instant::now();
+    }
+
+    /// Fraction of recent replies from this peer that arrived intact, or `None`
+    /// when we have not delivered from it recently enough to say.
+    ///
+    /// Expires on the same clock as the speed figures, for the same reason: a
+    /// link that was lossy an hour ago may be fine now, and a figure that never
+    /// decays is a ratchet. Falling back to "unknown" prices the peer exactly
+    /// like one we have never used, which cannot be worse than never having
+    /// tried it.
+    pub fn intact_delivery_ratio(&self) -> Option<f32> {
+        if self.delivery_samples == 0 || self.delivery_updated_at.elapsed() >= RANKING_STALE_AFTER {
+            return None;
+        }
+        Some(self.delivery_intact_ratio)
+    }
+
+    pub fn delivery_samples(&self) -> u32 {
+        self.delivery_samples
+    }
+
+    /// How much more work it takes, in expectation, to get one intact answer
+    /// out of this peer.
+    ///
+    /// This is not a tuning knob: if a fraction `p` of replies arrive intact,
+    /// getting one intact reply costs `1/p` attempts in expectation. A perfect
+    /// path multiplies by 1 and changes nothing; a path delivering 5% of
+    /// replies multiplies by 20. Clamped by [`MIN_INTACT_DELIVERY_RATIO`] so a
+    /// bad run cannot price a peer out beyond recovery.
+    pub fn expected_attempts_multiplier(&self) -> f32 {
+        match self.intact_delivery_ratio() {
+            None => 1.0,
+            Some(p) => 1.0 / p.clamp(MIN_INTACT_DELIVERY_RATIO, 1.0),
+        }
     }
 
     /// Fold in a per-layer figure that another node gossiped to us, weighted
@@ -618,5 +711,69 @@ mod ranking_trusts_only_what_it_measured {
             "timeout sizing must keep the cold sample — waiting too long is safe, \
              waiting too little is not"
         );
+    }
+
+    /// The reliability figure must start optimistic, fall with losses, and
+    /// recover — and it must never turn a peer into a permanent outcast.
+    #[test]
+    fn delivery_reliability_falls_with_losses_and_recovers() {
+        let mut s = PeerSpeed::default();
+
+        // Never used: unmeasured, and priced exactly like any other unknown.
+        assert_eq!(s.intact_delivery_ratio(), None);
+        assert_eq!(s.expected_attempts_multiplier(), 1.0);
+
+        // A clean reply keeps it at 1.0 — no penalty for working correctly.
+        s.observe_delivery(true);
+        assert_eq!(s.expected_attempts_multiplier(), 1.0);
+
+        // One loss is a nudge, not a verdict.
+        s.observe_delivery(false);
+        let after_one = s.expected_attempts_multiplier();
+        assert!(
+            after_one > 1.0 && after_one < 2.0,
+            "one loss should nudge, got {after_one}"
+        );
+
+        // A persistently lossy path converges to a decisive penalty, and the
+        // clamp stops it running away to infinity.
+        for _ in 0..50 {
+            s.observe_delivery(false);
+        }
+        let settled = s.expected_attempts_multiplier();
+        assert_eq!(
+            settled,
+            1.0 / MIN_INTACT_DELIVERY_RATIO,
+            "a path that loses everything must be clamped, not infinite"
+        );
+
+        // ...and it can climb back out once the path recovers.
+        for _ in 0..50 {
+            s.observe_delivery(true);
+        }
+        let recovered = s.expected_attempts_multiplier();
+        assert!(
+            recovered < 1.05,
+            "a recovered path must stop being penalised, got {recovered}"
+        );
+    }
+
+    /// Losing replies must not silently keep a stale SPEED figure alive. A
+    /// truncated stream records a delivery sample and deliberately records no
+    /// speed sample, so the two timestamps have to be separate.
+    #[test]
+    fn a_delivery_sample_does_not_refresh_the_speed_clock() {
+        let mut s = PeerSpeed::default();
+        s.observe(WorkKind::Decode, 160, 16, 16_384, true);
+        let speed_clock = s.updated_at();
+
+        s.observe_delivery(false);
+
+        assert_eq!(
+            s.updated_at(),
+            speed_clock,
+            "a delivery observation must leave the speed clock untouched"
+        );
+        assert!(s.intact_delivery_ratio().is_some());
     }
 }

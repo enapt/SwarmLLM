@@ -53,6 +53,13 @@ struct NodeCandidate {
     /// for the other is a measured mis-pricing, not a rounding error; see
     /// `parallax::vertex_cost`.
     observed_delegated_ms_per_layer: Option<f32>,
+    /// Expected attempts to get ONE intact reply out of this peer, from the
+    /// measured fraction that arrive whole. 1.0 for the local node and for any
+    /// peer whose path has been reliable or is unmeasured.
+    ///
+    /// A property of the path, not the hardware — see
+    /// `PeerSpeed::delivery_intact_ratio`.
+    expected_attempts: f32,
     /// True if this node is in our device pool (preferred for routing — free, trusted, low latency).
     is_pool_member: bool,
     /// Free GPU memory this node last advertised, in MB. `None` when it has no
@@ -990,6 +997,12 @@ impl PipelineScheduler {
             } else {
                 self.shared_state.observed_delegated_ms_per_layer(&node_id)
             };
+            // No path to ourselves, so nothing can be lost on the way.
+            let expected_attempts = if &node_id == local_node_id {
+                1.0
+            } else {
+                self.shared_state.peer_expected_attempts(&node_id)
+            };
             let gpu_vram_available_mb = if node_id == *local_node_id {
                 // Never used for the local node — the loader's own admission
                 // check is the authority on whether WE can fit a model, and it
@@ -1016,6 +1029,7 @@ impl PipelineScheduler {
                 est_tokens_per_sec,
                 observed_latency_ms_per_layer,
                 observed_delegated_ms_per_layer,
+                expected_attempts,
                 is_pool_member: is_pool,
                 gpu_vram_available_mb,
             });
@@ -1048,6 +1062,7 @@ impl PipelineScheduler {
                 est_tokens_per_sec = c.est_tokens_per_sec,
                 observed_ms_per_layer = ?c.observed_latency_ms_per_layer,
                 observed_delegated_ms_per_layer = ?c.observed_delegated_ms_per_layer,
+                expected_attempts = c.expected_attempts,
                 load = c.load,
                 "DIAG: pipeline candidate"
             );

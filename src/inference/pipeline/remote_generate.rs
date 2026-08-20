@@ -670,6 +670,13 @@ impl PipelineExecutor {
         // Same family as the cold-sample rule above it: a cold sample is a load
         // time wearing a compute figure's clothes, and this is a timeout wearing
         // the same disguise.
+        // Reliability of the PATH to this peer, recorded whether or not the
+        // reply survived — a figure built only from intact replies measures
+        // nothing. This is what steers traffic away from a lossy link now that
+        // truncation no longer (wrongly) does so through the speed EMA.
+        self.shared_state
+            .record_peer_delivery(&segment.node_id, !stream_was_truncated);
+
         if let Some(ttft) = first_token_at {
             let steady = sent_at
                 .elapsed()
