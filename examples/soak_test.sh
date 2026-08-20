@@ -96,6 +96,10 @@ enabled = false
 prune_enabled = false
 
 [inference]
+# CPU-only, deliberately. A machine with a graphics card is usually already
+# running a node on it, and two daemons competing for the same VRAM would make
+# a leak soak measure contention instead. It does mean a soak result says
+# nothing about the GPU path — check what you are claiming before citing one.
 gpu_layers = 0
 
 [network]
