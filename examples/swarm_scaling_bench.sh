@@ -50,24 +50,56 @@ fi
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# A distinct subject per request, so no two share a prefix.
-SUBJECTS=(volcanoes "the printing press" tides "the Silk Road" antibiotics "sonar"
-          "crop rotation" glaciers "the telegraph" yeast "monsoons" "cartography"
-          "the abacus" lighthouses "vaccination" "steam power" "coral reefs"
-          "the compass" "penicillin" "irrigation" "the loom" "seismographs"
-          "kites" "radio waves" "the sextant" "fermentation" "windmills"
-          "the barometer" "papermaking" "the pendulum" "sonnets" "aqueducts")
+# Bodies are built BEFORE the clock starts, never inside the launch loop.
+#
+# They used to be built per request with a `python3` call, which costs tens of
+# milliseconds each and runs sequentially — so eight "concurrent" requests
+# actually arrived spread over about a third of a second. That is the same
+# order as the window requests have to arrive within to be batched together,
+# so batching engaged on some runs and not others and the results swung by
+# 50% with nothing changed. A benchmark whose own launch jitter is the size of
+# the effect cannot measure the effect.
+prepare_bodies() {
+  local n=$1
+  python3 - "$WORK" "$MODEL" "$MAX_TOKENS" "$RUN_TAG" "$n" <<'PYEOF'
+import json, sys, os
+work, model, max_tokens, tag, n = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], int(sys.argv[5])
+subjects = ["volcanoes","the printing press","tides","the Silk Road","antibiotics","sonar",
+            "crop rotation","glaciers","the telegraph","yeast","monsoons","cartography",
+            "the abacus","lighthouses","vaccination","steam power","coral reefs",
+            "the compass","penicillin","irrigation","the loom","seismographs",
+            "kites","radio waves","the sextant","fermentation","windmills",
+            "the barometer","papermaking","the pendulum","sonnets","aqueducts"]
+for i in range(1, n + 1):
+    subject = subjects[i % len(subjects)]
+    # Deliberately open-ended, so every request runs to `max_tokens` instead
+    # of stopping wherever the model chose to. Aggregate tokens/sec divides by
+    # wall clock, so a run whose completions happened to be longer scores
+    # higher for no reason at all — which is how a 40% "win" appeared and then
+    # evaporated when the harness stopped adding its own noise. The summary
+    # reports whether every request hit the cap, so a run that did not is
+    # visibly not comparable.
+    # A counting task, because it mechanically cannot stop early. Anything
+    # open-ended ends where the model chooses, and aggregate tokens/sec divides
+    # by wall clock — so a run whose completions happened to be longer scores
+    # higher for no reason at all. That is how a 40% "win" appeared and then
+    # evaporated once the harness stopped adding its own noise. Every token
+    # costs the same forward pass, so a dull sequence measures throughput just
+    # as well as an interesting one, and the summary flags any run where a
+    # request did not reach the cap.
+    prompt = (f"Count upwards from {i * 1000}, one number per line, "
+              f"and do not stop. (ref {tag}-{i})")
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens}
+    with open(os.path.join(work, f"body_{i}.json"), "w") as f:
+        json.dump(body, f)
+PYEOF
+}
 
 one_request() {
   local idx=$1 out=$2
-  local subject=${SUBJECTS[$((idx % ${#SUBJECTS[@]}))]}
-  # The nonce guarantees a unique prefix even if a subject repeats at high N.
-  local prompt="Explain $subject in two sentences. (ref $RUN_TAG-$idx)"
   local body
-  body=$(python3 -c '
-import json,sys
-print(json.dumps({"model":sys.argv[1],"messages":[{"role":"user","content":sys.argv[2]}],"max_tokens":int(sys.argv[3])}))' \
-    "$MODEL" "$prompt" "$MAX_TOKENS")
+  body=$(cat "$WORK/body_$idx.json")
   local s e r
   s=$(date +%s.%N)
   r=$(curl -s -m 600 -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
@@ -94,7 +126,8 @@ printf '%-6s %-9s %-9s %-11s %-11s %-9s %s\n' \
 for N in "${LEVELS[@]}"; do
   RUN_TAG="n${N}-$(date +%s)"
   export RUN_TAG
-  rm -f "$WORK"/r_*.json
+  rm -f "$WORK"/r_*.json "$WORK"/body_*.json
+  prepare_bodies "$N"
   bs=$(date +%s.%N)
   for i in $(seq 1 "$N"); do
     one_request "$i" "$WORK/r_$i.json" &
@@ -102,9 +135,9 @@ for N in "${LEVELS[@]}"; do
   wait
   be=$(date +%s.%N)
 
-  python3 - "$WORK" "$N" "$bs" "$be" <<'PY'
+  python3 - "$WORK" "$N" "$bs" "$be" "$MAX_TOKENS" <<'PY'
 import json,glob,sys,statistics
-work,N,bs,be=sys.argv[1],int(sys.argv[2]),float(sys.argv[3]),float(sys.argv[4])
+work,N,bs,be,MAXT=sys.argv[1],int(sys.argv[2]),float(sys.argv[3]),float(sys.argv[4]),int(sys.argv[5])
 rows=[]
 for f in glob.glob(work+"/r_*.json"):
     try: rows.append(json.load(open(f)))
@@ -116,7 +149,9 @@ tot=sum(r["tokens"] for r in ok)
 agg=tot/wall if wall>0 else 0
 per=statistics.mean([r["tokens"]/r["wall"] for r in ok]) if ok else 0
 med=statistics.median([r["wall"] for r in ok]) if ok else 0
-print(f"{N:<6} {len(ok):<9} {len(fail):<9} {wall:<11.2f} {agg:<11.2f} {per:<9.2f} {med:.2f}")
+capped = sum(1 for r in ok if r["tokens"] >= MAXT)
+flag = "" if capped == len(ok) and ok else f"  <-- only {capped}/{len(ok)} hit the cap; not comparable"
+print(f"{N:<6} {len(ok):<9} {len(fail):<9} {wall:<11.2f} {agg:<11.2f} {per:<9.2f} {med:.2f}{flag}")
 for r in fail[:2]:
     if r["err"]: print(f"       ! {r['err'][:100]}")
 PY

@@ -296,29 +296,41 @@ pub struct InferenceConfig {
     /// Maximum number of requests to run through the model together.
     ///
     /// Batching amortises the expensive part of a decode step: reading the
-    /// weights dominates, and reading them once for eight tokens instead of
-    /// eight times saves most of the cost of seven of them.
+    /// weights dominates, and reading them once for several tokens instead of
+    /// once each saves most of that cost.
     ///
-    /// **Measured on an RTX 3070 with llama-3.2-3b, 2026-08-20.** Eight
-    /// concurrent requests: 65.9 tokens a second in aggregate without batching,
-    /// 91.9-96.9 with — around 40% more work from the same hardware, and each
-    /// individual request finished faster too. The daemon reported every
-    /// multi-request call actually batching (`calls=642 batched=642`), so this
-    /// is the mechanism working rather than a number moving.
+    /// **Measured on an RTX 3070 with llama-3.2-3b, 2026-08-21**, using the
+    /// daemon's own per-request rate rather than aggregate tokens over wall
+    /// clock — see below for why that distinction decided the numbers.
     ///
-    /// A single request pays nothing measurable: 28.9 tokens a second averaged
-    /// without batching against 31.6 with, across alternating runs. That was
-    /// the question that decided the default, since a throughput win bought
-    /// with single-user latency would be a bad trade for most nodes.
+    /// | concurrency | batching off | batching on |
+    /// |---|---|---|
+    /// | 1 | 28.9 tok/s | 31.6 tok/s |
+    /// | 8 | 9.18 tok/s/req | 9.50 tok/s/req |
+    /// | 12 | 7.21 tok/s/req | 8.37 tok/s/req |
     ///
-    /// **On a processor it is neutral, not a win**, which is worth stating
-    /// because the reasoning above predicts otherwise. Measured on a 6-core
-    /// i5-10500T with llama-3.2-1b, four concurrent requests: 12.9 and 14.3
-    /// tokens a second without batching, 13.3 and 14.1 with. A model that small
-    /// may simply not be bound by weight reads. So the default is safe rather
-    /// than universally good — it wins large where it wins and costs nothing
-    /// where it does not, and anyone who measures a loss on their own hardware
-    /// should say so.
+    /// So: no cost at any concurrency tested, nothing much at eight, and around
+    /// 16% at twelve. The gain grows with load, which is what amortising a
+    /// fixed cost over more work predicts. On a processor it is **neutral** —
+    /// 6-core i5-10500T with llama-3.2-1b, four concurrent requests gave
+    /// 12.9-14.3 tokens a second either way — so a small model there may
+    /// simply not be bound by weight reads.
+    ///
+    /// It defaults on because it costs nothing measurable and helps a busy
+    /// node, not because it is transformative.
+    ///
+    /// **An earlier measurement here claimed 40% and was wrong**, which is
+    /// worth keeping because the mistake is easy to repeat. Aggregate tokens
+    /// per second divides total tokens by wall clock, so a run whose
+    /// completions happened to be longer scores higher for no reason at all —
+    /// and completions vary when the prompt is open-ended. Worse, the benchmark
+    /// built each request body with its own interpreter call inside the launch
+    /// loop, spreading eight "concurrent" requests over about a third of a
+    /// second, which is the same order as the window requests must arrive
+    /// within to be batched at all. So batching engaged on some runs and not
+    /// others, and the arm with batching OFF was the stable one. Both faults
+    /// are fixed in `examples/swarm_scaling_bench.sh`, which now pre-builds
+    /// bodies and reports whether every request reached the token cap.
     ///
     /// It was 1 — no batching — described as backward-compatible, and left that
     /// way long after the batching path was measured at 2.4x on a GPU. Set it
