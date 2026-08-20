@@ -295,11 +295,9 @@ pub struct InferenceConfig {
     pub shard_range: Option<(u32, u32)>,
     /// Maximum number of requests to run through the model together.
     ///
-    /// Batching amortises the expensive part of a decode step. Reading the
+    /// Batching amortises the expensive part of a decode step: reading the
     /// weights dominates, and reading them once for eight tokens instead of
-    /// eight times is most of the cost of seven of those tokens saved — which
-    /// is why it helps a memory-bound processor at least as much as a graphics
-    /// card.
+    /// eight times saves most of the cost of seven of them.
     ///
     /// **Measured on an RTX 3070 with llama-3.2-3b, 2026-08-20.** Eight
     /// concurrent requests: 65.9 tokens a second in aggregate without batching,
@@ -312,6 +310,15 @@ pub struct InferenceConfig {
     /// without batching against 31.6 with, across alternating runs. That was
     /// the question that decided the default, since a throughput win bought
     /// with single-user latency would be a bad trade for most nodes.
+    ///
+    /// **On a processor it is neutral, not a win**, which is worth stating
+    /// because the reasoning above predicts otherwise. Measured on a 6-core
+    /// i5-10500T with llama-3.2-1b, four concurrent requests: 12.9 and 14.3
+    /// tokens a second without batching, 13.3 and 14.1 with. A model that small
+    /// may simply not be bound by weight reads. So the default is safe rather
+    /// than universally good — it wins large where it wins and costs nothing
+    /// where it does not, and anyone who measures a loss on their own hardware
+    /// should say so.
     ///
     /// It was 1 — no batching — described as backward-compatible, and left that
     /// way long after the batching path was measured at 2.4x on a GPU. Set it
