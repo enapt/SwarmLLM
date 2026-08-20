@@ -9146,3 +9146,89 @@ Any future measurement of a remote peer under concurrency must check for
 truncation first. Three separate figures in one afternoon said the RTX 4050 was
 the slowest node in the swarm; all three were the network losing tokens, and the
 same card measured 20.0 tok/s sequentially against its advertised 20.45.
+
+## Every pipeline hop round-trips through the coordinator, and that is what makes big models slow (2026-08-20)
+
+**This is the single highest-leverage change available for distributed inference,
+and it is a topology choice rather than a law of physics.**
+
+### What happens now
+
+`forward_through_segments` loops `for idx in 0..num_segments`, sending to each
+segment and awaiting its activations before sending them on to the next. So for
+an N-segment pipeline the coordinator pays **N round trips per token**. The
+module doc states this plainly and calls it a deliberate departure from the
+Parallax paper the router is adapted from, where the transition edge cost is
+`rtt(peer_A, peer_B)` — the hop between *adjacent* peers, not back through the
+origin each time.
+
+The cost of that choice grows linearly with segment count:
+
+| segments | coordinator-relayed | direct chain |
+|---|---|---|
+| 2 | 4 × RTT | 2 × RTT + 1 short hop |
+| 4 | 8 × RTT | 2 × RTT + 3 short hops |
+| 8 | 16 × RTT | 2 × RTT + 7 short hops |
+
+Direct chaining is ~constant in the coordinator's own RTT: one trip out, one
+trip back, and the hops between are between peers that the scheduler can choose
+to be near each other.
+
+### Why it matters most for exactly the case the project exists for
+
+A model too large for any single node is the reason to build a swarm at all, and
+it is precisely the case that needs many segments. Under coordinator relay the
+per-token network cost rises with the number of shards, so **the bigger the
+model, the worse the topology penalty** — the opposite of what the system needs.
+
+A live example: a tester's request was split four ways across peers in Australia
+and Belgium and took 30.4s, of which the segments themselves accounted for about
+2s (601 + 741 + 612 + 56 ms). Nearly all the remaining time is round trips, and
+three quarters of those trips exist only because the activations came home
+between every pair of hops.
+
+### The offsetting reason it was done this way, which must be preserved
+
+Coordinator relay is not arbitrary. It gives the coordinator the plaintext
+boundary control that `encrypted_pipeline` depends on, it means a peer needs no
+route to any peer but us (NAT traversal for one link rather than N²), and it
+makes failover simple because the coordinator holds the activations at every
+boundary and can re-send them to a standby.
+
+A direct-chaining design has to answer all three: activations sealed peer-to-peer
+(the machinery exists — `features::TENSOR_RELAY`, per-session X25519), a
+scheduler that prefers chains of mutually-reachable peers, and a failover story
+for a hop that dies mid-chain with the coordinator holding nothing.
+
+That is real work, and it is additive: gate it on a feature bit, keep the relayed
+path for peers that cannot chain, and choose per assembly. The scheduler already
+has the information needed to prefer a colocatable chain — `region_score` and
+per-peer latency — and the DP's cost function is where the choice belongs.
+
+### What NOT to do instead
+
+Tensor parallelism does not solve this and cannot. It parallelises a single
+token's compute, but requires two all-reduces per layer, which are sequential
+barriers: 56 of them for a 28-layer model. Australia to Belgium is ~16,700 km,
+so 167 ms is the round-trip floor in fibre — 9.4 s per token at the theoretical
+limit, with infinitely fast GPUs and infinite bandwidth. It is why the technique
+lives on NVLink at ~1-2 µs, and why `tp_max_latency_ms` is 10.
+
+Sequence parallelism (ring attention) parallelises PREFILL and is the right shape
+for a chunk-at-a-time intuition, but it is bandwidth-bound rather than
+latency-bound, so "put the nodes closer" does not fix it. Circulating K/V blocks
+costs, per node per layer, `(N-1)/N × prompt_tokens × kv_bytes_per_token`; against
+prefill compute of `24 d² L / N` the prompt length cancels entirely, leaving a
+pure hardware ratio. For a 3B model with GQA that is roughly **(N-1) × 2.2 Gbps**
+before two nodes beat one — 4.3 Gbps for three, 6.5 for four. Residential upload
+is 20-50 Mbps, so this is 50-100x out of reach; on 10-gigabit LAN it would work.
+Published measurements agree on the direction: ring attention's compute per step
+falls quadratically with node count while its communication falls only linearly,
+so it degrades as it scales.
+
+### The cheap win available before any of that
+
+Speculative verification already batches γ+1 tokens into one round trip
+(`speculative_gamma = 4`, so five). That divides the per-token network cost by
+five on any topology, and `speculative_distributed` is off by default. It is the
+one lever that reduces round trips without changing the wire topology at all.
