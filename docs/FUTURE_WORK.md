@@ -9106,6 +9106,40 @@ That fix stops the amplification. It does not stop the truncation.
    can. Largest change, and the one that removes the failure mode rather than
    compensating for it.
 
+### It is the path, not the machine
+
+Six give-up events were captured. **All six were on the two peers roughly 450-650
+ms away; the LAN peer at 1 ms never lost a token**, despite serving more requests
+than either of them across the same session. Both distant peers lose tokens —
+the RTX 4050 five times and a CPU node beside it once — so this is a property of
+the long-haul path rather than of any one machine, which is what a per-token
+fire-and-forget send over a lossy link predicts.
+
+That also means it is not fixed by avoiding a particular peer. Every remote node
+that is not on the local network is exposed to it.
+
+### A consequence of the fix above, which must not be left unsaid
+
+Refusing to measure truncated streams removes the only feedback that was, by
+accident, routing traffic away from a lossy path. The poisoned EMA was wrong
+about *why* — it recorded a network fault as slow hardware — but its effect was
+to stop sending requests down a link that was dropping them.
+
+With that gone, and with truncation still reported to the caller as a successful
+completion, **nothing at all now steers away from a path that truncates every
+reply.** A peer behind a lossy link keeps its advertised speed, keeps winning the
+route, and keeps returning three-token answers. That is a worse failure than the
+mis-attribution, even though each individual number is now honest.
+
+So option 1 above is no longer optional, and the shape it should take is clearer:
+what is needed is a per-peer **reliability** signal — the fraction of replies from
+that peer that arrived intact — kept separate from the speed EMA and from trust.
+Separate from speed because a lossy link says nothing about how fast the hardware
+computes. Separate from trust because nobody is at fault: the peer generated the
+whole answer and we asked for it correctly; the path between lost it. Docking a
+peer's reputation for that is the wrong-culprit mistake this codebase has already
+made twice.
+
 ### Do not conclude a peer is slow from this
 
 Any future measurement of a remote peer under concurrency must check for
