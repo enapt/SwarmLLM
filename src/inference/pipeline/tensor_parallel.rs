@@ -224,8 +224,10 @@ impl PipelineExecutor {
                 // layer downstream.
                 if post_attn_raw.len() % 4 == 0
                     && post_attn_raw
-                        .chunks_exact(4)
-                        .any(|c| !f32::from_le_bytes([c[0], c[1], c[2], c[3]]).is_finite())
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|c| !f32::from_le_bytes(*c).is_finite())
                 {
                     return Err(SwarmError::Inference(
                         "Attn AllReduce result contains NaN/Inf — possible tensor poisoning".into(),
@@ -337,8 +339,10 @@ impl PipelineExecutor {
                 // SEC: see attn AR check above — reject NaN/Inf from coordinator.
                 if ffn_raw.len() % 4 == 0
                     && ffn_raw
-                        .chunks_exact(4)
-                        .any(|c| !f32::from_le_bytes([c[0], c[1], c[2], c[3]]).is_finite())
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|c| !f32::from_le_bytes(*c).is_finite())
                 {
                     return Err(SwarmError::Inference(
                         "Ffn AllReduce result contains NaN/Inf — possible tensor poisoning".into(),

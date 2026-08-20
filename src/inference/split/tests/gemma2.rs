@@ -254,8 +254,10 @@ fn gemma2_embedding_verification() {
         let header_len = 10 + npy_bytes[8] as usize + ((npy_bytes[9] as usize) << 8);
         let data_bytes = &npy_bytes[header_len..];
         let py_vals: Vec<f32> = data_bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         eprintln!("Python ref first 8: {:?}", &py_vals[..8]);
 

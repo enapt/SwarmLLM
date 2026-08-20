@@ -349,8 +349,8 @@ pub fn decode_spec_logits(bytes: &[u8], dims: (u32, u32)) -> Result<Vec<Vec<f32>
     let mut out = Vec::with_capacity(n);
     for row_bytes in bytes.chunks_exact(v * 4) {
         let mut row = Vec::with_capacity(v);
-        for chunk in row_bytes.chunks_exact(4) {
-            row.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        for chunk in row_bytes.as_chunks::<4>().0.iter() {
+            row.push(f32::from_le_bytes(*chunk));
         }
         out.push(row);
     }

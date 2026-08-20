@@ -109,8 +109,8 @@ impl TpAllReduceCollector {
         };
         let mut sum = vec![0.0f32; elem_count];
         if decompressed.len() == elem_count * 4 {
-            for (i, chunk) in decompressed.chunks_exact(4).enumerate() {
-                sum[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            for (i, chunk) in decompressed.as_chunks::<4>().0.iter().enumerate() {
+                sum[i] = f32::from_le_bytes(*chunk);
             }
         }
 
@@ -135,8 +135,8 @@ impl TpAllReduceCollector {
                 buf
             };
             if dec.len() == elem_count * 4 {
-                for (j, chunk) in dec.chunks_exact(4).enumerate() {
-                    sum[j] += f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                for (j, chunk) in dec.as_chunks::<4>().0.iter().enumerate() {
+                    sum[j] += f32::from_le_bytes(*chunk);
                 }
             } else {
                 return Err(attribute(

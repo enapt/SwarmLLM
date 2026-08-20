@@ -1036,8 +1036,10 @@ async fn run_fused_batch_forward(
                 )));
             }
             let token_ids: Vec<i64> = slice
-                .chunks_exact(8)
-                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| i64::from_le_bytes(*c))
                 .collect();
             let seq_len = token_ids.len();
             candle_core::Tensor::from_vec(token_ids, &[1, seq_len], &candle_core::Device::Cpu)
@@ -1290,8 +1292,10 @@ async fn handle_forward(
                 )));
             }
             let token_ids: Vec<i64> = activation_bytes
-                .chunks_exact(8)
-                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| i64::from_le_bytes(*c))
                 .collect();
             let seq_len = token_ids.len();
             candle_core::Tensor::from_vec(token_ids, &[1, seq_len], &candle_core::Device::Cpu)
@@ -1326,7 +1330,9 @@ async fn handle_forward(
                         None
                     } else {
                         let f32_values: Vec<f32> = raw_bytes
-                            .chunks_exact(2)
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
                             .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
                             .collect();
                         // SEC: reject NaN/Inf from peer-supplied vision embeddings.

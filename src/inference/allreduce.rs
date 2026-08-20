@@ -254,8 +254,10 @@ fn ring_allreduce_sum_compressed(
                 )));
             }
             Ok(dec
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
                 .collect())
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -420,8 +422,8 @@ pub(crate) async fn ring_allreduce_network(
     }
     let num_elements = partial_bytes.len() / 4;
     let mut local_data: Vec<f32> = vec![0.0; num_elements];
-    for (i, chunk) in partial_bytes.chunks_exact(4).enumerate() {
-        local_data[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for (i, chunk) in partial_bytes.as_chunks::<4>().0.iter().enumerate() {
+        local_data[i] = f32::from_le_bytes(*chunk);
     }
     // SEC: Symmetric with the recv-side check below — IPC corruption or a
     // worker hardware fault can deliver a non-finite local partial; if we
@@ -531,8 +533,10 @@ pub(crate) async fn ring_allreduce_network(
             )));
         }
         let recv_floats: Vec<f32> = recv_bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
 
         // SEC: Reject NaN/Inf from peers — a single non-finite value in the ring
@@ -730,8 +734,10 @@ mod tests {
 
     fn decompress_f32(data: &[u8]) -> Vec<f32> {
         let dec = zstd::decode_all(std::io::Cursor::new(data)).unwrap();
-        dec.chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        dec.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect()
     }
 

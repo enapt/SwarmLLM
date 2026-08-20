@@ -1520,7 +1520,7 @@ impl NetworkManager {
                     self.handle_swarm_event(event).await;
                     // Process any broadcasts queued during event handling
                     if !self.deferred_broadcasts.is_empty() {
-                        let msgs: Vec<_> = self.deferred_broadcasts.drain(..).collect();
+                        let msgs = std::mem::take(&mut self.deferred_broadcasts);
                         for msg in msgs {
                             self.handle_broadcast(msg).await;
                         }

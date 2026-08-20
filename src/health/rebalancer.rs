@@ -122,7 +122,7 @@ impl ShardRebalancer {
 
     /// Batch-process queued PeerLeft events, respecting per-model cooldown.
     async fn process_pending_departures(&mut self) {
-        let departed: Vec<NodeId> = self.pending_peer_left.drain(..).collect();
+        let departed: Vec<NodeId> = std::mem::take(&mut self.pending_peer_left);
         if departed.is_empty() {
             return;
         }
