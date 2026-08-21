@@ -661,6 +661,48 @@ silently break at the wire if duplicated:
   minutes against the 4m47s it previously took to lose it, and a genuine
   two-segment pipeline then answered correctly across both.
 
+- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** (2026-08-21
+  night) — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`. One weight
+  column against `rows` activation rows in one call; the AVX2 Q4_K and Q6_K kernels
+  (`dot_q4k_q8k_rows::<R>`, `dot_q6k_q8k_rows::<R>`) unpack the column once and
+  share it across R rows. **Overrides MUST stay bit-identical to the per-row loop**
+  (`vec_dot_rows_generic`): each row keeps its own accumulators and sees the
+  single-row kernel's operations in the same order; `examples/qmatmul_bench`
+  asserts exact equality against the upstream ordering for Q4_K and Q6_K at every
+  m it prices — run it after touching either kernel. **R is a register-pressure
+  knob, not a "bigger is better" one**: Q4_K at R=8 spilled the 16 ymm registers and
+  R=4 was 1.2x faster at every m. `matmul` also runs the column-outer loop per
+  `ROW_BLOCK = 128` rows so the quantized activations stay in L2 — a whole-prompt
+  forward had streamed ~3 MB from L3 per column, which is why a per-row cost measured
+  at m=128 never carried to large m. The `examples/prefill_bench` single-forward
+  number is only representative of the production 128-token chunks because of this.
+- **`inference::decode_attn::gqa_decode_attention_cpu`** (2026-08-21 night) — single-
+  position attention straight over the KV cache in its stored `[b, kvh, S, d]` layout,
+  one rayon task per (batch, kv head). Dispatched at the top of
+  `standard_attention` for `q_len == 1` on the CPU (MHA and GQA). The two batched
+  matmuls it replaces cost 1.3 ms/layer at ~920 KV for ~11 MFLOP — GEMM packing and
+  dispatch, a quarter of every decoded token. **Returns `Ok(None)` for anything
+  outside its scope** (non-CPU, non-f32, `q_len > 1`, K/V whose `(S, d)` plane is not
+  dense, a mask it cannot reduce to one row) and the caller carries on unchanged —
+  it is an accelerator, never a requirement; keep it that way. `SWARMLLM_DECODE_ATTN=
+  standard` disables it (same discipline as `SWARMLLM_FORCE_STANDARD_ATTN`); that is
+  how its +24% decode was attributed (A/B/A/B in one binary). Not bit-identical to
+  the matmul path (different summation order); `decode_kernel_matches_the_matmul_
+  path` bounds it (abs < 1e-5, rel < 1e-4 with a 0.05 floor — the first metric
+  flagged fp32 noise on a near-zero output as a failure). The DRAM floor for the
+  cache read at ~900 KV × 28 layers is ~7 ms/token on this box; the kernel sits at
+  ~15 — the remainder is per-layer dispatch, not arithmetic.
+- **`inference::fast_math`** (2026-08-21 night) — eight-lane AVX2 `expf`
+  (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by
+  `vectorised_exp_tracks_libm` over [-80, 80]) and the fused `silu_mul` CustomOp2.
+  Every `exp` on the CPU path had been a scalar libm call — ~540 M in the softmax
+  rows and ~205 M in SiLU for an 896-token llama-3.2-3b prompt. **Used by the fused
+  softmax (`attn_softmax::softmax_row`), the three SiLU×up call sites in
+  `layers/mod.rs`, and the decode kernel.** Not bit-identical; every consumer keeps
+  its tolerance test against the composed candle reference (softmax 1e-6 rel, silu
+  2e-6). A new elementwise pass that calls `f32::exp` in a loop is the thing to
+  route through here instead. Inputs below ~-87.3 underflow to 0 (libm: denormal),
+  above 88.37 saturate — right for softmax (shifted ≤ 0) and SiLU (limits).
 - **`inference::cpu_pools::in_phase_pool`** (2026-08-07) — binds a forward pass
   to the CPU thread pool that suits its phase, at ONE choke point:
   `SplitModel::forward_inner_impl` and `forward_batch`. Every entry point —

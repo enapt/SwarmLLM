@@ -240,7 +240,7 @@ pub(crate) fn vec_dot_rows_q6k_q8k(
     let mut r0 = 0;
     while r0 + R <= rows {
         unsafe {
-            dot_q6k_q8k_4rows(xs, &ys[r0 * kb..(r0 + R) * kb], kb, &mut out[r0..r0 + R]);
+            dot_q6k_q8k_rows::<R>(xs, &ys[r0 * kb..(r0 + R) * kb], kb, &mut out[r0..r0 + R]);
         }
         r0 += R;
     }
@@ -249,12 +249,11 @@ pub(crate) fn vec_dot_rows_q6k_q8k(
     }
 }
 
-/// Four rows of `vec_dot_q6k_q8k` sharing one pass over the column. Kept in
+/// `R` rows of `vec_dot_q6k_q8k` sharing one pass over the column. Kept in
 /// lock-step with the single-row kernel: change one, change both, and re-run
 /// `examples/qmatmul_bench` (exact-equality assert).
 #[inline(always)]
-unsafe fn dot_q6k_q8k_4rows(xs: &[BlockQ6K], ys: &[BlockQ8K], kb: usize, out: &mut [f32]) {
-    const R: usize = 4;
+unsafe fn dot_q6k_q8k_rows<const R: usize>(xs: &[BlockQ6K], ys: &[BlockQ8K], kb: usize, out: &mut [f32]) {
     let m4 = _mm256_set1_epi8(0xF);
     let m2 = _mm256_set1_epi8(3);
     let m32s = _mm256_set1_epi8(32);
@@ -687,11 +686,14 @@ pub(crate) fn vec_dot_rows_q4k_q8k(
     );
     debug_assert_eq!(ys.len(), rows * kb, "vec_dot_rows_q4k_q8k: rows × blocks");
     debug_assert!(out.len() >= rows);
-    const R: usize = 8;
+    // Four rows per pass, not eight: eight accumulator pairs plus the column
+    // operands exceed the 16 ymm registers and spill; measured 0.080 → 0.067
+    // ms/row (attn proj) and 0.198 → 0.161 (ffn up) at m=128 going 8 → 4.
+    const R: usize = 4;
     let mut r0 = 0;
     while r0 + R <= rows {
         unsafe {
-            dot_q4k_q8k_8rows(xs, &ys[r0 * kb..(r0 + R) * kb], kb, &mut out[r0..r0 + R]);
+            dot_q4k_q8k_rows::<R>(xs, &ys[r0 * kb..(r0 + R) * kb], kb, &mut out[r0..r0 + R]);
         }
         r0 += R;
     }
@@ -700,12 +702,11 @@ pub(crate) fn vec_dot_rows_q4k_q8k(
     }
 }
 
-/// Eight rows of `vec_dot_q4k_q8k` sharing one pass over the column. Kept in
+/// `R` rows of `vec_dot_q4k_q8k` sharing one pass over the column. Kept in
 /// lock-step with the single-row kernel above: change one, change both, and
 /// re-run `examples/qmatmul_bench` (exact-equality assert).
 #[inline(always)]
-unsafe fn dot_q4k_q8k_8rows(xs: &[BlockQ4K], ys: &[BlockQ8K], kb: usize, out: &mut [f32]) {
-    const R: usize = 8;
+unsafe fn dot_q4k_q8k_rows<const R: usize>(xs: &[BlockQ4K], ys: &[BlockQ8K], kb: usize, out: &mut [f32]) {
     let mut utmp = [0u32; 4];
     const KMASK1: u32 = 0x3f3f3f3f;
     const KMASK2: u32 = 0x0f0f0f0f;
