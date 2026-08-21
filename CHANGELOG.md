@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.109-alpha] — 2026-08-21
+
 **Split models now pass work between the machines that hold them directly, by
 default.** When a model is spread over several machines, the middle ones used
 to send every step's result back to the machine that asked, which then sent it
