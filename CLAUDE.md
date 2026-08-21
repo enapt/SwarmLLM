@@ -252,9 +252,9 @@ Detail: `memory/round_log_0818_*.md`, `MEMORY.md` 08-20/21 lines, and the CHANGE
   win first published for it did not exist** — aggregate tok/s ÷ wall clock is
   biased by completion length, and the bench built bodies inside the launch loop;
   real figure ~3% at N=8, ~16% at N=12, neutral on CPU, correction pushed.
-  **Direct peer chaining implemented, OFF** (`inference.pipeline_chaining`, wire
-  trailer 0x06 carrying the REMAINING chain) — two hang-class bugs found by review;
-  **validated end to end on two machines on 08-21 (unreleased)** after three more
+  **Direct peer chaining implemented** (`inference.pipeline_chaining`, wire
+  trailer 0x06 carrying the REMAINING chain; **ON by default since .109**) — two
+  hang-class bugs found by review; **validated end to end on two machines on 08-21** after three more
   silent defects fell out of running it: the tail answered its predecessor at a
   second layer (#354), the coordinator was never on the wire (0x07 reply-to,
   `PIPELINE_CHAIN_V2`), and "retry unchained" never retried. 64 tokens → 64 sends,

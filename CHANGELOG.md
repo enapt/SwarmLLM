@@ -4,6 +4,19 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Split models now pass work between the machines that hold them directly, by
+default.** When a model is spread over several machines, the middle ones used
+to send every step's result back to the machine that asked, which then sent it
+on to the next — one extra trip per machine per token. They now hand it
+straight to the next machine, and only the last answers the one that asked
+(`inference.pipeline_chaining`, now on by default; set it to `false` to get the
+old behaviour). Machines on earlier versions are never handed work this way —
+they keep being asked the old way, and a run that cannot be chained for any
+reason, or fails while chained, falls back to the old way for that request.
+Measured on a two-machine split over a 1 ms network it saves about 9 ms per
+token; over a real internet path and a model split further the saving is
+larger, because it is one round trip per extra machine per token.
+
 **Chaining works now — a split model's middle hops pass activations directly to
 each other, and the answer comes straight back.** Direct peer chaining
 (`inference.pipeline_chaining`, still off by default) had been implemented but

@@ -1,7 +1,8 @@
 # Direct peer chaining for distributed inference
 
-**Status: implemented, validated end to end on two machines (2026-08-21), off by
-default** (`inference.pipeline_chaining`). This document is the case for doing it, the
+**Status: implemented, validated end to end on two machines (2026-08-21), ON by
+default since v0.3.109** (`inference.pipeline_chaining`; set it to `false` to
+run every segment through the coordinator as before). This document is the case for doing it, the
 prior art it rests on, the design, and what is still unproven.
 
 ### Six defects, all found by review rather than by running it (2026-08-21)

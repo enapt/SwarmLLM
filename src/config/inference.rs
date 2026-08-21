@@ -62,11 +62,17 @@ pub struct InferenceConfig {
     /// `encrypted_pipeline` the first and last segments stay here and only the
     /// middle is chained.
     ///
-    /// **Off by default while it is unproven on real hardware.** Every reason
-    /// not to chain falls back to the existing behaviour rather than failing,
-    /// so the risk is contained, but it has not yet been measured end to end.
+    /// **On by default since v0.3.109.** Validated end to end on two machines on
+    /// 2026-08-21 (64 tokens: 64 coordinator sends, none to the tail, every
+    /// answer straight from the tail; reply byte-identical to the unchained
+    /// control). Every reason not to chain falls back to the existing behaviour
+    /// rather than failing: a peer without `PIPELINE_CHAIN_V2`, a local segment,
+    /// a gap in the layer ranges, a request whose sampler needs the generated
+    /// ids — and a chained run that fails is re-run unchained for the rest of
+    /// that request. Known gaps: the n-gram speculative decode path runs its own
+    /// unchained loop, and only a 2-segment LAN chain has been measured.
     /// See `docs/plans/direct_peer_chaining.md`.
-    #[serde(default)]
+    #[serde(default = "default_pipeline_chaining")]
     pub pipeline_chaining: bool,
     /// Longest run of peer-to-peer hops to build in one chain.
     ///
@@ -893,6 +899,13 @@ fn default_max_chain_hops() -> u32 {
     8
 }
 
+/// See `InferenceConfig::pipeline_chaining`. A named default so the
+/// serde-default and `impl Default` paths cannot disagree
+/// (`empty_section_matches_missing_section`).
+fn default_pipeline_chaining() -> bool {
+    true
+}
+
 /// SWARM-SPEC Layer 0: default activation compression to ON. Saves
 /// ~50-70% wire bandwidth on multi-segment pipelines with negligible
 /// quality impact (group-32 Q8_0 — see `inference/quant.rs`).
@@ -1028,7 +1041,7 @@ impl Default for InferenceConfig {
             gpu_layers: default_gpu_layers(),
             kv_cache_ttl_secs: default_kv_cache_ttl(),
             speculative_decoding: false,
-            pipeline_chaining: false,
+            pipeline_chaining: default_pipeline_chaining(),
             max_chain_hops: default_max_chain_hops(),
             shed_load_when_busy: false,
             shed_load_threshold: default_shed_load_threshold(),
