@@ -39,9 +39,18 @@ pub mod features {
     /// coordinator — which is the existing behaviour and always correct, just
     /// one round trip more expensive.
     pub const PIPELINE_CHAIN: u64 = 1 << 2;
+    /// Direct peer chaining, second wire form: the chain trailer (0x06) is
+    /// followed by a reply-to trailer (0x07) naming the COORDINATOR, so the
+    /// tail of a chain answers the node that asked rather than the hop that
+    /// handed it the activations. The first form never carried that identity —
+    /// the receiver treated the forward's sender as the requester, which is
+    /// right for one hop and wrong for a chain — so a v1-only peer would
+    /// answer its predecessor and the run would time out. The planner
+    /// therefore requires THIS bit; v1 is kept defined, never re-used.
+    pub const PIPELINE_CHAIN_V2: u64 = 1 << 3;
 
     /// The full feature set THIS build implements. Advertised by every node.
-    pub const ALL: u64 = RELAY | TENSOR_RELAY | PIPELINE_CHAIN;
+    pub const ALL: u64 = RELAY | TENSOR_RELAY | PIPELINE_CHAIN | PIPELINE_CHAIN_V2;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

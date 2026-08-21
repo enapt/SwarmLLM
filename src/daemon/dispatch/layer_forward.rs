@@ -254,10 +254,19 @@ pub(super) async fn handle_layer_forward(
         return;
     }
 
-    // Pipeline sealing: encrypt token IDs for requester if this is the final segment
+    // Pipeline sealing: encrypt token IDs for requester if this is the final segment.
+    //
+    // Deliberately NOT fed the requester id. Until 2026-08-21 no decoder set
+    // `requester_node_id` on a received forward, so this seal never ran for a
+    // remote segment — the coordinator unseals on its prompt path only. The id
+    // now arrives on chained forwards (0x07 reply-to trailer) so the tail can
+    // ANSWER the coordinator; letting it also switch the seal on would make a
+    // chained reply the one kind the coordinator cannot read. Enabling the seal
+    // is its own change: every result path on the coordinator has to unseal
+    // first (`docs/FUTURE_WORK.md`).
     let mut result = result;
     if is_last {
-        seal_layer_result(&mut result, requester_node_id.as_ref());
+        seal_layer_result(&mut result, None);
     }
 
     // Direct peer chaining: hand our output to the next segment instead of

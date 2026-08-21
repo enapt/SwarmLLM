@@ -91,16 +91,10 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // the activations are sealed, but the routing decision would not be
     // authenticated, and a chained pipeline is exactly a routing decision made
     // by somebody else.
-    if !forward.chain.is_empty() {
-        let n = forward.chain.len().min(u8::MAX as usize);
-        aad.push(0x06);
-        aad.push(n as u8);
-        for hop in forward.chain.iter().take(n) {
-            aad.extend_from_slice(&hop.node_id.0);
-            aad.extend_from_slice(&hop.layer_range.0.to_le_bytes());
-            aad.extend_from_slice(&hop.layer_range.1.to_le_bytes());
-        }
-    }
+    // Same bytes the wire carries (0x06 chain, then 0x07 reply-to), from the
+    // one writer both encoders use — so "who is next" AND "who gets the
+    // answer" are authenticated.
+    super::layer_forward::append_chain_trailers(&mut aad, forward);
 
     aad
 }
@@ -205,16 +199,7 @@ pub fn encode_layer_forward_encrypted(
     // + layer_end(4 LE)). Mirrors the plaintext encoder, and must be emitted
     // here too or the receiver reconstructs a different AAD and every chained
     // encrypted forward fails to open.
-    if !forward.chain.is_empty() {
-        let n = forward.chain.len().min(u8::MAX as usize);
-        buf.push(0x06);
-        buf.push(n as u8);
-        for hop in forward.chain.iter().take(n) {
-            buf.extend_from_slice(&hop.node_id.0);
-            buf.extend_from_slice(&hop.layer_range.0.to_le_bytes());
-            buf.extend_from_slice(&hop.layer_range.1.to_le_bytes());
-        }
-    }
+    super::layer_forward::append_chain_trailers(&mut buf, forward);
 
     Ok(buf)
 }
@@ -429,6 +414,7 @@ pub fn decode_layer_forward_encrypted(
     // Next-hop trailer (0x06). Read through the same helper the plaintext
     // decoder uses, so the two wire readers cannot drift apart.
     let chain = super::layer_forward::read_chain_trailer(data, &mut cursor);
+    let requester_node_id = super::layer_forward::read_reply_to_trailer(data, &mut cursor);
     let _ = cursor;
 
     let forward = LayerForward {
@@ -443,7 +429,7 @@ pub fn decode_layer_forward_encrypted(
         vision_embeddings: None,
         chain,
         sender_peer_bytes: None,
-        requester_node_id: None,
+        requester_node_id,
         pre_embedded: tp_pre_embedded,
         generated_ids: Vec::new(),
         adapter_id: None,

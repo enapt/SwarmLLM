@@ -139,7 +139,10 @@ impl PipelineExecutor {
                 chain: Vec::new(),
                 sender_peer_bytes: None,
                 tp_meta: None,
-                requester_node_id: Some(self.shared_state.identity.node_id().0),
+                // Unchained: the receiver answers its sender, which is us. Naming
+                // ourselves would add the 0x07 reply-to trailer to a frame older
+                // peers do not expect.
+                requester_node_id: None,
                 pre_embedded: false,
                 generated_ids: Vec::new(),
                 adapter_id: None,

@@ -215,7 +215,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1964 lib (dev,claude-subscription) / 1954 (default) + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 31 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Counts re-measured 2026-08-21 (pre v0.3.107, all suites run). Clippy clean on default, `dev,claude-subscription`, **`dev,candle-cuda --all-targets`** (the config that hides gated breakage, #264) and a `--features llama` check.
+All 20 build phases complete. All subsystems wired — no stubs. **1967 lib (dev,claude-subscription; inferred +3, not re-run) / 1957 (default, re-measured) + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 31 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing**; 11 lib + 1 e2e ignored (env-var or manual). Default-feature counts re-measured 2026-08-21 after the chaining wire fix (3 new protocol tests), all suites run. Clippy clean on default, `dev,claude-subscription`, **`dev,candle-cuda --all-targets`** (the config that hides gated breakage, #264) and a `--features llama` check.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
@@ -253,8 +253,12 @@ Detail: `memory/round_log_0818_*.md`, `MEMORY.md` 08-20/21 lines, and the CHANGE
   biased by completion length, and the bench built bodies inside the launch loop;
   real figure ~3% at N=8, ~16% at N=12, neutral on CPU, correction pushed.
   **Direct peer chaining implemented, OFF** (`inference.pipeline_chaining`, wire
-  trailer 0x06 carrying the REMAINING chain) — two hang-class bugs found by review,
-  end-to-end UNVALIDATED on one host (needs two machines). Prefix cache byte-bounded
+  trailer 0x06 carrying the REMAINING chain) — two hang-class bugs found by review;
+  **validated end to end on two machines on 08-21 (unreleased)** after three more
+  silent defects fell out of running it: the tail answered its predecessor at a
+  second layer (#354), the coordinator was never on the wire (0x07 reply-to,
+  `PIPELINE_CHAIN_V2`), and "retry unchained" never retried. 64 tokens → 64 sends,
+  0 to the tail. Still unchained: the n-gram spec decode path. Prefix cache byte-bounded
   (2 GB/model); terminal reply frame sent 3x; reply tokens scoped to the peer
   serving the attempt. `3node_sharded_setup.sh` had no `gossip_network_id`, so it
   silently measured the live node next door — every earlier result from it is suspect.

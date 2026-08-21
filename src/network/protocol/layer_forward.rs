@@ -111,14 +111,46 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
         buf.extend_from_slice(&cm.total_chunks.to_le_bytes());
     }
 
-    // Optional: next-hop trailer (marker 0x06 + node_id(32) + layer_start(4 LE)
-    // + layer_end(4 LE)) — direct peer chaining. Tells the receiver to hand its
-    // output to the next segment holder instead of returning it here. Bound
-    // into AAD, so a peer cannot be redirected to a different node without
-    // failing authentication.
+    // Optional: next-hop trailer (0x06) and reply-to trailer (0x07) — direct
+    // peer chaining. One writer for the plaintext frame, the encrypted frame
+    // and the AAD, so the three cannot disagree about these bytes.
+    append_chain_trailers(&mut buf, forward);
+
+    Ok(buf)
+}
+
+/// Write the chaining trailers: `0x06 | n | n × (node_id(32) | layer_start(4
+/// LE) | layer_end(4 LE))` when hops remain, and `0x07 | node_id(32)` — the
+/// COORDINATOR the run must answer — whenever the forward names its requester.
+///
+/// The two are independent on purpose: the LAST hop of a chain receives a
+/// forward with NO remaining hops and still has to know whom to answer. (The
+/// first cut emitted 0x07 only next to 0x06 and so dropped it on exactly that
+/// hop; observed on two machines, 2026-08-21.) The one-hop frame every
+/// released node sends and expects stays byte-identical because the
+/// coordinator sets `requester_node_id` ONLY on a chained send — see
+/// `PipelineExecutor::forward_through_segments` — and every hop copies it
+/// onward; each other sender leaves it `None`.
+///
+/// Shared by `encode_layer_forward`, the encrypted encoder and
+/// `build_layer_forward_aad`: all three wrote the 0x06 bytes by hand before
+/// 2026-08-21, which is how a fourth copy would have drifted. Both trailers are
+/// AAD-bound, so a peer can neither be redirected to another next hop nor told
+/// to answer a different coordinator without failing authentication.
+///
+/// Why 0x07 exists: `requester_node_id` was never on the wire. Every decoder
+/// left it `None`, and the serving side fell back to answering the forward's
+/// SENDER — correct for one hop, and exactly wrong for a chain, where the
+/// sender is the previous hop: the tail answered its predecessor, which had
+/// handed the work on and dropped the reply, and the coordinator waited out
+/// its whole deadline (observed on two machines). The unit tests built
+/// forwards with the field set and never saw it. It is emitted only next to a
+/// chain, so the one-hop frame is byte-identical to what every released node
+/// sends and expects.
+pub(crate) fn append_chain_trailers(buf: &mut Vec<u8>, forward: &LayerForward) {
     if !forward.chain.is_empty() {
-        // Bounded by a byte: a pipeline with more than 255 remaining segments is
-        // not a routing decision, it is a bug, and truncating is safer than
+        // Bounded by a byte: a pipeline with more than 255 remaining segments
+        // is not a routing decision, it is a bug, and truncating is safer than
         // emitting a length nobody can parse.
         let n = forward.chain.len().min(u8::MAX as usize);
         buf.push(0x06);
@@ -129,8 +161,26 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
             buf.extend_from_slice(&hop.layer_range.1.to_le_bytes());
         }
     }
+    if let Some(reply_to) = forward.requester_node_id {
+        buf.push(0x07);
+        buf.extend_from_slice(&reply_to);
+    }
+}
 
-    Ok(buf)
+/// Read the reply-to trailer (`0x07 | node_id(32)`) at `cursor`, if present.
+/// It follows the (optional) chain trailer; callers pass the cursor
+/// `read_chain_trailer` left. Absent on every released node's frame and on a
+/// v1 chain sender's, in which case the receiver keeps the old behaviour
+/// (answer the sender) — and the planner does not chain to v1 peers in the
+/// first place (`features::PIPELINE_CHAIN_V2`).
+pub(crate) fn read_reply_to_trailer(data: &[u8], cursor: &mut usize) -> Option<[u8; 32]> {
+    if data.len() < *cursor + 33 || data[*cursor] != 0x07 {
+        return None;
+    }
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&data[*cursor + 1..*cursor + 33]);
+    *cursor += 33;
+    Some(id)
 }
 
 /// Read a next-hop trailer at `cursor`, if one is present.
@@ -401,8 +451,10 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         cursor += 9;
     }
 
-    // Optional: next-hop trailer (0x06) — direct peer chaining.
+    // Optional: next-hop trailer (0x06) — direct peer chaining — and, only
+    // after one, the reply-to trailer (0x07) naming the coordinator.
     let chain = read_chain_trailer(data, &mut cursor);
+    let requester_node_id = read_reply_to_trailer(data, &mut cursor);
     let _ = cursor;
 
     Ok(LayerForward {
@@ -417,7 +469,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         vision_embeddings: None,
         chain,
         sender_peer_bytes: None,
-        requester_node_id: None,
+        requester_node_id,
         pre_embedded: tp_pre_embedded,
         generated_ids: Vec::new(),
         adapter_id: None,
@@ -858,5 +910,92 @@ mod tests {
         let wire = encode_layer_forward(&f).expect("encode");
         let back = decode_layer_forward(&wire).expect("decode");
         assert_eq!(back.chain, f.chain, "hops must survive in order");
+    }
+
+    /// A chained forward names the coordinator the tail must answer, and the
+    /// name survives the wire. Without it the serving side falls back to
+    /// answering the forward's SENDER — right for one hop, wrong for a chain,
+    /// where the sender is the previous hop (observed on two machines,
+    /// 2026-08-21: the tail answered the head, which had already handed the
+    /// work on, and the coordinator waited out its whole deadline).
+    #[test]
+    fn a_chained_forward_carries_the_coordinator_it_must_answer() {
+        let mut f = base_forward();
+        f.chain = vec![crate::types::ChainHop {
+            node_id: crate::types::NodeId([7u8; 32]),
+            layer_range: (12, 28),
+        }];
+        f.requester_node_id = Some([0xC0; 32]);
+        let wire = encode_layer_forward(&f).expect("encode");
+        let back = decode_layer_forward(&wire).expect("decode");
+        assert_eq!(back.chain, f.chain);
+        assert_eq!(
+            back.requester_node_id,
+            Some([0xC0; 32]),
+            "the reply-to trailer must come back as the requester"
+        );
+    }
+
+    /// The LAST hop of a chain receives a forward with no remaining hops and
+    /// still has to know whom to answer — so the reply-to rides on its own,
+    /// chain or no chain. (The first cut tied it to the chain trailer and so
+    /// dropped it on exactly that hop: the tail answered the head, again.)
+    #[test]
+    fn the_tail_of_a_chain_still_learns_the_coordinator() {
+        let mut f = base_forward();
+        f.chain = Vec::new();
+        f.requester_node_id = Some([0xC0; 32]);
+        let wire = encode_layer_forward(&f).expect("encode");
+        let back = decode_layer_forward(&wire).expect("decode");
+        assert!(back.chain.is_empty());
+        assert_eq!(back.requester_node_id, Some([0xC0; 32]));
+    }
+
+    /// A forward that names no requester carries no 0x07 — the frame every
+    /// released node sends and expects. Keeping the one-hop wire unchanged is
+    /// therefore a SENDER discipline: the coordinator sets the field only on
+    /// a chained send, every other constructor leaves it `None`.
+    #[test]
+    fn a_forward_that_names_no_requester_is_unchanged_on_the_wire() {
+        let mut f = base_forward();
+        f.requester_node_id = None;
+        let wire = encode_layer_forward(&f).expect("encode");
+        assert!(
+            !wire
+                .windows(33)
+                .any(|w| w[0] == 0x07 && w.len() == 33 && wire.ends_with(w)),
+            "no 0x07 trailer when nothing is named"
+        );
+        let back = decode_layer_forward(&wire).expect("decode");
+        assert_eq!(back.requester_node_id, None);
+    }
+
+    /// "Who gets the answer" is a routing decision made by somebody else, so
+    /// it is authenticated like "who is next": a different reply-to is a
+    /// different AAD, and a tampered one fails Poly1305 rather than quietly
+    /// sending the tail's result to an attacker's node.
+    #[test]
+    fn redirecting_the_reply_changes_the_aad() {
+        let mut f = base_forward();
+        f.chain = vec![crate::types::ChainHop {
+            node_id: crate::types::NodeId([7u8; 32]),
+            layer_range: (12, 28),
+        }];
+        f.requester_node_id = Some([0xC0; 32]);
+        let honest = super::super::encrypted::build_layer_forward_aad(&f);
+        f.requester_node_id = Some([0xBA; 32]);
+        let redirected = super::super::encrypted::build_layer_forward_aad(&f);
+        assert_ne!(
+            honest, redirected,
+            "the reply-to must be bound into the AAD"
+        );
+        // And the AAD is the same bytes the wire carries for these trailers:
+        // one writer, three users.
+        let mut wire_tail = Vec::new();
+        append_chain_trailers(&mut wire_tail, &f);
+        assert!(
+            redirected.ends_with(&wire_tail),
+            "AAD must end with exactly the chain+reply-to bytes the frame carries"
+        );
     }
 }

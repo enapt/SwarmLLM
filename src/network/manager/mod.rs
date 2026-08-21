@@ -378,10 +378,20 @@ pub struct NetworkManager {
     /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
     /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
     /// we send the result as the response on the original channel — single substream per token.
+    ///
+    /// The entry also records WHICH peer the forward came from, because that
+    /// shortcut is only valid towards that peer. In a chained run the forward
+    /// arrives from the previous hop but the result is addressed to the
+    /// coordinator; keyed by request id alone, the tail answered its
+    /// predecessor — which had already handed the work on and dropped the
+    /// reply — and the coordinator waited out its whole deadline (observed on
+    /// two machines, 2026-08-21). `handle_send_tensor_result` compares before
+    /// it replies.
     pending_tensor_channels: HashMap<
         uuid::Uuid,
         (
             std::time::Instant,
+            libp2p::PeerId,
             request_response::ResponseChannel<SwarmResponse>,
         ),
     >,
@@ -801,6 +811,27 @@ impl NetworkManager {
     }
 
     /// Send an error LayerResult to the pipeline for a failed tensor forward.
+    /// Whether a forward for `inference_uuid` that was sent at `sent_at` has
+    /// since been RE-SENT — i.e. a newer forward for the same request is still
+    /// pending. A failure of the older one then belongs to an abandoned
+    /// attempt and must NOT be reported to the pipeline as the request's
+    /// result: the waiter is the new attempt's, and
+    /// `resolve_pending_layer_result`'s awaiting-node check cannot tell two
+    /// forwards to the SAME node apart (a chained run re-run unchained, or a
+    /// failover that kept the holder). Observed 2026-08-21: the re-sent
+    /// forward replaced the remote's stored channel for this request id, the
+    /// old substream reset, and the fresh attempt "failed" 1 ms after it was
+    /// sent — it had consumed the old forward's error (gotcha #229's shape).
+    fn tensor_forward_is_superseded(
+        &self,
+        inference_uuid: uuid::Uuid,
+        sent_at: std::time::Instant,
+    ) -> bool {
+        self.pending_tensor_outbound
+            .values()
+            .any(|(u, sent, _, _, _)| *u == inference_uuid && *sent > sent_at)
+    }
+
     fn fail_tensor_forward(
         &mut self,
         request_id: uuid::Uuid,
@@ -1240,7 +1271,7 @@ impl NetworkManager {
                 _ = stale_tensor_interval.tick() => {
                     // Sweep stale pending_tensor_channels independently of outbound state.
                     // On serving nodes, pending_tensor_outbound is empty but channels can still leak.
-                    self.pending_tensor_channels.retain(|_uuid, (inserted, _chan)| {
+                    self.pending_tensor_channels.retain(|_uuid, (inserted, _peer, _chan)| {
                         inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
                     });
                     // Also sweep the observability-only result-fallback map.
@@ -1375,7 +1406,20 @@ impl NetworkManager {
                                 %target_peer,
                                 "DIAG: stale tensor forward — notifying pipeline + disconnecting peer"
                             );
+                            let sent_at = self.pending_tensor_outbound.get(&req_id).map(|e| e.1);
                             self.pending_tensor_outbound.remove(&req_id);
+                            if sent_at.is_some_and(|s| self.tensor_forward_is_superseded(uuid, s)) {
+                                // Abandoned attempt with a newer one in flight to
+                                // this peer: neither fail the request nor reset the
+                                // session the new attempt is using.
+                                tracing::warn!(
+                                    ?req_id,
+                                    request_id = %uuid,
+                                    %target_peer,
+                                    "stale tensor forward is SUPERSEDED by a newer one — dropped without notifying or disconnecting"
+                                );
+                                continue;
+                            }
                             stale_peers.insert(target_peer);
                             self.fail_tensor_forward(uuid, &target_peer, "Tensor forward timed out".into());
                             // Also clean up the inbound response channel for this request

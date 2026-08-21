@@ -187,7 +187,7 @@ pub(super) fn build_spec_verify_forward(
     index_pos: u32,
     activations: Vec<u8>,
     segment: &crate::types::PipelineSegment,
-    requester_node_id_bytes: [u8; 32],
+    _requester_node_id_bytes: [u8; 32],
     truncate_kv_to: Option<u32>,
 ) -> crate::types::LayerForward {
     crate::types::LayerForward {
@@ -202,7 +202,12 @@ pub(super) fn build_spec_verify_forward(
         chain: Vec::new(),
         sender_peer_bytes: None,
         tp_meta: None,
-        requester_node_id: Some(requester_node_id_bytes),
+        // Unchained: the receiver answers its sender, which is us. Since
+        // 2026-08-21 a `Some` here would put the 0x07 reply-to trailer on the
+        // wire, which only chained runs carry and older peers do not expect.
+        // (The seal this once fed never ran for a remote segment — the id was
+        // not on the wire — so nothing is lost; `docs/FUTURE_WORK.md`.)
+        requester_node_id: None,
         pre_embedded: false,
         generated_ids: Vec::new(),
         adapter_id: None,
@@ -415,7 +420,7 @@ pub(super) fn build_kv_truncate_forward(
     request_id: uuid::Uuid,
     segment: &crate::types::PipelineSegment,
     truncate_to: u32,
-    requester_node_id_bytes: [u8; 32],
+    _requester_node_id_bytes: [u8; 32],
 ) -> crate::types::LayerForward {
     crate::types::LayerForward {
         request_id,
@@ -429,7 +434,12 @@ pub(super) fn build_kv_truncate_forward(
         chain: Vec::new(),
         sender_peer_bytes: None,
         tp_meta: None,
-        requester_node_id: Some(requester_node_id_bytes),
+        // Unchained: the receiver answers its sender, which is us. Since
+        // 2026-08-21 a `Some` here would put the 0x07 reply-to trailer on the
+        // wire, which only chained runs carry and older peers do not expect.
+        // (The seal this once fed never ran for a remote segment — the id was
+        // not on the wire — so nothing is lost; `docs/FUTURE_WORK.md`.)
+        requester_node_id: None,
         pre_embedded: false,
         generated_ids: Vec::new(),
         adapter_id: None,
@@ -559,6 +569,11 @@ pub struct PipelineExecutor {
     /// Collected per-token logprobs during token generation.
     /// Uses Mutex because process_local_segment takes &self.
     pub(super) collected_logprobs: std::sync::Mutex<Vec<TokenLogProbEntry>>,
+    /// Set the first time a chained run fails for this request. From then on
+    /// every segment of this request is sent unchained — the plain path that
+    /// names its culprit and fails over per segment. Per request, not global:
+    /// one bad hand-off says nothing about the next request's peers.
+    pub(super) chaining_disabled: bool,
 }
 
 impl PipelineExecutor {
@@ -574,6 +589,7 @@ impl PipelineExecutor {
             request,
             assignment,
             collected_logprobs: std::sync::Mutex::new(Vec::new()),
+            chaining_disabled: false,
         }
     }
 
@@ -1078,7 +1094,10 @@ mod tests {
         assert!(fwd.vision_embeddings.is_none());
         assert!(fwd.sender_peer_bytes.is_none());
         assert!(fwd.tp_meta.is_none());
-        assert_eq!(fwd.requester_node_id, Some(requester));
+        assert_eq!(
+            fwd.requester_node_id, None,
+            "a spec-verify forward is unchained, so it names no reply-to"
+        );
         assert!(!fwd.pre_embedded);
         assert!(fwd.generated_ids.is_empty());
         assert!(fwd.adapter_id.is_none());

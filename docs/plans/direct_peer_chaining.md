@@ -1,7 +1,7 @@
 # Direct peer chaining for distributed inference
 
-**Status: implemented and off by default** (`inference.pipeline_chaining`),
-end-to-end validation incomplete. This document is the case for doing it, the
+**Status: implemented, validated end to end on two machines (2026-08-21), off by
+default** (`inference.pipeline_chaining`). This document is the case for doing it, the
 prior art it rests on, the design, and what is still unproven.
 
 ### Six defects, all found by review rather than by running it (2026-08-21)
@@ -40,38 +40,124 @@ abandoned attempt could land in a retry of the same request id and kill it. The
 reply stream now records which peer the current attempt is being served by. See
 gotchas #349 and #350.
 
-### Validation as it stands (2026-08-20)
+### Five more, found by RUNNING it on two machines (2026-08-21)
 
-Unit level: 11 tests, including that a local segment ends a run — which is what
-makes prompt privacy survive — that a peer without the feature bit ends it, that
-a gap in the layer ranges ends it, and that redirecting or stripping a hop
-changes the sealed message's associated data so it cannot be tampered with.
+Every one of the six above was found by review; these five each needed a real
+chained request between a WSL host and a Debian LXC to show themselves. Same
+pattern — silent, plausible, a hang or a wrong addressee rather than an error.
 
-On real nodes, using `examples/3node_sharded_setup.sh` with a coordinator
-holding no model and two nodes holding consecutive halves of llama-3.2-3b: the
-coordinator planned a genuine two-segment split (layers 0-12 and 12-28), sent one
-forward carrying the chain, and the head **received it, computed its layers and
-handed the activations straight to the tail** — logged on both sides, with no
-outbound failure.
+8. **The tail answered its predecessor — again, one layer down.** Defect 1 was
+   fixed in `dispatch/layer_forward.rs` with `reply_target`. The network
+   manager's "answer on the substream the forward arrived on" shortcut is keyed
+   by REQUEST ID and knew nothing about chains, so with the dispatch fix in
+   place the result still went down the previous hop's substream. The stored
+   channel now records the peer it came from and the shortcut is taken only
+   towards that peer; a mismatch ACKs the old substream and sends the result as
+   its own request. Gotcha #354.
+9. **The coordinator's identity was never on the wire.** Every decoder set
+   `requester_node_id: None`, so `reply_target` fell back to the SENDER — right
+   for one hop, wrong for a chain. The in-process unit tests built forwards with
+   the field set and could not see it. Now a `0x07` reply-to trailer,
+   AAD-bound, emitted whenever the forward names its requester; the coordinator
+   names itself ONLY on a chained send and every hop copies it onward, so the
+   one-hop frame every released node expects is byte-identical. Behind
+   `features::PIPELINE_CHAIN_V2` — a v1 peer is never chained to. The first cut
+   tied 0x07 to the chain trailer and dropped it on the one hop with an empty
+   remaining chain: the tail. Gotcha #354 addendum.
+10. **A hop that handed the forward on never answered the request it
+    received.** The coordinator's rr to the head stayed open until the 600 s
+    libp2p timeout — one dangling request per chained TOKEN on that
+    connection, which also feeds the "fewest pending" connection selection.
+    `handle_send_tensor` now ACKs the inbound substream on hand-off, in the
+    manager, where no dispatch path can forget it.
+11. **"Retrying the request unchained" retried nothing.** The log line promised
+    it and the code returned `PeerUnresponsive`, expecting the router to
+    re-plan; the router's transient check matches other wording, and a re-plan
+    would have chained again anyway. Every chained failure was a hard 503 after
+    the full deadline. The pipeline now re-runs the segment unchained itself,
+    carrying `truncate_kv_to` for every segment the chain touched so the same
+    positions are not appended twice — verified: the re-run answered
+    byte-identically to the unchained control.
+12. **The re-run died 1 ms after it was sent.** Re-sending a forward for a
+    request id replaced the remote's stored channel, the old substream reset,
+    and the coordinator turned that `OutboundFailure` into an error result the
+    NEW waiter consumed — gotcha #229's shape, unreachable by the awaiting-node
+    check because both forwards went to the same node. A failure (or stale
+    sweep) for a forward with a NEWER pending forward for the same request is
+    now dropped as superseded, without disconnecting the peer the new attempt
+    is using.
 
-**The tail never received them, and this host cannot show whether that is
-chaining's fault.** The same machine failed the *unchained* control too, at an
-earlier hop, and logged 112 connection closures during the run. That is the
-condition documented above under "Connection churn on multi-interface hosts":
-libp2p routing a tensor forward to a stale connection and silently dropping it.
-A single WSL2 host advertising a NAT gateway, a link-local address, a Docker
-bridge and a LAN address is exactly the case that entry describes.
+Observed on the way, not caused by chaining: the pipeline seal has never run
+for a remote segment (gotcha #355, `docs/FUTURE_WORK.md`); the first tensor
+forward to a freshly connected peer can vanish on one dead-in-one-direction
+connection and wait out the whole deadline (gotcha #353); and a "private"
+`gossip_network_id` does not isolate routing on a machine with a live node —
+the DHT and the loopback probe leak public holders; a pool + private mode does
+(gotcha #352).
 
-So: the plan, the send, the receive, the compute and the onward hand-off are all
-demonstrated. Delivery of the final hop is not, on a host that cannot deliver an
-unchained one either. **It needs two real machines before the flag defaults on.**
+### Validation as it stands (2026-08-21) — end to end on two machines, PASS
 
-A defect in the harness was found and fixed on the way: it disabled bootstrap
-but never set a private gossip network, and loopback discovery is unconditional
-(gotcha #311). All three nodes found the live node next door, which holds the
-whole model, and every request was delegated to it — the log said `segments=1`
-and the split being measured never ran. Every earlier result from that script on
-a machine also running a node is suspect for the same reason.
+Topology: coordinator C and tail B are two daemons in a Debian 12 LXC
+(Proxmox, i5-10500T, CPU); head A is a daemon on the WSL2 host (CPU binary).
+llama-3.2-3b-instruct-q4-k-m split at layer 12: A holds shards 0-1 (layers
+0-12), B holds shards 2-3 (12-28), C holds nothing. The three are a pool with
+`private_mode` on C and `private_mode_allow_lan = false`, which is what actually
+keeps the two LIVE nodes on the same hosts out of C's candidate set (a private
+`gossip_network_id` does not — gotcha #352). `inference.pipeline_chaining = true`
+on C only; the serving side needs nothing but the feature bit.
+
+What was observed, by request id in the three logs:
+
+- **The chain completes.** Request `1a7bd758` (32 tokens, temperature 0): C sent
+  ONE forward (segment 0, chain=[B]); A computed layers 0-12, logged "chaining
+  activations to the next segment" and "handing a forward onward — released the
+  substream it arrived on"; B computed 12-28 and logged "result is for a
+  different node than the forward came from — released that substream, sending
+  the result as a new request"; C received the tail's token directly. HTTP 200
+  in 8.9 s, reply `Red\nBlue\nYellow` — byte-identical to the unchained control
+  (`721eeb97`).
+- **Per token, not just the prompt.** Request `e5b34033` (64 tokens, temperature
+  0.7 — which keeps decode on the main loop; at temperature 0 the n-gram
+  speculative path runs decode with its own per-segment loop, which does NOT
+  chain yet): 64 coordinator sends, all to the head with a chain, **zero** sends
+  to the tail, 64 tail results received directly; A 64 hand-offs, B 64 "new
+  request" replies. 12.4 s total, coherent text.
+- **A chained failure costs one deadline, not the request.** With the old
+  binaries on A and B (tail still answering the head), C re-ran the segment
+  unchained after its 296 s deadline and answered byte-identically to the control
+  (`37c05883`); before that fix every chained failure was a 503.
+- **Coordinator-side A/B, same nodes and connections** (chaining forced off per
+  request via a non-zero `frequency_penalty`, which disables chaining because the
+  sampler then needs the generated ids): see the table below.
+
+| arm (64 tokens, temp 0.7, 2-segment LAN split) | trial 1 | trial 2 | trial 3 | min | sends to tail |
+|---|---|---|---|---|---|
+| chained   | 12 832 ms | 12 788 ms | 13 443 ms | **12 788** | 0 / 64 |
+| unchained | 13 716 ms | 13 393 ms | 13 659 ms | **13 393** | 64 / 64 |
+
+Min-of-3: 4.5 % less wall time (median 6 %), ≈9 ms per token — one
+coordinator round trip per token on a ~1 ms LAN with one remote hop, which is
+what the design predicts and the floor of what it can show here. Every chained
+trial came in under every unchained one. The saving is proportional to RTT ×
+(segments − 1); a 2-segment LAN split is the least favourable case that still
+exercises the mechanism, and this box cannot resolve anything smaller (#267).
+
+What is NOT covered yet, in order of value: (1) the SWARM-SPEC n-gram verify
+path (`ngram_only_spec.rs`, `speculative.rs`) builds its own per-segment
+forwards and does not chain — at temperature 0 that is the default decode path,
+so today the flag chains the PROMPT and nothing else for a greedy request;
+(2) more than one remote hop between head and tail (only a 2-segment chain was
+run; the trailer format and `plan_chain` handle N, the wire has not carried N>2);
+(3) a chain over the internet rather than a LAN; (4) the prompt-privacy
+(boomerang) shape with a chain in the middle.
+
+The 2026-08-20 single-host attempt, for the record: the coordinator planned the
+split and the head handed off, but the tail never received the activations —
+the same host failed the unchained control at an earlier hop too, with 112
+connection closures. That turned out to be gotcha #353 (a freshly connected
+peer's newest connection dead in one direction, and the rr layer picking it
+first), which two machines reproduced as well, once.
+
 
 **Why it matters:** the per-token network cost of a distributed request
 currently grows *linearly with the number of shards*. That is backwards for a

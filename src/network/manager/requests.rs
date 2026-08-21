@@ -376,7 +376,7 @@ impl NetworkManager {
                             .send_response(channel, resp);
                     } else {
                         self.pending_tensor_channels
-                            .insert(request_id, (std::time::Instant::now(), channel));
+                            .insert(request_id, (std::time::Instant::now(), peer, channel));
                         tracing::info!(
                             %peer,
                             %request_id,

@@ -4,6 +4,40 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Chaining works now — a split model's middle hops pass activations directly to
+each other, and the answer comes straight back.** Direct peer chaining
+(`inference.pipeline_chaining`, still off by default) had been implemented but
+never completed a request on real machines. Run on two, it failed three
+different ways, each silent: the last hop answered the hop before it instead of
+the node that asked (twice — once in the dispatch code, once a layer down in the
+network manager's "answer on the same substream" shortcut, which knew nothing
+about chains), and the node that asked was not named on the wire at all, so
+there was nothing else to answer. Fixed at all three layers: the forward now
+carries the coordinator's identity (a new authenticated trailer, sent only on
+chained runs behind a new feature bit, so nodes on earlier versions are never
+chained to and see an unchanged wire), a hop that hands work on releases the
+request it received, and a chained failure re-runs the segment unchained
+instead of failing the request. Verified per token on a 2-segment split across
+a WSL host and a Debian LXC: 64 tokens, 64 sends from the coordinator, none to
+the tail, 64 answers straight from the tail.
+
+**Two retries stopped killing themselves.** When a forward had to be re-sent to
+the same node, the abandoned attempt's late failure was delivered to the new
+attempt and ended it 1 ms after it began. A failure for a forward that has a
+newer forward pending for the same request is now dropped as superseded.
+
+**A coordinator's request to a chained head no longer dangles for ten minutes
+per token.** The head now acknowledges the request it received the moment it
+hands the work on.
+
+Found and written up, not yet fixed: the first tensor forward to a freshly
+connected peer can vanish on a connection that is dead in one direction while
+every other request to that peer succeeds — it waits out the whole segment
+deadline (`docs/FUTURE_WORK.md`, gotcha #353); a private `gossip_network_id`
+does not keep a test node off the public swarm's holders (gotcha #352); and the
+pipeline seal has never run for a remote segment (gotcha #355).
+
+
 ## [0.3.108-alpha] — 2026-08-21
 
 **A maintenance release. Nothing behaves differently.**

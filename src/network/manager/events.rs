@@ -251,19 +251,33 @@ impl NetworkManager {
                     self.pending_tensor_outbound.remove(&request_id)
                 {
                     let age_ms = sent_at.elapsed().as_millis();
-                    tracing::error!(
-                        %peer,
-                        inference_request_id = %inference_uuid,
-                        %error,
-                        age_ms,
-                        "Tensor forward OutboundFailure — notifying pipeline"
-                    );
-                    // Send an error LayerResult so the pipeline can failover immediately
-                    self.fail_tensor_forward(
-                        inference_uuid,
-                        &peer,
-                        format!("OutboundFailure: {error}"),
-                    );
+                    if self.tensor_forward_is_superseded(inference_uuid, sent_at) {
+                        // The pipeline has already re-sent this request; this
+                        // failure is the abandoned attempt's and the waiter
+                        // belongs to the new one. Reporting it would fail the
+                        // retry 1 ms after it was sent (see the helper's doc).
+                        tracing::warn!(
+                            %peer,
+                            inference_request_id = %inference_uuid,
+                            %error,
+                            age_ms,
+                            "Tensor forward OutboundFailure for a SUPERSEDED forward — a newer one is pending, not notifying the pipeline"
+                        );
+                    } else {
+                        tracing::error!(
+                            %peer,
+                            inference_request_id = %inference_uuid,
+                            %error,
+                            age_ms,
+                            "Tensor forward OutboundFailure — notifying pipeline"
+                        );
+                        // Send an error LayerResult so the pipeline can failover immediately
+                        self.fail_tensor_forward(
+                            inference_uuid,
+                            &peer,
+                            format!("OutboundFailure: {error}"),
+                        );
+                    }
                 }
                 // Log result-send fallback failures with UUID context.
                 // We can't notify the upstream requester from here — their pipeline

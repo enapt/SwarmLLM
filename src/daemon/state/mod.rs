@@ -1761,9 +1761,11 @@ impl SharedState {
             .get(node_id)
             .and_then(|p| p.capability.as_ref().map(|c| c.features))
             .map(|f| {
+                // V2, not v1: a v1 peer never learns who the coordinator is
+                // and answers its predecessor (see `features::PIPELINE_CHAIN_V2`).
                 swarmllm_types::node::features::supports(
                     f,
-                    swarmllm_types::node::features::PIPELINE_CHAIN,
+                    swarmllm_types::node::features::PIPELINE_CHAIN_V2,
                 )
             })
             .unwrap_or(false)

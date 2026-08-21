@@ -46,6 +46,31 @@ impl NetworkManager {
         target_peer_bytes: Vec<u8>,
         forward: crate::types::LayerForward,
     ) {
+        // A node that forwards a request id it RECEIVED is handing the run on
+        // (direct peer chaining). The substream that forward arrived on is
+        // still open, waiting for a result that will never come from here — the
+        // tail answers the coordinator directly. Release it now with an ACK so
+        // the predecessor's request completes, instead of pending until the
+        // 600 s stale sweep tears the whole connection down. A coordinator holds
+        // no inbound channel for its own request ids, so this is inert for it.
+        // Done here rather than at the dispatch site so no hand-off path can
+        // forget it.
+        if let Some((_inserted, from_peer, channel)) =
+            self.pending_tensor_channels.remove(&forward.request_id)
+        {
+            let acked = self
+                .swarm
+                .behaviour_mut()
+                .request_response
+                .send_response(channel, SwarmResponse::Ack)
+                .is_ok();
+            tracing::info!(
+                %from_peer,
+                request_id = %forward.request_id,
+                acked,
+                "DIAG: handing a forward onward — released the substream it arrived on"
+            );
+        }
         let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "tensor send") else {
             return;
         };
@@ -363,53 +388,81 @@ impl NetworkManager {
             );
         }
 
-        // Try to send as response on the original forward's channel
-        if let Some((_inserted, channel)) = self.pending_tensor_channels.remove(&result.request_id)
-        {
-            match protocol::encode_layer_result(&result) {
-                Ok(payload) => {
-                    let payload_len = payload.len();
-                    let resp = SwarmResponse::TensorPayload(payload);
-                    if self
-                        .swarm
-                        .behaviour_mut()
-                        .request_response
-                        .send_response(channel, resp)
-                        .is_err()
-                    {
-                        tracing::warn!(
-                            %peer_id,
-                            request_id = %result.request_id,
-                            "ResponseChannel closed, falling back to new request"
-                        );
-                        // Channel was closed (timeout/disconnect) — fall back to new request
-                        self.send_tensor_result_as_request(&peer_id, &result, is_connected);
-                    } else {
-                        tracing::info!(
-                            %peer_id,
-                            request_id = %result.request_id,
-                            payload_len,
-                            is_connected,
-                            tokens = result.token_ids.len(),
-                            activations_bytes = result.activations.len(),
-                            finish = ?result.finish_reason,
-                            pending_channels = self.pending_tensor_channels.len(),
-                            "DIAG: sent tensor result as response (same substream)"
-                        );
+        // Try to send as response on the original forward's channel — but ONLY
+        // if that channel belongs to the peer this result is addressed to. The
+        // map is keyed by request id, and in a chained run the forward came
+        // from the previous hop while the result goes to the coordinator: the
+        // two differ, and answering on the stored channel sends the tail's
+        // result to a node that has already handed the work on and is not
+        // waiting (it logged "No pending channel" and dropped it, while the
+        // coordinator waited out its full deadline — 2026-08-21, two machines).
+        // A mismatched channel is released with an ACK so the predecessor's
+        // request completes, and the result travels to its real target as a
+        // request of its own.
+        match self.pending_tensor_channels.remove(&result.request_id) {
+            Some((_inserted, from_peer, channel)) if from_peer != peer_id => {
+                let acked = self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_response(channel, SwarmResponse::Ack)
+                    .is_ok();
+                tracing::info!(
+                    %from_peer,
+                    target_peer = %peer_id,
+                    request_id = %result.request_id,
+                    acked,
+                    "DIAG: result is for a different node than the forward came from — released that substream, sending the result as a new request"
+                );
+                self.send_tensor_result_as_request(&peer_id, &result, is_connected);
+            }
+            Some((_inserted, _from_peer, channel)) => {
+                match protocol::encode_layer_result(&result) {
+                    Ok(payload) => {
+                        let payload_len = payload.len();
+                        let resp = SwarmResponse::TensorPayload(payload);
+                        if self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_response(channel, resp)
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                %peer_id,
+                                request_id = %result.request_id,
+                                "ResponseChannel closed, falling back to new request"
+                            );
+                            // Channel was closed (timeout/disconnect) — fall back to new request
+                            self.send_tensor_result_as_request(&peer_id, &result, is_connected);
+                        } else {
+                            tracing::info!(
+                                %peer_id,
+                                request_id = %result.request_id,
+                                payload_len,
+                                is_connected,
+                                tokens = result.token_ids.len(),
+                                activations_bytes = result.activations.len(),
+                                finish = ?result.finish_reason,
+                                pending_channels = self.pending_tensor_channels.len(),
+                                "DIAG: sent tensor result as response (same substream)"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, request_id = %result.request_id, "Failed to encode tensor result");
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, request_id = %result.request_id, "Failed to encode tensor result");
-                }
             }
-        } else {
-            // No stored ResponseChannel — peer may have reconnected or sent a result for a different substream
-            tracing::debug!(
-                %peer_id,
-                request_id = %result.request_id,
-                "No stored ResponseChannel, sending result as new request"
-            );
-            self.send_tensor_result_as_request(&peer_id, &result, is_connected);
+            None => {
+                // No stored ResponseChannel — peer may have reconnected or sent a result for a different substream
+                tracing::debug!(
+                    %peer_id,
+                    request_id = %result.request_id,
+                    "No stored ResponseChannel, sending result as new request"
+                );
+                self.send_tensor_result_as_request(&peer_id, &result, is_connected);
+            }
         }
     }
 

@@ -655,8 +655,18 @@ impl PipelineExecutor {
         // segments is handed over in one message, its tail reports back here
         // and the segments in between must not be sent to again.
         let mut chained_through = 0usize;
-        for idx in 0..num_segments {
+        // Segments a failed chained run touched, and the position to rewind
+        // their KV to before they are re-run: `(first, last, index_pos)`. Every
+        // hop of a chain appends this step's positions to its cache whether or
+        // not the answer made it home, so the unchained re-run must tell each
+        // of them to truncate first or the same positions land twice.
+        let mut rewind: Option<(usize, usize, u32)> = None;
+        // `while` rather than `for`: a chained failure re-runs the SAME index
+        // unchained (no increment), everything else advances at the bottom.
+        let mut idx = 0usize;
+        while idx < num_segments {
             if idx < chained_through {
+                idx += 1;
                 continue;
             }
             let is_last = idx == num_segments - 1;
@@ -768,6 +778,7 @@ impl PipelineExecutor {
                         tp_result
                     };
                 }
+                idx += 1;
                 continue;
             }
 
@@ -851,29 +862,27 @@ impl PipelineExecutor {
                 // `apply_repetition_penalties` itself uses.
                 let needs_generated_ids = self.request.sampling_params.frequency_penalty != 0.0
                     || self.request.sampling_params.presence_penalty != 0.0;
-                let chain: Vec<crate::types::ChainHop> = if self
-                    .shared_state
-                    .cfg()
-                    .inference
-                    .pipeline_chaining
-                    && !needs_generated_ids
-                {
-                    let st = &self.shared_state;
-                    super::plan_chain(
-                        &self.assignment.segments,
-                        idx,
-                        st.identity.node_id(),
-                        |n| st.peer_supports_pipeline_chain(n),
-                        self.shared_state.cfg().inference.max_chain_hops as usize,
-                    )
-                } else {
-                    // `generated_ids` are needed by the segment that samples,
-                    // and they travel with the coordinator's own forward. In a
-                    // chain that forward is built on a serving node, which does
-                    // not have them — so a request carrying penalties is not
-                    // chained rather than silently losing them.
-                    Vec::new()
-                };
+                let chain: Vec<crate::types::ChainHop> =
+                    if self.shared_state.cfg().inference.pipeline_chaining
+                        && !needs_generated_ids
+                        && !self.chaining_disabled
+                    {
+                        let st = &self.shared_state;
+                        super::plan_chain(
+                            &self.assignment.segments,
+                            idx,
+                            st.identity.node_id(),
+                            |n| st.peer_supports_pipeline_chain(n),
+                            self.shared_state.cfg().inference.max_chain_hops as usize,
+                        )
+                    } else {
+                        // `generated_ids` are needed by the segment that samples,
+                        // and they travel with the coordinator's own forward. In a
+                        // chain that forward is built on a serving node, which does
+                        // not have them — so a request carrying penalties is not
+                        // chained rather than silently losing them.
+                        Vec::new()
+                    };
                 let awaiting_node = chain
                     .last()
                     .map(|h| h.node_id.clone())
@@ -904,7 +913,15 @@ impl PipelineExecutor {
                     tp_meta: None,
                     // Pipeline sealing: attach our node ID so the final segment
                     // can seal the result tokens for our X25519 key.
-                    requester_node_id: Some(self.shared_state.identity.node_id().0),
+                    // Named ONLY on a chained send: it is the reply-to the tail
+                    // answers, and it rides the wire as the 0x07 trailer — which
+                    // no released node expects on an ordinary one-hop forward.
+                    // Unchained, the receiver answers the sender, which IS us.
+                    requester_node_id: if chain.is_empty() {
+                        None
+                    } else {
+                        Some(self.shared_state.identity.node_id().0)
+                    },
                     // Local embedding privacy: only the first segment of the first
                     // forward needs this flag (subsequent segments receive hidden states anyway).
                     pre_embedded: pre_embedded && idx == 0,
@@ -921,7 +938,11 @@ impl PipelineExecutor {
                     adapter_id: None,
                     draft_tokens: Vec::new(),
                     spec_logits_requested: false,
-                    truncate_kv_to: None,
+                    // Rewind a segment a failed chained run already ran at this
+                    // position (see `rewind`); `None` for every ordinary forward.
+                    truncate_kv_to: rewind
+                        .filter(|(first, last, _)| idx >= *first && idx <= *last)
+                        .map(|(_, _, pos)| pos),
                     chunk_meta: None,
                 };
 
@@ -1136,13 +1157,22 @@ impl PipelineExecutor {
                 // A chained run tells us that something went wrong but not
                 // WHICH hop it was, so replacing this segment's holder would be
                 // a guess — and a wrong guess re-sends the whole run to the
-                // same nodes that just failed. Fail the request instead and let
-                // the router retry with a fresh assembly, which is honest and
-                // costs one retry rather than a wrong repair.
+                // same nodes that just failed. Re-run this segment UNCHAINED
+                // instead: the plain path names its culprit and fails over per
+                // segment, and the input activations are untouched because a
+                // chained run consumes nothing until its answer is accepted.
                 //
-                // `PeerUnresponsive` because it is transient and not this
-                // node's fault, and because the router already knows to re-route
-                // it. Nothing here can name a culprit, so nothing is penalised.
+                // Until 2026-08-21 this returned `PeerUnresponsive` with a log
+                // line promising a retry, on the theory that the router would
+                // re-plan. It did not: the router's transient-failure check
+                // matches other wording, and a re-plan would have chained again
+                // anyway. Every chained failure was a hard 503 after the full
+                // deadline (observed on two machines).
+                //
+                // The hops that DID run appended this step's positions to their
+                // KV, so the re-run carries `truncate_kv_to` for every segment
+                // the chain covered. `chaining_disabled` is per request: one bad
+                // hand-off says nothing about anyone else's peers.
                 if !chain.is_empty() {
                     let failed = match &result {
                         Err(e) => Some(e.to_string()),
@@ -1153,15 +1183,23 @@ impl PipelineExecutor {
                     };
                     if let Some(reason) = failed {
                         self.shared_state.pending_layer_results.remove(&request_id);
-                        tracing::warn!(
-                            request_id = %request_id,
-                            segment = idx,
-                            hops = chain.len(),
-                            head = %segment.node_id,
-                            tail = %awaiting_node,
-                            error = %reason,
-                            "chained run failed — retrying the request unchained"
-                        );
+                        if !self.chaining_disabled {
+                            self.chaining_disabled = true;
+                            rewind = Some((idx, idx + chain.len(), index_pos as u32));
+                            tracing::warn!(
+                                request_id = %request_id,
+                                segment = idx,
+                                hops = chain.len(),
+                                head = %segment.node_id,
+                                tail = %awaiting_node,
+                                error = %reason,
+                                "chained run failed — re-running this segment unchained for the rest of the request"
+                            );
+                            continue;
+                        }
+                        // Unreachable in practice — no chain is planned once
+                        // disabled — kept so a future planner change cannot
+                        // loop here.
                         return Err(SwarmError::PeerUnresponsive(format!(
                             "chained pipeline of {} hops failed: {reason}",
                             chain.len() + 1
@@ -1368,6 +1406,7 @@ impl PipelineExecutor {
                     }
                 }
             }
+            idx += 1;
         }
 
         Err(SwarmError::PipelineError(
@@ -1503,7 +1542,10 @@ impl PipelineExecutor {
                     vision_embeddings: None,
                     chain: Vec::new(),
                     sender_peer_bytes: None,
-                    requester_node_id: Some(self.shared_state.identity.node_id().0),
+                    // Unchained failover: the standby answers its sender, which is
+                    // us. Naming ourselves would put a 0x07 trailer on a frame an
+                    // older standby does not expect.
+                    requester_node_id: None,
                     pre_embedded: false,
                     generated_ids: Vec::new(),
                     adapter_id: None,

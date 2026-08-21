@@ -163,6 +163,65 @@ hosts (not same-host loopback, not a tester-side serving failure) showing the
 multi-connection stale-route drop. Until then the LAN fix + failover cover the
 observed cases.
 
+**Update 2026-08-21 — reproduced on a single-interface host, mechanism
+narrowed to connection selection, still open.** Two daemons in one Debian LXC
+(no WSL, no NAT gateway, no Docker bridge) held three connections to each
+other; the coordinator's first tensor forward went out on one of them,
+`rr_is_connected=true`, and the peer never received it — no closure, no
+`OutboundFailure`, both sides agreed every connection was open, and the peer
+kept answering the coordinator's *other* requests throughout. The request
+waited its full 484 s deadline; the libp2p rr timeout at 600 s
+("disconnecting stale peer to reset yamux session") is the only thing that
+cleared it. The identical request sent straight after succeeded — it landed on
+a different connection, because the dead one still held request #1 as pending.
+
+Why the FIRST forward: the vendored request-response selection
+(`vendor/libp2p-request-response/src/lib.rs:575`) picks the direct connection
+with the fewest pending requests and breaks ties by NEWEST. A fresh peer's
+connections are all tied, so the first send goes to the newest — here a
+loopback connection the peer had dialed — and stays there. Every later control
+message avoids it only *because* it is now non-empty. This is the "first
+forward to a fresh peer vanishes" shape the chaining validation kept hitting
+(`docs/plans/direct_peer_chaining.md`); the plan doc's "the tail never received
+them" was this. Per CONNECTION, not per host: a multi-interface host merely
+produces more connections.
+
+Not established: what makes that one connection dead in one direction (both
+daemons dial with TCP port reuse, so a B→C loopback dial and a C→B loopback
+dial share one 4-tuple — suspected, not proven; `ss` showed a single
+ESTABLISHED pair between the two listen ports), and whether two real machines
+with one connection each ever see it — every two-machine forward in the same
+session worked. Gotcha #353.
+
+What would fix it, in order of cost: (1) tensor forwards get no early ACK, so
+the 10 s `RR_ACK_TIMEOUT` fast-fail that protects the remote-generate path
+cannot cover them — an immediate ACK response on receipt (with the result as
+its own request, as chained hops now do) would make a lost forward visible in
+seconds instead of 480; (2) break ties towards the connection that has
+*demonstrated* traffic (the one the peer's own requests arrived on) rather than
+the newest; (3) on a forward timeout, retry once on a different connection
+before failing over to another holder. `max_connections_per_peer = 1` is not
+an option (gotcha #163: it disables DCUtR).
+
+### Pipeline seal — never active for remote segments; re-enable deliberately (2026-08-21)
+
+`daemon/dispatch/mod.rs::seal_layer_result` seals a final segment's token ids
+for the requester's X25519 key when the forward carries `requester_node_id`.
+Until 2026-08-21 no `LayerForward` decoder set that field — the coordinator
+wrote it, the wire dropped it — so the seal has never run for a remote segment,
+and the coordinator's only unseal site is `pipeline/prompt.rs`. The chaining fix
+puts the requester id on the wire (0x07 reply-to trailer) for CHAINED forwards,
+which would have switched the seal on for chained tails only; the serving site
+now passes `None` explicitly to keep the wire behaviour exactly as it was.
+
+To turn it on for real: (1) unseal on every coordinator result path (decode
+steps in `pipeline/distributed.rs`, not just the prompt path), (2) decide whether
+the one-hop forward should carry the id too — it would add the 0x07 trailer to a
+frame every released node expects without it, so that is a feature-bit gate
+(`PIPELINE_CHAIN_V2` peers already understand it), (3) measure the per-token
+cost. Gotcha #355.
+
+
 ## Demand-driven resource management — VRAM done, disk contraction deferred (2026-07-24)
 
 External report (`Rapport_VRAM_Idle`): a contributor node holds models in VRAM
