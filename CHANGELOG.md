@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.111-alpha] — 2026-08-21
+
 **A model you delete from one machine stays deleted.** Splitting a model across
 two computers by removing some of its pieces from one of them used to be undone
 within the hour: auto-manage saw a model with pieces missing and completed it,
