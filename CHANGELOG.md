@@ -6,10 +6,13 @@ All notable changes to SwarmLLM are documented here.
 
 ## [0.3.112-alpha] — 2026-08-22
 
-**CPU nodes read prompts about 40% faster and write replies about 30% faster.**
-Four changes to the CPU inference path, each measured on its own (llama-3.2-3b
-Q4_K_M, 4 threads, 896-token prompt, ~900-token context; min-of-N on an idle
-box; prompt processing 26.0 → 37.1 tok/s, decode 7.9 → 10.25 tok/s overall):
+**CPU nodes read prompts 20–40% faster and write replies 25–37% faster.** Four
+changes to the CPU inference path, each measured on its own (4 threads,
+896-token prompt, ~900-token context, min-of-N on an idle box, old binary vs new
+interleaved). llama-3.2-3b Q4_K_M: prompt processing 26.3 → 37.0 tok/s, decode
+8.0 → 10.1. phi-3.5-mini Q4_K_M (32 attention heads, no grouping): prompt
+10.5 → 12.8, decode 4.0 → 5.5 — the decode kernel helps it most, prompts less.
+Per-change numbers below are llama-3.2-3b:
 
 - *Quantized matmul* (83% of prompt processing). The kernel already read each
   weight column once for a block of rows but unpacked it again for every row —
