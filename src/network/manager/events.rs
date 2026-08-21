@@ -194,7 +194,13 @@ impl NetworkManager {
                     // a peer that answers even one request never accumulates.
                     self.rr_failures.remove(&peer);
                     // Clean up tensor outbound tracking (response received = not a failure)
-                    self.pending_tensor_outbound.remove(&request_id);
+                    if let Some((uuid, _, _, _, _)) =
+                        self.pending_tensor_outbound.remove(&request_id)
+                    {
+                        // The onward forward was received; its failure is no
+                        // longer ours to report to the coordinator.
+                        self.hop_reply_to.remove(&uuid);
+                    }
                     self.pending_tensor_result_outbound.remove(&request_id);
                     // A Response proves the peer received the request — the send was
                     // NOT silently dropped, so the RR_ACK_TIMEOUT (10s) sweep must no

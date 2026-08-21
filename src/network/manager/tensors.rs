@@ -49,7 +49,17 @@ impl NetworkManager {
         // A node that forwards a request id it RECEIVED is handing the run on
         // (direct peer chaining). The request it received was acknowledged on
         // arrival (`requests.rs`), so there is no substream to release here —
-        // the predecessor's request is already complete.
+        // the predecessor's request is already complete. What a hop DOES owe
+        // is a failure report: if this onward forward dies (no receipt ACK,
+        // OutboundFailure) nobody here is waiting, the coordinator is — so
+        // remember whom to tell. The coordinator's own sends name itself and
+        // are skipped.
+        if let Some(requester) = forward.requester_node_id {
+            let coordinator = crate::types::NodeId(requester);
+            if coordinator != *self.shared_state.identity.node_id() {
+                self.hop_reply_to.insert(forward.request_id, coordinator);
+            }
+        }
         let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "tensor send") else {
             return;
         };

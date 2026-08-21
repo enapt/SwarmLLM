@@ -337,6 +337,14 @@ pub struct NetworkManager {
     /// The Instant + workload info are used for adaptive stale tensor cleanup.
     pending_tensor_outbound:
         HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant, libp2p::PeerId, u32, usize)>,
+    /// For forwards THIS node sent onward as a chain hop: the coordinator the
+    /// run must answer, by request id. When such a forward fails here — no
+    /// receipt ACK, OutboundFailure — the error is reported to THAT node, not
+    /// only dispatched locally (where no waiter exists): otherwise a dead tail
+    /// is invisible to the coordinator, which waits out the whole chained
+    /// deadline (56 s measured against a 10 s ACK deadline, 2026-08-21).
+    /// Entries clear on the forward's ACK and in the stale sweep.
+    hop_reply_to: HashMap<uuid::Uuid, crate::types::NodeId>,
     /// Maps OutboundRequestId → inference UUID for tensor *results* sent via the
     /// fallback request path (`send_tensor_result_as_request`). Used purely for
     /// observability: on OutboundFailure we can log which result UUID failed
@@ -667,6 +675,7 @@ impl NetworkManager {
             relay_disabled_explained: false,
             last_relay_attempt: None,
             pending_tensor_outbound: HashMap::new(),
+            hop_reply_to: HashMap::new(),
             pending_tensor_result_outbound: HashMap::new(),
             pending_rr_observability: HashMap::new(),
             peer_failure_log_suppression: HashMap::new(),
@@ -842,6 +851,22 @@ impl NetworkManager {
         reason: String,
     ) {
         let error_result = crate::types::LayerResult::error(request_id, reason);
+        // A chain hop has no waiter of its own; the node that is waiting is the
+        // coordinator recorded when the forward was handed on. Tell it — that is
+        // what turns a dead tail into a 10 s fail-over instead of a full
+        // chained deadline. The local dispatch below stays: on a coordinator it
+        // IS the waiter, and on a hop it is harmless.
+        if let Some(coordinator) = self.hop_reply_to.remove(&request_id) {
+            if let Some(bytes) = self.shared_state.resolve_peer_id_bytes(&coordinator) {
+                tracing::warn!(
+                    %request_id,
+                    %coordinator,
+                    failed_hop_peer = %peer,
+                    "DIAG: chained hop failed onward — reporting the error to the coordinator"
+                );
+                self.handle_send_tensor_result(bytes, error_result.clone());
+            }
+        }
         if let Err(e) =
             self.dispatch_authenticated(Some(peer), SwarmMessage::LayerResult(error_result))
         {
@@ -1458,6 +1483,7 @@ impl NetworkManager {
                             let sent_at = self.pending_tensor_outbound.get(&req_id).map(|e| e.1);
                             self.pending_tensor_outbound.remove(&req_id);
                             if sent_at.is_some_and(|s| self.tensor_forward_is_superseded(uuid, s)) {
+                                self.hop_reply_to.remove(&uuid);
                                 // Abandoned attempt with a newer one in flight to
                                 // this peer: neither fail the request nor reset the
                                 // session the new attempt is using.
