@@ -20,6 +20,13 @@
 //! Treat their contents as unstable: they may change in any release.
 //! Downstream consumers should not depend on them.
 
+/// mimalloc for every binary built from this crate. The CPU inference path
+/// allocates a fresh buffer per tensor op, so the allocator is on the hot path
+/// of every layer of every token; measured on llama-3.2-3b decode (see
+/// CHANGELOG v0.3.112) against glibc malloc.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod api;
 pub mod config;
 #[doc(hidden)]

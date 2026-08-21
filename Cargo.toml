@@ -36,6 +36,10 @@ name = "swarmllm-launcher"
 path = "src/bin/launcher.rs"
 
 [dependencies]
+# Global allocator for every binary built from this crate (daemon, model worker,
+# examples, tests). candle allocates per op on the CPU path; glibc malloc was a
+# measurable slice of a decode step (see CHANGELOG v0.3.112).
+mimalloc = { version = "0.1", default-features = false }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
