@@ -30,6 +30,14 @@ concurrency:
 permissions:
   contents: read
 
+# `.cargo/config.toml` sets `target-cpu=native`; every workflow MUST override it
+# (see the WARNING there). Without this the cached proc-macro artifacts were
+# built for one runner's CPU and SIGILLed rustc on the next (2026-08-22, first
+# seen the moment a vendor/ change triggered this workflow after a cache miss).
+env:
+  RUSTFLAGS: ""
+  CARGO_TERM_COLOR: always
+
 jobs:
   request-response:
     name: libp2p-request-response patch
@@ -39,7 +47,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: vendored-request-response-v1
+          key: vendored-request-response-v2  # v1 held target-cpu=native artifacts
           workspaces: vendor/libp2p-request-response
           cache-bin: false
       # `--lib` deliberately: the crate's own integration tests need
