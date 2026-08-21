@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.110-alpha] — 2026-08-21
+
 **Machines on the same network stopped talking to each other through a relay on
 another continent.** A peer that reaches you through the relay shows up as a
 connection with no network address at all, and the code that picks which
