@@ -219,10 +219,13 @@ All 20 build phases complete. All subsystems wired — no stubs. **1967 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.104 → .108-alpha (2026-08-19 → 21): the swarm learned to see its own load, and replies stopped lying about being whole
+### Latest — v0.3.104 → .109-alpha (2026-08-19 → 21): the swarm learned to see its own load, replies stopped lying about being whole, and split models chain by default
 
-Five releases in three days, each verified on the DOWNLOADED artifact (sha256,
-25 assets, not a draft, `examples/smoke_test.sh` 8/8). **.108 is maintenance
+Six releases in three days, each verified on the DOWNLOADED artifact (sha256,
+25 assets, not a draft, `examples/smoke_test.sh` 8/8). **.109 turns direct peer
+chaining ON by default** after it was validated end to end on two machines the
+same day (see the .107 bullet; five more silent defects fell out of running it,
+gotchas #352-#355). **.108 is maintenance
 only**: Rust 1.98 reached the runners and added two lints (`chunks_exact_to_as_chunks`,
 `drain_collect`) that this tree trips — `.107` was tagged with CI RED for exactly
 that; its binaries are sound, the failing checks do not run during a build.
