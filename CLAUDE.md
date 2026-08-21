@@ -261,39 +261,26 @@ Detail: `memory/round_log_0818_*.md`, `MEMORY.md` 08-20/21 lines, and the CHANGE
   admission (cap from `cfg()`, headroom = 70% of memory free NOW) via a provider
   closure in the pool; the refusal names the limit that applied.
 - **.104** — a healthy WSL node told its owner to fix a firewall blocking nothing
-  (#335): the inbound-reachability evidence lived in memory, so every restart
-  re-decided a question about the MACHINE from a 10-minute window — and a reachable
-  node sees no inbound there, because it dials every known peer first. Now persisted
-  (`observed_inbound_connection`). Claude clients could not READ an error from
-  `/v1/messages` (#337/#339 — OpenAI envelope, and the first fix sat INSIDE auth so a
-  wrong key still got the wrong shape); MCP conformance; eight wrong-culprit fixes
-  (`reclassify_flattened_error` at two more boundaries); #338 undefined CSS custom
-  properties delete the whole declaration (now test-pinned).
-- **.105** — a request for a model three machines held went to the slowest, every
-  time, while a GPU holding it idled. **#341 a node that only SERVES advertised load
-  0 forever** — `active_pipelines` is the coordinator's map, and six call sites read
-  it as "how busy am I"; the delegated coefficient had ZERO readers; the fast path
-  never sheds load (#345). Verified live: **5/5 to the GPU, 0.23 → 20.0 tok/s**.
-- **.106** — **replies TRUNCATED over the WAN and said `finish_reason:"stop"`**
-  (#342/#343 — per-token fire-and-forget rr, all loss events on 450-650 ms peers).
-  Now `503 Reply truncated in transit: 3 of 60`; per-peer delivery reliability
-  (`expected_attempts` = 1/p) feeds `vertex_cost` and was seen steering off a lossy
-  path at 8.5x; backpressure no longer tears a reply down (that fix has NOT been
-  observed firing — do not credit it with the truncations).
-- **.107** — **batching ON by default** (`max_batch_size` 1 → 8). **#348: the 40%
-  win first published for it did not exist** — aggregate tok/s ÷ wall clock is
-  biased by completion length, and the bench built bodies inside the launch loop;
-  real figure ~3% at N=8, ~16% at N=12, neutral on CPU, correction pushed.
-  **Direct peer chaining implemented** (`inference.pipeline_chaining`, wire
-  trailer 0x06 carrying the REMAINING chain; **ON by default since .109**) — two
-  hang-class bugs found by review; **validated end to end on two machines on 08-21** after three more
-  silent defects fell out of running it: the tail answered its predecessor at a
-  second layer (#354), the coordinator was never on the wire (0x07 reply-to,
-  `PIPELINE_CHAIN_V2`), and "retry unchained" never retried. 64 tokens → 64 sends,
-  0 to the tail. Still unchained: the n-gram spec decode path. Prefix cache byte-bounded
-  (2 GB/model); terminal reply frame sent 3x; reply tokens scoped to the peer
-  serving the attempt. `3node_sharded_setup.sh` had no `gossip_network_id`, so it
-  silently measured the live node next door — every earlier result from it is suspect.
+  (#335: inbound evidence lived in memory, re-decided every restart → persisted
+  `observed_inbound_connection`); Claude clients could not READ an error from
+  `/v1/messages` (#337/#339, the first fix sat INSIDE auth); MCP conformance; eight
+  wrong-culprit fixes (`reclassify_flattened_error`); #338 undefined CSS custom
+  properties (test-pinned).
+- **.105** — **#341 a node that only SERVES advertised load 0 forever** (`active_pipelines`
+  is the coordinator's map; six sites misread it); the delegated coefficient had ZERO
+  readers; **#345 the fast path never sheds load**. Verified live: 5/5 to the GPU,
+  0.23 → 20.0 tok/s.
+- **.106** — **replies TRUNCATED over the WAN and said `finish_reason:"stop"`** (#342/#343,
+  per-token fire-and-forget rr) → `503 Reply truncated in transit: 3 of 60`; per-peer
+  delivery reliability (`expected_attempts` = 1/p) in `vertex_cost`; backpressure no
+  longer tears a reply down (NOT observed firing — do not credit it).
+- **.107** — **batching ON by default** (1 → 8); **#348 the published 40% win did not
+  exist** (aggregate tok/s ÷ wall clock is biased by completion length; real ~3% N=8,
+  ~16% N=12; correction pushed). **Direct peer chaining implemented** (trailer 0x06 =
+  REMAINING chain; ON since .109; validated on two machines 08-21 after #354 and the
+  0x07 reply-to / `PIPELINE_CHAIN_V2` fixes; still unchained: n-gram spec decode).
+  Prefix cache byte-bounded (2 GB/model). `3node_sharded_setup.sh` had no
+  `gossip_network_id` — every earlier result from it is suspect.
 
 **Gotchas from this round: #335-#361.** Most load-bearing: **#341** (ask what a
 map HOLDS, not what its name implies — its doc comment had warned for weeks),
