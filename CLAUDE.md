@@ -219,60 +219,60 @@ All 20 build phases complete. All subsystems wired — no stubs. **1964 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.101 / .102 / .103-alpha (2026-08-18): models need ~750 MB less, machines say what they are, + an h2 security patch
+### Latest — v0.3.104 → .108-alpha (2026-08-19 → 21): the swarm learned to see its own load, and replies stopped lying about being whole
 
-Three releases in one day, verified on the DOWNLOADED artifact. **.103 is a security patch only** — `h2` 0.4.13 → 0.4.16 for RUSTSEC-2026-0258 (unbounded empty DATA frames, published 08-17). It was caught by CI's `cargo audit` on the commit AFTER the .102 tag, so **.102 shipped vulnerable**; anyone on .102 or earlier should update.
-Detail: `memory/round_log_0818_quantized_embedding.md`.
+Five releases in three days, each verified on the DOWNLOADED artifact (sha256,
+25 assets, not a draft, `examples/smoke_test.sh` 8/8). **.108 is maintenance
+only**: Rust 1.98 reached the runners and added two lints (`chunks_exact_to_as_chunks`,
+`drain_collect`) that this tree trips — `.107` was tagged with CI RED for exactly
+that; its binaries are sound, the failing checks do not run during a build.
+Detail: `memory/round_log_0818_*.md`, `MEMORY.md` 08-20/21 lines, and the CHANGELOG.
 
-- **Models need up to 750 MB less memory, CPU and GPU.** `token_embd.weight` is
-  read a row at a time out of the QUANTIZED table instead of being dequantized
-  whole at load (`inference::split::token_embedding`, backed by the vendored
-  `QTensor::gather_rows`). Measured on llama-3.2-3b: **754 MB off CPU peak RSS,
-  736 MiB off an RTX 3070**, against 751 predicted. Weight-tied models save the
-  FULL f16 copy — they held the tensor twice. Bit-identical, asserted by exact
-  equality on both devices.
-- **`GPU_ADMISSION_KV_CONTEXT`** — GPU admission may charge under the worst case
-  ONLY where a runtime check catches the difference (GPU has one, CPU does not).
-  Raising `max_seq_len_override` no longer costs a model its place on the card.
-  `DEFAULT_MAX_SEQ_LEN` 4096 → 8192: an agentic system prompt is ~5000 tokens and
-  did not fit AT ALL.
-- **Peer delegation** (`scheduler::delegation_target`) — a node whose GPU cannot
-  fit a model hands it to a nearby capable peer instead of falling back to its own
-  CPU. With prompt privacy on it builds the BOOMERANG instead (first+last local,
-  middle to the peer, encrypted) — privacy changes the shape, it does not veto the
-  peer. Verified on two nodes both ways.
-- **A machine's speed is measured, not assumed** (`inference::mem_bandwidth`) —
-  every CPU node advertised a hardcoded 1.70 tok/s; now measured (29.9 GB/s on
-  this laptop vs 50 assumed). `NodeCapability.cpu` names the processor, so a peer
-  without a card is no longer the bare word "CPU". Interop tested against the
-  released binary in both directions.
-- **Honesty fixes** — the dashboard no longer contradicts the daemon about whether
-  a model fits; `swarmllm bench` warms up before timing; the CPU tooltip no longer
-  promises credits.
+- **.104** — a healthy WSL node told its owner to fix a firewall blocking nothing
+  (#335): the inbound-reachability evidence lived in memory, so every restart
+  re-decided a question about the MACHINE from a 10-minute window — and a reachable
+  node sees no inbound there, because it dials every known peer first. Now persisted
+  (`observed_inbound_connection`). Claude clients could not READ an error from
+  `/v1/messages` (#337/#339 — OpenAI envelope, and the first fix sat INSIDE auth so a
+  wrong key still got the wrong shape); MCP conformance; eight wrong-culprit fixes
+  (`reclassify_flattened_error` at two more boundaries); #338 undefined CSS custom
+  properties delete the whole declaration (now test-pinned).
+- **.105** — a request for a model three machines held went to the slowest, every
+  time, while a GPU holding it idled. **#341 a node that only SERVES advertised load
+  0 forever** — `active_pipelines` is the coordinator's map, and six call sites read
+  it as "how busy am I"; the delegated coefficient had ZERO readers; the fast path
+  never sheds load (#345). Verified live: **5/5 to the GPU, 0.23 → 20.0 tok/s**.
+- **.106** — **replies TRUNCATED over the WAN and said `finish_reason:"stop"`**
+  (#342/#343 — per-token fire-and-forget rr, all loss events on 450-650 ms peers).
+  Now `503 Reply truncated in transit: 3 of 60`; per-peer delivery reliability
+  (`expected_attempts` = 1/p) feeds `vertex_cost` and was seen steering off a lossy
+  path at 8.5x; backpressure no longer tears a reply down (that fix has NOT been
+  observed firing — do not credit it with the truncations).
+- **.107** — **batching ON by default** (`max_batch_size` 1 → 8). **#348: the 40%
+  win first published for it did not exist** — aggregate tok/s ÷ wall clock is
+  biased by completion length, and the bench built bodies inside the launch loop;
+  real figure ~3% at N=8, ~16% at N=12, neutral on CPU, correction pushed.
+  **Direct peer chaining implemented, OFF** (`inference.pipeline_chaining`, wire
+  trailer 0x06 carrying the REMAINING chain) — two hang-class bugs found by review,
+  end-to-end UNVALIDATED on one host (needs two machines). Prefix cache byte-bounded
+  (2 GB/model); terminal reply frame sent 3x; reply tokens scoped to the peer
+  serving the attempt. `3node_sharded_setup.sh` had no `gossip_network_id`, so it
+  silently measured the live node next door — every earlier result from it is suspect.
 
-**Confirmed on the real swarm, not just the bench.** Four of five nodes now run
-.103 and report measured speeds: anchor EPYC-Milan (2c) **~0.31 tok/s**, Proxmox
-i5-10500T (6c) ~0.85, Oz i7-7700 (6c) ~0.92 — against the hardcoded **1.70** every
-one of them used to claim, so the old constant overstated the smallest by 5.5x.
-Nodes still on .100/.101 correctly show no processor details, which is the
-mixed-version fallback working live. **The `.deb` upgrade now restarts the service
-itself and leaves the unit enabled** — the long-standing "always `systemctl start`
-afterwards" instruction is obsolete (see `memory/env_proxmox_test_node.md`).
-
-**Gotchas from this round: #326-#334.** Most load-bearing: **#328** (a single GPU
-A/B pair is worthless — within-arm spread 15-29%; find the measurement the machine
-CAN make), **#330/#333** (a gossiped field with no consumer is unverified — free
-VRAM was zero and CPU speed was a constant, swarm-wide, for as long as they existed),
-**#326** (candle's `as_t_slice` takes a `Cow` by value and returns a slice into it —
-`Cow::Owned` is a use-after-free), **#327** (`temperature: 0` + seed does NOT
-reproduce, so generated text cannot compare two inference paths here), **#334**
-(`cargo audit` runs in CI, NOT in Release — a tag can publish while the tree is
-vulnerable, and the failure lands on the NEXT commit wearing its title).
+**Gotchas from this round: #335-#351.** Most load-bearing: **#341** (ask what a
+map HOLDS, not what its name implies — its doc comment had warned for weeks),
+**#348** (aggregate throughput ÷ wall clock is biased by completion length; the
+erratic arm was the TREATMENT), **#350** (making a message reliable made a
+stale-message race routine — ask what else shares its key), **#351** (`target/`
+reached 432 GB and filled the HOST drive while `df /` showed 350 GB free; the
+cargo-sweep timer now bounds it — and after it prunes, the pre-push hook's clippy
+runs cold, so a tag push can outlive a 2-minute shell timeout).
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
+- **v0.3.101-.103** (08-18): models need ~750 MB less (quantized `token_embd` row gather, both devices — 754 MB CPU / 736 MiB RTX 3070); `GPU_ADMISSION_KV_CONTEXT` + `DEFAULT_MAX_SEQ_LEN` 8192; peer delegation (privacy builds the BOOMERANG, it does not veto); machine speed MEASURED (`mem_bandwidth`) + `NodeCapability.cpu`. **.103 is the h2 patch — .102 shipped vulnerable** (#334: `cargo audit` runs in CI, not Release). Gotchas #326-#334. `round_log_0818_quantized_embedding.md`.
 - **v0.3.100** (08-17): credits switched OFF (they were enforced: a -1000 floor refused peers, tier gave 8x concurrency); error hints translated across 21 locales; log severity follows blame (#315-#317); release build 54 min → 16m29s (#318/#319). `round_log_0817_honesty.md`.
 - **v0.3.99** (08-16): long prompts stalled for MINUTES — `insert_from_kv` snapshotted at EVERY block boundary, O(prompt²) ≈ 15 GB copied per 2.9k-token request (repeats 115.5s→4.1s, #312); silent-peer 500s→503 (`PeerUnresponsive`/`SegmentFailoverExhausted`); Docker `latest` had NEVER been published (#314).
 - **v0.3.98** (08-16): **1.41x CPU generation** — GQA decode stopped expanding the KV cache with `repeat_kv` (`grouped_gqa_decode_attention`); this REVERSED the CPU decode-kernel routing at every length. 4h soak, 3474/3474 ok.
