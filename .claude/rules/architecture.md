@@ -974,6 +974,33 @@ silently break at the wire if duplicated:
   never caught. The v0.3.10 disk-scan-only guard was insufficient because
   a peer on an older build re-gossips the name straight back in.
 
+## A tensor forward is acknowledged on receipt; a result is always its own request (2026-08-21)
+
+`requests.rs` answers an inbound `LayerForward` with `SwarmResponse::Ack` the
+moment it decodes; `tensors::handle_send_tensor_result` always sends the result
+via `send_tensor_result_as_request`. There is no held `ResponseChannel` any
+more — the "single substream per token" path and its map are gone.
+
+Why: with the request held open until the result was ready, a coordinator
+could not tell "computing" from "never received it", and a forward that landed
+on a peer that had gone quiet cost the WHOLE segment deadline (300 s, twice in
+one request on the live swarm). Now the serving node advertises
+`features::FORWARD_ACK`; the coordinator's stale sweep fails an unacknowledged
+forward to such a peer at `forward_ack_deadline_secs` (RTT-scaled, 10-90 s) so
+the pipeline fails over in seconds. **The compute deadline stays with the
+pipeline** — the sweep never reaps a slow answer, only a missing receipt; the
+comment at the sweep recounts how an earlier reaper synthesised timeouts for
+exactly the slow peers the measured deadlines were built for.
+
+Rules: do not gate the fast-fail on anything but the peer's `FORWARD_ACK` bit
+(an older server answers only with the result, which may take minutes); the
+ACK must be sent BEFORE any work, from the network manager, so no dispatch
+path can forget it; and both halves are compatible with older peers in both
+directions — an old coordinator accepts an ACK response and a result arriving
+as a request, an old server is never held to the ACK deadline. This also
+retired the chain-specific addressing branches from earlier the same day
+(gotcha #354): one rule now covers chained and unchained results.
+
 ## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
 
 The single answer, for BOTH layers that choose a connection. A relay-carried

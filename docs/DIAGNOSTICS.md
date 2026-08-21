@@ -130,7 +130,7 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 5. **Tensor forward send** → `DIAG: sent tensor forward via send_request` with `is_connected`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager/tensors.rs)
 6. **Codec write** → `DIAG: codec write_request start/done` with `frame_len` (protocol.rs)
 7. **Encryption (if enabled, R139)** → encrypt offloaded from event loop via `tokio::spawn`. Failure: `DIAG: tensor encrypt+encode failed — dropping forward` (manager/tensors.rs). On success the spawn task posts `NetworkCommand::SendEncodedTensor` back through `internal_cmd_tx`; the critical task then performs only the `send_request` step. Decode/decrypt offloaded symmetrically in the inbound path; failures log `DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption`
-9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: stored ResponseChannel` (manager/requests.rs)
+9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: acknowledged tensor forward on receipt` (manager/requests.rs) — the request is ACKed immediately; the result travels back as its own request (`features::FORWARD_ACK`, 2026-08-21). A coordinator that sees no ACK within the RTT-scaled deadline logs `DIAG: tensor forward not acknowledged within the ACK deadline` (manager/mod.rs, the stale sweep) and the pipeline fails over; an un-ACKed forward no longer waits out the segment deadline.
 10. **Dispatcher** → `DIAG: dispatcher received LayerForward, spawning handler` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch/mod.rs)
 11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon/dispatch/layer_forward.rs)
 12. **Split model forward** → `DIAG: SplitModel forward pass complete` with `forward_ms`, `seq_len`, `num_layers` (split/executor.rs)
@@ -872,3 +872,16 @@ CUDA_COMPUTE_CAP=86 cargo test --release \
 It sweeps prefill and decode shapes for an MHA and a GQA model, and asserts the
 two kernels agree numerically before reporting any speed figure — flash runs in
 F16 where standard runs in F32, and a fast wrong answer is not an optimisation.
+
+## Network event loop stalls (2026-08-21)
+
+Every arm of `NetworkManager::run`'s `select!` is timed; an iteration over
+100 ms logs `DIAG: network event loop stalled` with `arm=` (the interval or
+queue that was being serviced, or `swarm_event:<kind>`) and `took_ms`. Every
+latency this node measures — the PEX ping that becomes `latency_ms`, per-hop
+pipeline timings, ACK deadlines — is measured across this loop, so a stall
+here is added to every number routing uses. Zero lines on a live node is the
+normal reading; it is how the relay-carried-inbound-connection bug (#356) was
+separated from a loop problem in four minutes. `grep "loop stalled" node.log |
+grep -oE "arm=[^ ]+ took_ms=[0-9]+" | sort | uniq -c | sort -rn` names the
+culprit when there is one.
