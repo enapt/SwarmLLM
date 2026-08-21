@@ -1068,6 +1068,20 @@ impl SharedState {
             state.model_process_pool.set_ram_budget_mb(budget);
             state.model_process_pool.set_ram_budget_note(note);
         }
+        // …but admission asks for the budget LIVE: the cap from the current
+        // config and the anti-swap headroom from memory free at that moment. A
+        // startup snapshot made a restart while memory was busy set the
+        // verdict for the rest of the daemon's life (external report,
+        // 2026-08-21). `Weak`, because the pool lives inside the state.
+        {
+            let weak = Arc::downgrade(&state);
+            state
+                .model_process_pool
+                .set_ram_budget_provider(Box::new(move || {
+                    weak.upgrade()
+                        .and_then(|s| crate::model::auto_manage::vram::ram_budget_now(&s))
+                }));
+        }
         // Whether there is a GPU here at all decides whether a model is charged
         // against RAM (`ModelProcessPool::charges_ram`); without this a CPU-only
         // node never ran RAM admission.

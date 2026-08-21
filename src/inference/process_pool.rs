@@ -834,6 +834,14 @@ pub struct ModelProcessPool {
     /// footprint from the moment it is admitted, long before it has loaded
     /// anything to measure.
     ram_reserved_mb: dashmap::DashMap<ModelId, u64>,
+    /// Live RAM budget source, installed once by the daemon
+    /// (`set_ram_budget_provider`): returns the cap from the CURRENT config and
+    /// the anti-swap headroom from memory free NOW. Without one (tests), the
+    /// stored `ram_budget_mb` cap is used alone.
+    #[allow(clippy::type_complexity)]
+    ram_budget_provider: std::sync::OnceLock<
+        Box<dyn Fn() -> Option<crate::model::auto_manage::vram::RamBudget> + Send + Sync>,
+    >,
     /// Whether this node detected a GPU at startup (`SharedState::gpu_info`).
     /// Defaults to `true` so nothing changes for a pool nobody told; the daemon
     /// sets it once. See `charges_ram`.
@@ -970,6 +978,7 @@ impl ModelProcessPool {
             cpu_threads: std::sync::atomic::AtomicUsize::new(0),
             vram_reserved_mb: dashmap::DashMap::new(),
             ram_budget_mb: std::sync::atomic::AtomicU64::new(0),
+            ram_budget_provider: std::sync::OnceLock::new(),
             gpu_detected: std::sync::atomic::AtomicBool::new(true),
             cpu_kv_budget_bytes: dashmap::DashMap::new(),
             ram_budget_note: std::sync::Mutex::new(String::new()),
@@ -1620,6 +1629,30 @@ impl ModelProcessPool {
             .store(budget_mb, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Install the live budget source. Installed once; later calls are ignored.
+    #[allow(clippy::type_complexity)]
+    pub fn set_ram_budget_provider(
+        &self,
+        provider: Box<dyn Fn() -> Option<crate::model::auto_manage::vram::RamBudget> + Send + Sync>,
+    ) {
+        let _ = self.ram_budget_provider.set(provider);
+    }
+
+    /// The RAM budget to judge an admission against, RIGHT NOW. `None` = do
+    /// not judge (no cap derivable, and none stored).
+    fn ram_budget_now(&self) -> Option<crate::model::auto_manage::vram::RamBudget> {
+        if let Some(p) = self.ram_budget_provider.get() {
+            return p();
+        }
+        match self
+            .ram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => None,
+            cap => Some(crate::model::auto_manage::vram::RamBudget::cap_only(cap)),
+        }
+    }
+
     /// See `ram_budget_note`.
     /// Tell the pool whether a GPU was detected on this node at all. A node
     /// without one never takes the VRAM-refusal branch (there is no budget to
@@ -1656,19 +1689,17 @@ impl ModelProcessPool {
     /// room, with a 503 that re-routes, instead of swapping the machine.
     /// No budget configured → no guard (the pre-2026-08-21 behaviour).
     fn record_cpu_kv_budget(&self, model_id: &ModelId) {
-        let budget_mb = self
-            .ram_budget_mb
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if budget_mb == 0 {
+        let Some(budget) = self.ram_budget_now() else {
             self.cpu_kv_budget_bytes.remove(model_id);
             return;
-        }
+        };
         let Some(inputs) = self.footprint_inputs(model_id) else {
             self.cpu_kv_budget_bytes.remove(model_id);
             return;
         };
         let typical_kv = crate::model::auto_manage::vram::cpu_footprint(&inputs).kv_bytes;
-        let headroom_mb = budget_mb.saturating_sub(self.ram_committed_mb());
+        let this_mb = self.ram_reserved_mb.get(model_id).map(|v| *v).unwrap_or(0);
+        let headroom_mb = budget.headroom_after(self.ram_committed_mb(), this_mb);
         let kv_budget = typical_kv.saturating_add(headroom_mb.saturating_mul(1024 * 1024));
         tracing::info!(
             model = %model_id,
@@ -1691,17 +1722,19 @@ impl ModelProcessPool {
     /// but degrades every other request on the machine, and does so without
     /// anything in the API response explaining why.
     fn admit_to_cpu(&self, model_id: &ModelId, estimated_mb: u64) -> bool {
-        let budget = self
-            .ram_budget_mb
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if budget == 0 || estimated_mb == 0 {
-            // No budget configured, or the model's geometry could not be read:
-            // preserve the previous behaviour rather than inventing a limit.
+        let Some(budget) = self.ram_budget_now() else {
+            // No budget derivable: preserve the previous behaviour rather than
+            // inventing a limit.
+            self.ram_reserved_mb.insert(model_id.clone(), estimated_mb);
+            return true;
+        };
+        if estimated_mb == 0 {
+            // The model's geometry could not be read: nothing to weigh.
             self.ram_reserved_mb.insert(model_id.clone(), estimated_mb);
             return true;
         }
         let committed = self.ram_committed_mb();
-        if committed.saturating_add(estimated_mb) <= budget {
+        if budget.allows(committed, estimated_mb) {
             self.ram_reserved_mb.insert(model_id.clone(), estimated_mb);
             return true;
         }
@@ -1709,8 +1742,10 @@ impl ModelProcessPool {
             model = %model_id,
             estimated_mb,
             committed_mb = committed,
-            budget_mb = budget,
-            "Not enough system memory budget for this model — refusing to load it. \
+            cap_mb = budget.cap_mb,
+            available_mb = budget.available_mb,
+            live_headroom_mb = budget.live_headroom_mb,
+            "Not enough system memory for this model right now — refusing to load it. \
              Loading it anyway would swap, which slows down every other request \
              on this machine, not just this one"
         );
@@ -1737,16 +1772,15 @@ impl ModelProcessPool {
     /// the request outright, and a worker respawns on its next use. Returns the
     /// megabytes reclaimed.
     async fn free_ram_for_admission(&self, exclude: &ModelId, needed_mb: u64) -> u64 {
-        let budget = self
-            .ram_budget_mb
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if budget == 0 {
+        if self.ram_budget_now().is_none() {
             return 0;
         }
         let mut freed = 0u64;
-        loop {
+        // Re-read each round: unloading a model frees real memory, which the
+        // live headroom sees.
+        while let Some(budget) = self.ram_budget_now() {
             let committed = self.ram_committed_mb();
-            if committed.saturating_add(needed_mb) <= budget {
+            if budget.allows(committed, needed_mb) {
                 break;
             }
             // Longest-resident worker that is not serving anything.
@@ -2015,10 +2049,19 @@ impl ModelProcessPool {
                         .with_toast("warning", 8000),
                     );
                 }
-                let budget = self
-                    .ram_budget_mb
-                    .load(std::sync::atomic::Ordering::Relaxed);
                 let in_use = self.ram_committed_mb();
+                // The figure the model was judged against RIGHT NOW, and why —
+                // the cap, or the live anti-swap headroom.
+                let (budget, note) = self
+                    .ram_budget_now()
+                    .map(|b| b.limiting_figure(in_use, estimated))
+                    .unwrap_or_else(|| {
+                        (
+                            self.ram_budget_mb
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                            self.ram_budget_note(),
+                        )
+                    });
                 let message = match self.cpu_footprint_detail(model_id) {
                     Some((footprint, effective_context, source)) => {
                         crate::model::auto_manage::vram::describe_cpu_refusal(
@@ -2027,7 +2070,7 @@ impl ModelProcessPool {
                             effective_context,
                             source,
                             budget,
-                            &self.ram_budget_note(),
+                            &note,
                             in_use,
                         )
                     }
@@ -3483,6 +3526,34 @@ mod tests {
     /// `resources.max_ram_mb` shipped documented as "0 = auto (50% of system
     /// RAM)" while nothing read it, so a node had no memory ceiling at all.
     /// Admission now behaves like its GPU sibling.
+    /// The reporter's machine: cap 18000 MB, 14773 MB free at the time, a
+    /// 13149 MB model. The cap allows it; the live headroom (70% of free) does
+    /// not — and the same pool admits it once memory frees up, because the
+    /// provider is asked every time rather than once at startup.
+    #[test]
+    fn a_live_headroom_refuses_what_the_cap_would_allow_and_relents_when_memory_frees() {
+        use crate::model::auto_manage::vram::RamBudget;
+        let free = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(14773));
+        let p = test_pool();
+        let f = free.clone();
+        p.set_ram_budget_provider(Box::new(move || {
+            Some(RamBudget::from_machine(
+                18000,
+                18000,
+                32000,
+                f.load(std::sync::atomic::Ordering::Relaxed),
+            ))
+        }));
+        let m = ModelId("llama-8b".into());
+        assert!(
+            !p.admit_to_cpu(&m, 13149),
+            "10341 MB of headroom cannot take 13149 MB"
+        );
+        free.store(26000, std::sync::atomic::Ordering::Relaxed);
+        assert!(p.admit_to_cpu(&m, 13149), "18200 MB of headroom can");
+        p.release_ram_charge(&m);
+    }
+
     #[test]
     fn ram_admission_refuses_once_the_budget_is_committed() {
         let p = test_pool();

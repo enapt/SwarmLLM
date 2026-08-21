@@ -405,6 +405,18 @@ silently break at the wire if duplicated:
   `a_cpu_refusal_itemises_weights_kv_and_context` pins that the same model is now
   admitted and that the old ceiling figure is still what `resident_footprint` reports
   when asked for it.
+  **The RAM budget itself is a LIVE snapshot, never a startup figure**:
+  `vram::ram_budget_now` → `RamBudget { cap_mb (from `cfg()`), live_headroom_mb
+  (max(70% of available NOW, total/4)) }`, installed into the pool as a provider
+  closure (`set_ram_budget_provider`, `Weak<SharedState>`) and asked at EVERY
+  admission, by `free_ram_for_admission`'s retry loop, and by `record_cpu_kv_budget`.
+  The clamp used to be folded into the cap once at startup, so a daemon restarted
+  while memory was busy carried the smaller figure for life — the same
+  `max_ram_mb = 18000` answered "budget allows 13370 MB" one day and "10500 MB" the
+  next with 14773 MB actually free (external report, gotcha #362). The refusal names
+  whichever limit applied (`RamBudget::limiting_figure`). `set_ram_budget_mb` is the
+  no-provider fallback (tests) and the startup log figure; do not read it for a
+  decision.
   Why it exists: `inference.max_seq_len_override` is the only way to hold an agentic
   client's system prompt (~5000 tokens of tool schema before the user speaks), and
   raising it used to raise this charge in step, so the model stopped fitting the card

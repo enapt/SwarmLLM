@@ -33,12 +33,22 @@ with **no** graphics card at all never ran the memory check in the first place
 (there was no graphics budget to be refused against, so its models landed in
 system memory uncounted) — it does now, and gets the same guard.
 
+**The memory budget is judged when a model loads, not frozen when the node
+started.** The same `max_ram_mb = 18000` reported "budget allows 13370 MB" one
+day and "10500 MB" the next, with 14773 MB actually free at the time of the
+refusal (external report, 2026-08-21). The anti-swap clamp — never take more
+than 70% of what is free — was applied once, at startup, to whatever happened
+to be free in that moment, and a daemon restarted while memory was busy
+carried the smaller figure for the rest of its life. It is now evaluated every
+time a model is admitted, against memory free *then*, and the cap itself is
+read from the current settings, so changing `resources.max_ram_mb` takes
+effect without a restart.
+
 **A "not enough memory" refusal now says what it counted.** When a node does
 still decline a model, it itemises weights, attention cache (with the token
 count it was admitted at, the model's full context, and where that came from),
-and the rest — and the budget it is checked against says how it was derived:
-`resources.max_ram_mb`, limited to 70% of the memory that was free when the
-node started, so that loading a model cannot push the machine into swap. The
+and the rest — and names the limit it actually hit: the configured cap, or
+"right now N MB of memory is free and SwarmLLM uses at most 70% of that". The
 old one-number message was right and unexplained; "27125 MB" for a 2.3 GB file
 read as a tenfold mistake.
 

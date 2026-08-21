@@ -412,26 +412,105 @@ pub fn describe_cpu_refusal(
     s
 }
 
-/// One sentence on how the RAM budget was arrived at, for the refusal above.
-pub fn describe_ram_budget(
-    configured_mb: u64,
-    by_config_mb: u64,
-    by_machine_mb: u64,
-    total_mb: u64,
-    available_mb: u64,
-) -> String {
-    let source = if configured_mb > 0 {
-        format!("`resources.max_ram_mb` is {configured_mb} MB")
-    } else {
-        format!("auto-sized to {by_config_mb} MB from {total_mb} MB of RAM")
-    };
-    if by_machine_mb < by_config_mb {
-        format!(
-            "{source}, limited to {FREE_RAM_HEADROOM_PCT}% of the {available_mb} MB that was free \
-             when the node started, so loading a model cannot push it into swap"
+/// The system-RAM budget a CPU model is judged against, as a snapshot taken
+/// AT ADMISSION — never frozen at startup.
+///
+/// Two limits, both live: the cap the owner (or the auto default) set, read
+/// through `cfg()` so a Settings change applies at once, and an anti-swap
+/// clamp against what is free on the machine right now. Until 2026-08-21 the
+/// clamp was folded into the cap once at startup ("70% of the memory free when
+/// the node started"), so a daemon restarted while memory was busy carried the
+/// smaller figure for the rest of its life — the same `max_ram_mb = 18000`
+/// reported "budget allows 13370 MB" one day and "10500 MB" the next, with
+/// 14773 MB actually free at the time of the refusal (external report).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RamBudget {
+    /// The configured or auto-sized ceiling, MB.
+    pub cap_mb: u64,
+    /// `resources.max_ram_mb` as configured (0 = auto).
+    pub configured_mb: u64,
+    /// Machine total, MB (0 = unreadable).
+    pub total_mb: u64,
+    /// Memory available right now, MB (0 = unreadable → not judged).
+    pub available_mb: u64,
+    /// How much a NEW model may take right now without swapping:
+    /// `max(70% of available, total/4)`, or `u64::MAX` when unreadable.
+    pub live_headroom_mb: u64,
+}
+
+impl RamBudget {
+    pub fn from_machine(cap_mb: u64, configured_mb: u64, total_mb: u64, available_mb: u64) -> Self {
+        let live_headroom_mb = if available_mb == 0 {
+            u64::MAX
+        } else {
+            (available_mb / 100 * FREE_RAM_HEADROOM_PCT).max(total_mb / 4)
+        };
+        Self {
+            cap_mb,
+            configured_mb,
+            total_mb,
+            available_mb,
+            live_headroom_mb,
+        }
+    }
+
+    /// A cap with no knowledge of the machine (tests, and the fallback when no
+    /// provider is installed): only the ceiling is enforced.
+    pub fn cap_only(cap_mb: u64) -> Self {
+        Self {
+            cap_mb,
+            configured_mb: cap_mb,
+            total_mb: 0,
+            available_mb: 0,
+            live_headroom_mb: u64::MAX,
+        }
+    }
+
+    /// May a model estimated at `estimate_mb` be loaded while `committed_mb`
+    /// is already charged? Both limits must agree.
+    pub fn allows(&self, committed_mb: u64, estimate_mb: u64) -> bool {
+        committed_mb.saturating_add(estimate_mb) <= self.cap_mb
+            && estimate_mb <= self.live_headroom_mb
+    }
+
+    /// What is left for the admitted model's KV cache to grow into: the
+    /// smaller of the uncommitted cap and the live headroom beyond the model's
+    /// own charge.
+    pub fn headroom_after(&self, committed_mb_after: u64, this_estimate_mb: u64) -> u64 {
+        self.cap_mb
+            .saturating_sub(committed_mb_after)
+            .min(self.live_headroom_mb.saturating_sub(this_estimate_mb))
+    }
+
+    /// Where the cap came from, for messages.
+    pub fn cap_source(&self) -> String {
+        if self.configured_mb > 0 {
+            format!("`resources.max_ram_mb` is {} MB", self.configured_mb)
+        } else {
+            format!(
+                "auto-sized to {} MB from {} MB of RAM",
+                self.cap_mb, self.total_mb
+            )
+        }
+    }
+
+    /// The figure a refused model was actually judged against, and why —
+    /// the cap when the cap refused it, otherwise the live headroom.
+    pub fn limiting_figure(&self, committed_mb: u64, estimate_mb: u64) -> (u64, String) {
+        if committed_mb.saturating_add(estimate_mb) > self.cap_mb {
+            return (self.cap_mb, self.cap_source());
+        }
+        (
+            self.live_headroom_mb,
+            format!(
+                "{}; right now {} MB of memory is free and SwarmLLM uses at most \
+                 {FREE_RAM_HEADROOM_PCT}% of that ({} MB) so loading a model cannot push \
+                 the machine into swap",
+                self.cap_source(),
+                self.available_mb,
+                self.live_headroom_mb
+            ),
         )
-    } else {
-        source
     }
 }
 
@@ -782,15 +861,33 @@ pub const FREE_RAM_HEADROOM_PCT: u64 = 70;
 
 /// Effective system-RAM budget for CPU model loading, in MB.
 ///
-/// Takes the configured budget (or the documented 50%-of-total default) and
-/// clamps it to what is genuinely free right now. `None` means "do not judge":
-/// either no budget could be derived, or the machine could not be read — and a
-/// limit must never be invented from a failed measurement.
+/// The cap and its source, for the startup log and the no-provider fallback.
+/// Admission itself uses [`ram_budget_now`] every time, so the anti-swap clamp
+/// is judged against memory free NOW rather than at startup. `None` means "do
+/// not judge": no cap could be derived — a limit must never be invented from a
+/// failed measurement.
 pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<(u64, String)> {
+    let b = ram_budget_now(shared)?;
+    Some((b.cap_mb, b.cap_source()))
+}
+
+/// Machine memory right now: `(total_mb, available_mb)`. Reads `/proc/meminfo`
+/// (or the platform equivalent); cheap enough to call at every admission.
+pub fn system_memory_mb() -> (u64, u64) {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
-    let total_mb = sys.total_memory() / (1024 * 1024);
-    let available_mb = sys.available_memory() / (1024 * 1024);
+    (
+        sys.total_memory() / (1024 * 1024),
+        sys.available_memory() / (1024 * 1024),
+    )
+}
+
+/// The live RAM budget: the cap from the CURRENT config (so a Settings change
+/// applies at once) and the anti-swap headroom from what is free right now.
+/// `None` means "do not judge": no cap could be derived (unreadable total with
+/// no configured value).
+pub fn ram_budget_now(shared: &crate::daemon::SharedState) -> Option<RamBudget> {
+    let (total_mb, available_mb) = system_memory_mb();
     // "Has a GPU" here must mean "the GPU will actually run the models", not
     // merely that one is installed. A node with `inference.gpu_layers = 0` runs
     // everything on the CPU regardless of its hardware, so it is in exactly the
@@ -807,29 +904,12 @@ pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<(u64, S
             .resources
             .inference_ram_budget_mb(total_mb, has_gpu, shared.contribution())?;
 
-    // Clamp ONLY an explicitly configured number. The automatic value is
-    // already a fraction of this machine's own total memory, so clamping it
-    // again against *free* memory discounts it twice — and would make the
-    // ceiling depend on how much page cache happened to be warm at startup,
-    // which is neither stable nor something a user can reason about. A
-    // configured value is the only one that can exceed the machine.
-    if configured == 0 || available_mb == 0 {
-        let note = describe_ram_budget(configured, by_config, by_config, total_mb, available_mb);
-        return Some((by_config, note));
-    }
-    let by_machine = (available_mb / 100 * FREE_RAM_HEADROOM_PCT).max(total_mb / 4);
-    if by_machine < by_config {
-        tracing::warn!(
-            configured_mb = by_config,
-            total_mb,
-            available_mb,
-            allowed_mb = by_machine,
-            "Configured memory budget is larger than this machine can spare — limiting it \
-             so that loading a model cannot push the system into swap"
-        );
-    }
-    let note = describe_ram_budget(configured, by_config, by_machine, total_mb, available_mb);
-    Some((by_config.min(by_machine), note))
+    Some(RamBudget::from_machine(
+        by_config,
+        configured,
+        total_mb,
+        available_mb,
+    ))
 }
 
 #[cfg(test)]
@@ -1460,15 +1540,55 @@ mod footprint_tests {
 
     #[test]
     fn the_budget_note_names_what_limited_it() {
-        assert_eq!(
-            describe_ram_budget(18000, 18000, 13370, 32000, 19100),
-            "`resources.max_ram_mb` is 18000 MB, limited to 70% of the 19100 MB that was free when the node started, so loading a model cannot push it into swap"
+        // The reporter's machine: max_ram_mb 18000, 14773 MB free at the time.
+        let b = RamBudget::from_machine(18000, 18000, 32000, 14773);
+        assert_eq!(b.live_headroom_mb, 14773 / 100 * 70);
+        // Refused by the LIVE headroom, not the cap — and the note says so.
+        let (figure, note) = b.limiting_figure(0, 13149);
+        assert_eq!(figure, b.live_headroom_mb);
+        // 14773 / 100 * 70 = 10290 (integer arithmetic — which is also why the
+        // reporter's second figure was a round 10500: 15000 MB free at boot).
+        assert_eq!(b.live_headroom_mb, 10290);
+        assert!(
+            note.starts_with("`resources.max_ram_mb` is 18000 MB; right now 14773 MB of memory is free and SwarmLLM uses at most 70% of that (10290 MB)"),
+            "{note}"
         );
+        // Refused by the cap when the cap is what it hit.
+        let (figure, note) = b.limiting_figure(12000, 7000);
+        assert_eq!(figure, 18000);
+        assert_eq!(note, "`resources.max_ram_mb` is 18000 MB");
+        // Auto-sized cap names its derivation.
         assert_eq!(
-            describe_ram_budget(18000, 18000, 18000, 32000, 30000),
-            "`resources.max_ram_mb` is 18000 MB"
+            RamBudget::from_machine(12800, 0, 16000, 15000).cap_source(),
+            "auto-sized to 12800 MB from 16000 MB of RAM"
         );
-        assert!(describe_ram_budget(0, 12800, 12800, 16000, 15000)
-            .starts_with("auto-sized to 12800 MB from 16000 MB"));
+    }
+
+    /// The budget is a snapshot taken at admission: the same cap judges
+    /// differently as free memory changes, which is the point — a restart
+    /// while memory was busy must not set the verdict for the rest of the
+    /// daemon's life (external report, 2026-08-21: 13370 MB one day, 10500 MB
+    /// the next, 14773 MB actually free).
+    #[test]
+    fn the_live_budget_follows_free_memory_not_the_moment_the_node_started() {
+        let busy = RamBudget::from_machine(18000, 18000, 32000, 15000);
+        let quiet = RamBudget::from_machine(18000, 18000, 32000, 26000);
+        assert!(
+            !busy.allows(0, 13149),
+            "10500 MB of headroom refuses a 13 GB model"
+        );
+        assert!(quiet.allows(0, 13149), "18200 MB of headroom admits it");
+        // The cap still binds regardless of how much is free.
+        assert!(!quiet.allows(6000, 13149));
+        // Unreadable free memory judges by the cap alone — never invents a limit.
+        let unknown = RamBudget::from_machine(18000, 18000, 0, 0);
+        assert!(unknown.allows(0, 17999));
+        assert!(!unknown.allows(0, 18001));
+        assert_eq!(RamBudget::cap_only(6000).live_headroom_mb, u64::MAX);
+        // KV headroom for the admitted model: the tighter of the two limits —
+        // here the 18000 cap, just under the 18200 MB live headroom…
+        assert_eq!(quiet.headroom_after(13149, 13149), 18000 - 13149);
+        // …and the live term when THAT is tighter.
+        assert_eq!(busy.headroom_after(5000, 5000), 10500 - 5000);
     }
 }
