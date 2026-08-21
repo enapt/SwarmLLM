@@ -22,7 +22,7 @@ whole step deadline — five minutes, twice in one request on 2026-08-21 — bef
 trying someone else, because "still computing" and "never received it" looked
 the same. A machine now acknowledges a step the moment it arrives and sends the
 result back separately; a sender that gets no acknowledgement within about ten
-seconds moves on. Machines on earlier versions are unaffected in both directions.
+seconds moves on. Machines on earlier versions are unaffected in both directions. When the quiet machine is in the middle of a chain, the machine that handed it the work reports the failure back to the one that asked, so the whole run is retried the ordinary way within seconds rather than after the chain's own deadline.
 
 **The first message to a newly connected machine no longer goes to the connection
 least likely to work.** When a node holds several connections to the same peer, it
