@@ -974,6 +974,31 @@ silently break at the wire if duplicated:
   never caught. The v0.3.10 disk-scan-only guard was insufficient because
   a peer on an older build re-gossips the name straight back in.
 
+## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
+
+The single answer, for BOTH layers that choose a connection. A relay-carried
+connection looks different from each end: the dialer sees
+`/…/p2p-circuit/p2p/<peer>`; the LISTENER sees a bare `/p2p/<peer>` — no
+transport hop at all. `is_relay_circuit_addr` catches only the first form, and
+the vendored request-response layer recorded NO address for inbound connections
+(upstream behaviour), classifying `None` as direct. So a relay-carried inbound
+connection was "direct", and — being the newest with nothing pending — it won
+every send: two LAN nodes 0.7 ms apart measured 60-800 ms to each other and
+forwarded every tensor through the anchor in Europe (gotcha #356, 2026-08-21;
+#179 had fixed the classifier but inbound never had an address to classify).
+
+Rules that follow: the vendored inbound handler records the send-back address
+(`vendor/libp2p-request-response/src/lib.rs`, SwarmLLM patch); the manager's
+`peer_direct_conns` is gated on `addr_is_direct_transport` (a real `/ip4`,
+`/ip6` or `/dns*` hop AND no circuit), not on the circuit check alone. Any new
+"prefer direct" logic uses the same predicate. `latency_ms` in the peer
+registry is measured over whichever connection the rr layer picks, so a wrong
+pick here is not a cosmetic error — it is added to every number routing uses.
+
+The loop-stall tripwire in `NetworkManager::run` (per-arm, ≥100 ms → `DIAG:
+network event loop stalled`) exists because this investigation's first
+hypothesis was the loop; a shadow node cleared it in four minutes. Keep it.
+
 ## Peer Cache: storable vs dialable
 
 `network/peer_cache.rs` answers two different questions and they must not be

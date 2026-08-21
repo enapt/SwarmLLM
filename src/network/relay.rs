@@ -89,6 +89,33 @@ pub(crate) fn is_relay_circuit_addr(addr: &Multiaddr) -> bool {
         .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit))
 }
 
+/// Does this address describe a real, direct transport path to the peer?
+///
+/// True only when it carries a concrete network hop (`/ip4`, `/ip6`, `/dns*`)
+/// and no `/p2p-circuit`. The case `is_relay_circuit_addr` cannot see: a
+/// relay-carried INBOUND connection, whose send-back address is a bare
+/// `/p2p/<peer>` — no hop at all. Counting that as direct is how two LAN
+/// nodes 0.7 ms apart came to forward every tensor through a relay in another
+/// continent (gotcha #179, re-found 2026-08-21). Use this, not the circuit
+/// check alone, wherever "direct connection" is bookkept.
+pub(crate) fn addr_is_direct_transport(addr: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    let mut has_transport = false;
+    for p in addr.iter() {
+        match p {
+            Protocol::P2pCircuit => return false,
+            Protocol::Ip4(_)
+            | Protocol::Ip6(_)
+            | Protocol::Dns(_)
+            | Protocol::Dns4(_)
+            | Protocol::Dns6(_)
+            | Protocol::Dnsaddr(_) => has_transport = true,
+            _ => {}
+        }
+    }
+    has_transport
+}
+
 /// Handle relay server events — log reservations and circuit lifecycle.
 /// Tracks circuit open/close for relay service credit accrual.
 pub fn handle_relay_server_event(
@@ -316,5 +343,30 @@ mod tests {
             re_reserved = true;
         }
         assert!(re_reserved, "recovery must re-arm after the latch clears");
+    }
+
+    #[test]
+    fn a_bare_p2p_address_is_not_a_direct_transport() {
+        let bare: Multiaddr = "/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY"
+            .parse()
+            .unwrap();
+        assert!(
+            !addr_is_direct_transport(&bare),
+            "no hop at all = relay-carried inbound"
+        );
+        let circuit: Multiaddr = "/ip4/212.132.104.177/udp/8800/quic-v1/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G/p2p-circuit/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY".parse().unwrap();
+        assert!(!addr_is_direct_transport(&circuit));
+        assert!(
+            is_relay_circuit_addr(&circuit),
+            "the circuit check still sees an explicit circuit"
+        );
+        assert!(
+            !is_relay_circuit_addr(&bare),
+            "…but not the bare form — which is the whole reason the new helper exists"
+        );
+        let lan: Multiaddr = "/ip4/192.168.1.200/udp/50446/quic-v1".parse().unwrap();
+        assert!(addr_is_direct_transport(&lan));
+        let dns: Multiaddr = "/dns4/swarmllm.duckdns.org/tcp/8810".parse().unwrap();
+        assert!(addr_is_direct_transport(&dns));
     }
 }

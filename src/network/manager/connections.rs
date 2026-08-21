@@ -150,11 +150,13 @@ impl NetworkManager {
             // it while proving nothing about the LAN.
             self.shared_state.record_inbound_connection_observed();
         }
-        // NETWORKING_PLAN Phase 1 — record DIRECT (non-relay-circuit)
-        // connections so the relay send path can prefer the app-level relay over
-        // a peer reachable only via a flaky relay circuit. Bounded alongside
+        // NETWORKING_PLAN Phase 1 — record DIRECT connections so the relay
+        // send path can prefer the app-level relay over a peer reachable only
+        // via a flaky relay circuit. "Direct" means a real transport hop: a
+        // relay-carried INBOUND connection has a bare `/p2p/<peer>` here and
+        // must not be booked as direct (gotcha #179). Bounded alongside
         // connection_addrs (evict arbitrarily if a missed close leaked entries).
-        if !crate::network::relay::is_relay_circuit_addr(remote_addr) {
+        if crate::network::relay::addr_is_direct_transport(remote_addr) {
             if self.peer_direct_conns.len() >= MAX_CONNECTION_ADDRS {
                 let stale: Vec<_> = self
                     .peer_direct_conns

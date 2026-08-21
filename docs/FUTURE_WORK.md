@@ -163,6 +163,25 @@ hosts (not same-host loopback, not a tester-side serving failure) showing the
 multi-connection stale-route drop. Until then the LAN fix + failover cover the
 observed cases.
 
+**Update 2026-08-21 (later) — the relay-carried inbound connection, fixed.**
+The live WSL and Proxmox nodes, 0.7 ms apart, measured 60-800 ms to each
+other and were forwarding through the anchor relay in Europe: Proxmox had
+redialed us through the circuit while two direct LAN connections existed, the
+inbound end of that dial is a bare `/p2p/<peer>` address, the vendored rr layer
+records NO address for inbound connections and classifies `None` as direct, and
+"newest direct wins". Fixed at both layers (vendored inbound address recording;
+`relay::addr_is_direct_transport` for `peer_direct_conns`). Gotcha #356. The
+per-arm loop-stall tripwire added for the investigation stays: a shadow node
+proved the loop innocent in four minutes. The item below it is the separate,
+still-open, one-way-dead-connection case.
+
+**Update 2026-08-21 (evening) — mitigated.** The rr tie-break is now
+"answered before, then oldest" instead of "newest" (vendored
+`connection_rank`), so a first send no longer lands on the one connection that
+has never carried an answer. The underlying one-way-dead connection is still
+not explained, and a forward that does land on one still waits the segment
+deadline; a fast ACK for tensor forwards remains the real fix (item (1) below).
+
 **Update 2026-08-21 — reproduced on a single-interface host, mechanism
 narrowed to connection selection, still open.** Two daemons in one Debian LXC
 (no WSL, no NAT gateway, no Docker bridge) held three connections to each
@@ -202,6 +221,26 @@ seconds instead of 480; (2) break ties towards the connection that has
 the newest; (3) on a forward timeout, retry once on a different connection
 before failing over to another holder. `max_connections_per_peer = 1` is not
 an option (gotcha #163: it disables DCUtR).
+
+### Whole-model holders that cannot load the model are still chosen (2026-08-21)
+
+Observed on the live swarm: a request for llama-3.1-8b from a node holding 4
+of 9 shards was routed whole to the Belgium GPU node (holds all 32 layers,
+fastest advertised speed), which refused in 3 s with "needs about 13149 MB of
+memory but this node's budget allows 13370 MB and 12922 MB is already in use"
+— its 6 GB card cannot take an 8 GB model, so it would run it on the CPU, and
+its CPU RAM budget was full. The retry re-planned correctly, so the cost was
+one round trip plus the refusal; but the information to skip it existed:
+`NodeCapability` gossips `ram_available_mb` and `gpu_vram_available_mb`, and
+`scheduler::delegation_target` already applies a VRAM margin for the GPU
+delegation path. The ordinary single-holder choice (`parallax routing selected
+chain … segments=1`) does not consult either. Two steps: (1) for a whole-model
+remote holder, require the model to fit its advertised free VRAM or, failing
+that, its advertised free RAM, with the same margin the delegation path uses;
+(2) have a node advertise its remaining *budget* (`resources.max_ram_mb` minus
+what it holds), since OS-free RAM is not what its admission check compares
+against. Lower priority than the unanswered-forward deadline (gotcha #353 /
+early receipt-ACK): this costs seconds, that costs minutes.
 
 ### Pipeline seal — never active for remote segments; re-enable deliberately (2026-08-21)
 

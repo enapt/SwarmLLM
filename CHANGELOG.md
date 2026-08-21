@@ -4,6 +4,33 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Machines on the same network stopped talking to each other through a relay on
+another continent.** A peer that reaches you through the relay shows up as a
+connection with no network address at all, and the code that picks which
+connection to use treated "no address" as "direct" — and, preferring the newest,
+used it for everything. Two machines on one LAN, 0.7 ms apart, were measuring
+60-800 ms to each other and passing every step of a split model through Europe;
+every peer behind a NAT got the same treatment, which is also where the
+interrupted-reply reports came from. A relayed connection is now recognised
+whichever side opened it, so a direct path is used whenever one exists, and the
+latency each node measures — which decides who is asked to do what — is the real
+one again.
+
+**The first message to a newly connected machine no longer goes to the connection
+least likely to work.** When a node holds several connections to the same peer, it
+used to try the newest one first for anything new; on 2026-08-21 that newest
+connection was dead in one direction and the first request sat on it for the whole
+eight-minute deadline while everything else to that peer worked. The order is now:
+the connection with the fewest unanswered requests, then one that has actually
+answered before (most recently first), then the longest-lived.
+
+**A node now says so when its own network loop is the slow part.** Every branch
+of the network manager's loop is timed; anything over 100 ms is logged with the
+branch that took it. It was built to find the problem above — and proved in four
+minutes that the loop was innocent, which is what pointed at the connection
+table.
+
+
 ## [0.3.109-alpha] — 2026-08-21
 
 **Split models now pass work between the machines that hold them directly, by

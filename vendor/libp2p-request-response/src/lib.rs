@@ -598,43 +598,38 @@ where
             //     a single half-open one silently eats its share, which is the
             //     original bug the cap of 1 was hiding rather than fixing.
             //
-            // So: pick the NEWEST direct connection, falling back to the newest
-            // connection of any kind. Newest is the right choice on every axis
-            // here — a half-open connection is almost always an older one that
-            // died quietly, and DCUtR's upgraded direct connection is by
-            // definition the newest, so it wins automatically. Load-spreading
-            // across connections to a single peer was never a real benefit;
-            // they share a path and usually an endpoint.
+            // So, among DIRECT connections (falling back to the newest
+            // connection of any kind only when no direct one exists), rank by:
             //
-            //  4. Newest is NOT sufficient on its own. Observed live 2026-07-26:
-            //     a connection that had just served three consecutive requests
-            //     was passed over for a NEWER direct connection that silently
-            //     swallowed every send — no response, no `OutboundFailure` —
-            //     until the application's own 10s acknowledgement timeout gave
-            //     up. Age is a heuristic, and this is the case where it points
-            //     the wrong way.
+            //   (a) fewest requests still unanswered — a connection that is
+            //       swallowing sends accumulates them and is avoided;
+            //   (b) then one that has ANSWERED us before, most recent first —
+            //       the only proof the peer hears us on that path;
+            //   (c) then the OLDEST.
             //
-            //     `pending_outbound_responses` is the liveness signal already to
-            //     hand: it is inserted on send and removed when the response
-            //     arrives, so a connection that is answering drains it while a
-            //     half-open one only accumulates. Preferring the direct
-            //     connection with the FEWEST un-answered requests therefore
-            //     steers away from a dead path after the first failure, instead
-            //     of re-picking it every time. Ties break toward the newest,
-            //     which preserves the DCUtR behaviour above.
+            //  4. "Newest" was the original tie-break and is wrong twice over.
+            //     Observed live 2026-07-26: a connection that had just served
+            //     three consecutive requests was passed over for a NEWER direct
+            //     connection that silently swallowed every send — (a) above
+            //     catches that from the second send on. Observed 2026-08-21
+            //     (gotcha #353): the FIRST send to a freshly connected peer went
+            //     to its newest connection, which was dead in one direction,
+            //     and sat there for the whole 480 s segment deadline; nothing
+            //     else to that peer was affected because every later send
+            //     avoided the now-non-empty connection. (b) sends that first
+            //     request over the connection that already carried an answer
+            //     (the PEX ping, for one), and (c) prefers the connection that
+            //     has lived longest over the one that just appeared. DCUtR does
+            //     not need "newest": its upgraded direct connection is the only
+            //     direct one, so there is no tie. Load-spreading across
+            //     connections to a single peer was never a real benefit; they
+            //     share a path and usually an endpoint.
             //
-            // `connected` is append-ordered (`push` on establish), so a larger
-            // index is more recently established.
             let best_direct = connections
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| !connection_is_relayed(c))
-                .min_by_key(|(i, c)| {
-                    (
-                        c.pending_outbound_responses.len(),
-                        std::cmp::Reverse(*i),
-                    )
-                })
+                .min_by_key(|(i, c)| connection_rank(*i, c))
                 .map(|(i, _)| i);
             let ix = best_direct.unwrap_or(connections.len() - 1);
             let conn = &mut connections[ix];
@@ -860,8 +855,8 @@ where
         &mut self,
         connection_id: ConnectionId,
         peer: PeerId,
-        _: &Multiaddr,
-        _: &Multiaddr,
+        _local_addr: &Multiaddr,
+        remote_addr: &Multiaddr,
     ) -> Result<THandler<Self>, ConnectionDenied> {
         let mut handler = Handler::new(
             self.inbound_protocols.clone(),
@@ -871,7 +866,20 @@ where
             self.config.max_concurrent_streams,
         );
 
-        self.preload_new_handler(&mut handler, peer, connection_id, None);
+        // SwarmLLM patch: record the send-back address for INBOUND connections
+        // too. Upstream keeps `None` here, and `connection_is_relayed` treats
+        // `None` as direct — so a relay-carried inbound connection (send-back
+        // address a bare `/p2p/<peer>`, no transport hop) counted as DIRECT and,
+        // being the newest with nothing pending, won every send: two LAN nodes
+        // 0.7 ms apart measured 60-800 ms to each other and forwarded every
+        // tensor through a relay in another continent (2026-08-21). With the
+        // address recorded, `multiaddr_is_direct_transport` classifies it.
+        self.preload_new_handler(
+            &mut handler,
+            peer,
+            connection_id,
+            Some(remote_addr.clone()),
+        );
 
         Ok(handler)
     }
@@ -950,6 +958,10 @@ where
             } => {
                 let removed =
                     self.remove_pending_outbound_response(&peer, connection_id, request_id);
+                // SwarmLLM patch: this path demonstrably carries answers.
+                if let Some(c) = self.get_connection_mut(&peer, connection_id) {
+                    c.last_answered = Some(std::time::Instant::now());
+                }
                 debug_assert!(
                     removed,
                     "Expect request_id to be pending before receiving response.",
@@ -1136,6 +1148,10 @@ struct Connection {
     /// Pending inbound responses for previously sent requests on this
     /// connection.
     pending_inbound_responses: HashSet<InboundRequestId>,
+    /// SwarmLLM patch: when this connection last carried a response to one of
+    /// OUR requests — the only proof that the peer hears us on this path.
+    /// `None` until it has. Consulted by `connection_rank`.
+    last_answered: Option<std::time::Instant>,
 }
 
 /// SwarmLLM patch: whether a connection is carried over a relay circuit.
@@ -1162,6 +1178,22 @@ struct Connection {
 /// When the address is unknown (`None`) we still treat the connection as direct.
 /// That is the pre-existing default, and it is the safe direction: wrongly
 /// calling a direct connection relayed would exclude it from selection.
+/// SwarmLLM patch: the order in which direct connections to one peer are
+/// preferred — fewest unanswered requests, then one that has answered us
+/// (most recently first), then the oldest. Lower ranks first. Shared with the
+/// tests so they cannot pin a policy the code does not implement.
+fn connection_rank(
+    index: usize,
+    conn: &Connection,
+) -> (usize, bool, std::cmp::Reverse<Option<std::time::Instant>>, usize) {
+    (
+        conn.pending_outbound_responses.len(),
+        conn.last_answered.is_none(),
+        std::cmp::Reverse(conn.last_answered),
+        index,
+    )
+}
+
 fn connection_is_relayed(conn: &Connection) -> bool {
     conn.remote_address
         .as_ref()
@@ -1200,6 +1232,7 @@ impl Connection {
             remote_address,
             pending_outbound_responses: Default::default(),
             pending_inbound_responses: Default::default(),
+            last_answered: None,
         }
     }
 }
@@ -1300,7 +1333,7 @@ mod swarmllm_relay_selection_tests {
             .iter()
             .enumerate()
             .filter(|(_, c)| !connection_is_relayed(c))
-            .min_by_key(|(i, c)| (c.pending_outbound_responses.len(), std::cmp::Reverse(*i)))
+            .min_by_key(|(i, c)| connection_rank(*i, c))
             .map(|(i, _)| i);
         conns[best_direct.unwrap_or(conns.len() - 1)].id
     }
@@ -1332,12 +1365,33 @@ mod swarmllm_relay_selection_tests {
         assert_eq!(pick(&conns), ConnectionId::new_unchecked(1));
     }
 
+    /// Among idle connections that have never answered, the OLDEST wins —
+    /// the one that has lived longest, not the one that just appeared. The
+    /// first send to a fresh peer used to go to the newest connection, which
+    /// on 2026-08-21 was dead in one direction and ate the whole 480 s segment
+    /// deadline (gotcha #353). DCUtR does not need "newest": its upgraded
+    /// direct connection is the only direct one, so there is no tie to break.
     #[test]
-    fn among_equally_idle_connections_the_newest_still_wins() {
-        // Preserves the DCUtR behaviour: an upgraded direct connection is the
-        // newest and must win when nothing distinguishes them.
+    fn among_never_answered_idle_connections_the_oldest_wins() {
         let conns = vec![direct_conn(1, A, &[]), direct_conn(2, B, &[])];
+        assert_eq!(pick(&conns), ConnectionId::new_unchecked(1));
+    }
+
+    /// A connection that has carried an answer is preferred over one that
+    /// never has, newer or not — proof beats age.
+    #[test]
+    fn a_connection_that_has_answered_beats_a_never_answered_one() {
+        let older_silent = direct_conn(1, A, &[]);
+        let mut newer_answered = direct_conn(2, B, &[]);
+        newer_answered.last_answered = Some(std::time::Instant::now());
+        let conns = vec![older_silent, newer_answered];
         assert_eq!(pick(&conns), ConnectionId::new_unchecked(2));
+        // …and the most recently answered wins among answered ones.
+        let mut a = direct_conn(1, A, &[]);
+        a.last_answered = Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
+        let mut b = direct_conn(2, B, &[]);
+        b.last_answered = Some(std::time::Instant::now());
+        assert_eq!(pick(&[a, b]), ConnectionId::new_unchecked(2));
     }
 
     #[test]
@@ -1364,4 +1418,26 @@ mod swarmllm_relay_selection_tests {
         let ix = newest_direct.unwrap_or(conns.len() - 1);
         assert_eq!(conns[ix].id, ConnectionId::new_unchecked(9));
     }
+
+    /// A relay-carried INBOUND connection announces itself only by the peer
+    /// at the far end — its send-back address is a bare `/p2p/<peer>`, no
+    /// transport hop. Upstream never recorded inbound addresses, so such a
+    /// connection was `None` → "direct" → newest → chosen for every send.
+    /// Two LAN nodes 0.7 ms apart measured 60-800 ms to each other that way
+    /// (2026-08-21). Recording the address is what lets the classifier see it.
+    #[test]
+    fn a_relay_carried_inbound_connection_is_classified_relayed_once_its_address_is_recorded() {
+        let bare: Multiaddr = "/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY"
+            .parse()
+            .unwrap();
+        let inbound_relayed = Connection::new(ConnectionId::new_unchecked(7), Some(bare));
+        assert!(
+            connection_is_relayed(&inbound_relayed),
+            "a bare /p2p send-back address is a relay circuit seen from the listener"
+        );
+        let lan: Multiaddr = "/ip4/192.168.1.200/udp/50446/quic-v1".parse().unwrap();
+        let inbound_direct = Connection::new(ConnectionId::new_unchecked(8), Some(lan));
+        assert!(!connection_is_relayed(&inbound_direct));
+    }
+
 }
