@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Rimozione fallita: {error}",
   "shard.remove_failed": "Impossibile rimuovere il frammento",
   "shard.removed": "Frammento {idx} rimosso",
+  "shard.removed_by_user": "Rimossa",
+  "shard.removed_by_user_tip": "Hai rimosso questa parte da questo dispositivo. SwarmLLM non la scaricherà di nuovo da solo: usa Scarica per recuperarla.",
   "shard.route.ask": "chiedi",
   "shard.route.reply": "risposta",
   "shard.row.action_delete": "Elimina dal disco",

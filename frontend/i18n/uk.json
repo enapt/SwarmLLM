@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Видалення не вдалося: {error}",
   "shard.remove_failed": "Не вдалося видалити шард",
   "shard.removed": "Шард {idx} видалено",
+  "shard.removed_by_user": "Вилучено",
+  "shard.removed_by_user_tip": "Ви вилучили цю частину з цього пристрою. SwarmLLM не завантажуватиме її знову самостійно — натисніть «Завантажити», щоб повернути її.",
   "shard.route.ask": "запит",
   "shard.route.reply": "відповідь",
   "shard.row.action_delete": "Видалити з диска",

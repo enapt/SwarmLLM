@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Удаление не удалось: {error}",
   "shard.remove_failed": "Не удалось удалить шард",
   "shard.removed": "Шард {idx} удалён",
+  "shard.removed_by_user": "Удалена",
+  "shard.removed_by_user_tip": "Вы удалили эту часть с этого устройства. SwarmLLM не будет скачивать её снова сам по себе — нажмите «Скачать», чтобы вернуть её.",
   "shard.route.ask": "вопрос",
   "shard.route.reply": "ответ",
   "shard.row.action_delete": "Удалить с диска",

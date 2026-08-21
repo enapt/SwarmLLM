@@ -237,6 +237,8 @@ pub async fn delete_shard(
     shared
         .model_registry
         .remove_shard_holder(&shard_id, &local_node_id);
+    // The user removed it: auto-manage must not bring it back on its own.
+    shared.mark_shard_removed_by_user(&shard_id);
     // S5: Stop providing this shard via DHT
     if let Some(ref ntx) = state.network_tx {
         let _ = ntx.try_send(crate::types::NetworkCommand::StopProviding(vec![
@@ -352,6 +354,8 @@ pub async fn download_shard(
         model_id: mid.clone(),
         index: shard_index,
     };
+    // An explicit request for the shard outranks an earlier removal of it.
+    shared.clear_shard_removed_by_user(&shard_id);
 
     // Check if we already have it locally
     let local_node_id = shared.identity.node_id().clone();

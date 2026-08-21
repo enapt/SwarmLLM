@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Xóa thất bại: {error}",
   "shard.remove_failed": "Xóa mảnh thất bại",
   "shard.removed": "Đã xóa mảnh {idx}",
+  "shard.removed_by_user": "Đã gỡ",
+  "shard.removed_by_user_tip": "Bạn đã gỡ phần này khỏi thiết bị này. SwarmLLM sẽ không tự tải lại — dùng Tải xuống để khôi phục.",
   "shard.route.ask": "hỏi",
   "shard.route.reply": "trả lời",
   "shard.row.action_delete": "Xóa khỏi đĩa",

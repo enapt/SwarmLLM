@@ -219,6 +219,12 @@
     } else if (isLast) {
       endpointBadge = '<span class="shard-row-endpoint" data-kind="last" title="' + U.escapeHtml(I18n.t('shard.endpoint_last_tip')) + '">' + U.escapeHtml(I18n.t('shard.endpoint_last')) + '</span>';
     }
+    // The user deleted this piece from this device and has not asked for it
+    // since: auto-manage will not bring it back on its own (external report,
+    // 2026-08-21 — a deliberate two-machine split was silently undone).
+    var removedBadge = (s.removed_by_user && !s.local)
+      ? '<span class="shard-row-endpoint" data-kind="removed" title="' + U.escapeHtml(I18n.t('shard.removed_by_user_tip')) + '">' + U.escapeHtml(I18n.t('shard.removed_by_user')) + '</span>'
+      : '';
     var layerRange = '';
     var statusLabel = shardStatusLabel(s, state);
     var sizeText = s.size_bytes ? U.formatBytes(s.size_bytes) : '\u2014';
@@ -239,7 +245,7 @@
       ' data-shard-index="' + s.index + '"' +
       ' data-shard-locked="' + (s.locked ? '1' : '0') + '">' +
       '<span class="shard-row-state-glyph">' + shardGlyph(state) + '</span>' +
-      '<span class="shard-row-index">' + idxLabel + endpointBadge + '</span>' +
+      '<span class="shard-row-index">' + idxLabel + endpointBadge + removedBadge + '</span>' +
       '<span class="shard-row-layers">' + layerRange + '</span>' +
       '<span class="shard-row-status">' + U.escapeHtml(statusLabel) + '</span>' +
       shardReplicaPips(s) +

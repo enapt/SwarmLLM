@@ -71,7 +71,7 @@ pub(crate) use self::token_embedding::table_supports_row_gather;
 /// - A KV cache grows on demand (`layers::new_kv_cache`), so raising the
 ///   ceiling costs nothing until a conversation actually gets long.
 /// - GPU admission is capped independently at
-///   `model::auto_manage::vram::GPU_ADMISSION_KV_CONTEXT`, so this raise does
+///   `model::auto_manage::vram::ADMISSION_KV_CONTEXT`, so this raise does
 ///   not re-price what a card must have free to load a model at all. That
 ///   decoupling is deliberate: tying them would mean raising the default
 ///   silently pushed models off GPUs, which is the exact failure the cap was
@@ -126,6 +126,22 @@ pub static MAX_SEQ_LEN_OVERRIDE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// Read the current override (None when 0 — unset).
+/// KV-cache budget handed to a CPU worker by the daemon at spawn
+/// (`--kv-budget-bytes`), process-global like the override above. `0` = none
+/// (no budget → no runtime guard, the pre-2026-08-21 behaviour). Computed by
+/// `ModelProcessPool` at admission as the model's typical-context KV charge
+/// plus whatever of the node's RAM budget is still uncommitted, so the cache
+/// may grow into free memory and is refused — with a 503 that re-routes —
+/// before it would swap.
+pub static CPU_KV_BUDGET_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn cpu_kv_budget_bytes() -> Option<u64> {
+    match CPU_KV_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        v => Some(v),
+    }
+}
+
 pub fn max_seq_len_override() -> Option<usize> {
     let v = MAX_SEQ_LEN_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
     if v == 0 {

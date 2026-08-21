@@ -197,6 +197,10 @@ enum Commands {
         /// Cap GGUF context_length when allocating KV cache. 0 = use GGUF value.
         #[arg(long, default_value = "0")]
         max_seq_len_override: u32,
+        /// KV-cache budget in bytes for a CPU worker (daemon-computed at
+        /// admission). 0 = none: no runtime guard.
+        #[arg(long, default_value = "0")]
+        kv_budget_bytes: u64,
         /// Quantize intermediate-segment hidden state activations to Q8_0
         /// before returning them to the daemon. Compresses ~3.76× with
         /// negligible quality loss. Off by default; receivers always
@@ -420,6 +424,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             swift_skip_ratio,
             force_standard_attn,
             max_seq_len_override,
+            kv_budget_bytes,
             activation_compression,
             batch_generate,
             batch_generate_max_slots,
@@ -454,6 +459,11 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             let options = swarmllm::inference::model_worker::WorkerOptions {
                 force_standard_attn,
                 max_seq_len_override: max_seq_override,
+                kv_budget_bytes: if kv_budget_bytes == 0 {
+                    None
+                } else {
+                    Some(kv_budget_bytes)
+                },
                 activation_compression,
                 batch_generate,
                 batch_generate_max_slots,

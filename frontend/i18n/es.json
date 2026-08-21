@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Eliminación fallida: {error}",
   "shard.remove_failed": "Error al eliminar fragmento",
   "shard.removed": "Fragmento {idx} eliminado",
+  "shard.removed_by_user": "Eliminada",
+  "shard.removed_by_user_tip": "Eliminaste esta parte de este dispositivo. SwarmLLM no la descargará de nuevo por su cuenta: usa Descargar para recuperarla.",
   "shard.route.ask": "pide",
   "shard.route.reply": "responde",
   "shard.row.action_delete": "Eliminar del disco",

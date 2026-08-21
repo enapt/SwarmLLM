@@ -38,6 +38,7 @@
 | escrow | `{escrow_id}` | EscrowEntry |
 | hf_sources | `{model_id}` | HfSource metadata |
 | locked_shards | `{shard_id_json}` | bool |
+| removed_shards | `{shard_id_json}` | bool — the user deleted this shard; auto-manage leaves it alone until it is asked for again |
 | resource_schedule | `"current"` | ResourceSchedule |
 | model_trust | `{model_id}` | ModelTrustEntry (level, request count, last seen) |
 

@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Borttagning misslyckades: {error}",
   "shard.remove_failed": "Misslyckades att ta bort shard",
   "shard.removed": "Shard {idx} borttagen",
+  "shard.removed_by_user": "Borttagen",
+  "shard.removed_by_user_tip": "Du tog bort den här delen från den här enheten. SwarmLLM laddar inte ner den igen på egen hand – använd Ladda ner för att få tillbaka den.",
   "shard.route.ask": "fråga",
   "shard.route.reply": "svar",
   "shard.row.action_delete": "Radera från disk",

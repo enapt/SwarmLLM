@@ -797,6 +797,7 @@ pub async fn pool_add_pin(
         ..
     } = body;
     let model_id_resp = model_id.clone();
+    let pinned_indices = shard_indices.clone();
 
     // Hold the pool_state write lock across the DB persist so a concurrent
     // pin/unpin cannot write a stale snapshot.
@@ -819,7 +820,7 @@ pub async fn pool_add_pin(
         let pin = crate::types::ShardPin {
             model_id,
             shard_indices,
-            target_node_id: target,
+            target_node_id: target.clone(),
         };
         ps.shard_pins
             .retain(|p| !(p.model_id == pin.model_id && p.target_node_id == pin.target_node_id));
@@ -831,6 +832,24 @@ pub async fn pool_add_pin(
             &*ps,
         ) {
             tracing::warn!(error = %e, "Failed to persist pool shard pin — may be lost on restart");
+        }
+    }
+
+    // A pin naming THIS device is an explicit instruction to hold the model
+    // here; forget any earlier removal of its shards so auto-manage acts on it.
+    if target == *state.shared_state.identity.node_id() {
+        let mid = crate::types::ModelId(model_id_resp.clone());
+        if pinned_indices.is_empty() {
+            state.shared_state.clear_removed_by_user_for_model(&mid);
+        } else {
+            for index in &pinned_indices {
+                state
+                    .shared_state
+                    .clear_shard_removed_by_user(&crate::types::ShardId {
+                        model_id: mid.clone(),
+                        index: *index,
+                    });
+            }
         }
     }
 

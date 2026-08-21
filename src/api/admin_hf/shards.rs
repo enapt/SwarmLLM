@@ -123,6 +123,27 @@ pub async fn hf_download_shards(
 
     let model_id_str = safe_name.clone();
     let mid = crate::types::ModelId(model_id_str.clone());
+    // An explicit request outranks an earlier removal: the shards named here
+    // (or, for a fair-share request, every shard of the model) may be
+    // acquired again by auto-manage from here on.
+    let forgotten = if shard_indices.is_empty() {
+        state.shared_state.clear_removed_by_user_for_model(&mid)
+    } else {
+        shard_indices
+            .iter()
+            .filter(|&&index| {
+                state
+                    .shared_state
+                    .clear_shard_removed_by_user(&crate::types::ShardId {
+                        model_id: mid.clone(),
+                        index,
+                    })
+            })
+            .count()
+    };
+    if forgotten > 0 {
+        tracing::info!(model = %mid, forgotten, "User asked for these shards again — cleared their removal records");
+    }
 
     // ── Trust: pin this model as user-approved ──────────────────────────
     // User explicitly chose to download → set Pinned trust level so auto-manage

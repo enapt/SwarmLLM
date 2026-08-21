@@ -1198,6 +1198,8 @@
   "shard.remove_error": "فشل الإزالة: {error}",
   "shard.remove_failed": "فشل إزالة الشظية",
   "shard.removed": "تمت إزالة الشظية {idx}",
+  "shard.removed_by_user": "تمت إزالته",
+  "shard.removed_by_user_tip": "لقد أزلت هذا الجزء من هذا الجهاز. لن يعيد SwarmLLM تنزيله من تلقاء نفسه — استخدم «تنزيل» لاستعادته.",
   "shard.route.ask": "سؤال",
   "shard.route.reply": "إجابة",
   "shard.row.action_delete": "حذف من القرص",

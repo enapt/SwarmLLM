@@ -25,6 +25,7 @@ mod models;
 mod peer_speed;
 mod perf_history;
 mod relay;
+mod removed_shards;
 mod tp_allreduce;
 
 pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};
@@ -870,6 +871,21 @@ impl SharedState {
                     }
                     map
                 },
+                removed_by_user: {
+                    let map = DashMap::new();
+                    if let Ok(entries) = db.iter_raw(removed_shards::REMOVED_SHARDS_TREE) {
+                        for (key, _value) in entries {
+                            if let Ok(key_str) = std::str::from_utf8(&key) {
+                                if let Ok(shard_id) =
+                                    serde_json::from_str::<crate::types::ShardId>(key_str)
+                                {
+                                    map.insert(shard_id, true);
+                                }
+                            }
+                        }
+                    }
+                    map
+                },
                 model_request_counts: DashMap::new(),
                 resource_schedule: RwLock::new(config.resources.schedule.clone()),
                 prune_history: RwLock::new(VecDeque::new()),
@@ -1052,6 +1068,12 @@ impl SharedState {
             state.model_process_pool.set_ram_budget_mb(budget);
             state.model_process_pool.set_ram_budget_note(note);
         }
+        // Whether there is a GPU here at all decides whether a model is charged
+        // against RAM (`ModelProcessPool::charges_ram`); without this a CPU-only
+        // node never ran RAM admission.
+        state
+            .model_process_pool
+            .set_gpu_detected(state.gpu_info.is_some());
         state
             .model_process_pool
             .set_continuous_batching(state.config.inference.continuous_batching);

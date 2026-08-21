@@ -1198,6 +1198,8 @@
   "shard.remove_error": "การลบล้มเหลว: {error}",
   "shard.remove_failed": "ลบ shard ไม่สำเร็จ",
   "shard.removed": "ลบ shard {idx} แล้ว",
+  "shard.removed_by_user": "ลบแล้ว",
+  "shard.removed_by_user_tip": "คุณลบส่วนนี้ออกจากอุปกรณ์นี้แล้ว SwarmLLM จะไม่ดาวน์โหลดกลับมาเอง — ใช้ “ดาวน์โหลด” เพื่อนำกลับมา",
   "shard.route.ask": "ถาม",
   "shard.route.reply": "ตอบ",
   "shard.row.action_delete": "ลบจากดิสก์",

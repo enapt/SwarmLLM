@@ -1198,6 +1198,8 @@
   "shard.remove_error": "删除失败：{error}",
   "shard.remove_failed": "删除分片失败",
   "shard.removed": "分片 {idx} 已删除",
+  "shard.removed_by_user": "已移除",
+  "shard.removed_by_user_tip": "您已从此设备移除这一部分。SwarmLLM 不会自行重新下载它——使用“下载”可将其恢复。",
   "shard.route.ask": "提问",
   "shard.route.reply": "回答",
   "shard.row.action_delete": "从磁盘删除",

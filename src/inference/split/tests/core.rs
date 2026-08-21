@@ -1317,7 +1317,7 @@ fn a_forward_is_refused_when_the_kv_budget_is_exhausted() {
         "must be 503 so a coordinator re-routes to a peer, got {err:?}"
     );
     assert!(
-        err.to_string().contains("GPU memory"),
+        err.to_string().contains("KV cache"),
         "the message must say what ran out: {err}"
     );
 }

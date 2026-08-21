@@ -111,6 +111,10 @@ pub(super) fn build_shard_json(
         .get(&shard_id)
         .map(|v| *v)
         .unwrap_or(false);
+    // The user deleted this shard from this node and has not asked for it
+    // since: auto-manage will not bring it back on its own. Only meaningful
+    // while the shard is absent — a local copy means it was asked for again.
+    let removed_by_user = !is_local && shared.shard_removed_by_user(&shard_id);
     let holder_ids: Vec<String> = holders
         .iter()
         .filter(|h| *h != local_node_id)
@@ -125,6 +129,7 @@ pub(super) fn build_shard_json(
         "holders": holders.len(),
         "holder_ids": holder_ids,
         "locked": locked,
+        "removed_by_user": removed_by_user,
     });
 
     let mut any_downloading = false;

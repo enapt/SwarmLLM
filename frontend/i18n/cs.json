@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Odebrání selhalo: {error}",
   "shard.remove_failed": "Odebrání fragmentu selhalo",
   "shard.removed": "Fragment {idx} odebrán",
+  "shard.removed_by_user": "Odebráno",
+  "shard.removed_by_user_tip": "Tuto část jste z tohoto zařízení odebrali. SwarmLLM ji sám znovu nestáhne – použijte Stáhnout, abyste ji vrátili.",
   "shard.route.ask": "dotaz",
   "shard.route.reply": "odpověď",
   "shard.row.action_delete": "Smazat z disku",

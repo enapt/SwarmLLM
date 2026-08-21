@@ -40,7 +40,7 @@ pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
 ///
 /// The KV cache is the other large term, bounded by
 /// `inference.max_seq_len_override` and the shipped default — and, for the GPU
-/// estimator only, capped again at [`GPU_ADMISSION_KV_CONTEXT`] (see
+/// estimator only, capped again at [`ADMISSION_KV_CONTEXT`] (see
 /// `inference::split::kv_budget`).
 #[derive(Debug, Clone, Copy)]
 pub struct VramFootprintInputs {
@@ -155,7 +155,7 @@ const _: () = assert!(CPU_PROCESS_OVERHEAD_BYTES < CUDA_PROCESS_OVERHEAD_BYTES);
 /// **The CPU estimator does NOT apply this cap**, because there is no runtime
 /// head-room check on a CPU worker to catch the difference — under-charging
 /// there would mean swapping, which degrades every request on the machine.
-pub const GPU_ADMISSION_KV_CONTEXT: u64 = 4096;
+pub const ADMISSION_KV_CONTEXT: u64 = 4096;
 
 /// Bytes per element of the token-embedding table, when it is held dequantized.
 ///
@@ -264,7 +264,7 @@ fn resident_footprint(
     // `kv_admission_context`.
     //
     // That is the full effective context on a CPU worker and CAPPED on a GPU
-    // one; see [`GPU_ADMISSION_KV_CONTEXT`] for why the two differ. The cap is
+    // one; see [`ADMISSION_KV_CONTEXT`] for why the two differ. The cap is
     // the only place this estimator deliberately charges less than the worst
     // case, and it is allowed to because a GPU worker has a runtime check that
     // catches the difference.
@@ -308,11 +308,11 @@ pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
     //
     // The KV cache is charged at a capped context because a GPU worker has a
     // runtime head-room check that refuses gracefully if a conversation
-    // outgrows it — see `GPU_ADMISSION_KV_CONTEXT`.
+    // outgrows it — see `ADMISSION_KV_CONTEXT`.
     estimate_model_resident_bytes(
         i,
         i.embedding_gatherable,
-        i.effective_context.min(GPU_ADMISSION_KV_CONTEXT),
+        i.effective_context.min(ADMISSION_KV_CONTEXT),
     )
     .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
         / (1024 * 1024)
@@ -323,7 +323,8 @@ pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
 /// Identical to [`estimate_worker_vram_mb`] but for the per-process overhead —
 /// a CPU worker establishes no device context. Used for CPU admission, which
 /// exists because the GPU path's own fallback is "load it in system RAM
-/// instead": the more often that fires, the more weight lands here.
+/// instead": the more often that fires, the more weight lands here. KV is
+/// charged at [`ADMISSION_KV_CONTEXT`]; see [`cpu_footprint`].
 pub fn estimate_worker_ram_mb(i: &VramFootprintInputs) -> u64 {
     cpu_footprint(i)
         .total_bytes()
@@ -331,11 +332,20 @@ pub fn estimate_worker_ram_mb(i: &VramFootprintInputs) -> u64 {
         / (1024 * 1024)
 }
 
-/// The CPU worker's resident terms, itemised. FULL context for the KV cache,
-/// deliberately: nothing bounds a CPU worker's cache at runtime, so this is
-/// the only place the ceiling is priced at all. See `GPU_ADMISSION_KV_CONTEXT`.
+/// The CPU worker's resident terms, itemised.
 pub fn cpu_footprint(i: &VramFootprintInputs) -> ResidentFootprint {
-    resident_footprint(i, i.embedding_gatherable, i.effective_context)
+    // The SAME admission context the GPU uses, for the same reason: since
+    // 2026-08-21 a CPU worker is handed a KV budget (`--kv-budget-bytes`) and
+    // refuses at run time to grow past it, so admission no longer has to price
+    // the whole ceiling. Pricing it was what turned a 2.3 GB phi-3.5 into a
+    // 27 GB refusal at a 32k override — the model never loaded, where now it
+    // loads and only a conversation that outgrows the room is refused (and
+    // re-routed to a peer).
+    resident_footprint(
+        i,
+        i.embedding_gatherable,
+        i.effective_context.min(ADMISSION_KV_CONTEXT),
+    )
 }
 
 /// Where the admission context came from, for the refusal message.
@@ -353,6 +363,7 @@ pub enum ContextSource {
 pub fn describe_cpu_refusal(
     model: &str,
     f: &ResidentFootprint,
+    effective_context: u64,
     ctx_source: ContextSource,
     budget_mb: u64,
     budget_note: &str,
@@ -369,13 +380,25 @@ pub fn describe_cpu_refusal(
         ContextSource::Override => "set by `inference.max_seq_len_override`",
         ContextSource::DeclaredOrDefault => "its declared context, capped at the default",
     };
+    let kv_clause = if f.kv_context < effective_context {
+        format!(
+            "{} MB of KV cache for the {}-token conversation it is admitted at (its full context \
+             is {effective_context} tokens, {ctx_why}; longer conversations are allowed to grow \
+             while memory lasts and are refused and re-routed when it runs out)",
+            f.kv_bytes / MB,
+            f.kv_context,
+        )
+    } else {
+        format!(
+            "{} MB of KV cache for a {}-token context ({ctx_why})",
+            f.kv_bytes / MB,
+            f.kv_context,
+        )
+    };
     let mut s = format!(
-        "{model} needs about {total_mb} MB of memory: {} MB of weights, {} MB of KV cache for a \
-         {}-token context ({ctx_why}), {other_mb} MB of embeddings, tables and overhead. \
-         This node's budget allows {budget_mb} MB",
+        "{model} needs about {total_mb} MB of memory: {} MB of weights, {kv_clause}, \
+         {other_mb} MB of embeddings, tables and overhead. This node's budget allows {budget_mb} MB",
         f.weights_bytes / MB,
-        f.kv_bytes / MB,
-        f.kv_context,
     );
     if !budget_note.is_empty() {
         s.push_str(" (");
@@ -383,8 +406,8 @@ pub fn describe_cpu_refusal(
         s.push(')');
     }
     s.push_str(&format!(
-        " and {in_use_mb} MB is already in use. Lower `inference.max_seq_len_override` to shrink \
-         the KV cache, raise `resources.max_ram_mb`, or free memory by unloading another model."
+        " and {in_use_mb} MB is already in use. Raise `resources.max_ram_mb`, or free memory by \
+         unloading another model."
     ));
     s
 }
@@ -1042,24 +1065,36 @@ mod footprint_tests {
         );
     }
 
-    /// Context length drives the KV term — on the CPU estimator, which prices
-    /// the whole ceiling because nothing bounds a CPU worker at runtime.
+    /// Context length no longer drives the CPU estimate: since 2026-08-21 a
+    /// CPU worker is handed a KV budget and refuses a conversation that would
+    /// outgrow it (`CPU_KV_BUDGET_BYTES`), so admission charges the same
+    /// typical context the GPU does. Until then the estimator priced the
+    /// whole ceiling — correctly, for a worker nothing bounded — which turned
+    /// a 2.3 GB model into a "needs 27 GB" refusal at a 32k override.
     ///
-    /// A 128k context must estimate many GB higher there. This is the half of
-    /// the asymmetry that must NOT be capped: under-charging it means swapping.
+    /// **If this test starts failing because the estimate moved with context
+    /// again, check that the runtime guard still exists before "fixing" it**:
+    /// a typical-context charge with no guard means swapping.
     #[test]
-    fn context_length_moves_the_cpu_estimate() {
+    fn context_length_no_longer_moves_the_cpu_estimate_because_the_worker_is_budgeted() {
         let short = estimate_worker_ram_mb(&llama32_1b());
         let mut long = llama32_1b();
         long.effective_context = 131_072;
         let full = estimate_worker_ram_mb(&long);
+        // Only the RoPE table grows with the ceiling — tens of MB, not GB.
         assert!(
-            full > short + 7_000,
-            "131k context should add many GB over 4096 on CPU: {short} -> {full}"
+            full < short + 200,
+            "131k context must not change CPU admission by more than the RoPE table: {short} -> {full}"
+        );
+        // The ceiling is still computable, for the refusal message to report.
+        let ceiling = resident_footprint(&long, true, long.effective_context);
+        assert!(
+            ceiling.kv_bytes / (1024 * 1024) > 7_000,
+            "the whole-ceiling KV figure must still be available on request"
         );
     }
 
-    /// The GPU estimator caps the KV term at [`GPU_ADMISSION_KV_CONTEXT`], so
+    /// The GPU estimator caps the KV term at [`ADMISSION_KV_CONTEXT`], so
     /// raising `max_seq_len_override` no longer costs a model its place on the
     /// card. What remains context-dependent there is the RoPE table, which
     /// really is precomputed in full — so the difference must be small and
@@ -1094,7 +1129,7 @@ mod footprint_tests {
     #[test]
     fn the_cap_is_inert_at_the_context_it_was_derived_from() {
         let mut at_cap = llama32_1b();
-        at_cap.effective_context = GPU_ADMISSION_KV_CONTEXT;
+        at_cap.effective_context = ADMISSION_KV_CONTEXT;
         let capped = estimate_worker_vram_mb(&at_cap);
 
         let uncapped_bytes = estimate_model_resident_bytes(
@@ -1235,7 +1270,7 @@ mod footprint_tests {
     /// 2. The KV ceiling. A GPU worker charges a capped context because it has
     ///    a runtime head-room check that refuses gracefully when a conversation
     ///    outgrows the card; a CPU worker has none, so it prices the whole
-    ///    ceiling. See [`GPU_ADMISSION_KV_CONTEXT`].
+    ///    ceiling. See [`ADMISSION_KV_CONTEXT`].
     ///
     /// The embedding table is NOT one of them: both devices now read its rows
     /// on demand. It was briefly device-specific, between the CPU gather
@@ -1257,7 +1292,7 @@ mod footprint_tests {
             // term alone.
             let uncapped = i
                 .effective_context
-                .saturating_sub(i.effective_context.min(GPU_ADMISSION_KV_CONTEXT));
+                .saturating_sub(i.effective_context.min(ADMISSION_KV_CONTEXT));
             let kv_gap_mb =
                 i.segment_layers * 2 * i.head_count_kv * i.head_dim * uncapped * 4 / (1024 * 1024);
             // Each estimator truncates its own total to MB, so the difference
@@ -1379,21 +1414,35 @@ mod footprint_tests {
         };
         let f = cpu_footprint(&i);
         assert_eq!(f.weights_bytes / (1024 * 1024), 2284);
+        // Admission now charges the SAME typical context the GPU does; the
+        // 32k ceiling is bounded at run time by the worker's KV budget.
+        assert_eq!(f.kv_context, ADMISSION_KV_CONTEXT);
         assert_eq!(
             f.kv_bytes / (1024 * 1024),
-            32 * 2 * 32 * 96 * 32768 * 4 / (1024 * 1024)
+            32 * 2 * 32 * 96 * ADMISSION_KV_CONTEXT * 4 / (1024 * 1024)
         );
-        assert_eq!(f.kv_context, 32768);
+        let total_mb = (f.total_bytes() + CPU_PROCESS_OVERHEAD_BYTES) / (1024 * 1024);
+        assert!(
+            total_mb < 13370,
+            "the model that was refused at 27 GB is admitted: {total_mb} MB"
+        );
         let msg = describe_cpu_refusal(
             "phi-3.5-mini-instruct.q4-k-m",
             &f,
+            32768,
             ContextSource::Override,
             13370,
             "`resources.max_ram_mb` is 18000 MB, limited to 70% of the 19100 MB that was free when the node started, so loading a model cannot push it into swap",
             0,
         );
         assert!(msg.contains("2284 MB of weights"), "{msg}");
-        assert!(msg.contains("24576 MB of KV cache for a 32768-token context (set by `inference.max_seq_len_override`)"), "{msg}");
+        assert!(
+            msg.contains(&format!(
+                "{}-token conversation it is admitted at (its full context is 32768 tokens, set by `inference.max_seq_len_override`",
+                ADMISSION_KV_CONTEXT
+            )),
+            "{msg}"
+        );
         assert!(
             msg.contains(
                 "budget allows 13370 MB (`resources.max_ram_mb` is 18000 MB, limited to 70%"
@@ -1401,19 +1450,12 @@ mod footprint_tests {
             "{msg}"
         );
         assert!(
-            msg.contains("Lower `inference.max_seq_len_override`"),
-            "{msg}"
+            !msg.contains("Lower `inference.max_seq_len_override`"),
+            "the override is no longer what stops the model fitting: {msg}"
         );
-        // And the whole estimate is what the old one-number message said.
-        let i8 = VramFootprintInputs {
-            effective_context: 8192,
-            ..i
-        };
-        assert_eq!(
-            cpu_footprint(&i8).kv_bytes / (1024 * 1024),
-            6144,
-            "at the default cap the same model costs a quarter of that"
-        );
+        // What the old message priced — the whole ceiling — and why it read as 10x.
+        let ceiling = resident_footprint(&i, true, 32768);
+        assert_eq!(ceiling.kv_bytes / (1024 * 1024), 24576);
     }
 
     #[test]

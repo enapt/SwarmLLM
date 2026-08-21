@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Entfernen fehlgeschlagen: {error}",
   "shard.remove_failed": "Shard konnte nicht entfernt werden",
   "shard.removed": "Shard {idx} entfernt",
+  "shard.removed_by_user": "Entfernt",
+  "shard.removed_by_user_tip": "Du hast diesen Teil von diesem Gerät entfernt. SwarmLLM lädt ihn nicht von selbst erneut herunter – nutze „Herunterladen“, um ihn zurückzuholen.",
   "shard.route.ask": "Frage",
   "shard.route.reply": "Antwort",
   "shard.row.action_delete": "Von Festplatte löschen",

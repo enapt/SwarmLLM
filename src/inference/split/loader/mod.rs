@@ -416,7 +416,9 @@ impl SplitModel {
         //    setting wins, and the load-time OOM fallback to CPU backstops it.
         let mut kv_budget_bytes: Option<u64> = None;
         let mut kv_bytes_per_token: u64 = 0;
-        if device.is_cuda() && super::max_seq_len_override().is_none() {
+        // KV bytes per position is a property of the model, needed by both
+        // devices' guards below.
+        let per_token = {
             let seg_layers = layer_end.min(block_count).saturating_sub(layer_start);
             let (k_elems, v_elems) = if matches!(model_arch, ModelArch::DeepSeek2) {
                 let key_length = md_get("attention.key_length")
@@ -433,11 +435,13 @@ impl SplitModel {
             };
             // GQA models on CUDA also carry the f16 flash mirror, which is real
             // VRAM the head-room check must charge for. MLA never mirrors.
-            let mirrored = !matches!(model_arch, ModelArch::DeepSeek2)
+            let mirrored = device.is_cuda()
+                && !matches!(model_arch, ModelArch::DeepSeek2)
                 && crate::inference::layers::model_wants_kv_mirror(head_count, head_count_kv)
                 && cfg!(feature = "flash-attn");
-            let per_token =
-                super::kv_budget::kv_bytes_per_token(seg_layers, k_elems, v_elems, mirrored);
+            super::kv_budget::kv_bytes_per_token(seg_layers, k_elems, v_elems, mirrored)
+        };
+        if device.is_cuda() && super::max_seq_len_override().is_none() {
             let rows_on_demand = ct
                 .tensor_infos
                 .get("token_embd.weight")
@@ -493,6 +497,28 @@ impl SplitModel {
                          this",
                     );
                 }
+            }
+        } else if !device.is_cuda() {
+            // A CPU worker's budget is handed to it by the daemon at spawn
+            // (`--kv-budget-bytes`, computed at admission from the node's RAM
+            // budget). With it in place admission charges a typical context
+            // instead of the whole ceiling, and a conversation that outgrows
+            // the room is refused here — 503, re-routed — instead of swapping
+            // the machine or, before 2026-08-21, never loading at all.
+            if let Some(budget) = super::cpu_kv_budget_bytes() {
+                kv_budget_bytes = Some(budget);
+                kv_bytes_per_token = per_token;
+                let affordable = budget
+                    .checked_div(per_token)
+                    .map_or(context_length, |t| t as usize);
+                tracing::info!(
+                    context = context_length,
+                    affordable_tokens = affordable,
+                    budget_mb = budget / (1024 * 1024),
+                    kv_bytes_per_token = per_token,
+                    "CPU KV-cache budget: conversations up to about {affordable} tokens fit \
+                     in this node's memory budget; longer ones are refused and re-routed"
+                );
             }
         }
 

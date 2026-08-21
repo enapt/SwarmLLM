@@ -9,6 +9,8 @@ mod parallax;
 mod prune;
 pub mod quant;
 mod scoring;
+#[cfg(test)]
+mod test_support;
 pub mod vram;
 pub mod wishlist;
 

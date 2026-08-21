@@ -146,17 +146,12 @@ fn shard_overlaps_any(shard_range: (u32, u32), candidates: &[(u32, u32)]) -> boo
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use tokio::sync::{mpsc, watch, Mutex};
-
-    use crate::config::Config;
-    use crate::identity::Identity;
-    use crate::inference::executor::ModelExecutor;
-    use crate::storage::db::Database;
-    use crate::types::{
-        ModelArchitecture, ModelId, ModelManifest, NodeId, Quantization, ShardInfo,
+    use super::super::test_support::{
+        make_test_manager, make_test_manager_with_config, register_manifest_with_shards,
     };
+    use super::*;
+    use crate::config::Config;
+    use crate::types::{ModelId, NodeId};
 
     #[test]
     fn overlap_detects_partial_and_full() {
@@ -177,58 +172,6 @@ mod tests {
     fn overlap_any_of_multiple_candidates() {
         assert!(shard_overlaps_any((10, 12), &[(0, 5), (8, 14), (20, 24)]));
         assert!(!shard_overlaps_any((30, 40), &[(0, 5), (8, 14), (20, 24)]));
-    }
-
-    fn make_test_manager() -> (Arc<crate::daemon::SharedState>, AutoShardManager) {
-        let config = Config::default();
-        let identity = Identity::generate();
-        let temp = tempfile::tempdir().unwrap();
-        let db = Database::open(temp.path()).unwrap();
-        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (state, _, _) = crate::daemon::SharedState::new(config, identity, db, executor, None);
-        let (net_tx, _net_rx) = mpsc::channel(16);
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-        let manager = AutoShardManager::new(state.clone(), net_tx, shutdown_rx);
-        (state, manager)
-    }
-
-    fn register_manifest_with_shards(
-        state: &Arc<crate::daemon::SharedState>,
-        model_id: &str,
-        num_layers: u32,
-        shard_ranges: &[(u32, u32)],
-    ) -> ModelId {
-        let shards: Vec<ShardInfo> = shard_ranges
-            .iter()
-            .enumerate()
-            .map(|(i, &(start, end))| ShardInfo {
-                index: i as u32,
-                layer_range: (start, end),
-                size_bytes: 100_000_000,
-                hash: [0u8; 32],
-                tensors: vec![],
-            })
-            .collect();
-        let manifest = ModelManifest {
-            id: ModelId(model_id.into()),
-            name: format!("Test {model_id}"),
-            architecture: ModelArchitecture::Llama,
-            num_layers,
-            num_params_billions: 1.0,
-            quantization: Quantization::Q4KM,
-            total_size_bytes: shards.iter().map(|s| s.size_bytes).sum(),
-            shard_count: shards.len() as u32,
-            shards,
-            tokenizer_hash: [0u8; 32],
-            manifest_hash: [0u8; 32],
-            publisher: NodeId([0u8; 32]),
-            publish_date: chrono::Utc::now(),
-            license: "MIT".into(),
-            mmproj: None,
-        };
-        let id = manifest.id.clone();
-        state.model_registry.register_manifest(manifest);
-        id
     }
 
     #[test]
@@ -319,14 +262,7 @@ mod tests {
             },
             ..state.config.clone()
         };
-        let identity = Identity::generate();
-        let temp = tempfile::tempdir().unwrap();
-        let db = Database::open(temp.path()).unwrap();
-        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (state2, _, _) = crate::daemon::SharedState::new(config, identity, db, executor, None);
-        let (net_tx, _net_rx) = mpsc::channel(16);
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-        let manager2 = AutoShardManager::new(state2.clone(), net_tx, shutdown_rx);
+        let (state2, manager2) = make_test_manager_with_config(config);
 
         let local = state2.identity.node_id().clone();
         let mid = register_manifest_with_shards(&state2, "test-model", 16, &[(0, 16)]);

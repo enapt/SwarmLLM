@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Suppression échouée : {error}",
   "shard.remove_failed": "Échec de la suppression du fragment",
   "shard.removed": "Fragment {idx} supprimé",
+  "shard.removed_by_user": "Retirée",
+  "shard.removed_by_user_tip": "Vous avez retiré cette partie de cet appareil. SwarmLLM ne la retéléchargera pas de lui-même — utilisez Télécharger pour la récupérer.",
   "shard.route.ask": "demande",
   "shard.route.reply": "réponse",
   "shard.row.action_delete": "Supprimer du disque",

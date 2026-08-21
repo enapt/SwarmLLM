@@ -1198,6 +1198,8 @@
   "shard.remove_error": "हटाना विफल: {error}",
   "shard.remove_failed": "शार्ड हटाने में विफल",
   "shard.removed": "शार्ड {idx} हटाया गया",
+  "shard.removed_by_user": "हटाया गया",
+  "shard.removed_by_user_tip": "आपने यह हिस्सा इस डिवाइस से हटा दिया है। SwarmLLM इसे अपने आप दोबारा डाउनलोड नहीं करेगा — इसे वापस लाने के लिए “डाउनलोड” का उपयोग करें।",
   "shard.route.ask": "सवाल",
   "shard.route.reply": "जवाब",
   "shard.row.action_delete": "डिस्क से हटाएं",

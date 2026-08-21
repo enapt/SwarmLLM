@@ -379,13 +379,32 @@ silently break at the wire if duplicated:
   `gpu_layers` and OOM CPU-pinning), with
   `worker_ipc::permanent_gpu_failure` as the backstop for when the probe
   returned unknown.
-- **`model::auto_manage::vram::GPU_ADMISSION_KV_CONTEXT`** (2026-08-18) — the context
-  length GPU admission charges KV cache for, whatever the user configured.
+- **`model::auto_manage::vram::ADMISSION_KV_CONTEXT`** (2026-08-18; CPU since
+  2026-08-21) — the context length admission charges KV cache for, on either device,
+  whatever the user configured.
   **Admission may charge less than the worst case exactly where a runtime check
-  catches the difference, and nowhere else.** A GPU worker has one
-  (`kv_budget::claim_exceeds_headroom`, a 503 that re-routes); a CPU worker has none,
-  so `estimate_worker_ram_mb` still prices the whole ceiling and must keep doing so —
-  under-charging there means swapping, which degrades every request on the machine.
+  catches the difference, and nowhere else.** Both workers now have one:
+  `kv_budget::claim_exceeds_headroom` in `forward_inner_impl`, a 503 that re-routes.
+  The GPU worker derives its budget from free VRAM at load; the CPU worker is HANDED
+  its budget by the daemon at spawn (`--kv-budget-bytes` →
+  `inference::split::CPU_KV_BUDGET_BYTES`, computed by
+  `ModelProcessPool::record_cpu_kv_budget` as the typical-context charge plus the RAM
+  budget still uncommitted at admission), because only the daemon knows what else is
+  resident. **`ModelProcessPool::charges_ram` decides whether a spawn is charged against
+  RAM at all** — going to the CPU, OR no GPU detected, OR a build without CUDA. The
+  first alone missed every CPU-only node: with no GPU there is no VRAM budget,
+  `admit_to_gpu` admits everything, and the model landed in RAM uncharged and
+  un-budgeted. It changes charging, never placement — the worker still falls back
+  to the CPU on its own, so a working card whose probe failed is not sent to the CPU
+  by it (unreadable is unknown, not absent). Until 2026-08-21 the CPU had no guard, so `estimate_worker_ram_mb` priced
+  the WHOLE ceiling — correct for the mechanism that existed, and what turned a 2.3 GB
+  phi-3.5 into a "needs 27125 MB" refusal at a 32k override (external report; MHA,
+  0.75 MB/token). **Do not remove one side without the other**: admission at a typical
+  context with no runtime guard means swapping, which degrades every request on the
+  machine; a guard with ceiling-priced admission means refusing models that fit.
+  `a_cpu_refusal_itemises_weights_kv_and_context` pins that the same model is now
+  admitted and that the old ceiling figure is still what `resident_footprint` reports
+  when asked for it.
   Why it exists: `inference.max_seq_len_override` is the only way to hold an agentic
   client's system prompt (~5000 tokens of tool schema before the user speaks), and
   raising it used to raise this charge in step, so the model stopped fitting the card

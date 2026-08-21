@@ -740,6 +740,15 @@ async fn dispatch_scheduler_group(pool: &Arc<ModelProcessPool>, msgs: Vec<BatchS
 /// accept that this machine's GPU is too old. Downstream they were all just
 /// `--gpu-layers 0`, which is how a correct setting and an override came to look
 /// identical — see [`ModelProcessPool::cpu_reason`].
+/// Does a model being spawned count against the system-RAM budget (and get a
+/// KV budget handed to its worker)? Yes when it is being sent to the CPU, when
+/// no GPU was detected on this node, or when this build cannot drive one.
+/// Pure, so the truth table is pinned by `ram_is_charged_wherever_the_model_
+/// can_only_land_in_ram`.
+pub(crate) fn charges_ram(going_to_cpu: bool, gpu_detected: bool, build_has_cuda: bool) -> bool {
+    going_to_cpu || !gpu_detected || !build_has_cuda
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuReason {
     /// `inference.gpu_layers = 0` — the user asked for CPU.
@@ -825,6 +834,15 @@ pub struct ModelProcessPool {
     /// footprint from the moment it is admitted, long before it has loaded
     /// anything to measure.
     ram_reserved_mb: dashmap::DashMap<ModelId, u64>,
+    /// Whether this node detected a GPU at startup (`SharedState::gpu_info`).
+    /// Defaults to `true` so nothing changes for a pool nobody told; the daemon
+    /// sets it once. See `charges_ram`.
+    gpu_detected: std::sync::atomic::AtomicBool,
+    /// KV budget handed to each CPU worker at spawn (`--kv-budget-bytes`):
+    /// the model's typical-context KV charge plus the RAM budget still
+    /// uncommitted at admission. Set by `record_cpu_kv_budget`, cleared with
+    /// the reservation.
+    cpu_kv_budget_bytes: dashmap::DashMap<ModelId, u64>,
     /// Activity event sender for dashboard notifications.
     activity_tx:
         std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::daemon::state::ActivityEvent>>,
@@ -952,6 +970,8 @@ impl ModelProcessPool {
             cpu_threads: std::sync::atomic::AtomicUsize::new(0),
             vram_reserved_mb: dashmap::DashMap::new(),
             ram_budget_mb: std::sync::atomic::AtomicU64::new(0),
+            gpu_detected: std::sync::atomic::AtomicBool::new(true),
+            cpu_kv_budget_bytes: dashmap::DashMap::new(),
             ram_budget_note: std::sync::Mutex::new(String::new()),
             ram_reserved_mb: dashmap::DashMap::new(),
             activity_tx: std::sync::OnceLock::new(),
@@ -1267,6 +1287,7 @@ impl ModelProcessPool {
         model_id: &ModelId,
     ) -> Option<(
         crate::model::auto_manage::vram::ResidentFootprint,
+        u64,
         crate::model::auto_manage::vram::ContextSource,
     )> {
         use crate::model::auto_manage::vram::{cpu_footprint, ContextSource};
@@ -1280,7 +1301,7 @@ impl ModelProcessPool {
         } else {
             ContextSource::DeclaredOrDefault
         };
-        Some((cpu_footprint(&inputs), source))
+        Some((cpu_footprint(&inputs), inputs.effective_context, source))
     }
 
     /// Read a model's real geometry from its GGUF header and on-disk shards.
@@ -1600,6 +1621,16 @@ impl ModelProcessPool {
     }
 
     /// See `ram_budget_note`.
+    /// Tell the pool whether a GPU was detected on this node at all. A node
+    /// without one never takes the VRAM-refusal branch (there is no budget to
+    /// refuse against), so without this its models landed in system RAM with
+    /// nothing charged and no KV budget handed to the worker — every CPU-only
+    /// machine, which is exactly where swapping hurts most (2026-08-21).
+    pub fn set_gpu_detected(&self, detected: bool) {
+        self.gpu_detected
+            .store(detected, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn set_ram_budget_note(&self, note: String) {
         if let Ok(mut n) = self.ram_budget_note.lock() {
             *n = note;
@@ -1616,6 +1647,37 @@ impl ModelProcessPool {
     /// System RAM already committed to live CPU workers, in MB.
     fn ram_committed_mb(&self) -> u64 {
         self.ram_reserved_mb.iter().map(|e| *e.value()).sum()
+    }
+
+    /// After a CPU admission: how much KV this model's worker may hold — its
+    /// typical-context charge (already inside the reservation) plus whatever of
+    /// the RAM budget nothing else has claimed. Handed to the worker at spawn
+    /// so its runtime guard refuses a conversation that would outgrow the
+    /// room, with a 503 that re-routes, instead of swapping the machine.
+    /// No budget configured → no guard (the pre-2026-08-21 behaviour).
+    fn record_cpu_kv_budget(&self, model_id: &ModelId) {
+        let budget_mb = self
+            .ram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if budget_mb == 0 {
+            self.cpu_kv_budget_bytes.remove(model_id);
+            return;
+        }
+        let Some(inputs) = self.footprint_inputs(model_id) else {
+            self.cpu_kv_budget_bytes.remove(model_id);
+            return;
+        };
+        let typical_kv = crate::model::auto_manage::vram::cpu_footprint(&inputs).kv_bytes;
+        let headroom_mb = budget_mb.saturating_sub(self.ram_committed_mb());
+        let kv_budget = typical_kv.saturating_add(headroom_mb.saturating_mul(1024 * 1024));
+        tracing::info!(
+            model = %model_id,
+            kv_budget_mb = kv_budget / (1024 * 1024),
+            typical_kv_mb = typical_kv / (1024 * 1024),
+            headroom_mb,
+            "CPU worker KV budget: typical-context charge plus uncommitted RAM budget"
+        );
+        self.cpu_kv_budget_bytes.insert(model_id.clone(), kv_budget);
     }
 
     /// Decide whether `model_id` may be loaded into system RAM, and charge it
@@ -1716,6 +1778,7 @@ impl ModelProcessPool {
     /// Release a worker's RAM charge. Must pair with every `admit_to_cpu`.
     fn release_ram_charge(&self, model_id: &ModelId) {
         self.ram_reserved_mb.remove(model_id);
+        self.cpu_kv_budget_bytes.remove(model_id);
     }
 
     /// Models currently forced onto the CPU after a GPU OOM.
@@ -1896,7 +1959,25 @@ impl ModelProcessPool {
         // further device to demote to, so this refuses rather than degrades:
         // swapping would slow every other request on the machine, not just
         // this model, and nothing in the response would say so.
-        if going_to_cpu {
+        //
+        // `going_to_cpu` alone missed every CPU-only node: with no GPU there is
+        // no VRAM budget, `admit_to_gpu` admits everything, and the model lands
+        // in RAM uncharged. `charges_ram` adds "no GPU detected" and "this build
+        // has no CUDA"; placement is deliberately NOT changed by it — the worker
+        // falls back to the CPU on its own, so a working card whose probe failed
+        // is never sent to the CPU by this (unreadable is unknown, not absent).
+        let charge_ram = charges_ram(
+            going_to_cpu,
+            self.gpu_detected.load(std::sync::atomic::Ordering::Relaxed),
+            cfg!(feature = "candle-cuda"),
+        );
+        if charge_ram && !going_to_cpu {
+            tracing::debug!(
+                model = %model_id,
+                "No usable GPU on this node — charging the model against the RAM budget"
+            );
+        }
+        if charge_ram {
             let estimated = self.estimate_cpu_footprint_mb(model_id);
             // Refusing is the last resort: first reclaim memory from models
             // nothing is using, then ask again. Only then does the user see an
@@ -1939,10 +2020,11 @@ impl ModelProcessPool {
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let in_use = self.ram_committed_mb();
                 let message = match self.cpu_footprint_detail(model_id) {
-                    Some((footprint, source)) => {
+                    Some((footprint, effective_context, source)) => {
                         crate::model::auto_manage::vram::describe_cpu_refusal(
                             &model_id.0,
                             &footprint,
+                            effective_context,
                             source,
                             budget,
                             &self.ram_budget_note(),
@@ -1958,6 +2040,7 @@ impl ModelProcessPool {
                 };
                 return Err(SwarmError::ServiceUnavailable(message));
             }
+            self.record_cpu_kv_budget(model_id);
         }
 
         match self.spawn_worker(model_id).await {
@@ -2231,6 +2314,10 @@ impl ModelProcessPool {
         // executor, so a CUDA build ignored the setting entirely.
         args.push("--gpu-layers".to_string());
         args.push(self.effective_gpu_layers(model_id).to_string());
+        if let Some(b) = self.cpu_kv_budget_bytes.get(model_id) {
+            args.push("--kv-budget-bytes".to_string());
+            args.push(b.value().to_string());
+        }
 
         // If a shard window is set for this model, pass it to the worker
         if let Some(window) = self.active_shard_windows.get(model_id) {
@@ -3301,6 +3388,19 @@ mod tests {
 
     fn test_pool() -> ModelProcessPool {
         ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-test-pool"))
+    }
+
+    #[test]
+    fn ram_is_charged_wherever_the_model_can_only_land_in_ram() {
+        // Sent to the CPU explicitly or by VRAM refusal: charged.
+        assert!(charges_ram(true, true, true));
+        // GPU present and usable, model going to it: not charged.
+        assert!(!charges_ram(false, true, true));
+        // No GPU detected: charged — this is every CPU-only node, which used
+        // to skip RAM admission entirely (2026-08-21).
+        assert!(charges_ram(false, false, true));
+        // A build without CUDA cannot put the model anywhere else.
+        assert!(charges_ram(false, true, false));
     }
 
     #[test]

@@ -222,21 +222,21 @@ the newest; (3) on a forward timeout, retry once on a different connection
 before failing over to another holder. `max_connections_per_peer = 1` is not
 an option (gotcha #163: it disables DCUtR).
 
-### CPU admission prices the whole context; a runtime KV guard would admit more (2026-08-21)
+### Manual shard download ignores private mode when picking a peer (2026-08-21)
 
-`estimate_worker_ram_mb` charges the full effective context of f32 KV cache at
-admission because a CPU worker has no runtime check that would catch growth
-past a smaller charge (the GPU path has `kv_budget::claim_exceeds_headroom`,
-which is why `GPU_ADMISSION_KV_CONTEXT` may under-charge). That is the right
-rule for the mechanism that exists, and it is what turned a 2.3 GB phi-3.5
-into a 27 GB refusal at a 32k override (external report 2026-08-21; MHA, 0.75
-MB/token). The better design is the GPU one on the CPU too: record a
-`kv_budget_bytes` for CPU workers (RAM budget minus weights and overhead),
-have `forward_inner_impl`'s headroom check refuse with a 503 that re-routes
-when a request's claim would exceed it, and then admit at a typical context
-instead of the ceiling. The lazily-growing cache already makes the memory
-usage match the conversation, not the ceiling; only the admission does not.
-Until then the message says what it counted.
+`api/admin_models/shards.rs::download_shard` ("Download this part" in the
+dashboard) builds its holder list from `shard_holders` and hands it to
+`select_best_peer` unfiltered. With `pool.private_mode = true` and
+`private_mode_allow_lan = false` on an isolated test node it chose a public
+peer (observed 2026-08-21 while validating the removal tombstones). Auto-manage's
+scorer already filters holders through `pool::scope::filter_allowed_holders`
+(`allowed_node_set`), so the two disagree about what private mode promises —
+and the config's own doc says "restrict all inference and shard management to
+pool members only". Model weights are public, so no private data leaves the
+pool, but the node does reveal its interest in a model to a stranger. Fix is a
+one-liner at that site (filter the holders the same way the scorer does, falling
+through to the HF path when none remain); left out of the .111 release to keep
+it to the reported causes.
 
 ### Whole-model holders that cannot load the model are still chosen (2026-08-21)
 

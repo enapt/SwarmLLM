@@ -25,6 +25,13 @@ pub struct ModelMgmt {
     pub model_trust: DashMap<crate::types::ModelId, crate::types::ModelTrustInfo>,
     pub loading_models: DashMap<crate::types::ModelId, Arc<tokio::sync::Notify>>,
     pub locked_shards: DashMap<crate::types::ShardId, bool>,
+    /// Shards the operator removed by hand (dashboard / API delete), persisted
+    /// in the `removed_shards` DB tree. Auto-manage must not bring one of these
+    /// back on its own — see `SharedState::shard_removed_by_user` and the
+    /// scorer skip in `model/auto_manage/scoring.rs`. Cleared by an explicit
+    /// request for the shard again (HF shard download, single-shard download,
+    /// a pool pin to this device).
+    pub removed_by_user: DashMap<crate::types::ShardId, bool>,
     /// Shards where P2P download has exhausted all peer attempts in this session.
     /// Signals auto_manage to force the HF path even when peer holders are registered.
     /// Cleared when a download for the shard successfully completes.
@@ -481,6 +488,7 @@ mod tests {
             model_trust: DashMap::new(),
             loading_models: DashMap::new(),
             locked_shards: DashMap::new(),
+            removed_by_user: DashMap::new(),
             shard_p2p_failed: dashmap::DashSet::new(),
             shard_download_backoff: DashMap::new(),
             model_request_counts: DashMap::new(),

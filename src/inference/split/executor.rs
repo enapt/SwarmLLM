@@ -417,12 +417,13 @@ impl SplitModel {
                         claiming_positions = claiming,
                         in_use_mb = in_use / (1024 * 1024),
                         budget_mb = budget / (1024 * 1024),
-                        "DIAG: refusing to grow the KV cache past the GPU budget"
+                        "DIAG: refusing to grow the KV cache past this worker's budget"
                     );
                     return Err(SwarmError::ServiceUnavailable(format!(
-                        "Not enough free GPU memory to continue this conversation \
+                        "Not enough free memory on this node to continue this conversation \
                          ({} MB of KV cache already in use, budget {} MB). Shorter \
-                         conversations still work; close other GPU programs to raise this.",
+                         conversations still work; free memory on this node (close other \
+                         programs, or raise its memory budget) to raise this.",
                         in_use / (1024 * 1024),
                         budget / (1024 * 1024),
                     )));

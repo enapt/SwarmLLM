@@ -1198,6 +1198,8 @@
   "shard.remove_error": "제거 실패: {error}",
   "shard.remove_failed": "샤드 제거 실패",
   "shard.removed": "샤드 {idx} 제거됨",
+  "shard.removed_by_user": "제거됨",
+  "shard.removed_by_user_tip": "이 부분을 이 기기에서 제거했습니다. SwarmLLM은 스스로 다시 다운로드하지 않습니다. 되돌리려면 '다운로드'를 사용하세요.",
   "shard.route.ask": "질문",
   "shard.route.reply": "응답",
   "shard.row.action_delete": "디스크에서 삭제",

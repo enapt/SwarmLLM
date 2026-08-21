@@ -93,6 +93,9 @@ pub struct WorkerOptions {
     /// Cap GGUF `context_length` when allocating KV cache. None = use the GGUF
     /// metadata value.
     pub max_seq_len_override: Option<usize>,
+    /// See `inference::split::CPU_KV_BUDGET_BYTES`: the KV-cache budget a CPU
+    /// worker enforces at run time. None = no guard.
+    pub kv_budget_bytes: Option<u64>,
     /// Quantize intermediate-segment hidden state activations to Q8_0 before
     /// returning them to the daemon. Off by default; receivers always
     /// auto-dispatch on the dtype tag.
@@ -123,6 +126,7 @@ impl Default for WorkerOptions {
         Self {
             force_standard_attn: false,
             max_seq_len_override: None,
+            kv_budget_bytes: None,
             activation_compression: false,
             batch_generate: false,
             batch_generate_max_slots: 8,
@@ -158,6 +162,7 @@ pub async fn run_worker(
     let WorkerOptions {
         force_standard_attn,
         max_seq_len_override,
+        kv_budget_bytes,
         activation_compression,
         batch_generate,
         batch_generate_max_slots,
@@ -250,6 +255,10 @@ pub async fn run_worker(
     if let Some(cap) = max_seq_len_override {
         crate::inference::split::MAX_SEQ_LEN_OVERRIDE
             .store(cap, std::sync::atomic::Ordering::Relaxed);
+    }
+    // KV budget for a CPU worker: same lifetime and scope as the override.
+    if let Some(b) = kv_budget_bytes {
+        crate::inference::split::CPU_KV_BUDGET_BYTES.store(b, std::sync::atomic::Ordering::Relaxed);
     }
 
     if let Some(ref w) = shard_window {

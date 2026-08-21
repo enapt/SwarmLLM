@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Usuwanie nie powiodło się: {error}",
   "shard.remove_failed": "Nie udało się usunąć sharda",
   "shard.removed": "Shard {idx} usunięty",
+  "shard.removed_by_user": "Usunięto",
+  "shard.removed_by_user_tip": "Usunąłeś tę część z tego urządzenia. SwarmLLM nie pobierze jej ponownie samodzielnie — użyj „Pobierz”, aby ją przywrócić.",
   "shard.route.ask": "pytanie",
   "shard.route.reply": "odpowiedź",
   "shard.row.action_delete": "Usuń z dysku",

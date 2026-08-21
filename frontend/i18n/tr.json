@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Kaldırma başarısız: {error}",
   "shard.remove_failed": "Parça kaldırılamadı",
   "shard.removed": "{idx}. parça kaldırıldı",
+  "shard.removed_by_user": "Kaldırıldı",
+  "shard.removed_by_user_tip": "Bu parçayı bu cihazdan kaldırdınız. SwarmLLM onu kendi başına yeniden indirmez — geri almak için İndir'i kullanın.",
   "shard.route.ask": "soru",
   "shard.route.reply": "yanıt",
   "shard.row.action_delete": "Diskten sil",

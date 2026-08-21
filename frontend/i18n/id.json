@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Penghapusan gagal: {error}",
   "shard.remove_failed": "Gagal menghapus shard",
   "shard.removed": "Shard {idx} dihapus",
+  "shard.removed_by_user": "Dihapus",
+  "shard.removed_by_user_tip": "Anda menghapus bagian ini dari perangkat ini. SwarmLLM tidak akan mengunduhnya lagi dengan sendirinya — gunakan Unduh untuk mengembalikannya.",
   "shard.route.ask": "tanya",
   "shard.route.reply": "jawab",
   "shard.row.action_delete": "Hapus dari disk",

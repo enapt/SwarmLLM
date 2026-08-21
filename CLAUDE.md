@@ -157,7 +157,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - 3 modal overlays (setup, settings, R127 `#welcome-modal` first-run tour) + 11 `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
 - All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`)
 - Dark/light/system theme toggle, CSS custom properties for theming
-- i18n: 1316 translation keys (1318 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key; parity + these counts are asserted by `tests/repo_consistency.rs` (update the count in BOTH CLAUDE.md and `docs/ARCHITECTURE.md` when adding keys). Every locale carries idiomatic native strings, not English fallback — a new key MUST be translated across all 21 locales (see `.claude/rules/i18n.md`). Per-batch history in `memory/`.
+- i18n: 1318 translation keys (1320 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key; parity + these counts are asserted by `tests/repo_consistency.rs` (update the count in BOTH CLAUDE.md and `docs/ARCHITECTURE.md` when adding keys). Every locale carries idiomatic native strings, not English fallback — a new key MUST be translated across all 21 locales (see `.claude/rules/i18n.md`). Per-batch history in `memory/`.
 - Frontend payload: **~1065 KB** (html 130 + css 247 + js 687), plus **one** locale at a time (~83 KB en; Thai is the largest at 150 KB) and **88 KB of bundled fonts** (`frontend/fonts/`, IBM Plex Latin subsets — NOT counted by the payload test, which sums `js|css|html` only) — the other 20 locales are never fetched. Measured byte-accurate and capped by `frontend_payload_stays_within_budget` in `tests/repo_consistency.rs`; the long-standing "< 200KB target" in this file was 5.6x out and nothing checked it. The cap is a regression budget, not a goal: it fails on a step change, not on ordinary growth.
 - Communication: WebSocket for real-time, REST for initial load, SSE for chat streaming
 - WebSocket message types (only 5): `activity_event` (unified event bus — all subsystem events, toasts, prune history), `stats_update` (2s interval — stats, shard registry, acquisitions, **swarm_capacity** (R110), **wishlist** (R111)), `peer_list` (full peer snapshot on change), `models_changed` (shard download/load/prune signals dashboard refresh), `update_available` (new version detected)
@@ -219,9 +219,9 @@ All 20 build phases complete. All subsystems wired — no stubs. **1967 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.104 → .110-alpha (2026-08-19 → 21): the swarm learned to see its own load, replies stopped lying about being whole, split models chain by default, and LAN neighbours stopped meeting in Europe
+### Latest — v0.3.104 → .111-alpha (2026-08-19 → 21): the swarm learned to see its own load, replies stopped lying about being whole, split models chain by default, LAN neighbours stopped meeting in Europe, and a deleted shard stays deleted
 
-Seven releases in three days, each verified on the DOWNLOADED artifact (sha256,
+Eight releases in three days, each verified on the DOWNLOADED artifact (sha256,
 25 assets, not a draft, `examples/smoke_test.sh` 8/8). **.109 turns direct peer
 chaining ON by default** after it was validated end to end on two machines the
 same day (see the .107 bullet; five more silent defects fell out of running it,
@@ -240,6 +240,21 @@ only**: Rust 1.98 reached the runners and added two lints (`chunks_exact_to_as_c
 that; its binaries are sound, the failing checks do not run during a build.
 Detail: `memory/round_log_0818_*.md`, `MEMORY.md` 08-20/21 lines, and the CHANGELOG.
 
+- **.111** (08-21 evening) — **the Belgium report's two causes fixed, not explained.**
+  A shard the user deletes is now a tombstone (`removed_by_user`, persisted,
+  `daemon/state/removed_shards.rs`): the scorer skips it unless a configured
+  `shard_range` or a pin to this node claims it, the shard list shows "Removed",
+  and an explicit request (HF shard download, single-shard download, pool pin)
+  clears it — auto-manage had re-completed a deliberate two-machine split within
+  the hour (#360). **CPU workers get the GPU's KV runtime guard** (`--kv-budget-bytes`
+  → `CPU_KV_BUDGET_BYTES`, handed by the daemon at spawn = typical-context charge +
+  uncommitted RAM budget) so admission charges `ADMISSION_KV_CONTEXT` on BOTH
+  devices: phi-3.5 at a 32k override went from "needs 27125 MB" to 5621 MB and
+  loads (#359). **Found while validating: a node with NO GPU never ran RAM
+  admission at all** (`going_to_cpu` only fired after a VRAM refusal) →
+  `ModelProcessPool::charges_ram`, charging only, never placement. Control on the
+  released .110 binary reproduced the report exactly; the new binary itemised,
+  loaded, and the worker logged "conversations up to about 4496 tokens fit".
 - **.104** — a healthy WSL node told its owner to fix a firewall blocking nothing
   (#335): the inbound-reachability evidence lived in memory, so every restart
   re-decided a question about the MACHINE from a 10-minute window — and a reachable
@@ -275,7 +290,7 @@ Detail: `memory/round_log_0818_*.md`, `MEMORY.md` 08-20/21 lines, and the CHANGE
   serving the attempt. `3node_sharded_setup.sh` had no `gossip_network_id`, so it
   silently measured the live node next door — every earlier result from it is suspect.
 
-**Gotchas from this round: #335-#351.** Most load-bearing: **#341** (ask what a
+**Gotchas from this round: #335-#361.** Most load-bearing: **#341** (ask what a
 map HOLDS, not what its name implies — its doc comment had warned for weeks),
 **#348** (aggregate throughput ÷ wall clock is biased by completion length; the
 erratic arm was the TREATMENT), **#350** (making a message reliable made a

@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Verwijderen mislukt: {error}",
   "shard.remove_failed": "Shard verwijderen mislukt",
   "shard.removed": "Shard {idx} verwijderd",
+  "shard.removed_by_user": "Verwijderd",
+  "shard.removed_by_user_tip": "Je hebt dit deel van dit apparaat verwijderd. SwarmLLM downloadt het niet uit zichzelf opnieuw — gebruik Downloaden om het terug te halen.",
   "shard.route.ask": "vraag",
   "shard.route.reply": "antwoord",
   "shard.row.action_delete": "Verwijderen van schijf",

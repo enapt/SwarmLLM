@@ -444,33 +444,48 @@ impl AutoShardManager {
 
                 // Shard pinning bonus: if this shard is pinned to us, massive bonus.
                 // If pinned to another node, score 0 (skip it).
-                let pin_bonus = {
-                    let pins_for_model: Vec<_> = shard_pins
-                        .iter()
-                        .filter(|p| p.model_id == manifest.id.0)
-                        .collect();
-                    if pins_for_model.is_empty() {
-                        1.0 // No pins for this model
-                    } else {
-                        let pinned_to_us = pins_for_model
-                            .iter()
-                            .any(|p| p.matches(&manifest.id.0, local_node_id, shard.index));
-                        let pinned_to_other = pins_for_model.iter().any(|p| {
-                            p.target_node_id != *local_node_id
-                                && p.matches_shard(&manifest.id.0, shard.index)
-                        });
-                        if pinned_to_us {
-                            1000.0 // Massive bonus — download this shard
-                        } else if pinned_to_other {
-                            0.0 // Pinned elsewhere — don't download
-                        } else {
-                            1.0 // Not pinned
-                        }
-                    }
+                let pins_for_model: Vec<_> = shard_pins
+                    .iter()
+                    .filter(|p| p.model_id == manifest.id.0)
+                    .collect();
+                let pinned_to_us = pins_for_model
+                    .iter()
+                    .any(|p| p.matches(&manifest.id.0, local_node_id, shard.index));
+                let pinned_to_other = pins_for_model.iter().any(|p| {
+                    p.target_node_id != *local_node_id
+                        && p.matches_shard(&manifest.id.0, shard.index)
+                });
+                let pin_bonus = if pins_for_model.is_empty() {
+                    1.0 // No pins for this model
+                } else if pinned_to_us {
+                    1000.0 // Massive bonus — download this shard
+                } else if pinned_to_other {
+                    0.0 // Pinned elsewhere — don't download
+                } else {
+                    1.0 // Not pinned
                 };
 
                 if pin_bonus == 0.0 {
                     continue; // Skip shards pinned to other nodes
+                }
+
+                // The operator deleted this shard from this node by hand. That
+                // is an instruction, not a gap to fill: re-downloading it erased
+                // a deliberate two-machine split with no message (external
+                // report, 2026-08-21). Only an equally explicit instruction
+                // outranks it — a configured `shard_range` that claims it, or
+                // a pool pin naming this device. Forgotten when the user asks
+                // for the shard again (`clear_shard_removed_by_user`).
+                if !in_configured_range
+                    && !pinned_to_us
+                    && self.shared_state.shard_removed_by_user(&shard_id)
+                {
+                    tracing::debug!(
+                        model = %manifest.id,
+                        shard = shard.index,
+                        "Skipping shard — removed by the user; not re-acquiring on our own"
+                    );
+                    continue;
                 }
 
                 // Node-specific jitter (0.0-0.1) so nodes with identical views
@@ -773,5 +788,91 @@ impl AutoShardManager {
 
         let global_target = (global_floor as f64 * demand_factor).ceil() as u32;
         global_target.clamp(min_replicas, (pool_size as u32).max(min_replicas))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{
+        make_test_manager, make_test_manager_with_config, register_manifest_with_shards,
+    };
+    use crate::config::Config;
+    use crate::types::{NodeId, ShardId};
+
+    /// Local holds shard 0 of a two-shard model, a connected peer holds shard 1:
+    /// the gap-filling rule makes shard 1 a candidate. That is exactly the
+    /// path that re-downloaded what a user had deleted to split a model across
+    /// two machines (external report, 2026-08-21).
+    fn split_model(
+        state: &std::sync::Arc<crate::daemon::SharedState>,
+    ) -> (NodeId, ShardId, ShardId) {
+        // No per-model cap: the test is about the removal, not the cap.
+        state
+            .models
+            .auto_manage_default_model_cap
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let mid = register_manifest_with_shards(state, "split-model", 16, &[(0, 8), (8, 16)]);
+        let local = state.identity.node_id().clone();
+        let peer = NodeId([7u8; 32]);
+        let s0 = ShardId {
+            model_id: mid.clone(),
+            index: 0,
+        };
+        let s1 = ShardId {
+            model_id: mid,
+            index: 1,
+        };
+        state
+            .model_registry
+            .record_shard_holder(s0.clone(), local.clone());
+        state
+            .model_registry
+            .record_shard_holder(s1.clone(), peer.clone());
+        // Gotcha #86: connected_node_ids is the liveness oracle.
+        state.connected_node_ids.insert(peer);
+        (local, s0, s1)
+    }
+
+    #[test]
+    fn a_shard_the_user_removed_is_not_re_acquired_until_asked_for_again() {
+        let (state, manager) = make_test_manager();
+        let (local, _s0, s1) = split_model(&state);
+
+        let wants_s1 = |m: &super::AutoShardManager| {
+            m.gather_candidates(&local, 0)
+                .iter()
+                .any(|c| c.model_id == s1.model_id && c.shard_index == 1)
+        };
+        assert!(
+            wants_s1(&manager),
+            "control: gap-filling offers the missing shard before any removal"
+        );
+
+        state.mark_shard_removed_by_user(&s1);
+        assert!(
+            !wants_s1(&manager),
+            "a removal the user performed is an instruction, not a gap to fill"
+        );
+
+        // Asking for it again (HF shard download / single-shard download /
+        // a pin to this device all call this) restores the old behaviour.
+        assert!(state.clear_shard_removed_by_user(&s1));
+        assert!(wants_s1(&manager));
+    }
+
+    #[test]
+    fn a_configured_shard_range_outranks_a_removal() {
+        let mut config = Config::default();
+        config.inference.shard_range = Some((0, 1));
+        let (state, manager) = make_test_manager_with_config(config);
+        let (local, _s0, s1) = split_model(&state);
+        state.mark_shard_removed_by_user(&s1);
+        assert!(
+            manager
+                .gather_candidates(&local, 0)
+                .iter()
+                .any(|c| c.model_id == s1.model_id && c.shard_index == 1),
+            "the config explicitly claims this shard, which is itself an instruction"
+        );
     }
 }

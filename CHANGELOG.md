@@ -4,17 +4,41 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-**A "not enough memory" refusal now says what it counted.** A node declining to
-load a model used to report one number — "needs about 27125 MB" for a file that
-is 2.3 GB on disk read as a tenfold mistake. It was not: that figure was 2.3 GB
-of weights plus 24.6 GB of attention cache for the 32 768-token context the
-node had been configured to allow (`inference.max_seq_len_override`), on a
-model with no grouped-query attention. The refusal now itemises weights, cache
-(with the token count and where it came from), and the rest — and the budget
-it is checked against says how it was derived: `resources.max_ram_mb`, limited
-to 70% of the memory that was free when the node started, so that loading a
-model cannot push the machine into swap. Both numbers were right; neither was
-explained.
+**A model you delete from one machine stays deleted.** Splitting a model across
+two computers by removing some of its pieces from one of them used to be undone
+within the hour: auto-manage saw a model with pieces missing and completed it,
+because completing partial models is what it is for. The split was erased with
+no message (external report, 2026-08-21). A removal you perform is now an
+instruction, remembered across restarts and honoured by auto-manage; the piece
+shows as "Removed" in the model's shard list, and asking for it again —
+downloading the model's shards, downloading that one piece, or pinning the
+model to this device from a pool — cancels the removal. A configured
+`inference.shard_range` and a pool pin to this device still outrank it.
+
+**Raising the context no longer stops a model fitting on a CPU node.** A 2.3 GB
+phi-3.5 was refused at "needs about 27125 MB" on a node that allowed 32 768
+tokens of context, because a CPU node priced the attention cache for the whole
+ceiling at load — the only safe thing to do while nothing bounded that cache
+once the model was running. CPU workers now get the same guard GPU workers have
+had since v0.3.88: the node hands each worker a memory budget when it starts
+it, the worker refuses a conversation that would outgrow the budget with an
+error that re-routes the request to another machine, and loading therefore
+charges a typical 4096-token conversation instead of the ceiling. The same
+model on the same node now loads; a very long conversation grows into whatever
+memory is free and is refused, not swapped, when it runs out. The log says how
+many tokens fit when the model loads. Found while verifying this: a machine
+with **no** graphics card at all never ran the memory check in the first place
+(there was no graphics budget to be refused against, so its models landed in
+system memory uncounted) — it does now, and gets the same guard.
+
+**A "not enough memory" refusal now says what it counted.** When a node does
+still decline a model, it itemises weights, attention cache (with the token
+count it was admitted at, the model's full context, and where that came from),
+and the rest — and the budget it is checked against says how it was derived:
+`resources.max_ram_mb`, limited to 70% of the memory that was free when the
+node started, so that loading a model cannot push the machine into swap. The
+old one-number message was right and unexplained; "27125 MB" for a 2.3 GB file
+read as a tenfold mistake.
 
 
 ## [0.3.110-alpha] — 2026-08-21

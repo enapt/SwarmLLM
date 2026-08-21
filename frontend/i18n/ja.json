@@ -1198,6 +1198,8 @@
   "shard.remove_error": "削除に失敗しました：{error}",
   "shard.remove_failed": "シャードの削除に失敗しました",
   "shard.removed": "シャード{idx}を削除しました",
+  "shard.removed_by_user": "削除済み",
+  "shard.removed_by_user_tip": "この部分はこのデバイスから削除されました。SwarmLLM が勝手に再ダウンロードすることはありません。戻すには「ダウンロード」を使ってください。",
   "shard.route.ask": "質問",
   "shard.route.reply": "応答",
   "shard.row.action_delete": "ディスクから削除",

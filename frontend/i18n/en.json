@@ -1198,6 +1198,8 @@
   "shard.remove_error": "Remove failed: {error}",
   "shard.remove_failed": "Failed to remove shard",
   "shard.removed": "Shard {idx} removed",
+  "shard.removed_by_user": "Removed",
+  "shard.removed_by_user_tip": "You removed this piece from this device. SwarmLLM won't download it again on its own — use Download to bring it back.",
   "shard.route.ask": "ask",
   "shard.route.reply": "reply",
   "shard.row.action_delete": "Delete from disk",

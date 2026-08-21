@@ -95,6 +95,18 @@ pub async fn delete_model(
         .filter(|s| s.model_id == mid)
         .collect();
 
+    // The user removed the whole model: remember EVERY shard of it (not just
+    // the ones that were local), so auto-manage does not quietly re-acquire
+    // any of it when the manifest arrives again by gossip.
+    if let Some(manifest) = shared.model_registry.get_manifest(&mid) {
+        for s in &manifest.shards {
+            shared.mark_shard_removed_by_user(&crate::types::ShardId {
+                model_id: mid.clone(),
+                index: s.index,
+            });
+        }
+    }
+
     // Remove from SharedState registries
     shared.model_registry.remove_manifest(&mid);
     shared.model_registry.remove_all_model_shards(&mid);

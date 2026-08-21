@@ -5209,6 +5209,13 @@ textarea.pool-code-input { min-height: 4.5em; }
   line-height: 1.4;
 }
 .shard-row-endpoint-row { border-left-width: 3px; }
+/* "Removed" — the user deleted this piece here and auto-manage is leaving it
+   alone. Muted, not alarming: it is the state they asked for. */
+.shard-row-endpoint[data-kind="removed"] {
+  background: rgba(148,163,184,0.14);
+  color: rgba(148,163,184,0.95);
+  border-color: rgba(148,163,184,0.35);
+}
 
 /* Pipeline-pinned endpoint rows: saturated green tint across the whole row,
    matching the PRIVACY panel's pipeline-active state. */
