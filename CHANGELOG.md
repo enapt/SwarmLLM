@@ -4,6 +4,19 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A "not enough memory" refusal now says what it counted.** A node declining to
+load a model used to report one number — "needs about 27125 MB" for a file that
+is 2.3 GB on disk read as a tenfold mistake. It was not: that figure was 2.3 GB
+of weights plus 24.6 GB of attention cache for the 32 768-token context the
+node had been configured to allow (`inference.max_seq_len_override`), on a
+model with no grouped-query attention. The refusal now itemises weights, cache
+(with the token count and where it came from), and the rest — and the budget
+it is checked against says how it was derived: `resources.max_ram_mb`, limited
+to 70% of the memory that was free when the node started, so that loading a
+model cannot push the machine into swap. Both numbers were right; neither was
+explained.
+
+
 ## [0.3.110-alpha] — 2026-08-21
 
 **Machines on the same network stopped talking to each other through a relay on

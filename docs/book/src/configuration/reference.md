@@ -104,7 +104,7 @@ booted with.
 | `privacy_mode` | boolean | `false` | Never write user prompts to disk — KV-cache sessions stay in memory only |
 | `parallax_routing` | boolean | `true` | Use Parallax shortest-path DP for segment assignment; falls back to greedy on any failure |
 | `persistent_pipeline_stream` | boolean | `false` | One long-lived libp2p stream per pipeline session instead of per-token request/response |
-| `max_seq_len_override` | integer | none | Cap the GGUF `context_length` when sizing the KV cache, so long-context models fit small VRAM. Unset = use the GGUF value |
+| `max_seq_len_override` | integer | none | Cap the GGUF `context_length` when sizing the KV cache, so long-context models fit small VRAM. Unset = use the GGUF value On a CPU node the WHOLE effective context is priced into RAM admission as f32 KV cache (nothing bounds a CPU worker's cache at runtime): a model without grouped-query attention such as phi-3.5-mini costs 0.75 MB per token — 24 GB at 32 768 tokens, 6 GB at the 8192 default — so raising this can make a model stop fitting on a CPU node; the refusal message itemises it. |
 | `draft_gpu_layers` | integer | none | Device placement for the draft model. Unset = inherit `gpu_layers` |
 | `force_standard_attn` | boolean | `false` | Route every attention call through `standard_attention` instead of the fused kernel. Diagnostic; auto-enabled while SWIFT is on |
 | `shard_range` | tuple | none | Advanced/dev: claim only this shard index range for split inference. Normal nodes auto-detect their local shards |

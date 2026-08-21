@@ -815,6 +815,10 @@ pub struct ModelProcessPool {
     /// weight lands in system RAM. With no ceiling there, the fallback that
     /// keeps a node answering is also what drives a small machine into swap.
     ram_budget_mb: std::sync::atomic::AtomicU64,
+    /// How `ram_budget_mb` was arrived at, in one sentence, for the refusal
+    /// message — the number alone surprised a user whose `max_ram_mb` was
+    /// larger (external report, 2026-08-21).
+    ram_budget_note: std::sync::Mutex<String>,
     /// System RAM charged to each live CPU worker, in MB. Same
     /// charge-at-admission / credit-on-unload discipline as
     /// `vram_reserved_mb`, and for the same reason: a worker owes its
@@ -948,6 +952,7 @@ impl ModelProcessPool {
             cpu_threads: std::sync::atomic::AtomicUsize::new(0),
             vram_reserved_mb: dashmap::DashMap::new(),
             ram_budget_mb: std::sync::atomic::AtomicU64::new(0),
+            ram_budget_note: std::sync::Mutex::new(String::new()),
             ram_reserved_mb: dashmap::DashMap::new(),
             activity_tx: std::sync::OnceLock::new(),
             kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(DEFAULT_KV_CACHE_TTL_SECS),
@@ -1253,6 +1258,29 @@ impl ModelProcessPool {
         self.footprint_inputs(model_id)
             .map(|i| estimate_worker_ram_mb(&i))
             .unwrap_or(0)
+    }
+
+    /// The itemised CPU estimate and where its context came from — what the
+    /// refusal message is built from.
+    fn cpu_footprint_detail(
+        &self,
+        model_id: &ModelId,
+    ) -> Option<(
+        crate::model::auto_manage::vram::ResidentFootprint,
+        crate::model::auto_manage::vram::ContextSource,
+    )> {
+        use crate::model::auto_manage::vram::{cpu_footprint, ContextSource};
+        let inputs = self.footprint_inputs(model_id)?;
+        let source = if self
+            .max_seq_len_override
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+        {
+            ContextSource::Override
+        } else {
+            ContextSource::DeclaredOrDefault
+        };
+        Some((cpu_footprint(&inputs), source))
     }
 
     /// Read a model's real geometry from its GGUF header and on-disk shards.
@@ -1569,6 +1597,20 @@ impl ModelProcessPool {
     pub fn set_ram_budget_mb(&self, budget_mb: u64) {
         self.ram_budget_mb
             .store(budget_mb, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// See `ram_budget_note`.
+    pub fn set_ram_budget_note(&self, note: String) {
+        if let Ok(mut n) = self.ram_budget_note.lock() {
+            *n = note;
+        }
+    }
+
+    fn ram_budget_note(&self) -> String {
+        self.ram_budget_note
+            .lock()
+            .map(|n| n.clone())
+            .unwrap_or_default()
     }
 
     /// System RAM already committed to live CPU workers, in MB.
@@ -1892,16 +1934,29 @@ impl ModelProcessPool {
                         .with_toast("warning", 8000),
                     );
                 }
-                return Err(SwarmError::ServiceUnavailable(format!(
-                    "{} needs about {} MB of memory but this node's budget allows {} MB \
-                     and {} MB is already in use. Raise `resources.max_ram_mb`, or free \
-                     memory by unloading another model.",
-                    model_id.0,
-                    estimated,
-                    self.ram_budget_mb
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    self.ram_committed_mb(),
-                )));
+                let budget = self
+                    .ram_budget_mb
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let in_use = self.ram_committed_mb();
+                let message = match self.cpu_footprint_detail(model_id) {
+                    Some((footprint, source)) => {
+                        crate::model::auto_manage::vram::describe_cpu_refusal(
+                            &model_id.0,
+                            &footprint,
+                            source,
+                            budget,
+                            &self.ram_budget_note(),
+                            in_use,
+                        )
+                    }
+                    None => format!(
+                        "{} needs about {} MB of memory but this node's budget allows {} MB \
+                         and {} MB is already in use. Raise `resources.max_ram_mb`, or free \
+                         memory by unloading another model.",
+                        model_id.0, estimated, budget, in_use,
+                    ),
+                };
+                return Err(SwarmError::ServiceUnavailable(message));
             }
         }
 

@@ -1048,8 +1048,9 @@ impl SharedState {
         // the shipped config as "0 = auto (50% of system RAM)" since before any
         // code read it — the setting was inert, so a user capping RAM to protect
         // a small machine got nothing, silently.
-        if let Some(budget) = crate::model::auto_manage::vram::compute_ram_budget(&state) {
+        if let Some((budget, note)) = crate::model::auto_manage::vram::compute_ram_budget(&state) {
             state.model_process_pool.set_ram_budget_mb(budget);
+            state.model_process_pool.set_ram_budget_note(note);
         }
         state
             .model_process_pool

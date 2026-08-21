@@ -192,13 +192,46 @@ fn estimate_model_resident_bytes(
     rows_on_demand: bool,
     kv_admission_context: u64,
 ) -> u64 {
+    resident_footprint(i, rows_on_demand, kv_admission_context).total_bytes()
+}
+
+/// The terms a worker's resident memory is made of, kept apart so a refusal
+/// can SAY what it is refusing. A user reading "phi-3.5 needs about 27125 MB"
+/// for a 2.3 GB file called it a 10x estimate; it was 2.3 GB of weights plus
+/// 24.6 GB of f32 KV cache for the 32768-token context they had configured —
+/// correct, and invisible (external report, 2026-08-21). `kv_context` is the
+/// token count the KV term was priced at, for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentFootprint {
+    pub weights_bytes: u64,
+    pub embedding_bytes: u64,
+    pub kv_bytes: u64,
+    pub rope_bytes: u64,
+    pub kv_context: u64,
+}
+
+impl ResidentFootprint {
+    pub fn total_bytes(&self) -> u64 {
+        self.weights_bytes
+            .saturating_add(self.embedding_bytes)
+            .saturating_add(self.kv_bytes)
+            .saturating_add(self.rope_bytes)
+    }
+}
+
+/// Per-term estimate; see [`estimate_model_resident_bytes`] for the rules.
+fn resident_footprint(
+    i: &VramFootprintInputs,
+    rows_on_demand: bool,
+    kv_admission_context: u64,
+) -> ResidentFootprint {
     const F32: u64 = 4;
     // Weights. A quantized checkpoint stays quantized on the device, so its
     // on-disk size is what it costs. An UNQUANTIZED one does not: candle's
     // `QMatMul::from_arc` dequantizes F16 / BF16 / F32 to a dense f32 tensor
     // eagerly, so an F16 file costs twice its bytes. See
     // `unquantized_bytes_per_element`.
-    let mut bytes = match i.unquantized_bytes_per_element {
+    let weights_bytes = match i.unquantized_bytes_per_element {
         Some(bpe) if bpe > 0 && bpe < F32 => i
             .quantized_weight_bytes
             .saturating_mul(F32)
@@ -219,13 +252,13 @@ fn estimate_model_resident_bytes(
     // (token_embd lives in shard 0, whose file size is summed above) — so the
     // term is simply absent rather than replaced. Charging it anyway is what
     // refuses a model that would have fitted.
-    if i.is_first && !rows_on_demand {
-        bytes = bytes.saturating_add(
-            i.vocab_size
-                .saturating_mul(i.embedding_length)
-                .saturating_mul(EMBEDDING_TABLE_BYTES_PER_ELEMENT),
-        );
-    }
+    let embedding_bytes = if i.is_first && !rows_on_demand {
+        i.vocab_size
+            .saturating_mul(i.embedding_length)
+            .saturating_mul(EMBEDDING_TABLE_BYTES_PER_ELEMENT)
+    } else {
+        0
+    };
 
     // KV cache — [B, H, ctx, D] per layer, for K and V, as f32, at
     // `kv_admission_context`.
@@ -235,28 +268,32 @@ fn estimate_model_resident_bytes(
     // the only place this estimator deliberately charges less than the worst
     // case, and it is allowed to because a GPU worker has a runtime check that
     // catches the difference.
-    bytes = bytes.saturating_add(
-        i.segment_layers
-            .saturating_mul(2)
-            .saturating_mul(i.head_count_kv)
-            .saturating_mul(i.head_dim)
-            .saturating_mul(kv_admission_context)
-            .saturating_mul(F32),
-    );
+    let kv_bytes = i
+        .segment_layers
+        .saturating_mul(2)
+        .saturating_mul(i.head_count_kv)
+        .saturating_mul(i.head_dim)
+        .saturating_mul(kv_admission_context)
+        .saturating_mul(F32);
 
     // RoPE cos/sin tables. Charged at the FULL context regardless, because
     // unlike the KV cache these really are precomputed in full at load
     // (`rope::precompute_freqs_cis`) — nothing grows them on demand and no
     // runtime check bounds them. They are small (34 MB at 32k) but the reason
     // they are not capped is the reason the KV cache can be.
-    bytes = bytes.saturating_add(
-        i.effective_context
-            .saturating_mul(i.rope_dim.max(2) / 2)
-            .saturating_mul(F32)
-            .saturating_mul(2),
-    );
+    let rope_bytes = i
+        .effective_context
+        .saturating_mul(i.rope_dim.max(2) / 2)
+        .saturating_mul(F32)
+        .saturating_mul(2);
 
-    bytes
+    ResidentFootprint {
+        weights_bytes,
+        embedding_bytes,
+        kv_bytes,
+        rope_bytes,
+        kv_context: kv_admission_context,
+    }
 }
 
 /// Estimate a worker's GPU footprint in MB from the model's real geometry.
@@ -288,12 +325,91 @@ pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
 /// exists because the GPU path's own fallback is "load it in system RAM
 /// instead": the more often that fires, the more weight lands here.
 pub fn estimate_worker_ram_mb(i: &VramFootprintInputs) -> u64 {
-    // FULL context for the KV cache, deliberately: nothing bounds a CPU
-    // worker's cache at runtime, so this is the only place the ceiling is
-    // priced at all. See `GPU_ADMISSION_KV_CONTEXT`.
-    estimate_model_resident_bytes(i, i.embedding_gatherable, i.effective_context)
+    cpu_footprint(i)
+        .total_bytes()
         .saturating_add(CPU_PROCESS_OVERHEAD_BYTES)
         / (1024 * 1024)
+}
+
+/// The CPU worker's resident terms, itemised. FULL context for the KV cache,
+/// deliberately: nothing bounds a CPU worker's cache at runtime, so this is
+/// the only place the ceiling is priced at all. See `GPU_ADMISSION_KV_CONTEXT`.
+pub fn cpu_footprint(i: &VramFootprintInputs) -> ResidentFootprint {
+    resident_footprint(i, i.embedding_gatherable, i.effective_context)
+}
+
+/// Where the admission context came from, for the refusal message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextSource {
+    /// `inference.max_seq_len_override` is set and won.
+    Override,
+    /// The model's declared context, capped at the shipped default.
+    DeclaredOrDefault,
+}
+
+/// The human-readable account of a CPU refusal: what the estimate is made of,
+/// and what the budget is limited by. Pure, so the wording is testable and the
+/// two numbers in the message can no longer surprise the reader in silence.
+pub fn describe_cpu_refusal(
+    model: &str,
+    f: &ResidentFootprint,
+    ctx_source: ContextSource,
+    budget_mb: u64,
+    budget_note: &str,
+    in_use_mb: u64,
+) -> String {
+    const MB: u64 = 1024 * 1024;
+    let total_mb = f.total_bytes().saturating_add(CPU_PROCESS_OVERHEAD_BYTES) / MB;
+    let other_mb = f
+        .embedding_bytes
+        .saturating_add(f.rope_bytes)
+        .saturating_add(CPU_PROCESS_OVERHEAD_BYTES)
+        / MB;
+    let ctx_why = match ctx_source {
+        ContextSource::Override => "set by `inference.max_seq_len_override`",
+        ContextSource::DeclaredOrDefault => "its declared context, capped at the default",
+    };
+    let mut s = format!(
+        "{model} needs about {total_mb} MB of memory: {} MB of weights, {} MB of KV cache for a \
+         {}-token context ({ctx_why}), {other_mb} MB of embeddings, tables and overhead. \
+         This node's budget allows {budget_mb} MB",
+        f.weights_bytes / MB,
+        f.kv_bytes / MB,
+        f.kv_context,
+    );
+    if !budget_note.is_empty() {
+        s.push_str(" (");
+        s.push_str(budget_note);
+        s.push(')');
+    }
+    s.push_str(&format!(
+        " and {in_use_mb} MB is already in use. Lower `inference.max_seq_len_override` to shrink \
+         the KV cache, raise `resources.max_ram_mb`, or free memory by unloading another model."
+    ));
+    s
+}
+
+/// One sentence on how the RAM budget was arrived at, for the refusal above.
+pub fn describe_ram_budget(
+    configured_mb: u64,
+    by_config_mb: u64,
+    by_machine_mb: u64,
+    total_mb: u64,
+    available_mb: u64,
+) -> String {
+    let source = if configured_mb > 0 {
+        format!("`resources.max_ram_mb` is {configured_mb} MB")
+    } else {
+        format!("auto-sized to {by_config_mb} MB from {total_mb} MB of RAM")
+    };
+    if by_machine_mb < by_config_mb {
+        format!(
+            "{source}, limited to {FREE_RAM_HEADROOM_PCT}% of the {available_mb} MB that was free \
+             when the node started, so loading a model cannot push it into swap"
+        )
+    } else {
+        source
+    }
 }
 
 /// MoE-aware VRAM estimation. For Mixture-of-Experts models, only a fraction
@@ -647,7 +763,7 @@ pub const FREE_RAM_HEADROOM_PCT: u64 = 70;
 /// clamps it to what is genuinely free right now. `None` means "do not judge":
 /// either no budget could be derived, or the machine could not be read — and a
 /// limit must never be invented from a failed measurement.
-pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
+pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<(u64, String)> {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
     let total_mb = sys.total_memory() / (1024 * 1024);
@@ -675,7 +791,8 @@ pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     // which is neither stable nor something a user can reason about. A
     // configured value is the only one that can exceed the machine.
     if configured == 0 || available_mb == 0 {
-        return Some(by_config);
+        let note = describe_ram_budget(configured, by_config, by_config, total_mb, available_mb);
+        return Some((by_config, note));
     }
     let by_machine = (available_mb / 100 * FREE_RAM_HEADROOM_PCT).max(total_mb / 4);
     if by_machine < by_config {
@@ -688,7 +805,8 @@ pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
              so that loading a model cannot push the system into swap"
         );
     }
-    Some(by_config.min(by_machine))
+    let note = describe_ram_budget(configured, by_config, by_machine, total_mb, available_mb);
+    Some((by_config.min(by_machine), note))
 }
 
 #[cfg(test)]
@@ -1238,5 +1356,77 @@ mod footprint_tests {
             est > weights_only,
             "estimate {est} MB must exceed the raw weights {weights_only} MB"
         );
+    }
+
+    /// The number a user called "10x the model's size": phi-3.5-mini (32
+    /// layers, 32 KV heads — MHA, no GQA — head_dim 96) at the 32768-token
+    /// context they had configured is 0.75 MB of f32 KV per token, 24 GB in
+    /// all, on top of 2.3 GB of weights. Correct, and the refusal must SAY so.
+    #[test]
+    fn a_cpu_refusal_itemises_weights_kv_and_context() {
+        let i = VramFootprintInputs {
+            quantized_weight_bytes: 2284 * 1024 * 1024,
+            unquantized_bytes_per_element: None,
+            vocab_size: 32064,
+            embedding_length: 3072,
+            segment_layers: 32,
+            head_count_kv: 32,
+            head_dim: 96,
+            rope_dim: 96,
+            effective_context: 32768,
+            is_first: true,
+            embedding_gatherable: true,
+        };
+        let f = cpu_footprint(&i);
+        assert_eq!(f.weights_bytes / (1024 * 1024), 2284);
+        assert_eq!(
+            f.kv_bytes / (1024 * 1024),
+            32 * 2 * 32 * 96 * 32768 * 4 / (1024 * 1024)
+        );
+        assert_eq!(f.kv_context, 32768);
+        let msg = describe_cpu_refusal(
+            "phi-3.5-mini-instruct.q4-k-m",
+            &f,
+            ContextSource::Override,
+            13370,
+            "`resources.max_ram_mb` is 18000 MB, limited to 70% of the 19100 MB that was free when the node started, so loading a model cannot push it into swap",
+            0,
+        );
+        assert!(msg.contains("2284 MB of weights"), "{msg}");
+        assert!(msg.contains("24576 MB of KV cache for a 32768-token context (set by `inference.max_seq_len_override`)"), "{msg}");
+        assert!(
+            msg.contains(
+                "budget allows 13370 MB (`resources.max_ram_mb` is 18000 MB, limited to 70%"
+            ),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("Lower `inference.max_seq_len_override`"),
+            "{msg}"
+        );
+        // And the whole estimate is what the old one-number message said.
+        let i8 = VramFootprintInputs {
+            effective_context: 8192,
+            ..i
+        };
+        assert_eq!(
+            cpu_footprint(&i8).kv_bytes / (1024 * 1024),
+            6144,
+            "at the default cap the same model costs a quarter of that"
+        );
+    }
+
+    #[test]
+    fn the_budget_note_names_what_limited_it() {
+        assert_eq!(
+            describe_ram_budget(18000, 18000, 13370, 32000, 19100),
+            "`resources.max_ram_mb` is 18000 MB, limited to 70% of the 19100 MB that was free when the node started, so loading a model cannot push it into swap"
+        );
+        assert_eq!(
+            describe_ram_budget(18000, 18000, 18000, 32000, 30000),
+            "`resources.max_ram_mb` is 18000 MB"
+        );
+        assert!(describe_ram_budget(0, 12800, 12800, 16000, 15000)
+            .starts_with("auto-sized to 12800 MB from 16000 MB"));
     }
 }

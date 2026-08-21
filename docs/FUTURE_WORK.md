@@ -222,6 +222,22 @@ the newest; (3) on a forward timeout, retry once on a different connection
 before failing over to another holder. `max_connections_per_peer = 1` is not
 an option (gotcha #163: it disables DCUtR).
 
+### CPU admission prices the whole context; a runtime KV guard would admit more (2026-08-21)
+
+`estimate_worker_ram_mb` charges the full effective context of f32 KV cache at
+admission because a CPU worker has no runtime check that would catch growth
+past a smaller charge (the GPU path has `kv_budget::claim_exceeds_headroom`,
+which is why `GPU_ADMISSION_KV_CONTEXT` may under-charge). That is the right
+rule for the mechanism that exists, and it is what turned a 2.3 GB phi-3.5
+into a 27 GB refusal at a 32k override (external report 2026-08-21; MHA, 0.75
+MB/token). The better design is the GPU one on the CPU too: record a
+`kv_budget_bytes` for CPU workers (RAM budget minus weights and overhead),
+have `forward_inner_impl`'s headroom check refuse with a 503 that re-routes
+when a request's claim would exceed it, and then admit at a typical context
+instead of the ceiling. The lazily-growing cache already makes the memory
+usage match the conversation, not the ceiling; only the admission does not.
+Until then the message says what it counted.
+
 ### Whole-model holders that cannot load the model are still chosen (2026-08-21)
 
 Observed on the live swarm: a request for llama-3.1-8b from a node holding 4
