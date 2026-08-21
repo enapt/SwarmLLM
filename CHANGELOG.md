@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.112-alpha] — 2026-08-22
+
 **CPU nodes read prompts about 40% faster and write replies about 30% faster.**
 Four changes to the CPU inference path, each measured on its own (llama-3.2-3b
 Q4_K_M, 4 threads, 896-token prompt, ~900-token context; min-of-N on an idle
