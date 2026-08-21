@@ -219,13 +219,22 @@ All 20 build phases complete. All subsystems wired — no stubs. **1967 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.104 → .109-alpha (2026-08-19 → 21): the swarm learned to see its own load, replies stopped lying about being whole, and split models chain by default
+### Latest — v0.3.104 → .110-alpha (2026-08-19 → 21): the swarm learned to see its own load, replies stopped lying about being whole, split models chain by default, and LAN neighbours stopped meeting in Europe
 
-Six releases in three days, each verified on the DOWNLOADED artifact (sha256,
+Seven releases in three days, each verified on the DOWNLOADED artifact (sha256,
 25 assets, not a draft, `examples/smoke_test.sh` 8/8). **.109 turns direct peer
 chaining ON by default** after it was validated end to end on two machines the
 same day (see the .107 bullet; five more silent defects fell out of running it,
-gotchas #352-#355). **.108 is maintenance
+gotchas #352-#355). **.110 (same afternoon)**: two LAN nodes 0.7 ms apart were
+measuring 60-800 ms to each other and forwarding every tensor through the
+anchor relay — a relay-carried INBOUND connection has a bare `/p2p/<peer>`
+address and was booked "direct" at both layers (gotcha #356; after: 2 ms / 9 ms);
+the rr tie-break prefers a connection that has answered, then the oldest (#353);
+every tensor forward is **ACKed on receipt** (`features::FORWARD_ACK`) and a
+chain hop reports its onward failure to the coordinator, so a peer that goes
+quiet costs ~10-25 s instead of 300 s (SIGSTOP test: 300+ → 67.8 → **26.1 s**,
+gotcha #357); `NetworkManager::run` logs its own stalls per arm. Both live nodes
+verified at 2/9 ms, zero stall lines. **.108 is maintenance
 only**: Rust 1.98 reached the runners and added two lints (`chunks_exact_to_as_chunks`,
 `drain_collect`) that this tree trips — `.107` was tagged with CI RED for exactly
 that; its binaries are sound, the failing checks do not run during a build.
