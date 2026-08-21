@@ -8,18 +8,18 @@
 //! Both fire from `events.rs::handle_swarm_event` when the swarm surfaces a
 //! `request_response::Event::Message`. They mutate a wide swath of
 //! NetworkManager state: `pex_inbound_timestamps`, `pending_shard_requests`,
-//! `pending_prefix_kv_*`, `pending_tensor_channels`, `shard_*` progress maps.
+//! `pending_prefix_kv_*`, `shard_*` progress maps.
 
 use libp2p::request_response::{self, OutboundRequestId};
 
 use crate::model::acquisition::AcquisitionCommand;
 use crate::network::helpers::is_non_public_addr;
-use crate::network::protocol::{self, PrefixKvDataResp, SwarmRequest, SwarmResponse};
+use crate::network::protocol::{PrefixKvDataResp, SwarmRequest, SwarmResponse};
 use crate::types::{NetworkCommand, SwarmMessage};
 
 use super::{
     NetworkManager, MAX_INBOUND_PREFIX_FETCHES, MAX_INBOUND_SHARD_FETCHES,
-    MAX_PENDING_SHARD_REQUESTS, MAX_PENDING_TENSOR_CHANNELS, PEX_MAX_PER_WINDOW, PEX_WINDOW,
+    MAX_PENDING_SHARD_REQUESTS, PEX_MAX_PER_WINDOW, PEX_WINDOW,
 };
 
 impl NetworkManager {
@@ -355,35 +355,29 @@ impl NetworkManager {
                     "DIAG: inbound TensorPayload request"
                 );
                 if let Some(request_id) = self.handle_tensor_payload(peer, &payload) {
-                    // Store the ResponseChannel so we can send the computed result as
-                    // the actual response (single substream per token, no separate request).
-                    if self.pending_tensor_channels.len() >= MAX_PENDING_TENSOR_CHANNELS {
-                        tracing::warn!(%peer, %request_id, "pending_tensor_channels full — responding with error LayerResult");
-                        // Respond with an error LayerResult so the requester's oneshot resolves
-                        // immediately instead of waiting for the ~600s request_timeout.
-                        let err = crate::types::LayerResult::error(
-                            request_id,
-                            "server tensor-channel capacity exceeded",
-                        );
-                        let resp = match protocol::encode_layer_result(&err) {
-                            Ok(bytes) => SwarmResponse::TensorPayload(bytes),
-                            Err(_) => SwarmResponse::Ack,
-                        };
-                        let _ = self
-                            .swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_response(channel, resp);
-                    } else {
-                        self.pending_tensor_channels
-                            .insert(request_id, (std::time::Instant::now(), peer, channel));
-                        tracing::info!(
-                            %peer,
-                            %request_id,
-                            pending_channels = self.pending_tensor_channels.len(),
-                            "DIAG: stored ResponseChannel for tensor forward"
-                        );
-                    }
+                    // Acknowledge RECEIPT now; the computed result travels back
+                    // as its own request (`send_tensor_result_as_request`).
+                    //
+                    // Until 2026-08-21 the channel was held open and the result
+                    // sent as the response — "single substream per token". The
+                    // price was that a forward landing on a peer that never
+                    // answers was indistinguishable, to the coordinator, from
+                    // one that is computing: it waited the whole segment
+                    // deadline (300 s, twice in one request that day) where a
+                    // missing receipt would have said "dead path" in ten
+                    // seconds. With the ACK here and `features::FORWARD_ACK`
+                    // advertised, the coordinator's sweep fails an unacknowledged
+                    // forward at the ACK deadline and the pipeline fails over.
+                    // The compute deadline stays with the pipeline, sized from
+                    // measured peer speed — this never reaps a slow answer.
+                    // Older coordinators accept both halves unchanged.
+                    let acked = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, SwarmResponse::Ack)
+                        .is_ok();
+                    tracing::debug!(%peer, %request_id, acked, "DIAG: acknowledged tensor forward on receipt");
                 } else {
                     // LayerResult or decode failure — just ACK since there's no round-trip
                     if self

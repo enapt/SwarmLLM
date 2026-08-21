@@ -101,8 +101,6 @@ const PEX_PING_STALENESS_SECS: u64 = 30;
 const PEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 /// Maximum inbound PEX requests allowed per window before dropping.
 const PEX_MAX_PER_WINDOW: usize = 50;
-/// Maximum pending tensor channels before rejecting new ones (memory exhaustion guard).
-const MAX_PENDING_TENSOR_CHANNELS: usize = 256;
 /// Maximum pending provider model-list queries before pruning oldest.
 const MAX_PENDING_PROVIDER_QUERIES: usize = 500;
 /// Maximum queued redial attempts for recently-disconnected peers.
@@ -298,7 +296,7 @@ pub struct NetworkManager {
     inbound_rx: mpsc::Receiver<NetworkCommand>,
     /// A sender into our OWN `inbound_rx`, for spawned tasks that must post a
     /// command back into the event loop. The loop owns state a `tokio::spawn`
-    /// cannot borrow (`pending_tensor_channels` in particular), so a detached
+    /// cannot borrow the manager's own maps, so a detached
     /// task answers a peer by queueing a command rather than touching it.
     self_command_tx: mpsc::Sender<NetworkCommand>,
     /// Sends decoded network messages to the dispatcher for routing.
@@ -379,26 +377,6 @@ pub struct NetworkManager {
     /// the same line 247 times.
     peer_failure_log_suppression: HashMap<(libp2p::PeerId, String), PeerFailureSuppression>,
     /// Holds ResponseChannels for pending tensor forwards, keyed by inference UUID.
-    /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
-    /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
-    /// we send the result as the response on the original channel — single substream per token.
-    ///
-    /// The entry also records WHICH peer the forward came from, because that
-    /// shortcut is only valid towards that peer. In a chained run the forward
-    /// arrives from the previous hop but the result is addressed to the
-    /// coordinator; keyed by request id alone, the tail answered its
-    /// predecessor — which had already handed the work on and dropped the
-    /// reply — and the coordinator waited out its whole deadline (observed on
-    /// two machines, 2026-08-21). `handle_send_tensor_result` compares before
-    /// it replies.
-    pending_tensor_channels: HashMap<
-        uuid::Uuid,
-        (
-            std::time::Instant,
-            libp2p::PeerId,
-            request_response::ResponseChannel<SwarmResponse>,
-        ),
-    >,
     /// Maps ConnectionId → remote Multiaddr for each established connection.
     /// Used by the Identify handler to add only the *connected* address to Kademlia,
     /// not all listen_addrs (which causes redundant connections to the same peer on
@@ -692,7 +670,6 @@ impl NetworkManager {
             pending_tensor_result_outbound: HashMap::new(),
             pending_rr_observability: HashMap::new(),
             peer_failure_log_suppression: HashMap::new(),
-            pending_tensor_channels: HashMap::new(),
             connection_addrs: HashMap::new(),
             peer_direct_conns: HashMap::new(),
             peer_remote_addrs: HashMap::new(),
@@ -834,6 +811,28 @@ impl NetworkManager {
         self.pending_tensor_outbound
             .values()
             .any(|(u, sent, _, _, _)| *u == inference_uuid && *sent > sent_at)
+    }
+
+    /// The receipt-ACK deadline for a forward to `peer`, or `None` if the peer
+    /// does not advertise `features::FORWARD_ACK` (it answers only with the
+    /// result, which may legitimately take minutes). Scaled from the peer's
+    /// measured round trip the same way streaming ACKs are.
+    fn forward_ack_deadline_secs(&self, peer: &libp2p::PeerId) -> Option<u64> {
+        let node_id = self.peer_to_node.get(peer).map(|r| r.clone())?;
+        let (features, rtt) = {
+            let p = self.shared_state.peer_registry.get(&node_id)?;
+            (
+                p.capability.as_ref().map(|c| c.features).unwrap_or(0),
+                p.latency_ms.unwrap_or(0),
+            )
+        };
+        if !swarmllm_types::node::features::supports(
+            features,
+            swarmllm_types::node::features::FORWARD_ACK,
+        ) {
+            return None;
+        }
+        Some(tensors::ack_deadline_from_rtt(rtt))
     }
 
     fn fail_tensor_forward(
@@ -1292,11 +1291,6 @@ impl NetworkManager {
                 _ = stale_tensor_interval.tick() => {
                     last_arm = "stale_tensor_interval".into();
                     arm_started = std::time::Instant::now();
-                    // Sweep stale pending_tensor_channels independently of outbound state.
-                    // On serving nodes, pending_tensor_outbound is empty but channels can still leak.
-                    self.pending_tensor_channels.retain(|_uuid, (inserted, _peer, _chan)| {
-                        inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
-                    });
                     // Also sweep the observability-only result-fallback map.
                     self.pending_tensor_result_outbound.retain(|_id, (_, inserted)| {
                         inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
@@ -1370,6 +1364,7 @@ impl NetworkManager {
                     if !self.pending_tensor_outbound.is_empty() {
                         let now = std::time::Instant::now();
                         let mut stale: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId)> = Vec::new();
+                        let mut unacked: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId, u64)> = Vec::new();
                         for (req_id, (uuid, sent_at, target_peer, num_layers, activation_bytes)) in &self.pending_tensor_outbound {
                             let age = now.duration_since(*sent_at);
                             let _ = (num_layers, activation_bytes);
@@ -1418,7 +1413,38 @@ impl NetworkManager {
                             );
                             if age.as_secs() > timeout_secs {
                                 stale.push((*req_id, *uuid, *target_peer));
+                            } else if let Some(deadline_secs) =
+                                self.forward_ack_deadline_secs(target_peer)
+                            {
+                                // A peer that acknowledges receipt has not: the
+                                // path is dead, whatever the compute deadline
+                                // says. Fail it now so the pipeline fails over in
+                                // seconds instead of minutes. Gated on the peer
+                                // advertising `FORWARD_ACK`; an older peer answers
+                                // only with the result, which may take minutes.
+                                if age.as_secs() > deadline_secs {
+                                    unacked.push((*req_id, *uuid, *target_peer, deadline_secs));
+                                }
                             }
+                        }
+                        for (req_id, uuid, target_peer, deadline_secs) in unacked {
+                            let sent_at = self.pending_tensor_outbound.get(&req_id).map(|e| e.1);
+                            self.pending_tensor_outbound.remove(&req_id);
+                            if sent_at.is_some_and(|s| self.tensor_forward_is_superseded(uuid, s)) {
+                                continue;
+                            }
+                            tracing::warn!(
+                                ?req_id,
+                                request_id = %uuid,
+                                %target_peer,
+                                deadline_secs,
+                                "DIAG: tensor forward not acknowledged within the ACK deadline — failing it so the pipeline can fail over"
+                            );
+                            self.fail_tensor_forward(
+                                uuid,
+                                &target_peer,
+                                format!("no receipt acknowledgement within {deadline_secs}s"),
+                            );
                         }
                         // Collect unique stale peers for disconnection
                         let mut stale_peers: std::collections::HashSet<libp2p::PeerId> = std::collections::HashSet::new();
@@ -1445,14 +1471,6 @@ impl NetworkManager {
                             }
                             stale_peers.insert(target_peer);
                             self.fail_tensor_forward(uuid, &target_peer, "Tensor forward timed out".into());
-                            // Also clean up the inbound response channel for this request
-                            // to prevent unbounded memory leak on timed-out distributed inference
-                            if self.pending_tensor_channels.remove(&uuid).is_some() {
-                                tracing::debug!(
-                                    request_id = %uuid,
-                                    "Cleaned up stale pending_tensor_channel"
-                                );
-                            }
                         }
                         // Disconnect stale peers to reset the yamux session.
                         // The connection task may be stuck (handler not polled, SubstreamRequested

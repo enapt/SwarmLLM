@@ -16,6 +16,14 @@ whichever side opened it, so a direct path is used whenever one exists, and the
 latency each node measures — which decides who is asked to do what — is the real
 one again.
 
+**A machine that never answers now costs seconds, not minutes.** When a step of a
+split model was sent to a machine that had gone quiet, the sender waited out the
+whole step deadline — five minutes, twice in one request on 2026-08-21 — before
+trying someone else, because "still computing" and "never received it" looked
+the same. A machine now acknowledges a step the moment it arrives and sends the
+result back separately; a sender that gets no acknowledgement within about ten
+seconds moves on. Machines on earlier versions are unaffected in both directions.
+
 **The first message to a newly connected machine no longer goes to the connection
 least likely to work.** When a node holds several connections to the same peer, it
 used to try the newest one first for anything new; on 2026-08-21 that newest

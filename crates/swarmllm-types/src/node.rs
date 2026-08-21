@@ -48,9 +48,18 @@ pub mod features {
     /// answer its predecessor and the run would time out. The planner
     /// therefore requires THIS bit; v1 is kept defined, never re-used.
     pub const PIPELINE_CHAIN_V2: u64 = 1 << 3;
+    /// The node acknowledges a tensor forward the moment it is received and
+    /// sends the computed result back as its own request, instead of holding
+    /// the request open until the result is ready. A coordinator that sees this
+    /// bit may treat "no acknowledgement within the ACK deadline" as a dead path
+    /// and fail over in seconds; without it, a forward that lands on a peer that
+    /// never answers costs the whole segment deadline (observed 2026-08-21:
+    /// 300 s, twice in one request). Older coordinators still work: they accept
+    /// an ACK response and a result arriving as a request.
+    pub const FORWARD_ACK: u64 = 1 << 4;
 
     /// The full feature set THIS build implements. Advertised by every node.
-    pub const ALL: u64 = RELAY | TENSOR_RELAY | PIPELINE_CHAIN | PIPELINE_CHAIN_V2;
+    pub const ALL: u64 = RELAY | TENSOR_RELAY | PIPELINE_CHAIN | PIPELINE_CHAIN_V2 | FORWARD_ACK;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

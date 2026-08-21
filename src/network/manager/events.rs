@@ -240,7 +240,6 @@ impl NetworkManager {
                     %error,
                     is_connected = self.swarm.is_connected(&peer),
                     pending_tensor_out = self.pending_tensor_outbound.len(),
-                    pending_channels = self.pending_tensor_channels.len(),
                         suppressed_since_last = suppressed,
                         "DIAG: OutboundFailure"
                     );
@@ -363,14 +362,14 @@ impl NetworkManager {
                     ..
                 },
             )) => {
-                // Note: pending_tensor_channels is keyed by Uuid (from the parsed
-                // message), not InboundRequestId — we can't directly remove the entry
-                // here. The stale timeout cleanup (every 30s) handles orphaned channels.
+                // An inbound request is acknowledged the moment it is decoded
+                // (`requests.rs`), so a failed response send here can only be
+                // that ACK — the result itself travels as its own request and
+                // is not affected.
                 tracing::warn!(
                     %peer,
                     ?request_id,
                     %error,
-                    pending_channels = self.pending_tensor_channels.len(),
                     "DIAG: InboundFailure — response send may have failed, stale cleanup will reclaim"
                 );
             }
