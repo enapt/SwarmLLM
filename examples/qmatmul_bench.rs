@@ -7,7 +7,7 @@
 //! ```bash
 //! cargo run --release --no-default-features --features dev --example qmatmul_bench
 //! ```
-use candle_core::quantized::k_quants::{matmul, BlockQ4K, GgmlType};
+use candle_core::quantized::k_quants::{matmul, BlockQ4K, BlockQ6K, GgmlType};
 
 /// Reproduces the ORIGINAL upstream algorithm (batch row outer, full weight
 /// sweep per row) so the tiled kernel can be checked against it. Every dst
@@ -36,11 +36,11 @@ fn reference<T: GgmlType>(
     }
 }
 
-fn bench(label: &str, k: usize, n: usize, ms: &[usize]) {
-    let k_in_blocks = k / BlockQ4K::BLCK_SIZE;
+fn bench<T: GgmlType>(label: &str, k: usize, n: usize, ms: &[usize]) {
+    let k_in_blocks = k / T::BLCK_SIZE;
 
     // Real quantized weights — zeroed blocks could take degenerate paths.
-    let mut rhs = vec![BlockQ4K::zeros(); n * k_in_blocks];
+    let mut rhs = vec![T::zeros(); n * k_in_blocks];
     let mut seed = 0x243f_6a88_85a3_08d3u64;
     let mut noise = |scale: f32| {
         seed = seed
@@ -49,7 +49,7 @@ fn bench(label: &str, k: usize, n: usize, ms: &[usize]) {
         ((seed >> 33) as f32 / (1u64 << 31) as f32 - 0.5) * scale
     };
     let src: Vec<f32> = (0..n * k).map(|_| noise(1.0)).collect();
-    BlockQ4K::from_float(&src, &mut rhs);
+    T::from_float(&src, &mut rhs);
 
     println!("\n  {label}  (k={k}, n={n})");
     println!(
@@ -195,8 +195,11 @@ fn dequant_split() {
 fn main() {
     println!("candle quantized matmul (Q4_K)");
     // llama-3.2-3b shapes: attention projection and FFN up.
-    bench("attn proj", 3072, 3072, &[1, 2, 3, 4, 8, 43, 128]);
-    bench("ffn up", 3072, 8192, &[1, 2, 3, 4, 8, 43, 128]);
+    bench::<BlockQ4K>("attn proj Q4_K", 3072, 3072, &[1, 2, 3, 4, 8, 43, 128, 896]);
+    bench::<BlockQ4K>("ffn up Q4_K", 3072, 8192, &[1, 2, 3, 4, 8, 43, 128, 896]);
+    // Q4_K_M keeps ffn_down (and some attn_v) in Q6_K; its kernel has its own
+    // multi-row path and must be checked and priced separately.
+    bench::<BlockQ6K>("ffn down Q6_K", 8192, 3072, &[1, 4, 8, 43, 128, 896]);
     pool_sweep();
     dequant_split();
 }

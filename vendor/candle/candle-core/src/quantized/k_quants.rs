@@ -2388,23 +2388,40 @@ pub fn matmul<T: GgmlType>(
     }
 
     const COL_BLOCK: usize = 64;
+    // SWARMLLM PATCH — row blocking. With the column as the outer loop, every
+    // column's pass streams ALL m quantized activation rows; at m=128 that is
+    // ~450 KB (L2-resident), at a whole 896-token prompt in one forward it is
+    // ~3 MB and comes from L3 for every one of thousands of columns — which is
+    // why the per-row cost measured in `qmatmul_bench` at m=128 did not carry
+    // to large m. Blocks of ROW_BLOCK rows keep the activations in L2; the
+    // weights are re-read once per row block instead (14 MB per pass for the
+    // FFN, negligible beside the dots). Production prefill chunks are 128
+    // tokens, so ROW_BLOCK = 128 makes large-m calls behave like the chunked
+    // path rather than slower than it.
+    const ROW_BLOCK: usize = 128;
     let mut dst_t = vec![0f32; n * m];
-    dst_t
-        .par_chunks_mut(m * COL_BLOCK)
-        .enumerate()
-        .for_each(|(blk, chunk)| {
-            let col_base = blk * COL_BLOCK;
-            for (j, slot) in chunk.chunks_mut(m).enumerate() {
-                let col_idx = col_base + j;
-                let rhs_col = &rhs_t[col_idx * k_in_blocks..(col_idx + 1) * k_in_blocks];
-                // SWARMLLM PATCH — all rows of this column through one call, so
-                // a SIMD type can unpack the column once for every row instead
-                // of once per (column, row) pair (`vec_dot_rows`; the Q4_K AVX2
-                // kernel does 8 rows per pass, bit-identical to the per-row
-                // loop that is still the default).
-                T::vec_dot_rows(k, rhs_col, &lhs_b, m, slot);
-            }
-        });
+    let mut row_base = 0;
+    while row_base < m {
+        let rows = ROW_BLOCK.min(m - row_base);
+        let lhs_blk = &lhs_b[row_base * k_in_blocks..(row_base + rows) * k_in_blocks];
+        dst_t
+            .par_chunks_mut(m * COL_BLOCK)
+            .enumerate()
+            .for_each(|(blk, chunk)| {
+                let col_base = blk * COL_BLOCK;
+                for (j, slot) in chunk.chunks_mut(m).enumerate() {
+                    let col_idx = col_base + j;
+                    let rhs_col = &rhs_t[col_idx * k_in_blocks..(col_idx + 1) * k_in_blocks];
+                    // SWARMLLM PATCH — all rows of this block through one call,
+                    // so a SIMD type can unpack the column once for every row
+                    // instead of once per (column, row) pair (`vec_dot_rows`;
+                    // the Q4_K AVX2 kernel does 8 rows per pass, Q6_K 4, both
+                    // bit-identical to the per-row loop that is the default).
+                    T::vec_dot_rows(k, rhs_col, lhs_blk, rows, &mut slot[row_base..row_base + rows]);
+                }
+            });
+        row_base += rows;
+    }
     // Parallel over output rows. The reads from dst_t are strided either way;
     // splitting by row keeps each thread's writes contiguous and lets the
     // transpose scale with the cores already reserved for this matmul.

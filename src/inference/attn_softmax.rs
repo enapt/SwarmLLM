@@ -132,12 +132,14 @@ fn softmax_row(
     // `max` at -inf and yields NaN, exactly as `masked_fill` + `softmax_last_dim`
     // did; a causal mask never produces one, since position `i` always attends
     // to itself.
-    let mut sum = 0.0f32;
+    // exp over the whole row at once (vectorised — `fast_math::exp_inplace`),
+    // then the sum. This was a scalar libm `exp` per score: ~540 M of them for
+    // an 896-token llama-3.2-3b prompt, a measurable slice of "attention".
     for d in dst.iter_mut() {
-        let e = (*d - max).exp();
-        *d = e;
-        sum += e;
+        *d -= max;
     }
+    crate::inference::fast_math::exp_inplace(dst);
+    let sum: f32 = dst.iter().sum();
     for d in dst.iter_mut() {
         *d /= sum;
     }

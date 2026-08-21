@@ -297,11 +297,12 @@ impl Mlp {
                 }
             }
             let __act_t = std::time::Instant::now();
-            let activated = match self.activation {
-                Activation::SiLU => candle_nn::ops::silu(&gate)?,
-                Activation::Gelu => gate.gelu()?,
+            // SiLU × up as one fused, vectorised pass on the CPU (see
+            // `fast_math::silu_mul`); two candle ops and two temporaries before.
+            let __prod = match self.activation {
+                Activation::SiLU => crate::inference::fast_math::silu_mul(&gate, &up)?,
+                Activation::Gelu => (gate.gelu()? * up)?,
             };
-            let __prod = (activated * up)?;
             crate::inference::prof::add(P::FfnAct, __act_t.elapsed().as_nanos() as u64);
             __prod
         } else {
@@ -710,8 +711,7 @@ fn expert_ffn(
     let run = |input: &Tensor| -> CandleResult<Tensor> {
         let gate_out = input.matmul(&gate_w.t()?)?;
         let up_out = input.matmul(&up_w.t()?)?;
-        let activated = candle_nn::ops::silu(&gate_out)?;
-        let combined = (activated * up_out)?;
+        let combined = crate::inference::fast_math::silu_mul(&gate_out, &up_out)?;
         combined.matmul(&down_w.t()?)
     };
 
@@ -811,8 +811,8 @@ impl MoeFfn {
         {
             let shared_gate_out = sg.forward(&x_flat)?;
             let shared_up_out = su.forward(&x_flat)?;
-            let shared_activated = candle_nn::ops::silu(&shared_gate_out)?;
-            let shared_combined = (shared_activated * shared_up_out)?;
+            let shared_combined =
+                crate::inference::fast_math::silu_mul(&shared_gate_out, &shared_up_out)?;
             let shared_out = sd.forward(&shared_combined)?;
             output = (output + shared_out)?;
         }
@@ -1246,6 +1246,25 @@ pub(crate) fn standard_attention(
     // win is, and it is the case where the mask is a single row and the
     // grouping is unambiguous. Prefill keeps the existing path.
     let n_rep = n_head / n_kv_head;
+    // Single-position decode on the CPU: a purpose-built kernel over the cache
+    // in its stored layout. The two batched matmuls below cost 1.3 ms per
+    // layer at ~920 KV for ~11 MFLOP (26% of a decode step on llama-3.2-3b) —
+    // GEMM packing and dispatch, not arithmetic. The kernel returns `None` for
+    // anything outside its scope (non-CPU, non-f32, q_len > 1, a mask it cannot
+    // reduce to one row) and this function carries on as before.
+    // `SWARMLLM_DECODE_ATTN=standard` forces the matmul path for A/B.
+    if q.dim(2)? == 1 && q.device().is_cpu() {
+        if let Some(out) = crate::inference::decode_attn::gqa_decode_attention_cpu(
+            q,
+            k,
+            v,
+            mask,
+            crate::inference::attn_softmax::scale_from_head_dim(head_dim) as f32,
+            attn_logit_softcap,
+        )? {
+            return Ok(out);
+        }
+    }
     if n_rep > 1 && q.dim(2)? == 1 {
         return grouped_gqa_decode_attention(
             q,
