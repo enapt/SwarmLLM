@@ -4,6 +4,26 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.108-alpha] — 2026-08-21
+
+**A maintenance release. Nothing behaves differently.**
+
+Rust 1.98 arrived on the machines that build SwarmLLM and brought two new
+compiler warnings, which this project treats as errors. The code they pointed at
+had not been touched in weeks — the compiler simply got better at noticing it.
+Both are now fixed rather than silenced, and both left the code slightly simpler:
+reading four bytes at a time out of a buffer no longer needs the bytes reassembled
+by hand afterwards, and emptying a list into a new list is now just handing the
+list over.
+
+v0.3.107 is fine and its binaries are sound — the checks that failed do not run
+during a build. This release exists so the published version and the checks agree,
+which is worth keeping true.
+
+Everything in v0.3.107 — batching on by default, the groundwork for machines
+passing work directly to each other, and the reliability fixes — is unchanged
+here. See that entry for what actually changed.
+
 ## [0.3.107-alpha] — 2026-08-21
 
 **Your machine gets more done when several people are asking at once.** Requests
