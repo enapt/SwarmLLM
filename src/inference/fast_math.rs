@@ -70,7 +70,11 @@ mod avx2 {
         let x = _mm256_min_ps(x, _mm256_set1_ps(88.376_26));
         let x = _mm256_max_ps(x, _mm256_set1_ps(-88.376_26));
         // n = floor(x * log2(e) + 0.5)
-        let fx = _mm256_fmadd_ps(x, _mm256_set1_ps(1.442_695_f32), _mm256_set1_ps(0.5));
+        let fx = _mm256_fmadd_ps(
+            x,
+            _mm256_set1_ps(std::f32::consts::LOG2_E),
+            _mm256_set1_ps(0.5),
+        );
         let fx = _mm256_floor_ps(fx);
         // r = x - n*ln2, with ln2 split so the product is exact
         let r = _mm256_fnmadd_ps(fx, _mm256_set1_ps(0.693_359_4), x);
@@ -80,7 +84,8 @@ mod avx2 {
         y = _mm256_fmadd_ps(y, r, _mm256_set1_ps(8.333_452e-3));
         y = _mm256_fmadd_ps(y, r, _mm256_set1_ps(4.166_579_6e-2));
         y = _mm256_fmadd_ps(y, r, _mm256_set1_ps(1.666_666_5e-1));
-        y = _mm256_fmadd_ps(y, r, _mm256_set1_ps(5.000_000_1e-1));
+        // Cephes p5 = 5.0000001201e-1, which is 0.5 exactly in f32.
+        y = _mm256_fmadd_ps(y, r, _mm256_set1_ps(0.5));
         let r2 = _mm256_mul_ps(r, r);
         y = _mm256_fmadd_ps(y, r2, r);
         y = _mm256_add_ps(y, _mm256_set1_ps(1.0));
@@ -93,12 +98,12 @@ mod avx2 {
 
     #[inline(always)]
     pub(super) unsafe fn exp_inplace_avx2(xs: &mut [f32]) {
-        let mut chunks = xs.chunks_exact_mut(8);
-        for c in &mut chunks {
+        let (chunks, rest) = xs.as_chunks_mut::<8>();
+        for c in chunks.iter_mut() {
             let v = _mm256_loadu_ps(c.as_ptr());
             _mm256_storeu_ps(c.as_mut_ptr(), exp256_ps(v));
         }
-        for x in chunks.into_remainder() {
+        for x in rest {
             *x = x.exp();
         }
     }

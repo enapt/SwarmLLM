@@ -238,6 +238,37 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### CPU decode attention: the kernel sits 2x above the DRAM floor (2026-08-22)
+
+`inference::decode_attn` cut single-position attention from 36 to ~15 ms/token
+at ~920 KV on llama-3.2-3b (28 layers). Reading the cache once per token is
+~211 MB (28 × 2 × 8 heads × 920 × 128 × 4 B) ≈ 7 ms at this box's 30 GB/s, so
+about half of what remains is per-layer dispatch: one rayon fork/join for 8
+tasks, `q.contiguous()` + `to_vec1` + `Tensor::from_vec` copies (tiny), the
+mask reduction. Options, in order of value: (1) fold the per-layer
+`from_vec`/`to_vec1` into a CustomOp that writes the output storage directly;
+(2) an f16 KV cache on the CPU would halve the floor but changes numerics —
+the CUDA mirror is GQA-gated for good reason (the MHA null control came out slower); (3) at small S the rayon
+split is pure overhead — run single-threaded below ~128 KV. Measure with the
+profiler's "attention" bucket per token (`SWARMLLM_PROFILE=1 prefill_bench`).
+
+### CPU prefill: the quantized GEMM is at ~14% of AVX2 int8 peak after the multi-row kernel (2026-08-22)
+
+`vec_dot_rows` (4 rows/pass, bit-identical) + row blocking took llama-3.2-3b
+prompt processing 26 → 37 tok/s at 4 threads; matmuls are still ~85% of
+prefill. The per-output work is now ~24 irreducible int ops per block
+(maddubs/madd/add for 4 nibble groups) plus ~12 of shared column unpack plus ~18
+of row-side loads; a 2-column × 4-row tile does not fit the 16 ymm registers
+(measured: 8 rows already spilled, 1.2x slower than 4). The next step is
+llama.cpp's one — repack weights at load into an interleaved `Q4_K_8x8` layout
+so one q8 broadcast meets 8 columns' nibbles (PR #12332, 1.8-1.9x pp on
+Q4_K_M AVX2) — which is a storage-layout change touching `QTensor`,
+`gather_rows`, dequantize and the GPU path, not a kernel tweak. AVX-512 VNNI
+(`vpdpbusd`) would also lift the floor on machines that have it; this box does
+not. Anyone continuing: `examples/qmatmul_bench` prices m=1..896 for Q4_K and
+Q6_K and asserts exactness; `prefill_bench` with `SWARMLLM_PROFILE=1` is the
+end-to-end check; min-of-N, idle box.
+
 ### Whole-model holders that cannot load the model are still chosen (2026-08-21)
 
 Observed on the live swarm: a request for llama-3.1-8b from a node holding 4

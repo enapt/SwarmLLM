@@ -800,8 +800,9 @@ silently break at the wire if duplicated:
   group `h / n_rep`); get that backwards and every head reads another group's
   cache while still producing plausible logits, which is why
   `grouping_query_heads_matches_expanding_kv_heads` compares against the
-  expanded path rather than asserting shapes. MHA is pinned byte-identical
-  (`mha_decode_is_unchanged`). This flipped the CPU decode routing: GQA decode
+  expanded path rather than asserting shapes. MHA was pinned byte-identical
+  (`mha_decode_matches_the_plain_path` — now within 1e-5, since the decode kernel
+  serves MHA decode too, 2026-08-22). This flipped the CPU decode routing: GQA decode
   had been sent to the fused kernel precisely because of the `repeat_kv` cost,
   and with it gone the same benchmark reports the opposite at every length
   (3-9x) — so **all CPU decode now takes standard**, with the control run

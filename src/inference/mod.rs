@@ -1,9 +1,9 @@
 pub mod allreduce;
 pub mod attn_kernel;
-pub mod decode_attn;
 pub(crate) mod attn_softmax;
 pub mod chat_template;
 pub(crate) mod cpu_pools;
+pub mod decode_attn;
 pub mod dsd_controller;
 pub mod executor;
 pub mod fast_math;
@@ -522,5 +522,76 @@ mod finalize_reply_text_tests {
         let mut t = "<|eot_id|>\nAnswer".to_string();
         assert_eq!(finalize_reply_text(&mut t, &[]), None);
         assert_eq!(t, "Answer");
+    }
+}
+
+/// The vendored multi-row quantized matmul kernels (`GgmlType::vec_dot_rows`,
+/// Q4_K four rows per pass, Q6_K four) promise bit-identical results to the
+/// per-row upstream ordering — each row keeps its own accumulators and sees
+/// the single-row kernel's operations in the same order. `examples/qmatmul_bench`
+/// asserts the same thing, but an example is not run by CI; this is.
+#[cfg(test)]
+mod qmatmul_exactness_tests {
+    use candle_core::quantized::k_quants::{matmul, BlockQ4K, BlockQ6K, GgmlType};
+
+    /// The upstream algorithm: batch row outer, one `vec_dot` per element.
+    fn reference<T: GgmlType>(
+        (m, k, n): (usize, usize, usize),
+        lhs: &[f32],
+        rhs_t: &[T],
+    ) -> Vec<f32> {
+        let kb = k / T::BLCK_SIZE;
+        let mut lhs_b = vec![T::VecDotType::zeros(); m * kb];
+        for r in 0..m {
+            T::VecDotType::from_float(&lhs[r * k..(r + 1) * k], &mut lhs_b[r * kb..(r + 1) * kb]);
+        }
+        let mut out = vec![0f32; m * n];
+        for r in 0..m {
+            let row = &lhs_b[r * kb..(r + 1) * kb];
+            for c in 0..n {
+                out[r * n + c] = T::vec_dot(k, &rhs_t[c * kb..(c + 1) * kb], row);
+            }
+        }
+        out
+    }
+
+    fn check<T: GgmlType>(label: &str) {
+        let (k, n) = (512usize, 96usize);
+        let kb = k / T::BLCK_SIZE;
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut noise = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32 / (1u64 << 31) as f32 - 0.5) * 2.0
+        };
+        let src: Vec<f32> = (0..n * k).map(|_| noise()).collect();
+        let mut rhs = vec![T::zeros(); n * kb];
+        T::from_float(&src, &mut rhs);
+        // Row counts that exercise the multi-row passes, their tails, the m=1
+        // decode path and a whole row block.
+        for m in [1usize, 2, 3, 4, 5, 7, 8, 9, 13, 130] {
+            let lhs: Vec<f32> = (0..m * k).map(|_| noise()).collect();
+            let mut got = vec![0f32; m * n];
+            matmul((m, k, n), &lhs, &rhs, &mut got).unwrap();
+            let want = reference((m, k, n), &lhs, &rhs);
+            let bad = got
+                .iter()
+                .zip(&want)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            assert_eq!(
+                bad,
+                0,
+                "{label} m={m}: {bad}/{} elements differ from the per-row ordering",
+                m * n
+            );
+        }
+    }
+
+    #[test]
+    fn multi_row_kernels_are_bit_identical_to_the_per_row_ordering() {
+        check::<BlockQ4K>("Q4_K");
+        check::<BlockQ6K>("Q6_K");
     }
 }

@@ -44,7 +44,6 @@ struct Planes<'a> {
     offset: usize,
     /// strides for (b, h, s, d)
     strides: [usize; 4],
-    dims: [usize; 4],
 }
 
 fn f32_planes<'a>(storage: &'a Storage, layout: &Layout) -> Option<Planes<'a>> {
@@ -67,7 +66,6 @@ fn f32_planes<'a>(storage: &'a Storage, layout: &Layout) -> Option<Planes<'a>> {
         data,
         offset: layout.start_offset(),
         strides: [strides[0], strides[1], strides[2], strides[3]],
-        dims: [dims[0], dims[1], dims[2], dims[3]],
     })
 }
 
@@ -199,22 +197,26 @@ pub fn gqa_decode_attention_cpu(
             }
         });
 
-    Ok(Some(Tensor::from_vec(out, (b, n_head, 1, d), &Device::Cpu)?))
+    Ok(Some(Tensor::from_vec(
+        out,
+        (b, n_head, 1, d),
+        &Device::Cpu,
+    )?))
 }
 
 /// 8-lane dot product (independent accumulators so LLVM vectorises it).
 #[inline(always)]
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0f32; 8];
-    let mut ca = a.chunks_exact(8);
-    let mut cb = b.chunks_exact(8);
-    for (x, y) in (&mut ca).zip(&mut cb) {
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    for (x, y) in ca.iter().zip(cb) {
         for i in 0..8 {
             acc[i] += x[i] * y[i];
         }
     }
     let mut tail = 0f32;
-    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+    for (x, y) in ra.iter().zip(rb) {
         tail += x * y;
     }
     acc.iter().sum::<f32>() + tail
@@ -317,10 +319,14 @@ mod tests {
         let dev = Device::Cpu;
         let q = Tensor::randn(0f32, 1.0, (1, 8, 2, 64), &dev).unwrap(); // q_len 2
         let k = Tensor::randn(0f32, 1.0, (1, 8, 10, 64), &dev).unwrap();
-        assert!(gqa_decode_attention_cpu(&q, &k, &k, None, 0.1, None).unwrap().is_none());
+        assert!(gqa_decode_attention_cpu(&q, &k, &k, None, 0.1, None)
+            .unwrap()
+            .is_none());
         let q1 = Tensor::randn(0f32, 1.0, (1, 8, 1, 64), &dev).unwrap();
         // K whose (S, d) plane is not dense: a transposed view.
         let kt = k.transpose(2, 3).unwrap();
-        assert!(gqa_decode_attention_cpu(&q1, &kt, &kt, None, 0.1, None).unwrap().is_none());
+        assert!(gqa_decode_attention_cpu(&q1, &kt, &kt, None, 0.1, None)
+            .unwrap()
+            .is_none());
     }
 }

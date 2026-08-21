@@ -2702,9 +2702,12 @@ mod blocked_attention_tests {
 
     /// MHA (`n_head == n_kv_head`) must not take the grouped path — there is no
     /// expansion to avoid, and the reshape would be a no-op that only adds a
-    /// contiguous copy.
+    /// contiguous copy. Since the decode kernel (`inference::decode_attn`) sits
+    /// in front of both paths for `q_len == 1`, MHA decode is now served by it
+    /// and agrees with the plain matmul path to fp32 summation-order noise
+    /// rather than byte for byte (the kernel's own test bounds that at 1e-5).
     #[test]
-    fn mha_decode_is_unchanged() {
+    fn mha_decode_matches_the_plain_path() {
         let dev = Device::Cpu;
         let mk = |h: usize, s: usize, d: usize, seed: f32| {
             let n = h * s * d;
@@ -2723,7 +2726,15 @@ mod blocked_attention_tests {
                 .unwrap();
         let a = got.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let b = want.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        assert_eq!(a, b, "MHA decode must be byte-identical to the plain path");
+        let worst = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-5,
+            "MHA decode diverges from the plain path: worst {worst}"
+        );
     }
 
     /// The blocking claim is that it is EXACT, not approximate. Softmax runs
@@ -2977,8 +2988,10 @@ mod blocked_expert_ffn_tests {
         let whole = {
             let gate_out = input.matmul(&g.t().unwrap()).unwrap();
             let up_out = input.matmul(&u.t().unwrap()).unwrap();
-            let activated = candle_nn::ops::silu(&gate_out).unwrap();
-            let combined = (activated * up_out).unwrap();
+            // The same fused SiLU×up the function uses, so this pins BLOCKING
+            // (which must be exact) and not the activation kernel (which is
+            // tolerance-tested in `fast_math`).
+            let combined = crate::inference::fast_math::silu_mul(&gate_out, &up_out).unwrap();
             combined.matmul(&d.t().unwrap()).unwrap()
         };
 

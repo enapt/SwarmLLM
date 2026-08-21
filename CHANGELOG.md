@@ -4,6 +4,37 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**CPU nodes read prompts about 40% faster and write replies about 30% faster.**
+Four changes to the CPU inference path, each measured on its own (llama-3.2-3b
+Q4_K_M, 4 threads, 896-token prompt, ~900-token context; min-of-N on an idle
+box; prompt processing 26.0 → 37.1 tok/s, decode 7.9 → 10.25 tok/s overall):
+
+- *Quantized matmul* (83% of prompt processing). The kernel already read each
+  weight column once for a block of rows but unpacked it again for every row —
+  scale decode, nibble split, shuffled scale vectors, about half its
+  instructions. It now unpacks a column once and applies it to four rows (Q4_K
+  and Q6_K); results are bit-identical to before, asserted by the microbench
+  and by a test CI runs. Long prompts are processed in 128-row blocks so the
+  quantized activations stay in L2 — a whole-prompt forward used to stream
+  them from L3 for every one of thousands of columns. Prompt processing 26.0 →
+  33.3 tok/s.
+- *Decode attention.* For one query position the two attention matmuls are tiny
+  and were costing 1.3 ms per layer — a quarter of every generated token — in
+  GEMM setup rather than arithmetic. A purpose-built kernel reads the KV cache
+  in the layout it is already stored in. Decode 7.9 → 9.8 tok/s at ~900 context
+  (same binary, A/B/A/B; `SWARMLLM_DECODE_ATTN=standard` restores the old path).
+- *Vectorised `exp`.* Softmax rows, SiLU and the decode kernel each called the
+  scalar libm `exp` per element — some 750 million calls for one 896-token
+  prompt. An eight-lane AVX2 `exp` (Cephes polynomial, ~2 ulp) replaces them,
+  with SiLU×up fused into one pass. Prompt processing 33.3 → 35.1 tok/s.
+- *Allocator.* Every binary now uses mimalloc: the CPU path allocates a buffer
+  per tensor op, so the allocator sits on the hot path of every layer of every
+  token. +3–4% on both prompt processing and decode against glibc, interleaved
+  A/B.
+
+GPU inference is untouched by all four; a CUDA node sees only the allocator
+change.
+
 ## [0.3.111-alpha] — 2026-08-21
 
 **A model you delete from one machine stays deleted.** Splitting a model across
