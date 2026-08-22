@@ -138,10 +138,28 @@ What was observed, by request id in the three logs:
 
 Min-of-3: 4.5 % less wall time (median 6 %), ≈9 ms per token — one
 coordinator round trip per token on a ~1 ms LAN with one remote hop, which is
-what the design predicts and the floor of what it can show here. Every chained
-trial came in under every unchained one. The saving is proportional to RTT ×
-(segments − 1); a 2-segment LAN split is the least favourable case that still
-exercises the mechanism, and this box cannot resolve anything smaller (#267).
+what the design predicts. The saving is proportional to RTT × (segments − 1);
+a 2-segment LAN split is the least favourable case that still exercises the
+mechanism.
+
+**Re-measured on v0.3.112 (2026-08-22), 6 trials per arm instead of 3, same
+three nodes and the same in-binary switch — and the speed claim above does not
+survive it.** Chained min 11.79 s / median 11.98 s; unchained min 11.76 s /
+median 12.22 s. The median still favours chaining (+2.0 %, ≈3.7 ms per token,
+the right sign and order for one saved LAN round trip) but the minima are a
+dead heat (−0.3 %), and the spread *within* each arm is 7.9 % — larger than the
+gap between them. So the honest statement is: **on a 2-segment LAN split this
+setup cannot resolve the saving**, and the 4.5 % figure sits inside its own
+noise. Two corrections to the paragraph above, both found by re-running it:
+"every chained trial came in under every unchained one" is contradicted by its
+own table (chained trial 3, 13 443 ms, is slower than unchained trial 2,
+13 393 ms), and three trials was too few to say anything at this effect size.
+
+What the re-run *does* establish, and what matters more than the milliseconds,
+is that the mechanism is correct on the shipped binary: 384 hand-offs across 6
+chained runs — exactly 64 per run, one per token — and **zero** across the 6
+unchained runs, with both arms returning complete, coherent 64-token replies.
+The flag does what it says, on every token, and does nothing when it is off.
 
 What is NOT covered yet, in order of value: (1) the SWARM-SPEC n-gram verify
 path (`ngram_only_spec.rs`, `speculative.rs`) builds its own per-segment
