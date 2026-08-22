@@ -272,7 +272,11 @@ impl super::SharedState {
         if holder == self.identity.node_id() {
             return;
         }
-        self.model_registry.remove_shard_holder(shard_id, holder);
+        // Durable, not just for this request: the DHT keeps advertising this
+        // holder for hours, and the merge that reads it cannot remove anyone —
+        // so a retraction that is not remembered is undone within seconds and
+        // every later request is routed here again (gotcha #364).
+        self.model_registry.retract_shard_holder(shard_id, holder);
         let remaining = self.model_registry.shard_holders(shard_id).len();
         tracing::info!(
             model = %shard_id.model_id,

@@ -4,6 +4,17 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A machine that gives up part of a model is believed when it says so.** Moving
+some of a model's pieces off one computer could leave the rest of the swarm
+convinced they were still there: the network's own directory keeps advertising a
+machine as holding a piece for up to a day after it stops, and that outdated
+entry was allowed to overrule the machine's own announcement — which it repeats
+every five minutes, correctly. Requests were then sent to a computer that no
+longer had the weights and failed outright, saying no fallback was available,
+while another machine holding exactly that piece was never asked. Found while
+running a model split three ways across two computers.
+
+
 ## [0.3.112-alpha] — 2026-08-22
 
 **CPU nodes read prompts 20–40% faster and write replies 25–37% faster.** Four

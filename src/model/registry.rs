@@ -12,6 +12,19 @@ use crate::types::{ModelId, ModelManifest, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 /// DHT provider queries fill in the rest on demand.
 const MAX_HOLDERS_PER_SHARD: usize = 50;
 
+/// How long a holder's own retraction outranks a DHT provider record naming it.
+///
+/// Sized to exceed libp2p-kad's provider-record lifetime (24 h by default, with
+/// republication at 12 h): the record is what keeps resurrecting the claim, so
+/// honouring the retraction for anything less leaves a window where the stale
+/// record wins again. A node that genuinely re-acquires the shard does not wait
+/// this out — its own announcement clears the entry immediately.
+const RETRACTION_HONOURED_SECS: u64 = 26 * 60 * 60;
+
+/// Cap on remembered retractions; entries past `RETRACTION_HONOURED_SECS` are
+/// swept when it is reached, so the map stays bounded without its own timer.
+const MAX_RETRACTED_CLAIMS: usize = 10_000;
+
 /// Thread-safe registry of known models and shard locations.
 ///
 /// Uses DashMap for concurrent access from multiple daemon tasks.
@@ -38,6 +51,25 @@ pub struct ModelRegistry {
     /// `record_global_holder_count` from the DHT query result; readers fall
     /// back to the cached count if no DHT data is available.
     global_holder_count: DashMap<ShardId, u32>,
+    /// Claims a holder has explicitly RETRACTED, and when.
+    ///
+    /// A DHT provider record outlives the fact it asserts: a node that deletes
+    /// or loses a shard stays a provider until the record expires (hours), and
+    /// other peers republish it meanwhile. `merge_dht_providers` is additive —
+    /// it can add a holder, never remove one — so without this map a stale
+    /// record silently resurrects a claim the holder itself has withdrawn.
+    ///
+    /// Measured 2026-08-22 on a three-way split: the holder retracted shard 2
+    /// correctly and said so every 5 minutes, the coordinator re-merged the
+    /// stale DHT record every few seconds, and the scheduler kept planning a
+    /// segment onto a node that no longer had the weights — a hard 503 with no
+    /// standby rather than a re-route. Retraction alone is futile when
+    /// something else re-adds the claim faster than it is withdrawn.
+    ///
+    /// Cleared by `record_shard_holder`, so a node that genuinely re-acquires
+    /// the shard is believed again as soon as it announces it itself. The DHT
+    /// path deliberately does NOT clear it — that is the whole point.
+    retracted_claims: DashMap<(ShardId, NodeId), Instant>,
     /// Local node ID — never evicted from holder sets.
     local_node_id: Option<NodeId>,
 }
@@ -49,6 +81,7 @@ impl ModelRegistry {
             shard_holders: DashMap::new(),
             node_shards: DashMap::new(),
             global_holder_count: DashMap::new(),
+            retracted_claims: DashMap::new(),
             local_node_id: None,
         }
     }
@@ -62,6 +95,7 @@ impl ModelRegistry {
             shard_holders: DashMap::new(),
             node_shards: DashMap::new(),
             global_holder_count: DashMap::new(),
+            retracted_claims: DashMap::new(),
             local_node_id: Some(local_node_id),
         }
     }
@@ -124,6 +158,11 @@ impl ModelRegistry {
     /// Bounded: if the holder set is at capacity, the oldest non-local holder
     /// is evicted to make room. Maintains reverse index.
     pub fn record_shard_holder(&self, shard_id: ShardId, node_id: NodeId) {
+        // A first-hand claim supersedes any earlier retraction: the node is
+        // telling us it has the shard now. Only this path clears it — the DHT
+        // merge must not, or a stale provider record would undo a retraction.
+        self.retracted_claims
+            .remove(&(shard_id.clone(), node_id.clone()));
         let mut entry = self.shard_holders.entry(shard_id.clone()).or_default();
         let holders = entry.value_mut();
 
@@ -218,8 +257,40 @@ impl ModelRegistry {
 
         for shard_id in &stale {
             self.remove_shard_holder(shard_id, node_id);
+            self.note_retracted_claim(shard_id.clone(), node_id.clone());
         }
         stale.len()
+    }
+
+    /// Drop a holder's claim AND remember that it was withdrawn, so a stale DHT
+    /// provider record cannot reinstate it (see `retracted_claims`).
+    ///
+    /// This is the one to call from a retraction path. A bare
+    /// `remove_shard_holder` is for eviction and bookkeeping, and on its own it
+    /// is undone by the next `GetProviders` response.
+    pub fn retract_shard_holder(&self, shard_id: &ShardId, node_id: &NodeId) {
+        self.remove_shard_holder(shard_id, node_id);
+        self.note_retracted_claim(shard_id.clone(), node_id.clone());
+    }
+
+    /// Remember that `node_id` has withdrawn its claim on `shard_id`, so a
+    /// stale DHT provider record cannot put it back (see `retracted_claims`).
+    fn note_retracted_claim(&self, shard_id: ShardId, node_id: NodeId) {
+        if self.retracted_claims.len() >= MAX_RETRACTED_CLAIMS {
+            let now = Instant::now();
+            self.retracted_claims
+                .retain(|_, at| now.duration_since(*at).as_secs() < RETRACTION_HONOURED_SECS);
+        }
+        self.retracted_claims
+            .insert((shard_id, node_id), Instant::now());
+    }
+
+    /// Has this node withdrawn its claim on this shard recently enough that a
+    /// DHT provider record should not be believed over it?
+    fn claim_was_retracted(&self, shard_id: &ShardId, node_id: &NodeId) -> bool {
+        self.retracted_claims
+            .get(&(shard_id.clone(), node_id.clone()))
+            .is_some_and(|at| at.elapsed().as_secs() < RETRACTION_HONOURED_SECS)
     }
 
     /// Get nodes that hold the mmproj (vision encoder) for a model.
@@ -288,6 +359,13 @@ impl ModelRegistry {
     /// Updates timestamps for existing entries and adds new ones (with eviction).
     pub fn merge_dht_providers(&self, shard_id: &ShardId, providers: &[NodeId]) {
         for node_id in providers {
+            // The holder's own word beats the DHT's memory of it. A provider
+            // record is republished for hours after the shard is gone, and this
+            // merge is the only writer that cannot remove a holder, so without
+            // the check a withdrawn claim comes straight back.
+            if self.claim_was_retracted(shard_id, node_id) {
+                continue;
+            }
             self.record_shard_holder(shard_id.clone(), node_id.clone());
         }
     }
@@ -992,6 +1070,81 @@ mod tests {
 
         registry.merge_dht_providers(&shard_id, &nodes);
         assert_eq!(registry.shard_holder_count(&shard_id), 5);
+    }
+
+    /// A stale DHT provider record must not resurrect a claim its holder has
+    /// withdrawn. Measured live on 2026-08-22: the holder retracted the shard
+    /// and re-announced that every 5 minutes, the coordinator re-merged the
+    /// stale record every few seconds, and every request was then scheduled
+    /// onto a node without the weights — a 503 with no standby, indefinitely.
+    #[test]
+    fn a_dht_record_cannot_undo_a_holders_own_retraction() {
+        let registry = ModelRegistry::new();
+        let model_id = ModelId("test".into());
+        let shard_id = ShardId {
+            model_id: model_id.clone(),
+            index: 2,
+        };
+        let node = NodeId([7u8; 32]);
+
+        // The node held it, and the DHT learned so.
+        registry.record_shard_holder(shard_id.clone(), node.clone());
+        assert_eq!(registry.shard_holder_count(&shard_id), 1);
+
+        // Then it announced a holding that no longer includes shard 2.
+        let keep: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        assert_eq!(
+            registry.retain_node_shards_for_model(&model_id, &node, &keep),
+            1
+        );
+        assert_eq!(registry.shard_holder_count(&shard_id), 0);
+
+        // The DHT still names it. Without honouring the retraction this puts
+        // the claim straight back, which is the whole defect.
+        registry.merge_dht_providers(&shard_id, std::slice::from_ref(&node));
+        assert_eq!(
+            registry.shard_holder_count(&shard_id),
+            0,
+            "a stale DHT provider record resurrected a retracted claim"
+        );
+
+        // But the node's own word is still believed: if it re-acquires the
+        // shard and says so, it is a holder again, and the DHT agrees freely.
+        registry.record_shard_holder(shard_id.clone(), node.clone());
+        assert_eq!(registry.shard_holder_count(&shard_id), 1);
+        registry.remove_shard_holder(&shard_id, &node);
+        registry.merge_dht_providers(&shard_id, std::slice::from_ref(&node));
+        assert_eq!(
+            registry.shard_holder_count(&shard_id),
+            1,
+            "a re-announced holding must clear the retraction"
+        );
+    }
+
+    /// The other way a holder tells us it lost a shard: it fails a live request
+    /// with "shard not found". That is first-hand too, and must stick for every
+    /// later request — before this, a per-request blacklist covered the retry
+    /// and the DHT re-taught the claim in time for the next one, so a coordinator
+    /// restarted while a record was stale failed request after request.
+    #[test]
+    fn a_retraction_from_a_failed_segment_also_survives_the_dht() {
+        let registry = ModelRegistry::new();
+        let shard_id = ShardId {
+            model_id: ModelId("test".into()),
+            index: 2,
+        };
+        let node = NodeId([9u8; 32]);
+
+        registry.record_shard_holder(shard_id.clone(), node.clone());
+        registry.retract_shard_holder(&shard_id, &node);
+        assert_eq!(registry.shard_holder_count(&shard_id), 0);
+
+        registry.merge_dht_providers(&shard_id, std::slice::from_ref(&node));
+        assert_eq!(
+            registry.shard_holder_count(&shard_id),
+            0,
+            "the DHT reinstated a holder that had just failed for want of the shard"
+        );
     }
 
     #[test]

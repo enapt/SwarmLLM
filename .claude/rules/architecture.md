@@ -1150,6 +1150,35 @@ Retraction of a peer's *shard* claims is a different mechanism entirely; see
 
 ## ModelRegistry Holder Counts
 
+**`merge_dht_providers` is the one writer of `shard_holders` that cannot remove
+a holder** — it loops `record_shard_holder` over a DHT `GetProviders` result.
+That matters because a provider record outlives the fact it asserts: libp2p-kad
+keeps one for 24 h, republishes at 12 h, and other peers serve it, so a node that
+deleted or lost a shard is still advertised as holding it for hours. An
+add-only writer wins every disagreement with a writer that removes, and its
+cadence decides how fast.
+
+Measured live 2026-08-22 on a three-way split (gotcha #364): the holder
+retracted shard 2 correctly and re-announced its reduced holding every 5 minutes
+(`Peer retracted shards it no longer hosts … dropped=1`, six times), the
+coordinator re-merged the stale DHT record every few seconds, and every request
+was then scheduled onto a node without those weights — `503 Segment failover
+exhausted`, indefinitely, while a healthy node holding exactly that shard was
+never considered. **Retraction alone is futile when something re-adds the claim
+faster than it is withdrawn** (same shape as #163).
+
+So `ModelRegistry::retracted_claims` records what a holder has withdrawn, and
+`merge_dht_providers` skips a (shard, node) pair found there. Two halves that
+must stay together: `record_shard_holder` CLEARS the entry, so a node that
+genuinely re-acquires the shard is believed the moment it announces that itself;
+the DHT path must NEVER clear it, which is the entire point. Honoured for
+`RETRACTION_HONOURED_SECS` (26 h — deliberately longer than the provider
+record's own life, or the record simply wins again at the end of the window).
+
+A new writer of `shard_holders` fed by anything other than the holder's own word
+must answer the same question first: can it remove, and if not, what stops it
+resurrecting something already withdrawn?
+
 `ModelRegistry::shard_holders` caches at most `MAX_HOLDERS_PER_SHARD = 50`
 holders per shard (LRU-evicted, local node never evicted). This is the
 **routing oracle** — pipeline scheduler, region eviction, busy-holder
