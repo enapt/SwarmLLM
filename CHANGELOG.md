@@ -40,6 +40,14 @@ Per-change numbers below are llama-3.2-3b:
 GPU inference is untouched by all four; a CUDA node sees only the allocator
 change.
 
+How much a given model gains depends on its size and quantization, and the
+decode figures above are the best case. Confirmed afterwards on a second, older
+processor (6-core i5-10500T) against the same pre-change build: tinyllama-1.1b
+Q4_K_M prompt processing +25%, decode +6%; llama-3.2-1b Q8_0 +13% and +7%. Small
+models gain less on decode — the new attention kernel saves a fixed cost per
+layer, and these have 16-22 of them against 28-32 — and Q8_0 gains less on
+prompts, because the multi-row weight kernel covers Q4_K and Q6_K only.
+
 ## [0.3.111-alpha] — 2026-08-21
 
 **A model you delete from one machine stays deleted.** Splitting a model across
