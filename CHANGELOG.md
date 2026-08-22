@@ -4,6 +4,18 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**Replies are up to 1.8x faster on processor nodes that were told to give the
+swarm more of their machine.** Writing a reply is limited by memory speed rather
+than processing power, so past a certain number of threads it gets *slower* —
+and that number is a property of the machine and the model, which no fixed
+setting can know. A node set to contribute its whole processor was therefore
+replying at less than half the speed of the same node on the default setting:
+the more you gave, the worse your own replies got. Each node now works out the
+right width for itself, timing its own first few tokens at different widths and
+keeping the best. Reading prompts is unaffected and still uses everything
+offered. Nodes on the default setting gain too, so nothing is traded away.
+
+
 ## [0.3.113-alpha] — 2026-08-22
 
 **A machine that gives up part of a model is believed when it says so.** Moving

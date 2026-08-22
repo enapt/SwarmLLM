@@ -59,16 +59,90 @@
 //! harmed by that rule, and it recovers the large loss when someone sets
 //! `max_cpu_threads` to their logical count — a natural thing to do.
 //!
-//! What it deliberately does NOT do is guess the sub-physical optimum. On the
-//! Ryzen that leaves 4 threads' worth of decode speed on the table (5.26 vs
-//! 4.56 tok/s at 8). Recovering it needs calibration on the machine itself, not
-//! a better constant; see `docs/FUTURE_WORK.md`.
+//! # The sub-physical optimum is measured, not guessed (2026-08-22)
+//!
+//! The cap above is a ceiling, and on a machine whose cores each pull a lot of
+//! bandwidth the real optimum sits well below it. That was known and deferred
+//! when the loss was 15% (5.26 vs 4.56 tok/s at 8 on the Ryzen). **The v0.3.112
+//! CPU kernels changed the premise**: with the arithmetic per byte cut, decode
+//! became far more bandwidth-bound and the same comparison is now much wider.
+//! Re-measured 2026-08-22, llama-3.2-3b Q4_K_M, 256-token prompt, min of 2:
+//!
+//! | decode threads | tok/s |
+//! |---|---|
+//! | 1 | 6.8 |
+//! | 2 | 12.7 |
+//! | **4** | **18.9** |
+//! | 6 | 15.0 |
+//! | 8 (= the cap here, so the global pool) | 8.3 |
+//!
+//! A node set to `contribution = "maximum"` therefore replied **2.3x slower**
+//! than the same node on the default `minimal`, because minimal's ceiling of 4
+//! happens to land on the optimum. Giving the swarm more of your machine made
+//! your own replies worse — the same defect this module was written to fix,
+//! reopened by making the kernels faster.
+//!
+//! No constant fixes it, and the second machine proves it: on the i5-10500T
+//! llama-3.2-1b Q8_0 still climbs monotonically to all six cores (4.9 → 13.95
+//! tok/s) while tinyllama Q4_K_M on that same box peaks around three. The
+//! optimum depends on the machine AND the model, so it is now **calibrated at
+//! run time**: the first decode steps of a worker's life are timed round-robin
+//! across candidate widths and the best is kept. A worker process serves one
+//! model, so a process-global calibration is per-model by construction.
+//!
+//! The measurement is free — those are real tokens the user asked for, not a
+//! synthetic probe — and self-correcting: it only moves off the widest
+//! candidate when the margin exceeds `CALIBRATION_MARGIN_PCT`, so noise leaves
+//! the previous behaviour in place.
+//!
+//! Measured A/B inside one binary (`SWARMLLM_DECODE_CALIBRATE=0` is the off
+//! arm), llama-3.2-3b Q4_K_M, 896-token prompt, ~916 KV, 3 interleaved reps on
+//! an idle box:
+//!
+//! | offered | calibration off | calibration on | it chose | its own timings |
+//! |---|---|---|---|---|
+//! | 8 (`maximum`) | 7.3-7.5 tok/s | **13.5-14.2** | 4 of 8 | 8:129 6:76 4:60 2:86 ms |
+//! | 4 (`minimal`, default) | 8.4-11.8 | **11.6-12.5** | 3 of 4 | 4:84 3:70 2:87 1:156 ms |
+//!
+//! **1.80x on `maximum`** with prompt processing unchanged (62-68 tok/s in both
+//! arms), and the default gains too rather than merely holding — nothing here
+//! trades one contribution level against another. No run of the on arm was
+//! slower than any run of the off arm at either width.
+//!
+//! The cost is the tokens spent measuring, which is worst on a short reply, so
+//! `ELIMINATION_RATIO` drops a hopeless candidate after one look instead of
+//! timing it three times. With that, a 16-token reply at the default measures
+//! 10.91 tok/s calibrated against 10.85 uncalibrated — the cost is gone at the
+//! length where it would have been most visible.
 //!
 //! Prefill is left on the global pool untouched, so a node on the default
 //! `contribution = "minimal"` takes exactly the code path it did before, with
 //! no pool and no `install`.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
+
+/// Timed decode steps per candidate width before a choice is made. Three is
+/// enough to take a min that survives one scheduler hiccup, and costs only the
+/// first ~dozen tokens of a worker's life.
+const SAMPLES_PER_CANDIDATE: usize = 3;
+
+/// How much faster a narrower pool must be before decode moves off the widest
+/// candidate. Below this the two are indistinguishable on a busy machine and
+/// the previous behaviour (use what the owner offered) stands.
+const CALIBRATION_MARGIN_PCT: u64 = 3;
+
+/// After one full cycle, a candidate this much slower than the best so far is
+/// dropped instead of being sampled again.
+///
+/// Calibration is paid for out of the user's own first tokens, so its cost is
+/// worst on a short reply. On the Ryzen the narrowest candidate measured 156 ms
+/// against 70 ms — hopeless after one look, and re-timing it twice more was
+/// most of the price. 3/2 is deliberately loose: it only ever discards a
+/// candidate that lost badly, never one that is merely behind.
+const ELIMINATION_RATIO: (u64, u64) = (3, 2);
 
 /// How many threads decode should use, given what the owner offered and what
 /// the machine has.
@@ -92,6 +166,232 @@ fn env_decode_threads() -> Option<usize> {
         std::env::var("SWARMLLM_DECODE_THREADS")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
+    })
+}
+
+/// Candidate decode widths for this machine, widest first.
+///
+/// Anchored on [`decode_threads`] — the cap is still a cap, calibration only
+/// chooses beneath it — and thinned out to quarters so at most four pools are
+/// ever built. Both measured optima are members: 4 of the Ryzen's 8, and all 6
+/// of the i5's 6 (the widest candidate is always present).
+pub(crate) fn decode_candidates(offered: usize, physical: usize) -> Vec<usize> {
+    let cap = decode_threads(offered, physical);
+    let mut v: Vec<usize> = [cap, cap * 3 / 4, cap / 2, cap / 4]
+        .into_iter()
+        .map(|n| n.max(1))
+        .collect();
+    v.sort_unstable_by(|a, b| b.cmp(a));
+    v.dedup();
+    v
+}
+
+/// Which candidate to time next, and the bookkeeping to decide between them.
+///
+/// The cursor alternates direction every cycle. That matters: the KV cache
+/// grows with every token, so decode gets steadily slower on its own, and a
+/// fixed round-robin order would hand the first candidate every short-KV slot
+/// and the last one every long-KV slot — measuring position, not width.
+struct Calibration {
+    candidates: Vec<usize>,
+    cursor: AtomicUsize,
+    /// Decided width, or 0 while still measuring.
+    chosen: AtomicUsize,
+    state: Mutex<CalibrationState>,
+}
+
+struct CalibrationState {
+    /// Fastest nanoseconds seen per candidate — min, not mean: every source of
+    /// error here adds time, so the minimum is the least contaminated estimate.
+    best_ns: Vec<Option<u64>>,
+    counts: Vec<usize>,
+    /// Candidates that lost their first cycle badly enough not to be re-timed.
+    eliminated: Vec<bool>,
+}
+
+impl Calibration {
+    fn new(candidates: Vec<usize>) -> Self {
+        let n = candidates.len();
+        Self {
+            candidates,
+            cursor: AtomicUsize::new(0),
+            chosen: AtomicUsize::new(0),
+            state: Mutex::new(CalibrationState {
+                best_ns: vec![None; n],
+                counts: vec![0; n],
+                eliminated: vec![false; n],
+            }),
+        }
+    }
+
+    /// Index of the candidate to time on this call, skipping any already
+    /// eliminated. Falls back to the raw rotation if the state is unreadable.
+    fn next_index(&self) -> usize {
+        let n = self.candidates.len();
+        let raw = |step: usize| {
+            let (cycle, pos) = (step / n, step % n);
+            if cycle % 2 == 0 {
+                pos
+            } else {
+                n - 1 - pos
+            }
+        };
+        let step = self.cursor.fetch_add(1, Ordering::Relaxed);
+        let Ok(st) = self.state.lock() else {
+            return raw(step);
+        };
+        if st.eliminated.iter().all(|e| !e) {
+            return raw(step);
+        }
+        // Walk forward to the next live candidate so the rotation still
+        // alternates over whichever ones remain.
+        for extra in 0..n {
+            let idx = raw(step + extra);
+            if !st.eliminated[idx] {
+                return idx;
+            }
+        }
+        raw(step)
+    }
+
+    /// Record one timing and, once every candidate has been seen enough, settle.
+    fn record(&self, idx: usize, ns: u64) {
+        let mut st = match self.state.lock() {
+            Ok(g) => g,
+            // A poisoned lock means another thread panicked mid-forward. Losing
+            // calibration is not worth propagating that: keep the widest.
+            Err(_) => return,
+        };
+        st.counts[idx] += 1;
+        st.best_ns[idx] = Some(match st.best_ns[idx] {
+            Some(prev) => prev.min(ns),
+            None => ns,
+        });
+        // Once every candidate has been seen once, drop the hopeless ones so
+        // the user does not pay to re-time them.
+        if st.counts.iter().all(|c| *c >= 1) {
+            if let Some(best) = st.best_ns.iter().flatten().copied().min() {
+                for i in 0..st.best_ns.len() {
+                    if let Some(v) = st.best_ns[i] {
+                        if v * ELIMINATION_RATIO.1 > best * ELIMINATION_RATIO.0 {
+                            st.eliminated[i] = true;
+                        }
+                    }
+                }
+            }
+        }
+        let unfinished = st
+            .counts
+            .iter()
+            .zip(st.eliminated.iter())
+            .any(|(c, dead)| !*dead && *c < SAMPLES_PER_CANDIDATE);
+        if unfinished {
+            return;
+        }
+        let widest_ns = st.best_ns[0];
+        let best = st
+            .best_ns
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !st.eliminated[*i])
+            .filter_map(|(i, ns)| ns.map(|v| (i, v)))
+            .min_by_key(|(_, v)| *v);
+        let (pick_idx, pick_ns) = match (best, widest_ns) {
+            (Some(b), Some(_)) => b,
+            _ => (0, 0),
+        };
+        // Only move off the widest when the gain is real.
+        let keep_widest = match widest_ns {
+            Some(w) => pick_ns * 100 > w * (100 - CALIBRATION_MARGIN_PCT),
+            None => true,
+        };
+        let final_idx = if keep_widest { 0 } else { pick_idx };
+        self.chosen
+            .store(self.candidates[final_idx], Ordering::Relaxed);
+        let table: Vec<String> = self
+            .candidates
+            .iter()
+            .zip(st.best_ns.iter())
+            .map(|(t, ns)| format!("{t}:{}ms", ns.map(|v| v / 1_000_000).unwrap_or(0)))
+            .collect();
+        tracing::info!(
+            decode_threads = self.candidates[final_idx],
+            offered = self.candidates[0],
+            measured = %table.join(" "),
+            "Decode thread width calibrated on this machine from real tokens"
+        );
+        // The benches run without a tracing subscriber, and a calibration you
+        // cannot see is a calibration you cannot check.
+        if std::env::var("SWARMLLM_DECODE_CALIBRATE_VERBOSE").is_ok() {
+            eprintln!(
+                "CALIB chose {} of {} — {}",
+                self.candidates[final_idx],
+                self.candidates[0],
+                table.join(" ")
+            );
+        }
+    }
+}
+
+/// One rayon pool per candidate width, built on first use and shared after.
+///
+/// `None` means "use the global pool", which is what the widest candidate
+/// always resolves to — so the common path still builds nothing.
+fn pool_for(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
+    static POOLS: OnceLock<Mutex<HashMap<usize, Option<Arc<rayon::ThreadPool>>>>> = OnceLock::new();
+    if threads >= rayon::current_num_threads() {
+        return None;
+    }
+    let map = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().ok()?;
+    guard
+        .entry(threads)
+        .or_insert_with(|| {
+            match rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(move |i| format!("swarm-decode{threads}-{i}"))
+                .build()
+            {
+                Ok(p) => Some(Arc::new(p)),
+                Err(e) => {
+                    // Falling back to the global pool is the previous
+                    // behaviour, so this costs speed and nothing else.
+                    tracing::warn!(error = %e, threads, "Could not build a decode thread pool — using the global one");
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+/// The calibrator, or `None` when there is nothing to choose between.
+fn calibration() -> Option<&'static Calibration> {
+    static CALIB: OnceLock<Option<Calibration>> = OnceLock::new();
+    CALIB
+        .get_or_init(|| {
+            // An explicit width (or an explicit 0) is a decision already made.
+            if env_decode_threads().is_some() || !env_calibration_enabled() {
+                return None;
+            }
+            let candidates =
+                decode_candidates(rayon::current_num_threads(), num_cpus::get_physical());
+            if candidates.len() < 2 {
+                return None;
+            }
+            Some(Calibration::new(candidates))
+        })
+        .as_ref()
+}
+
+/// `SWARMLLM_DECODE_CALIBRATE=0` pins the previous behaviour, for A/B inside
+/// one binary — the same discipline as `SWARMLLM_FORCE_STANDARD_ATTN`.
+fn env_calibration_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_DECODE_CALIBRATE").ok().as_deref(),
+            Some("0")
+        )
     })
 }
 
@@ -152,10 +452,30 @@ pub(crate) fn in_phase_pool<R: Send>(seq_len: usize, f: impl FnOnce() -> R + Sen
     if seq_len != 1 {
         return f();
     }
-    match decode_pool() {
+    let Some(calib) = calibration() else {
+        // Pinned width, or nothing to choose between: the original path.
+        return match decode_pool() {
+            Some(pool) => pool.install(f),
+            None => f(),
+        };
+    };
+    let settled = calib.chosen.load(Ordering::Relaxed);
+    if settled != 0 {
+        return match pool_for(settled) {
+            Some(pool) => pool.install(f),
+            None => f(),
+        };
+    }
+    // Still measuring: time this token on the next candidate in the rotation.
+    let idx = calib.next_index();
+    let threads = calib.candidates[idx];
+    let started = Instant::now();
+    let out = match pool_for(threads) {
         Some(pool) => pool.install(f),
         None => f(),
-    }
+    };
+    calib.record(idx, started.elapsed().as_nanos() as u64);
+    out
 }
 
 /// Is the machine currently too hot? Observed by [`super::thermal`] and reported
@@ -188,6 +508,140 @@ pub fn set_machine_is_hot(hot: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cap is still the ceiling, and both machines' measured optima are
+    /// candidates: 4 of the Ryzen's 8, and all 6 of the i5's 6.
+    #[test]
+    fn candidates_span_the_measured_optima_and_never_exceed_the_cap() {
+        let ryzen = decode_candidates(8, 8);
+        assert_eq!(
+            ryzen[0], 8,
+            "the widest candidate is what the owner offered"
+        );
+        assert!(
+            ryzen.contains(&4),
+            "the Ryzen's measured optimum: {ryzen:?}"
+        );
+        let i5 = decode_candidates(6, 6);
+        assert_eq!(
+            i5[0], 6,
+            "the i5 wants all six and must be able to keep them"
+        );
+        assert!(i5.contains(&3), "tinyllama peaked near three there: {i5:?}");
+        for c in decode_candidates(16, 8) {
+            assert!(c <= 8, "calibration must not reach past physical cores");
+        }
+        assert!(
+            decode_candidates(1, 1).len() < 2,
+            "one core leaves nothing to choose between, so no calibration runs"
+        );
+    }
+
+    /// The KV cache grows every token, so decode slows down on its own. A fixed
+    /// rotation would give the first candidate every short-KV slot — measuring
+    /// position rather than width. Direction alternates to cancel that.
+    #[test]
+    fn the_rotation_alternates_so_a_growing_cache_cannot_pick_the_winner() {
+        let c = Calibration::new(vec![8, 6, 4, 2]);
+        let seen: Vec<usize> = (0..8).map(|_| c.next_index()).collect();
+        assert_eq!(seen, vec![0, 1, 2, 3, 3, 2, 1, 0]);
+        for i in 0..4 {
+            let slots: Vec<usize> = seen
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| **v == i)
+                .map(|(pos, _)| pos % 4)
+                .collect();
+            assert_ne!(
+                slots[0], slots[1],
+                "candidate {i} saw the same slot twice — the bias is not cancelled"
+            );
+        }
+    }
+
+    /// Calibration is paid for out of the user's own first tokens, so a
+    /// candidate that lost its first cycle badly is not timed again.
+    #[test]
+    fn a_hopeless_candidate_is_dropped_after_one_look() {
+        let c = Calibration::new(vec![8, 6, 4, 2]);
+        // One cycle: 2 threads is more than 1.5x off the best and is hopeless.
+        c.record(0, 90_000_000);
+        c.record(1, 76_000_000);
+        c.record(2, 60_000_000);
+        c.record(3, 160_000_000);
+        {
+            let st = c.state.lock().unwrap();
+            assert!(
+                st.eliminated[3],
+                "160ms against 60ms should not be re-timed"
+            );
+            assert!(!st.eliminated[2], "the leader must survive");
+            assert!(
+                !st.eliminated[1],
+                "76ms is behind but not hopeless — keep it"
+            );
+            // 90 against 60 is EXACTLY the ratio, and the rule discards only
+            // what is strictly past it. Pinned deliberately: the boundary is
+            // where a loose threshold would start throwing away real
+            // candidates, which is the failure mode that matters here.
+            assert!(
+                !st.eliminated[0],
+                "a candidate exactly at the ratio must survive"
+            );
+        }
+        // The rotation must now only offer the survivors.
+        for _ in 0..8 {
+            let idx = c.next_index();
+            let st = c.state.lock().unwrap();
+            assert!(
+                !st.eliminated[idx],
+                "the rotation offered an eliminated candidate"
+            );
+        }
+        // Finishing the survivors is enough to settle, without the dead ones.
+        for _ in 0..SAMPLES_PER_CANDIDATE {
+            c.record(0, 90_000_000);
+            c.record(1, 76_000_000);
+            c.record(2, 60_000_000);
+        }
+        assert_eq!(
+            c.chosen.load(Ordering::Relaxed),
+            4,
+            "settled on the fastest survivor without ever re-timing the hopeless one"
+        );
+        assert_eq!(
+            c.state.lock().unwrap().counts[3],
+            1,
+            "the eliminated candidate was timed exactly once"
+        );
+    }
+
+    /// A clear winner is taken; a photo finish leaves the owner's own setting
+    /// alone rather than chasing noise.
+    #[test]
+    fn calibration_takes_a_real_gain_and_ignores_a_marginal_one() {
+        let c = Calibration::new(vec![8, 4]);
+        for _ in 0..SAMPLES_PER_CANDIDATE {
+            c.record(0, 100_000_000);
+            c.record(1, 50_000_000);
+        }
+        assert_eq!(
+            c.chosen.load(Ordering::Relaxed),
+            4,
+            "twice as fast at half the width and it was not taken"
+        );
+
+        let tie = Calibration::new(vec![8, 4]);
+        for _ in 0..SAMPLES_PER_CANDIDATE {
+            tie.record(0, 100_000_000);
+            tie.record(1, 99_000_000);
+        }
+        assert_eq!(
+            tie.chosen.load(Ordering::Relaxed),
+            8,
+            "1% is inside the noise of a busy machine — keep what was offered"
+        );
+    }
 
     /// The rule, stated once: never more threads than physical cores, and
     /// never more than the owner offered.

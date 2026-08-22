@@ -7497,6 +7497,33 @@ it is running on**, timing real decode steps round-robin across candidates over
 the first seconds of a conversation. That measures the actual box with the
 actual model at no synthetic cost, and removes the one guess this fix contains.
 
+**DONE 2026-08-22 — and it became urgent rather than nice-to-have.** The v0.3.112
+CPU kernels cut the arithmetic per byte, which made decode more bandwidth-bound
+and widened this gap from the 15% recorded above to **1.80x**: at
+`contribution = "maximum"` (8 threads on the Ryzen) decode ran at 7.3-7.5 tok/s
+against 13.5-14.2 with the right width. A tuned constant whose premise moved,
+which is the third time this codebase has been caught that way (#255, the
+flash-attn crossover, and now this).
+
+Implemented exactly as proposed: `cpu_pools::Calibration` times real decode
+steps round-robin across candidate widths and keeps the best. Three details
+that were not obvious before building it:
+- **The rotation must alternate direction.** The KV cache grows every token, so
+  decode slows on its own; a fixed order hands the first candidate every
+  short-KV slot and measures position rather than width.
+- **Early elimination pays for itself.** The cost is the user's own first
+  tokens, worst on a short reply. Dropping a candidate that lost its first cycle
+  by more than 1.5x takes a 16-token reply from measurably slower to 10.91 vs
+  10.85 tok/s — i.e. free.
+- **A worker process serves one model, so a process-global calibration is
+  per-model by construction** — which matters, because the same i5 wants all six
+  cores for llama-3.2-1b Q8_0 and about three for tinyllama Q4_K_M.
+
+`SWARMLLM_DECODE_CALIBRATE=0` restores the previous behaviour for A/B inside one
+binary; `SWARMLLM_DECODE_CALIBRATE_VERBOSE=1` prints what was measured and
+chosen, because the benches run without a tracing subscriber and a calibration
+you cannot see is one you cannot check.
+
 ## Nothing on the push path compiles the GPU code (2026-08-07) — FIXED, see the resolution at the end
 
 Found by breaking it. A change to `inference::layers` removed an import used
