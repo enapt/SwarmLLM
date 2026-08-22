@@ -3,10 +3,11 @@
 //! Outbound:
 //! - `handle_send_tensor` — encrypts (or fails) a `LayerForward` for a peer
 //!   and dispatches it as a `SwarmRequest::TensorPayload`.
-//! - `handle_send_tensor_result` — prefers writing a `LayerResult` back on
-//!   the original forward's stored `ResponseChannel`; falls back to a fresh
-//!   request when the channel is gone.
-//! - `send_tensor_result_as_request` — fallback path for the above.
+//! - `handle_send_tensor_result` — delivers a `LayerResult` back to the
+//!   coordinator: on the persistent pipeline stream when the forward arrived
+//!   that way, otherwise as a fresh request.
+//! - `send_tensor_result_as_request` — that request send. Since 2026-08-21 a
+//!   result is ALWAYS its own request; no `ResponseChannel` is held open.
 //! - `handle_send_streaming_token` / `handle_send_rr_message` — small JSON
 //!   point-to-point helpers via request_response.
 //!
@@ -388,8 +389,13 @@ impl NetworkManager {
         self.send_tensor_result_as_request(&peer_id, &result, is_connected);
     }
 
-    /// Timeout recovery: send tensor result as a new outbound request when the
-    /// original response channel was closed (peer disconnect or timeout).
+    /// Send a tensor result to the coordinator as a new outbound request.
+    ///
+    /// This is the normal path, not a recovery one: a forward is acknowledged on
+    /// receipt (`features::FORWARD_ACK`) and its result travels as an
+    /// independent request, so nothing holds a substream open while a segment
+    /// computes. Relays back over the reverse route when the peer is
+    /// unreachable directly.
     pub(super) fn send_tensor_result_as_request(
         &mut self,
         peer_id: &libp2p::PeerId,
@@ -421,7 +427,7 @@ impl NetworkManager {
                 tracing::warn!(
                     %peer_id,
                     request_id = %result.request_id,
-                    "Dropping tensor result fallback — peer not connected and no relay path"
+                    "Dropping tensor result — peer not connected and no relay path"
                 );
                 return;
             }
@@ -448,11 +454,11 @@ impl NetworkManager {
                     activations_bytes = result.activations.len(),
                     finish = ?result.finish_reason,
                     ?outbound_id,
-                    "DIAG: sent tensor result as new request (fallback)"
+                    "DIAG: sent tensor result as new request"
                 );
             }
             Err(e) => {
-                tracing::warn!(error = %e, request_id = %result.request_id, "Failed to encode tensor result (fallback)");
+                tracing::warn!(error = %e, request_id = %result.request_id, "Failed to encode tensor result");
             }
         }
     }
