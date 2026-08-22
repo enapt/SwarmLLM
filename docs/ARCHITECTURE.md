@@ -227,7 +227,7 @@ Memory bounded at O(1) instead of O(N). LAN peers and pipeline-active peers are 
 
 Two-tier shard holder discovery for 50K+ node scaling:
 
-- **Tier 1 — Bounded in-memory cache**: `ModelRegistry.shard_holders` uses `HashMap<NodeId, Instant>` (not `HashSet<NodeId>`) with max 50 holders per shard. LRU eviction when at capacity. Local node never evicted. Populated by GossipSub `ShardAnnounce` + DHT query results. Sync `shard_holders()` API unchanged — scheduler hot path stays fast.
+- **Tier 1 — Bounded in-memory cache**: `ModelRegistry.shard_holders` uses `HashMap<NodeId, Instant>` (not `HashSet<NodeId>`) with max 50 holders per shard. LRU eviction when at capacity. Local node never evicted. Populated by GossipSub `ShardAnnounce` + DHT query results. Sync `shard_holders()` API unchanged — scheduler hot path stays fast. **The DHT merge can only ADD a holder** (`merge_dht_providers` loops `record_shard_holder`), and a kad provider record outlives the fact it asserts by up to 24h — so a holder's explicit retraction is recorded in `ModelRegistry.retracted_claims` and outranks the record for 26h; only the holder's own announcement clears it. Without that, a withdrawn claim was reinstated within seconds and every request was scheduled onto a node that no longer had the weights (gotcha #364, fixed v0.3.113).
 
 - **Tier 2 — Kademlia provider records**: Each node calls `kademlia.start_providing()` for its shards (key: `/swarm/provide/<model_id>/<shard_index>`). Provider records TTL 1 hour, republished every 20 minutes. `get_providers()` results are resolved from PeerId → NodeId (same Ed25519 key, bidirectional conversion in `transport.rs`) and merged into the bounded cache.
 

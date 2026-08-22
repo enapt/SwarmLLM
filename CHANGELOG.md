@@ -4,6 +4,8 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.113-alpha] — 2026-08-22
+
 **A machine that gives up part of a model is believed when it says so.** Moving
 some of a model's pieces off one computer could leave the rest of the swarm
 convinced they were still there: the network's own directory keeps advertising a
@@ -13,6 +15,18 @@ every five minutes, correctly. Requests were then sent to a computer that no
 longer had the weights and failed outright, saying no fallback was available,
 while another machine holding exactly that piece was never asked. Found while
 running a model split three ways across two computers.
+
+Two things could withdraw a claim and neither stuck: the machine's own
+announcement of what it now holds, and a request failing on that machine for
+want of the weights. The second only skipped it for the request that had already
+failed, so the next one made the same mistake. Both are now remembered, and only
+the machine's own word — saying it has the piece again — restores it.
+
+**Splitting a model across three machines works.** A model divided into three
+consecutive parts now passes work straight along the line, each machine handing
+its output to the next rather than sending it back to the one that asked. That
+had only ever been run across two machines before. Nothing changed to make it
+work; this release is the first time it was tried.
 
 
 ## [0.3.112-alpha] — 2026-08-22

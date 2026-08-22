@@ -161,12 +161,25 @@ chained runs — exactly 64 per run, one per token — and **zero** across the 6
 unchained runs, with both arms returning complete, coherent 64-token replies.
 The flag does what it says, on every token, and does nothing when it is off.
 
+**N>2 has now been carried on the wire (2026-08-22, v0.3.112).** A model split
+three ways across two machines — head A (layers 0-12, WSL), middle D (12-21,
+Proxmox), tail B (21-28, Proxmox), coordinator holding nothing — produced
+`segments=3` and a two-hop chain: the head logged `next=<D> remaining=1`, the
+middle `next=<B> remaining=0`, and the tail answered the coordinator. It is
+per-token, not prompt-only: across two 64-token chained runs at temperature 0.7
+the MIDDLE node logged exactly 128 hand-offs and the unchained control logged
+none. The timing question is still open — with 2 and 3 samples the arms sat ~1%
+apart, and a LAN cannot resolve even two saved round trips per token against
+run-to-run noise (see the re-measurement note above). Running that split also
+surfaced a routing defect that made it fail entirely at first; see gotcha #364
+and the v0.3.113 changelog entry.
+
 What is NOT covered yet, in order of value: (1) the SWARM-SPEC n-gram verify
 path (`ngram_only_spec.rs`, `speculative.rs`) builds its own per-segment
 forwards and does not chain — at temperature 0 that is the default decode path,
 so today the flag chains the PROMPT and nothing else for a greedy request;
-(2) more than one remote hop between head and tail (only a 2-segment chain was
-run; the trailer format and `plan_chain` handle N, the wire has not carried N>2);
+(2) chains longer than 3 segments, and any chain over a link slow enough to
+measure the saving on (`tc netem`, needs sudo);
 (3) a chain over the internet rather than a LAN; (4) the prompt-privacy
 (boomerang) shape with a chain in the middle.
 
