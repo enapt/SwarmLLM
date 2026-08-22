@@ -34,12 +34,26 @@ set -u
 
 BINARY="${1:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/swarmllm}"
 HOURS="${HOURS:-4}"
+# Checked HERE, before a node is started or a model loaded. HOURS feeds shell
+# arithmetic, which is integer-only, so a reasonable-looking `HOURS=1.5` used to
+# abort with a syntax error AFTER the daemon was up and the model was in memory
+# — which reads like the daemon failing rather than the argument being wrong,
+# and left a node running against no load for an hour (2026-08-22).
+case "$HOURS" in
+    ''|*[!0-9]*)
+        echo "soak: HOURS must be a whole number of hours (got '$HOURS'); use HOURS=2, not 1.5" >&2
+        exit 2 ;;
+esac
 PORT="${PORT:-8895}"
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 CONCURRENCY="${CONCURRENCY:-2}"
 SAMPLE_SECS="${SAMPLE_SECS:-60}"
 SRC=~/.local/share/swarmllm/models/$MODEL
-DATA=/tmp/swarm_soak
+# Per-PORT so two soaks can run side by side. It used to be one fixed path for
+# every run, and `stop_ours` + the `rm -rf` below are scoped to it — so starting
+# a second soak silently killed the first one's node and deleted its data dir
+# mid-run, which looks exactly like the daemon dying under load (2026-08-22).
+DATA=/tmp/swarm_soak-$PORT
 
 if [ ! -f "$SRC/manifest.json" ]; then
     echo "No model at $SRC" >&2
