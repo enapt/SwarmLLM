@@ -498,17 +498,7 @@ pub(super) async fn send_error_result(
     error: &str,
 ) {
     tracing::warn!(request_id = %request_id, error, "LayerForward processing failed");
-    // Sanitize error for network — don't leak internal paths, layer counts, or model topology
-    let sanitized = if error.contains("layer range") || error.contains("layer_start") {
-        "Layer configuration error".to_string()
-    } else if error.contains("No local shards") || error.contains("shard") {
-        "Required shards not available".to_string()
-    } else {
-        // Truncate and strip paths
-        let msg = error.chars().take(100).collect::<String>();
-        msg.replace(['/', '\\'], "")
-    };
-    let result = crate::types::LayerResult::error(request_id, sanitized);
+    let result = crate::types::LayerResult::error(request_id, sanitize_peer_facing_error(error));
     let _ = network_tx
         .send(NetworkCommand::SendTensorResult {
             target_peer_bytes: target_peer_bytes.to_vec(),
@@ -516,6 +506,42 @@ pub(super) async fn send_error_result(
         })
         .await;
 }
+
+/// What a peer is allowed to be told about a failure here.
+///
+/// Two jobs, and only one of them is truncation: replace anything that would
+/// describe this node's shard layout, and strip path separators.
+///
+/// **The length cap is not a security control and must not be sized as one.**
+/// A leak lives in the first characters as readily as the last, which is why
+/// the two `contains` arms above exist; the cap only stops a runaway string.
+/// It was 100 characters, chosen before any error was written to be read by a
+/// person. v0.3.111 then added the itemised memory refusal — 361 characters
+/// for a typical model, and the whole point of it is the itemisation — so
+/// every remote refusal arrived cut mid-word, at `4170 M`, with the breakdown
+/// the release notes promised removed (external report, 2026-08-22, reproduced
+/// byte-for-byte 3/3). Two changes that never met: the message got longer, and
+/// nothing told the thing that shortens it.
+///
+/// 512 matches the provider-body cap in `error::classify_error` — one number
+/// for "as much of a message as a caller may see".
+pub(crate) fn sanitize_peer_facing_error(error: &str) -> String {
+    if error.contains("layer range") || error.contains("layer_start") {
+        return "Layer configuration error".to_string();
+    }
+    if error.contains("No local shards") || error.contains("shard") {
+        return "Required shards not available".to_string();
+    }
+    error
+        .chars()
+        .take(PEER_FACING_ERROR_CHARS)
+        .collect::<String>()
+        .replace(['/', '\\'], "")
+}
+
+/// See [`sanitize_peer_facing_error`]. Long enough for the itemised memory
+/// refusal, which is the longest message a peer is meant to be able to read.
+const PEER_FACING_ERROR_CHARS: usize = 512;
 
 /// Is a peer-supplied layer range safe to act on for a model of `total_layers`?
 ///
@@ -726,5 +752,65 @@ mod chaining_tests {
             Some(b"self".to_vec())
         });
         assert_eq!(to, b"sender".to_vec());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact string an external tester received on 2026-08-22, and what
+    /// produced it: the worker's message carries a `Worker: ` prefix, the cap
+    /// was 100, and 100 - 8 is where `4170 M` stops. Reproduced 3/3 on their
+    /// side, byte-for-byte.
+    #[test]
+    fn a_memory_refusal_reaches_the_peer_whole() {
+        let refusal = "Worker: Service unavailable: meta-llama-3.1-8b-instruct-q4-k-m needs about \
+             5454 MB of memory: 4170 MB of weights, 1024 MB of KV cache for a 8192-token context \
+             (typical conversation), 260 MB of embeddings, tables and overhead. This node's budget \
+             allows 4000 MB and 1200 MB is already in use. Raise `resources.max_ram_mb`, or free \
+             memory by unloading another model.";
+        let out = sanitize_peer_facing_error(refusal);
+        assert!(
+            out.contains("4170 MB of weights"),
+            "the breakdown was cut mid-unit again: {out}"
+        );
+        assert!(
+            out.contains("unloading another model"),
+            "the refusal must survive to the part that says what to do: {out}"
+        );
+        assert!(
+            !out.ends_with(" M"),
+            "cut mid-unit — the shape of the original report: {out}"
+        );
+    }
+
+    /// The cap is a runaway guard, not a security control — but it still caps.
+    #[test]
+    fn a_runaway_message_is_still_bounded() {
+        let huge = "x".repeat(10_000);
+        assert_eq!(
+            sanitize_peer_facing_error(&huge).chars().count(),
+            PEER_FACING_ERROR_CHARS
+        );
+    }
+
+    /// The two jobs that ARE about disclosure keep working, and are checked
+    /// before the cap so no length can smuggle them through.
+    #[test]
+    fn shard_layout_is_never_described_to_a_peer() {
+        assert_eq!(
+            sanitize_peer_facing_error("bad layer range 10..18 for model x"),
+            "Layer configuration error"
+        );
+        assert_eq!(
+            sanitize_peer_facing_error("No local shards for meta-llama"),
+            "Required shards not available"
+        );
+        assert!(
+            !sanitize_peer_facing_error("failed reading /home/user/.local/share/swarmllm/x.bin")
+                .contains('/'),
+            "path separators must still be stripped"
+        );
     }
 }

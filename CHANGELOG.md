@@ -4,6 +4,15 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+**A refusal from another machine arrives whole again.** When a computer turned
+down work because it did not have the memory, the reason it gave was cut off
+after about a hundred characters — mid-number, before the breakdown of what
+the model actually needed. That breakdown was added in v0.3.111 precisely so
+the message would be useful, and the limit that shortened it was written long
+before, for a different purpose. Reported by a tester running a model split
+across four machines (2026-08-22).
+
+
 **Replies are up to 1.8x faster on processor nodes that were told to give the
 swarm more of their machine.** Writing a reply is limited by memory speed rather
 than processing power, so past a certain number of threads it gets *slower* —
