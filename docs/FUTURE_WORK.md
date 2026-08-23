@@ -435,7 +435,40 @@ the CUDA mirror is GQA-gated for good reason (the MHA null control came out slow
 split is pure overhead — run single-threaded below ~128 KV. Measure with the
 profiler's "attention" bucket per token (`SWARMLLM_PROFILE=1 prefill_bench`).
 
-### Q4_K block-interleaved repack: researched, NOT attempted, and the reasons are not obvious (2026-08-23)
+### Q4_K block-interleaved repack: the 1.8x does not survive our own kernel (2026-08-23)
+
+**Revised payoff estimate — read this before believing the entry below.**
+llama.cpp's reported 1.8-1.9x was measured against THEIR baseline, which did
+per-row dots with no multi-row amortisation. We already added that
+(`vec_dot_rows`, R=4 rows sharing one column pass), and it took prompt
+processing 26 -> 37 tok/s. Part of the win the 1.8x figure describes is
+therefore already banked here, and what the repack adds on top is much smaller.
+
+Op count for the current AVX2 Q4_K kernel, per 256-value block at R=4:
+
+```text
+  column work (q4 loads, nibble unpack, scale prep)   ~20 ops, shared by 4 rows
+  per row: 8 q8 loads + 8 maddubs + 8 madd + 8 add     32 ops
+  total                                              ~148 ops for 1024 MACs
+```
+
+An 8-column interleave shares the ACTIVATION loads and nothing else: the nibble
+unpack is weight data and cannot be shared, and the maddubs/madd/add are the
+irreducible arithmetic. Per row the loads go 8 -> 1, giving ~120 ops — about
+**1.23x**, and a 2-column version (which needs no repack at all, just a
+restructured loop) prices at ~1.12x.
+
+So the storage-layout change, the loss of the bit-exactness assertion, the
+load-time repack cost and the `gather_rows`/dequantize/GPU fallout would be paid
+for roughly 1.2x, not 1.8x.
+
+**If anyone still wants it, measure the ceiling FIRST and cheaply**: hoist the
+q8 loads out of the row loop in the existing kernel so they are reused across
+rows (numerically wrong, but it prices what the loads cost) and compare. If that
+does not show ~20%, the repack cannot either, and the whole project is answered
+in an afternoon instead of a week.
+
+### Q4_K block-interleaved repack: the traps llama.cpp hit (2026-08-23)
 
 The entry below names llama.cpp's `Q4_K_8x8` repack (PR #12332) as the next step
 for CPU prompt processing, at a reported 1.8-1.9x. Before anyone starts it, read
