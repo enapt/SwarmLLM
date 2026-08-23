@@ -1101,6 +1101,16 @@ impl SharedState {
         state
             .model_process_pool
             .set_prefill_target_ms(state.config.inference.prefill_target_ms);
+        // One value carries the switch and the width: disabled means a draft of
+        // zero tokens, so a worker cannot be spawned with the two disagreeing.
+        state.model_process_pool.set_ngram_params(
+            state.config.inference.ngram_max_size,
+            if state.config.inference.ngram_lookup_enabled {
+                state.config.inference.ngram_num_pred_tokens
+            } else {
+                0
+            },
+        );
         state
             .model_process_pool
             .set_batched_prefill_forward(state.config.inference.batched_prefill_forward);

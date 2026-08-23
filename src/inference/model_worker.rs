@@ -108,6 +108,10 @@ pub struct WorkerOptions {
     /// Item 7 Phase 2 chunked prefill chunk size (in prompt tokens). A CEILING
     /// — `prefill_target_ms` picks the operating quantum.
     pub prefill_chunk_tokens: u32,
+    /// Longest n-gram the local draft-free speculator tries to match.
+    pub ngram_max_size: u32,
+    /// Tokens a local speculative round drafts; zero disables the speculator.
+    pub ngram_pred_tokens: u32,
     /// Wall-time budget (ms) for one tick's prefill work while slots are
     /// shared. See `inference::prefill_pacer`.
     pub prefill_target_ms: u64,
@@ -133,6 +137,11 @@ impl Default for WorkerOptions {
             gpu_layers: -1,
             prefill_chunk_tokens: 128,
             prefill_target_ms: 200,
+            // Off unless a caller asks. The daemon always does, from
+            // `inference.ngram_lookup_enabled`; a bare `WorkerOptions::default()`
+            // (tests, tools) gets the plain decode loop.
+            ngram_max_size: 0,
+            ngram_pred_tokens: 0,
             batched_prefill_forward: true,
         }
     }
@@ -168,10 +177,20 @@ pub async fn run_worker(
         batch_generate_max_slots,
         prefill_chunk_tokens,
         prefill_target_ms,
+        ngram_max_size,
+        ngram_pred_tokens,
         batched_prefill_forward,
         gpu_layers,
     } = options;
     set_worker_force_cpu(gpu_layers);
+    // The local draft-free speculator's shape, built once. `num_pred_tokens ==
+    // 0` is how `inference.ngram_lookup_enabled = false` arrives, so there is
+    // no separate switch to disagree with the width.
+    let ngram_cfg = crate::inference::ngram_lookup::NgramLookupConfig {
+        max_ngram_size: ngram_max_size as usize,
+        num_pred_tokens: ngram_pred_tokens as usize,
+        ..Default::default()
+    };
     // Connect to the daemon's IPC socket. The name matches what the daemon
     // bound: a filesystem path on Unix, a namespace name on Windows.
     use interprocess::local_socket::tokio::{prelude::*, Stream};
@@ -401,6 +420,7 @@ pub async fn run_worker(
                 &data_dir,
                 &shard_window,
                 &swift_cfg,
+                &ngram_cfg,
                 &options,
                 &mut slot_table,
                 &pending_fetches,
@@ -428,6 +448,7 @@ pub async fn run_worker(
                             &data_dir,
                             &shard_window,
                             &swift_cfg,
+                            &ngram_cfg,
                             &options,
                             &mut slot_table,
                             &pending_fetches,
@@ -1846,6 +1867,224 @@ async fn try_remote_prefix_hydrate(
     }
 }
 
+/// May this request use the local draft-free speculator?
+///
+/// The admission gate and the decode loop BOTH ask this. They used to be two
+/// conditions written in two places, which is the shape this codebase gets
+/// caught by most often: the gate would divert a request to the sequential loop
+/// and the loop would then decline to speculate it, so it would lose batching
+/// and gain nothing.
+///
+/// Every clause is a correctness condition, not a tuning choice:
+///
+/// * `temperature == 0` — a draft is kept by comparing it against what the
+///   sampler returned, which is a verification only while the sampler is
+///   deterministic. With sampling on it would quietly bias the output toward
+///   whatever the n-gram guessed.
+/// * `!logprobs` — accepted tokens come out of a verify forward and this path
+///   does not carry their per-token logprobs back. Better to decline than to
+///   answer `null` where a client asked for numbers.
+/// * SWIFT off — it is already speculating; two schemes drafting for one
+///   request would fight.
+/// * a non-zero draft width, which is how `inference.ngram_lookup_enabled`
+///   arrives here.
+pub(crate) fn ngram_spec_eligible(
+    sampling: &crate::types::SamplingParams,
+    ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
+    swift_cfg: &SwiftConfig,
+) -> bool {
+    ngram_cfg.num_pred_tokens > 0
+        && ngram_cfg.max_ngram_size >= ngram_cfg.min_ngram_size
+        && sampling.temperature == 0.0
+        && !sampling.logprobs
+        && !(swift_cfg.enabled && sampling.temperature == 0.0)
+}
+
+/// Whether the local speculator should draft this round.
+///
+/// A draft that is found and then rejected is not free: the round still pays a
+/// multi-token forward to return the one token a plain step would have
+/// returned. On a reply with nothing to copy that is a standing tax — measured
+/// at ~5% on an open-ended prompt, where 70 rounds produced 80 tokens and only
+/// 10 drafts were accepted.
+///
+/// So a run of useless rounds pauses drafting, doubling the pause each time it
+/// recurs, and ANY acceptance clears it entirely. The lookup itself is a
+/// hash-table probe and is not what costs; the forward it provokes is.
+///
+/// Extracted rather than left inline because it is a policy with an arithmetic
+/// that is easy to get subtly wrong — and because a decision made inside a hot
+/// loop is otherwise only observable by timing a whole request.
+#[derive(Debug, Default)]
+struct SpecBackoff {
+    miss_streak: u32,
+    pause_left: u32,
+    pause_len: u32,
+    paused_rounds: u64,
+}
+
+impl SpecBackoff {
+    /// Consecutive drafted-and-rejected rounds before pausing. Small, because
+    /// each one buys nothing and costs a wider forward.
+    const MISSES_BEFORE_PAUSE: u32 = 3;
+    /// Longest pause, in rounds. Bounded so a reply that becomes copy-heavy
+    /// partway through — a preamble and then the model quoting the prompt back,
+    /// which is the common agentic shape — resumes speculating promptly rather
+    /// than staying switched off for the rest of a long generation.
+    const MAX_PAUSE_ROUNDS: u32 = 64;
+
+    /// Call once per round. Consumes one round of any active pause.
+    fn should_draft(&mut self) -> bool {
+        if self.pause_left == 0 {
+            return true;
+        }
+        self.pause_left -= 1;
+        self.paused_rounds += 1;
+        false
+    }
+
+    /// Report what a drafted round achieved. Only call when a draft was made —
+    /// a paused round proves nothing about whether drafting would have worked.
+    fn record(&mut self, accepted_any: bool) {
+        if accepted_any {
+            self.miss_streak = 0;
+            self.pause_len = 0;
+            return;
+        }
+        self.miss_streak += 1;
+        if self.miss_streak >= Self::MISSES_BEFORE_PAUSE {
+            self.miss_streak = 0;
+            self.pause_len = (self.pause_len.max(1) * 2).min(Self::MAX_PAUSE_ROUNDS);
+            self.pause_left = self.pause_len;
+        }
+    }
+}
+
+/// Window of recent generation the local speculator searches for self-matches,
+/// matching the distributed path's choice in `pipeline::speculative`.
+const NGRAM_RECENT_GEN_WINDOW: usize = 500;
+
+/// One draft-free speculative round on the local decode path.
+///
+/// Drafts from an n-gram match against the prompt and the generation tail, then
+/// verifies the whole draft in ONE forward. There is no draft model: the guess
+/// is that text already in the context will recur, which is what SwarmLLM's own
+/// workload does constantly (tool schemas, code, retrieved passages).
+///
+/// Returns the tokens produced and how many KV positions were committed. The
+/// two are deliberately NOT the same number: a round commits `next_token` plus
+/// every accepted draft token, and the last token it produces is not in the
+/// cache yet. That is the same invariant the plain loop keeps, where one
+/// forward commits one position and yields one not-yet-cached token — which is
+/// why the caller can drain the extras without forwarding again.
+///
+/// **Acceptance goes through the real sampler, not a private argmax.** Every
+/// position is sampled by the same `sample_token_with_logprob_history` the plain
+/// loop uses, with the history it would have had at that point, and a draft
+/// token is kept only when it equals what that call returned. Re-deriving
+/// "argmax" here would have been a second sampler to keep in step with the
+/// first — this codebase's most repeated defect.
+///
+/// **What that does and does not guarantee.** In exact arithmetic the result is
+/// the sequence greedy decoding would have produced. In floating point it is
+/// *almost* that: a verify forward computes its logits with a different matmul
+/// shape than a one-token forward, so the reduction order differs and a
+/// near-tie between two tokens can land the other way. Measured on
+/// llama-3.2-3b: an input-grounded reply of 53 tokens came out byte-identical,
+/// while an open-ended one diverged at one token ("which refers to" against
+/// "which means") and then, as any single token flip does, went its own way.
+/// Both runs are deterministic — repeating either reproduces it exactly — so
+/// this is reassociation, not a race.
+///
+/// That is inherent to speculative decoding on real hardware rather than a
+/// defect here, but it must not be described as bit-identical, because someone
+/// will one day diff two replies and need to know whether they have found a
+/// bug. They have not; they have found fp addition being non-associative.
+#[allow(clippy::too_many_arguments)]
+fn ngram_spec_round(
+    model: &mut crate::inference::split::SplitModel,
+    kv_store: &crate::inference::split::KvCacheStore,
+    model_key: &str,
+    req_id_str: &str,
+    index_pos: usize,
+    next_token: u32,
+    ctx: &[u32],
+    prompt_len: usize,
+    generated: &[u32],
+    sampling: &crate::types::SamplingParams,
+    cfg: crate::inference::ngram_lookup::NgramLookupConfig,
+    draft_allowed: bool,
+    force_attn: bool,
+) -> Result<(Vec<u32>, usize), SwarmError> {
+    let (draft, _source) = if draft_allowed {
+        crate::inference::ngram_lookup::cascade_find_candidate(
+            ctx,
+            prompt_len,
+            NGRAM_RECENT_GEN_WINDOW,
+            cfg,
+        )
+    } else {
+        (
+            Vec::new(),
+            crate::inference::ngram_lookup::NgramHitSource::None,
+        )
+    };
+
+    // No match: do exactly what the plain loop does. A miss must cost nothing
+    // beyond the lookup itself, or speculation becomes a tax on the workloads
+    // it cannot help.
+    if draft.is_empty() {
+        let input = model.token_tensor(next_token)?;
+        let logits = tokio::task::block_in_place(|| {
+            let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
+            model.forward(&input, index_pos, kv_store, req_id_str)
+        })?;
+        let (tok, _) = crate::inference::tensor_util::sample_token_with_logprob_history(
+            &logits, sampling, generated,
+        )?;
+        return Ok((vec![tok], 1));
+    }
+
+    let ids: Vec<u32> = std::iter::once(next_token)
+        .chain(draft.iter().copied())
+        .collect();
+    let input = model.tensor_from_ids(&ids)?;
+    let all = tokio::task::block_in_place(|| {
+        let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
+        model.forward_verify_all_positions(&input, index_pos, kv_store, req_id_str)
+    })?;
+
+    use candle_core::IndexOp;
+    let mut hist: Vec<u32> = generated.to_vec();
+    let mut produced: Vec<u32> = Vec::with_capacity(draft.len() + 1);
+    let mut accepted = 0usize;
+    for (i, _) in ids.iter().enumerate() {
+        let row = all
+            .i((0, i))
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(SwarmError::internal)?;
+        let (tok, _) = crate::inference::tensor_util::sample_token_with_logprob_history(
+            &row, sampling, &hist,
+        )?;
+        produced.push(tok);
+        // The last position has no draft to check — its token is the round's
+        // bonus and always ends it.
+        if i < draft.len() && tok == draft[i] {
+            accepted += 1;
+            hist.push(tok);
+        } else {
+            break;
+        }
+    }
+
+    // Drop the cache entries written for drafts that were not accepted. Without
+    // this the next forward would attend over positions holding tokens the
+    // reply does not contain — a silent corruption, not an error.
+    let committed = 1 + accepted;
+    kv_store.truncate_request_to(model_key, req_id_str, index_pos + committed)?;
+    Ok((produced, committed))
+}
+
 /// Handle a Generate IPC message — run a full tokenize+decode loop.
 #[allow(clippy::too_many_arguments)]
 async fn handle_generate(
@@ -1857,6 +2096,7 @@ async fn handle_generate(
     gen: IpcGenerate,
     shard_window: &Option<Vec<u32>>,
     swift_cfg: &SwiftConfig,
+    ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
     force_standard_attn: bool,
     max_seq_len_override: Option<usize>,
     pending_fetches: &PrefixFetchWaiterMap,
@@ -2049,6 +2289,35 @@ async fn handle_generate(
             "DIAG: SWIFT session complete"
         );
     } else {
+        // Draft-free speculation on the local path. Eligibility is deliberately
+        // narrow, and every clause is a correctness condition rather than a
+        // tuning choice:
+        //
+        // * `temperature == 0` — a draft is kept by comparing it to what the
+        //   sampler returned. That is a verification only when the sampler is
+        //   deterministic; with sampling on it would silently bias the output
+        //   towards whatever the n-gram happened to guess.
+        // * `!logprobs` — accepted tokens come from a verify forward, and this
+        //   path does not carry their per-token logprobs back out. Rather than
+        //   report `null` where a client asked for numbers, it declines.
+        // * `!swift_active` — SWIFT is already speculating; two schemes
+        //   drafting for the same request would fight.
+        let spec_cfg = *ngram_cfg;
+        let spec_active = ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg) && !swift_active;
+        // Context the lookup searches: prompt then generation, in order, so its
+        // tail is always the most recent token. Only built when it will be used
+        // — it is a copy of the whole prompt.
+        let mut spec_ctx: Vec<u32> = if spec_active {
+            prompt_ids.clone()
+        } else {
+            Vec::new()
+        };
+        // Verified tokens a round produced beyond the one being emitted. They
+        // are already in the KV cache, so draining them costs no forward.
+        let mut pending: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+        let (mut spec_rounds, mut spec_drafted, mut spec_accepted) = (0u64, 0u64, 0u64);
+        let mut spec_backoff = SpecBackoff::default();
+
         for _ in 0..gen.sampling.max_tokens {
             // This loop owns the worker's main loop for its whole duration, so
             // the cancelled set (written by the reader task) is the only way a
@@ -2081,6 +2350,9 @@ async fn handle_generate(
             }
 
             generated.push(next_token);
+            if spec_active {
+                spec_ctx.push(next_token);
+            }
 
             send_worker(
                 writer,
@@ -2096,21 +2368,72 @@ async fn handle_generate(
             .await
             .map_err(|e| SwarmError::Internal(format!("send Token: {e}")))?;
 
-            let input = model.token_tensor(next_token)?;
-            let logits = tokio::task::block_in_place(|| {
-                let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
-                model.forward(&input, index_pos, kv_store, &req_id_str)
-            })?;
-            // Pass `generated` so frequency_penalty / presence_penalty
-            // are honored against the completion-so-far per OpenAI spec.
-            let (tok, lp) = crate::inference::tensor_util::sample_token_with_logprob_history(
-                &logits,
-                &gen.sampling,
-                &generated,
-            )?;
-            next_token = tok;
-            token_logprob = lp;
-            index_pos += 1;
+            if let Some(tok) = pending.pop_front() {
+                // Already verified and already in the cache: no forward at all.
+                // This is where speculation actually pays.
+                next_token = tok;
+                token_logprob = None;
+            } else if spec_active {
+                let draft_allowed = spec_backoff.should_draft();
+                let (produced, committed) = ngram_spec_round(
+                    model,
+                    kv_store,
+                    &model_key_string,
+                    &req_id_str,
+                    index_pos,
+                    next_token,
+                    &spec_ctx,
+                    prompt_ids.len(),
+                    &generated,
+                    &gen.sampling,
+                    spec_cfg,
+                    draft_allowed,
+                    force_attn,
+                )?;
+                index_pos += committed;
+                spec_rounds += 1;
+                spec_drafted += produced.len() as u64;
+                spec_accepted += (committed - 1) as u64;
+                if draft_allowed {
+                    spec_backoff.record(committed > 1);
+                }
+                let mut it = produced.into_iter();
+                // A round always yields at least the token that follows the one
+                // just forwarded, so this cannot be empty.
+                next_token = it.next().ok_or_else(|| {
+                    SwarmError::Internal("speculative round produced no token".into())
+                })?;
+                pending.extend(it);
+                token_logprob = None;
+            } else {
+                let input = model.token_tensor(next_token)?;
+                let logits = tokio::task::block_in_place(|| {
+                    let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
+                    model.forward(&input, index_pos, kv_store, &req_id_str)
+                })?;
+                // Pass `generated` so frequency_penalty / presence_penalty
+                // are honored against the completion-so-far per OpenAI spec.
+                let (tok, lp) = crate::inference::tensor_util::sample_token_with_logprob_history(
+                    &logits,
+                    &gen.sampling,
+                    &generated,
+                )?;
+                next_token = tok;
+                token_logprob = lp;
+                index_pos += 1;
+            }
+        }
+
+        if spec_rounds > 0 {
+            tracing::debug!(
+                request_id = %request_id,
+                rounds = spec_rounds,
+                drafted = spec_drafted,
+                accepted = spec_accepted,
+                paused_rounds = spec_backoff.paused_rounds,
+                tokens_per_round = spec_drafted as f64 / spec_rounds as f64,
+                "DIAG: local n-gram speculation complete"
+            );
         }
 
         // The loop samples one token ahead: when it exits on `length`,
@@ -2489,6 +2812,7 @@ enum SlotAdmitError {
 fn slot_admission_eligible(
     gen: &IpcGenerate,
     swift_cfg: &SwiftConfig,
+    ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
     slot_table: &SlotTable,
 ) -> bool {
     if gen.sampling.max_tokens == 0 {
@@ -2510,6 +2834,28 @@ fn slot_admission_eligible(
     // SWIFT decoding has its own self-speculative loop; not batchable v1.
     if swift_cfg.enabled && gen.sampling.temperature == 0.0 {
         tracing::debug!(request_id = %gen.request_id, "slot admission refused: SWIFT-eligible");
+        return false;
+    }
+    // A request that is ALONE and can be speculated takes the sequential loop
+    // instead, where the n-gram speculator lives.
+    //
+    // **Only when the table is empty.** Refusing while others are decoding
+    // would send this request to a loop that owns the worker for its whole
+    // duration, stalling everyone already in the batch to speed up the
+    // newcomer. Joining the batch is strictly better there; speculation is
+    // simply not available to it.
+    //
+    // Trading batching for speculation when solo is safe on this project's own
+    // numbers: batching was measured at ~3% for 8 concurrent requests and
+    // NEUTRAL on a processor, after a claimed 40% was retracted as a
+    // measurement artefact (gotcha #348). A verify round wins far more than
+    // that, and against an empty table batching has nothing to amortise
+    // anyway — there is no second request to share the weight read with.
+    if slot_table.is_empty() && ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg) {
+        tracing::debug!(
+            request_id = %gen.request_id,
+            "slot admission refused: solo and speculatable — taking the n-gram path"
+        );
         return false;
     }
     tracing::debug!(
@@ -3237,6 +3583,7 @@ async fn handle_daemon_msg(
     data_dir: &std::path::Path,
     shard_window: &Option<Vec<u32>>,
     swift_cfg: &SwiftConfig,
+    ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
     options: &WorkerOptions,
     slot_table: &mut SlotTable,
     pending_fetches: &PrefixFetchWaiterMap,
@@ -3301,7 +3648,7 @@ async fn handle_daemon_msg(
             if batch_generate
                 && pending
                     .as_ref()
-                    .map(|g| slot_admission_eligible(g, swift_cfg, slot_table))
+                    .map(|g| slot_admission_eligible(g, swift_cfg, ngram_cfg, slot_table))
                     .unwrap_or(false)
             {
                 let g = pending.take().expect("checked above");
@@ -3337,6 +3684,7 @@ async fn handle_daemon_msg(
                     g,
                     shard_window,
                     swift_cfg,
+                    ngram_cfg,
                     force_standard_attn,
                     max_seq_len_override,
                     pending_fetches,
@@ -3781,5 +4129,121 @@ mod prefix_reconcile_tests {
     fn zero_hydrated_is_inert() {
         let store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(60)));
         assert_eq!(reconcile_hydrated_prefix(&store, MODEL_KEY, REQ, 0, 10), 0);
+    }
+}
+
+#[cfg(test)]
+mod local_speculation_tests {
+    use super::*;
+    use crate::inference::ngram_lookup::NgramLookupConfig;
+    use crate::types::SamplingParams;
+
+    fn greedy() -> SamplingParams {
+        SamplingParams {
+            temperature: 0.0,
+            logprobs: false,
+            ..Default::default()
+        }
+    }
+
+    fn on() -> NgramLookupConfig {
+        NgramLookupConfig::default()
+    }
+
+    fn swift_off() -> SwiftConfig {
+        SwiftConfig {
+            enabled: false,
+            ..Default::default()
+        }
+    }
+
+    /// The admission gate and the decode loop must agree about which requests
+    /// are speculated. They were two conditions in two places before this
+    /// helper existed, and the failure mode is silent: the gate diverts a
+    /// request off the batched path and the loop then declines to speculate it,
+    /// so it loses batching and gains nothing.
+    #[test]
+    fn eligibility_is_one_predicate_both_callers_share() {
+        assert!(ngram_spec_eligible(&greedy(), &on(), &swift_off()));
+
+        // Sampling on: a draft is "verified" by comparing it with what the
+        // sampler returned, which means nothing once the sampler is random.
+        let mut warm = greedy();
+        warm.temperature = 0.7;
+        assert!(!ngram_spec_eligible(&warm, &on(), &swift_off()));
+
+        // Logprobs asked for: accepted tokens carry none back out, and
+        // answering `null` where a client asked for numbers is worse than
+        // declining to speculate.
+        let mut lp = greedy();
+        lp.logprobs = true;
+        assert!(!ngram_spec_eligible(&lp, &on(), &swift_off()));
+
+        // SWIFT is already speculating for this request.
+        let swift_on = SwiftConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_on));
+
+        // `inference.ngram_lookup_enabled = false` arrives as a zero width, so
+        // the switch cannot disagree with the shape.
+        let off = NgramLookupConfig {
+            num_pred_tokens: 0,
+            ..NgramLookupConfig::default()
+        };
+        assert!(!ngram_spec_eligible(&greedy(), &off, &swift_off()));
+    }
+
+    #[test]
+    fn backoff_pauses_after_a_run_of_useless_rounds() {
+        let mut b = SpecBackoff::default();
+        // Drafting is free to start.
+        for _ in 0..SpecBackoff::MISSES_BEFORE_PAUSE {
+            assert!(b.should_draft());
+            b.record(false);
+        }
+        // Having missed three times, it now sits out a couple of rounds rather
+        // than paying a wider forward for each of them.
+        assert!(!b.should_draft());
+        assert!(b.paused_rounds > 0);
+    }
+
+    #[test]
+    fn any_acceptance_clears_the_whole_backoff() {
+        let mut b = SpecBackoff::default();
+        for _ in 0..(SpecBackoff::MISSES_BEFORE_PAUSE * 4) {
+            if b.should_draft() {
+                b.record(false);
+            }
+        }
+        assert!(b.pause_len > 0, "should have backed off by now");
+
+        // Drain the pause, then land one acceptance.
+        while !b.should_draft() {}
+        b.record(true);
+
+        // The next round drafts immediately, and a fresh run of misses starts
+        // from the shortest pause again rather than resuming where it left off.
+        // A reply that turns copy-heavy halfway through is the case this
+        // protects: staying switched off for the rest of it would forfeit
+        // exactly the part speculation is best at.
+        assert!(b.should_draft());
+        assert_eq!(b.pause_len, 0);
+    }
+
+    #[test]
+    fn the_pause_is_bounded() {
+        let mut b = SpecBackoff::default();
+        for _ in 0..10_000 {
+            if b.should_draft() {
+                b.record(false);
+            }
+        }
+        assert!(
+            b.pause_len <= SpecBackoff::MAX_PAUSE_ROUNDS,
+            "pause grew past its bound: {}",
+            b.pause_len
+        );
     }
 }

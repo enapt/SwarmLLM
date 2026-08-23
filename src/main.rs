@@ -228,6 +228,14 @@ enum Commands {
         /// `inference::prefill_pacer`.
         #[arg(long, default_value = "200")]
         prefill_target_ms: u64,
+        /// Longest n-gram the local draft-free speculator tries to match
+        /// against the prompt and the generation tail.
+        #[arg(long, default_value = "0")]
+        ngram_max_size: u32,
+        /// Tokens a local speculative round drafts. Zero turns the speculator
+        /// off, which is how `inference.ngram_lookup_enabled` gets here.
+        #[arg(long, default_value = "0")]
+        ngram_pred_tokens: u32,
         /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into
         /// one `forward_batch` call inside `step_decode_pool`'s Phase A.
         /// Off → Phase A runs singleton forwards per slot (useful for A/B).
@@ -430,6 +438,8 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             batch_generate_max_slots,
             prefill_chunk_tokens,
             prefill_target_ms,
+            ngram_max_size,
+            ngram_pred_tokens,
             batched_prefill_forward,
         } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
@@ -469,6 +479,8 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
                 batch_generate_max_slots,
                 prefill_chunk_tokens,
                 prefill_target_ms,
+                ngram_max_size,
+                ngram_pred_tokens,
                 batched_prefill_forward,
                 gpu_layers,
             };

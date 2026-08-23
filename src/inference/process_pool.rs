@@ -902,6 +902,14 @@ pub struct ModelProcessPool {
     prefill_chunk_tokens: std::sync::atomic::AtomicU32,
     /// Runtime mirror of `InferenceConfig::prefill_target_ms`.
     prefill_target_ms: std::sync::atomic::AtomicU64,
+    /// Longest n-gram the local draft-free speculator will try to match.
+    /// Matches `InferenceConfig::ngram_max_size`.
+    ngram_max_size: std::sync::atomic::AtomicU32,
+    /// How many tokens a local speculative round drafts. **Zero means the
+    /// speculator is off**, which is how `InferenceConfig::ngram_lookup_enabled`
+    /// reaches the worker — one value carries both the switch and the width, so
+    /// a worker cannot be spawned with them disagreeing.
+    ngram_pred_tokens: std::sync::atomic::AtomicU32,
     /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into one
     /// `forward_batch` call. Passed into spawned workers as
     /// `--batched-prefill-forward`. Matches
@@ -1002,6 +1010,8 @@ impl ModelProcessPool {
             batch_collection_ms: std::sync::atomic::AtomicU64::new(5),
             max_concurrent_decode_batch: std::sync::atomic::AtomicU32::new(8),
             prefill_chunk_tokens: std::sync::atomic::AtomicU32::new(128),
+            ngram_max_size: std::sync::atomic::AtomicU32::new(0),
+            ngram_pred_tokens: std::sync::atomic::AtomicU32::new(0),
             prefill_target_ms: std::sync::atomic::AtomicU64::new(200),
             batched_prefill_forward: std::sync::atomic::AtomicBool::new(true),
             batch_scheduler: std::sync::OnceLock::new(),
@@ -1167,6 +1177,18 @@ impl ModelProcessPool {
 
     /// Sarathi prefill chunk size for future-spawned workers. Existing
     /// workers retain whatever chunk size they were spawned with.
+    /// Set the local speculator's shape. `pred_tokens == 0` disables it.
+    ///
+    /// Takes effect for workers spawned afterwards, like every other spawn-time
+    /// option here — a running worker holds its model and cache and is not
+    /// recycled to change a setting (see `settings.contribution_restart_note`).
+    pub fn set_ngram_params(&self, max_size: u32, pred_tokens: u32) {
+        self.ngram_max_size
+            .store(max_size, std::sync::atomic::Ordering::Relaxed);
+        self.ngram_pred_tokens
+            .store(pred_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn set_prefill_chunk_tokens(&self, chunk_tokens: u32) {
         self.prefill_chunk_tokens
             .store(chunk_tokens.max(1), std::sync::atomic::Ordering::Relaxed);
@@ -2341,6 +2363,10 @@ impl ModelProcessPool {
                     .load(Ordering::Relaxed)
                     .to_string(),
             );
+            args.push("--ngram-max-size".to_string());
+            args.push(self.ngram_max_size.load(Ordering::Relaxed).to_string());
+            args.push("--ngram-pred-tokens".to_string());
+            args.push(self.ngram_pred_tokens.load(Ordering::Relaxed).to_string());
             args.push("--prefill-target-ms".to_string());
             args.push(self.prefill_target_ms.load(Ordering::Relaxed).to_string());
             args.push("--batched-prefill-forward".to_string());
