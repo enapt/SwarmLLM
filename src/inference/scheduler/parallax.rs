@@ -32,7 +32,7 @@ use super::NodeCandidate;
 
 /// Per-vertex cost components. All in milliseconds.
 #[derive(Debug, Clone, Copy)]
-struct VertexCost {
+pub(super) struct VertexCost {
     /// `2 * latency_ms` for remote peers, 0 for local — multiplied by
     /// `ASSUMED_FORWARD_PASSES` when the segment is entered mid-chain, since the
     /// coordinator round-trips into it per token.
@@ -47,7 +47,7 @@ struct VertexCost {
 }
 
 impl VertexCost {
-    fn total(self) -> f32 {
+    pub(super) fn total(self) -> f32 {
         self.network_ms + self.compute_ms + self.load_ms + self.prefill_ms
     }
 }
@@ -149,7 +149,7 @@ pub(super) const BASELINE_LAYER_COUNT: f32 = 32.0;
 /// 2. Static `est_tokens_per_sec` capability estimate when no observations exist.
 /// 3. `UNKNOWN_COMPUTE_MS` when neither is available — deliberately non-zero,
 ///    because a free unmeasured candidate outranks every measured one.
-fn vertex_cost(
+pub(super) fn vertex_cost(
     c: &NodeCandidate,
     range: (u32, u32),
     local: &NodeId,

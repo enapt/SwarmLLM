@@ -595,6 +595,12 @@ pub(super) async fn execute_request(
             seg.node_id == local_node_id || shared_state.connected_node_ids.contains(&seg.node_id)
         });
         if all_connected && !prev.segments.is_empty() {
+            // Note for anyone measuring prompt-length routing: this path does
+            // NOT re-route, so the prefill term fires on the first turn of a
+            // session and after a disconnect, and never in between. That is
+            // deliberate — re-routing would abandon the KV cache this reuse
+            // exists to keep — but a multi-turn conversation whose context
+            // grows keeps the route it was given while it was short.
             tracing::info!(
                 request_id = %request.id,
                 segments = prev.segments.len(),

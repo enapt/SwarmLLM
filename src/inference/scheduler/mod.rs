@@ -828,7 +828,7 @@ impl PipelineScheduler {
         }
 
         // Identify standby nodes for each segment
-        let standbys = self.find_standbys(&segments, &candidates);
+        let standbys = self.find_standbys(&segments, &candidates, prompt_tokens, num_layers);
 
         // Detect tensor-parallel opportunities: LAN peers sharing the same layer range.
         // Opt-in only (`inference.tensor_parallel`, default false) — per-layer
@@ -1805,6 +1805,8 @@ impl PipelineScheduler {
         &self,
         segments: &[PipelineSegment],
         candidates: &[NodeCandidate],
+        prompt_tokens: Option<u32>,
+        num_layers: u32,
     ) -> Vec<PipelineSegment> {
         let mut standbys = Vec::new();
 
@@ -1849,9 +1851,36 @@ impl PipelineScheduler {
                         .partial_cmp(&a.region_score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 };
-                la.cmp(&lb)
-                    .then(region_cmp)
-                    .then_with(|| a.latency_ms.cmp(&b.latency_ms))
+                // Last tiebreak used to be raw `latency_ms`, i.e. whichever
+                // node answered a health ping fastest. That is the wrong
+                // question once the primary was chosen by a cost model: the
+                // request that failed over is the SAME request, so the standby
+                // has to be priced the same way, prompt length included.
+                //
+                // Ranking on ping alone routinely picked the slowest machine in
+                // the swarm — nearness and speed are unrelated here, and the
+                // measured spread is 0.37 to 20.45 tok/s. A long prompt
+                // correctly steered to a graphics card would fail over to a
+                // processor-only box and take minutes instead of seconds.
+                //
+                // Local-first and region anti-affinity still come first: a
+                // standby is about surviving a failure, and those two answer
+                // that. This only replaces the tiebreak among equals.
+                let cost = |c: &NodeCandidate| {
+                    parallax::vertex_cost(
+                        c,
+                        segment.layer_range,
+                        local_node_id,
+                        num_layers,
+                        prompt_tokens,
+                    )
+                    .total()
+                };
+                la.cmp(&lb).then(region_cmp).then_with(|| {
+                    cost(a)
+                        .partial_cmp(&cost(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
             });
             if let Some(backup) = eligible.first() {
                 standbys.push(PipelineSegment {

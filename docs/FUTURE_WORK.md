@@ -238,6 +238,33 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### Two cost models are still prompt-blind (2026-08-24)
+
+Prompt length now reaches `parallax::vertex_cost` (the DP that picks the route)
+and `find_standbys` (which picks the machine that takes over when a holder
+drops). Two others still price a request as if every prompt were the same size:
+
+- **`scheduler::mod.rs::estimated_cost_per_layer`** — the greedy assigner, used
+  whenever the DP finds no source-to-sink path. Reached rarely, but when it is
+  reached it is the whole routing decision.
+- **`scheduler::mod.rs::delegation_target`** — the "hand the whole model to a
+  nearby peer rather than run it on our own processor" decision. A long prompt
+  is exactly where delegating pays most and a short one is where the round trip
+  dominates, so this is the one of the two more likely to matter.
+
+Neither is a divergence introduced by the routing change — both were prompt-blind
+before it — but this repo's most-repeated defect is a shared invariant
+implemented per path, and three of four is not four.
+
+**A third case is deliberate and should stay that way, with a comment.**
+`distributed_exec.rs` reuses the previous assignment wholesale when every segment
+is still connected (KV-cache affinity), and never re-routes. So prompt-length
+routing fires on the first turn of a session and after a disconnect, and a
+conversation whose context grows over many turns keeps the route it was given
+when it was short. That is the right trade — re-routing would throw away the KV
+cache — but anyone measuring this feature on a multi-turn session will conclude
+it does not work, so the call site should say so.
+
 ### The distributed n-gram miss round returns a whole vocabulary for one token (2026-08-24)
 
 Bounded by a payoff gate, not fixed. The wire is still the wrong shape.

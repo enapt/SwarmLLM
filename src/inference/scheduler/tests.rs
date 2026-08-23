@@ -1599,3 +1599,68 @@ fn a_card_with_room_needs_no_speed_comparison() {
     let cands = vec![local_full_coverage(), peer];
     assert!(super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 99.0).is_some());
 }
+
+/// A standby serves the SAME request the primary was chosen for, so it has to be
+/// priced by the same model. It used to be ranked on `latency_ms` alone — a
+/// health-ping round trip, which says nothing about how fast a machine computes
+/// — so a long prompt correctly steered to a fast node would fail over to
+/// whichever node happened to answer a ping quickest.
+#[test]
+fn a_standby_is_chosen_by_cost_not_by_ping() {
+    use crate::inference::scheduler::{NodeCandidate, ReachTier};
+    use crate::types::{ModelId, ShardId};
+
+    let local = NodeId([9u8; 32]);
+    let near_slow = NodeId([1u8; 32]);
+    let far_fast = NodeId([2u8; 32]);
+
+    let mk = |byte: u8, latency_ms: u32, tps: f32, gpu: bool| NodeCandidate {
+        node_id: NodeId([byte; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        available_ranges: vec![(0, 32)],
+        reach: ReachTier::DirectMeasured,
+        latency_ms,
+        load: 0.0,
+        trust_score: 1.0,
+        can_be_first: true,
+        can_be_last: true,
+        region_score: 1.0,
+        est_tokens_per_sec: tps,
+        observed_latency_ms_per_layer: None,
+        observed_delegated_ms_per_layer: None,
+        expected_attempts: 1.0,
+        is_pool_member: false,
+        gpu_vram_available_mb: None,
+        max_hostable_layers: None,
+        observed_prefill_ms_per_layer_byte: None,
+        has_gpu: gpu,
+    };
+
+    // The primary, plus two possible standbys: one very close and very slow,
+    // one further away and much faster.
+    let primary = mk(3, 10, 5.0, false);
+    let candidates = vec![
+        primary.clone(),
+        mk(1, 2, 0.4, false),   // near_slow  — wins on ping by a mile
+        mk(2, 120, 20.0, true), // far_fast   — the machine that can do the work
+    ];
+    let segments = vec![PipelineSegment {
+        node_id: primary.node_id.clone(),
+        shard_id: primary.shard_id.clone(),
+        layer_range: (0, 32),
+    }];
+
+    let scheduler = PipelineScheduler::new(make_shared_state());
+    let standbys = scheduler.find_standbys(&segments, &candidates, Some(6000), 32);
+    assert_eq!(standbys.len(), 1, "expected one standby");
+    assert_eq!(
+        standbys[0].node_id, far_fast,
+        "a 6000-token prompt must fail over to the machine that can read it, not \
+         the one with the shortest ping"
+    );
+    let _ = near_slow;
+    let _ = local;
+}
