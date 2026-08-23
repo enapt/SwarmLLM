@@ -69,6 +69,54 @@ struct NodeCandidate {
     /// plausibly run the whole model on its GPU" — never to rank peers against
     /// each other. See [`delegation_target`].
     gpu_vram_available_mb: Option<u64>,
+    /// How many of this model's layers this peer could plausibly hold at once,
+    /// from the free memory it last advertised. `None` means WE CANNOT TELL —
+    /// the peer gossiped no capability, or gossiped zero (which is what every
+    /// node before v0.3.103 sent, gotcha #330). See
+    /// [`max_hostable_layers`] for why unknown must never exclude.
+    max_hostable_layers: Option<u32>,
+}
+
+/// How many layers of a model a peer could plausibly hold, from the free
+/// memory it last advertised — GPU first, else RAM.
+///
+/// **`None` means unknown and must never be read as zero.** A peer that
+/// gossips no capability, or gossips a zero (every node before v0.3.103 sent
+/// `vram_available_mb: 0`, gotcha #330), tells us nothing; refusing to route to
+/// it would empty the candidate set during any rollout, and the swarm is always
+/// mixed-version while one is in progress.
+///
+/// Carries [`DELEGATE_VRAM_MARGIN`] for the same reason the delegation path
+/// does: the advertised figure is free memory at the last health tick, not a
+/// reservation, and the worker needs room for activations and KV cache beyond
+/// the weights.
+///
+/// Why it exists: observed on the live swarm 2026-08-21, a request for
+/// llama-3.1-8b was routed whole to a node that holds all 32 layers and is the
+/// fastest advertised — and which refused it in 3 s, because its 6 GB card
+/// cannot take an 8 GB model and its processor budget was already full. The
+/// information to route around it was on the wire and nothing consulted it.
+fn max_hostable_layers(
+    capability: Option<&swarmllm_types::NodeCapability>,
+    bytes_per_layer: u64,
+) -> Option<u32> {
+    if bytes_per_layer == 0 {
+        return None;
+    }
+    let cap = capability?;
+    // A GPU node is judged on its card; a node with no card, on its RAM. This
+    // mirrors `allocate_offline`, which asks the same question for capacity
+    // planning — the worker subprocess can host layers in either.
+    let free_mb = match &cap.gpu {
+        Some(g) => g.vram_available_mb,
+        None => cap.ram_available_mb,
+    };
+    if free_mb == 0 {
+        // Not "no room": no information. See the doc comment.
+        return None;
+    }
+    let usable_bytes = (free_mb as f64 * 1_048_576.0 / DELEGATE_VRAM_MARGIN) as u64;
+    Some((usable_bytes / bytes_per_layer) as u32)
 }
 
 /// How far away a peer may be and still be handed a whole model, in ms.
@@ -668,22 +716,51 @@ impl PipelineScheduler {
         // enabled; fall back to greedy on any failure (disjoint ranges, no
         // valid source/sink, etc.) so routing never regresses below greedy.
         let raw_segments = if self.shared_state.config.inference.parallax_routing {
-            match parallax::route_shortest_path(
+            // Encryption forces the first and last segments onto this node,
+            // so an encrypted distributed pipeline is multi-segment by
+            // construction — there is no single-delegation alternative to
+            // lose. The per-token cost that keeps partial ranges off by
+            // default therefore does not apply, and without them a peer
+            // holding a SUPERSET of the middle (very commonly the whole
+            // model) offers only one indivisible range, which can be neither
+            // a middle segment nor a remote encrypted end. That produced a
+            // hard "No node available" for a perfectly valid boomerang.
+            let partial = self.shared_state.config.inference.parallax_partial_ranges || encrypted;
+            // Route twice at most. The first pass holds every peer to the layer
+            // count its advertised free memory can take; the second drops that
+            // bound entirely. A peer's self-reported figure is therefore allowed
+            // to make a route BETTER and never to make a routable request fail —
+            // which matters because the figure is stale by up to a health tick,
+            // is zero on any node older than v0.3.103, and is absent for a peer
+            // that has gossiped no capability at all.
+            let routed = parallax::route_shortest_path(
                 num_layers,
                 &candidates,
                 local_node_id,
                 encrypted,
-                // Encryption forces the first and last segments onto this node,
-                // so an encrypted distributed pipeline is multi-segment by
-                // construction — there is no single-delegation alternative to
-                // lose. The per-token cost that keeps partial ranges off by
-                // default therefore does not apply, and without them a peer
-                // holding a SUPERSET of the middle (very commonly the whole
-                // model) offers only one indivisible range, which can be neither
-                // a middle segment nor a remote encrypted end. That produced a
-                // hard "No node available" for a perfectly valid boomerang.
-                self.shared_state.config.inference.parallax_partial_ranges || encrypted,
-            ) {
+                partial,
+                true,
+            )
+            .or_else(|first_err| {
+                let relaxed = parallax::route_shortest_path(
+                    num_layers,
+                    &candidates,
+                    local_node_id,
+                    encrypted,
+                    partial,
+                    false,
+                );
+                if relaxed.is_ok() {
+                    tracing::info!(
+                        model = %model_id,
+                        constrained_err = %first_err,
+                        "DIAG: no route fits the peers' advertised memory — routing without \
+                         that bound, a holder may refuse and the request will re-plan"
+                    );
+                }
+                relaxed
+            });
+            match routed {
                 // Both arms log at `info`, deliberately. Nodes run at `info`, so
                 // at `debug` which router actually chose a route was invisible in
                 // every real log — and reading that absence as "parallax never
@@ -804,6 +881,12 @@ impl PipelineScheduler {
                 }
             }
         };
+
+        // Average bytes a layer occupies, for the per-peer capacity bound
+        // below. The manifest is the only size the coordinator has; it is the
+        // on-disk quantized figure, which is what the peer's loader charges
+        // against its budget too.
+        let bytes_per_layer = manifest.total_size_bytes / manifest.num_layers.max(1) as u64;
 
         // Build set of pool member NodeIds for preferred routing.
         // Pool devices are trusted, free (no credit cost), and usually low latency.
@@ -1003,6 +1086,18 @@ impl PipelineScheduler {
             } else {
                 self.shared_state.peer_expected_attempts(&node_id)
             };
+            // The local node is deliberately unconstrained: our own loader's
+            // admission check is the authority on what we can fit, and it knows
+            // what is already committed to live workers, which a gossiped
+            // free-memory figure does not.
+            let max_hostable_layers = if node_id == *local_node_id {
+                None
+            } else {
+                self.shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .and_then(|p| max_hostable_layers(p.capability.as_ref(), bytes_per_layer))
+            };
             let gpu_vram_available_mb = if node_id == *local_node_id {
                 // Never used for the local node — the loader's own admission
                 // check is the authority on whether WE can fit a model, and it
@@ -1032,6 +1127,7 @@ impl PipelineScheduler {
                 expected_attempts,
                 is_pool_member: is_pool,
                 gpu_vram_available_mb,
+                max_hostable_layers,
             });
         }
 
