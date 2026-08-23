@@ -4,6 +4,52 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.116-alpha] — 2026-08-23
+
+**A model running on your own machine now works ahead of itself, and answers
+that repeat something you just showed it come back about twice as fast on a
+processor and about three times as fast on a graphics card.** Measured asking a
+model to repeat a function it had just been given: 4.5 seconds down to 2.4 on a
+processor, 1.4 down to 0.44 on a graphics card, for the same answer.
+
+The idea is simple: when the reply is about to repeat something already in front
+of it — a function you pasted, a file it just read, a list of tools — the model
+guesses the next few words from what it has already seen and then checks them
+all in one pass instead of one at a time. Nothing is downloaded and no second
+model is involved. Every guess is checked against the model before it is used,
+so it cannot put words in the model's mouth. Writing that has nothing to copy is
+unaffected: the machine notices within a few attempts and stops guessing, and we
+measured that case to make sure it costs nothing rather than assuming it.
+
+This works for peer-served requests too, not just models on your own machine.
+It also no longer requires asking for the most predictable setting — an earlier
+form of this only helped requests that asked for zero randomness, which is not
+what any normal client asks for, so in practice it helped almost nobody.
+
+**Prompts are read faster on graphics cards.** A long prompt is read in pieces,
+and every piece after the first was being handled by the slower of two available
+methods for no reason — a note in the code claimed the faster one could not do
+that shape, and it can. A 128-word piece dropped from 116 to 76 milliseconds.
+This affects every request with a prompt longer than a couple of paragraphs.
+
+**Short pieces of work on processors are roughly twice as fast.** Asking for two
+words at once instead of one used to cost nearly eight times as much, because
+every shortcut in the code was written for exactly one word at a time and two
+fell off the edge of all of them. Checked on two different processors, and the
+gain is larger on the smaller one.
+
+**Nodes now say why a reply came back with nothing in it.** Before, a reply cut
+short by a stop word your client sent looked exactly like a model that had
+nothing to say — both came back as an ordinary finished reply. The node now says
+which of the two happened, and names the stop word when that was the cause. This
+came out of a user report we could not otherwise have explained.
+
+**Also:** grouped-query models now generate on the faster of the two available
+methods on graphics cards, after the reason for the old choice stopped applying;
+and when a machine is already busy with other requests, working ahead steps
+aside so those keep sharing the machine as before.
+
+
 ## [0.3.115-alpha] — 2026-08-23
 
 **Correction to v0.3.114.** That release said replies were up to 1.8x faster on
