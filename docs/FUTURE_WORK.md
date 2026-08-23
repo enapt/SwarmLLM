@@ -7515,6 +7515,14 @@ that were not obvious before building it:
   tokens, worst on a short reply. Dropping a candidate that lost its first cycle
   by more than 1.5x takes a 16-token reply from measurably slower to 10.91 vs
   10.85 tok/s — i.e. free.
+- **How you compare matters more than what you compare** (found in v0.3.114,
+  fixed in .115). Deciding on each width's FASTEST token is right on a machine
+  with a clear optimum and wrong on one without: the i5 chose 4 of 6 on one run
+  and 6 of 6 on the next for the same model, and lost 6-8%. Compare medians, and
+  require the winner's WORST timing to beat the offered width's typical one —
+  the gain must exceed the machine's own run-to-run noise, which on the i5 is
+  the same size as the gap between widths (16 ms) and on the Ryzen is not
+  (3 ms against a 69 ms gap).
 - **A worker process serves one model, so a process-global calibration is
   per-model by construction** — which matters, because the same i5 wants all six
   cores for llama-3.2-1b Q8_0 and about three for tinyllama Q4_K_M.

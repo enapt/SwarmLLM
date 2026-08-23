@@ -76,7 +76,7 @@
 //! | 6 | 15.0 |
 //! | 8 (= the cap here, so the global pool) | 8.3 |
 //!
-//! A node set to `contribution = "maximum"` therefore replied **2.3x slower**
+//! A node set to `contribution = "maximum"` therefore replied **much slower**
 //! than the same node on the default `minimal`, because minimal's ceiling of 4
 //! happens to land on the optimum. Giving the swarm more of your machine made
 //! your own replies worse — the same defect this module was written to fix,
@@ -96,24 +96,59 @@
 //! the previous behaviour in place.
 //!
 //! Measured A/B inside one binary (`SWARMLLM_DECODE_CALIBRATE=0` is the off
-//! arm), llama-3.2-3b Q4_K_M, 896-token prompt, ~916 KV, 3 interleaved reps on
-//! an idle box:
+//! arm), 3 interleaved reps per arm, on BOTH machines — which is the part that
+//! matters, because the first version of this passed on one machine and
+//! regressed the other.
 //!
-//! | offered | calibration off | calibration on | it chose | its own timings |
-//! |---|---|---|---|---|
-//! | 8 (`maximum`) | 7.3-7.5 tok/s | **13.5-14.2** | 4 of 8 | 8:129 6:76 4:60 2:86 ms |
-//! | 4 (`minimal`, default) | 8.4-11.8 | **11.6-12.5** | 3 of 4 | 4:84 3:70 2:87 1:156 ms |
+//! Ryzen 5800H, llama-3.2-3b Q4_K_M, 896-token prompt, `offered = 8`
+//! (`contribution = "maximum"`), the case this exists for:
 //!
-//! **1.80x on `maximum`** with prompt processing unchanged (62-68 tok/s in both
-//! arms), and the default gains too rather than merely holding — nothing here
-//! trades one contribution level against another. No run of the on arm was
-//! slower than any run of the off arm at either width.
+//! | calibration off | on | it chose | its own timings |
+//! |---|---|---|---|
+//! | 7.68-7.94 tok/s | **14.17-14.52** | 4 of 8, every run | 8:126-133 6:74-82 4:59-66 2:83-92 ms |
 //!
-//! The cost is the tokens spent measuring, which is worst on a short reply, so
-//! `ELIMINATION_RATIO` drops a hopeless candidate after one look instead of
-//! timing it three times. With that, a 16-token reply at the default measures
-//! 10.91 tok/s calibrated against 10.85 uncalibrated — the cost is gone at the
-//! length where it would have been most visible.
+//! **1.85-1.89x**, prompt processing unchanged (both arms use everything
+//! offered). i5-10500T, `offered = 6`: it keeps **6 of 6 on every run** for both
+//! tinyllama Q4_K_M and llama-3.2-1b Q8_0 — the right answer there, and it must
+//! not be talked out of it by noise.
+//!
+//! # Deciding, and why the obvious rules are wrong
+//!
+//! Comparisons use the MEDIAN of `SAMPLES_PER_CANDIDATE`, and a width is only
+//! taken when its WORST timing still beats the offered width's typical one.
+//! Both of those were paid for:
+//!
+//! - **Min-of-N is wrong here**, though it is this project's rule for
+//!   benchmarks. There the environment is controlled and every error adds time,
+//!   so the fastest run is the least contaminated. Here each sample is a
+//!   different token, at a different cache length, on a machine doing whatever
+//!   else its owner asked — so the minimum is the LUCKIEST sample. On the i5 it
+//!   picked 4 of 6 on one run and 6 of 6 on the next for the same model, and
+//!   cost 6-8%.
+//! - **A percentage margin alone is wrong too.** On the i5 the gap between
+//!   widths (~16 ms) is the size of the spread of ONE width re-measured (6
+//!   threads: 48, 52, 36 ms across three runs), so any threshold small enough to
+//!   catch a real win also catches noise. On the Ryzen the gap is 69 ms against
+//!   a ~3 ms spread. The question is "is the gain bigger than this machine's own
+//!   noise", and 15% only happened to be a proxy for that on one box.
+//!
+//! # What it costs, and why a benchmark overstates it
+//!
+//! The measurement is paid in the user's own first tokens, ONCE per worker
+//! process. A bench pays that inside a single short run; a real worker pays it
+//! once and then serves for hours. Measured on the i5 (tinyllama, same binary,
+//! calibration on vs off):
+//!
+//! | decode tokens | on | off |
+//! |---|---|---|
+//! | 48 | 25.38 tok/s | 27.87 (**-8.9%**) |
+//! | 256 | 26.18 | 25.83 (**level**) |
+//!
+//! So the visible cost is a short-run artefact. It is minimised anyway:
+//! `ELIMINATION_RATIO` drops a hopeless width after one look, and
+//! `EARLY_SETTLE_SAMPLES` stops the whole search once the offered width is
+//! holding its own — the common case, since most machines have no sub-physical
+//! optimum worth taking.
 //!
 //! Prefill is left on the global pool untouched, so a node on the default
 //! `contribution = "minimal"` takes exactly the code path it did before, with
@@ -127,12 +162,20 @@ use std::time::Instant;
 /// Timed decode steps per candidate width before a choice is made. Three is
 /// enough to take a min that survives one scheduler hiccup, and costs only the
 /// first ~dozen tokens of a worker's life.
-const SAMPLES_PER_CANDIDATE: usize = 3;
+const SAMPLES_PER_CANDIDATE: usize = 5;
 
 /// How much faster a narrower pool must be before decode moves off the widest
 /// candidate. Below this the two are indistinguishable on a busy machine and
 /// the previous behaviour (use what the owner offered) stands.
-const CALIBRATION_MARGIN_PCT: u64 = 3;
+///
+/// **Sized for the flat case, not the sharp one.** Where narrowing genuinely
+/// helps it helps enormously — the Ryzen measures 60 ms against 129 ms, which
+/// clears any threshold — so nothing is lost by being strict. Where the curve
+/// is flat, as on the i5 (23.7 vs 22.5 tok/s across four widths, ~7% end to
+/// end), a small margin just lets sampling noise pick a winner, and the choice
+/// came out differently on two consecutive runs of the same model. 3% did
+/// exactly that.
+const CALIBRATION_MARGIN_PCT: u64 = 15;
 
 /// After one full cycle, a candidate this much slower than the best so far is
 /// dropped instead of being sampled again.
@@ -143,6 +186,17 @@ const CALIBRATION_MARGIN_PCT: u64 = 3;
 /// most of the price. 3/2 is deliberately loose: it only ever discards a
 /// candidate that lost badly, never one that is merely behind.
 const ELIMINATION_RATIO: (u64, u64) = (3, 2);
+
+/// Samples per candidate after which, if nothing is beating the width the owner
+/// offered, calibration stops and keeps it.
+///
+/// Most machines have no sub-physical optimum worth taking — the i5 measured
+/// here wants all six cores for both its models — and on those every further
+/// sample is pure cost to the user, paid in their own first tokens. Settling
+/// early takes that from ~15 tokens to ~6. The sharp case is unaffected: where
+/// a narrower width really wins it is already ahead by 2x after two samples, so
+/// this never fires and the full comparison runs.
+const EARLY_SETTLE_SAMPLES: usize = 2;
 
 /// How many threads decode should use, given what the owner offered and what
 /// the machine has.
@@ -201,12 +255,35 @@ struct Calibration {
 }
 
 struct CalibrationState {
-    /// Fastest nanoseconds seen per candidate — min, not mean: every source of
-    /// error here adds time, so the minimum is the least contaminated estimate.
-    best_ns: Vec<Option<u64>>,
+    /// Every timing seen per candidate. Compared by MEDIAN, deliberately not by
+    /// minimum.
+    ///
+    /// Min-of-N is this project's rule for benchmarks, where the environment is
+    /// controlled and every error source only adds time — there the fastest run
+    /// is the least contaminated. It is the wrong statistic HERE: each sample is
+    /// a different token, at a different cache length, on a machine doing
+    /// whatever else its owner asked of it. The minimum is then the luckiest
+    /// sample rather than the truest one, and on a machine whose widths are
+    /// close together the luckiest sample decides the winner. Measured on the
+    /// i5 (2026-08-22): the same model chose 4 of 6 on one run and 6 of 6 on the
+    /// next, from single samples that disagreed by 30%.
+    samples_ns: Vec<Vec<u64>>,
     counts: Vec<usize>,
     /// Candidates that lost their first cycle badly enough not to be re-timed.
     eliminated: Vec<bool>,
+}
+
+/// Median of a set of timings, or `None` when there are none.
+///
+/// See `CalibrationState::samples_ns` for why this is a median and not a
+/// minimum.
+fn median_ns(v: &[u64]) -> Option<u64> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut sorted = v.to_vec();
+    sorted.sort_unstable();
+    Some(sorted[sorted.len() / 2])
 }
 
 impl Calibration {
@@ -217,10 +294,37 @@ impl Calibration {
             cursor: AtomicUsize::new(0),
             chosen: AtomicUsize::new(0),
             state: Mutex::new(CalibrationState {
-                best_ns: vec![None; n],
+                samples_ns: vec![Vec::new(); n],
                 counts: vec![0; n],
                 eliminated: vec![false; n],
             }),
+        }
+    }
+
+    /// Report the decision once, the same way from either exit.
+    fn announce(&self, st: &CalibrationState, final_idx: usize, medians: &[Option<u64>]) {
+        let _ = st;
+        let table: Vec<String> = self
+            .candidates
+            .iter()
+            .zip(medians.iter())
+            .map(|(t, ns)| format!("{t}:{}ms", ns.map(|v| v / 1_000_000).unwrap_or(0)))
+            .collect();
+        tracing::info!(
+            decode_threads = self.candidates[final_idx],
+            offered = self.candidates[0],
+            measured = %table.join(" "),
+            "Decode thread width calibrated on this machine from real tokens"
+        );
+        // The benches run without a tracing subscriber, and a calibration you
+        // cannot see is a calibration you cannot check.
+        if std::env::var("SWARMLLM_DECODE_CALIBRATE_VERBOSE").is_ok() {
+            eprintln!(
+                "CALIB chose {} of {} — {}",
+                self.candidates[final_idx],
+                self.candidates[0],
+                table.join(" ")
+            );
         }
     }
 
@@ -263,20 +367,49 @@ impl Calibration {
             Err(_) => return,
         };
         st.counts[idx] += 1;
-        st.best_ns[idx] = Some(match st.best_ns[idx] {
-            Some(prev) => prev.min(ns),
-            None => ns,
-        });
+        st.samples_ns[idx].push(ns);
         // Once every candidate has been seen once, drop the hopeless ones so
-        // the user does not pay to re-time them.
+        // the user does not pay to re-time them. One sample is enough to spot
+        // hopeless — it is not enough to pick a winner, which is why only the
+        // elimination step reads a single measurement.
         if st.counts.iter().all(|c| *c >= 1) {
-            if let Some(best) = st.best_ns.iter().flatten().copied().min() {
-                for i in 0..st.best_ns.len() {
-                    if let Some(v) = st.best_ns[i] {
+            if let Some(best) = st
+                .samples_ns
+                .iter()
+                .filter_map(|v| v.iter().min())
+                .min()
+                .copied()
+            {
+                for i in 0..st.samples_ns.len() {
+                    if let Some(v) = st.samples_ns[i].iter().min().copied() {
                         if v * ELIMINATION_RATIO.1 > best * ELIMINATION_RATIO.0 {
                             st.eliminated[i] = true;
                         }
                     }
+                }
+            }
+        }
+        // Early settle: if the offered width is holding its own after a couple
+        // of looks, there is nothing here worth the user's tokens to find.
+        let live_seen = |n: usize| {
+            st.counts
+                .iter()
+                .zip(st.eliminated.iter())
+                .all(|(c, dead)| *dead || *c >= n)
+        };
+        if live_seen(EARLY_SETTLE_SAMPLES) {
+            let medians: Vec<Option<u64>> = st.samples_ns.iter().map(|v| median_ns(v)).collect();
+            let best_live = medians
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !st.eliminated[*i])
+                .filter_map(|(_, ns)| *ns)
+                .min();
+            if let (Some(w), Some(b)) = (medians[0], best_live) {
+                if b * 100 > w * (100 - CALIBRATION_MARGIN_PCT) {
+                    self.chosen.store(self.candidates[0], Ordering::Relaxed);
+                    self.announce(&st, 0, &medians);
+                    return;
                 }
             }
         }
@@ -288,9 +421,9 @@ impl Calibration {
         if unfinished {
             return;
         }
-        let widest_ns = st.best_ns[0];
-        let best = st
-            .best_ns
+        let medians: Vec<Option<u64>> = st.samples_ns.iter().map(|v| median_ns(v)).collect();
+        let widest_ns = medians[0];
+        let best = medians
             .iter()
             .enumerate()
             .filter(|(i, _)| !st.eliminated[*i])
@@ -300,36 +433,33 @@ impl Calibration {
             (Some(b), Some(_)) => b,
             _ => (0, 0),
         };
-        // Only move off the widest when the gain is real.
-        let keep_widest = match widest_ns {
-            Some(w) => pick_ns * 100 > w * (100 - CALIBRATION_MARGIN_PCT),
-            None => true,
+        // Only move off the widest when the gain is real. Two conditions, and
+        // the second is the one that separates the two machines this was
+        // measured on:
+        //
+        //   1. a percentage margin, so a hair's difference is ignored; and
+        //   2. the candidate's WORST timing must still beat the widest's
+        //      typical one.
+        //
+        // A percentage alone cannot tell the cases apart. On the flat i5 the
+        // gap between widths (~16 ms) is the same size as the spread of one
+        // width measured repeatedly (6 threads came out at 48, 52 and 36 ms
+        // across three runs), so any threshold small enough to catch a real
+        // win also catches noise — and it did, moving to 3 threads on one run
+        // in six. On the Ryzen the gap is 69 ms against a spread of ~2 ms.
+        // "Bigger than the noise" is the question; "bigger than 15%" only
+        // happened to be a proxy for it on one machine.
+        let pick_worst = st.samples_ns[pick_idx].iter().max().copied();
+        let keep_widest = match (widest_ns, pick_worst) {
+            (Some(w), Some(worst)) => {
+                pick_ns * 100 > w * (100 - CALIBRATION_MARGIN_PCT) || worst >= w
+            }
+            _ => true,
         };
         let final_idx = if keep_widest { 0 } else { pick_idx };
         self.chosen
             .store(self.candidates[final_idx], Ordering::Relaxed);
-        let table: Vec<String> = self
-            .candidates
-            .iter()
-            .zip(st.best_ns.iter())
-            .map(|(t, ns)| format!("{t}:{}ms", ns.map(|v| v / 1_000_000).unwrap_or(0)))
-            .collect();
-        tracing::info!(
-            decode_threads = self.candidates[final_idx],
-            offered = self.candidates[0],
-            measured = %table.join(" "),
-            "Decode thread width calibrated on this machine from real tokens"
-        );
-        // The benches run without a tracing subscriber, and a calibration you
-        // cannot see is a calibration you cannot check.
-        if std::env::var("SWARMLLM_DECODE_CALIBRATE_VERBOSE").is_ok() {
-            eprintln!(
-                "CALIB chose {} of {} — {}",
-                self.candidates[final_idx],
-                self.candidates[0],
-                table.join(" ")
-            );
-        }
+        self.announce(&st, final_idx, &medians);
     }
 }
 
@@ -559,6 +689,122 @@ mod tests {
         }
     }
 
+    /// The i5 case, replayed: four widths within a few percent of each other,
+    /// and one lucky sample on the narrower one. Deciding on the minimum picked
+    /// that sample's width — differently on two consecutive runs of the same
+    /// model — and cost real speed. The median ignores it.
+    #[test]
+    fn one_lucky_sample_cannot_decide_a_flat_machine() {
+        let c = Calibration::new(vec![6, 4]);
+        // 6 is genuinely a touch faster; 4 gets one outlier far below its norm.
+        c.record(0, 44_000_000);
+        c.record(1, 33_000_000); // the lucky one
+        for _ in 1..SAMPLES_PER_CANDIDATE {
+            c.record(0, 44_000_000);
+            c.record(1, 47_000_000);
+        }
+        assert_eq!(
+            c.chosen.load(Ordering::Relaxed),
+            6,
+            "a single lucky sample decided the width — this is the i5 regression"
+        );
+    }
+
+    /// On a machine with nothing to find, calibration must stop early rather
+    /// than spend the user's tokens confirming it. The i5's own figures: every
+    /// width within a few ms of the six it was offered.
+    #[test]
+    fn a_machine_with_nothing_to_find_stops_looking() {
+        let c = Calibration::new(vec![6, 4, 3, 1]);
+        for _ in 0..EARLY_SETTLE_SAMPLES {
+            c.record(0, 45_000_000);
+            c.record(1, 42_000_000);
+            c.record(2, 47_000_000);
+            c.record(3, 83_000_000);
+        }
+        assert_eq!(
+            c.chosen.load(Ordering::Relaxed),
+            6,
+            "settled on what was offered"
+        );
+        let st = c.state.lock().unwrap();
+        assert!(
+            st.counts.iter().all(|c| *c <= EARLY_SETTLE_SAMPLES),
+            "kept sampling after there was nothing to find: {:?}",
+            st.counts
+        );
+    }
+
+    /// ...but a machine that DOES have something to find is not settled early:
+    /// the Ryzen's 4 is already 2x ahead after two samples, so the comparison
+    /// runs to completion and takes it.
+    #[test]
+    fn a_real_optimum_is_not_settled_away_early() {
+        let c = Calibration::new(vec![8, 4]);
+        for _ in 0..EARLY_SETTLE_SAMPLES {
+            c.record(0, 129_000_000);
+            c.record(1, 60_000_000);
+        }
+        assert_eq!(
+            c.chosen.load(Ordering::Relaxed),
+            0,
+            "settled before confirming a 2x difference"
+        );
+        for _ in EARLY_SETTLE_SAMPLES..SAMPLES_PER_CANDIDATE {
+            c.record(0, 129_000_000);
+            c.record(1, 60_000_000);
+        }
+        assert_eq!(c.chosen.load(Ordering::Relaxed), 4);
+    }
+
+    /// The real i5 numbers, where a percentage margin is not enough: 3 threads
+    /// posted the best median (36 ms) against 6 threads' 52 ms — a 31% gap that
+    /// clears any sane threshold — but 3's own timings ranged up past what 6
+    /// typically does, which is what "this machine is flat and noisy" looks
+    /// like. It must keep the width its owner offered.
+    #[test]
+    fn a_gap_no_bigger_than_the_noise_does_not_move_the_width() {
+        let c = Calibration::new(vec![6, 3]);
+        for v in [52_000_000, 48_000_000, 52_000_000, 36_000_000, 52_000_000] {
+            c.record(0, v);
+        }
+        // Best median, but its worst run is slower than 6's typical run.
+        for v in [36_000_000, 30_000_000, 36_000_000, 60_000_000, 36_000_000] {
+            c.record(1, v);
+        }
+        assert_eq!(
+            c.chosen.load(Ordering::Relaxed),
+            6,
+            "moved on a gap the size of the machine's own noise — the i5 regression"
+        );
+    }
+
+    /// And the sharp case still wins: where narrowing genuinely helps it helps
+    /// by far more than any margin, so being strict costs nothing.
+    #[test]
+    fn a_machine_with_a_real_optimum_still_finds_it() {
+        let c = Calibration::new(vec![8, 4]);
+        // The Ryzen's actual figures, including their real run-to-run spread:
+        // 4 reproduced at 59/60/62 ms against 8's 125-129.
+        for v in [
+            129_000_000,
+            125_000_000,
+            126_000_000,
+            128_000_000,
+            127_000_000,
+        ] {
+            c.record(0, v);
+        }
+        for v in [60_000_000, 59_000_000, 62_000_000, 59_000_000, 61_000_000] {
+            c.record(1, v);
+        }
+        assert_eq!(
+            c.chosen.load(Ordering::Relaxed),
+            4,
+            "a 69ms gap against a 3ms spread is exactly what this should catch"
+        );
+    }
+
     /// Calibration is paid for out of the user's own first tokens, so a
     /// candidate that lost its first cycle badly is not timed again.
     #[test]
@@ -634,12 +880,12 @@ mod tests {
         let tie = Calibration::new(vec![8, 4]);
         for _ in 0..SAMPLES_PER_CANDIDATE {
             tie.record(0, 100_000_000);
-            tie.record(1, 99_000_000);
+            tie.record(1, 91_000_000);
         }
         assert_eq!(
             tie.chosen.load(Ordering::Relaxed),
             8,
-            "1% is inside the noise of a busy machine — keep what was offered"
+            "9% is inside the spread of a flat machine — keep what was offered"
         );
     }
 

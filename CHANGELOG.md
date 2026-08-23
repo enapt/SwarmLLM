@@ -4,6 +4,28 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.115-alpha] — 2026-08-23
+
+**Correction to v0.3.114.** That release said replies were up to 1.8x faster on
+processor nodes contributing more of their machine. That was true of the machine
+it was measured on and not true everywhere: on a second computer, where the
+speed barely changes with the number of threads, the same code could make
+replies 6-8% *slower* and picked a different answer each time it was asked. It
+was choosing from each width's single fastest token, which on a machine with a
+clear best width is the right reading and on a machine without one is just
+whichever measurement got lucky. v0.3.114 was never deployed to our own nodes
+for this reason.
+
+**What it does now.** It compares typical tokens rather than lucky ones, and
+only moves off the setting you chose when the difference is bigger than the
+machine's own variation between identical runs — which is the thing that
+actually separates a computer with a best width from one without. On a machine
+with nothing to find it now stops looking after a couple of tokens instead of
+continuing to measure. Re-measured on both computers: the 1.8x is unchanged
+where it applies, and the machine that was losing 6-8% is now level, choosing to
+keep every core it was given on every run.
+
+
 ## [0.3.114-alpha] — 2026-08-22
 
 **Replies are up to 1.8x faster on processor nodes that were told to give the
