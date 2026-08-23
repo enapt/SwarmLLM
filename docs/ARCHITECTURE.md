@@ -797,12 +797,38 @@ decisively at **12.9× iter-1 TTFT speedup** (151.7 s full local prefill
 
 ### Speculative Decoding
 
-- Draft model (small/fast) proposes K candidate tokens per step (default 4)
-- Target model verifies all K in one forward pass (amortized GPU cost)
-- Rejection sampling ensures output distribution identical to non-speculative
-- KV-cache resynchronization on rejection (trim + reseed)
-- Config: `speculative_decoding`, `speculative_gamma`, `draft_model_path`
-- Falls back to standard decoding if no draft model available
+Three paths, and they differ in where the draft comes from:
+
+**Draft-model (opt-in).** A small model proposes K tokens per step (default 4);
+the target verifies all K in one forward; KV is trimmed and reseeded on
+rejection. Config: `speculative_decoding`, `speculative_gamma`,
+`draft_model_path`. Greedy only by construction — a draft model has a real
+distribution, so doing this properly needs `min(1, p/q)` and a residual built
+from both sides. Falls back to standard decoding with no draft model.
+
+**Draft-free n-gram, LOCAL (v0.3.116, on by default).** A whole model on one
+machine drafts from an n-gram match against the prompt and its own output, and
+verifies the batch in one forward — no second model, nothing downloaded. Lives
+in `model_worker::ngram_spec_round`, i.e. in the worker's decode loop, which is
+the choke point every local surface funnels through (streaming and not, OpenAI
+and Anthropic). ~2x CPU / ~3x GPU on replies that copy from context.
+
+**Draft-free n-gram, DISTRIBUTED.** `pipeline::ngram_only_spec` for pipelines
+with a remote segment, verifying through `forward_verify_through_segments`.
+
+Three invariants the two draft-free paths share, all learned the hard way:
+
+- **Any temperature.** With a point-mass draft (`q = δ_x`) the rejection rule is
+  "accept w.p. `p(x)`, else draw from `p` minus `x` renormalised", and "draw
+  `t ~ p`, keep the draft iff `t == x`" has exactly those branches. Both paths
+  were once gated on `temperature == 0`, which made them inert — the OpenAI
+  default is 0.7 and Anthropic's 1.0.
+- **NOT bit-identical** (gotcha #370). A verify forward reassociates, so a
+  near-tie can land the other way. Each run is deterministic; that is how you
+  tell reassociation from a race.
+- **A miss is not free** (#371), and diverting a request out of the batched path
+  is not free either (#373). `SpecBackoff` handles the first,
+  `spec_payoff_justifies_diverting` the second.
 
 ### Subprocess-Per-Model Isolation (Ollama-style)
 

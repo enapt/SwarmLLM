@@ -55,6 +55,58 @@ Absent fields mean "not measured", never zero. `ttft_ms` and `decode_ms` are
 omitted on a path that never emitted an incremental token, because there is no
 honest way to split decode out of the total there.
 
+## "The reply came back empty or one token"
+
+`finish_reason: "stop"` cannot tell you why, and the OpenAI schema has no field
+for it — a reply cut off by the caller's own stop sequence and a model that
+ended its turn immediately look identical to a client. Since v0.3.116 the node
+says which happened, so this is one grep rather than a testing session
+(gotcha #372, from an external report that took several rounds to narrow):
+
+```bash
+# A stop sequence in the REQUEST matched almost at once — names the culprit.
+grep "stop sequence in the request matched" node.log
+
+# The model emitted end-of-turn straight away, nothing cut it off.
+# Points at the prompt: check the chat template for this model.
+grep "ended its turn immediately" node.log
+
+# Finalisation removed everything the model generated (leaked markers, a stop
+# matching at position 0). Older, and covers the fully-empty case only.
+grep "empty after finalisation" node.log
+```
+
+Neither of the first two fires when the caller legitimately asked for a short
+reply — `max_tokens: 1` yielding one token is not a fault and is deliberately
+silent, so the warning stays meaningful.
+
+**Was it served locally or by a peer?** That changes which code path to suspect
+entirely, and it is a response header rather than a log line:
+
+```bash
+curl -sD- -o /dev/null http://localhost:8800/v1/chat/completions ... | grep x-swarm
+# x-swarm-route: local | x-swarm-segments: 1 | x-swarm-peers: 0 | x-swarm-nodes: …
+```
+
+Ask for that FIRST on any report from a multi-node setup — model, request body
+and version were all obtained for the report above and none of them
+discriminated, while this header would have (gotcha #374).
+
+## Is speculative decoding actually helping?
+
+A local model drafts ahead of itself when the reply repeats something already in
+the context. One line per request, at debug:
+
+```bash
+grep "local n-gram speculation complete" node.log
+# rounds=6 drafted=53 accepted=47 paused_rounds=0 tokens_per_round=8.83
+```
+
+`tokens_per_round` is the number that matters: ~8.8 means it is working, ~1.0
+means this workload has nothing to copy. `paused_rounds` counts rounds where the
+backoff suppressed drafting — high is CORRECT on prose, not a fault. A request
+that is not alone on the worker joins the batch instead and logs nothing.
+
 ## No log file? Use the endpoint
 
 `GET /api/admin/diagnostics` renders plain text for a shell, and includes the
