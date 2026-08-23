@@ -238,6 +238,45 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### Routing never sees how long the prompt is (2026-08-23)
+
+`scheduler::parallax::vertex_cost` prices a candidate from its per-layer decode
+latency (observed EMA, else `est_tokens_per_sec`) multiplied by a FIXED
+`ASSUMED_FORWARD_PASSES = 64`. Nothing in `src/inference/scheduler/` ever sees
+`prompt_tokens` — grep it; the only "prompt" mentions there are about privacy.
+
+So a 10-token request and a 10,000-token request are routed identically, while
+prefill cost is linear in prompt length and the hardware gap is much wider on
+prefill than on decode. Measured here, llama-3.2-3b Q4_K:
+
+```text
+              prefill        decode
+  i5 (CPU)      36 tok/s      8 tok/s
+  RTX 3070    ~2000 tok/s    47 tok/s
+  ratio          ~55x          ~6x
+```
+
+A 5000-token agentic system prompt is therefore ~140 s of prefill on the CPU
+node against ~2.5 s on the GPU one — a difference nine times larger than the
+decode ratio the cost model actually prices. The fixed 64 forward passes is a
+deliberate and well-argued choice for the DECODE side (the comment explains why
+`max_tokens` would over-penalise splitting), but it leaves prefill unpriced
+entirely.
+
+This does not always bite: routing already prefers a faster node through
+`est_tokens_per_sec`, so when the GPU node is idle it wins anyway (verified live
+in .105 — 5/5 to the GPU). It bites when the cost is close: a loaded GPU node
+against an idle CPU one is the right call for a short prompt and badly wrong for
+a long one, and today the scheduler cannot tell those two requests apart.
+
+Fixing it means splitting the cost into a prefill term (scaled by
+`prompt_tokens`) and a decode term (the current one), and threading
+`prompt_tokens` through to `vertex_cost`. **Validate on a real pair, not in
+theory** — a local GPU node and the Proxmox CPU node both holding one model,
+with a long prompt and a short one, checking the choice flips. Changing a
+routing cost model without that is how the delegation penalty in `cbbed678`
+came to price out every good split.
+
 ### A request that carries tools gets no streaming at all (2026-08-23)
 
 Measured on llama-3.2-3b, identical prompt, `stream: true`, counting content
