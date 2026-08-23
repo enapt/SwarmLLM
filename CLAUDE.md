@@ -167,7 +167,9 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1997 lib tests passing + 11 ignored with `--features dev,claude-subscription` (2008 total; re-measured 2026-08-23); 1987 + 11 with default features (also re-run) — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration tests in `tests/integration/` (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 31 repo-consistency, 1 in `tests/api_key_side_effects.rs` (deliberately an INTEGRATION test — see gotcha #230), 30 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root; CI runs it explicitly since 2026-08-09), 9 in the vendored request-response patch (CI: path-triggered `.github/workflows/vendored.yml`; locally `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). End-to-end forward-pass bench (no daemon): `SWARM_BENCH_MODEL=<model shard dir> RAYON_NUM_THREADS=4 cargo run --release --no-default-features --features dev --example prefill_bench` — loads a real model from its shard directory and drives `SplitModel::forward` directly, so prompt-processing and decode changes can be A/B'd without chunking policy, batching or the API in the way. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. Attention-op bench: `examples/attn_bench.rs`. Quantized-matmul bench: `cargo run --release --no-default-features --features dev --example qmatmul_bench` — prices the kernel against batch size AND asserts the tiled path is bit-identical to the upstream ordering; it also sweeps rayon pool size. **Use min-of-N on an idle machine**: the same unchanged code path measured 0.42 ms and 0.97 ms across runs on the WSL2 test box. End-to-end smoke test (any binary, isolated node, never touches a running one): `examples/smoke_test.sh [binary] [port]` — starts, admin API, a setting applying without restart, reload response shape, non-empty inference, streaming, the Anthropic surface, and zero startup errors. Run it after a refactor: the test suite passing and the daemon still booting and serving are different questions. Isolated two-node cross-node test: `examples/two_node_test.sh [binary]` — one node holds the models, one holds none, both on a private gossip network so the scheduler cannot pick a public peer; asserts the reply is non-empty and that the server's `streamed_count` matches the client's `completion_tokens`. **Expect it to fail on a single multi-interface host** (the documented connection-churn case — it names that failure explicitly rather than implying a regression, and reproduces on released binaries); run it across two machines. Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons on ports 8890-8892 — deliberately NOT 8800, and it stops only its own nodes, because the old broad `killall swarmllm` took down whatever else was running) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap AND setting a private `gossip_network_id` — without that last part all three nodes found the live node next door, which holds the whole model, and every request was delegated to it while the log said `segments=1`, so the split was never measured at all). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. Leak soak: `examples/soak_test.sh [binary]` (`HOURS=`, `MODEL=` env) — sustained inference against an ISOLATED node, sampling worker RSS / KV occupancy / threads / fds / ok-fail; it PROVES it is exercising this node (shard-file preflight, private `gossip_network_id`, aborts if a `Pipeline segment` line names a peer — no-bootstrap + no-mDNS is NOT isolation on a machine with a live node, loopback discovery is unconditional, gotcha #311); analyse with `examples/soak_report.sh`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- **Counts** (re-measured 2026-08-23): **1997 lib** + 11 ignored with `--features dev,claude-subscription`; **1987** + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 31 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 9 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
+- **Benches and harnesses — see `docs/DIAGNOSTICS.md` § Benchmarks for the full list and the traps.** The ones reached for most: `examples/prefill_bench.rs` (drives `SplitModel::forward` directly, no daemon — `SWARM_BENCH_MODEL`, `SWARM_BENCH_PROMPT`, `SWARM_BENCH_DECODE`, `SWARM_BENCH_REPS`; pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown), `examples/qmatmul_bench.rs` (asserts the tiled kernel is bit-identical to upstream), `examples/smoke_test.sh [binary] [port]` (8 checks on an isolated node — run it on the DOWNLOADED release artifact), `examples/soak_test.sh` (`HOURS=` must be a WHOLE number; data dir is per-`PORT`, so two soaks no longer kill each other).
+- **Measurement discipline** (paid for repeatedly): min-of-N on an IDLE box — the same unchanged code measured 0.42 ms and 0.97 ms across runs here, and a benchmark taken while a build runs is worthless. **min-of-N is for benchmarks, not for live measurement** (#367). A/B inside ONE binary via an env switch (`SWARMLLM_DECODE_CALIBRATE=0`, `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`), never across two builds. **Verify the mechanism fired**, not just that the outcome improved. Pinned reference models: `docs/REFERENCE_MODELS.md`.
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -219,159 +221,89 @@ All 20 build phases complete. All subsystems wired — no stubs. **1997 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.104 → .115-alpha (2026-08-19 → 23): the swarm learned to see its own load, replies stopped lying about being whole, split models chain by default, LAN neighbours stopped meeting in Europe, a deleted shard stays deleted, and CPU nodes got 20-40% faster
+### Latest — v0.3.115-alpha (2026-08-23): each node measures its own decode thread width, and a refusal from a peer arrives whole
 
 Twelve releases in five days, each verified on the DOWNLOADED artifact (sha256,
-25 assets, not a draft, `examples/smoke_test.sh` 8/8). **.109 turns direct peer
-chaining ON by default** after it was validated end to end on two machines the
-same day (see the .107 bullet; five more silent defects fell out of running it,
-gotchas #352-#355). **.110 (same afternoon)**: two LAN nodes 0.7 ms apart were
-measuring 60-800 ms to each other and forwarding every tensor through the
-anchor relay — a relay-carried INBOUND connection has a bare `/p2p/<peer>`
-address and was booked "direct" at both layers (gotcha #356; after: 2 ms / 9 ms);
-the rr tie-break prefers a connection that has answered, then the oldest (#353);
-every tensor forward is **ACKed on receipt** (`features::FORWARD_ACK`) and a
-chain hop reports its onward failure to the coordinator, so a peer that goes
-quiet costs ~10-25 s instead of 300 s (SIGSTOP test: 300+ → 67.8 → **26.1 s**,
-gotcha #357); `NetworkManager::run` logs its own stalls per arm. Both live nodes
-verified at 2/9 ms, zero stall lines. **.108 is maintenance
-only**: Rust 1.98 reached the runners and added two lints (`chunks_exact_to_as_chunks`,
-`drain_collect`) that this tree trips — `.107` was tagged with CI RED for exactly
-that; its binaries are sound, the failing checks do not run during a build.
-Detail: `memory/round_log_0818_*.md`, `MEMORY.md` 08-20/21 lines, and the CHANGELOG.
+25 assets, not a draft, `examples/smoke_test.sh` 8/8). Local + Proxmox + anchor
+on **.115**; Oz on .114, Belgium CPU on .113. Full per-release detail:
+`memory/round_log_0822_perf_night.md`, `_0821_report_fixes.md`,
+`_0821_chaining_validation.md`, and the CHANGELOG.
 
-- **.115** (08-23) — **the .114 calibration was right on one machine and wrong on
-  another; corrected.** It decided from each width's FASTEST token. On a machine
-  with a clear optimum (Ryzen) that reads correctly; on a flat one (i5) the
-  fastest token is just the luckiest, so it chose 4 of 6 on one run and 6 of 6 on
-  the next for the SAME model and cost 6-8%. **.114 was never deployed to our
-  nodes.** Now: median of 5, AND the winner's WORST timing must beat the offered
-  width's typical one — because on the i5 the gap between widths (~16 ms) is the
-  size of one width's own spread (48/52/36 ms), while on the Ryzen it is 69 ms
-  against ~3 ms. A percentage threshold cannot tell those apart; "bigger than
-  this machine's noise" can. Plus `EARLY_SETTLE_SAMPLES`: stop searching once the
-  offered width is holding its own (the common case). Re-measured on BOTH:
-  Ryzen 1.85-1.89x choosing 4 of 8 every run; i5 keeps 6 of 6 every run for both
-  its models. The residual is one-time measurement cost, proven by length —
-  48 tok: -8.9%, 256 tok: level.
-- **.114** (08-22 evening) — **each node works out its own decode thread width**
-  (#366): decode is bandwidth-bound, so past the width that saturates memory more
-  threads make replies SLOWER, and that width is a property of the machine AND the
-  model — the same i5 wants all 6 cores for llama-3.2-1b Q8_0 and ~3 for tinyllama
-  Q4_K_M. **The .112 kernels reopened a defect measured and accepted at 15%: it is
-  now 1.80x** (`maximum` 7.3-7.5 tok/s vs 13.5-14.2 at the right width) — giving
-  the swarm more of your machine made your own replies worse. Calibrated from real
-  tokens, round-robin with the direction alternating each cycle (the KV cache grows
-  while measuring, so a fixed order ranks position not width), a hopeless candidate
-  dropped after one look so short replies pay nothing (16 tok: 10.91 vs 10.85).
-  Prefill untouched; the default gains too. `SWARMLLM_DECODE_CALIBRATE=0` is the
-  A/B switch. 1h soak 1886/0, threads flat 18-19. **Also #365, from the Belgium
-  tester**: a peer's memory refusal arrived cut mid-unit at `4170 M` —
-  `fail_tensor_forward` clipped every peer-facing error to 100 chars, the worker
-  prefix is 8, and 100-8=92 is exactly the reported length. The .111 itemised
-  refusal (361 chars) and that older clip never met; the cap was never the
-  disclosure control.
-- **.113** (08-22) — **a machine that gives up part of a model is believed when it
-  says so** (#364, found by building a genuine THREE-holder split to exercise a 2-hop
-  chain). A kad provider record outlives the fact by up to 24h and
-  `merge_dht_providers` is the ONE writer of `shard_holders` that can only ADD — so a
-  holder's retraction, correctly re-announced every 5 min, was undone every few
-  seconds, and every request was scheduled onto a node without the weights
-  (`503 Segment failover exhausted`) while a healthy holder was never asked. Fix:
-  `retracted_claims` outranks the DHT for 26h; only the holder's own word clears it;
-  the FAILURE-path retraction is durable too (it had set a per-request blacklist, so
-  the next request re-learned and re-failed). **Also: N>2 chaining carried on the wire
-  for the first time** — head `remaining=1` → middle `remaining=0` → tail, 128 middle
-  hand-offs across two 64-token runs, 0 in the control. Chaining SPEED remains
-  unresolvable on a LAN (~1% at n=2/3; needs `tc netem`, #284). Validation caveat:
-  half 2 of the fix is UNIT-tested only — two live repro attempts logged 0 retractions,
-  i.e. the mechanism never fired, so they are not evidence (diagnosis rule 4).
-- **.112** (08-22 morning) — **CPU nodes read prompts 20-40% faster and write
-  replies 25-37% faster**, from an overnight self-managed perf round (measure →
-  research → change → test → benchmark; `memory/round_log_0822_perf_night.md`).
-  Four changes, each A/B'd old binary vs new on an idle box, min-of-N: the
-  vendored Q4_K/Q6_K kernels unpack a weight column ONCE for four activation rows
-  (`vec_dot_rows`, bit-identical — asserted by `qmatmul_bench` AND a CI-run test;
-  R=8 spilled the 16 ymm registers, R=4 was 1.2x faster at every m) plus 128-row
-  blocking so the quantized activations stay in L2; a single-position decode
-  attention kernel straight over the KV cache (`decode_attn`, +24%,
-  `SWARMLLM_DECODE_ATTN=standard` restores the matmul path); an eight-lane AVX2
-  `exp` + fused SiLU×up (`fast_math`); mimalloc as the global allocator (+3-4%).
-  llama-3.2-3b prefill 26.3 → 37.0 tok/s, decode 8.0 → 10.1; phi-3.5 (MHA) 10.5 →
-  12.8 / 4.0 → 5.5. GPU path untouched bar the allocator. 2 h soak 3108/0, RSS a
-  bounded band (mimalloc arena reuse — the glibc soak was byte-flat; not a leak).
-  **#363**: the Vendored-patches workflow never set `RUSTFLAGS=""`, so
-  `target-cpu=native` from `.cargo/config.toml` (which the cache key does not
-  hash) poisoned its shared cache with proc-macros built for another runner's
-  CPU → rustc SIGILL; fixed in `ccb9404a` (env + cache key rotated).
-- **.111** (08-21 evening) — **the Belgium report's two causes fixed, not explained.**
-  A shard the user deletes is now a tombstone (`removed_by_user`, persisted,
-  `daemon/state/removed_shards.rs`): the scorer skips it unless a configured
-  `shard_range` or a pin to this node claims it, the shard list shows "Removed",
-  and an explicit request (HF shard download, single-shard download, pool pin)
-  clears it — auto-manage had re-completed a deliberate two-machine split within
-  the hour (#360). **CPU workers get the GPU's KV runtime guard** (`--kv-budget-bytes`
-  → `CPU_KV_BUDGET_BYTES`, handed by the daemon at spawn = typical-context charge +
-  uncommitted RAM budget) so admission charges `ADMISSION_KV_CONTEXT` on BOTH
-  devices: phi-3.5 at a 32k override went from "needs 27125 MB" to 5621 MB and
-  loads (#359). **Found while validating: a node with NO GPU never ran RAM
-  admission at all** (`going_to_cpu` only fired after a VRAM refusal) →
-  `ModelProcessPool::charges_ram`, charging only, never placement. Control on the
-  released .110 binary reproduced the report exactly; the new binary itemised,
-  loaded, and the worker logged "conversations up to about 4496 tokens fit".
-  **Same evening, second report: the RAM budget was a STARTUP snapshot** — the same
-  `max_ram_mb = 18000` answered "budget allows 13370 MB" one day and "10500 MB" the
-  next, 14773 MB actually free (#362). Now `vram::RamBudget` is taken LIVE at every
-  admission (cap from `cfg()`, headroom = 70% of memory free NOW) via a provider
-  closure in the pool; the refusal names the limit that applied.
-- **.104** — a healthy WSL node told its owner to fix a firewall blocking nothing
-  (#335: inbound evidence lived in memory, re-decided every restart → persisted
-  `observed_inbound_connection`); Claude clients could not READ an error from
-  `/v1/messages` (#337/#339, the first fix sat INSIDE auth); MCP conformance; eight
-  wrong-culprit fixes (`reclassify_flattened_error`); #338 undefined CSS custom
-  properties (test-pinned).
-- **.105** — **#341 a node that only SERVES advertised load 0 forever** (`active_pipelines`
-  is the coordinator's map; six sites misread it); the delegated coefficient had ZERO
-  readers; **#345 the fast path never sheds load**. Verified live: 5/5 to the GPU,
-  0.23 → 20.0 tok/s.
-- **.106** — **replies TRUNCATED over the WAN and said `finish_reason:"stop"`** (#342/#343,
-  per-token fire-and-forget rr) → `503 Reply truncated in transit: 3 of 60`; per-peer
-  delivery reliability (`expected_attempts` = 1/p) in `vertex_cost`; backpressure no
-  longer tears a reply down (NOT observed firing — do not credit it).
-- **.107** — **batching ON by default** (1 → 8); **#348 the published 40% win did not
-  exist** (aggregate tok/s ÷ wall clock is biased by completion length; real ~3% N=8,
-  ~16% N=12; correction pushed). **Direct peer chaining implemented** (trailer 0x06 =
-  REMAINING chain; ON since .109; validated on two machines 08-21 after #354 and the
-  0x07 reply-to / `PIPELINE_CHAIN_V2` fixes; still unchained: n-gram spec decode).
-  Prefix cache byte-bounded (2 GB/model). `3node_sharded_setup.sh` had no
-  `gossip_network_id` — every earlier result from it is suspect.
+- **.115** (08-23) — **the .114 calibration was right on one machine and wrong
+  on another** (#367). It decided each decode width from its FASTEST token —
+  min-of-N, this project's rule for BENCHMARKS, where the environment is
+  controlled and every error adds time. Wrong for a LIVE measurement: each
+  sample is a different token at a different KV length on a busy machine, so the
+  minimum is the LUCKIEST sample. On the flat i5 it chose 4 of 6 then 6 of 6 for
+  the SAME model and cost 6-8%; on the sharp Ryzen it was right by luck.
+  **.114 was deliberately never deployed to our nodes** (the anchor and Oz
+  auto-updated to it anyway — withholding a deploy does not withhold a release).
+  Fix: median of 5, AND the winner's WORST timing must beat the offered width's
+  typical one — because on the i5 the gap BETWEEN widths (~16 ms) is the size of
+  ONE width's own spread (48/52/36 ms), while on the Ryzen it is 69 ms against
+  ~3 ms; a percentage cannot separate those, "bigger than this machine's noise"
+  can. Plus early settle once the offered width is holding its own. Re-measured
+  on BOTH machines: Ryzen **1.85-1.89x** choosing 4 of 8 every run, i5 keeps 6 of
+  6 every run. Residual is ONE-TIME, proven by length (48 tok -8.9%, 256 level).
+  Confirmed in production: Proxmox logged `decode_threads=3 offered=3
+  measured=3:112ms 2:104ms 1:194ms` — refused an apparent 7% gain, correctly.
+- **.114** (08-22) — the first cut of the above. **Its premise stands and is the
+  reason this exists**: decode is bandwidth-bound, so past the width that
+  saturates memory more threads make replies SLOWER, and the .112 kernels
+  widened a defect measured and accepted at 15% into 1.80x — a node on
+  `contribution = "maximum"` replied at less than half the speed of the same node
+  on the default. Also **#365, from the Belgium tester**: a peer's memory refusal
+  arrived cut mid-unit at `4170 M` — `fail_tensor_forward` clipped every
+  peer-facing error to 100 chars, the worker prefix is 8, 100-8=92 = exactly the
+  reported length. The .111 itemised refusal (361 chars) and that older clip
+  never met; the cap was never the disclosure control.
+- **.113** (08-22) — **a machine that gives up part of a model is believed when
+  it says so** (#364, found by building a genuine THREE-holder split to exercise
+  a 2-hop chain). A kad provider record outlives the fact by up to 24h and
+  `merge_dht_providers` is the ONE writer of `shard_holders` that can only ADD —
+  so a holder's retraction, correctly re-announced every 5 min, was undone every
+  few seconds and every request was scheduled onto a node without the weights
+  (`503 Segment failover exhausted`) while a healthy holder went unasked. Fix:
+  `retracted_claims` outranks the DHT for 26h; only the holder's own word clears
+  it; the FAILURE-path retraction is durable too. **N>2 chaining carried on the
+  wire for the first time** — head `remaining=1` → middle `remaining=0` → tail,
+  128 middle hand-offs across two 64-token runs, 0 in the control. Chaining
+  SPEED remains unresolvable on a LAN (~1% at n=2/3; needs `tc netem`, #284).
+- **.112** (08-22) — **CPU nodes read prompts 20-40% faster, write replies
+  25-37% faster**: multi-row Q4_K/Q6_K kernels (bit-identical) + 128-row
+  blocking, a single-position decode attention kernel, AVX2 `exp` + fused SiLU,
+  mimalloc. GPU untouched bar the allocator. **#363**: the Vendored-patches
+  workflow never set `RUSTFLAGS=""`, so `target-cpu=native` poisoned its shared
+  cache with proc-macros built for another runner's CPU → rustc SIGILL.
+- **.111** (08-21) — user-deleted shards are tombstoned (#360); CPU workers get
+  the GPU's KV runtime guard so admission charges a typical context, not the
+  ceiling; a node with NO GPU never ran RAM admission at all (#359); the RAM
+  budget is judged LIVE at every admission, not frozen at startup (#362).
+- **.104-.110** (08-19→21) — the swarm learned to see its own load (#341); replies
+  stopped lying about being whole (#342/#343); split models chain by default;
+  LAN neighbours stopped meeting in Europe (#356); receipt ACKs cut a quiet
+  peer's cost from 300 s to ~26 s (#357). Detail in `MEMORY.md` 08-20/21 lines.
 
-**Gotchas from this round: #335-#366.** Most load-bearing: **#341** (ask what a
-map HOLDS, not what its name implies — its doc comment had warned for weeks),
-**#348** (aggregate throughput ÷ wall clock is biased by completion length; the
-erratic arm was the TREATMENT), **#350** (making a message reliable made a
-stale-message race routine — ask what else shares its key), **#351** (`target/`
-reached 432 GB and filled the HOST drive while `df /` showed 350 GB free; the
-cargo-sweep timer now bounds it — and after it prunes, the pre-push hook's clippy
-runs cold, so a tag push can outlive a 2-minute shell timeout).
+**Gotchas from this round: #335-#367.** Most load-bearing: **#341** (ask what a
+map HOLDS, not what its name implies), **#348** (aggregate throughput ÷ wall
+clock is biased by completion length — a published 40% win that did not exist),
+**#351** (`target/` hit 432 GB and filled the HOST drive while `df /` showed
+350 GB free), **#364** (a source that can only ADD wins every disagreement with
+one that removes, regardless of which is right), **#367** (min-of-N is for
+benchmarks, not live measurement; and a fix validated on ONE machine is not
+validated — the second machine found the defect in its first run).
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
-- **v0.3.101-.103** (08-18): models need ~750 MB less (quantized `token_embd` row gather, both devices — 754 MB CPU / 736 MiB RTX 3070); `GPU_ADMISSION_KV_CONTEXT` + `DEFAULT_MAX_SEQ_LEN` 8192; peer delegation (privacy builds the BOOMERANG, it does not veto); machine speed MEASURED (`mem_bandwidth`) + `NodeCapability.cpu`. **.103 is the h2 patch — .102 shipped vulnerable** (#334: `cargo audit` runs in CI, not Release). Gotchas #326-#334. `round_log_0818_quantized_embedding.md`.
-- **v0.3.100** (08-17): credits switched OFF (they were enforced: a -1000 floor refused peers, tier gave 8x concurrency); error hints translated across 21 locales; log severity follows blame (#315-#317); release build 54 min → 16m29s (#318/#319). `round_log_0817_honesty.md`.
-- **v0.3.99** (08-16): long prompts stalled for MINUTES — `insert_from_kv` snapshotted at EVERY block boundary, O(prompt²) ≈ 15 GB copied per 2.9k-token request (repeats 115.5s→4.1s, #312); silent-peer 500s→503 (`PeerUnresponsive`/`SegmentFailoverExhausted`); Docker `latest` had NEVER been published (#314).
-- **v0.3.98** (08-16): **1.41x CPU generation** — GQA decode stopped expanding the KV cache with `repeat_kv` (`grouped_gqa_decode_attention`); this REVERSED the CPU decode-kernel routing at every length. 4h soak, 3474/3474 ok.
-- **v0.3.97** (08-15): **models you own could not be reached** — a node that loaded a model with `-m` announced it under its DISPLAY NAME, invisible as a holder, phantom `shard_count: 0` entries everywhere (three id derivations, no two agreeing → `slugify_model_name`, #310); removing `shard_range` from the config did nothing (#306); loopback-only endpoints told remote admins to fetch a key they had already sent (`LocalOnly`, #309); manifest-less models no longer claim `available`; embeddings 501 not 503.
-- **v0.3.96** (08-12/15): **a failure could not report itself** — six defects, one shape: the error's type known in one place, a literal written in another (empty Anthropic streams, `[inference failed]` as assistant text, peers DOCKED for callers' mistakes). Fix = make classification reachable: `classify_error` (HTTP + both SSE encoders), `reclassify_flattened_error` (typeless boundaries), `AnthropicSseEvent::Error`. Gotchas #300-#305. `round_log_0812_error_reporting.md`.
-- **v0.3.88-.94** (08-09→12): four rounds where the fix was always "make the one right answer reachable" — a new node could see the swarm's models and run NONE of them (holders erased each other's `publisher` until nobody broadcast → `manifests_to_gossip`, #296); a model asked a question in ANOTHER model's format (#294); **settings saved, said "ok", did nothing** (`state.config` is a boot snapshot → **`SharedState::cfg()`**, #281); serving the swarm paid and reported nothing (accounting on the LESS travelled path → `record_peer_serve`, #279/#280); an f16 KV mirror for 1.4x on long GQA chats — **GQA-gated because the MHA null control came out SLOWER**; a GPU could not run ANY unquantized model (#288-#290); **replies from distant peers arrived SCRAMBLED** (`token_id` hardcoded 0 at all five sites → `StreamReassembler`, #282); a "private network" shared PUBLIC gossip topics (#285). **GPU decode is LAUNCH-BOUND — do not size it from FLOPs. ⚠ #283: `pkill -x swarmllm` killed the user's live node — kill by PID.** `round_log_0811_retry_advice.md`, `round_log_0810_kv_mirror.md`, `round_log_0809_night.md`.
-- **v0.3.81-.87** (08-06→09): the round where every defect was a claim nothing could contradict — batching NEVER engaged (0/156) → **2.4x** GPU; a timed rescan undid the shard split; CPU inference measured not guessed (**it was attention**, wrong in BOTH phases in opposite directions, #254-#256); CPU fused attention +19%; KV reservation held 940 MB for a 100-token chat (#261). **⚠ #266 measure the FORWARD, not the isolated call. ⚠ #267 this box cannot resolve a GPU change below ~25%.** `round_log_0808_night.md`, `round_log_0807_*.md`, `round_log_0806_batching.md`.
-- **v0.3.78/.79** (08-06): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE, wrong date; all invisible, found by diffing against `tokenizers`/`jinja2` references built from the model's OWN vocab (#246-#253). **.79** shipped AVX2 — releases had candle's quantized kernels COMPILED OUT, **3.09x**. `round_log_0805_prompt_pipeline.md`.
-- **v0.3.39-.77** (07-27→08-05): **v0.3.72 our API key was being sent to strangers** — nothing in that code changed, its PREMISE did (#238); SPM tokenizer mis-tokenised **64.9%** of inputs (**a hash cannot tell "wrong bytes" from "not all the bytes" — check `size_bytes` FIRST**, #203); local replies took a GPT-2 byte fallback under a stale comment (#200). `round_log_0805_security.md`, `round_log_0803*.md`, `round_log_overnight_0728.md`.
-- **v0.3.15-.38** (07-23→28): **read #179 before touching connection selection** — a relay carrying an INBOUND connection is a bare `/p2p/<peer>`, counted as direct, and wins every send; **retraction alone is futile, the blacklist is REQUIRED**. `max_established_per_peer = 1` structurally disabled DCUtR (#163). `round_log_networking_audit.md`.
-- **R136-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT v1→v2, `--anchor`), request cancellation, `gpu_layers` plumbing, per-shard download backoff (#150-#160); SWARM-SPEC v0.1 cascade; `swarmpool://` invites v2; cross-pool routing.
-- **Pre-R136**: the 20 build phases. `docs/ARCHITECTURE.md` § phase history.
+- **v0.3.101-.103** (08-18): models need ~750 MB less (quantized `token_embd` row gather, both devices); machine speed MEASURED (`mem_bandwidth`) + `NodeCapability.cpu`; peer delegation (privacy builds the BOOMERANG, it does not veto). **.102 shipped vulnerable** (#334: `cargo audit` runs in CI, not Release). `round_log_0818_quantized_embedding.md`.
+- **v0.3.96-.100** (08-12→17): credits switched OFF (they WERE enforced); **a failure could not report itself** — the error's type known in one place, a literal written in another (#300-#305 → `classify_error`, `reclassify_flattened_error`); log severity follows blame (#315-#317); release build 54 → 16 min. `round_log_0817_honesty.md`, `round_log_0812_error_reporting.md`.
+- **v0.3.97-.99** (08-15/16): **models you own could not be reached** — three id derivations, no two agreeing → `slugify_model_name` (#310); long prompts stalled for MINUTES, O(prompt²) KV snapshotting (#312); **1.41x CPU generation** from dropping `repeat_kv` in GQA decode, which REVERSED the kernel routing at every length.
+- **v0.3.88-.94** (08-09→12): four rounds of "make the one right answer reachable" — a new node could see the swarm's models and run NONE (#296); **settings saved, said "ok", did nothing** (`state.config` is a boot snapshot → **`SharedState::cfg()`**, #281); serving paid and reported nothing (#279/#280); distant-peer replies arrived SCRAMBLED (#282 → `StreamReassembler`); a "private network" shared PUBLIC topics (#285). **GPU decode is LAUNCH-BOUND. ⚠ #283: `pkill -x swarmllm` killed the live node — kill by PID.**
+- **v0.3.78-.87** (08-05→09): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE; invisible until diffed against `tokenizers`/`jinja2` (#246-#253). Releases had AVX2 kernels COMPILED OUT (**3.09x**). Batching NEVER engaged (**2.4x** GPU). **⚠ #266 measure the FORWARD, not the isolated call. ⚠ #267 this box cannot resolve a GPU change below ~25%.**
+- **v0.3.15-.77** (07-23→08-05): our API key was sent to strangers — nothing in that code changed, its PREMISE did (#238); SPM tokenizer mis-tokenised **64.9%** (**a hash cannot tell "wrong bytes" from "not all the bytes"**, #203); **read #179 before touching connection selection**; **retraction alone is futile** (#163).
+- **R136-R150 and the 20 build phases**: NAT/reachability, SWARM-SPEC cascade, `swarmpool://` v2, cross-pool routing. `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)
 

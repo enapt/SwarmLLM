@@ -885,3 +885,38 @@ normal reading; it is how the relay-carried-inbound-connection bug (#356) was
 separated from a loop problem in four minutes. `grep "loop stalled" node.log |
 grep -oE "arm=[^ ]+ took_ms=[0-9]+" | sort | uniq -c | sort -rn` names the
 culprit when there is one.
+
+## Benchmarks
+
+Every harness below runs against an ISOLATED node or no daemon at all. None of
+them touch a running node; several used to, and that is where most of the traps
+in this section came from.
+
+| harness | what it measures | notes |
+|---|---|---|
+| `examples/prefill_bench.rs` | prompt processing + decode, driving `SplitModel::forward` directly | no daemon, no scheduler, no API in the way. `SWARM_BENCH_MODEL` (a model dir holding every shard), `SWARM_BENCH_PROMPT` (896), `SWARM_BENCH_DECODE` (32), `SWARM_BENCH_REPS` (3), `SWARM_BENCH_DEVICE=cuda`. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown |
+| `examples/qmatmul_bench.rs` | the quantized matmul against batch size | ALSO asserts the tiled path is bit-identical to the upstream ordering — run it after touching either kernel |
+| `examples/attn_bench.rs` | attention ops in isolation | ⚠ an isolated call is not a forward pass (#255/#266) |
+| `examples/smoke_test.sh [binary] [port]` | 8 end-to-end checks on an isolated node | run it on the DOWNLOADED release artifact, not a local build (#268) |
+| `examples/soak_test.sh [binary]` | sustained inference, sampling worker RSS / KV / threads / fds / ok-fail | `HOURS=` must be a WHOLE number (shell arithmetic); data dir is `/tmp/swarm_soak-$PORT`, per-port so two soaks cannot kill each other; analyse with `soak_report.sh` |
+| `examples/two_node_test.sh`, `3node_setup.sh`, `3node_sharded_setup.sh` | cross-node paths | EXPECTED to fail on a single multi-interface host — that is the documented connection-churn case, not a regression. Validate on two real machines |
+
+### Traps that have cost real time
+
+- **The box must be idle.** The same unchanged code path measured 0.42 ms and
+  0.97 ms here. A run taken while a build or another bench is going is worthless,
+  and it will not look wrong — it will look like a result.
+- **min-of-N is for BENCHMARKS, not live measurement** (#367). Controlled
+  environment, every error adds time → the minimum is the least contaminated.
+  Samples taken from live traffic are different tokens at different cache
+  lengths on a busy machine → the minimum is the LUCKIEST one.
+- **A/B inside ONE binary**, via an env switch — `SWARMLLM_DECODE_CALIBRATE=0`,
+  `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`,
+  `SWARMLLM_DECODE_THREADS=0`. Comparing two builds compares two builds.
+- **Verify the mechanism fired.** An outcome can improve for unrelated reasons;
+  assert on the log line or counter the change emits.
+- **A short run magnifies a one-time cost** into what looks like a standing
+  loss. Vary the length it should amortise against before believing it.
+- **The benches have no tracing subscriber**, so `tracing::info!` from the code
+  under test goes nowhere. If a decision needs to be observed, give it an
+  explicit `eprintln!` behind an env var.
