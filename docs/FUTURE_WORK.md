@@ -414,12 +414,27 @@ in hand**: from a 1-token to a 4-token forward every matmul bucket is FLAT
 (qkv 3.6 -> 3.3, ffn up 2.2 -> 2.1, ffn down 1.3 -> 1.0). Four tokens cost the
 same weight traffic as one. That is also why speculation pays so well here.
 
-Options in order of value: fuse the per-layer elementwise chain (rms norm ->
-rope, silu*up, residual add) into custom kernels; reuse activation buffers
-across layers to cut the allocation share; CUDA graph capture, which is the
-biggest but needs deterministic allocation addresses that candle does not
-currently give. **Note #267: this box cannot resolve a GPU change below ~25%
-end-to-end, so stage-level profiling has to carry the attribution.**
+Options in order of value: fuse the per-layer elementwise chain (rope, silu*up,
+residual add) into custom kernels; reuse activation buffers across layers to cut
+the allocation share; CUDA graph capture, which is the biggest but needs
+deterministic allocation addresses that candle does not currently give.
+
+**Two things checked on 2026-08-23 that shrink this considerably.** `rms_norm`
+is ALREADY fused — `candle_transformers::quantized_nn::RmsNorm::forward` calls
+`candle_nn::ops::rms_norm`, which has a CUDA kernel — so that 0.8 ms bucket is
+not addressable. That leaves rope (0.8), silu*up (0.8) and residual adds (0.9)
+as the fusable elementwise work: 2.5 ms of a 17 ms token, and fusing cannot
+remove all of it, only the launches between the pieces. Realistically ~1-1.5 ms,
+i.e. 6-9%.
+
+**That is below what this box can attribute end-to-end (#267, ~25%)**, and it is
+custom CUDA kernel work in a vendored dependency. So the honest position is that
+the 5x roofline gap is real but the tractable part of it is small: the remaining
+bulk is the quantized GEMV itself (8.2 ms moving the weights at ~206 GB/s, 46%
+of peak) and the "unattributed" 3.1 ms, whose composition has NOT been
+established — do that before assuming it is allocation. cudarc allocates through
+the stream-ordered allocator, which the driver pools, so the obvious guess is
+probably wrong.
 
 ### CPU decode attention: the kernel sits 2x above the DRAM floor (2026-08-22)
 
