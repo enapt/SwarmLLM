@@ -1921,6 +1921,73 @@ pub(crate) fn ngram_spec_eligible(
         && !(swift_cfg.enabled && sampling.temperature == 0.0)
 }
 
+/// Recent tokens-per-round the local speculator has been achieving, ×100, or 0
+/// for "not measured yet". One value for the worker, which serves one model set.
+static SPEC_PAYOFF_X100: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Tokens per round below which diverting a request out of the batch to
+/// speculate is not worth what it gives up. A round that lands one token is
+/// doing exactly what a plain decode step does.
+const SPEC_PAYOFF_WORTH_DIVERTING_X100: u32 = 150;
+
+/// Record what a finished speculative generation achieved, so the next
+/// admission decision has something better than a guess. EWMA at 1/4 weight —
+/// enough to follow a workload change within a few requests, slow enough that
+/// one unusual reply does not flip the policy.
+fn record_spec_payoff(tokens_per_round: f64) {
+    use std::sync::atomic::Ordering;
+    let prev = SPEC_PAYOFF_X100.load(Ordering::Relaxed);
+    SPEC_PAYOFF_X100.store(blend_spec_payoff(prev, tokens_per_round), Ordering::Relaxed);
+}
+
+/// The EWMA step, separated from the global it updates so the arithmetic can be
+/// tested without a shared static — tests that mutate one only pass under
+/// `--test-threads=1`, and this project runs them in parallel.
+///
+/// Never returns 0 once a sample has been taken: 0 means "not measured yet", and
+/// letting a measured-as-poor workload look unmeasured would quietly re-enable
+/// the diversion it had just been measured out of.
+fn blend_spec_payoff(prev_x100: u32, tokens_per_round: f64) -> u32 {
+    let sample = (tokens_per_round * 100.0).clamp(0.0, 100_000.0) as u32;
+    let next = if prev_x100 == 0 {
+        sample
+    } else {
+        (prev_x100 * 3 + sample) / 4
+    };
+    next.max(1)
+}
+
+/// Is speculation paying well enough to justify taking a request OUT of the
+/// batched decode path to get it?
+///
+/// **This exists because the trade is not free, and measuring the workload
+/// speculation CANNOT help is what showed it.** A diverted request runs on the
+/// sequential loop, which owns the worker for its whole duration, so every other
+/// request waits rather than sharing a batched decode tick. When speculation is
+/// landing ~9 tokens a round that is still a clear win — measured on an RTX
+/// 3070, 8 concurrent copy-heavy requests finished in 3.76 s against 5.52 s
+/// batched. When it is landing ~1, the node gives up batching and gets nothing:
+/// the same 8 requests on an open-ended prompt took 29.07 s against 12.48 s,
+/// and aggregate throughput fell from 77 to 33 tok/s.
+///
+/// The earlier justification for diverting unconditionally cited this project's
+/// own measurement that batching is worth ~3% (gotcha #348). That figure is from
+/// a PROCESSOR. On a graphics card batching amortises kernel launches across
+/// requests — the same launch-bound property speculation exploits — so it is
+/// worth far more there, and a CPU-derived number had no business being applied
+/// to it.
+///
+/// Unknown means "let one request find out": the first generation after start
+/// diverts, measures, and the answer steers everything after it.
+fn spec_payoff_justifies_diverting() -> bool {
+    payoff_justifies_diverting(SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The decision itself. Pure, for the same reason `blend_spec_payoff` is.
+fn payoff_justifies_diverting(seen_x100: u32) -> bool {
+    seen_x100 == 0 || seen_x100 >= SPEC_PAYOFF_WORTH_DIVERTING_X100
+}
+
 /// Whether the local speculator should draft this round.
 ///
 /// A draft that is found and then rejected is not free: the round still pays a
@@ -2441,13 +2508,17 @@ async fn handle_generate(
         }
 
         if spec_rounds > 0 {
+            let tokens_per_round = spec_drafted as f64 / spec_rounds as f64;
+            // Steers the next admission decision — see
+            // `spec_payoff_justifies_diverting`.
+            record_spec_payoff(tokens_per_round);
             tracing::debug!(
                 request_id = %request_id,
                 rounds = spec_rounds,
                 drafted = spec_drafted,
                 accepted = spec_accepted,
                 paused_rounds = spec_backoff.paused_rounds,
-                tokens_per_round = spec_drafted as f64 / spec_rounds as f64,
+                tokens_per_round,
                 "DIAG: local n-gram speculation complete"
             );
         }
@@ -2867,7 +2938,10 @@ fn slot_admission_eligible(
     // measurement artefact (gotcha #348). A verify round wins far more than
     // that, and against an empty table batching has nothing to amortise
     // anyway — there is no second request to share the weight read with.
-    if slot_table.is_empty() && ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg) {
+    if slot_table.is_empty()
+        && ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg)
+        && spec_payoff_justifies_diverting()
+    {
         tracing::debug!(
             request_id = %gen.request_id,
             "slot admission refused: solo and speculatable — taking the n-gram path"
@@ -4265,5 +4339,63 @@ mod local_speculation_tests {
             "pause grew past its bound: {}",
             b.pause_len
         );
+    }
+}
+
+#[cfg(test)]
+mod spec_payoff_tests {
+    use super::*;
+
+    /// Run the EWMA from "unmeasured" through `n` samples of the same value,
+    /// the way a run of similar requests would.
+    fn settle(tokens_per_round: f64, n: usize) -> u32 {
+        let mut v = 0;
+        for _ in 0..n {
+            v = blend_spec_payoff(v, tokens_per_round);
+        }
+        v
+    }
+
+    /// Serialising a request out of the batched path costs every other request
+    /// in flight. Measured on an RTX 3070 with 8 concurrent requests: worth it
+    /// when speculation lands ~8.8 tokens a round (3.76 s against 5.52 s
+    /// batched), badly wrong when it lands ~1 (29.07 s against 12.48 s, and
+    /// aggregate throughput 33 against 77 tok/s). The threshold has to sit
+    /// between the two, and these are the two measured workloads.
+    #[test]
+    fn the_threshold_separates_the_two_measured_workloads() {
+        assert!(payoff_justifies_diverting(settle(8.83, 8)), "copy-heavy");
+        assert!(!payoff_justifies_diverting(settle(1.04, 8)), "open-ended");
+    }
+
+    /// The first generation after start has nothing to go on and must be allowed
+    /// to find out — otherwise the policy latches off and nothing ever measures.
+    #[test]
+    fn unknown_payoff_lets_one_request_find_out() {
+        assert!(payoff_justifies_diverting(0));
+    }
+
+    /// It has to be able to change its mind. A session that turns copy-heavy
+    /// after a discursive opening is the common agentic shape, and latching off
+    /// would forfeit exactly the part speculation is best at.
+    #[test]
+    fn it_recovers_when_the_workload_changes() {
+        let mut v = settle(1.0, 8);
+        assert!(!payoff_justifies_diverting(v));
+        for _ in 0..8 {
+            v = blend_spec_payoff(v, 9.0);
+        }
+        assert!(
+            payoff_justifies_diverting(v),
+            "must follow the workload back up, not latch off"
+        );
+    }
+
+    /// 0 means "not measured". A measured-as-poor workload must never be
+    /// mistaken for one, or it silently regains the diversion it just lost.
+    #[test]
+    fn a_measured_payoff_is_never_mistaken_for_unmeasured() {
+        assert_ne!(blend_spec_payoff(0, 0.0), 0);
+        assert_ne!(blend_spec_payoff(1, 0.0), 0);
     }
 }

@@ -1611,13 +1611,22 @@ this one. The rule here works only because an n-gram draft is a point mass.
 
 Three things a change here must keep:
 
-- **It runs on the sequential loop only, and only when the worker is otherwise
-  idle.** `slot_admission_eligible` diverts a solo speculatable request there;
-  one arriving while others decode joins the batch instead. Diverting it then
-  would stall everyone already in flight, because that loop owns the worker's
-  main loop for its whole duration. Trading batching for speculation when solo
-  is safe on this project's own numbers — batching measured ~3% at 8 concurrent
-  and neutral on a processor (#348).
+- **It runs on the sequential loop only, when the worker is otherwise idle AND
+  speculation has been paying.** `slot_admission_eligible` diverts a solo
+  speculatable request there; one arriving while others decode joins the batch
+  instead, because that loop owns the worker for its whole duration and
+  diverting would stall everyone in flight.
+  **The third condition was added after measuring, and matters as much as the
+  other two.** The trade was originally justified with this project's ~3%
+  batching figure (#348) — a PROCESSOR measurement. On a graphics card batching
+  amortises kernel launches across requests, the same launch-bound property
+  speculation exploits, so it is worth far more: 8 concurrent open-ended
+  requests took 29.07 s diverted against 12.48 s batched, aggregate throughput
+  77 -> 33 tok/s (gotcha #373). `spec_payoff_justifies_diverting` therefore gates
+  it on the tokens-per-round speculation has actually been achieving; unknown
+  lets one request find out, and the answer steers the rest. With it, both
+  workloads beat either fixed policy — open-ended 8-way 11.03 s against 12.48 s
+  batched, copy-heavy 8-way 3.37 s against 5.52 s.
 - **It is not bit-identical** (gotcha #370). Do not describe it as such.
 - **A miss is not free** (gotcha #371): the forward the draft provokes costs
   even when nothing is accepted, which is what `SpecBackoff` exists for. Measure
