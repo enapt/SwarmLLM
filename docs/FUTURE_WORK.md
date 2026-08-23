@@ -238,6 +238,82 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### Speculation inside the batched decode scheduler (2026-08-23)
+
+Local draft-free speculation ships on the SEQUENTIAL decode loop only. A
+request that is alone on the worker is diverted there by
+`slot_admission_eligible`; a request that arrives while others are decoding
+joins the batch and simply does not speculate.
+
+That is the right split today — the sequential loop owns the worker's main loop
+for its whole duration, so diverting a request into it while others are mid-
+generation would stall them to speed up the newcomer — but it leaves the win
+unavailable exactly when a node is busy. The proper fix is speculation
+per-sequence inside `step_decode_pool`, which is what vLLM does: each slot
+carries its own draft and accepted count, and a tick verifies every slot's draft
+in one batched forward. The pieces are already here (`forward_verify_all_positions`,
+`KvCacheStore::truncate_request_to`, `SpecBackoff`); what is missing is a slot
+that can advance by a variable number of tokens per tick, since `SlotTable`
+currently assumes one.
+
+Worth doing when a node is regularly serving concurrent greedy requests. For a
+single-user machine it changes nothing.
+
+### Adaptive draft width: MEASURED AND REJECTED (2026-08-23)
+
+`dsd_controller::GammaController` was wired into the local speculator to size
+the draft from the observed acceptance rate, replacing the fixed
+`ngram_num_pred_tokens`. It was reverted, and the reason is worth keeping so
+nobody re-derives it.
+
+The controller works — its own diagnostics show it moving — but it moves in the
+direction that cannot help and barely moves in the one that could. On an
+input-grounded reply it widened 10 -> 12 (accept_ema 0.74) and `tokens_per_round`
+stayed at 8.83, because the length of the n-gram MATCH, not the width offered,
+is what bounds a round. On an open-ended reply it stayed at 10 against an
+accept_ema of 0.338, because `gamma * (1 + 0.2 * (0.338 - 0.5))` is 9.68 and
+rounds straight back to 10 — with the backoff pausing most rounds, it had few
+observations to move on anyway. End to end the input-grounded case measured
+0.46-0.48 s against 0.40-0.44 s without it.
+
+So the knob to reach for is NOT width. If this is revisited, the quantity worth
+adapting is whether to draft at all (which `SpecBackoff` already does) or the
+n-gram sizes that decide how long a match can be — and any attempt should be
+held to showing `tokens_per_round` actually moving, not just gamma.
+
+### GPU decode is launch-bound with ~5x of roofline left (2026-08-23)
+
+Measured on an RTX 3070, llama-3.2-3b Q4_K at ~928 KV: 21.1 ms/token, where the
+card's bandwidth would stream the same ~1.69 GB of weights in ~3.8 ms. Where it
+goes, per token over 28 layers (`SWARMLLM_PROFILE=1`, one-token forward):
+
+```text
+  qkv projections   3.6 ms      attention        2.3 ms
+  ffn up + gate     2.2 ms      ffn down         1.3 ms
+  output proj       1.1 ms      residual adds    0.9 ms
+  rope / transpose  0.8 ms      rms norms        0.8 ms
+  silu * up         0.8 ms      unattributed     3.1 ms
+```
+
+The four matmuls total 8.2 ms and move the weights at ~206 GB/s — about 46% of
+peak, which is respectable for a GEMV. The other ~9 ms is not weight traffic at
+all: six small elementwise/normalisation kernels at ~20 us each across 28 layers
+is launch-dominated (a launch is 5-10 us), and "unattributed" is allocation and
+dispatch. That is where the headroom is, and it is a fusion problem, not a
+kernel-efficiency one.
+
+**The evidence that this is launch-bound rather than bandwidth-bound is already
+in hand**: from a 1-token to a 4-token forward every matmul bucket is FLAT
+(qkv 3.6 -> 3.3, ffn up 2.2 -> 2.1, ffn down 1.3 -> 1.0). Four tokens cost the
+same weight traffic as one. That is also why speculation pays so well here.
+
+Options in order of value: fuse the per-layer elementwise chain (rms norm ->
+rope, silu*up, residual add) into custom kernels; reuse activation buffers
+across layers to cut the allocation share; CUDA graph capture, which is the
+biggest but needs deterministic allocation addresses that candle does not
+currently give. **Note #267: this box cannot resolve a GPU change below ~25%
+end-to-end, so stage-level profiling has to carry the attribution.**
+
 ### CPU decode attention: the kernel sits 2x above the DRAM floor (2026-08-22)
 
 `inference::decode_attn` cut single-position attention from 36 to ~15 ms/token

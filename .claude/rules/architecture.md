@@ -1477,3 +1477,85 @@ Rules that follow:
 5. **Unknown keys warn, they do not fail.** `deny_unknown_fields` would refuse
    to start on a config mentioning a later release's key. `warn_unknown_keys_in`
    names the key and continues.
+
+## Attention kernel choice and the query-length cliff (2026-08-23)
+
+Four helpers now own decisions that used to be spread across call sites. All
+four exist because a predicate that *reads* obviously correct was answering a
+different question than the one that mattered.
+
+- **`inference::layers::flash_handles_offset_causal`** — may flash attention take
+  a query block that lands on a warm prefix (`k_len > q_len && q_len > 1`)? Yes,
+  and it is not a judgement call: the vendored kernel's
+  `col_idx_limit_right = row_idx + 1 + max_seqlen_k - max_seqlen_q`
+  (`vendor/candle-flash-attn/kernels/mask.h`) is bottom-right aligned causal,
+  the same predicate `SplitExecutor::causal_mask` builds by hand. The dispatch
+  used to divert that shape to `standard_attention` on the stated grounds that
+  flash could not express the mask; since `prefill_chunk_tokens` is a CEILING
+  that always applies, that meant EVERY prompt chunk after the first took the
+  slower kernel on every GQA model (gotcha #368). A benchmark that prefills in
+  one call cannot see it. `SWARMLLM_FLASH_OFFSET_CAUSAL=0` restores the old
+  behaviour for A/B.
+
+- **`inference::layers::cuda_decode_prefers_standard`** — now `q_len == 1` for
+  EVERY head geometry, not just MHA. The GQA exclusion existed because
+  `standard_attention` rebuilt the `repeat_kv` expansion every token;
+  `grouped_gqa_decode_attention` deleted that work in August and the rule
+  outlived its premise by a week. Re-measured: standard wins at every context
+  length and the margin grows with it. **The isolated table overstates the
+  penalty** — its flash arm runs without the f16 KV mirror that production
+  always has — so end to end this is ~6% at 4120 KV and unresolvable at ~900.
+  Both numbers are recorded at the benchmark; the forward is the one that
+  describes a reply (#266). `SWARMLLM_GQA_DECODE_FLASH=1` restores the old rule.
+
+- **`inference::layers::grouping_applies` + `grouped_gqa_attention`** — read the
+  KV cache at its stored width instead of expanding it, for ANY query length
+  whose score matrix fits in one pass (not just `q_len == 1`). Blocked calls keep
+  the expanded path: the blocking loop slices the query axis, and under grouping
+  that axis carries repeats and positions interleaved, so a block boundary would
+  cut one query position's rows across two passes. The mask must be TILED to
+  match — row `r * q_len + t` sees mask row `t` — and getting that transposed
+  computes plausible garbage, which is why the test compares against the expanded
+  path with a REAL causal mask rather than a permissive one.
+
+- **`inference::cpu_pools::DECODE_SHAPED_MAX_TOKENS`** — the phase predicate is
+  no longer `seq_len == 1`. What the pool choice turns on is whether the matmuls
+  are bandwidth-bound, and a 4-token verify re-reads exactly the weights one
+  token does. Measured with `examples/qmatmul_bench`, the narrow pool wins at
+  every width to 32 and draws level at 128. **A short block must not feed the
+  decode-width calibration** — the calibration compares candidate widths by the
+  cost of one token, and a sample from a different query length is not that
+  measurement (same class of error as #367).
+
+Together these were one defect: every CPU decode fast path was gated on
+`q_len == 1` exactly, so a 2-token forward lost the grouping, the single-position
+kernel and the narrow pool at once and cost 7.8x a 1-token forward — for one
+extra token (gotcha #369).
+
+## Local speculative decoding — `inference::model_worker::ngram_spec_eligible`
+
+The single answer to "may this request be speculated?", consulted by BOTH the
+slot-admission gate and the decode loop. Two copies would eventually disagree,
+and the failure is silent: the gate diverts a request off the batched path and
+the loop then declines to speculate it, so it loses batching and gains nothing.
+
+Every clause is a correctness condition, not tuning: `temperature == 0` (a draft
+is verified by comparing it with what the sampler returned, which means nothing
+once the sampler is random), `!logprobs` (accepted tokens carry none back out),
+SWIFT off (it is already speculating), and a non-zero draft width — which is how
+`inference.ngram_lookup_enabled` arrives, so the switch cannot disagree with the
+shape.
+
+Three things a change here must keep:
+
+- **It runs on the sequential loop only, and only when the worker is otherwise
+  idle.** `slot_admission_eligible` diverts a solo speculatable request there;
+  one arriving while others decode joins the batch instead. Diverting it then
+  would stall everyone already in flight, because that loop owns the worker's
+  main loop for its whole duration. Trading batching for speculation when solo
+  is safe on this project's own numbers — batching measured ~3% at 8 concurrent
+  and neutral on a processor (#348).
+- **It is not bit-identical** (gotcha #370). Do not describe it as such.
+- **A miss is not free** (gotcha #371): the forward the draft provokes costs
+  even when nothing is accepted, which is what `SpecBackoff` exists for. Measure
+  the workload speculation CANNOT help, not just the one it can.
