@@ -276,6 +276,89 @@ fn main() -> anyhow::Result<()> {
         best_decode * 1000.0,
         prompt_tokens + decode_tokens / 2
     );
+
+    if let Ok(widths) = std::env::var("SWARM_BENCH_SPEC_WIDTHS") {
+        spec_width_sweep(&mut model, &device, &widths, prompt_tokens, decode_tokens)?;
+    }
+    Ok(())
+}
+
+/// Price a K-token forward against a 1-token forward at the same KV depth.
+///
+/// This is the number that decides whether speculative decoding pays: a
+/// speculative round spends one width-K forward to win up to K tokens, so it
+/// beats plain decode only when `cost(K) / accepted < cost(1)`. Modelling it
+/// from FLOPs and bandwidth gives answers a factor of two apart depending on
+/// whether the two overlap, so it has to be measured.
+///
+/// The arms are INTERLEAVED (1, K, 1, K, …) rather than run in blocks. Each
+/// forward appends to the same cache, so the KV depth creeps during the sweep
+/// and a blocked layout would hand the later arm a deeper cache — measuring
+/// the drift instead of the width. Alternating splits that drift evenly
+/// between the arms, and min-of-N over the pairs takes the least contaminated
+/// sample of each.
+fn spec_width_sweep(
+    model: &mut SplitModel,
+    device: &Device,
+    widths: &str,
+    prompt_tokens: usize,
+    decode_tokens: usize,
+) -> anyhow::Result<()> {
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let req = "spec-sweep".to_string();
+    let ids: Vec<i64> = (0..prompt_tokens).map(|i| (i % 20000) as i64 + 1).collect();
+    let input = Tensor::from_vec(ids, &[1, prompt_tokens], &Device::Cpu)?;
+    model
+        .forward(&input, 0, &store, &req)
+        .map_err(|e| anyhow::anyhow!("spec sweep prefill: {e}"))?;
+    sync(device);
+    let mut pos = prompt_tokens;
+
+    let one_forward = |model: &mut SplitModel, pos: &mut usize, k: usize| -> anyhow::Result<f64> {
+        let step = Tensor::from_vec(vec![7i64; k], &[1, k], &Device::Cpu)?;
+        let t = Instant::now();
+        let out = model
+            .forward(&step, *pos, &store, &req)
+            .map_err(|e| anyhow::anyhow!("spec sweep forward: {e}"))?;
+        sync(device);
+        let dt = t.elapsed().as_secs_f64();
+        drop(out);
+        *pos += k;
+        Ok(dt)
+    };
+
+    println!(
+        "\nSPEC WIDTH SWEEP at ~{} KV (interleaved 1-vs-K, min of pairs)",
+        prompt_tokens + decode_tokens
+    );
+    println!(
+        "  width   ms/forward   vs width 1   ms/token if all K accepted   break-even acceptance"
+    );
+    let reps = env_usize("SWARM_BENCH_SPEC_REPS", 5);
+    for w in widths
+        .split(',')
+        .filter_map(|w| w.trim().parse::<usize>().ok())
+    {
+        if w == 0 {
+            continue;
+        }
+        let (mut best_one, mut best_k) = (f64::MAX, f64::MAX);
+        for _ in 0..reps {
+            best_one = best_one.min(one_forward(model, &mut pos, 1)?);
+            best_k = best_k.min(one_forward(model, &mut pos, w)?);
+        }
+        // Tokens a round must land for the width to beat plain decode.
+        let breakeven = best_k / best_one;
+        println!(
+            "  {:>5}   {:>10.1}   {:>10.2}x   {:>26.1}   {:>21.2} of {}",
+            w,
+            best_k * 1000.0,
+            best_k / best_one,
+            best_k * 1000.0 / w as f64,
+            breakeven,
+            w
+        );
+    }
     Ok(())
 }
 

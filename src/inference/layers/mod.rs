@@ -1468,10 +1468,120 @@ fn attention_scores_block(
 /// change touches only what it claims to.
 ///
 /// Only answers the decode question; prefill (`q_len > 1`) always prefers
-/// flash, and the caller separately handles the offset-causal-mask fallback
-/// and the SWIFT/spec force-standard override.
+/// flash, and the caller separately handles the SWIFT/spec force-standard
+/// override. It used to handle an offset-causal-mask fallback too — see
+/// `flash_handles_offset_causal` for why there is no longer one.
+///
+/// Only the `flash-attn` dispatch and the tests call this, so a default lib
+/// build reports it unused — that is about ONE configuration, not about the
+/// symbol being dead (gotcha #264).
+#[cfg_attr(not(feature = "flash-attn"), allow(dead_code))]
 pub(crate) fn cuda_decode_prefers_standard(q_len: usize, n_head: usize, n_kv_head: usize) -> bool {
-    q_len == 1 && n_head == n_kv_head
+    if q_len != 1 {
+        // Prefill, and any query block landing on a warm prefix, still prefer
+        // flash — 2.4x-5.0x in the table above, and unchanged by any of this.
+        return false;
+    }
+    // GQA used to be excluded here. See the note below for why it no longer is;
+    // `SWARMLLM_GQA_DECODE_FLASH=1` restores the old rule so the two can be
+    // A/B'd inside ONE binary.
+    if n_head != n_kv_head && gqa_decode_keeps_flash() {
+        return false;
+    }
+    true
+}
+
+/// Escape hatch restoring the pre-2026-08-23 rule, where GQA decode took flash.
+///
+/// **Why the rule changed.** The GQA half of the table above was measured on
+/// 2026-08-07, when `standard_attention` rebuilt the `repeat_kv` expansion of
+/// the whole history on every decoded token — so standard cost 2.501 ms at
+/// kv=1024 and 9.416 ms at kv=8192, and flash beat it above ~1k. That premise
+/// expired on 2026-08-16, when `grouped_gqa_decode_attention` (c4cc3b16) taught
+/// the standard path to reshape query heads into matmul rows against the
+/// UNEXPANDED cache. `repeat_kv` is gone from GQA decode, and the rule that
+/// existed to route around its cost outlived it by a week.
+///
+/// Re-measured 2026-08-23 on the same RTX 3070, same benchmark, min of 20:
+///
+/// ```text
+///   llama-3.2-3b GQA 24/8 d128    standard    flash   flash is
+///     decode q=1  kv=512             0.107    0.270     2.5x slower
+///     decode q=1  kv=1024            0.108    0.385     3.6x slower
+///     decode q=1  kv=2048            0.129    2.234    17.3x slower
+///     decode q=1  kv=3072            0.160    3.335    20.9x slower
+///     decode q=1  kv=4096            0.194    2.588    13.3x slower
+///     decode q=1  kv=8192            0.319    4.450    14.0x slower
+/// ```
+///
+/// There is no crossover left to find: standard wins at every length measured,
+/// and the gap WIDENS with context — the opposite of the shape that justified
+/// the old rule. The mechanism is the same one that makes flash lose on MHA
+/// decode: candle-flash-attn ships no split-KV kernel, so one query row launches
+/// a grid of `(1 x n_head x batch)` blocks and leaves the card idle, while
+/// standard decode is two efficient GEMVs. Expanding the cache was the only
+/// thing that had ever made that trade worth taking.
+///
+/// **This says nothing about prefill**, which is a different shape and still
+/// prefers flash by 2.4x-5.0x; `cuda_decode_prefers_standard` returns early for
+/// `q_len != 1` so that path is untouched.
+#[cfg_attr(not(feature = "flash-attn"), allow(dead_code))]
+fn gqa_decode_keeps_flash() -> bool {
+    static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *KEEP.get_or_init(|| {
+        matches!(
+            std::env::var("SWARMLLM_GQA_DECODE_FLASH").as_deref(),
+            Ok("1")
+        )
+    })
+}
+
+/// Can the flash kernel express a causal mask when the query block is SHORTER
+/// than the KV it attends over — a chunk landing on a warm prefix?
+///
+/// Yes, and this is not a judgement call: it is what the kernel we vendor
+/// computes. `vendor/candle-flash-attn/kernels/mask.h` builds the causal limit
+/// as
+///
+/// ```text
+/// col_idx_limit_right = min(max_seqlen_k, row_idx + 1 + max_seqlen_k - max_seqlen_q + window_size_right)
+/// ```
+///
+/// and `causal = true` reaches it as `window_size_right = 0`. So query row `i`
+/// of the block attends to keys `j < i + 1 + (k_len - q_len)` — the mask is
+/// aligned to the BOTTOM-RIGHT of the score matrix, which is exactly where a
+/// continuation block belongs. `SplitExecutor::causal_mask` independently
+/// builds `j > (kv_len - query_len) + i => -inf`, i.e. the same predicate. The
+/// explicit mask and the kernel's own mask agree element for element, so
+/// handing this shape to flash and dropping the mask changes nothing.
+///
+/// **Why it is worth a named function.** The opposite was asserted in three
+/// places — the dispatch, its comment, and an `assert!` inside
+/// `flash_vs_standard_attention_on_cuda` — and the consequence was not
+/// theoretical. `inference.prefill_chunk_tokens` is a CEILING that always
+/// applies, so a prompt is processed in 128-token chunks: chunk 0 has
+/// `k_len == q_len` and got flash, and EVERY later chunk satisfied
+/// `k_len > q_len && q_len > 1` and fell back to standard — which on a GQA
+/// model rebuilds the `repeat_kv` expansion of the whole history, the case
+/// measured at 3.5x slower in the table above. A benchmark that prefills a
+/// prompt in one call never sees it, which is why it survived: the shape that
+/// regressed is the one only production produces.
+///
+/// `SWARMLLM_FLASH_OFFSET_CAUSAL=0` restores the fallback, so the two kernels
+/// can be A/B'd inside ONE binary — the same discipline as
+/// `SWARMLLM_FORCE_STANDARD_ATTN` and `SWARMLLM_DECODE_ATTN`.
+/// Only the `flash-attn` dispatch calls this; a default build compiles that arm
+/// out, and an unused-warning there is about ONE configuration, not about the
+/// symbol being dead (gotcha #264).
+#[cfg_attr(not(feature = "flash-attn"), allow(dead_code))]
+fn flash_handles_offset_causal() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_FLASH_OFFSET_CAUSAL").as_deref(),
+            Ok("0")
+        )
+    })
 }
 
 /// Unified attention dispatch: selects the best backend for the device.
@@ -1620,12 +1730,16 @@ pub(crate) fn run_attention(
             let q_len = q.dim(2)?;
             let k_len = k.dim(2)?;
 
-            // Flash attention only supports simple causal masking. When the KV cache
-            // has pre-populated prefix entries (k_len > q_len with q_len > 1), the
-            // offset causal mask can't be expressed via flash_attn's boolean causal
-            // flag. Fall back to standard matmul attention with the explicit mask.
-            // Also taken when SWIFT/spec sessions force standard attention so
-            // baseline + draft + verify share identical numerics.
+            // Taken when SWIFT/spec sessions force standard attention so baseline +
+            // draft + verify share identical numerics, and when the decode routing
+            // below prefers standard.
+            //
+            // It used to be taken for a THIRD case — a query block landing on a
+            // warm prefix (`k_len > q_len && q_len > 1`) — on the stated grounds
+            // that "the offset causal mask can't be expressed via flash_attn's
+            // boolean causal flag". That is not true of the kernel we ship, and
+            // believing it sent the common production shape to the slower kernel.
+            // See `flash_handles_offset_causal`.
             //
             // DECODE ROUTING — measured 2026-08-07 on an RTX 3070 (sm_86) with
             // `flash_vs_standard_attention_on_cuda` at the bottom of this file.
@@ -1658,7 +1772,11 @@ pub(crate) fn run_attention(
             // at 1024 it wins. Prefill is unconditional — flash won every
             // prefill shape measured, 2.4x-7.8x.
             let decode_prefers_standard = cuda_decode_prefers_standard(q_len, n_head, n_kv_head);
-            if (k_len > q_len && q_len > 1) || decode_prefers_standard || force_standard {
+            let offset_causal = k_len > q_len && q_len > 1;
+            if (offset_causal && !flash_handles_offset_causal())
+                || decode_prefers_standard
+                || force_standard
+            {
                 return standard_attention(
                     q,
                     k,
@@ -3279,22 +3397,33 @@ mod cuda_attention_routing {
         }
     }
 
-    /// **GQA decode takes flash at EVERY length — there is no crossover.**
+    /// **GQA decode takes STANDARD at every length — and there is still no
+    /// crossover, it just points the other way now.**
     ///
-    /// There used to be one at 1024, taken from timing the attention call in
-    /// isolation. Measured end to end on an RTX 3070 (min of 2, A/B inside one
-    /// binary via `SWARMLLM_GQA_FLASH_MIN_KV`), flash won everywhere and by
-    /// more as context grew: 1.13x at kv~272, 1.42x at ~528, 1.61x at ~912.
-    /// If this test is ever loosened back to a threshold, re-measure the
-    /// FORWARD rather than the call — that mistake has now been made three
-    /// times (gotcha #255).
+    /// This test asserted the opposite until 2026-08-23, and both versions were
+    /// right about the machine they were measured on. Flash won when
+    /// `standard_attention` rebuilt the `repeat_kv` expansion of the whole
+    /// history every token; `grouped_gqa_decode_attention` (c4cc3b16,
+    /// 2026-08-16) deleted that work, and the rule that existed to route around
+    /// it outlived its own premise by a week.
+    ///
+    /// Re-measured on the same RTX 3070: standard wins at every length, and the
+    /// margin GROWS with context (2.5x at kv=512 to 14x at kv=8192 on the
+    /// isolated call). End to end through `examples/prefill_bench` the win is
+    /// ~6% at 4120 KV and unresolvable at ~900 — because production hands flash
+    /// an f16 KV mirror that the isolated benchmark deliberately withholds. Both
+    /// numbers are true; the second is the one that describes a user's reply.
+    ///
+    /// If this is ever flipped back, re-measure the FORWARD, not the call —
+    /// that mistake has now been made three times (gotcha #255) and the
+    /// isolated table is what made it tempting each time.
     #[test]
-    fn gqa_decode_always_takes_flash() {
+    fn gqa_decode_takes_standard_now_that_repeat_kv_is_gone() {
         for kv in [1usize, 128, 512, 1023, 1024, 2048, 32768] {
-            let _ = kv;
+            let _ = kv; // context length is not part of the rule
             assert!(
-                !cuda_decode_prefers_standard(1, GQA.0, GQA.1),
-                "GQA decode must take flash at every context length"
+                cuda_decode_prefers_standard(1, GQA.0, GQA.1),
+                "GQA decode must take standard at every context length"
             );
         }
     }
@@ -3302,8 +3431,9 @@ mod cuda_attention_routing {
     #[test]
     fn prefill_is_never_routed_to_standard_by_this_rule() {
         // Flash won every prefill shape measured, 2.4x-7.8x, for both
-        // attention layouts. The offset-causal-mask fallback is a SEPARATE
-        // condition in the caller and is not this function's business.
+        // attention layouts — including, since `flash_handles_offset_causal`,
+        // the chunk-on-a-warm-prefix shape that used to be diverted to standard
+        // by the caller.
         for (n_head, n_kv_head) in [MHA, GQA] {
             for q in [2usize, 128, 512, 1536, 4096] {
                 assert!(
@@ -3315,13 +3445,17 @@ mod cuda_attention_routing {
     }
 
     #[test]
-    fn the_rule_turns_on_gqa_and_nothing_else() {
-        // The whole reason the two differ is repeat_kv materialisation, which
-        // does not exist when n_head == n_kv_head. If a refactor ever makes
-        // MHA follow the GQA branch, this fails.
+    fn the_rule_no_longer_turns_on_gqa_at_all() {
+        // It used to: MHA took standard and GQA took flash, because repeat_kv
+        // materialisation existed for one and not the other. With that work
+        // gone from the decode path, head geometry stops being a reason to pick
+        // a different kernel and every decode shape takes standard.
         assert!(cuda_decode_prefers_standard(1, 32, 32), "MHA");
-        assert!(!cuda_decode_prefers_standard(1, 32, 8), "GQA 4:1");
-        assert!(!cuda_decode_prefers_standard(1, 32, 1), "MQA 32:1");
+        assert!(cuda_decode_prefers_standard(1, 32, 8), "GQA 4:1");
+        assert!(cuda_decode_prefers_standard(1, 32, 1), "MQA 32:1");
+        // Prefill is a different shape and is still flash's, whatever the heads.
+        assert!(!cuda_decode_prefers_standard(2, 32, 8), "GQA prefill");
+        assert!(!cuda_decode_prefers_standard(2, 32, 32), "MHA prefill");
     }
 }
 
@@ -3353,7 +3487,100 @@ mod flash_vs_standard {
     use crate::inference::attn_kernel::ForceStandardAttnGuard;
     use candle_core::{Device, Tensor};
 
-    /// Upper-triangular causal mask, `[q_len, k_len]`, u8, 1 = masked.
+    /// A query block landing on a warm prefix must get the same answer from
+    /// flash as from standard-with-an-explicit-mask.
+    ///
+    /// This is the shape `flash_handles_offset_causal` unlocked, and it is the
+    /// one production generates constantly: `prefill_chunk_tokens` splits every
+    /// prompt into 128-token chunks, so chunk 0 attends over `k_len == q_len`
+    /// and every chunk after it attends over a longer history than its own
+    /// length. It is also the shape a speculative verify has.
+    ///
+    /// The two arms differ ONLY in which kernel runs — same tensors, same mask,
+    /// one process. Standard applies the mask it is handed; flash ignores it and
+    /// applies its own from the `causal` flag. So this asserts the claim the
+    /// change rests on: that those two masks are the same function. If flash
+    /// were top-left aligned rather than bottom-right, every row would attend to
+    /// the wrong span and this fails loudly rather than shipping quiet garbage.
+    #[test]
+    fn flash_matches_standard_on_a_warm_prefix() {
+        let Ok(dev) = Device::new_cuda(0) else {
+            eprintln!("no CUDA device — skipping");
+            return;
+        };
+        // Stating the precondition rather than assuming it: with the escape
+        // hatch set both arms would be standard and the test would pass while
+        // comparing standard against itself (diagnosis rule 5).
+        assert!(
+            flash_handles_offset_causal(),
+            "SWARMLLM_FLASH_OFFSET_CAUSAL=0 makes this test vacuous"
+        );
+
+        let (n_head, n_kv_head, head_dim) = (24usize, 8usize, 128usize);
+        // GQA, so `cuda_decode_prefers_standard` is false and the dispatch is
+        // free to choose flash for these shapes.
+        assert!(!cuda_decode_prefers_standard(8, n_head, n_kv_head));
+
+        // (query block, total KV) — a first chunk, later chunks, and the two
+        // speculative-verify widths.
+        for (q_len, k_len) in [
+            (128usize, 128usize),
+            (128, 384),
+            (128, 1024),
+            (4, 912),
+            (2, 513),
+        ] {
+            let q = Tensor::randn(0f32, 1.0, (1, n_head, q_len, head_dim), &dev).unwrap();
+            let k = Tensor::randn(0f32, 1.0, (1, n_kv_head, k_len, head_dim), &dev).unwrap();
+            let v = Tensor::randn(0f32, 1.0, (1, n_kv_head, k_len, head_dim), &dev).unwrap();
+            let m = causal_mask(q_len, k_len, &dev);
+            let mask = Some(&m);
+
+            let std_out = {
+                let _g = ForceStandardAttnGuard::new(true);
+                run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, None, None).unwrap()
+            };
+            let flash_out =
+                run_attention(&q, &k, &v, mask, n_head, n_kv_head, head_dim, None, None).unwrap();
+            assert_eq!(std_out.dims(), flash_out.dims(), "layout must match");
+
+            let diff = (&std_out - &flash_out)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            let scale = std_out
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            let rel = diff / scale.max(f32::MIN_POSITIVE);
+            println!("q_len={q_len} k_len={k_len}: relative diff {rel:.3e}");
+            // Same tolerance as the sibling check below: flash casts to F16,
+            // standard stays F32, so this is bounded by F16 rounding and not by
+            // whether the masks agree — a mask disagreement moves entire rows
+            // and lands orders of magnitude above it.
+            assert!(
+                rel < 5e-2,
+                "q_len={q_len} k_len={k_len}: flash and standard disagree by {rel:.3e}. \
+                 If this is large, the kernel's causal alignment is not the \
+                 bottom-right one `flash_handles_offset_causal` documents."
+            );
+        }
+    }
+
+    /// Bottom-right aligned causal mask, `[q_len, k_len]`, additive f32
+    /// (`0.0` visible, `-inf` masked — the representation
+    /// `scaled_masked_softmax` documents).
     ///
     /// **Not optional, and getting it wrong invalidates everything.** The flash
     /// branch passes `causal = q_len > 1` to the kernel, which applies the mask
@@ -3365,11 +3592,28 @@ mod flash_vs_standard {
     /// assertion at the end is what caught it (relative diff 3.1, against an
     /// F16 rounding budget of 0.05).
     ///
-    /// Aligned q/k only: position i attends to keys 0..=i.
+    /// Query row `i` attends to keys `j <= (k_len - q_len) + i`, which for
+    /// `q_len == k_len` is the familiar `j <= i`. This mirrors
+    /// `SplitExecutor::causal_mask` deliberately: production builds exactly this
+    /// tensor, and the whole claim behind `flash_handles_offset_causal` is that
+    /// it equals what the kernel applies from its `causal` flag. A helper that
+    /// could only express the square case is what let that go unchecked.
     fn causal_mask(q_len: usize, k_len: usize, dev: &Device) -> Tensor {
-        assert_eq!(q_len, k_len, "this mask assumes aligned q/k");
+        assert!(
+            k_len >= q_len,
+            "kv ({k_len}) cannot be shorter than the query block ({q_len})"
+        );
+        let offset = k_len - q_len;
         let data: Vec<f32> = (0..q_len)
-            .flat_map(|i| (0..k_len).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0 }))
+            .flat_map(|i| {
+                (0..k_len).map(move |j| {
+                    if j > offset + i {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                })
+            })
             .collect();
         Tensor::from_vec(data, (q_len, k_len), dev).unwrap()
     }
@@ -3447,6 +3691,7 @@ mod flash_vs_standard {
         );
         println!("{}", "-".repeat(88));
 
+        let mut violations: Vec<String> = Vec::new();
         for (mlabel, n_head, n_kv_head, head_dim) in models {
             for (slabel, q_len, kv_len) in shapes {
                 let q = Tensor::randn(0f32, 1.0, (1, *n_head, *q_len, *head_dim), &dev).unwrap();
@@ -3455,13 +3700,14 @@ mod flash_vs_standard {
                 let v =
                     Tensor::randn(0f32, 1.0, (1, *n_kv_head, *kv_len, *head_dim), &dev).unwrap();
 
-                // The dispatch only reaches flash when q_len == kv_len or
-                // q_len == 1 — an offset causal mask (a warm prefix cache)
-                // cannot be expressed through flash_attn's boolean causal flag
-                // and falls back by design. Measuring those shapes would
-                // compare standard against itself and report a meaningless 1.0x.
+                // Shapes where BOTH arms would land on standard measure standard
+                // against itself and report a meaningless 1.0x. Since
+                // `flash_handles_offset_causal`, a warm-prefix block
+                // (q_len < kv_len, q_len > 1) is no longer one of them — it is
+                // now the most interesting row here, because it is the shape
+                // production actually generates.
                 assert!(
-                    q_len == kv_len || *q_len == 1,
+                    *q_len == 1 || !cuda_decode_prefers_standard(*q_len, *n_head, *n_kv_head),
                     "{slabel} would fall back to standard on both sides"
                 );
 
@@ -3483,6 +3729,18 @@ mod flash_vs_standard {
                         // rather than through a cache, and it is comparing
                         // KERNELS — handing one arm pre-converted operands
                         // would measure the mirror instead.
+                        //
+                        // **So do not read a production cost off this table.**
+                        // A real GQA decode DOES have the f16 mirror
+                        // (`model_wants_kv_mirror`), so it never pays the
+                        // f32->f16 conversion of the whole history that the
+                        // flash arm is charged here. The ratios below are
+                        // therefore an upper bound on flash's penalty, not an
+                        // estimate of it: the same rows that read 13x-21x at
+                        // long context were worth ~6% end-to-end when measured
+                        // through `examples/prefill_bench` at 4120 KV
+                        // (2026-08-23). Use this table to pick which kernel,
+                        // and the forward to size the win — #266.
                         None,
                     )
                     .unwrap();
@@ -3509,15 +3767,32 @@ mod flash_vs_standard {
                 // 1.35x of headroom: these are sub-millisecond calls at the
                 // small shapes, where fixed launch overhead is a large fraction
                 // and run-to-run spread is real even at min-of-20.
-                assert!(
-                    dispatch_ms < std_ms * 1.35,
-                    "{mlabel} / {slabel}: the dispatch chose a kernel {:.2}x SLOWER than \
-                     standard ({dispatch_ms:.3} ms vs {std_ms:.3} ms). Check \
-                     `cuda_decode_prefers_standard` against the measured table above it.",
-                    dispatch_ms / std_ms
-                );
+                //
+                // COLLECTED, not asserted per row. This is a table whose value
+                // is the whole curve — the crossover it exists to locate can
+                // only be read off a complete one. Failing at the first bad row
+                // hides every row after it, which is exactly what happened when
+                // the GQA decode rule needed re-measuring: the run aborted at
+                // kv=512 and printed nothing about where the crossover had
+                // actually moved to.
+                if dispatch_ms >= std_ms * 1.35 {
+                    violations.push(format!(
+                        "{mlabel} / {slabel}: dispatch chose a kernel {:.2}x SLOWER than \
+                         standard ({dispatch_ms:.3} ms vs {std_ms:.3} ms)",
+                        dispatch_ms / std_ms
+                    ));
+                }
             }
         }
+
+        assert!(
+            violations.is_empty(),
+            "the dispatch chose a materially slower kernel on {} shape(s). Check \
+             `cuda_decode_prefers_standard` against the table above — the measured \
+             crossover moves when either kernel changes.\n  {}",
+            violations.len(),
+            violations.join("\n  ")
+        );
 
         // Numerics, not just speed: flash runs in F16 while standard runs in
         // F32, so the two must be checked to agree before any speed figure
