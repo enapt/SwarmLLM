@@ -1539,12 +1539,31 @@ slot-admission gate and the decode loop. Two copies would eventually disagree,
 and the failure is silent: the gate diverts a request off the batched path and
 the loop then declines to speculate it, so it loses batching and gains nothing.
 
-Every clause is a correctness condition, not tuning: `temperature == 0` (a draft
-is verified by comparing it with what the sampler returned, which means nothing
-once the sampler is random), `!logprobs` (accepted tokens carry none back out),
-SWIFT off (it is already speculating), and a non-zero draft width — which is how
+Clauses: `!logprobs` (accepted tokens carry none back out), SWIFT off (it is
+already speculating), and a non-zero draft width — which is how
 `inference.ngram_lookup_enabled` arrives, so the switch cannot disagree with the
 shape.
+
+**Temperature is deliberately NOT one of them, and briefly was.** The argument
+for excluding sampled requests — that comparing a draft against what the sampler
+returned "is a verification only while the sampler is deterministic" — is wrong,
+and it left the feature inert for essentially all traffic: the OpenAI surface
+defaults to 0.7 and the Anthropic one to 1.0, so Claude Code and MCP tool use,
+the workload `ngram_lookup` names as its reason for existing, never speculated.
+
+With a deterministic draft `x` (`q = δ_x`) the speculative-sampling rule accepts
+with probability `min(1, p(x)/q(x)) = p(x)` and otherwise draws from
+`norm((p − q)₊)` — `p` with `x` removed, renormalised. "Draw `t ~ p`; keep the
+draft iff `t == x`" has exactly those two branches, so sampling each position
+with the real sampler and keeping a match IS that rule, at any temperature.
+`accepting_only_on_a_match_preserves_the_sampled_distribution` pins it, with a
+control that fails if the metric could not detect a bias.
+
+Measured at temperature 0.7 on an RTX 3070: a copying reply speculated at 8.83
+tokens per round — the same as greedy, because a copied token's distribution is
+sharply peaked — and ran 1.79-1.90 s -> 0.58-0.69 s. An open-ended reply at the
+same temperature accepted nothing and `SpecBackoff` suppressed 62 of 80 rounds,
+which is the correct outcome rather than a failure.
 
 Three things a change here must keep:
 

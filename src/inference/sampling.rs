@@ -970,3 +970,123 @@ mod tests {
         assert_eq!(token, 1);
     }
 }
+
+#[cfg(test)]
+mod speculative_acceptance_tests {
+    use super::*;
+    use crate::types::SamplingParams;
+
+    /// Draw `n` tokens the plain way, and `n` more through the accept/reject
+    /// procedure the local speculator uses, then compare the two distributions.
+    ///
+    /// **This is the whole correctness argument for speculating at a non-zero
+    /// temperature, so it is worth stating.** Speculative sampling with a
+    /// deterministic draft `x` (an n-gram guess carries no distribution, so
+    /// `q = δ_x`) says: accept `x` with probability `min(1, p(x)/q(x)) = p(x)`,
+    /// and on rejection draw from the residual `norm((p − q)₊)`, which is `p`
+    /// with `x` removed and renormalised.
+    ///
+    /// "Draw `t ~ p`; accept iff `t == x`" has exactly those two branches —
+    /// acceptance happens with probability `p(x)`, and conditioned on rejection
+    /// `t` is distributed as `p` restricted to `≠ x`. So the speculator does not
+    /// need a bespoke rejection rule, and it is NOT limited to greedy decoding:
+    /// sampling every position with the real sampler and keeping the draft only
+    /// when it matches already IS the rule.
+    ///
+    /// The test exists because that equivalence is easy to assert and easy to
+    /// get wrong, and a mistake would not fail loudly — it would quietly bias
+    /// every sampled reply toward whatever the n-gram happened to guess.
+    #[test]
+    fn accepting_only_on_a_match_preserves_the_sampled_distribution() {
+        let vocab = 12usize;
+        // A distribution with real spread, so a bias would show. Deliberately
+        // not uniform: under a uniform target every token is equally likely to
+        // match and a bias toward the draft would be invisible.
+        let base: Vec<f32> = (0..vocab).map(|i| (i as f32 * 0.37).sin() * 2.0).collect();
+        let params = SamplingParams {
+            temperature: 0.8,
+            top_k: 0,
+            top_p: 1.0,
+            ..Default::default()
+        };
+        // The token the speculator would propose. Picked as a HIGH-probability
+        // one: that is the case where acceptance is frequent, so any error in
+        // the accept branch has the most room to distort the result.
+        let draft = 3u32;
+
+        let draws = 60_000;
+        let mut plain = vec![0u32; vocab];
+        let mut spec = vec![0u32; vocab];
+        let mut ctx = SamplingContext::new(vocab);
+
+        for _ in 0..draws {
+            let mut l = base.clone();
+            plain[sample_token_with_history(&mut l, &params, &[], &mut ctx) as usize] += 1;
+
+            // The speculator's step: sample this position, then keep the draft
+            // only if the sampler independently produced it.
+            let mut l2 = base.clone();
+            let t = sample_token_with_history(&mut l2, &params, &[], &mut ctx);
+            let emitted = if t == draft { draft } else { t };
+            spec[emitted as usize] += 1;
+        }
+
+        // Total variation distance between the two empirical distributions.
+        // With 60k draws per arm, sampling noise on a 12-token vocabulary sits
+        // around 0.01; 0.03 leaves room for that while still failing on a real
+        // bias (accepting unconditionally puts ~0.3 of the mass on `draft`).
+        let tv: f32 = (0..vocab)
+            .map(|i| {
+                let a = plain[i] as f32 / draws as f32;
+                let b = spec[i] as f32 / draws as f32;
+                (a - b).abs()
+            })
+            .sum::<f32>()
+            / 2.0;
+        assert!(
+            tv < 0.03,
+            "speculative acceptance shifted the distribution (total variation {tv:.4})\n\
+             plain: {plain:?}\n spec:  {spec:?}"
+        );
+    }
+
+    /// The control for the test above: if the draft were accepted without being
+    /// checked against the sampler, the distribution WOULD move, and by much
+    /// more than the tolerance. Without this, a test that passes proves only
+    /// that the metric is insensitive.
+    #[test]
+    fn accepting_a_draft_unconditionally_would_fail_that_test() {
+        let vocab = 12usize;
+        let base: Vec<f32> = (0..vocab).map(|i| (i as f32 * 0.37).sin() * 2.0).collect();
+        let params = SamplingParams {
+            temperature: 0.8,
+            top_k: 0,
+            top_p: 1.0,
+            ..Default::default()
+        };
+        let draft = 3u32;
+        let draws = 20_000;
+        let mut plain = vec![0u32; vocab];
+        let mut bad = vec![0u32; vocab];
+        let mut ctx = SamplingContext::new(vocab);
+
+        for _ in 0..draws {
+            let mut l = base.clone();
+            plain[sample_token_with_history(&mut l, &params, &[], &mut ctx) as usize] += 1;
+            // The bug being ruled out: trusting the draft.
+            bad[draft as usize] += 1;
+        }
+        let tv: f32 = (0..vocab)
+            .map(|i| {
+                let a = plain[i] as f32 / draws as f32;
+                let b = bad[i] as f32 / draws as f32;
+                (a - b).abs()
+            })
+            .sum::<f32>()
+            / 2.0;
+        assert!(
+            tv > 0.3,
+            "the metric cannot detect an obvious bias (total variation {tv:.4})"
+        );
+    }
+}

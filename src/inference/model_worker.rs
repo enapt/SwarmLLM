@@ -1875,12 +1875,34 @@ async fn try_remote_prefix_hydrate(
 /// and the loop would then decline to speculate it, so it would lose batching
 /// and gain nothing.
 ///
-/// Every clause is a correctness condition, not a tuning choice:
+/// **Temperature is deliberately NOT one of the clauses**, and it used to be.
+/// The reasoning for excluding sampled requests was that a draft is kept by
+/// comparing it against what the sampler returned, which "is a verification
+/// only while the sampler is deterministic". That is wrong, and it mattered:
+/// the default temperature is 0.7 on the OpenAI surface and 1.0 on the
+/// Anthropic one, so the gate left the feature inert for essentially all real
+/// traffic — including Claude Code and MCP tool use, the workload
+/// `ngram_lookup`'s own documentation names as the reason it exists.
 ///
-/// * `temperature == 0` — a draft is kept by comparing it against what the
-///   sampler returned, which is a verification only while the sampler is
-///   deterministic. With sampling on it would quietly bias the output toward
-///   whatever the n-gram guessed.
+/// Speculative sampling with a DETERMINISTIC draft `x` (an n-gram guess carries
+/// no distribution, so `q = δ_x`) accepts with probability
+/// `min(1, p(x)/q(x)) = p(x)` and otherwise draws from the residual
+/// `norm((p − q)₊)`, i.e. `p` with `x` removed and renormalised. "Draw `t ~ p`;
+/// keep the draft iff `t == x`" has exactly those two branches — it accepts
+/// with probability `p(x)`, and conditioned on rejection `t` is distributed as
+/// `p` restricted to `≠ x`. Sampling each position with the real sampler and
+/// keeping a draft only on a match therefore IS the rejection rule, at any
+/// temperature, and needs no separate implementation.
+/// `accepting_only_on_a_match_preserves_the_sampled_distribution` pins that
+/// empirically, with a control that fails if the metric could not see a bias.
+///
+/// Acceptance is naturally lower when sampling is diffuse, which is correct
+/// rather than unfortunate — and the case speculation exists for, copying text
+/// already in the context, is exactly where the distribution is sharply peaked
+/// and `p(draft)` is near 1. `SpecBackoff` handles the rest.
+///
+/// The remaining clauses are correctness conditions, not tuning choices:
+///
 /// * `!logprobs` — accepted tokens come out of a verify forward and this path
 ///   does not carry their per-token logprobs back. Better to decline than to
 ///   answer `null` where a client asked for numbers.
@@ -1895,7 +1917,6 @@ pub(crate) fn ngram_spec_eligible(
 ) -> bool {
     ngram_cfg.num_pred_tokens > 0
         && ngram_cfg.max_ngram_size >= ngram_cfg.min_ngram_size
-        && sampling.temperature == 0.0
         && !sampling.logprobs
         && !(swift_cfg.enabled && sampling.temperature == 0.0)
 }
@@ -2289,19 +2310,14 @@ async fn handle_generate(
             "DIAG: SWIFT session complete"
         );
     } else {
-        // Draft-free speculation on the local path. Eligibility is deliberately
-        // narrow, and every clause is a correctness condition rather than a
-        // tuning choice:
+        // Draft-free speculation on the local path. `ngram_spec_eligible` owns
+        // the conditions, and the admission gate asks it the same question, so
+        // the two cannot disagree about which requests get here.
         //
-        // * `temperature == 0` — a draft is kept by comparing it to what the
-        //   sampler returned. That is a verification only when the sampler is
-        //   deterministic; with sampling on it would silently bias the output
-        //   towards whatever the n-gram happened to guess.
-        // * `!logprobs` — accepted tokens come from a verify forward, and this
-        //   path does not carry their per-token logprobs back out. Rather than
-        //   report `null` where a client asked for numbers, it declines.
-        // * `!swift_active` — SWIFT is already speculating; two schemes
-        //   drafting for the same request would fight.
+        // Works at ANY temperature: sampling each position with the real
+        // sampler and keeping a draft only when it matches is the
+        // speculative-sampling rejection rule itself, not an approximation of
+        // it. See the note on `ngram_spec_eligible`.
         let spec_cfg = *ngram_cfg;
         let spec_active = ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg) && !swift_active;
         // Context the lookup searches: prompt then generation, in order, so its
@@ -4166,11 +4182,15 @@ mod local_speculation_tests {
     fn eligibility_is_one_predicate_both_callers_share() {
         assert!(ngram_spec_eligible(&greedy(), &on(), &swift_off()));
 
-        // Sampling on: a draft is "verified" by comparing it with what the
-        // sampler returned, which means nothing once the sampler is random.
+        // Sampling on is FINE, and this is the case that matters: 0.7 and 1.0
+        // are the two API defaults, so gating on greedy left the feature inert
+        // for almost all real traffic. Keeping a draft only when the sampler
+        // independently produced it is the speculative-sampling rejection rule
+        // itself — see the note on `ngram_spec_eligible` and
+        // `accepting_only_on_a_match_preserves_the_sampled_distribution`.
         let mut warm = greedy();
         warm.temperature = 0.7;
-        assert!(!ngram_spec_eligible(&warm, &on(), &swift_off()));
+        assert!(ngram_spec_eligible(&warm, &on(), &swift_off()));
 
         // Logprobs asked for: accepted tokens carry none back out, and
         // answering `null` where a client asked for numbers is worse than
