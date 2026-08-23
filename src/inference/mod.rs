@@ -363,6 +363,87 @@ fn utf8_char_len(b: u8) -> usize {
     }
 }
 
+/// Roughly how many tokens a set of chat messages will become.
+///
+/// **An estimate, and deliberately a cheap one.** It exists for the routing
+/// decision in `scheduler::parallax::vertex_cost`, which needs to tell a
+/// ten-token request from a ten-thousand-token one and does not care about the
+/// difference between 4900 and 5000. Tokenising properly here would mean
+/// loading a tokenizer the coordinator may not have (a network-only model has
+/// no local `gguf_header.bin`) and doing the work twice, on the latency path,
+/// for a number that only has to land in the right order of magnitude.
+///
+/// Four bytes per token is the usual rule of thumb for English prose through a
+/// BPE vocabulary; code and non-Latin scripts run denser, so this UNDER-counts
+/// them, which biases toward the old behaviour rather than toward a surprise.
+/// The per-message constant covers the role markers and separators every chat
+/// template adds.
+///
+/// Images are counted at a fixed per-image cost: a CLIP-style encoder emits a
+/// fixed number of embeddings regardless of the picture's size, and 577 is what
+/// this project measures for LLaVA (see `inference::vision`).
+pub fn estimate_prompt_tokens(messages: &[crate::types::ChatMessage]) -> u32 {
+    const BYTES_PER_TOKEN: usize = 4;
+    const PER_MESSAGE_OVERHEAD_TOKENS: usize = 4;
+    const TOKENS_PER_IMAGE: usize = 577;
+
+    let mut total = 0usize;
+    for m in messages {
+        total += m.content.len() / BYTES_PER_TOKEN;
+        total += PER_MESSAGE_OVERHEAD_TOKENS;
+        total += m.images.len() * TOKENS_PER_IMAGE;
+    }
+    total.min(u32::MAX as usize) as u32
+}
+
+#[cfg(test)]
+mod prompt_estimate_tests {
+    use super::estimate_prompt_tokens;
+    use crate::types::{ChatMessage, Role};
+
+    fn msg(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: Role::User,
+            content: content.to_string(),
+            images: vec![],
+        }
+    }
+
+    /// The only property routing needs: the bands are far apart and ordered.
+    /// Pinning an exact count would pin the rule of thumb rather than the
+    /// behaviour that matters.
+    #[test]
+    fn a_long_prompt_is_ordered_far_above_a_short_one() {
+        let short = estimate_prompt_tokens(&[msg("hi")]);
+        let agentic = estimate_prompt_tokens(&[msg(&"x".repeat(20_000))]);
+        assert!(short < 20, "a two-character prompt should be tiny: {short}");
+        assert!(
+            agentic > 20 * short,
+            "a 20 KB prompt must land in a different band from a 2-byte one: \
+             {agentic} vs {short}"
+        );
+    }
+
+    /// Empty input must be zero, not a per-message constant applied to nothing
+    /// — `vertex_cost` reads zero as "no prefill to price".
+    #[test]
+    fn no_messages_is_zero() {
+        assert_eq!(estimate_prompt_tokens(&[]), 0);
+    }
+
+    /// An image carries real prefill cost even when its message has no text.
+    #[test]
+    fn an_image_costs_more_than_its_empty_caption() {
+        let mut with_image = msg("");
+        with_image.images.push(crate::types::ImageData {
+            rgb_bytes: vec![],
+            width: 1,
+            height: 1,
+        });
+        assert!(estimate_prompt_tokens(&[with_image]) > 500);
+    }
+}
+
 #[cfg(test)]
 mod stop_trim_tests {
     use super::trim_trailing_partial_stop;

@@ -332,8 +332,9 @@ async fn assemble_awaiting_dht(
     model_id: &crate::types::ModelId,
     local_node_id: &crate::types::NodeId,
     request_id: uuid::Uuid,
+    prompt_tokens: Option<u32>,
 ) -> Result<PipelineAssignment, SwarmError> {
-    let first = scheduler.assemble_pipeline_for(model_id, local_node_id, request_id);
+    let first = scheduler.assemble_pipeline_for(model_id, local_node_id, request_id, prompt_tokens);
     let Err(err) = first else {
         return first;
     };
@@ -344,7 +345,8 @@ async fn assemble_awaiting_dht(
     let deadline = std::time::Instant::now() + DHT_ASSEMBLY_GRACE;
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(DHT_ASSEMBLY_POLL).await;
-        if let Ok(assignment) = scheduler.assemble_pipeline_for(model_id, local_node_id, request_id)
+        if let Ok(assignment) =
+            scheduler.assemble_pipeline_for(model_id, local_node_id, request_id, prompt_tokens)
         {
             tracing::info!(
                 %request_id,
@@ -583,6 +585,11 @@ pub(super) async fn execute_request(
     // peer_registry is intentionally preserved across mid-pipeline disconnects
     // (gotcha #86); use connected_node_ids as the actual liveness oracle, same
     // gate as scheduler::gather_candidates.
+    // Routing has to be able to tell a short prompt from a long one: prefill is
+    // linear in prompt length and the hardware spread on it is far wider than on
+    // decode. An estimate is enough — see `estimate_prompt_tokens`.
+    let prompt_tokens_hint = Some(crate::inference::estimate_prompt_tokens(&request.messages));
+
     let assignment = if let Some(prev) = preferred_pipeline {
         let all_connected = prev.segments.iter().all(|seg| {
             seg.node_id == local_node_id || shared_state.connected_node_ids.contains(&seg.node_id)
@@ -598,10 +605,24 @@ pub(super) async fn execute_request(
                 ..prev
             }
         } else {
-            assemble_awaiting_dht(&scheduler, model_id, &local_node_id, request.id).await?
+            assemble_awaiting_dht(
+                &scheduler,
+                model_id,
+                &local_node_id,
+                request.id,
+                prompt_tokens_hint,
+            )
+            .await?
         }
     } else {
-        assemble_awaiting_dht(&scheduler, model_id, &local_node_id, request.id).await?
+        assemble_awaiting_dht(
+            &scheduler,
+            model_id,
+            &local_node_id,
+            request.id,
+            prompt_tokens_hint,
+        )
+        .await?
     };
     let schedule_ms = schedule_start.elapsed().as_millis() as u64;
 

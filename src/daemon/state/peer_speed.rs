@@ -281,6 +281,29 @@ impl PeerSpeed {
             .map(|c| c * NOMINAL_DECODE_ACTIVATION_BYTES as f32)
     }
 
+    /// Measured prefill coefficient, in ms per (layer x activation byte), or
+    /// `None` when this node has never prefilled through this peer.
+    ///
+    /// Separate from [`Self::ranking_ms_per_layer`] because prefill and decode
+    /// are not the same work and do not scale with the same thing: prefill is
+    /// linear in prompt length, decode is not. Measured on the same hardware
+    /// they differ by roughly two orders of magnitude (see the module docs).
+    ///
+    /// Expires on the same clock as ranking, and carries the same rule: only a
+    /// figure THIS node measured may price a peer, because a stranger's number
+    /// describes the path from them to that peer rather than from here.
+    /// `merge_ranking_sample` deliberately cannot seed this coefficient, so the
+    /// sample check is belt-and-braces rather than the only guard.
+    pub fn prefill_ms_per_layer_byte(&self) -> Option<f32> {
+        if self.updated_at.elapsed() >= RANKING_STALE_AFTER {
+            return None;
+        }
+        if self.prefill_samples == 0 {
+            return None;
+        }
+        self.prefill_ms_per_layer_byte
+    }
+
     /// Per-layer cost of running a **whole model** on this peer, in ms — the
     /// delegated shape, with no per-token round trip in it.
     ///
@@ -424,7 +447,7 @@ impl PeerSpeed {
 /// Activation size of a single-token decode step at a typical hidden width
 /// (4096 × 4 bytes). Used only to put a prefill-only coefficient on the same
 /// scale as a decode one for ranking.
-const NOMINAL_DECODE_ACTIVATION_BYTES: usize = 4096 * 4;
+pub(crate) const NOMINAL_DECODE_ACTIVATION_BYTES: usize = 4096 * 4;
 
 #[cfg(test)]
 mod tests {

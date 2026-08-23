@@ -1004,7 +1004,7 @@ pub async fn pipeline_plan(
     let local_node_id = state.shared_state.identity.node_id().clone();
     let scheduler = crate::inference::scheduler::PipelineScheduler::new(state.shared_state.clone());
     let assignment = scheduler
-        .assemble_pipeline_for(&mid, &local_node_id, uuid::Uuid::new_v4())
+        .assemble_pipeline_for(&mid, &local_node_id, uuid::Uuid::new_v4(), None)
         .map_err(ApiError)?;
 
     // Map segment layer range → full list of shard indices so the UI can

@@ -41,11 +41,14 @@ struct VertexCost {
     compute_ms: f32,
     /// active_request_count * LOAD_COMPENSATOR_MS.
     load_ms: f32,
+    /// Reading the prompt: one pass over `prompt_tokens`, linear in them.
+    /// Zero when the caller did not say how long the prompt is.
+    prefill_ms: f32,
 }
 
 impl VertexCost {
     fn total(self) -> f32 {
-        self.network_ms + self.compute_ms + self.load_ms
+        self.network_ms + self.compute_ms + self.load_ms + self.prefill_ms
     }
 }
 
@@ -89,6 +92,40 @@ pub(super) const UNKNOWN_COMPUTE_MS: f32 = 25.0;
 /// the model.
 pub(super) const ASSUMED_FORWARD_PASSES: f32 = 64.0;
 
+/// How much faster a machine reads a prompt than it writes a reply, before we
+/// have measured that machine doing it.
+///
+/// Prefill and decode are bounded by different things — prefill by arithmetic,
+/// decode by memory bandwidth — so the ratio is a property of the DEVICE CLASS
+/// and is the entire reason routing needs to know how long a prompt is. Both
+/// figures are measured on the hardware this was written against,
+/// llama-3.2-3b Q4_K:
+///
+/// | machine | prefill | decode | ratio |
+/// |---|---|---|---|
+/// | i5-10500T, no GPU | 36 tok/s | 8 tok/s | 4.5x |
+/// | Ryzen 5800H, no GPU | 37 | 6.6 | 5.6x |
+/// | RTX 3070 laptop | ~2000 | 47 | 42x |
+///
+/// They are a PRIOR and nothing more: the moment this node has actually
+/// prefilled through a peer, `observed_prefill_ms_per_layer_byte` replaces them
+/// (`peer_speed` has tracked prefill separately since 2026-08-01). They exist so
+/// that a peer we have never measured is not priced as though reading a prompt
+/// were free, which is what the model did before — and the error that produces
+/// is much larger on prefill than the 6x decode spread the model already knew
+/// about.
+pub(super) const PREFILL_SPEEDUP_GPU: f32 = 40.0;
+/// See [`PREFILL_SPEEDUP_GPU`]. Deliberately the low end of the two CPU
+/// measurements: under-crediting a processor's prefill errs toward keeping a
+/// long prompt off it, which is the safe direction.
+pub(super) const PREFILL_SPEEDUP_CPU: f32 = 4.5;
+
+/// Bytes of activation one token of prompt carries, at a typical hidden width.
+/// Shared with `peer_speed` so the measured coefficient and the estimate below
+/// are expressed in the same units.
+pub(super) const ACTIVATION_BYTES_PER_TOKEN: usize =
+    crate::daemon::state::peer_speed::NOMINAL_DECODE_ACTIVATION_BYTES;
+
 /// Cap on how many partial-range vertices the DP will consider, summed across
 /// candidates. Keeps vertex generation bounded when a popular model has many
 /// holders; past it, only whole ranges are emitted.
@@ -117,6 +154,11 @@ fn vertex_cost(
     range: (u32, u32),
     local: &NodeId,
     num_layers: u32,
+    // How long the prompt is, when the caller knows. `None` leaves the prefill
+    // term at zero, which is exactly the cost model as it stood before prompt
+    // length was threaded through — so an offline allocation or a test that
+    // does not have a prompt prices requests exactly as it always did.
+    prompt_tokens: Option<u32>,
 ) -> VertexCost {
     let is_local = &c.node_id == local;
     let layers = (range.1 - range.0) as f32;
@@ -216,6 +258,44 @@ fn vertex_cost(
 
     let load_ms = c.load * LOAD_COMPENSATOR_MS;
 
+    // Reading the prompt. Nothing in this cost model used to price it at all:
+    // every candidate was charged a fixed `ASSUMED_FORWARD_PASSES` of DECODE
+    // and a ten-token request was routed identically to a ten-thousand-token
+    // one. That is not a rounding error — prefill is linear in prompt length,
+    // and the hardware spread on prefill (~55x between a graphics card and a
+    // processor here) is an order of magnitude wider than the ~6x on decode
+    // that the model did price. A 5000-token agentic system prompt is ~140s of
+    // prefill on a CPU node against ~2.5s on a GPU one.
+    //
+    // Kept as a separate term rather than folded into `compute_ms` so the two
+    // can be reported and reasoned about apart — they scale with different
+    // things and a future measurement will want to check them separately.
+    let prefill_ms = match prompt_tokens {
+        None => 0.0,
+        Some(0) => 0.0,
+        Some(tokens) => {
+            let per_layer_prefill_ms = match c.observed_prefill_ms_per_layer_byte {
+                // Measured on this peer, for exactly this work. The coefficient
+                // is normalised by layers x activation bytes, so it carries
+                // across models.
+                Some(coeff) => coeff * tokens as f32 * ACTIVATION_BYTES_PER_TOKEN as f32,
+                // Never measured: derive from whatever prices its decode, using
+                // the device-class prior. `per_layer_ms` is a per-TOKEN decode
+                // cost, so a prompt of N tokens costs N of them, divided by how
+                // much faster this class of machine reads than writes.
+                None => {
+                    let speedup = if c.has_gpu {
+                        PREFILL_SPEEDUP_GPU
+                    } else {
+                        PREFILL_SPEEDUP_CPU
+                    };
+                    per_layer_ms * tokens as f32 / speedup
+                }
+            };
+            per_layer_prefill_ms * layers
+        }
+    };
+
     // Scale the whole vertex by how many attempts it takes to get one intact
     // answer out of this peer.
     //
@@ -239,6 +319,7 @@ fn vertex_cost(
         network_ms: network_ms * attempts,
         compute_ms: compute_ms * attempts,
         load_ms: load_ms * attempts,
+        prefill_ms: prefill_ms * attempts,
     }
 }
 
@@ -261,6 +342,9 @@ pub(super) fn route_shortest_path(
     // never turn a routable request into a failure — see
     // `assemble_pipeline_for`.
     respect_capacity: bool,
+    // Prompt length, when known. See `vertex_cost`; `None` reproduces the cost
+    // model exactly as it stood before prefill was priced.
+    prompt_tokens: Option<u32>,
 ) -> Result<Vec<PipelineSegment>, SwarmError> {
     if num_layers == 0 {
         return Err(SwarmError::PipelineError("num_layers=0".into()));
@@ -350,7 +434,7 @@ pub(super) fn route_shortest_path(
             vertices.push(Vertex {
                 cand_idx,
                 range,
-                cost_ms: vertex_cost(c, range, local_node_id, num_layers).total(),
+                cost_ms: vertex_cost(c, range, local_node_id, num_layers, prompt_tokens).total(),
             });
         };
         // The whole range is always available, so a chain that was routable
@@ -617,7 +701,103 @@ mod tests {
             is_pool_member: false,
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
+            observed_prefill_ms_per_layer_byte: None,
+            has_gpu: false,
         }
+    }
+
+    /// The whole point of pricing prefill: a loaded GPU node against an idle
+    /// CPU one is the right call for a short prompt and the wrong one for a
+    /// long prompt, and before this the scheduler could not tell those two
+    /// requests apart.
+    ///
+    /// The CPU peer here is idle and the GPU peer is carrying load, so on
+    /// decode alone the CPU peer wins. Prefill is where the ~55x hardware gap
+    /// lives, so a long prompt has to reverse that.
+    #[test]
+    fn a_long_prompt_moves_the_choice_to_the_machine_that_can_read_it() {
+        let local = NodeId([9u8; 32]);
+        let gpu_id = NodeId([2u8; 32]);
+        let cpu_id = NodeId([3u8; 32]);
+
+        // Both hold the whole model and both ADVERTISE THE SAME DECODE SPEED,
+        // so the only thing separating them is the card — which is exactly the
+        // variable under test. The GPU peer is carrying load and is further
+        // away, so on decode alone it loses.
+        let mut gpu = cand(2, vec![(0, 32)], 40, 12.0, true, true, 8.0);
+        gpu.has_gpu = true;
+        let cpu = cand(3, vec![(0, 32)], 5, 0.0, true, true, 8.0);
+
+        let pick = |tokens: Option<u32>| -> NodeId {
+            route_shortest_path(
+                32,
+                &[gpu.clone(), cpu.clone()],
+                &local,
+                false,
+                false,
+                false,
+                tokens,
+            )
+            .expect("a route must exist")[0]
+                .node_id
+                .clone()
+        };
+
+        assert_eq!(
+            pick(Some(8)),
+            cpu_id,
+            "a short prompt should still go to the idle, closer node — its \
+             prefill disadvantage is a few tokens' worth and does not outweigh \
+             the busy node's queue"
+        );
+        assert_eq!(
+            pick(Some(6000)),
+            gpu_id,
+            "a 6000-token prompt is minutes of prefill on a processor — it must \
+             go to the graphics card even though that node is busier"
+        );
+    }
+
+    /// `None` must reproduce the cost model exactly as it stood before prefill
+    /// was priced, so a caller with no prompt in hand loses nothing. Without
+    /// this the change would silently alter the offline allocator and every
+    /// non-request routing path.
+    #[test]
+    fn an_unknown_prompt_length_prices_exactly_as_before() {
+        let local = NodeId([9u8; 32]);
+        let mut gpu = cand(2, vec![(0, 32)], 20, 0.0, true, true, 20.0);
+        gpu.has_gpu = true;
+        let cpu = cand(3, vec![(0, 32)], 15, 0.0, true, true, 8.0);
+        for c in [&gpu, &cpu] {
+            let none = vertex_cost(c, (0, 32), &local, 32, None);
+            let zero = vertex_cost(c, (0, 32), &local, 32, Some(0));
+            assert_eq!(none.prefill_ms, 0.0, "unknown prompt must cost no prefill");
+            assert_eq!(
+                none.total(),
+                zero.total(),
+                "an empty prompt and an unknown one must price identically"
+            );
+        }
+    }
+
+    /// A measured coefficient must override the device-class prior — the prior
+    /// exists only until this node has actually prefilled through a peer.
+    #[test]
+    fn a_measured_prefill_coefficient_outranks_the_prior() {
+        let local = NodeId([9u8; 32]);
+        // A peer with no GPU, so the prior would price it at the slow CPU
+        // ratio; but we have measured it prefilling very fast.
+        let mut measured = cand(2, vec![(0, 32)], 20, 0.0, true, true, 8.0);
+        measured.observed_prefill_ms_per_layer_byte = Some(1.0e-9);
+        let prior_only = cand(3, vec![(0, 32)], 20, 0.0, true, true, 8.0);
+
+        let with_measurement = vertex_cost(&measured, (0, 32), &local, 32, Some(4000)).prefill_ms;
+        let with_prior = vertex_cost(&prior_only, (0, 32), &local, 32, Some(4000)).prefill_ms;
+        assert!(
+            with_measurement < with_prior,
+            "the measured peer should be priced cheaper than the prior: \
+             {with_measurement} vs {with_prior}"
+        );
     }
 
     /// The live case from 2026-08-21: a node holding 4 of 9 shards asked for
@@ -654,6 +834,7 @@ mod tests {
             false,
             true,
             true,
+            None,
         )
         .expect("a route must exist");
         assert!(
@@ -664,9 +845,16 @@ mod tests {
         // Now the peer advertises room for 20 of the 32 layers.
         let mut bounded_peer = peer;
         bounded_peer.max_hostable_layers = Some(20);
-        let segs =
-            route_shortest_path(32, &[bounded_peer, local_prefix], &local, false, true, true)
-                .expect("a route must still exist");
+        let segs = route_shortest_path(
+            32,
+            &[bounded_peer, local_prefix],
+            &local,
+            false,
+            true,
+            true,
+            None,
+        )
+        .expect("a route must still exist");
         assert!(
             peer_layers(&segs) <= 20,
             "peer was handed {} layers but advertised room for 20: {segs:?}",
@@ -693,7 +881,7 @@ mod tests {
         local_head.node_id = local.clone();
 
         // partial_ranges = false, respect_capacity = true
-        let segs = route_shortest_path(32, &[peer, local_head], &local, false, false, true)
+        let segs = route_shortest_path(32, &[peer, local_head], &local, false, false, true, None)
             .expect("a route must exist");
         for seg in &segs {
             if seg.node_id == NodeId([2u8; 32]) {
@@ -718,12 +906,13 @@ mod tests {
         // Constrained: no route (no split points to cut against, nothing else
         // holds these layers).
         assert!(
-            route_shortest_path(32, &[only_holder.clone()], &local, false, false, true).is_err(),
+            route_shortest_path(32, &[only_holder.clone()], &local, false, false, true, None)
+                .is_err(),
             "the constrained pass should refuse rather than over-commit the peer"
         );
         // Relaxed: the same call that `assemble_pipeline_for` makes second.
         assert!(
-            route_shortest_path(32, &[only_holder], &local, false, false, false).is_ok(),
+            route_shortest_path(32, &[only_holder], &local, false, false, false, None).is_ok(),
             "the relaxed pass must still route — a self-reported figure may not \
              make a request unservable"
         );
@@ -740,8 +929,16 @@ mod tests {
         let mut local_fast = cand(1, vec![(0, 10)], 0, 0.0, true, false, 0.0);
         local_fast.node_id = local.clone();
 
-        let segs = route_shortest_path(16, &[remote_slow, local_fast], &local, false, true, true)
-            .expect("a route must exist");
+        let segs = route_shortest_path(
+            16,
+            &[remote_slow, local_fast],
+            &local,
+            false,
+            true,
+            true,
+            None,
+        )
+        .expect("a route must exist");
 
         assert_eq!(segs.len(), 2, "expected a split, got {segs:?}");
         assert_eq!(segs[0].node_id, local, "local prefix must run locally");
@@ -763,8 +960,8 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let wide = cand(1, vec![(0, 16)], 0, 0.0, true, true, 0.0);
         let narrow = cand(2, vec![(0, 4)], 0, 0.0, true, true, 0.0);
-        let cw = vertex_cost(&wide, (0, 16), &local, 16).total();
-        let cn = vertex_cost(&narrow, (0, 4), &local, 16).total();
+        let cw = vertex_cost(&wide, (0, 16), &local, 16, None).total();
+        let cn = vertex_cost(&narrow, (0, 4), &local, 16, None).total();
         assert!(cw > 0.0, "an unmeasured candidate must not be free");
         assert!(
             cw > cn,
@@ -780,8 +977,8 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let measured_fast = cand_with_obs(cand(1, vec![(0, 16)], 0, 0.0, true, true, 0.0), 1.0);
         let unmeasured = cand(2, vec![(0, 16)], 0, 0.0, true, true, 0.0);
-        let cm = vertex_cost(&measured_fast, (0, 16), &local, 16).total();
-        let cu = vertex_cost(&unmeasured, (0, 16), &local, 16).total();
+        let cm = vertex_cost(&measured_fast, (0, 16), &local, 16, None).total();
+        let cu = vertex_cost(&unmeasured, (0, 16), &local, 16, None).total();
         assert!(cm < cu, "measured-fast {cm} should beat unmeasured {cu}");
     }
 
@@ -794,8 +991,8 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let remote = cand(2, vec![(0, 16)], 20, 0.0, true, true, 0.0);
         // Same candidate, differing only in whether it runs the whole model.
-        let delegated = vertex_cost(&remote, (0, 16), &local, 16);
-        let as_mid_chain = vertex_cost(&remote, (8, 16), &local, 16);
+        let delegated = vertex_cost(&remote, (0, 16), &local, 16, None);
+        let as_mid_chain = vertex_cost(&remote, (8, 16), &local, 16, None);
         assert!(
             as_mid_chain.network_ms > delegated.network_ms,
             "mid-chain network {} must exceed delegated {}",
@@ -818,8 +1015,8 @@ mod tests {
     fn a_remote_first_segment_of_a_split_still_pays_per_token() {
         let local = NodeId([9u8; 32]);
         let remote = cand(2, vec![(0, 16)], 20, 0.0, true, true, 0.0);
-        let first_of_split = vertex_cost(&remote, (0, 8), &local, 16);
-        let whole_model = vertex_cost(&remote, (0, 16), &local, 16);
+        let first_of_split = vertex_cost(&remote, (0, 8), &local, 16, None);
+        let whole_model = vertex_cost(&remote, (0, 16), &local, 16, None);
         assert_eq!(
             first_of_split.network_ms,
             whole_model.network_ms * ASSUMED_FORWARD_PASSES,
@@ -842,8 +1039,8 @@ mod tests {
         c.observed_latency_ms_per_layer = Some(100.0);
         c.observed_delegated_ms_per_layer = Some(10.0);
 
-        let delegated = vertex_cost(&c, (0, 16), &local, 16);
-        let mid_chain = vertex_cost(&c, (8, 16), &local, 16);
+        let delegated = vertex_cost(&c, (0, 16), &local, 16, None);
+        let mid_chain = vertex_cost(&c, (8, 16), &local, 16, None);
 
         assert_eq!(
             delegated.compute_ms,
@@ -872,7 +1069,7 @@ mod tests {
         c.observed_latency_ms_per_layer = Some(1063.0);
 
         c.observed_delegated_ms_per_layer = None;
-        let bounded = vertex_cost(&c, (0, 16), &local, 16);
+        let bounded = vertex_cost(&c, (0, 16), &local, 16, None);
         assert_eq!(
             bounded.compute_ms,
             1063.0 * 16.0 * ASSUMED_FORWARD_PASSES,
@@ -880,7 +1077,7 @@ mod tests {
         );
 
         c.observed_delegated_ms_per_layer = Some(60.0);
-        let corrected = vertex_cost(&c, (0, 16), &local, 16);
+        let corrected = vertex_cost(&c, (0, 16), &local, 16, None);
         assert_eq!(
             corrected.compute_ms,
             60.0 * 16.0 * ASSUMED_FORWARD_PASSES,
@@ -907,12 +1104,12 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let mut reliable = cand(2, vec![(0, 16)], 20, 0.0, true, true, 5.0);
         reliable.expected_attempts = 1.0;
-        let baseline = vertex_cost(&reliable, (0, 16), &local, 16).total();
+        let baseline = vertex_cost(&reliable, (0, 16), &local, 16, None).total();
 
         // Half the replies arrive whole: two attempts per usable answer.
         let mut lossy = reliable.clone();
         lossy.expected_attempts = 2.0;
-        let doubled = vertex_cost(&lossy, (0, 16), &local, 16).total();
+        let doubled = vertex_cost(&lossy, (0, 16), &local, 16, None).total();
         assert_eq!(
             doubled,
             baseline * 2.0,
@@ -923,7 +1120,7 @@ mod tests {
         let mut terrible = reliable.clone();
         terrible.expected_attempts = 20.0;
         assert_eq!(
-            vertex_cost(&terrible, (0, 16), &local, 16).total(),
+            vertex_cost(&terrible, (0, 16), &local, 16, None).total(),
             baseline * 20.0
         );
     }
@@ -936,11 +1133,11 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let mut c = cand(2, vec![(0, 16)], 20, 0.0, true, true, 5.0);
         c.expected_attempts = 1.0;
-        let baseline = vertex_cost(&c, (0, 16), &local, 16).total();
+        let baseline = vertex_cost(&c, (0, 16), &local, 16, None).total();
 
         for bad in [0.0f32, 0.5, -3.0, f32::NAN, f32::INFINITY] {
             c.expected_attempts = bad;
-            let got = vertex_cost(&c, (0, 16), &local, 16).total();
+            let got = vertex_cost(&c, (0, 16), &local, 16, None).total();
             assert_eq!(got, baseline, "multiplier {bad} must be ignored, got {got}");
         }
     }
@@ -959,9 +1156,16 @@ mod tests {
         let mut slow_reliable = cand(3, vec![(0, 16)], 1, 0.0, true, true, 5.0);
         slow_reliable.expected_attempts = 1.0;
 
-        let segs =
-            route_shortest_path(16, &[fast_lossy, slow_reliable], &local, false, false, true)
-                .expect("a route must exist");
+        let segs = route_shortest_path(
+            16,
+            &[fast_lossy, slow_reliable],
+            &local,
+            false,
+            false,
+            true,
+            None,
+        )
+        .expect("a route must exist");
         assert_eq!(segs.len(), 1);
         assert_eq!(
             segs[0].node_id,
@@ -976,8 +1180,8 @@ mod tests {
         let local = NodeId([1u8; 32]);
         let mut c = cand(1, vec![(0, 16)], 50, 0.0, true, true, 0.0);
         c.node_id = local.clone();
-        assert_eq!(vertex_cost(&c, (0, 8), &local, 16).network_ms, 0.0);
-        assert_eq!(vertex_cost(&c, (8, 16), &local, 16).network_ms, 0.0);
+        assert_eq!(vertex_cost(&c, (0, 8), &local, 16, None).network_ms, 0.0);
+        assert_eq!(vertex_cost(&c, (8, 16), &local, 16, None).network_ms, 0.0);
     }
 
     /// With the per-token term in place, a split onto a peer that is only
@@ -991,7 +1195,7 @@ mod tests {
         let mut local_node = cand_with_obs(cand(1, vec![(0, 10)], 0, 0.0, true, false, 0.0), 10.0);
         local_node.node_id = local.clone();
 
-        let segs = route_shortest_path(16, &[remote, local_node], &local, false, true, true)
+        let segs = route_shortest_path(16, &[remote, local_node], &local, false, true, true, None)
             .expect("route");
         assert_eq!(
             segs.len(),
@@ -1022,12 +1226,12 @@ mod tests {
 
         let cands = vec![head, tail, peer];
         assert!(
-            route_shortest_path(28, &cands, &local, true, false, true).is_err(),
+            route_shortest_path(28, &cands, &local, true, false, true, None).is_err(),
             "reproduces the reported failure: no route with ranges indivisible"
         );
 
         // And the fix: let the peer serve part of its range.
-        let segs = route_shortest_path(28, &cands, &local, true, true, true)
+        let segs = route_shortest_path(28, &cands, &local, true, true, true, None)
             .expect("partial ranges must make the boomerang routable");
         assert_eq!(
             segs.len(),
@@ -1053,7 +1257,7 @@ mod tests {
         // Peer holds ONLY the middle — the aligned case.
         let peer = cand(2, vec![(3, 21)], 5, 0.0, false, false, 0.0);
 
-        let segs = route_shortest_path(28, &[head, tail, peer], &local, true, false, true)
+        let segs = route_shortest_path(28, &[head, tail, peer], &local, true, false, true, None)
             .expect("aligned middle must route with partial ranges OFF");
         assert_eq!(segs.len(), 3, "{segs:?}");
         assert_eq!(segs[0].layer_range, (0, 3));
@@ -1083,6 +1287,7 @@ mod tests {
             true,
             true,
             true,
+            None,
         )
         .expect("must route: this is the topology encryption is designed for");
         assert_eq!(segs.len(), 3, "{segs:?}");
@@ -1103,7 +1308,7 @@ mod tests {
         head.node_id = local.clone();
         let peer = cand(2, vec![(0, 28)], 5, 0.0, true, true, 0.0);
         assert!(
-            route_shortest_path(28, &[head, peer], &local, true, true, true).is_err(),
+            route_shortest_path(28, &[head, peer], &local, true, true, true, None).is_err(),
             "must refuse rather than leak the tail to a peer"
         );
     }
@@ -1119,7 +1324,7 @@ mod tests {
         let mut local_fast = cand(1, vec![(0, 10)], 0, 0.0, true, false, 0.0);
         local_fast.node_id = local.clone();
 
-        let segs = route_shortest_path(16, &[remote, local_fast], &local, false, false, true)
+        let segs = route_shortest_path(16, &[remote, local_fast], &local, false, false, true, None)
             .expect("a route must exist");
         assert_eq!(segs.len(), 1, "default must not split: {segs:?}");
         assert_eq!(segs[0].layer_range, (0, 16));
@@ -1138,8 +1343,16 @@ mod tests {
         let mut local_node = cand(1, vec![(0, 10)], 0, 0.0, true, false, 0.0);
         local_node.node_id = local.clone();
 
-        let segs = route_shortest_path(16, &[remote_fast, local_node], &local, false, true, true)
-            .expect("route");
+        let segs = route_shortest_path(
+            16,
+            &[remote_fast, local_node],
+            &local,
+            false,
+            true,
+            true,
+            None,
+        )
+        .expect("route");
         let total: u32 = segs.iter().map(|s| s.layer_range.1 - s.layer_range.0).sum();
         assert_eq!(total, 16, "coverage must be complete either way");
     }
@@ -1149,7 +1362,8 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let a = cand(1, vec![(0, 12)], 10, 0.0, true, false, 0.0);
         let b = cand(2, vec![(4, 20)], 10, 0.0, false, true, 0.0);
-        let segs = route_shortest_path(20, &[a, b], &local, false, true, true).expect("route");
+        let segs =
+            route_shortest_path(20, &[a, b], &local, false, true, true, None).expect("route");
         let mut expect = 0;
         for s in &segs {
             assert_eq!(s.layer_range.0, expect, "gap or overlap in {segs:?}");
@@ -1165,7 +1379,7 @@ mod tests {
         let local = NodeId([9u8; 32]);
         // Covers everything but is not allowed to be last.
         let not_last = cand(1, vec![(0, 16)], 1, 0.0, true, false, 0.0);
-        assert!(route_shortest_path(16, &[not_last], &local, false, true, true).is_err());
+        assert!(route_shortest_path(16, &[not_last], &local, false, true, true, None).is_err());
     }
 
     /// And a source must still be able to be first.
@@ -1173,7 +1387,7 @@ mod tests {
     fn partial_ranges_respect_can_be_first() {
         let local = NodeId([9u8; 32]);
         let not_first = cand(1, vec![(0, 16)], 1, 0.0, false, true, 0.0);
-        assert!(route_shortest_path(16, &[not_first], &local, false, true, true).is_err());
+        assert!(route_shortest_path(16, &[not_first], &local, false, true, true, None).is_err());
     }
 
     /// Encrypted pipelines require the local node at both ends; partial ranges
@@ -1183,7 +1397,7 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let remote = cand(2, vec![(0, 16)], 1, 0.0, true, true, 0.0);
         assert!(
-            route_shortest_path(16, &[remote], &local, true, true, true).is_err(),
+            route_shortest_path(16, &[remote], &local, true, true, true, None).is_err(),
             "a remote-only chain must be refused when encrypted_pipeline is on"
         );
     }
@@ -1200,8 +1414,8 @@ mod tests {
             let lo = (i as u32) % 40;
             cands.push(cand(i, vec![(lo, 80)], 5, 0.0, true, true, 0.0));
         }
-        let segs =
-            route_shortest_path(80, &cands, &local, false, true, true).expect("must still route");
+        let segs = route_shortest_path(80, &cands, &local, false, true, true, None)
+            .expect("must still route");
         let mut expect = 0;
         for s in &segs {
             assert_eq!(s.layer_range.0, expect);
@@ -1219,7 +1433,7 @@ mod tests {
     fn single_node_covers_all() {
         let local = NodeId([1u8; 32]);
         let cands = vec![cand(1, vec![(0, 32)], 0, 0.0, true, true, 0.0)];
-        let segs = route_shortest_path(32, &cands, &local, false, false, true).unwrap();
+        let segs = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap();
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].layer_range, (0, 32));
         assert_eq!(segs[0].node_id, local);
@@ -1234,7 +1448,7 @@ mod tests {
             cand(2, vec![(8, 32)], 200, 0.0, false, true, 0.0),
             cand(3, vec![(8, 32)], 10, 0.0, false, true, 0.0),
         ];
-        let segs = route_shortest_path(32, &cands, &local, false, false, true).unwrap();
+        let segs = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap();
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].node_id, local);
         assert_eq!(segs[1].node_id, NodeId([3u8; 32]));
@@ -1248,7 +1462,7 @@ mod tests {
             cand(1, vec![(0, 32)], 50, 10.0, true, true, 0.0),
             cand(2, vec![(0, 32)], 50, 0.0, true, true, 0.0),
         ];
-        let segs = route_shortest_path(32, &cands, &local, false, false, true).unwrap();
+        let segs = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap();
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].node_id, NodeId([2u8; 32]));
     }
@@ -1261,7 +1475,7 @@ mod tests {
             cand(1, vec![(0, 4), (28, 32)], 0, 0.0, true, true, 0.0),
             cand(2, vec![(4, 28)], 5, 0.0, false, false, 0.0),
         ];
-        let segs = route_shortest_path(32, &cands, &local, true, false, true).unwrap();
+        let segs = route_shortest_path(32, &cands, &local, true, false, true, None).unwrap();
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[0].node_id, local);
         assert_eq!(segs[0].layer_range, (0, 4));
@@ -1273,7 +1487,7 @@ mod tests {
     fn no_first_capable_errors() {
         let local = NodeId([1u8; 32]);
         let cands = vec![cand(2, vec![(0, 32)], 50, 0.0, false, true, 0.0)];
-        let err = route_shortest_path(32, &cands, &local, false, false, true).unwrap_err();
+        let err = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap_err();
         assert!(matches!(err, SwarmError::PipelineError(_)));
     }
 
@@ -1281,7 +1495,7 @@ mod tests {
     fn no_sink_errors() {
         let local = NodeId([1u8; 32]);
         let cands = vec![cand(1, vec![(0, 16)], 0, 0.0, true, false, 0.0)];
-        let err = route_shortest_path(32, &cands, &local, false, false, true).unwrap_err();
+        let err = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap_err();
         assert!(matches!(err, SwarmError::PipelineError(_)));
     }
 
@@ -1293,7 +1507,7 @@ mod tests {
             cand(1, vec![(0, 8)], 0, 0.0, true, false, 0.0),
             cand(2, vec![(16, 32)], 10, 0.0, false, true, 0.0),
         ];
-        let err = route_shortest_path(32, &cands, &local, false, false, true).unwrap_err();
+        let err = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap_err();
         assert!(matches!(err, SwarmError::PipelineError(_)));
     }
 
@@ -1307,7 +1521,7 @@ mod tests {
         let slow = cand_with_obs(cand(1, vec![(0, 32)], 50, 0.0, true, true, 0.0), 20.0);
         let fast = cand_with_obs(cand(2, vec![(0, 32)], 50, 0.0, true, true, 0.0), 2.0);
         let cands = vec![slow, fast];
-        let segs = route_shortest_path(32, &cands, &local, false, false, true).unwrap();
+        let segs = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap();
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].node_id, NodeId([2u8; 32]));
     }
@@ -1324,7 +1538,7 @@ mod tests {
             cand(3, vec![(16, 32)], 10, 0.0, false, true, 0.0),
             cand(4, vec![(8, 32)], 100, 0.0, false, true, 0.0),
         ];
-        let segs = route_shortest_path(32, &cands, &local, false, false, true).unwrap();
+        let segs = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap();
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[1].node_id, NodeId([2u8; 32]));
         assert_eq!(segs[2].node_id, NodeId([3u8; 32]));
@@ -1360,6 +1574,7 @@ mod tests {
             false,
             true,
             true,
+            None,
         )
         .expect("must route");
         assert_eq!(segs.len(), 1, "one holder can serve the whole model");

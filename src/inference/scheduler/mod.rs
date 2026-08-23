@@ -75,6 +75,15 @@ struct NodeCandidate {
     /// node before v0.3.103 sent, gotcha #330). See
     /// [`max_hostable_layers`] for why unknown must never exclude.
     max_hostable_layers: Option<u32>,
+    /// MEASURED prefill coefficient for this peer, ms per (layer x activation
+    /// byte). `None` until this node has prefilled through it — see
+    /// `parallax::vertex_cost` for what stands in meanwhile.
+    observed_prefill_ms_per_layer_byte: Option<f32>,
+    /// Whether this peer has told us it has a graphics card. Used ONLY to pick
+    /// which prefill-to-decode prior applies before a real measurement exists;
+    /// never to rank peers against each other, which is what the peer's own
+    /// speed figures are for.
+    has_gpu: bool,
 }
 
 /// How many layers of a model a peer could plausibly hold, from the free
@@ -497,7 +506,7 @@ impl PipelineScheduler {
         model_id: &ModelId,
         local_node_id: &NodeId,
     ) -> Result<PipelineAssignment, SwarmError> {
-        self.assemble_pipeline_for(model_id, local_node_id, uuid::Uuid::new_v4())
+        self.assemble_pipeline_for(model_id, local_node_id, uuid::Uuid::new_v4(), None)
     }
 
     /// Assemble a pipeline for the given model with a specific request ID.
@@ -506,6 +515,11 @@ impl PipelineScheduler {
         model_id: &ModelId,
         local_node_id: &NodeId,
         request_id: uuid::Uuid,
+        // Roughly how many tokens of prompt this request carries, when the
+        // caller knows. `None` prices the request exactly as this scheduler did
+        // before prompt length was threaded through, so a caller with no prompt
+        // in hand loses nothing.
+        prompt_tokens: Option<u32>,
     ) -> Result<PipelineAssignment, SwarmError> {
         let manifest = self
             .shared_state
@@ -740,6 +754,7 @@ impl PipelineScheduler {
                 encrypted,
                 partial,
                 true,
+                prompt_tokens,
             )
             .or_else(|first_err| {
                 let relaxed = parallax::route_shortest_path(
@@ -749,6 +764,7 @@ impl PipelineScheduler {
                     encrypted,
                     partial,
                     false,
+                    prompt_tokens,
                 );
                 if relaxed.is_ok() {
                     tracing::info!(
@@ -1086,6 +1102,23 @@ impl PipelineScheduler {
             } else {
                 self.shared_state.peer_expected_attempts(&node_id)
             };
+            let observed_prefill_ms_per_layer_byte = if &node_id == local_node_id {
+                // Our own prefill cost is not measured through this path (there
+                // is no segment round trip to sample), so the local node prices
+                // prefill from its capability prior like any unmeasured peer.
+                None
+            } else {
+                self.shared_state
+                    .observed_prefill_ms_per_layer_byte(&node_id)
+            };
+            let has_gpu = if &node_id == local_node_id {
+                self.shared_state.gpu_info.is_some()
+            } else {
+                self.shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .is_some_and(|p| p.capability.as_ref().is_some_and(|c| c.gpu.is_some()))
+            };
             // The local node is deliberately unconstrained: our own loader's
             // admission check is the authority on what we can fit, and it knows
             // what is already committed to live workers, which a gossiped
@@ -1128,6 +1161,8 @@ impl PipelineScheduler {
                 is_pool_member: is_pool,
                 gpu_vram_available_mb,
                 max_hostable_layers,
+                observed_prefill_ms_per_layer_byte,
+                has_gpu,
             });
         }
 

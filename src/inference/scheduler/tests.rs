@@ -274,6 +274,8 @@ fn greedy_assign_multi_range_candidate() {
             is_pool_member: false,
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
+            observed_prefill_ms_per_layer_byte: None,
+            has_gpu: false,
         },
         NodeCandidate {
             node_id: NodeId([2u8; 32]),
@@ -296,6 +298,8 @@ fn greedy_assign_multi_range_candidate() {
             is_pool_member: false,
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
+            observed_prefill_ms_per_layer_byte: None,
+            has_gpu: false,
         },
     ];
 
@@ -1126,6 +1130,8 @@ fn cost_cand(
         is_pool_member: false,
         gpu_vram_available_mb: None,
         max_hostable_layers: None,
+        observed_prefill_ms_per_layer_byte: None,
+        has_gpu: false,
     }
 }
 

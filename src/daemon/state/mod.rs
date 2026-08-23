@@ -22,7 +22,7 @@ mod events;
 mod hf;
 mod metrics;
 mod models;
-mod peer_speed;
+pub(crate) mod peer_speed;
 mod perf_history;
 mod relay;
 mod removed_shards;
@@ -1713,6 +1713,24 @@ impl SharedState {
             .peer_speed
             .get(node_id)
             .and_then(|s| s.ranking_ms_per_layer())
+    }
+
+    /// This peer's MEASURED prefill coefficient, in ms per (layer x activation
+    /// byte). `None` when we have never prefilled through it, or the figure has
+    /// gone stale.
+    ///
+    /// Deliberately not folded into `observed_latency_ms_per_layer`: that one
+    /// answers "how fast does this peer decode", which is what ranks a
+    /// generated reply, and prefill is a different question that scales with
+    /// prompt length instead of token count.
+    pub fn observed_prefill_ms_per_layer_byte(
+        &self,
+        node_id: &crate::types::NodeId,
+    ) -> Option<f32> {
+        self.metrics
+            .peer_speed
+            .get(node_id)
+            .and_then(|s| s.prefill_ms_per_layer_byte())
     }
 
     /// How many inference requests this node is working on **right now** — the
