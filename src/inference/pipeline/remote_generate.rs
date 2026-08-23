@@ -740,6 +740,11 @@ impl PipelineExecutor {
             }
         }
 
+        crate::inference::report_stop_truncation(
+            &request_id,
+            completion_tokens,
+            matched_stop_seq.as_deref(),
+        );
         Ok(Some(InferenceOutput {
             request_id,
             content,

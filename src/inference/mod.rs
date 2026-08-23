@@ -156,6 +156,72 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
     matched
 }
 
+/// Longest reply still treated as "a stop sequence ate the answer".
+///
+/// Two tokens is not an answer to anything. Deliberately tiny: the point is to
+/// catch a stop string matching the model's opening words, not to second-guess
+/// a genuinely terse reply.
+const STOP_ATE_THE_REPLY_TOKENS: u32 = 2;
+
+/// Did a stop sequence leave the caller with essentially no reply?
+///
+/// Split from the logging so the threshold can be tested without capturing log
+/// output — the same reason `emptied_reply_evidence` is split out.
+pub(crate) fn stop_sequence_ate_the_reply(completion_tokens: u32, matched: Option<&str>) -> bool {
+    matched.is_some() && completion_tokens <= STOP_ATE_THE_REPLY_TOKENS
+}
+
+/// Say so when a caller's stop sequence is what ended a reply almost before it
+/// began.
+///
+/// **The OpenAI surface cannot say this in the response.** `finish_reason` is
+/// `"stop"` whether the model chose to end its turn or a stop sequence cut it
+/// off, and the schema has no field for which one fired. (The Anthropic surface
+/// does carry `stop_sequence`, and does report it.) So a reply truncated to
+/// nothing is indistinguishable, to the client, from a model with nothing to
+/// say — and the node said nothing either.
+///
+/// That gap has a measured cost. An external report on 2026-08-23 described a
+/// coding agent getting `completion_tokens: 1` from a large tool-using request
+/// with no error, and a testing session went into narrowing it; plain `curl`
+/// could not reproduce it because the attempts left the client's `stop` array
+/// out. Reproduced locally afterwards: a stop string matching the model's
+/// second token yields exactly `completion_tokens: 1, finish_reason: "stop"`,
+/// silently. Whether that was the reported cause is unconfirmed; that the
+/// product could not say so is not.
+///
+/// **Call this wherever a generation finishes with a `matched_stop_sequence`.**
+/// It deliberately does NOT live in `finalize_reply_text`, which looks like the
+/// choke point and is the wrong place: every generator applies the caller's stop
+/// sequences DURING generation and stops before the matching text is kept, so by
+/// the time finalisation runs the text no longer contains the stop and there is
+/// nothing left to notice. That was tried, and it silently never fired —
+/// caught by running a request rather than by reading the diff.
+pub(crate) fn report_stop_truncation(
+    request_id: &uuid::Uuid,
+    completion_tokens: u32,
+    matched: Option<&str>,
+) {
+    let Some(stop) = matched else { return };
+    if stop_sequence_ate_the_reply(completion_tokens, matched) {
+        tracing::warn!(
+            %request_id,
+            completion_tokens,
+            stop_sequence = %stop.escape_debug(),
+            "a stop sequence in the request matched almost immediately, so the reply came back \
+             with next to nothing — the caller sees finish_reason \"stop\" and cannot tell that \
+             from the model choosing to say nothing; check the `stop` values the client sends"
+        );
+    } else {
+        tracing::debug!(
+            %request_id,
+            completion_tokens,
+            stop_sequence = %stop.escape_debug(),
+            "DIAG: reply ended on a caller-supplied stop sequence"
+        );
+    }
+}
+
 /// Whether an emptied reply is worth reporting, and the evidence to report with
 /// it — `None` means stay silent.
 ///
@@ -372,7 +438,10 @@ mod control_token_strip_tests {
 
 #[cfg(test)]
 mod finalize_reply_text_tests {
-    use super::{emptied_reply_evidence, finalize_reply_text, EMPTIED_REPLY_LOG_CHARS};
+    use super::{
+        emptied_reply_evidence, finalize_reply_text, stop_sequence_ate_the_reply,
+        EMPTIED_REPLY_LOG_CHARS, STOP_ATE_THE_REPLY_TOKENS,
+    };
 
     fn stops() -> Vec<String> {
         vec!["<|im_end|>".to_string()]
@@ -412,6 +481,37 @@ mod finalize_reply_text_tests {
     /// The report has to name what was removed — that text is the entire
     /// diagnostic value, since it distinguishes a template fault (a leaked
     /// marker) from a prompt fault (a stop matching at position 0).
+    #[test]
+    fn a_stop_that_ate_the_reply_is_reported() {
+        // The reported shape: one token, then a stop sequence ended it.
+        assert!(stop_sequence_ate_the_reply(1, Some(" tests")));
+        assert!(stop_sequence_ate_the_reply(0, Some("Unit")));
+        assert!(stop_sequence_ate_the_reply(
+            STOP_ATE_THE_REPLY_TOKENS,
+            Some("x")
+        ));
+    }
+
+    #[test]
+    fn a_real_answer_cut_by_a_stop_is_not_reported() {
+        // A stop trimming the tail of a genuine answer is the feature working.
+        // Warning about it would train operators to ignore the warning, which is
+        // how the case that matters gets missed.
+        assert!(!stop_sequence_ate_the_reply(
+            STOP_ATE_THE_REPLY_TOKENS + 1,
+            Some("\nUser:")
+        ));
+        assert!(!stop_sequence_ate_the_reply(80, Some("\nUser:")));
+    }
+
+    #[test]
+    fn a_short_reply_that_nothing_cut_off_is_not_reported() {
+        // Terse but voluntary. `max_tokens: 1` is a legitimate request, and a
+        // model answering "Yes." is not a fault to report.
+        assert!(!stop_sequence_ate_the_reply(1, None));
+        assert!(!stop_sequence_ate_the_reply(0, None));
+    }
+
     #[test]
     fn an_emptied_reply_is_reported_with_what_was_removed() {
         let evidence = emptied_reply_evidence(true, "", "<|im_end|>")

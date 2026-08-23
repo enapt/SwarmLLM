@@ -3083,6 +3083,11 @@ impl ModelProcessPool {
         // so a match can sit anywhere in the accumulated text, and the token
         // that completed it is withheld rather than the marker being removed.
         crate::inference::finalize_reply_text(&mut content, &stop_sequences);
+        crate::inference::report_stop_truncation(
+            &request_id,
+            completion_tokens,
+            matched_stop_sequence.as_deref(),
+        );
 
         Ok(crate::inference::router::InferenceOutput {
             request_id,
