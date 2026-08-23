@@ -59,8 +59,19 @@ impl PipelineExecutor {
         // n-gram hit-rate on code/RAG (99% / 96% from synthetic bench)
         // accepts multiple tokens per round, which beats remote_generate's
         // one-token-per-RTT throughput when the workload is
-        // input-grounded. Falls through (Ok(None)) when ngram is
-        // disabled, draft is configured, segments aren't 1, etc.
+        // input-grounded. Falls through (Ok(None)) when ngram is disabled, a
+        // draft model is configured, the assignment is empty or entirely
+        // local, the request is otherwise disqualified, no tokenizer is
+        // loaded, or — since the measurement below — the loop has not been
+        // accepting enough tokens per round to pay for the logits it returns.
+        //
+        // This comment used to say it also fell through when "segments aren't
+        // 1". It never did, and the difference is expensive: on a multi-segment
+        // pipeline this path takes over from the standard loop, which means no
+        // chaining (every hop round-trips the coordinator) and a full-vocabulary
+        // f32 return per round. The payoff gate is what bounds that now; the
+        // wire itself is still the wrong shape for a miss round, and that is
+        // written up in `docs/FUTURE_WORK.md`.
         if let Some(out) = self.try_ngram_only_distributed(token_tx.clone()).await? {
             return Ok(out);
         }

@@ -33,9 +33,66 @@ use crate::inference::router::{InferenceOutput, StreamingTokenEvent, StreamingTo
 
 use super::PipelineExecutor;
 
+/// Observed payoff of this loop, as accepted tokens per round x 100.
+/// `0` means unknown — nothing has run yet and the next request finds out.
+static DIST_SPEC_PAYOFF_X100: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The payoff at which speculating over the network is worth what it costs.
+///
+/// **A round on this path is not free the way a local one is.** Every round —
+/// including one where the n-gram found nothing to draft — goes back through
+/// the coordinator asking for `spec_logits`, which is a full-vocabulary f32
+/// vector per position: ~513 KB for a 128k-vocab model, where an ordinary
+/// decode step through `forward_through_segments` returns a sampled token id in
+/// four bytes and can be chained straight down the pipeline.
+///
+/// So a round has to return meaningfully more than the one token a plain step
+/// would have returned before it pays for the vocabulary it drags back. 1.3
+/// tokens per round is a deliberately modest bar: it clears a workload that is
+/// copying its input, which is what this path was built for, and fails one that
+/// is writing prose, which is where it was measured doing nothing at all.
+///
+/// Measured on the live node before this gate existed: three requests at
+/// `ngram_hit_rate="0.0%"` — every round a miss, every miss a full vocabulary
+/// for one token — and one at 30.5%, whose 41 miss rounds moved roughly 21 MB
+/// to produce a 60-token reply.
+const PAYOFF_WORTH_THE_WIRE_X100: u32 = 130;
+
+/// Whether the loop has earned its bandwidth. Pure, so the policy is testable
+/// without a pipeline.
+fn payoff_justifies_the_wire(seen_x100: u32) -> bool {
+    seen_x100 == 0 || seen_x100 >= PAYOFF_WORTH_THE_WIRE_X100
+}
+
+/// Fold one request's result into the running figure.
+///
+/// Blended rather than replaced, for the same reason every other EMA here is:
+/// one short reply that happened to copy its prompt should not switch the path
+/// back on for every request after it, and one that happened not to should not
+/// switch it off forever. `accepted` counts tokens produced by the loop, so a
+/// round that drafted nothing contributes its single fallback token — which is
+/// exactly the comparison being made.
+fn record_payoff(accepted_tokens: u32, rounds: u32) {
+    if rounds == 0 {
+        return;
+    }
+    let observed = (accepted_tokens as u64 * 100 / rounds as u64) as u32;
+    let prev = DIST_SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed);
+    let blended = if prev == 0 {
+        observed.max(1)
+    } else {
+        ((prev as u64 * 7 + observed as u64 * 3) / 10) as u32
+    };
+    DIST_SPEC_PAYOFF_X100.store(blended.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Fast-path preconditions for the draft-free n-gram-only spec loop.
 fn eligible(exec: &PipelineExecutor) -> bool {
-    let cfg = &exec.shared_state.config.inference;
+    // The LIVE config, not the boot snapshot. Every read here used to come from
+    // `shared_state.config`, so turning n-gram lookup off in Settings changed
+    // nothing until the daemon was restarted (gotcha #281).
+    let live = exec.shared_state.cfg();
+    let cfg = &live.inference;
     if !cfg.ngram_lookup_enabled {
         return false;
     }
@@ -70,6 +127,19 @@ fn eligible(exec: &PipelineExecutor) -> bool {
     if super::fastpath_request_disqualified(exec) {
         return false;
     }
+    // Has speculating over the wire actually been paying? Unknown lets one
+    // request find out, and its answer steers the rest — the same shape as
+    // `spec_payoff_justifies_diverting` on the local speculator, which learned
+    // this lesson on 2026-08-23. This path never had it, so a workload it
+    // cannot help paid the full cost on every token indefinitely.
+    if !payoff_justifies_the_wire(DIST_SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed))
+    {
+        tracing::debug!(
+            "SWARM-SPEC L1: skipping the n-gram wire — it has not been accepting \
+             enough tokens per round to pay for the logits it returns"
+        );
+        return false;
+    }
     if exec
         .shared_state
         .standalone_tokenizer(&exec.request.model_id)
@@ -89,7 +159,8 @@ impl PipelineExecutor {
         &mut self,
         token_tx: Option<StreamingTokenTx>,
     ) -> Result<Option<InferenceOutput>, SwarmError> {
-        let cfg = &self.shared_state.config.inference;
+        let live = self.shared_state.cfg();
+        let cfg = &live.inference;
         tracing::debug!(
             request_id = %self.request.id,
             ngram_lookup_enabled = cfg.ngram_lookup_enabled,
@@ -191,7 +262,8 @@ impl PipelineExecutor {
             finish_reason = "stop".into();
         }
 
-        let cfg = &self.shared_state.config.inference;
+        let live = self.shared_state.cfg();
+        let cfg = &live.inference;
         let max_draft = cfg.ngram_num_pred_tokens.min(cfg.speculative_gamma);
         // SWARM-SPEC L1: pending truncate carries over to the NEXT verify
         // call. When a verify round partially rejects drafts, the remote
@@ -293,11 +365,12 @@ impl PipelineExecutor {
                 segment_idx: 0,
                 holder: self.assignment.segments[0].node_id.clone(),
             };
+            let hedge_live = self.shared_state.cfg();
             let hedge_cfg = crate::inference::hedging::HedgeConfig {
-                enabled: self.shared_state.config.inference.hedge_enabled,
-                after_factor: self.shared_state.config.inference.hedge_after_factor,
-                max_rate: self.shared_state.config.inference.hedge_max_rate,
-                min_samples: self.shared_state.config.inference.hedge_min_samples,
+                enabled: hedge_live.inference.hedge_enabled,
+                after_factor: hedge_live.inference.hedge_after_factor,
+                max_rate: hedge_live.inference.hedge_max_rate,
+                min_samples: hedge_live.inference.hedge_min_samples,
             };
             let spec_logits = super::hedge_dispatch::forward_verify_with_hedge(
                 &self.shared_state,
@@ -372,11 +445,14 @@ impl PipelineExecutor {
             finish_reason = "length".into();
         }
 
+        record_payoff(generated.len() as u32, ngram_rounds + fallback_rounds);
+
         tracing::info!(
             request_id = %request_id,
             generated_tokens = generated.len(),
             ngram_rounds,
             fallback_rounds,
+            payoff_x100 = DIST_SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed),
             ngram_hit_rate = format!(
                 "{:.1}%",
                 100.0 * ngram_rounds as f32 / (ngram_rounds + fallback_rounds).max(1) as f32
@@ -392,5 +468,44 @@ impl PipelineExecutor {
             prompt_token_count as u32,
             finish_reason,
         )))
+    }
+}
+
+#[cfg(test)]
+mod payoff_tests {
+    use super::{payoff_justifies_the_wire, PAYOFF_WORTH_THE_WIRE_X100};
+
+    /// Unknown must try. A gate that refused on no evidence would never
+    /// collect any, and the path would be dead on arrival for every workload
+    /// including the one it helps.
+    #[test]
+    fn unknown_payoff_lets_one_request_find_out() {
+        assert!(payoff_justifies_the_wire(0));
+    }
+
+    /// The measured failure: every round a miss, so the loop returned exactly
+    /// the one token a plain decode step would have returned — while dragging
+    /// back a full vocabulary to do it.
+    #[test]
+    fn one_token_per_round_does_not_pay_for_a_vocabulary() {
+        assert!(
+            !payoff_justifies_the_wire(100),
+            "a round that yields one token is a plain decode step wearing a \
+             513 KB hat"
+        );
+    }
+
+    /// The workload this path exists for: copying its input back, several
+    /// tokens accepted per round.
+    #[test]
+    fn a_copying_workload_still_speculates() {
+        assert!(payoff_justifies_the_wire(880));
+        assert!(payoff_justifies_the_wire(PAYOFF_WORTH_THE_WIRE_X100));
+    }
+
+    /// Just under the bar must be refused, or the constant is decorative.
+    #[test]
+    fn just_below_the_bar_is_refused() {
+        assert!(!payoff_justifies_the_wire(PAYOFF_WORTH_THE_WIRE_X100 - 1));
     }
 }

@@ -977,10 +977,17 @@ fn default_prefetch_max_candidates() -> u32 {
 }
 
 fn default_ngram_lookup_enabled() -> bool {
-    // SWARM-SPEC Layer 1.1: ON by default. N-gram lookup is purely
-    // additive — drafts are verified by the target so quality cannot
-    // regress. The only cost is a sub-millisecond hash-table lookup
-    // per spec round, paid only when speculative decoding is itself on.
+    // SWARM-SPEC Layer 1.1: ON by default. Drafts are verified by the target,
+    // so quality cannot regress.
+    //
+    // It is NOT free, and the comment here used to say it was ("the only cost
+    // is a sub-millisecond hash-table lookup"). The lookup is indeed free; the
+    // forward it provokes is not. On the local speculator a rejected draft
+    // costs a wider forward, which `SpecBackoff` bounds. On the DISTRIBUTED
+    // path every round — hit or miss — asks the pipeline tail for a
+    // full-vocabulary f32 vector, ~513 KB on a 128k-vocab model, where an
+    // ordinary decode step returns a four-byte token id. Both paths now gate
+    // on whether speculation has actually been paying.
     true
 }
 

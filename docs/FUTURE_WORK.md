@@ -238,6 +238,71 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### The distributed n-gram miss round returns a whole vocabulary for one token (2026-08-24)
+
+Bounded by a payoff gate, not fixed. The wire is still the wrong shape.
+
+**What is verified, by reading the code and by the live node's own log.**
+`ngram_only_spec.rs` takes over any distributed pipeline that is not entirely
+local. Every round it calls `forward_verify_through_segments`, which builds its
+envelope through `pipeline::build_spec_verify_forward` —
+`spec_logits_requested: true`, hardcoded, no parameter. On a MISS round (the
+n-gram found nothing to draft) it sends exactly one token and still gets back
+`LayerResult.spec_logits`: a full-vocabulary f32 vector, **~513 KB** for a
+128k-vocab model such as llama-3.2-3b. An ordinary decode step through
+`forward_through_segments` returns a sampled token id in **four bytes**, and can
+be chained straight down the pipeline instead of round-tripping the coordinator
+at every hop.
+
+Measured on this node's own log, before the gate:
+
+```text
+  generated_tokens=4   ngram_rounds=0   fallback_rounds=3    hit_rate 0.0%   (x3)
+  generated_tokens=60  ngram_rounds=18  fallback_rounds=41   hit_rate 30.5%
+```
+
+Three requests where every single round was a miss, and one where 41 of 59 were
+— roughly 21 MB of logits to produce a 60-token reply. Multi-segment
+assemblies are not rare either: 243 three-segment and 53 two-segment against
+2693 single-segment in the same log, about 11%.
+
+Two smaller things confirmed alongside it, both fixed: every config read in
+`eligible` came from the boot snapshot (gotcha #281 by construction — turning
+n-gram lookup off in Settings did nothing until restart), and the call-site
+comment in `distributed.rs` claimed the path "falls through when segments
+aren't 1", which it never did.
+
+**What shipped.** A payoff gate mirroring `spec_payoff_justifies_diverting` on
+the local speculator: the loop records accepted tokens per round, and declines
+the wire once that figure sits below `PAYOFF_WORTH_THE_WIRE_X100` (1.3). Unknown
+lets one request find out. That kills the 0%-hit-rate case, which is the one
+measured doing nothing at all, and leaves a copying workload speculating.
+
+**What is still wrong.** A miss round on a paying request still drags a
+vocabulary back. The clean fix is for the miss branch to use the ordinary
+`forward_through_segments` — it returns a token id, it chains, and the tail
+already applies repetition penalties correctly (`generated_ids` travel with the
+coordinator's forward, and chaining is disabled precisely when they are needed).
+So sampling quality is not the obstacle.
+
+**The obstacle is KV state.** `pending_truncate` carries a partial rejection into
+the NEXT verify call, and `forward_through_segments` takes no `truncate_kv_to`,
+so it cannot honour one. The guarded version is therefore: use the ordinary
+forward when `pending_truncate.is_none()` (which is every round of a
+never-hitting request), and the verify wire otherwise. Alternatively thread
+`truncate_kv_to` through `forward_through_segments`, which is the tidier fix and
+touches the standard decode loop.
+
+**Do not ship either without measuring on a real multi-segment pipeline with a
+REMOTE tail.** That topology is what makes the cost real, and every shipped
+default pushes the tail local (`encrypted_pipeline_auto` on,
+`boomerang_assignment`, `delegation_target`, `parallax_partial_ranges = false`).
+`tensors.rs::send_tensor_result_as_request` already logs `payload_len` at
+`info`; read it beside `x-swarm-route` (gotcha #374) before and after. The
+mechanism check is a count, not a stopwatch: one `SendTensor` per round from the
+coordinator instead of one per segment, and `DIAG: chaining activations to the
+next segment` appearing on the intermediate holders.
+
 ### Routing never sees how long the prompt is (2026-08-23)
 
 `scheduler::parallax::vertex_cost` prices a candidate from its per-layer decode
