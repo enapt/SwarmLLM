@@ -579,7 +579,7 @@ fn decode_pool() -> Option<&'static rayon::ThreadPool> {
 /// Prefill returns `f()` directly, so it keeps the global pool and pays
 /// nothing.
 pub(crate) fn in_phase_pool<R: Send>(seq_len: usize, f: impl FnOnce() -> R + Send) -> R {
-    if seq_len != 1 {
+    if seq_len > DECODE_SHAPED_MAX_TOKENS {
         return f();
     }
     let Some(calib) = calibration() else {
@@ -596,6 +596,18 @@ pub(crate) fn in_phase_pool<R: Send>(seq_len: usize, f: impl FnOnce() -> R + Sen
             None => f(),
         };
     }
+    if seq_len != 1 {
+        // Decode-SHAPED but not a decode token. It gets the narrow pool, and it
+        // must NOT be timed: the calibration compares candidate widths by the
+        // cost of one token, and a sample from a different query length is not
+        // that measurement. Mixing shapes into the rotation is the same class of
+        // error as taking the fastest sample instead of a typical one — it makes
+        // the comparison decide something other than what it is asked (#367).
+        return match decode_pool() {
+            Some(pool) => pool.install(f),
+            None => f(),
+        };
+    }
     // Still measuring: time this token on the next candidate in the rotation.
     let idx = calib.next_index();
     let threads = calib.candidates[idx];
@@ -607,6 +619,35 @@ pub(crate) fn in_phase_pool<R: Send>(seq_len: usize, f: impl FnOnce() -> R + Sen
     calib.record(idx, started.elapsed().as_nanos() as u64);
     out
 }
+
+/// Longest query block still treated as decode-shaped, i.e. narrow-pool work.
+///
+/// The phase predicate used to be `seq_len == 1`, which reads as the obvious
+/// definition of decode and is the wrong question to ask here. What the pool
+/// choice actually turns on is whether the matmuls are bandwidth-bound, and
+/// they stay bandwidth-bound well past one row: a speculative verify of 4
+/// tokens re-reads the same weights a single token does, it just brings three
+/// more activation rows along.
+///
+/// Measured on this machine (Ryzen 7 5800H, 8 physical / 16 logical) with
+/// `examples/qmatmul_bench`, ms for one Q4_K projection (k=3072, n=8192):
+///
+/// ```text
+///   threads    m=1     m=2     m=4     m=8    m=16    m=32   m=128
+///         8   0.157   0.273   0.349   0.844   1.644   2.943  10.844
+///        16   0.339   0.424   0.629   1.564   3.096   4.207  10.941
+/// ```
+///
+/// The narrow pool wins at every width up to 32 — by 1.4x-2.2x — and the two
+/// draw level at 128. So the boundary is not sharp and does not need to be:
+/// anywhere in 32..128 costs nothing either way, while classifying a 2-token
+/// forward as prompt processing costs ~1.5x. 32 sits at the last width with a
+/// measured margin.
+///
+/// Prompt chunks (`inference.prefill_chunk_tokens`, 128 by default) stay on the
+/// global pool, which is what the prefill measurements behind `cpu_pools` were
+/// taken on.
+const DECODE_SHAPED_MAX_TOKENS: usize = 32;
 
 /// Is the machine currently too hot? Observed by [`super::thermal`] and reported
 /// to the user; it does NOT narrow the pools.

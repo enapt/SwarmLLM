@@ -1193,6 +1193,27 @@ fn attention_query_block(q_len: usize, k_len: usize, heads: usize) -> usize {
     budgeted.clamp(1, q_len.max(1))
 }
 
+/// Should this attention call read the KV cache at its stored width rather than
+/// expanding it with `repeat_kv`?
+///
+/// Yes whenever the score matrix fits in one pass — see the call site in
+/// [`standard_attention`]. Blocked calls keep the expanded path because the
+/// blocking loop slices the query axis, and under grouping that axis carries
+/// repeats and positions interleaved, so a block boundary would cut a query
+/// position's rows across two passes.
+fn grouping_applies(q_len: usize, k_len: usize, n_head: usize) -> bool {
+    if q_len == 1 {
+        return true;
+    }
+    if matches!(
+        std::env::var("SWARMLLM_GROUPED_GQA_DECODE_ONLY").as_deref(),
+        Ok("1")
+    ) {
+        return false;
+    }
+    attention_query_block(q_len, k_len, n_head) >= q_len
+}
+
 /// Standard O(n^2) matmul attention with optional causal mask.
 /// Input/output layout: BHSD `(b, n_head, seq, head_dim)`.
 /// Supports optional Gemma 2 attention logit soft-capping.
@@ -1240,11 +1261,26 @@ pub(crate) fn standard_attention(
     // head `h` belongs to group `h / n_rep` — which is the layout a contiguous
     // reshape produces.
     //
-    // Restricted to `q_len == 1` deliberately. Measured on this model,
-    // attention is 46.4% of a decode step but only 10.0% of prefill (which is
-    // 83.8% quantized matmul), so the decode case is where nearly all of the
-    // win is, and it is the case where the mask is a single row and the
-    // grouping is unambiguous. Prefill keeps the existing path.
+    // It was restricted to `q_len == 1` on the grounds that decode is where
+    // nearly all of the win is. That is true of the win, and it left a hole:
+    // EVERY `q_len == 1` fast path is gated on the same predicate, so a
+    // two-token forward loses this grouping, the single-position decode kernel
+    // AND the narrow thread pool at once, and falls into the prefill-shaped
+    // path all together. Measured 2026-08-23 on llama-3.2-3b at ~912 KV, a
+    // 2-token forward cost 7.8x a 1-token one — for one extra token — with
+    // attention alone going 8.5 ms -> 241 ms. That is the shape a speculative
+    // verify has, and the shape the last chunk of a prompt has whenever its
+    // length is not a multiple of the chunk size, so it is not hypothetical.
+    //
+    // The gate is now "whenever the score matrix would not have been blocked
+    // anyway", which covers decode, speculative widths and ordinary prefill
+    // chunks. It allocates no more than the unblocked path it replaces: the
+    // grouped score tensor `[b, n_kv_head, n_rep * q_len, kv_len]` holds
+    // exactly the elements `[b, n_head, q_len, kv_len]` does. Longer query
+    // blocks still take the blocked `repeat_kv` path below, which is unchanged.
+    //
+    // `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1` restores the old gate for A/B inside
+    // one binary.
     let n_rep = n_head / n_kv_head;
     // Single-position decode on the CPU: a purpose-built kernel over the cache
     // in its stored layout. The two batched matmuls below cost 1.3 ms per
@@ -1265,8 +1301,8 @@ pub(crate) fn standard_attention(
             return Ok(out);
         }
     }
-    if n_rep > 1 && q.dim(2)? == 1 {
-        return grouped_gqa_decode_attention(
+    if n_rep > 1 && grouping_applies(q.dim(2)?, k.dim(2)?, n_head) {
+        return grouped_gqa_attention(
             q,
             k,
             v,
@@ -1334,20 +1370,31 @@ pub(crate) fn standard_attention(
     Tensor::cat(&parts, 2)
 }
 
-/// Single-token GQA attention that reads the KV cache at its stored width.
+/// GQA attention that reads the KV cache at its stored width, for any query
+/// length.
 ///
 /// See the comment at the call site in [`standard_attention`] for why this
 /// exists. The arithmetic is the same as the expanded path — same operands in
 /// the same order, only arranged so the shared K/V are visited once per group
 /// instead of once per query head.
 ///
-/// The mask is broadcast to the grouped row count rather than left at one row.
-/// All `n_rep` rows are the same query position so they take the same mask row,
-/// and handing the fused softmax a `[n_rep, kv_len]` block keeps it on its fast
-/// path — it declines a mask whose shape does not line up and falls back to the
-/// unfused composition, which is what this is trying to avoid paying.
+/// **The row ordering is the whole correctness argument.** `q` is
+/// `[b, n_head, q_len, d]` contiguous, and `repeat_kv` numbers heads
+/// group-major, so query head `h` belongs to group `h / n_rep`. Reshaping to
+/// `[b, n_kv_head, n_rep * q_len, d]` therefore puts the row for
+/// (repeat `r`, position `t`) at index `r * q_len + t`. Get that mapping
+/// backwards and every head reads another group's cache while still producing
+/// plausible logits, which is why `grouping_query_heads_matches_expanding_kv_heads`
+/// compares against the expanded path rather than asserting shapes.
+///
+/// The mask is tiled to match: row `r * q_len + t` must see mask row `t`, so a
+/// `[q_len, kv_len]` mask broadcasts to `[n_rep, q_len, kv_len]` and flattens.
+/// For `q_len == 1` that reduces to the single-row broadcast this function did
+/// when it only served decode. Handing the fused softmax a mask block whose
+/// shape lines up keeps it on its fast path — it declines one that does not and
+/// falls back to the unfused composition, which is what this avoids paying.
 #[allow(clippy::too_many_arguments)]
-fn grouped_gqa_decode_attention(
+fn grouped_gqa_attention(
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
@@ -1357,12 +1404,12 @@ fn grouped_gqa_decode_attention(
     n_kv_head: usize,
     attn_logit_softcap: Option<f32>,
 ) -> CandleResult<Tensor> {
-    let (b, _, _, d) = q.dims4()?;
+    let (b, _, q_len, d) = q.dims4()?;
     let n_rep = n_head / n_kv_head;
 
     // `q` arrives via reshape/transpose and is generally strided; the regroup
     // is a reinterpretation of the head axis, so it has to be contiguous first.
-    let qg = q.contiguous()?.reshape((b, n_kv_head, n_rep, d))?;
+    let qg = q.contiguous()?.reshape((b, n_kv_head, n_rep * q_len, d))?;
     let kt = k.t()?;
     let v = v.contiguous()?;
 
@@ -1370,12 +1417,22 @@ fn grouped_gqa_decode_attention(
         None => None,
         Some(m) => {
             let kv_len = k.dim(2)?;
-            Some(m.broadcast_as((n_rep, kv_len))?.contiguous()?)
+            // A 2D `[q_len, kv_len]` mask broadcasts over the repeat axis and
+            // flattens to `[n_rep * q_len, kv_len]`, matching the row order
+            // above. A mask that is already 4D is left to broadcast on its own.
+            match m.rank() {
+                2 => Some(
+                    m.broadcast_as((n_rep, q_len, kv_len))?
+                        .reshape((n_rep * q_len, kv_len))?
+                        .contiguous()?,
+                ),
+                _ => Some(m.contiguous()?),
+            }
         }
     };
 
     let out = attention_scores_block(&qg, &kt, &v, mask_g.as_ref(), head_dim, attn_logit_softcap)?;
-    out.reshape((b, n_head, 1, d))
+    out.reshape((b, n_head, q_len, d))
 }
 
 /// One block of [`standard_attention`] — the original body, over whatever
@@ -2774,47 +2831,70 @@ mod blocked_attention_tests {
             Tensor::from_vec(data, (b, h, s, d), &dev).unwrap()
         };
         for (n_head, n_kv_head) in [(24usize, 8usize), (8, 2), (12, 4)] {
-            let head_dim = 16;
-            let k_len = 37;
-            let q = mk(1, n_head, 1, head_dim, 0.0);
-            let k = mk(1, n_kv_head, k_len, head_dim, 1.3);
-            let v = mk(1, n_kv_head, k_len, head_dim, 2.9);
-            // A decode mask: one row, everything visible. Included rather than
-            // passing None so the broadcast-to-grouped-rows path is exercised.
-            let m = Tensor::from_vec(vec![0.0f32; k_len], (1, k_len), &dev).unwrap();
+            // 1 is decode; 2/4/8 are speculative-verify widths; 33 is a short
+            // prompt chunk and is deliberately not a multiple of anything.
+            for q_len in [1usize, 2, 4, 8, 33] {
+                let head_dim = 16;
+                let k_len = 37 + q_len;
+                let q = mk(1, n_head, q_len, head_dim, 0.0);
+                let k = mk(1, n_kv_head, k_len, head_dim, 1.3);
+                let v = mk(1, n_kv_head, k_len, head_dim, 2.9);
 
-            // Grouped path (what `standard_attention` now takes for q_len == 1).
-            let grouped =
-                standard_attention(&q, &k, &v, Some(&m), head_dim, n_head, n_kv_head, None)
+                // A REAL offset-causal mask, not a permissive one. With every
+                // entry visible, a mask tiled in the wrong order — repeats and
+                // positions transposed — computes the same answer and the test
+                // passes while the kernel is wrong. The mask is the only thing
+                // that distinguishes row `r * q_len + t` from row `t * n_rep + r`,
+                // so it has to actually mask something.
+                let offset = k_len - q_len;
+                let mdata: Vec<f32> = (0..q_len)
+                    .flat_map(|i| {
+                        (0..k_len).map(move |j| {
+                            if j > offset + i {
+                                f32::NEG_INFINITY
+                            } else {
+                                0.0
+                            }
+                        })
+                    })
+                    .collect();
+                let m = Tensor::from_vec(mdata, (q_len, k_len), &dev).unwrap();
+
+                // Grouped path — what `standard_attention` takes whenever the
+                // score matrix fits in one pass.
+                let grouped =
+                    standard_attention(&q, &k, &v, Some(&m), head_dim, n_head, n_kv_head, None)
+                        .unwrap();
+
+                // Expanded path, written out explicitly — the previous behaviour.
+                let n_rep = n_head / n_kv_head;
+                let ke = candle_transformers::utils::repeat_kv(k.clone(), n_rep).unwrap();
+                let ve = candle_transformers::utils::repeat_kv(v.clone(), n_rep)
+                    .unwrap()
+                    .contiguous()
                     .unwrap();
+                let expanded =
+                    attention_scores_block(&q, &ke.t().unwrap(), &ve, Some(&m), head_dim, None)
+                        .unwrap();
 
-            // Expanded path, written out explicitly — the previous behaviour.
-            let n_rep = n_head / n_kv_head;
-            let ke = candle_transformers::utils::repeat_kv(k.clone(), n_rep).unwrap();
-            let ve = candle_transformers::utils::repeat_kv(v.clone(), n_rep)
-                .unwrap()
-                .contiguous()
-                .unwrap();
-            let expanded =
-                attention_scores_block(&q, &ke.t().unwrap(), &ve, Some(&m), head_dim, None)
-                    .unwrap();
-
-            assert_eq!(
-                grouped.dims(),
-                expanded.dims(),
-                "shape ({n_head},{n_kv_head})"
-            );
-            let a = grouped.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-            let b = expanded.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-            let worst = a
-                .iter()
-                .zip(&b)
-                .map(|(x, y)| (x - y).abs())
-                .fold(0.0f32, f32::max);
-            assert!(
-                worst < 1e-5,
-                "grouped GQA diverges from expanded at ({n_head},{n_kv_head}): worst {worst}"
-            );
+                assert_eq!(
+                    grouped.dims(),
+                    expanded.dims(),
+                    "shape ({n_head},{n_kv_head}) q_len={q_len}"
+                );
+                let a = grouped.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+                let b = expanded.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+                let worst = a
+                    .iter()
+                    .zip(&b)
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    worst < 1e-5,
+                    "grouped GQA diverges from expanded at ({n_head},{n_kv_head}) \
+                     q_len={q_len}: worst {worst}"
+                );
+            }
         }
     }
 

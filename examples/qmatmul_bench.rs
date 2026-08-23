@@ -105,23 +105,29 @@ fn pool_sweep() {
         .collect();
     BlockQ4K::from_float(&src, &mut rhs);
     println!("\n  rayon pool size sweep (k={k}, n={n})");
-    println!(
-        "      {:>6}  {:>12}  {:>12}",
-        "threads", "m=1 ms", "m=128 ms"
-    );
+    // Widths 2..16 are the speculative-verify shapes. They are here because
+    // `in_phase_pool` has to decide which of them are decode-shaped (narrow
+    // pool) rather than prompt-shaped (global pool), and that boundary is a
+    // property of the machine's memory system, not something to guess.
+    let widths = [1usize, 2, 4, 8, 16, 32, 128];
+    print!("      {:>7}", "threads");
+    for m in widths {
+        print!("  {:>9}", format!("m={m}"));
+    }
+    println!();
     for threads in [2usize, 4, 6, 8, 16] {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .unwrap();
         let mut row = Vec::new();
-        for m in [1usize, 128] {
+        for m in widths {
             let lhs: Vec<f32> = (0..m * k)
                 .map(|i| ((i % 89) as f32 - 44.0) / 44.0)
                 .collect();
             let mut dst = vec![0f32; m * n];
             pool.install(|| matmul((m, k, n), &lhs, &rhs, &mut dst).unwrap());
-            let reps = if m == 1 { 30 } else { 5 };
+            let reps = if m <= 16 { 30 } else { 5 };
             let mut best = f64::INFINITY;
             for _ in 0..5 {
                 let t = std::time::Instant::now();
@@ -134,7 +140,11 @@ fn pool_sweep() {
             }
             row.push(best);
         }
-        println!("      {threads:>6}  {:>12.3}  {:>12.2}", row[0], row[1]);
+        print!("      {threads:>7}");
+        for v in &row {
+            print!("  {v:>9.3}");
+        }
+        println!();
     }
 }
 
