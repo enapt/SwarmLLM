@@ -462,11 +462,28 @@ So the storage-layout change, the loss of the bit-exactness assertion, the
 load-time repack cost and the `gather_rows`/dequantize/GPU fallout would be paid
 for roughly 1.2x, not 1.8x.
 
-**If anyone still wants it, measure the ceiling FIRST and cheaply**: hoist the
-q8 loads out of the row loop in the existing kernel so they are reused across
-rows (numerically wrong, but it prices what the loads cost) and compare. If that
-does not show ~20%, the repack cannot either, and the whole project is answered
-in an afternoon instead of a week.
+**The ceiling was measured, not just counted.** The q8 loads were hoisted out of
+the row loop so all four rows reuse row 0's activation vectors — numerically
+wrong (the bench's exactness assert catches it at exactly m=4, where R=4
+engages, which is the assert doing its job) but it prices precisely what those
+loads cost. Back to back on this box, attn proj Q4_K (k=3072, n=3072), ms:
+
+```text
+      m      real kernel   loads hoisted   ratio
+      4          1.32          1.20        1.10x
+      8          1.80          1.30        1.38x
+    128          6.12          4.95        1.24x
+    896         41.68         32.83        1.27x
+```
+
+**1.24-1.27x at the shapes production uses**, against an op count that predicted
+1.23x — two independent methods agreeing. And that is the CEILING: it removes
+the activation loads entirely, where an 8-column interleave still pays 1/8 of
+them plus the repack, the layout change and the lost exactness assertion.
+
+Run-to-run spread on this bench is ~14%, so read the ratio as "well under 1.4x,
+nowhere near 1.8x" rather than as three significant figures. The conclusion does
+not depend on the precision: the project is not worth its cost.
 
 ### Q4_K block-interleaved repack: the traps llama.cpp hit (2026-08-23)
 
