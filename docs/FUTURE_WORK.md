@@ -238,6 +238,41 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### A request that carries tools gets no streaming at all (2026-08-23)
+
+Measured on llama-3.2-3b, identical prompt, `stream: true`, counting content
+deltas actually delivered to the client:
+
+```text
+  without tools    40 deltas
+  with tools        1 delta
+```
+
+`streaming.rs` appends every token to `buffered` when `tools_requested` and
+flushes once at the end, because a local model can only express a tool call as
+text and `parse_tool_calls` needs the whole reply to recognise one. So every
+agentic client — which is every client that sends `tools`, including Claude Code
+and the coding agents users actually run — gets a single delta at the end. The
+request still works; it just does not stream, which is the one thing the client
+asked for.
+
+**Why it is not a one-line fix.** The obvious guard ("if the text does not start
+with `{`, it cannot be a tool call, so stream freely") is wrong here on purpose:
+`parse_tool_calls` deliberately supports a call EMBEDDED after prose, and the
+non-streaming path DISCARDS that prose when it finds one (`content: null` with
+`tool_calls`, per OpenAI). Streaming the prose first and then discovering a call
+would deliver text the non-streaming path would have thrown away, so the two
+surfaces would disagree about the same reply.
+
+Options, none free: (a) stream once a bounded lookahead shows no tool-call
+marker, accepting that a late call means the client saw prose the non-streaming
+path would have dropped; (b) keep buffering but emit periodic keepalives so the
+client can distinguish "thinking" from "hung"; (c) decide that content plus
+tool_calls together is the honest answer and change the non-streaming path to
+match. (c) is the only one that leaves the two surfaces agreeing, and it is a
+deliberate change to what a tool-calling reply looks like — worth a decision
+rather than a patch.
+
 ### Two prefill hypotheses MEASURED AND FALSIFIED (2026-08-23)
 
 Both looked plausible from the numbers and neither survived contact with a
