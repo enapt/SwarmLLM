@@ -44,9 +44,16 @@ fn eligible(exec: &PipelineExecutor) -> bool {
     if cfg.draft_model_path.is_some() {
         return false;
     }
-    if exec.request.sampling_params.temperature != 0.0 {
-        return false;
-    }
+    // Temperature is deliberately NOT a condition. It was one, because this path
+    // took the target's raw argmax and a draft compared against an argmax
+    // verifies nothing once sampling is on. It now samples every position through
+    // the real sampler and keeps a draft only on a match, which IS the
+    // speculative-sampling rejection rule for a draft with no distribution
+    // behind it — see `speculative::sampled_accept_reject`.
+    //
+    // The gate mattered: no client asks for greedy by default (0.7 on the
+    // OpenAI surface, 1.0 on the Anthropic one), so peer-served requests never
+    // reached this path at all.
     if exec.assignment.segments.is_empty() {
         return false;
     }
@@ -235,7 +242,15 @@ impl PipelineExecutor {
                     finish_reason = "stop".into();
                     break;
                 }
-                let bonus = super::speculative::argmax(&spec_logits[0]);
+                // Sample, not argmax: this is an ordinary decode step that
+                // happens to have gone through the verify wire, and it must
+                // honour the same sampling parameters every other step does.
+                let (_, bonus, _) = super::speculative::sampled_accept_reject(
+                    &[],
+                    &spec_logits,
+                    &self.request.sampling_params,
+                    &generated,
+                );
                 last_token = bonus;
                 generated.push(bonus);
                 current_pos += 1;
@@ -306,8 +321,12 @@ impl PipelineExecutor {
                 break;
             }
 
-            let (accepted, bonus, _all) =
-                super::speculative::greedy_accept_reject(&drafts, &spec_logits);
+            let (accepted, bonus, _all) = super::speculative::sampled_accept_reject(
+                &drafts,
+                &spec_logits,
+                &self.request.sampling_params,
+                &generated,
+            );
             let mut emitted: Vec<u32> = accepted
                 .iter()
                 .copied()

@@ -1565,6 +1565,29 @@ sharply peaked — and ran 1.79-1.90 s -> 0.58-0.69 s. An open-ended reply at th
 same temperature accepted nothing and `SpecBackoff` suppressed 62 of 80 rounds,
 which is the correct outcome rather than a failure.
 
+**The DISTRIBUTED n-gram path carried the same gate for the same wrong reason**,
+and it was fixed the same way — but note the mechanism differed. It took the
+target's raw `argmax` (`greedy_accept_reject`), which ignores temperature, top-k,
+top-p AND the repetition penalties, so there the gate was correct for the
+implementation. `speculative::sampled_accept_reject` samples every position
+through the real sampler instead; at temperature 0 with no penalties it
+reproduces the argmax decision exactly (pinned by
+`at_temperature_zero_it_agrees_with_the_argmax_it_replaces`), so nothing already
+using it changes. It also closed a routing-dependent difference: penalties
+always applied on the local worker and never across peers, so the same request
+got a different answer depending on where it ran.
+
+**The peer-supplied non-finite guard is not optional and must survive any change
+of sampler.** These logits come from another node, and NaN comparisons are
+non-deterministic in `argmax`, so a malicious segment could otherwise steer which
+drafts are accepted. Both helpers reject the whole round, and a test asserts they
+agree on that verdict so the two cannot drift.
+
+**Draft-MODEL paths (`speculative.rs`'s main loop, `dsd.rs`) stay greedy-only on
+purpose.** A draft model has a real distribution `q`, so doing this properly
+needs `min(1, p/q)` and a residual built from both — a different algorithm, not
+this one. The rule here works only because an n-gram draft is a point mass.
+
 Three things a change here must keep:
 
 - **It runs on the sequential loop only, and only when the worker is otherwise

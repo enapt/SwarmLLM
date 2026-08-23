@@ -708,6 +708,80 @@ pub(super) fn greedy_accept_reject(
     (accepted, bonus, all_accepted)
 }
 
+/// Accept-reject for a DRAFT THAT CARRIES NO DISTRIBUTION, honouring the
+/// caller's sampling parameters.
+///
+/// An n-gram draft proposes a token with no probability behind it — `q = δ_x` —
+/// and speculative sampling then reduces to: accept with probability
+/// `min(1, p(x)/q(x)) = p(x)`, otherwise draw from the residual
+/// `norm((p − q)₊)`, i.e. `p` with `x` removed and renormalised. "Draw `t ~ p`;
+/// keep the draft iff `t == x`" has exactly those two branches, so sampling each
+/// position through the real sampler and keeping a match IS that rule — at any
+/// temperature, with no separate machinery.
+/// `accepting_only_on_a_match_preserves_the_sampled_distribution` in
+/// `inference::sampling` pins it, with a control that fails if the metric could
+/// not detect a bias.
+///
+/// **Why this exists beside `greedy_accept_reject`.** That one takes the raw
+/// argmax, which ignores temperature, top-k, top-p AND the repetition
+/// penalties. It is correct for the paths that are greedy-only by construction
+/// (a draft MODEL needs the draft's own probabilities to do this properly, which
+/// is a different algorithm), but it meant the same request got a different
+/// answer depending on whether it was served locally or across peers — the local
+/// worker has always sampled properly. It also meant n-gram speculation could
+/// only ever run at temperature 0, which is not what any client asks for: the
+/// OpenAI surface defaults to 0.7 and the Anthropic one to 1.0.
+///
+/// `generated` is the history the penalties apply against, and it grows as
+/// drafts are accepted, so each position sees what it would have seen had the
+/// tokens been produced one at a time.
+///
+/// The non-finite guard is NOT optional and is the reason this cannot simply
+/// call the sampler in a loop: a peer supplies these logits, and NaN comparisons
+/// are non-deterministic, so a malicious segment could otherwise steer which
+/// tokens get accepted. Same treatment as the greedy sibling — reject the whole
+/// round.
+pub(super) fn sampled_accept_reject(
+    drafts: &[u32],
+    spec_logits: &[Vec<f32>],
+    params: &crate::types::SamplingParams,
+    generated: &[u32],
+) -> (Vec<u32>, u32, bool) {
+    let nonfinite = spec_logits
+        .iter()
+        .take(drafts.len() + 1)
+        .any(|row| row.iter().any(|v| !v.is_finite()));
+    if nonfinite {
+        return (Vec::new(), 0, false);
+    }
+    let vocab = spec_logits.first().map(|r| r.len()).unwrap_or(0);
+    let mut ctx = crate::inference::sampling::SamplingContext::new(vocab);
+    let mut history: Vec<u32> = generated.to_vec();
+    let mut accepted: Vec<u32> = Vec::with_capacity(drafts.len());
+    let mut bonus: u32 = 0;
+    for (i, &q) in drafts.iter().enumerate() {
+        let mut row = spec_logits[i].clone();
+        let pick = crate::inference::sampling::sample_token_with_history(
+            &mut row, params, &history, &mut ctx,
+        );
+        if pick == q {
+            accepted.push(q);
+            history.push(q);
+        } else {
+            bonus = pick;
+            break;
+        }
+    }
+    let all_accepted = accepted.len() == drafts.len();
+    if all_accepted {
+        let mut row = spec_logits[drafts.len()].clone();
+        bonus = crate::inference::sampling::sample_token_with_history(
+            &mut row, params, &history, &mut ctx,
+        );
+    }
+    (accepted, bonus, all_accepted)
+}
+
 // ─── Draft-model driver (llama-cpp) ────────────────────────────────────────
 
 #[cfg(feature = "llama")]
@@ -991,4 +1065,89 @@ pub(super) fn draft_sync_after_round(
     Err(SwarmError::Inference(
         "speculative requires llama feature".into(),
     ))
+}
+
+#[cfg(test)]
+mod sampled_accept_reject_tests {
+    use super::{greedy_accept_reject, sampled_accept_reject};
+    use crate::types::SamplingParams;
+
+    fn greedy_params() -> SamplingParams {
+        SamplingParams {
+            temperature: 0.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            ..Default::default()
+        }
+    }
+
+    fn logits(rows: &[&[f32]]) -> Vec<Vec<f32>> {
+        rows.iter().map(|r| r.to_vec()).collect()
+    }
+
+    /// **The compatibility guarantee.** This path shipped greedy-only, so at
+    /// temperature 0 with no penalties the new sampler must reproduce the old
+    /// argmax decision exactly — otherwise switching it changes answers for
+    /// every request that was already using it.
+    #[test]
+    fn at_temperature_zero_it_agrees_with_the_argmax_it_replaces() {
+        let rows = logits(&[
+            &[0.1, 5.0, 0.2], // argmax 1
+            &[7.0, 0.5, 0.3], // argmax 0
+            &[0.0, 0.1, 9.0], // argmax 2
+            &[3.0, 0.2, 0.1], // argmax 0
+        ]);
+        for drafts in [
+            vec![],
+            vec![1u32],
+            vec![1, 0],
+            vec![1, 0, 2],
+            vec![1, 9], // second draft mismatches
+            vec![9],    // first draft mismatches
+        ] {
+            let want = greedy_accept_reject(&drafts, &rows);
+            let got = sampled_accept_reject(&drafts, &rows, &greedy_params(), &[]);
+            assert_eq!(got, want, "drafts {drafts:?}");
+        }
+    }
+
+    /// A peer supplies these logits. NaN comparisons are non-deterministic in
+    /// argmax, so a malicious segment could otherwise steer which drafts are
+    /// accepted — the guard must survive the change of sampler.
+    #[test]
+    fn non_finite_logits_from_a_peer_reject_the_whole_round() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let rows = logits(&[&[0.1, bad, 0.2], &[1.0, 2.0, 3.0]]);
+            let got = sampled_accept_reject(&[1], &rows, &greedy_params(), &[]);
+            assert_eq!(got, (Vec::new(), 0, false), "value {bad}");
+            // Same verdict as the greedy sibling, so the two cannot drift.
+            assert_eq!(got, greedy_accept_reject(&[1], &rows));
+        }
+    }
+
+    /// The behaviour change that comes with sampling properly: repetition
+    /// penalties now apply here. They always applied on the local worker, so
+    /// before this the same request got a different answer depending on whether
+    /// it was served locally or across peers.
+    #[test]
+    fn repetition_penalties_now_reach_this_path() {
+        // Token 1 wins on raw logits, but has been generated already.
+        let rows = logits(&[&[4.0, 5.0, 0.0]]);
+        let mut penalised = greedy_params();
+        penalised.frequency_penalty = 2.0;
+
+        let (_, unpenalised_bonus, _) =
+            sampled_accept_reject(&[], &rows, &greedy_params(), &[1, 1, 1]);
+        let (_, penalised_bonus, _) = sampled_accept_reject(&[], &rows, &penalised, &[1, 1, 1]);
+        assert_eq!(
+            unpenalised_bonus, 1,
+            "without a penalty the raw argmax wins"
+        );
+        assert_ne!(
+            penalised_bonus, 1,
+            "a frequency penalty against an already-generated token must move the pick"
+        );
+        // And the greedy helper it replaces cannot express this at all.
+        assert_eq!(greedy_accept_reject(&[], &rows).1, 1);
+    }
 }
