@@ -555,9 +555,10 @@ impl PipelineExecutor {
         // earned at `SharedState::record_peer_serve`, reached only from the two
         // inbound paths.
 
-        crate::inference::report_stop_truncation(
+        crate::inference::report_short_reply(
             &request_id,
             clean_tokens.len() as u32,
+            self.request.sampling_params.max_tokens,
             matched_stop_seq.as_deref(),
         );
         Ok(InferenceOutput {

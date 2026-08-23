@@ -2927,6 +2927,10 @@ impl ModelProcessPool {
         // Kept for the post-generation stop-marker trim below; `sampling` is
         // moved into the IPC message.
         let stop_sequences = sampling.stop.clone();
+        // Same reason as `stop_sequences`: `sampling` is moved below, and the
+        // short-reply report needs to tell "asked for one token" from "stopped
+        // after one".
+        let requested_max_tokens = sampling.max_tokens;
 
         let gen = IpcGenerate {
             request_id,
@@ -3083,9 +3087,10 @@ impl ModelProcessPool {
         // so a match can sit anywhere in the accumulated text, and the token
         // that completed it is withheld rather than the marker being removed.
         crate::inference::finalize_reply_text(&mut content, &stop_sequences);
-        crate::inference::report_stop_truncation(
+        crate::inference::report_short_reply(
             &request_id,
             completion_tokens,
+            requested_max_tokens,
             matched_stop_sequence.as_deref(),
         );
 

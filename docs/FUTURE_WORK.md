@@ -238,6 +238,39 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### Two prefill hypotheses MEASURED AND FALSIFIED (2026-08-23)
+
+Both looked plausible from the numbers and neither survived contact with a
+controlled measurement. Recorded so nobody re-derives them.
+
+**"128-token prefill chunking costs 2-3x on a GPU."** Production prefill through
+the API measured 716-1198 tok/s while `examples/prefill_bench` held ~2028 tok/s
+one-shot at the same length, and `PrefillPacer` does apply the
+`prefill_chunk_tokens` ceiling (128) even to a solo request with nobody to
+starve — so raising it looked like a 2-3x win. A/B on an isolated GPU node with
+a WARM worker, llama-3.2-3b:
+
+```text
+  prefill_chunk_tokens    ~2370 tok      ~4750 tok
+                   128     1983 tok/s     1852 tok/s
+                   512     1803           1662
+                  2048     1896           1723
+```
+
+No difference — if anything 128 is marginally best, and all three sit at the
+bench's own throughput. The original gap was an artefact of comparing the LIVE
+node (connected to the swarm, several models resident, serving) against an idle
+benchmark. Same error as measuring inside a post-restart window: the arms
+differed by machine state, not by the thing being tested.
+
+**"The prefix cache is not hitting for agentic prompts."** An agent resends the
+same multi-thousand-token system prompt every request, so a miss would dominate
+everything else. Measured, ~4200-token system prompt, `max_tokens: 1` to isolate
+prefill: cold 11.94 s, identical repeat **0.12 s**, same system prompt with a new
+user turn **0.25 s**. It works, including across turns, which is the case that
+matters. Five repeats of a ~5500-token tools request also returned identical
+full answers, so there is no degeneration on a cache hit either.
+
 ### Speculation inside the batched decode scheduler (2026-08-23)
 
 Local draft-free speculation ships on the SEQUENTIAL decode loop only. A

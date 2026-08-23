@@ -163,6 +163,26 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
 /// a genuinely terse reply.
 const STOP_ATE_THE_REPLY_TOKENS: u32 = 2;
 
+/// Did the model end its own turn immediately, well inside the token budget?
+///
+/// No stop sequence matched, so nothing external cut the reply short — the model
+/// emitted end-of-turn at once. That points at the prompt (a chat template from
+/// the wrong family, a rendered prompt that does not end where the model expects
+/// to answer) rather than at sampling.
+///
+/// `max_tokens` is what separates it from a caller who asked for one token and
+/// got exactly one. Warning on that would fire on every deliberate
+/// single-token request, which is how a useful warning becomes noise.
+fn reply_ended_itself_early(
+    completion_tokens: u32,
+    max_tokens: u32,
+    matched: Option<&str>,
+) -> bool {
+    matched.is_none()
+        && completion_tokens <= STOP_ATE_THE_REPLY_TOKENS
+        && completion_tokens < max_tokens
+}
+
 /// Did a stop sequence leave the caller with essentially no reply?
 ///
 /// Split from the logging so the threshold can be tested without capturing log
@@ -171,8 +191,13 @@ pub(crate) fn stop_sequence_ate_the_reply(completion_tokens: u32, matched: Optio
     matched.is_some() && completion_tokens <= STOP_ATE_THE_REPLY_TOKENS
 }
 
-/// Say so when a caller's stop sequence is what ended a reply almost before it
-/// began.
+/// Say why a reply came back with (almost) nothing.
+///
+/// Two causes, and until this existed the node reported neither: a stop sequence
+/// in the request matched immediately, or the model emitted end-of-turn at once.
+/// Both surface to an OpenAI client identically — `finish_reason: "stop"`,
+/// HTTP 200, a blank or one-word answer — and the distinction is exactly what
+/// tells a user whether to look at their client's `stop` array or at the prompt.
 ///
 /// **The OpenAI surface cannot say this in the response.** `finish_reason` is
 /// `"stop"` whether the model chose to end its turn or a stop sequence cut it
@@ -197,13 +222,22 @@ pub(crate) fn stop_sequence_ate_the_reply(completion_tokens: u32, matched: Optio
 /// the time finalisation runs the text no longer contains the stop and there is
 /// nothing left to notice. That was tried, and it silently never fired —
 /// caught by running a request rather than by reading the diff.
-pub(crate) fn report_stop_truncation(
+pub(crate) fn report_short_reply(
     request_id: &uuid::Uuid,
     completion_tokens: u32,
+    max_tokens: u32,
     matched: Option<&str>,
 ) {
-    let Some(stop) = matched else { return };
-    if stop_sequence_ate_the_reply(completion_tokens, matched) {
+    if let Some(stop) = matched {
+        if !stop_sequence_ate_the_reply(completion_tokens, matched) {
+            tracing::debug!(
+                %request_id,
+                completion_tokens,
+                stop_sequence = %stop.escape_debug(),
+                "DIAG: reply ended on a caller-supplied stop sequence"
+            );
+            return;
+        }
         tracing::warn!(
             %request_id,
             completion_tokens,
@@ -212,12 +246,18 @@ pub(crate) fn report_stop_truncation(
              with next to nothing — the caller sees finish_reason \"stop\" and cannot tell that \
              from the model choosing to say nothing; check the `stop` values the client sends"
         );
-    } else {
-        tracing::debug!(
+        return;
+    }
+
+    if reply_ended_itself_early(completion_tokens, max_tokens, matched) {
+        tracing::warn!(
             %request_id,
             completion_tokens,
-            stop_sequence = %stop.escape_debug(),
-            "DIAG: reply ended on a caller-supplied stop sequence"
+            max_tokens,
+            "the model ended its turn immediately, well inside the token budget, and no stop \
+             sequence matched — it emitted end-of-turn straight away. That is usually the prompt \
+             rather than sampling: check the chat template for this model (grep `chat template \
+             failed`) and whether the rendered prompt ends where the model expects to answer"
         );
     }
 }
@@ -439,8 +479,8 @@ mod control_token_strip_tests {
 #[cfg(test)]
 mod finalize_reply_text_tests {
     use super::{
-        emptied_reply_evidence, finalize_reply_text, stop_sequence_ate_the_reply,
-        EMPTIED_REPLY_LOG_CHARS, STOP_ATE_THE_REPLY_TOKENS,
+        emptied_reply_evidence, finalize_reply_text, reply_ended_itself_early,
+        stop_sequence_ate_the_reply, EMPTIED_REPLY_LOG_CHARS, STOP_ATE_THE_REPLY_TOKENS,
     };
 
     fn stops() -> Vec<String> {
@@ -502,6 +542,38 @@ mod finalize_reply_text_tests {
             Some("\nUser:")
         ));
         assert!(!stop_sequence_ate_the_reply(80, Some("\nUser:")));
+    }
+
+    #[test]
+    fn a_caller_who_asked_for_one_token_is_not_a_fault() {
+        // `max_tokens: 1` legitimately yields one token. Warning there would
+        // fire on every deliberate single-token request — the classic way a
+        // useful warning becomes noise and stops being read.
+        assert!(!reply_ended_itself_early(1, 1, None));
+        assert!(!reply_ended_itself_early(0, 0, None));
+        assert!(!reply_ended_itself_early(2, 2, None));
+    }
+
+    #[test]
+    fn a_model_stopping_well_inside_its_budget_is_reported() {
+        // The reported shape: one token out of a hundred asked for, nothing cut
+        // it off, so the model emitted end-of-turn straight away.
+        assert!(reply_ended_itself_early(1, 100, None));
+        assert!(reply_ended_itself_early(0, 100, None));
+    }
+
+    #[test]
+    fn a_stop_match_is_the_other_reports_business() {
+        // When a stop sequence matched, that is the explanation and it is
+        // reported separately — this branch must stay quiet so one event never
+        // produces two different warnings.
+        assert!(!reply_ended_itself_early(1, 100, Some(" tests")));
+    }
+
+    #[test]
+    fn a_full_length_reply_is_not_reported() {
+        assert!(!reply_ended_itself_early(100, 100, None));
+        assert!(!reply_ended_itself_early(64, 100, None));
     }
 
     #[test]
