@@ -328,6 +328,49 @@ the CUDA mirror is GQA-gated for good reason (the MHA null control came out slow
 split is pure overhead — run single-threaded below ~128 KV. Measure with the
 profiler's "attention" bucket per token (`SWARMLLM_PROFILE=1 prefill_bench`).
 
+### Q4_K block-interleaved repack: researched, NOT attempted, and the reasons are not obvious (2026-08-23)
+
+The entry below names llama.cpp's `Q4_K_8x8` repack (PR #12332) as the next step
+for CPU prompt processing, at a reported 1.8-1.9x. Before anyone starts it, read
+what llama.cpp itself found afterwards — issue #12759, "Weight repacking for
+AVX2 block interleaving is very slow and NUMA unfriendly":
+
+- **Repacking at model load took ~20 minutes** for a large Q4_K_M model. That
+  cost lands differently here than in llama.cpp: SwarmLLM loads models into
+  worker subprocesses that are spawned, evicted under VRAM/RAM pressure and
+  respawned, so a load-time transform is paid far more often than once per
+  session. It would need a repacked artefact cached on disk, which means a
+  second copy of every model's weights and a cache-invalidation story.
+- **Token generation got SLOWER** — 1.92 -> 1.63 tok/s on one model, 9.53 ->
+  8.81 on another — and prompt processing regressed ~9% on one of them. The
+  reporter traced it to repacked weights landing in one socket's RAM on a NUMA
+  box, and it disappears when pinned to a single socket. Most SwarmLLM nodes are
+  single-socket consumer machines, so this probably does not apply to them; the
+  point is that the headline number came with a decode regression attached, and
+  decode is where a conversation spends its time.
+
+Three further things specific to this codebase:
+
+- It breaks an invariant we currently rely on. `examples/qmatmul_bench` asserts
+  the tiled kernel is BIT-IDENTICAL to the upstream ordering, and that assertion
+  is what makes the existing multi-row kernels safe to change. An interleaved
+  layout reassociates, so that test would have to become tolerance-based — a
+  real loss of safety, and it should be replaced with something equally strong
+  (e.g. exactness against a reference repack) rather than just loosened.
+- It touches more than the kernel: `QTensor`, the vendored `gather_rows` used by
+  quantized token embedding, `dequantize`, and the CUDA path all read the
+  current layout. The repack must therefore be confined to tensors used as
+  matmul weights, and NOT applied to `token_embd.weight`, which is read by row.
+- **Do not repack on a node that will run the model on its GPU.** Placement is
+  decided by `ModelProcessPool::effective_gpu_layers` at spawn, so the loader
+  knows — but a shared/cached artefact would have to record which layout it is.
+
+Rough verdict: worth doing for CPU-only serving nodes, where prompt processing
+dominates agentic traffic and 1.8x is large. Not worth doing as a
+load-time transform without a disk cache, and not worth doing at all until
+there is a decode A/B on the target machine proving it does not repeat #12759's
+regression. Sources: llama.cpp PR #12332, issue #12759, AVX512 follow-up #12829.
+
 ### CPU prefill: the quantized GEMM is at ~14% of AVX2 int8 peak after the multi-row kernel (2026-08-22)
 
 `vec_dot_rows` (4 rows/pass, bit-identical) + row blocking took llama-3.2-3b
