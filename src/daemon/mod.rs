@@ -607,6 +607,18 @@ impl Daemon {
         shared_state
             .model_process_pool
             .set_prefix_manifest_tx(prefix_manifest_tx);
+        // Opting in publishes a commitment to every prompt this node caches and
+        // serves the prompt tokens themselves on request. That is a reasonable
+        // trade on machines you control and a surprising one otherwise, so it
+        // is said out loud rather than left in a config comment.
+        if shared_state.cfg().inference.share_prefix_cache_with_peers {
+            tracing::warn!(
+                "Prefix-cache sharing is ON: this node announces hashes of the prompts it \
+                 caches to the swarm and serves those prompts' tokens to peers that ask. \
+                 Set inference.share_prefix_cache_with_peers = false to keep prompts on \
+                 this machine."
+            );
+        }
         background::spawn_prefix_announce_forwarder(
             &mut background_tasks,
             shared_state.clone(),

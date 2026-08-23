@@ -130,6 +130,7 @@ booted with.
 | `prefix_cache_block_tokens` | integer | `64` | Block alignment for the chained-hash manifest, and the granularity of a partial hit |
 | `prefix_cache_min_tokens` | integer | `32` | Shortest prefix worth caching |
 | `cross_node_prefix_trust_min` | float | `0.5` | Minimum peer trust score before accepting a prefix-KV snapshot fetched from that peer |
+| `share_prefix_cache_with_peers` | bool | `false` | Offer this node's prompt prefix cache to other nodes. Off by default: turning it on announces hashes of the prompts this node caches to the whole swarm, and serves those prompts' token IDs and key/value cache to any peer that asks. Your own local prefix cache works either way |
 
 ### `[inference]` — speculative decoding
 

@@ -441,6 +441,45 @@ pub struct InferenceConfig {
     /// Prompts shorter than this aren't worth caching. Default 32.
     #[serde(default = "default_prefix_cache_min_tokens")]
     pub prefix_cache_min_tokens: u32,
+    /// Whether this node offers its prompt prefix cache to other nodes.
+    ///
+    /// **Default `false`, and the default is the point.** Sharing a prefix
+    /// cache means two things leave this machine, neither of which a user
+    /// asked for by running a node:
+    ///
+    /// - A `PrefixCacheAnnounce` **broadcast to the whole gossip mesh**,
+    ///   listing BLAKE3 hashes chained over the prompt's token blocks. The
+    ///   gossip seal is derived from `network_id || epoch`
+    ///   (`GossipSealer::derive_epoch_key`), so every node on the same network
+    ///   holds that key — it authenticates the sender, it does not hide the
+    ///   contents from the swarm. A hash of a prompt is a commitment to it:
+    ///   anyone who guesses a system prompt can confirm the guess offline,
+    ///   block by block, without fetching anything.
+    /// - On a matching `PrefixKvFetch`, the snapshot itself — whose
+    ///   `SnapshotHeader.tokens` is the **verbatim prompt token IDs**
+    ///   (`inference::split::prefix_cache`), alongside the per-layer K/V.
+    ///
+    /// The serve gate was membership of `peer_registry`, i.e. any peer we have
+    /// ever authenticated, which on the public swarm is any node that connects.
+    /// Note the asymmetry that made this easy to miss:
+    /// [`Self::cross_node_prefix_trust_min`] guards the *fetch* side, so we
+    /// protected our own cache from a peer's bad K/V and did not protect our
+    /// user's prompts from a bad fetcher.
+    ///
+    /// Meanwhile the dashboard says, unconditionally, "End-to-end encryption is
+    /// on. No peer can read your prompts or outputs." That sentence is true
+    /// with this off and was not true with it on, and a privacy promise that
+    /// depends on a setting nobody was offered is not a promise.
+    ///
+    /// Turning it on is a real speedup where several nodes serve the same
+    /// system prompt, and it is a legitimate thing to want on a network of
+    /// machines you control. It is off until you say so.
+    ///
+    /// A pool-only tier — announce to the devices you invited and nobody else —
+    /// is the natural next step and needs directed sends rather than a
+    /// broadcast; see `docs/FUTURE_WORK.md`.
+    #[serde(default)]
+    pub share_prefix_cache_with_peers: bool,
     /// Item 8 Phase 3: minimum peer trust score to accept a cross-node
     /// prefix-KV fetch from. Peers below this threshold are skipped
     /// entirely at probe-time (no wire round-trip). On a successful
@@ -1086,6 +1125,7 @@ impl Default for InferenceConfig {
             prefix_cache_max_prompt_tokens: default_prefix_cache_max_prompt_tokens(),
             prefix_cache_block_tokens: default_prefix_cache_block_tokens(),
             prefix_cache_min_tokens: default_prefix_cache_min_tokens(),
+            share_prefix_cache_with_peers: false,
             cross_node_prefix_trust_min: default_cross_node_prefix_trust_min(),
             swift_self_speculative: false,
             swift_calibration_tokens: default_swift_calibration_tokens(),

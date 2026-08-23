@@ -83,6 +83,15 @@ privacy_mode = false           # When true, user prompts are NOT written to disk
                                # and SwarmLLM's default pipeline parallelism moves one activation per SEGMENT instead.
                                # Only worth enabling for a large model on a very fast LAN, after measuring.
 # tp_max_latency_ms = 10       # Max peer RTT to admit into a tensor-parallel group (only used when tensor_parallel = true)
+# share_prefix_cache_with_peers = false
+                               # Offer this node's prompt prefix cache to other nodes. OFF by default.
+                               # Turning it on publishes, to the whole swarm, hashes chained over the
+                               # token blocks of every prompt this node caches — a hash of a prompt is a
+                               # commitment to it, so a guessed system prompt can be confirmed against it
+                               # — and serves the prompt's own token IDs, plus its key/value cache, to any
+                               # peer that asks for a block it announced. Worth enabling across machines
+                               # you control, where several nodes share a system prompt. Your own local
+                               # prefix cache is unaffected either way and stays on.
 
 [logging]
 level = "info"                 # trace, debug, info, warn, error

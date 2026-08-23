@@ -271,8 +271,25 @@ impl NetworkManager {
                     Some(nid) => self.shared_state.peer_registry.contains_key(nid),
                     None => false,
                 };
-                if !is_authenticated {
-                    tracing::warn!(%peer, "PrefixKvFetch from unauthenticated peer — rejecting");
+                // Serving this hands over `SnapshotHeader.tokens` — the prompt
+                // itself, as token IDs — so it is gated on the same opt-in as
+                // the announce. Refused with the ordinary empty response rather
+                // than an error, so a scanner cannot tell a refusal from a
+                // cache that simply does not hold that block.
+                let sharing_enabled = self
+                    .shared_state
+                    .cfg()
+                    .inference
+                    .share_prefix_cache_with_peers;
+                if !is_authenticated || !sharing_enabled {
+                    if !is_authenticated {
+                        tracing::warn!(%peer, "PrefixKvFetch from unauthenticated peer — rejecting");
+                    } else {
+                        tracing::debug!(
+                            %peer,
+                            "PrefixKvFetch declined — prefix-cache sharing is off on this node"
+                        );
+                    }
                     let resp = SwarmResponse::PrefixKvData(PrefixKvDataResp {
                         request_id: req.request_id,
                         payload: None,

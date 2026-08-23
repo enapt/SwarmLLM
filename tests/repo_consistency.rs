@@ -2285,3 +2285,65 @@ fn advertised_load_counts_every_kind_of_work() {
         offenders.join("\n")
     );
 }
+
+/// Everything that puts a prompt, or anything derived from one, on the wire
+/// must be gated on `inference.share_prefix_cache_with_peers`.
+///
+/// There are two such paths and they are easy to fix one at a time. The
+/// announce broadcasts BLAKE3 hashes chained over the prompt's token blocks to
+/// the whole gossip mesh; the serve hands back `SnapshotHeader.tokens`, which
+/// is the prompt itself as token IDs. Gating only one leaves the other, and the
+/// two are in different subsystems (`daemon/background.rs` and
+/// `network/manager/requests.rs`) so nothing but this test connects them.
+///
+/// The gate must be read through `cfg()` — the live config — because a user who
+/// turns prompt sharing off expects it to stop, not to stop after a restart.
+/// That is gotcha #281, and a privacy toggle is the worst possible place for it.
+#[test]
+fn nothing_leaves_this_node_with_a_prompt_in_it_unless_sharing_is_on() {
+    let root = repo_root();
+    let sites = [
+        (
+            "src/daemon/background.rs",
+            "PrefixCacheAnnounce broadcast",
+            "SwarmMessage::PrefixCacheAnnounce",
+        ),
+        (
+            "src/network/manager/requests.rs",
+            "PrefixKvFetch serve",
+            "SwarmRequest::PrefixKvFetch",
+        ),
+    ];
+
+    for (rel, what, marker) in sites {
+        let src = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        assert!(
+            src.contains(marker),
+            "{rel}: expected to find {what} ({marker}). If this path moved, move \
+             the gate with it and update this test — do not delete the assertion."
+        );
+        assert!(
+            src.contains("share_prefix_cache_with_peers"),
+            "{rel}: {what} is not gated on inference.share_prefix_cache_with_peers. \
+             This path puts prompt-derived data on the wire and must be opt-in."
+        );
+        assert!(
+            src.contains("cfg().inference.share_prefix_cache_with_peers")
+                || src.contains("cfg()\n                    .inference\n                    .share_prefix_cache_with_peers")
+                || src.contains(".cfg()"),
+            "{rel}: the sharing gate must be read from the LIVE config via cfg(), \
+             not from the boot snapshot — turning a privacy setting off has to take \
+             effect without a restart (gotcha #281)."
+        );
+    }
+
+    // The default is the whole point: a node nobody configured must not publish
+    // anything derived from its user's prompts.
+    let cfg = swarmllm::config::Config::default();
+    assert!(
+        !cfg.inference.share_prefix_cache_with_peers,
+        "prefix-cache sharing must default to OFF — the dashboard tells every user \
+         'No peer can read your prompts or outputs', and that has to be true for \
+         someone who changed no settings."
+    );
+}

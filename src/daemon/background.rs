@@ -549,6 +549,13 @@ pub(super) fn spawn_prefix_announce_forwarder(
                         removed,
                         "DIAG: prefix-cache loopback indexed (self)"
                     );
+                    // The loopback index above is local and always runs — it is
+                    // how THIS node finds its own cached prefixes. What follows
+                    // leaves the machine, and a block hash is a commitment to
+                    // the prompt it was taken from, so it is opt-in.
+                    if !shared_state.cfg().inference.share_prefix_cache_with_peers {
+                        continue;
+                    }
                     let announce = crate::types::PrefixCacheAnnounce {
                         node_id: our_id.clone(),
                         model_id: event.model_id,
