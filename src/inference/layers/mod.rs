@@ -1138,19 +1138,53 @@ pub(crate) fn new_kv_cache(max_seq_len: usize, mirror_for_flash: bool) -> LayerK
 
 /// Whether a model with these head counts should maintain the f16 BSHD mirror.
 ///
-/// **GQA only, because that is exactly where decode uses the flash kernel.** On
-/// MHA the decode path takes `standard_attention` (see
-/// `cuda_decode_prefers_standard`), which reads the f32 cache — so a mirror
-/// there is built and paid for on every token and never read. Measured on
-/// phi-3.5 (MHA 32/32) at 2064 KV, maintaining it unconditionally cost
-/// **39.0-39.8 -> 40.2-43.1 ms/token**, roughly 3-8%: the conversion itself is
-/// tiny, but it is ~8 extra CUDA launches per layer per token for a consumer
-/// that never runs. It also spent 50% more KV memory for nothing.
+/// **GQA only — but no longer for the reason it was written.** The original
+/// rationale was that GQA is where DECODE uses the flash kernel, and MHA decode
+/// takes `standard_attention`, so a mirror there would be built every token and
+/// never read (measured on phi-3.5 MHA at 2064 KV: 39.0-39.8 -> 40.2-43.1
+/// ms/token, 3-8%, plus 50% more KV memory for nothing).
 ///
-/// Prefill takes flash on both, so MHA gives up a smaller prefill gain to avoid
-/// a decode regression — the right trade, since decode is where a conversation
-/// spends its time.
+/// On 2026-08-23 GQA decode moved to `standard_attention` too, which retired
+/// that rationale entirely — the mirror now has NO decode consumer on either
+/// geometry. The predicate is unchanged because it turned out to still be
+/// right, for a different reason, and it was re-measured rather than assumed:
+/// the remaining reader is the WARM-PREFIX flash path — prompt chunks after the
+/// first, which `flash_handles_offset_causal` sends to flash. Without a mirror
+/// each chunk re-converts the whole history to f16, which is O(history) per
+/// chunk and therefore O(n^2) over a prompt.
+///
+/// Re-measured on an RTX 3070, llama-3.2-3b, one 128-token chunk on a warm
+/// prefix, `SWARMLLM_KV_MIRROR` A/B inside one binary:
+///
+/// ```text
+///   prefix    mirror on    mirror off
+///     ~960      77-78 ms      80-82 ms     ~4%
+///     ~2048      82.6 ms       90.1 ms      9%
+///     ~4096      87.1 ms      104.6 ms     20%
+/// ```
+///
+/// The gap WIDENS with context, which is the signature of the quadratic it
+/// removes, and long prompts are exactly the agentic workload. Decode showed no
+/// resolvable difference either way (21.1/21.7 against 20.5/21.6 ms/token — the
+/// arms overlap), so the 50% extra KV memory now buys prefill rather than
+/// decode. That memory is a hard constraint (`kv_bytes_per_token` charges it and
+/// admission refuses on it), so if a future change removes the chunked-prefill
+/// reader as well, this should go to `false` rather than being left standing.
+///
+/// **Re-examine this whenever the decode routing changes.** The predicate is a
+/// stand-in for "does decode read the mirror", and on 2026-08-23 GQA decode
+/// moved to `standard_attention` as well — so the mirror's decode consumer went
+/// away on both geometries and its remaining reader is the warm-prefix flash
+/// path, i.e. prompt chunks after the first. That makes it a genuine trade
+/// rather than free: a chunk keeps an O(history) f16 conversion it would
+/// otherwise repeat, while every decoded token pays the append.
+/// `SWARMLLM_KV_MIRROR=0`/`=1` forces it off/on for an A/B inside one binary.
 pub(crate) fn model_wants_kv_mirror(n_head: usize, n_kv_head: usize) -> bool {
+    match std::env::var("SWARMLLM_KV_MIRROR").as_deref() {
+        Ok("0") => return false,
+        Ok("1") => return true,
+        _ => {}
+    }
     n_head != n_kv_head
 }
 
