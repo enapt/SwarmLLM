@@ -1532,6 +1532,27 @@ Together these were one defect: every CPU decode fast path was gated on
 kernel and the narrow pool at once and cost 7.8x a 1-token forward — for one
 extra token (gotcha #369).
 
+**Validated on a SECOND machine** (2026-08-23), because #367's lesson is that a
+fix measured on one is not measured: an Intel i5-10500T, 6 cores, no GPU — the
+same box whose first run found the .114 calibration defect. It holds there and by
+more, and the cost of a wide forward is LOWER than on the 8-core Ryzen, which is
+what fewer cores predicts (more bandwidth-bound, so extra rows cost less):
+
+```text
+  width   old (i5)   new (i5)   break-even accept
+      2   373/362     148/149    1.10-1.16 of 2
+      4   383/377     171/182    1.47-1.58 of 4
+      8   462/453     242/254    2.10-2.20 of 8
+```
+
+Against 2.5 of 4 on the Ryzen. Decode was unchanged on the i5 (8.08/8.05 against
+7.88/7.75 tok/s, arms overlapping) and prefill gained 1.5-2.9%, consistent in
+direction across both pairings.
+
+**The GPU changes above are still single-machine.** They were measured only on
+the RTX 3070 here; no second card was available. Treat their magnitudes as
+one machine's numbers until a second one confirms them.
+
 ## Local speculative decoding — `inference::model_worker::ngram_spec_eligible`
 
 The single answer to "may this request be speculated?", consulted by BOTH the
