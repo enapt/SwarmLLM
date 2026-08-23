@@ -2589,17 +2589,52 @@ impl SharedState {
         crate::model::shard::ShardStore::new(&self.config.node.data_dir)
     }
 
-    /// Select the best peer from a set of holders based on LAN proximity, latency, and trust.
-    /// Returns the first holder as fallback if no peers are in the registry.
-    pub fn select_best_peer(&self, holders: &[crate::types::NodeId]) -> crate::types::NodeId {
-        let mut scored: Vec<_> = holders
+    /// The single answer to "which peer should this node fetch a shard from?".
+    ///
+    /// Excludes the local node, applies the pool / private-mode scope
+    /// (`pool::scope::allowed_node_set`), then ranks the survivors LAN-first,
+    /// lowest latency, highest trust. Returns `None` when no permitted holder
+    /// remains, so a caller must decide what to do instead — fall through to
+    /// the HuggingFace path, or give up — rather than silently reaching past
+    /// the pool.
+    ///
+    /// **There is deliberately no unscoped variant.** Four call sites picked a
+    /// shard peer and only ONE of them filtered: the manual "Download this
+    /// part" button, the acquisition manager and the P2P retry path all built
+    /// their list straight from `shard_holders`. The retry is the one that
+    /// mattered most — auto-manage's own download path filtered correctly and
+    /// then handed a failure to a retry that did not, so private mode held
+    /// until the first transfer error and not after. Model weights are public,
+    /// so nothing secret leaves the pool, but the node reveals to a stranger
+    /// which model it is interested in, and the config promises to "restrict
+    /// all inference and shard management to pool members only".
+    ///
+    /// Returning `Option` also removes a latent panic: the old signature
+    /// indexed `holders[0]` as its fallback, so an empty slice aborted the
+    /// task. Every caller happened to check first.
+    pub fn select_best_allowed_peer(
+        &self,
+        holders: &[crate::types::NodeId],
+    ) -> Option<crate::types::NodeId> {
+        let local = self.identity.node_id();
+        let allowed = crate::pool::scope::allowed_node_set(self);
+        let permitted: Vec<&crate::types::NodeId> = holders
+            .iter()
+            .filter(|nid| *nid != local)
+            .filter(|nid| match allowed {
+                Some(ref set) => set.contains(*nid),
+                None => true,
+            })
+            .collect();
+
+        let mut scored: Vec<_> = permitted
             .iter()
             .filter_map(|nid| {
-                self.peer_registry.get(nid).map(|p| {
+                self.peer_registry.get(*nid).map(|p| {
                     let is_lan = if p.is_lan_peer { 0u64 } else { 1 };
                     let latency = p.latency_ms.unwrap_or(9999) as u64;
                     let trust = (10000.0 - p.trust_score * 100.0) as u64;
-                    (nid.clone(), is_lan * 100_000 + latency * 100 + trust)
+                    ((*nid).clone(), is_lan * 100_000 + latency * 100 + trust)
                 })
             })
             .collect();
@@ -2607,7 +2642,10 @@ impl SharedState {
         scored
             .first()
             .map(|(nid, _)| nid.clone())
-            .unwrap_or_else(|| holders[0].clone())
+            // A permitted holder we have never had in the peer registry is
+            // still a legitimate target: the caller resolves its PeerId
+            // separately and gives up there if it cannot.
+            .or_else(|| permitted.first().map(|nid| (*nid).clone()))
     }
 
     /// Schedule deferred removal of an acquisition_progress entry after 5 seconds.
@@ -2685,6 +2723,108 @@ impl SharedState {
             return None;
         }
         self.resolve_peer_id_bytes(node_id)
+    }
+}
+
+#[cfg(test)]
+mod shard_peer_scope_tests {
+    use crate::types::NodeId;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    fn test_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use tokio::sync::Mutex;
+
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            identity,
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    fn register(
+        state: &crate::daemon::SharedState,
+        node: &NodeId,
+        latency_ms: u32,
+        is_lan_peer: bool,
+    ) {
+        state.peer_registry.insert(
+            node.clone(),
+            crate::types::PeerInfo {
+                node_id: node.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(latency_ms),
+                trust_score: 0.5,
+                peer_id_bytes: Some(vec![1, 2, 3]),
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer,
+            },
+        );
+    }
+
+    /// Private mode must scope where a shard is fetched FROM, not only where
+    /// inference runs. Before this was a single helper, three of the four
+    /// peer-selection sites built their list straight from `shard_holders`.
+    #[test]
+    fn private_mode_keeps_a_shard_download_inside_the_pool() {
+        let state = test_state();
+        let stranger = NodeId([7u8; 32]);
+        register(&state, &stranger, 20, false);
+
+        // Private mode off: the stranger is a legitimate source.
+        assert_eq!(
+            state.select_best_allowed_peer(std::slice::from_ref(&stranger)),
+            Some(stranger.clone()),
+            "with private mode off any holder may serve the shard"
+        );
+
+        // Private mode on, stranger is not a pool member and LAN is not
+        // admitted: there is no permitted source, so the caller must fall
+        // through to HuggingFace rather than reach past the pool.
+        state.credits.private_mode.store(true, Relaxed);
+        assert_eq!(
+            state.select_best_allowed_peer(std::slice::from_ref(&stranger)),
+            None,
+            "private mode must not fetch a shard from a non-member"
+        );
+    }
+
+    /// The local node is never its own download source, and an empty holder
+    /// list is `None` rather than a panic — the old signature indexed
+    /// `holders[0]`.
+    #[test]
+    fn the_local_node_and_an_empty_list_both_yield_none() {
+        let state = test_state();
+        let local = state.identity.node_id().clone();
+        assert_eq!(state.select_best_allowed_peer(&[]), None);
+        assert_eq!(state.select_best_allowed_peer(&[local]), None);
+    }
+
+    /// Ranking is unchanged for the permitted set: LAN first, then latency.
+    #[test]
+    fn a_lan_holder_still_outranks_a_faster_wan_holder() {
+        let state = test_state();
+        let lan = NodeId([1u8; 32]);
+        let wan = NodeId([2u8; 32]);
+        register(&state, &lan, 900, true);
+        register(&state, &wan, 5, false);
+        assert_eq!(
+            state.select_best_allowed_peer(&[wan, lan.clone()]),
+            Some(lan)
+        );
     }
 }
 

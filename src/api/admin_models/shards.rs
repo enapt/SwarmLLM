@@ -389,18 +389,13 @@ pub async fn download_shard(
         crate::model::check_disk_space(&dest_dir, shard_size)?;
     }
 
-    // Try P2P: find peers who hold this shard
-    let holders: Vec<_> = shared
-        .model_registry
-        .shard_holders(&shard_id)
-        .into_iter()
-        .filter(|n| n != &local_node_id)
-        .collect();
+    // Try P2P: find peers who hold this shard. `select_best_allowed_peer`
+    // drops the local node and anything outside the pool when private mode is
+    // on, so this button cannot reach a stranger the auto-manage scorer would
+    // have refused; `None` falls through to the HuggingFace path below.
+    let holders = shared.model_registry.shard_holders(&shard_id);
 
-    if !holders.is_empty() {
-        // Pick the best peer: LAN first, then lowest latency, then highest trust
-        let target = shared.select_best_peer(&holders);
-
+    if let Some(target) = shared.select_best_allowed_peer(&holders) {
         let peer_id_bytes = shared
             .peer_registry
             .get(&target)

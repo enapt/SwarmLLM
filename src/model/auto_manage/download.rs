@@ -749,24 +749,11 @@ e
                 model_id: candidate.model_id.clone(),
                 index: candidate.shard_index,
             };
-            // Private mode: only download from allowed nodes
-            let allowed_set = crate::pool::scope::allowed_node_set(&self.shared_state);
-            let holders: Vec<_> = self
-                .shared_state
-                .model_registry
-                .shard_holders(&sid)
-                .into_iter()
-                .filter(|n| {
-                    if n == self.shared_state.identity.node_id() {
-                        return false; // Skip self
-                    }
-                    match allowed_set {
-                        Some(ref allowed) => allowed.contains(n),
-                        None => true,
-                    }
-                })
-                .collect();
-            if holders.is_empty() {
+            // Private mode and the self-exclusion both live in
+            // `select_best_allowed_peer` now, so this path and the retry that
+            // follows a failure cannot disagree about who is in scope.
+            let holders = self.shared_state.model_registry.shard_holders(&sid);
+            let Some(target) = self.shared_state.select_best_allowed_peer(&holders) else {
                 tracing::debug!(
                     model = %candidate.model_id,
                     shard = candidate.shard_index,
@@ -787,10 +774,9 @@ e
                     .with_detail_num(candidate.shard_index as i64)
                     .with_toast("warning", 6000));
                 }
-            } else {
-                // Pick the best holder: LAN first, lowest latency, highest trust
-                let target = self.shared_state.select_best_peer(&holders);
-
+                return;
+            };
+            {
                 let peer_id_bytes = self
                     .shared_state
                     .peer_registry

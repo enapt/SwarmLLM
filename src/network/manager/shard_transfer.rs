@@ -59,26 +59,22 @@ impl NetworkManager {
 
         if retry_num <= MAX_P2P_RETRIES {
             // Pick next peer holding this shard, excluding the failed one.
-            let local_nid = self.shared_state.identity.node_id().clone();
             let failed_nid = self.peer_to_node.get(&failed_peer).map(|r| r.clone());
             let other_holders: Vec<_> = self
                 .shared_state
                 .model_registry
                 .shard_holders(&shard_id)
                 .into_iter()
-                .filter(|n| {
-                    if *n == local_nid {
-                        return false;
-                    }
-                    match &failed_nid {
-                        Some(fp) => n != fp,
-                        None => true,
-                    }
+                .filter(|n| match &failed_nid {
+                    Some(fp) => n != fp,
+                    None => true,
                 })
                 .collect();
 
-            if !other_holders.is_empty() {
-                let next_target = self.shared_state.select_best_peer(&other_holders);
+            // The retry is scoped exactly like the first attempt. It used to
+            // pick straight out of `shard_holders`, so private mode held until
+            // a transfer failed and not afterwards.
+            if let Some(next_target) = self.shared_state.select_best_allowed_peer(&other_holders) {
                 if let Some(next_bytes) = self
                     .shared_state
                     .peer_registry

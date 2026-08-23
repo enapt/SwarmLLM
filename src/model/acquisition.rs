@@ -494,22 +494,20 @@ impl AcquisitionManager {
                     break;
                 }
 
-                // Pick the best peer (lowest latency, highest trust)
-                let local_id = self.shared_state.identity.node_id().clone();
-                let non_local: Vec<NodeId> = eligible
-                    .iter()
-                    .filter(|n| **n != local_id)
-                    .cloned()
-                    .collect();
-                if non_local.is_empty() {
+                // Pick the best peer (lowest latency, highest trust). The
+                // helper also drops the local node and, in private mode,
+                // anything outside the pool.
+                let eligible_vec: Vec<NodeId> = eligible.to_vec();
+                let Some(target) = self.shared_state.select_best_allowed_peer(&eligible_vec) else {
                     tracing::warn!(
                         model = %model_id,
                         shard = shard_id.index,
-                        "All holders are local node, cannot self-download"
+                        holders = eligible_vec.len(),
+                        "No permitted peer holds this shard (all local, or outside the pool \
+                         in private mode) — cannot download"
                     );
                     break;
-                }
-                let target = self.shared_state.select_best_peer(&non_local);
+                };
 
                 // Send directed shard transfer request to the target peer.
                 // Resume from any existing partial `.tmp` so we don't truncate
