@@ -36,14 +36,14 @@ pub(super) struct VertexCost {
     /// `2 * latency_ms` for remote peers, 0 for local — multiplied by
     /// `ASSUMED_FORWARD_PASSES` when the segment is entered mid-chain, since the
     /// coordinator round-trips into it per token.
-    network_ms: f32,
+    pub(super) network_ms: f32,
     /// Per-layer cost × layers × `ASSUMED_FORWARD_PASSES`.
-    compute_ms: f32,
+    pub(super) compute_ms: f32,
     /// active_request_count * LOAD_COMPENSATOR_MS.
-    load_ms: f32,
+    pub(super) load_ms: f32,
     /// Reading the prompt: one pass over `prompt_tokens`, linear in them.
     /// Zero when the caller did not say how long the prompt is.
-    prefill_ms: f32,
+    pub(super) prefill_ms: f32,
 }
 
 impl VertexCost {

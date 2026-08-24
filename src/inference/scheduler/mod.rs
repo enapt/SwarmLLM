@@ -547,7 +547,8 @@ impl PipelineScheduler {
         }
 
         // Gather all candidates: nodes that have shards for this model
-        let candidates = self.gather_candidates(&manifest, local_node_id, request_id);
+        let candidates =
+            self.gather_candidates(&manifest, local_node_id, request_id, prompt_tokens);
         if candidates.is_empty() {
             // In private mode, give a specific error showing which shards are missing
             if self
@@ -878,6 +879,7 @@ impl PipelineScheduler {
         manifest: &ModelManifest,
         local_node_id: &NodeId,
         request_id: uuid::Uuid,
+        prompt_tokens: Option<u32>,
     ) -> Vec<NodeCandidate> {
         // Private mode: compute allowed node set (None = unrestricted).
         // R134.7: when `allow_cross_pool_inference` is on and the local pool
@@ -1182,7 +1184,19 @@ impl PipelineScheduler {
         //
         // Once per pipeline assembly, not per token, so it is affordable — the
         // same cost argument the router-choice line already makes.
+        //
+        // The cost is DECOMPOSED, not just totalled. Prefill and decode are
+        // priced separately and scale with different things, so a single number
+        // cannot say why one candidate beat another — and "the winner flipped"
+        // is the only assertion that proves prompt-length routing fired at all.
         for c in &candidates {
+            let whole = parallax::vertex_cost(
+                c,
+                (0, manifest.num_layers),
+                local_node_id,
+                manifest.num_layers,
+                prompt_tokens,
+            );
             tracing::info!(
                 node = %c.node_id,
                 ranges = ?c.available_ranges,
@@ -1193,8 +1207,18 @@ impl PipelineScheduler {
                 est_tokens_per_sec = c.est_tokens_per_sec,
                 observed_ms_per_layer = ?c.observed_latency_ms_per_layer,
                 observed_delegated_ms_per_layer = ?c.observed_delegated_ms_per_layer,
+                observed_prefill_ms_per_layer_byte = ?c.observed_prefill_ms_per_layer_byte,
+                has_gpu = c.has_gpu,
+                max_hostable_layers = ?c.max_hostable_layers,
                 expected_attempts = c.expected_attempts,
                 load = c.load,
+                prompt_tokens = ?prompt_tokens,
+                // Priced over the WHOLE model, so candidates are comparable to
+                // each other even when they offer different ranges.
+                cost_prefill_ms = whole.prefill_ms,
+                cost_compute_ms = whole.compute_ms,
+                cost_network_ms = whole.network_ms,
+                cost_total_ms = whole.total(),
                 "DIAG: pipeline candidate"
             );
         }
