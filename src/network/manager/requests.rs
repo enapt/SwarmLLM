@@ -749,10 +749,119 @@ impl NetworkManager {
                         let manifest_has_hash =
                             shard_info.as_ref().is_some_and(|i| i.hash != [0u8; 32]);
                         if !manifest_has_hash {
-                            tracing::debug!(
+                            // Nothing to check these bytes against — so do not
+                            // accept them on trust.
+                            //
+                            // "No hash available" is not a verdict, and treating
+                            // it as one made this path a PROPAGATION channel: a
+                            // shard taken on trust is recorded as held and
+                            // re-served, so one bad copy becomes several, each
+                            // making the bad copy look more authoritative.
+                            // Measured 2026-08-24 — two independent peers
+                            // serving byte-identical corrupt bytes for the same
+                            // shard, confirmed corrupt against the origin repo
+                            // (gotcha #382).
+                            //
+                            // But the node is NOT out of options: it knows where
+                            // the model came from. Discarding the peer's copy and
+                            // forcing the HuggingFace path fetches the bytes from
+                            // the ORIGIN, and that path hashes what it writes —
+                            // so the shard arrives verified AND the manifest
+                            // gains the real hash, which then spreads by gossip
+                            // (`manifest::merge_known_shard_hashes`) and lets
+                            // later P2P transfers of other shards verify
+                            // normally. The cost is one origin download for a
+                            // model whose hashes nobody knew yet; it is not a
+                            // permanent fallback to HuggingFace.
+                            //
+                            // The peer is deliberately NOT penalised. It may
+                            // have served perfect bytes — we cannot tell, and
+                            // "cannot tell" must not be recorded as either fine
+                            // or as the peer's fault.
+                            // Both halves matter: an origin we know AND a
+                            // fallback that will actually run. The HF fetch is
+                            // performed by the auto-manage loop (woken below via
+                            // `shard_p2p_failed`), which is inert while
+                            // auto-manage is switched off — discarding the
+                            // peer's copy then would replace usable bytes with
+                            // nothing at all.
+                            let origin_fetch_available = self
+                                .shared_state
+                                .models
+                                .hf_sources
+                                .contains_key(&shard_id.model_id)
+                                && self
+                                    .shared_state
+                                    .models
+                                    .auto_manage_enabled
+                                    .load(std::sync::atomic::Ordering::Acquire);
+                            let decision = crate::model::manifest::classify_p2p_shard_acceptance(
+                                manifest_has_hash,
+                                origin_fetch_available,
+                            );
+                            if decision
+                                == crate::model::manifest::P2pShardAcceptance::FetchFromOrigin
+                            {
+                                tracing::warn!(
+                                    model = %shard_id.model_id,
+                                    shard = shard_id.index,
+                                    peer = %peer,
+                                    "No hash to verify this shard against — discarding the \
+                                     peer copy and fetching from the origin instead"
+                                );
+                                let _ = self
+                                    .shard_store
+                                    .delete_shard(&shard_id.model_id, shard_id.index);
+                                // Force the HF path (see shard_transfer.rs's
+                                // exhausted-retries branch, same mechanism), and
+                                // clear the per-shard progress entry so
+                                // `is_shard_in_progress` lets it through.
+                                self.shared_state
+                                    .models
+                                    .shard_p2p_failed
+                                    .insert(shard_id.clone());
+                                if let Some(mut entry) = self
+                                    .shared_state
+                                    .models
+                                    .acquisition_progress
+                                    .get_mut(&shard_id.model_id)
+                                {
+                                    entry.shard_progress.remove(&shard_id.index);
+                                }
+                                self.shared_state.emit_activity(
+                                    crate::daemon::state::ActivityEvent::new(
+                                        "download",
+                                        "shard_download_started",
+                                        format!(
+                                            "Shard {} of {} could not be checked against a known \
+                                             fingerprint — fetching it from the original source \
+                                             instead",
+                                            crate::types::ShardId::display_index_short(
+                                                shard_id.index
+                                            ),
+                                            shard_id.model_id
+                                        ),
+                                    )
+                                    .with_model(shard_id.model_id.0.clone())
+                                    .with_detail_num(shard_id.index as i64)
+                                    .with_detail_str("hf_fallback".to_string()),
+                                );
+                                self.shared_state.models.auto_manage_notify.notify_one();
+                                return;
+                            }
+                            // No origin to fall back to (a model published
+                            // locally by a peer, say). Accepting is the only way
+                            // the model can be acquired at all — refusing here
+                            // was shipped once and soak-caught. The shard is
+                            // UNCHECKED, not verified: the background sweep now
+                            // counts and reports it as such, and verifies it as
+                            // soon as a hash reaches us by gossip.
+                            tracing::warn!(
                                 model = %shard_id.model_id,
                                 shard = shard_id.index,
-                                "Manifest carries no hash for this shard — accepting unverified"
+                                peer = %peer,
+                                "Accepting a shard with no hash and no origin to check it \
+                                 against — it stays unchecked until a hash arrives"
                             );
                         }
                         if let Some(info) = shard_info.filter(|_| manifest_has_hash) {

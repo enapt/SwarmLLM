@@ -238,7 +238,7 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
-### A P2P shard can still be accepted with nothing to verify it against (2026-08-24)
+### A P2P shard accepted with nothing to verify it against — CLOSED (2026-08-24)
 
 **Partly fixed the same day — this entry now covers only what is left.** Found
 on the live node, not reasoned about.
@@ -267,28 +267,37 @@ meaning "verified"**:
    the real hash had arrived. **FIXED**: unchecked shards are counted and
    reported separately, and the "all shards OK" line is no longer emitted when
    any shard had no hash to check against.
-3. **The P2P accept path takes a hash-less transfer on trust** and announces the
-   node as a holder of those bytes. **NOT fixed, deliberately** — see below.
+3. **The P2P accept path took a hash-less transfer on trust** and announced the
+   node as a holder of those bytes — the propagation channel that spread a
+   corrupt shard to at least two peers. **FIXED**: a node is not limited to what
+   its peers tell it. `manifest::classify_p2p_shard_acceptance` is now the single
+   policy — with a hash, verify; with no hash but a reachable origin, discard the
+   peer's copy and fetch that shard from the origin, which supplies trustworthy
+   bytes *and* teaches us the real hash (the HF path hashes what it writes and
+   persists it), which then spreads by gossip so later transfers verify normally.
+   The peer is not penalised: it may have served perfect bytes, and "cannot tell"
+   must be recorded as neither fine nor as the peer's fault.
 
 **What is still open.**
 
-- **The accept path's carve-out stays.** `network/manager/requests.rs` verifies a
-  completed transfer only when the manifest carries a non-zero hash. Enforcing it
-  unconditionally was shipped once and caught in a soak: it quarantines every
-  P2P shard of any model whose manifest lacks hashes, making that model
-  impossible to acquire at all. Since hashes are known only to nodes that hold
-  the shard, a swarm where no single node holds everything has no complete
-  manifest anywhere, so this cannot simply be tightened. Fix 1 makes real hashes
-  far more available (they now accumulate across gossip instead of being
-  destroyed), which narrows the window rather than closing it.
+- **One residual accept-unchecked case, deliberately.** A model with no origin to
+  consult — published locally by a peer — still has its shards accepted without a
+  check, because refusing outright was shipped once and soak-caught: it makes such
+  a model impossible to acquire at all. It is now *reported* as unchecked rather
+  than counted as verified, and gets verified as soon as a hash arrives by gossip.
+  In practice a locally-published model's publisher holds every shard and so
+  publishes real hashes, making this rare.
+- **The origin fallback requires auto-manage to be running.** It is carried out by
+  the auto-manage loop (woken via `shard_p2p_failed`), which is inert when
+  auto-manage is switched off — so the policy asks whether the fetch will actually
+  *happen*, not merely whether an origin exists, and keeps the copy in hand
+  otherwise. Never discard data you cannot replace. Performing the fallback
+  directly, independent of auto-manage, would remove that caveat.
 - **The on-disk manifest still persists placeholders.** The registry now heals
   itself as gossip arrives, but a fresh boot reloads the blank copy, so the
   window reopens until the next gossip round — which is exactly when a queued
   download may land. Persisting the merged manifest is the remaining half.
-- **Gating the announcement is NOT the answer on its own.** Not announcing an
-  unverified shard would stop the bytes being re-served, but for a model whose
-  hashes nobody knows it means nobody ever announces and distribution dies —
-  the soak failure in a different shape.
+
 - **The periodic rescan self-certifies a hash-less shard from its own bytes.**
   `model/auto_manage/scan.rs` computes the BLAKE3 of a local file whose manifest
   entry is a placeholder and writes that in as the hash — on disk, in the DB, and

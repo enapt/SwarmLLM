@@ -250,6 +250,57 @@ impl ModelManifestExt for ModelManifest {
     }
 }
 
+/// What to do with a P2P shard transfer that has just finished arriving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum P2pShardAcceptance {
+    /// The manifest carries a hash — check the bytes against it.
+    Verify,
+    /// No hash to check against, but we know where the model came from.
+    /// Discard the peer's copy and fetch this shard from the origin, which
+    /// both supplies trustworthy bytes and teaches us the real hash.
+    FetchFromOrigin,
+    /// No hash and no origin. Accept, but the shard is UNCHECKED — it must be
+    /// reported as such and verified once a hash reaches us.
+    AcceptUnchecked,
+}
+
+/// The single policy for "may these bytes be accepted, and on what basis?".
+///
+/// **"No hash available" is not a verdict.** Treating it as one turned the
+/// accept path into a corruption PROPAGATION channel: a shard taken on trust is
+/// recorded as held and re-served to other peers, so one bad copy becomes
+/// several, and every extra holder makes it look more authoritative. Measured
+/// 2026-08-24 — two independent peers serving byte-identical corrupt bytes for
+/// one shard, proven corrupt against the origin repo (gotcha #382).
+///
+/// The way out is that a node is not limited to what its peers tell it: it
+/// knows the model's origin. Fetching the shard from there supplies bytes worth
+/// trusting AND the real hash, which then spreads by gossip (see
+/// `merge_known_shard_hashes`) so later transfers verify normally. So the
+/// fallback is self-limiting — one origin download for a model whose hashes
+/// nobody knew yet, not a permanent retreat from P2P.
+///
+/// `AcceptUnchecked` remains for a model with no origin to consult (published
+/// locally by a peer). Refusing outright was shipped once and soak-caught: it
+/// makes such a model impossible to acquire at all.
+///
+/// **`origin_fetch_available` means the fetch will actually HAPPEN, not merely
+/// that an origin exists.** The fallback is carried out by the auto-manage loop
+/// (woken via `shard_p2p_failed`), which does nothing while auto-manage is
+/// switched off — so passing a bare "we know the repo id" there would discard a
+/// perfectly usable copy and replace it with nothing. Never throw away data you
+/// cannot actually replace.
+pub fn classify_p2p_shard_acceptance(
+    manifest_has_hash: bool,
+    origin_fetch_available: bool,
+) -> P2pShardAcceptance {
+    match (manifest_has_hash, origin_fetch_available) {
+        (true, _) => P2pShardAcceptance::Verify,
+        (false, true) => P2pShardAcceptance::FetchFromOrigin,
+        (false, false) => P2pShardAcceptance::AcceptUnchecked,
+    }
+}
+
 /// Adopt shard hashes we already know for shards `incoming` leaves as
 /// placeholders, returning how many were recovered.
 ///
@@ -341,6 +392,25 @@ pub fn build_shard_infos_from_layouts(
 
 #[cfg(test)]
 mod tests {
+    use super::{classify_p2p_shard_acceptance as classify, P2pShardAcceptance as A};
+
+    /// Bytes we cannot check are never simply accepted when the origin is
+    /// reachable — that is what let a corrupt shard spread between peers.
+    #[test]
+    fn an_uncheckable_shard_is_fetched_from_the_origin_instead() {
+        assert_eq!(classify(false, true), A::FetchFromOrigin);
+        // The second argument means the fetch will actually happen. When it
+        // cannot (auto-manage off, so nothing performs the fallback), the copy
+        // in hand is kept rather than discarded for nothing.
+        assert_eq!(classify(false, false), A::AcceptUnchecked);
+        // With a hash present the origin is irrelevant — check locally.
+        assert_eq!(classify(true, true), A::Verify);
+        assert_eq!(classify(true, false), A::Verify);
+        // No hash AND no origin: accepting is the only way such a model can be
+        // acquired, but it must be reported as unchecked, never as verified.
+        assert_eq!(classify(false, false), A::AcceptUnchecked);
+    }
+
     use super::is_backup_artifact_id;
     use crate::types::*;
 
