@@ -844,8 +844,22 @@ pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
         .as_ref()
         .map(|g| g.vram_total_mb)
         .unwrap_or(0);
+    // The LIVE config, not the boot snapshot. `max_gpu_vram_mb` is the escape
+    // hatch for exactly the situation where this matters — a model that does
+    // not fit the default fraction of the card — and reading the startup value
+    // meant raising it in Settings saved, answered "ok", wrote the new number
+    // to disk, and changed nothing until the daemon restarted.
+    //
+    // Measured on this machine 2026-08-24: `max_gpu_vram_mb = 7000` on disk,
+    // the running daemon still reporting a 4095 MB budget, an 8B model needing
+    // 6033 MB refused, and the card 88% empty (832 MB used of 8192). The model
+    // ran on the processor at 1.0 tok/s instead.
+    //
+    // Same lesson as gotcha #281, and the sibling `ram_budget_now` was given
+    // exactly this treatment in August (gotcha #362) while this one was left
+    // on the snapshot.
     shared
-        .config
+        .cfg()
         .resources
         .inference_vram_budget_mb(gpu_total, shared.contribution())
 }

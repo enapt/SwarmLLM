@@ -238,6 +238,64 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### The VRAM budget is a fraction of TOTAL, read from the boot snapshot — measured at 25.7x (2026-08-24)
+
+**The largest measured effect found this session, on real hardware, end to end.**
+
+An 8B model, all nine shards local, on an RTX 3070 laptop:
+
+```text
+  model needs                     6033 MB
+  card free at the time           7187 MB   (832 of 8192 used)
+  daemon's budget                 4095 MB   -> refused
+  -> loaded on the processor      1.00 tok/s
+  -> loaded on the card          25.7 tok/s  (median of 3: 21.88 / 27.97 / 25.72)
+```
+
+**25.7x, from a memory budget, on a card that was 88% empty.**
+
+Two independent causes, both verified:
+
+1. **`compute_vram_budget` read `shared.config.resources` — the BOOT SNAPSHOT.**
+   Setting `max_gpu_vram_mb = 7000` through the API returned `{"status":"ok"}`,
+   wrote the value to `config.toml`, and left the running daemon reporting 4095.
+   It took effect only after a restart. Gotcha #281, in the setting that decides
+   whether a model runs on the card or crawls. **Fixed** — reads `cfg()` now,
+   pinned by `the_vram_budget_is_read_live_like_the_ram_budget_beside_it`.
+   The sibling `ram_budget_now` was given exactly this treatment in August
+   (gotcha #362); this one was left behind.
+
+2. **The budget is a fraction of TOTAL VRAM, not of FREE VRAM.**
+   `vram_fraction_for` is 0.5 / 0.65 / 0.8 by contribution level, so the default
+   gives half the card whatever is or is not on it. **NOT FIXED** — it changes
+   admission semantics globally and wants a deliberate decision.
+
+**The design question in (2), stated properly.** `contribution` is a setting
+about how much of your machine you give the SWARM. It is currently also the cap
+on how much you may use for YOUR OWN request, which is a different question and
+was probably never the intent: the observed behaviour is a user asking their own
+node for an answer, being refused an idle card, and getting a processor at 1/25th
+the speed — while the fallback puts 6 GB into system RAM, which is arguably more
+disruptive to "whatever else the person is doing" than using the idle GPU.
+
+The shape of the fix already exists next door: `ram_budget_now` returns
+`max(70% of available NOW, total/4)` and is consulted at EVERY admission. The
+VRAM equivalent would let an empty card be used fully and back off when a game
+or another workload appears. Care needed on two points — the free figure from
+`nvidia-smi` already includes our own loaded models, so it must not double-count
+against `committed_mb`; and a budget that moves under a running worker must not
+retroactively invalidate an admission it already granted.
+
+**A caution for whoever measures this next, learned the hard way here.** A local
+`cargo build --release --no-default-features --features dev,claude-subscription`
+has **no `cuda` feature**, so the binary reports `Split model using CPU (no CUDA
+available)` and every placement measurement taken with it is meaningless. It
+looks exactly like a placement bug: admission logs `admitting model to GPU`,
+the loader logs `force_cpu=false`, and the worker still lands on `device=Cpu`.
+Check `strings <binary> | grep -c ggml_cuda_init` before believing any
+device-placement result. The released CUDA asset is the only local build that
+can answer this question without a CUDA toolchain build.
+
 ### Splitting a model across the internet is a CAPACITY mechanism being used as a SPEED mechanism (2026-08-24)
 
 **Read this before optimising the distributed path further. It reframes what

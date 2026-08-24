@@ -2347,3 +2347,39 @@ fn nothing_leaves_this_node_with_a_prompt_in_it_unless_sharing_is_on() {
          someone who changed no settings."
     );
 }
+
+/// The VRAM budget decides whether a model runs on the graphics card or crawls
+/// on the processor, so it must be read from the LIVE config.
+///
+/// It was not. `compute_vram_budget` read `shared.config.resources` — the
+/// snapshot taken at startup — so raising `max_gpu_vram_mb` in Settings saved,
+/// answered "ok", wrote the new value to disk, and changed nothing until the
+/// daemon restarted. Measured 2026-08-24 on a machine with 7187 MB of its card
+/// free: config on disk said 7000, the running daemon reported a 4095 MB
+/// budget, and a 6033 MB model was pushed to the processor at 1.0 tok/s.
+///
+/// Its sibling `ram_budget_now` was given exactly this treatment in August
+/// (gotcha #362). The two must not drift apart again.
+#[test]
+fn the_vram_budget_is_read_live_like_the_ram_budget_beside_it() {
+    let root = repo_root();
+    let src = std::fs::read_to_string(root.join("src/model/auto_manage/vram.rs")).expect("vram.rs");
+
+    let start = src
+        .find("pub fn compute_vram_budget")
+        .expect("compute_vram_budget must exist — if it moved, move this test with it");
+    // The body is short; take a generous window and check what it reads from.
+    let body = &src[start..(start + 1600).min(src.len())];
+    let body = &body[..body.find("\n}\n").map(|i| i + 2).unwrap_or(body.len())];
+
+    assert!(
+        body.contains("cfg()"),
+        "compute_vram_budget must read the live config via cfg(), not the boot \
+         snapshot — raising max_gpu_vram_mb has to take effect without a restart"
+    );
+    assert!(
+        !body.contains("shared\n        .config\n        .resources")
+            && !body.contains("shared.config.resources"),
+        "compute_vram_budget still reads shared.config (the boot snapshot)"
+    );
+}

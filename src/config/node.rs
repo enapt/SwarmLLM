@@ -199,8 +199,19 @@ impl ResourceConfig {
     /// Compute the effective VRAM budget for inference model loading.
     ///
     /// - If `max_gpu_vram_mb > 0`: use it as a hard cap.
-    /// - Else if GPU detected (`gpu_vram_total_mb > 0`): use 80% of total.
+    /// - Else if a GPU was detected: use [`vram_fraction_for`] of TOTAL VRAM,
+    ///   which is 0.5 / 0.65 / 0.8 by contribution level — NOT a flat 80%, as
+    ///   this comment claimed until 2026-08-24.
     /// - Else: `None` (CPU-only node, no budget = unlimited).
+    ///
+    /// **This is a fraction of TOTAL, not of FREE, and that has a cost worth
+    /// knowing.** A node on the default contribution level gets half its card
+    /// whatever else is or is not running on it, so an 8 GB card refuses a
+    /// 6 GB model while sitting 88% empty and the request falls to the
+    /// processor — measured at 1.0 tok/s against roughly 15-20 on the card.
+    /// Whether the fraction should instead track free VRAM the way
+    /// `vram::ram_budget_now` tracks free system memory is an open design
+    /// question; see `docs/FUTURE_WORK.md`.
     pub fn inference_vram_budget_mb(
         &self,
         gpu_vram_total_mb: u64,
