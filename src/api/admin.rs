@@ -1045,8 +1045,20 @@ pub async fn update_config(
     // Note: most config changes take effect after daemon restart.
     let config_path = state.config.node.data_dir.join("config.toml");
 
-    // Build a partial config update
-    let mut config = state.config.clone();
+    // Start from the config the daemon is RUNNING, not the one it booted with.
+    //
+    // `state.config` is the boot snapshot. Building the update on top of it
+    // meant every field this request does not mention was reset to whatever it
+    // was at startup — so changing two settings in sequence silently undid the
+    // first, live and on disk, because the second PUT carries only its own
+    // field. The Settings panel sends one section at a time, so this fired on
+    // ordinary use.
+    //
+    // The live config is the accumulated result of every previous apply, which
+    // is exactly the base a partial update needs. Same lesson as gotcha #281,
+    // one level up: that fix taught every READER to use `cfg()` and left the
+    // WRITER building from the snapshot.
+    let mut config: crate::config::Config = (**state.shared_state.cfg()).clone();
 
     if let Some(contribution) = &body.contribution {
         let mode = match contribution.as_str() {

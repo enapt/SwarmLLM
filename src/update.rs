@@ -241,6 +241,26 @@ impl UpdateChecker {
         self
     }
 
+    /// The update settings the daemon is running RIGHT NOW.
+    ///
+    /// `self.config` is the snapshot this checker was constructed with, so
+    /// reading it inside the loop froze the update mode and the check interval
+    /// at whatever they were when the daemon started: changing "Automatic
+    /// updates" in Settings saved, reported success, and changed nothing until
+    /// a restart. That is gotcha #281, and it is worse here than in most places
+    /// because the setting governs whether the machine installs software by
+    /// itself — the direction a user is most likely to want to change in a
+    /// hurry.
+    ///
+    /// Falls back to the constructor snapshot when no shared state is attached,
+    /// which is the case in tests.
+    fn live_update_config(&self) -> crate::config::UpdateConfig {
+        match &self.shared {
+            Some(shared) => shared.cfg().updates.clone(),
+            None => self.config.clone(),
+        }
+    }
+
     /// Check GitHub for a newer release. Returns `Some(UpdateInfo)` if an update is available.
     pub async fn check_for_update(&self) -> Result<Option<UpdateInfo>, SwarmError> {
         tracing::debug!("DIAG: check_for_update starting");
@@ -912,12 +932,16 @@ impl UpdateChecker {
             "Update mode resolved — 'install' is the only value that installs by itself"
         );
         if mode == UpdateMode::Off {
-            tracing::info!("Update checking disabled (updates.mode = \"off\")");
-            return;
+            // Deliberately does NOT return. Returning ended the task, so a user
+            // who started with updates off and later turned them on got nothing
+            // until the next restart — and "off" is exactly the state someone
+            // changes their mind about. The loop below re-reads the mode each
+            // pass and sleeps quietly while it stays off.
+            tracing::info!(
+                "Update checking is off (updates.mode = \"off\") — turning it on in \
+                 Settings takes effect without a restart"
+            );
         }
-
-        let interval =
-            std::time::Duration::from_secs(self.config.check_interval_hours as u64 * 3600);
 
         // Initial check after a short delay (let daemon finish starting)
         tokio::select! {
@@ -928,6 +952,23 @@ impl UpdateChecker {
         }
 
         loop {
+            // Both of these are re-read every pass: a settings change has to
+            // reach a task that sleeps for hours at a time.
+            let live = self.live_update_config();
+            let mode = live.effective_mode();
+            let interval =
+                std::time::Duration::from_secs(live.check_interval_hours.max(1) as u64 * 3600);
+
+            if mode == UpdateMode::Off {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => continue,
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() { return; }
+                        continue;
+                    }
+                }
+            }
+
             match self.check_for_update().await {
                 Ok(Some(info)) => {
                     tracing::info!(

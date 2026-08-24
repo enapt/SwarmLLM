@@ -77,6 +77,18 @@ AFTER=$(curl -s -m 8 -H "Authorization: Bearer $K" "http://localhost:$PORT/api/a
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("total_mb"))' 2>/dev/null)
 [ "$AFTER" = "77777" ]; check "settings apply without restart" $?
 
+# ...and a LATER change must not silently undo an earlier one. The Settings
+# panel sends one section at a time, so a handler that rebuilds the config from
+# the boot snapshot reverts every field the current request happens to omit —
+# live and on disk. Changing a different setting and re-reading the first is the
+# whole reproduction.
+curl -s -m 8 -X PUT -H "Authorization: Bearer $K" -H 'Content-Type: application/json' \
+  "http://localhost:$PORT/api/admin/config" -d '{"contribution": "moderate"}' >/dev/null
+sleep 1
+STILL=$(curl -s -m 8 -H "Authorization: Bearer $K" "http://localhost:$PORT/api/admin/storage/breakdown" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("total_mb"))' 2>/dev/null)
+[ "$STILL" = "77777" ]; check "one setting does not revert another" $?
+
 curl -s -m 8 -X POST -H "Authorization: Bearer $K" "http://localhost:$PORT/api/admin/config/reload" \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if "applied" in d and "restart_required" in d else 1)' 2>/dev/null
 check "reload separates applied/restart" $?
