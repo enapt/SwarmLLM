@@ -21,12 +21,34 @@
 //!
 //! # Correctness
 //!
-//! Greedy speculative decoding is bit-identical to greedy non-spec
-//! decoding by construction: a draft token is only accepted when its
-//! id matches the target's argmax at that position. N-gram lookup
-//! shifts only the DRAFT SOURCE, not the verification — so this path
-//! produces the same output a non-spec greedy decode would on the
-//! same prompt.
+//! This path preserves the SAMPLED DISTRIBUTION, at any temperature. A
+//! draft position is sampled through the real sampler
+//! (`speculative::sampled_accept_reject`) and the draft is kept only
+//! when the sampler independently produced the same token — which IS
+//! the speculative-sampling rejection rule for a draft with no
+//! distribution behind it, since accepting with probability `p(x)` and
+//! otherwise drawing from the renormalised remainder is exactly what
+//! "draw `t ~ p`, keep the draft iff `t == x`" does. N-gram lookup
+//! shifts only the DRAFT SOURCE, not the verification.
+//!
+//! **It is NOT bit-identical to non-speculative decoding** (gotcha
+//! #370), and this comment used to say it was — twice over: it also
+//! described an argmax comparison the code stopped doing when the
+//! greedy-only gate was removed. A verify forward reassociates, so the
+//! logits differ in the last bits even at temperature 0. Describing
+//! this as bit-identical invites someone to hunt a bug in a difference
+//! that is expected.
+//!
+//! # Cost
+//!
+//! Every round asks the pipeline tail for `spec_logits` — a
+//! full-vocabulary f32 vector per position, ~513 KB on a 128k-vocab
+//! model — including a MISS round, which sends one token and gets a
+//! vocabulary back where an ordinary decode step returns a four-byte
+//! token id and can be chained. `payoff_justifies_the_wire` is what
+//! stops a workload that never hits from paying that indefinitely; the
+//! wire shape itself is still wrong for a miss round and is written up
+//! in `docs/FUTURE_WORK.md`.
 
 use crate::error::SwarmError;
 use crate::inference::router::{InferenceOutput, StreamingTokenEvent, StreamingTokenTx};

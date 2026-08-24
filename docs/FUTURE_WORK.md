@@ -320,6 +320,21 @@ never-hitting request), and the verify wire otherwise. Alternatively thread
 `truncate_kv_to` through `forward_through_segments`, which is the tidier fix and
 touches the standard decode loop.
 
+**How often this path actually runs, measured 2026-08-24 — read this before
+ranking the remaining work.** On the live node: **25 completions in 25 days**
+of log (2026-07-30 to 2026-08-24), and `swarm_spec.ngram` at
+`/api/admin/stats` reads `total: 0` for the current process, ~10 hours in.
+So the cost is real per request and the path is RARE, which makes the payoff
+gate cheap insurance rather than a throughput win — do not describe it as one.
+
+Two eligibility gates explain the rarity and were missed on the first pass:
+`eligible` also requires `!fastpath_request_disqualified(exec)` AND a local
+`standalone_tokenizer`, i.e. `gguf_header.bin` on the COORDINATOR's disk. That
+correlates with holding shards, which correlates with holding the tail locally —
+so the remote-tail topology this costs the most on may be rarer still. Note
+`swarm_spec.ngram` is a shipped counter and is the right instrument here; a log
+grep re-derives it less reliably.
+
 **Do not ship either without measuring on a real multi-segment pipeline with a
 REMOTE tail.** That topology is what makes the cost real, and every shipped
 default pushes the tail local (`encrypted_pipeline_auto` on,
@@ -4386,6 +4401,26 @@ more when the network is idle — precisely when generosity costs nothing.
 **Why deferred.** Not what the reporting bug needed — the user's ask was "reducing gpu_layers should reduce VRAM", and `gpu_layers = 0` now genuinely does that, as does the automatic CPU pin after a GPU OOM. Hybrid offload is a performance feature on top. It touches the latency-critical forward path across every architecture, and validating it requires a CUDA build (~56 min) plus per-arch GPU testing. Worth doing when there's a concrete workload that needs a model slightly too big for available VRAM and where CPU-only is too slow to be acceptable.
 
 **Interim workarounds:** shard windows (`ModelProcessPool::restart_with_window`) bound VRAM by loading fewer shards; `gpu_layers = 0` forces CPU; a GPU OOM auto-pins the model to CPU for the rest of the run.
+
+**Re-rated 2026-08-24, and it should now be near the top of this file.** The
+2026-07-22 note above defers this pending "a concrete workload that needs a model
+slightly too big for available VRAM". That workload is the reported one, twice:
+a model refused at 27125 MB, and a model admitted to the CPU that then spent
+396 s on prompt processing with a thermal warning. `force_cpu_for` is
+all-or-nothing, so a model 20% too large for an 8 GB card loses the card
+ENTIRELY — a 20.45 → 0.85 tok/s cliff on this swarm, about 24x, which is the
+single largest measured multiplier in the system.
+
+It is also single-node work needing no protocol change, no additive feature bit
+and no mixed-version story, which is unusual for anything this large here.
+
+A completeness critic on the 2026-08-24 research round named this as the obvious
+idea nobody proposed, and it was right: seven concepts were designed and reviewed
+that round and every one asked "what makes decode faster" rather than "what makes
+a user's request slow". **The answer to the second question is capacity —
+admission, placement and cold start — and a research round framed that way would
+surface a different and probably better list.** Worth remembering when scoping
+the next one.
 
 ---
 

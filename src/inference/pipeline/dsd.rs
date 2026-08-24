@@ -33,10 +33,23 @@
 //!
 //! # Correctness
 //!
-//! Greedy speculative decoding produces output bit-identical to greedy
-//! non-speculative decoding because we only accept draft tokens whose ID
-//! matches the target's argmax at the same position. Regressions show up as
-//! output divergence on a fixed prompt with `temperature=0`.
+//! This path is greedy-only on purpose — a draft MODEL has a real
+//! distribution `q`, so accepting it properly needs `min(1, p/q)` and a
+//! residual built from both, which is a different algorithm from the one the
+//! draft-free n-gram path uses. A draft token is accepted only when its id
+//! matches the target's argmax at the same position
+//! (`speculative::greedy_accept_reject`).
+//!
+//! **That is not the same as being bit-identical to non-speculative decoding,
+//! and this comment used to claim it was** (gotcha #370). A verify forward
+//! computes several positions at once and reassociates, so the logits differ
+//! in their last bits; where two candidates are near-tied that can flip an
+//! argmax and the sampled token with it. Rare, expected, and not a bug.
+//!
+//! So do NOT treat divergence on a fixed prompt at `temperature = 0` as a
+//! regression signal on its own — that advice was here and it points at
+//! behaviour the design permits. A real regression is a distributional one
+//! or a systematic drift, not one token in a long reply.
 
 use crate::error::SwarmError;
 #[cfg(feature = "llama")]
