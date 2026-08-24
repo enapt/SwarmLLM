@@ -238,6 +238,200 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### Splitting a model across the internet is a CAPACITY mechanism being used as a SPEED mechanism (2026-08-24)
+
+**Read this before optimising the distributed path further. It reframes what
+"parallelise inference" means for this system, and it came out of measuring
+rather than reasoning.**
+
+For a single request, adding nodes to a pipeline makes it SLOWER, not faster.
+The stages run in series (`forward_through_segments` is a `while` loop with an
+`.await` inside), every hop adds a round trip, and the slowest node sets the
+pace. Pipeline parallelism buys the ability to run a model no single node could
+hold. It does not buy speed, and on this swarm it costs a great deal of it.
+
+**Measured on the live swarm, 2026-08-24.** A request for meta-llama-3.1-8b from
+the RTX 3070 laptop:
+
+```text
+  routing chose:   layers  0..10  local  (RTX 3070, advertises 30.5 tok/s)
+                   layers 10..32  peer   (CPU only,  advertises 0.86 tok/s)
+
+  model total: 4.92 GB across 9 shards; this node holds 4 of them (2.11 GB)
+  card: 8192 MB total
+```
+
+The 22-layer stage is 69% of the model and sits on a machine roughly 35x slower
+than the one that scheduled it. **The request runs at approximately the speed of
+the slow peer.** Had this node held all nine shards, the same request is a single
+local segment with no network in it at all.
+
+**The whole model fits the card.** 4.92 GB against 8 GB, and the missing five
+shards are 2.8 GB — minutes of download, once. Nothing in the system is trying
+to make that happen.
+
+**Why nothing is trying: the acquisition scorer optimises the wrong quantity.**
+`model::auto_manage::scoring.rs` computes
+
+```text
+  score = model_popularity * regional_rarity * configured_bonus * pin_bonus
+        * vram_fitness * spread_bonus * source_bonus * parallax_bonus + jitter
+```
+
+Every term is about the SWARM's replication health (is this model popular, is it
+rare in this region, is it over-replicated, is it spread) or about whether the
+shard fits locally. **Not one of them asks whether this node is dramatically
+faster than the peers currently holding the shard, and whether holding it would
+remove a slow hop from requests this node actually serves.** `parallax_bonus` is
+the nearest thing and it is about pipeline-coverage stability, not speed.
+
+So the scorer will happily leave 69% of a model on a 0.86 tok/s box while a
+30 tok/s box with free VRAM sits next to it, because from a replication point of
+view the shard is adequately covered. It is: covered badly.
+
+**The proposal: a speed-differential term.** For a shard this node does not hold,
+where the shard would fit and the node is materially faster than the best current
+holder, raise its acquisition score. The inputs all exist —
+`NodeCapability::est_tokens_per_sec_7b` for the holders,
+`mem_bandwidth::measured_gbps` / GPU estimate for us, `vram_fitness` for the fit,
+`ModelRegistry::shard_holders` for who has it. It converts "the swarm has this
+covered" into "the swarm has this covered badly and I can fix it permanently for
+the cost of one download".
+
+**Ranked against the alternatives, on the numbers measured today:**
+
+| lever | measured effect on this case |
+|---|---|
+| consolidate the model onto the fast node | ~35x (0.86 -> ~30 tok/s, no network) |
+| per-layer GPU/CPU hybrid offload | ~24x on the reported refuse-or-crawl cases |
+| pipelined prefill (entry below) | ~1.45x here, bounded by the 10/22 imbalance |
+
+**This is why the pipelining idea below is ranked third rather than first**, and
+the honest reason is the measurement: the ceiling for overlapping a 10/22 split
+is `32/22 = 1.45x`, and stage imbalance is not a routing failure here — it is a
+PLACEMENT failure. The local node cannot take more than 10 contiguous layers
+from zero because it does not hold shards 3, 4, 5, 7 and 8.
+
+**What must not be got wrong if this is built.**
+
+- **A fast node must not hoover up the swarm.** The term needs a cap and must
+  stay multiplicative against `spread_bonus`, or every fast node converges on the
+  same popular models and the swarm loses the diversity that makes it useful.
+  The failure mode is silent and slow.
+- **It must not fight the pruner.** `prune.rs` sheds over-replicated shards; a
+  speed term that re-acquires what the pruner just dropped is a download loop
+  costing gigabytes. Whatever bonus applies to acquisition must apply to
+  retention too, or the two disagree.
+- **"Faster" must mean measured, not advertised.** `est_tokens_per_sec_7b` is
+  self-reported. `PeerSpeed::ranking_ms_per_layer` already enforces "only a
+  figure THIS node measured may rank a peer" and exists for exactly this reason
+  (a stranger's number once priced an RTX 4050 at 13x worse than an i5).
+- **The gain is only real if the node then WINS the routing.** It does not
+  automatically: a node holding every shard takes the local fast path, which is
+  the point, but that is worth re-checking after the placement changes.
+
+**How to prove it, cheaply, before building anything.** Download the five
+missing shards onto the fast node by hand and re-run the same request. The
+prediction is a single local segment and roughly a 30x change in tokens per
+second. That is one afternoon and it settles whether the whole line of work is
+worth anything.
+
+### The pipeline is idle (N-1)/N of the time during the phase that dominates a long request (2026-08-24)
+
+**This is the largest structural inefficiency currently in the system, and the
+machinery to fix it is ~80% already built.**
+
+**The finding, in three verified parts.**
+
+1. **Prefill is 94% of a long request.** Measured today on the live swarm, an
+   8B model, 4504-token prompt: a processor-only peer's cost is 1 159 742 ms of
+   prefill against 74 158 ms of decode. At 11 tokens the same peer is 1.4%
+   prefill. (See the validation entry below.)
+
+2. **The distributed prefill runs one stage at a time.**
+   `distributed.rs::forward_through_segments` is `while idx < num_segments` with
+   an `.await` inside: the WHOLE prompt goes through segment 0, then the whole
+   thing through segment 1, then segment 2. `inference.prefill_chunk_tokens`
+   does not help here — it is worker-local, applied inside a single node by
+   `PrefillPacer`. Across the network there is no chunking at all.
+   So an N-stage pipeline has exactly one stage computing at any instant:
+   **utilisation 1/N, bubble (N-1)/N**, throughout the 94%.
+
+3. **The per-chunk compute primitive already exists on both sides.** The worker
+   does Sarathi-style chunked prefill internally (`PrefillPacer`,
+   `prefill_chunk_tokens` as a ceiling), and R139 already ships wire chunking
+   (`pipeline_stream::chunk_layer_forward`,
+   `SharedState::try_assemble_chunked_forward`) with chunk-meta bound into the
+   AAD. What is missing is only that the receiver **reassembles every chunk
+   before computing anything** — `state.filled` accumulates until the payload is
+   whole, then one forward is dispatched.
+
+**The proposal: compute each chunk on arrival and stream it onward, instead of
+reassembling first.** With `pipeline_chaining` on (default since v0.3.109),
+stage 0 emits chunk `c`'s output as soon as it has computed it; stage 1 computes
+chunk `c` while stage 0 works on chunk `c+1`. That is GPipe microbatching, and
+the stages overlap.
+
+**Why this dodges the blocker the 2026-08-24 research round identified.** That
+round concluded pipelined execution was gated behind decoupling `request_id`
+from the KV session key, the pending-result key, the worker slot key and the
+cancel key — because the COORDINATOR cannot have two forwards outstanding for
+one request. True, and irrelevant here: with chaining the coordinator issues ONE
+forward and the overlap happens peer-to-peer along the chain. Each stage needs
+only to process chunks of a request in order, which is already the KV append
+order.
+
+**It also overlaps transfer with compute, which is a second win on the same
+change.** The prefill activation for this measurement is
+`4504 x 4096 x 4 = 73.8 MB` per hop (~18.5 MB with Q8_0 activation
+compression), which is roughly 10 s per hop on a 15 Mbps uplink before any
+compute starts. Today that transfer and the next stage's compute are strictly
+serial.
+
+**Honest bound on the win.** Speedup on prefill approaches N for balanced stages
+and large chunk counts; at 4504 tokens and 128-token chunks that is M=35 against
+N=2-3, so the fill cost is small and the ceiling is ~2-2.8x. Prefill being 94%
+of the request puts end-to-end around 2.5x on a long-prompt distributed request.
+**All of that is arithmetic, not measurement** — see the plan below.
+
+**Why now, specifically.** The research round dismissed microbatched prefill as
+premature on the grounds that stage imbalance dominates and the DP sums a
+decode-shaped cost, so stages are balanced for the wrong phase. That objection
+was correct and has since been removed: `vertex_cost` prices prefill as of
+v0.3.117, so the DP now balances stages for the phase this optimises. The
+prerequisite the report named is the thing that shipped.
+
+**What could kill it, in order of likelihood.**
+
+- **Stage imbalance still dominates.** Speedup is bounded by the slowest stage,
+  not the average. If routing puts 26 layers on one peer and 6 on another, N is
+  effectively 1.2, not 3. Measure the per-stage split on real assemblies first.
+- **Per-chunk overhead.** 35 sends per hop instead of 1. Chained sends are
+  fire-and-forward rather than request/response, so this is a framing and
+  sealing cost, not 35 round trips — but it is not free and it is per hop.
+- **A lost chunk leaves a stage with partial KV.** The rewind machinery exists
+  (`truncate_kv_to`, and `forward_through_segments` already tracks a `rewind`
+  tuple for failed chained runs) but it would need to cover a partially
+  streamed prefill.
+- **Mixed-version.** Needs a `NodeCapability::features` bit; a peer without it
+  reassembles exactly as today, which is the correct degradation.
+
+**How to prove it, and what to measure BEFORE building.**
+
+The cheap measurement first, because it sizes everything and needs no code: on a
+real multi-segment assembly, read the per-segment elapsed times that
+`RequestTrace::record_segment_timing` already records (exposed via
+`Server-Timing` and `x-swarm-route`) for a long prompt. Two numbers decide it:
+the ratio of the largest stage to the sum (the achievable speedup ceiling), and
+the gap between "result sent" and "next forward received" (the transfer share).
+**If the largest stage is most of the sum, stage balance is the bug and this is
+not.**
+
+Then the mechanism check, which is a count rather than a stopwatch: the tail
+segment should begin computing before the head segment has finished the prompt.
+`SWARMLLM_PIPELINED_PREFILL=0` for an A/B inside one binary. Median-of-5 on an
+idle box; the short-prompt case is the null control and must not move.
+
 ### Prompt-length routing — VALIDATED on real hardware (2026-08-24)
 
 The v0.3.117 note said this shipped unvalidated. It has now been measured on the
