@@ -250,6 +250,46 @@ impl ModelManifestExt for ModelManifest {
     }
 }
 
+/// Adopt shard hashes we already know for shards `incoming` leaves as
+/// placeholders, returning how many were recovered.
+///
+/// A shard's BLAKE3 hash is a property of the MODEL, not of this node — but a
+/// manifest is generated from what the generating node happens to hold on disk
+/// (`build_shard_infos_from_layouts` hashes a shard file only when it exists,
+/// and writes all-zero otherwise). So every partial holder publishes a manifest
+/// that is authoritative for its own shards and blank for the rest.
+///
+/// The registry's `insert` is blind, so a blank used to overwrite a hash we
+/// already held — and that is how a node ends up with nothing to verify a
+/// download against: the P2P accept path checks a completed transfer ONLY when
+/// the manifest carries a non-zero hash, so a placeholder means the bytes are
+/// taken on trust, recorded as held, and re-served to other peers unchecked.
+/// Measured on the live node 2026-08-24: five shards fetched from peers against
+/// a manifest carrying placeholders for exactly those five, one of them corrupt
+/// and surfacing only hours later, after a restart.
+///
+/// Merging makes hash knowledge MONOTONIC — a hash may go from unknown to
+/// known, or be replaced by a differing known one (a genuine re-publish), but
+/// never back to unknown. Note the converse is deliberately NOT protected: a
+/// real incoming hash still wins over a real stored one, exactly as before.
+pub fn merge_known_shard_hashes(incoming: &mut ModelManifest, known: &ModelManifest) -> usize {
+    let mut recovered = 0usize;
+    for shard in incoming.shards.iter_mut() {
+        if shard.hash != [0u8; 32] {
+            continue;
+        }
+        if let Some(prev) = known
+            .shards
+            .iter()
+            .find(|s| s.index == shard.index && s.hash != [0u8; 32])
+        {
+            shard.hash = prev.hash;
+            recovered += 1;
+        }
+    }
+    recovered
+}
+
 /// Build ShardInfo entries from `LayerShardLayout` computed by `compute_layer_shard_layouts`.
 ///
 /// For each layout, hashes the on-disk shard file (if present) and builds the

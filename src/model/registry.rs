@@ -4,6 +4,7 @@ use std::time::Instant;
 use dashmap::DashMap;
 
 use crate::error::SwarmError;
+use crate::model::manifest::ModelManifestExt;
 use crate::storage::db::Database;
 use crate::types::{ModelId, ModelManifest, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 
@@ -106,7 +107,7 @@ impl ModelRegistry {
     }
 
     /// Register a model manifest.
-    pub fn register_manifest(&self, manifest: ModelManifest) {
+    pub fn register_manifest(&self, mut manifest: ModelManifest) {
         // Universal net against copied-folder model names (`<model>.FULLBACKUP`,
         // `<model>.old`). This is the single point every adoption path funnels
         // through — gossip ingress, DB reload on startup, local disk scan,
@@ -135,6 +136,39 @@ impl ModelRegistry {
         // `manifest_hash` is the manifest's own content hash, so this compares
         // what a peer sent against what we hold without a field-by-field walk.
         // A genuine change (new shard, re-publish) still announces itself.
+        // Keep any shard hash this manifest leaves blank that we already know.
+        //
+        // A manifest is generated from what its author happens to hold on disk,
+        // so a partial holder publishes real hashes for its own shards and
+        // all-zero placeholders for the rest. The `insert` below is blind, so a
+        // placeholder used to overwrite a hash we already had — and the P2P
+        // accept path verifies a completed transfer ONLY when the manifest
+        // carries a non-zero hash. Losing one therefore means the next download
+        // of that shard is accepted on trust and announced to the swarm
+        // unchecked. See `manifest::merge_known_shard_hashes`.
+        let recovered = match self.manifests.get(&manifest.id) {
+            Some(prev) => {
+                crate::model::manifest::merge_known_shard_hashes(&mut manifest, prev.value())
+            }
+            None => 0,
+        };
+        if recovered > 0 {
+            // Recompute so the stored manifest stays self-consistent: it is now
+            // a local composite rather than verbatim what the publisher sent,
+            // and `load_from_dir` re-derives this hash to validate a saved copy.
+            //
+            // Doing it here also keeps the `changed` check below quiet in the
+            // steady state: the merge is deterministic, so an unchanged
+            // re-gossip merges to the same bytes and recomputes to the same
+            // hash. Without the recompute, every re-gossip of a placeholder
+            // manifest would compare unequal and log forever.
+            manifest.manifest_hash = manifest.compute_hash();
+            tracing::debug!(
+                model = %manifest.id,
+                recovered,
+                "Kept shard hashes this manifest left blank"
+            );
+        }
         let changed = match self.manifests.get(&manifest.id) {
             Some(prev) => prev.manifest_hash != manifest.manifest_hash,
             None => true,
@@ -799,6 +833,94 @@ mod tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+        }
+    }
+
+    /// A shard hash may go from unknown to known, never back to unknown.
+    ///
+    /// A manifest is generated from what its author holds on disk, so a partial
+    /// holder publishes real hashes for its own shards and all-zero
+    /// placeholders for the rest. Registration used to `insert` blindly, so the
+    /// placeholder won and the hash we already had was destroyed — after which
+    /// the P2P accept path, which verifies a completed transfer only when a
+    /// non-zero hash exists, took that shard's bytes on trust and announced us
+    /// as a holder of them.
+    ///
+    /// Observed on the live node 2026-08-24: five shards fetched from peers
+    /// against a manifest carrying placeholders for exactly those five, one of
+    /// them corrupt, surfacing only after a restart.
+    #[test]
+    fn a_placeholder_hash_never_overwrites_one_we_already_know() {
+        let registry = ModelRegistry::new();
+        let real = [7u8; 32];
+
+        let mut complete = test_manifest("m", "M");
+        complete.shard_count = 2;
+        complete.shards = vec![test_shard(0, real), test_shard(1, [9u8; 32])];
+        registry.register_manifest(complete);
+
+        // The same model as seen by a node that holds neither shard.
+        let mut blank = test_manifest("m", "M");
+        blank.shard_count = 2;
+        blank.shards = vec![test_shard(0, [0u8; 32]), test_shard(1, [0u8; 32])];
+        registry.register_manifest(blank.clone());
+
+        let stored = registry.get_manifest(&ModelId("m".into())).unwrap();
+        assert_eq!(
+            stored.shards[0].hash, real,
+            "a blank manifest must not erase a hash we already had — without it \
+             the next download of this shard is accepted unverified"
+        );
+        assert_eq!(stored.shards[1].hash, [9u8; 32]);
+
+        // The stored manifest must stay self-consistent, since `load_from_dir`
+        // re-derives this hash to validate a saved copy.
+        let stored_hash = stored.manifest_hash;
+        assert_eq!(
+            stored_hash,
+            stored.compute_hash(),
+            "a merged manifest must carry a hash matching its own content"
+        );
+
+        // Re-gossiping the SAME blank manifest must settle, not oscillate: the
+        // peer sends identical bytes each round, so the merge must recompute to
+        // an identical hash or the changed-detection logs on every repeat.
+        registry.register_manifest(blank);
+        let settled = registry.get_manifest(&ModelId("m".into())).unwrap();
+        assert_eq!(settled.shards[0].hash, real);
+        assert_eq!(
+            settled.manifest_hash, stored_hash,
+            "an unchanged re-gossip must merge to the same bytes, or the \
+             changed-detection logs on every repeat"
+        );
+    }
+
+    /// The converse, which is deliberately NOT protected: a genuine re-publish
+    /// changes the bytes, and the newer real hash must win. Only unknown is
+    /// treated as "no information".
+    #[test]
+    fn a_real_hash_still_replaces_an_earlier_real_hash() {
+        let registry = ModelRegistry::new();
+
+        let mut first = test_manifest("m", "M");
+        first.shards = vec![test_shard(0, [1u8; 32])];
+        registry.register_manifest(first);
+
+        let mut republished = test_manifest("m", "M");
+        republished.shards = vec![test_shard(0, [2u8; 32])];
+        registry.register_manifest(republished);
+
+        let stored = registry.get_manifest(&ModelId("m".into())).unwrap();
+        assert_eq!(stored.shards[0].hash, [2u8; 32]);
+    }
+
+    fn test_shard(index: u32, hash: Blake3Hash) -> ShardInfo {
+        ShardInfo {
+            index,
+            layer_range: (index, index + 1),
+            size_bytes: 512,
+            hash,
+            tensors: vec![],
         }
     }
 

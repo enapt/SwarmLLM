@@ -922,6 +922,37 @@ silently break at the wire if duplicated:
   Holding a shard is the honest signal, which is why the gossip handler
   deliberately does NOT require `sender == publisher`. `publisher` means who
   published it — do not reintroduce a self-claim to grant broadcast rights.
+- **`model::manifest::merge_known_shard_hashes`** (2026-08-24) — the rule that a
+  shard hash may go from unknown to known but never back. Called from
+  `ModelRegistry::register_manifest`, the single funnel every adoption path uses
+  (gossip ingress, DB reload, disk scan, acquisition), so no caller can skip it.
+  **Why**: a shard's BLAKE3 hash is a property of the MODEL, but a manifest is
+  built from what its author holds on disk — `build_shard_infos_from_layouts`
+  hashes a shard file only when it exists and writes all-zero otherwise. So every
+  partial holder publishes real hashes for its own shards and placeholders for
+  the rest, and the registry's blind `insert` let a placeholder destroy a hash we
+  already had. That matters because `network/manager/requests.rs` verifies a
+  completed P2P transfer ONLY when the manifest carries a non-zero hash: lose the
+  hash and the bytes are taken on trust, recorded as held, and re-served to other
+  peers unchecked. Measured on the live node — five shards fetched against a
+  manifest carrying placeholders for exactly those five, one corrupt (gotcha
+  #381).
+  Three things a change here must keep. The merge is **one-directional**: a real
+  incoming hash still replaces a real stored one (a genuine re-publish), and only
+  unknown is treated as no information — so this cannot be used to pin a stale
+  hash. `manifest_hash` is **recomputed** when anything was recovered, because the
+  stored manifest is then a local composite rather than what the publisher sent
+  and `load_from_dir` re-derives that hash to validate a saved copy; recomputing
+  also keeps the changed-detection quiet, since the merge is deterministic and an
+  unchanged re-gossip lands on the same bytes. And the accept path's carve-out
+  **stays** — enforcing verification unconditionally was shipped once and
+  soak-caught, because hashes are known only to nodes holding the shard, so a
+  swarm where nobody holds everything has no complete manifest anywhere.
+  The sibling half is `daemon/background.rs`: a shard with no hash is counted as
+  `unchecked`, never as `verified`. It had been counted as verified, so the sweep
+  reported "all shards OK verified=21" over five shards it had never hashed. **A
+  check that cannot run must be reported, not rounded up into the success line.**
+
 - **`types::slugify_model_name`** (2026-08-15) — the single derivation of a model
   id from a human display name. It is what
   `daemon::manifest::generate_and_register_local_manifest` registers, persists

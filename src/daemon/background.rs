@@ -175,6 +175,7 @@ pub(super) fn spawn_shard_verification(
         let shard_store = crate::model::shard::ShardStore::new(&data_dir);
         let mut verified = 0u32;
         let mut quarantined = 0u32;
+        let mut unchecked = 0u32;
         for manifest in shared_state.model_registry.models() {
             for shard_info in &manifest.shards {
                 // Only verify shards we registered (i.e., we are a holder)
@@ -193,9 +194,25 @@ pub(super) fn spawn_shard_verification(
                 if !shard_path.exists() {
                     continue;
                 }
-                // Skip zero-hash shards (hash not yet computed)
+                // A shard we hold no hash for is UNCHECKED, not verified.
+                //
+                // Counting it as verified is what kept this failure mode
+                // invisible: on 2026-08-24 this pass twice reported "all shards
+                // OK verified=21" over a set including five freshly downloaded
+                // shards it had never hashed — one of which was corrupt and
+                // surfaced hours later, after a restart, once a manifest
+                // carrying the real hash arrived. A verifier that reports work
+                // it did not do is worse than none, because it reads as
+                // assurance.
+                //
+                // There is nothing to quarantine here: the bytes may be
+                // perfectly good and we simply have nothing to compare them
+                // against. So it is counted separately, reported, and re-checked
+                // on a later pass once the hash is known — which is what
+                // `manifest::merge_known_shard_hashes` now makes possible, by
+                // stopping a placeholder overwriting a hash we already held.
                 if shard_info.hash == [0u8; 32] {
-                    verified += 1;
+                    unchecked += 1;
                     continue;
                 }
                 // Run BLAKE3 verification in a blocking thread
@@ -272,7 +289,18 @@ pub(super) fn spawn_shard_verification(
             tracing::warn!(
                 verified,
                 quarantined,
+                unchecked,
                 "Background shard verification complete — some shards quarantined"
+            );
+        } else if unchecked > 0 {
+            // Deliberately NOT "all shards OK": some were never hashed. Said
+            // plainly so the gap is visible while it lasts, rather than being
+            // rounded up into the success line.
+            tracing::info!(
+                verified,
+                unchecked,
+                "Background shard verification complete — some shards have no \
+                 hash to check against yet"
             );
         } else {
             tracing::info!(
@@ -285,10 +313,15 @@ pub(super) fn spawn_shard_verification(
                 "system",
                 "shard_verified",
                 format!(
-                    "Verified {} shards{}",
+                    "Verified {} shards{}{}",
                     verified,
                     if quarantined > 0 {
                         format!(" ({quarantined} quarantined)")
+                    } else {
+                        String::new()
+                    },
+                    if unchecked > 0 {
+                        format!(" ({unchecked} not yet checkable)")
                     } else {
                         String::new()
                     }

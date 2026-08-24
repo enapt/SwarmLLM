@@ -238,6 +238,74 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### A P2P shard can still be accepted with nothing to verify it against (2026-08-24)
+
+**Partly fixed the same day — this entry now covers only what is left.** Found
+on the live node, not reasoned about.
+
+**What happened.** Five shards of meta-llama-3.1-8b were fetched with "Download
+this part" — four from a LAN peer, one (shard 7) from a WAN peer. All five
+registered as local and the model served correct-looking output at ~26 tok/s.
+The on-disk `manifest.json` carried **all-zero (placeholder) hashes for exactly
+those five shards** (3, 4, 5, 7, 8) and real ones for the four this node already
+held (0, 1, 2, 6) — written on 2026-08-06 and never updated since.
+
+The three defects behind it, all one family — **"no hash available" silently
+meaning "verified"**:
+
+1. **`register_manifest` let a placeholder overwrite a hash we already knew.**
+   A manifest is generated from what its author holds on disk
+   (`build_shard_infos_from_layouts` hashes a shard file only when it exists),
+   so every partial holder publishes real hashes for its own shards and blanks
+   for the rest — and the registry's blind `insert` let a blank win. **FIXED**:
+   `manifest::merge_known_shard_hashes`, called from the single registry funnel,
+   makes hash knowledge monotonic. A real incoming hash still replaces a real
+   stored one (a genuine re-publish); only unknown is treated as no information.
+2. **The background verifier counted unchecked shards as verified.** It reported
+   `all shards OK verified=21` at 04:47Z and 04:49Z over a set that included the
+   five it had never hashed; shard 7 then failed at 12:03Z, once a manifest with
+   the real hash had arrived. **FIXED**: unchecked shards are counted and
+   reported separately, and the "all shards OK" line is no longer emitted when
+   any shard had no hash to check against.
+3. **The P2P accept path takes a hash-less transfer on trust** and announces the
+   node as a holder of those bytes. **NOT fixed, deliberately** — see below.
+
+**What is still open.**
+
+- **The accept path's carve-out stays.** `network/manager/requests.rs` verifies a
+  completed transfer only when the manifest carries a non-zero hash. Enforcing it
+  unconditionally was shipped once and caught in a soak: it quarantines every
+  P2P shard of any model whose manifest lacks hashes, making that model
+  impossible to acquire at all. Since hashes are known only to nodes that hold
+  the shard, a swarm where no single node holds everything has no complete
+  manifest anywhere, so this cannot simply be tightened. Fix 1 makes real hashes
+  far more available (they now accumulate across gossip instead of being
+  destroyed), which narrows the window rather than closing it.
+- **The on-disk manifest still persists placeholders.** The registry now heals
+  itself as gossip arrives, but a fresh boot reloads the blank copy, so the
+  window reopens until the next gossip round — which is exactly when a queued
+  download may land. Persisting the merged manifest is the remaining half.
+- **Gating the announcement is NOT the answer on its own.** Not announcing an
+  unverified shard would stop the bytes being re-served, but for a model whose
+  hashes nobody knows it means nobody ever announces and distribution dies —
+  the soak failure in a different shape.
+- **The re-download went back to the SAME peer that served the bad copy.**
+  `select_best_allowed_peer` ranks LAN, then latency, then trust, and whether one
+  verification failure moves trust enough to pick a different holder was not
+  observed. If it does not, a peer with genuinely corrupt storage is an infinite
+  retry loop.
+
+**Two consequences worth keeping stated.**
+
+- **A model can serve confidently on corrupt weights.** The reply here was a
+  correct count from one to twenty. "It answered sensibly" is not evidence the
+  weights are intact, and any measurement taken on a freshly P2P-fetched model is
+  provisional until the verifier has swept it *with real hashes*.
+- **Losing one shard silently changes the ROUTE.** At 8 of 9 the node lost full
+  local coverage, so the same request became `route=distributed segments=3` and
+  failed with segment failover. The user sees a failed request; the cause is a
+  verification three steps upstream, hours earlier.
+
 ### The VRAM budget is a fraction of TOTAL, read from the boot snapshot — measured at 25.7x (2026-08-24)
 
 **The largest measured effect found this session, on real hardware, end to end.**
