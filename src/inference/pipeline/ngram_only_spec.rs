@@ -59,7 +59,8 @@ use super::PipelineExecutor;
 /// `0` means unknown — nothing has run yet and the next request finds out.
 static DIST_SPEC_PAYOFF_X100: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// The payoff at which speculating over the network is worth what it costs.
+/// The payoff at which speculating over the network is worth what it costs,
+/// when we cannot price the link.
 ///
 /// **A round on this path is not free the way a local one is.** Every round —
 /// including one where the n-gram found nothing to draft — goes back through
@@ -80,10 +81,60 @@ static DIST_SPEC_PAYOFF_X100: std::sync::atomic::AtomicU32 = std::sync::atomic::
 /// to produce a 60-token reply.
 const PAYOFF_WORTH_THE_WIRE_X100: u32 = 130;
 
+/// What a round has to return before speculating beats not speculating, given
+/// what the link actually costs.
+///
+/// **The flat constant above ignores the round trip it saves, and that is the
+/// wrong calculus on exactly the path where speculation matters most.** A plain
+/// decode step on a multi-segment pipeline also pays a full round trip, so
+/// speculating trades `(k - 1)` round trips for one payload of logits:
+///
+/// ```text
+///   speculating wins  <=>  ship(logits) < (k - 1) * rtt
+///   i.e.  k > 1 + ship(logits) / rtt
+/// ```
+///
+/// Worked at 513 KB (a 128k-vocab miss round) and 200 ms RTT: on a 10 Mbps
+/// uplink the payload costs ~410 ms, so a round must return more than 3.05
+/// tokens; on 100 Mbps it costs ~41 ms and 1.21 is enough. A single flat bar
+/// cannot express that, and it lands conservative on the slow link and
+/// permissive on the fast one — the opposite of useful.
+///
+/// It matters most for **boomerang** (`inference.encrypted_pipeline`), which is
+/// multi-segment by construction and therefore takes this path. Boomerang
+/// decode is latency-bound at about one round trip per token — a ceiling near
+/// 5 tok/s at 200 ms and 1.25 at 800 ms whatever the hardware does — and
+/// amortising that trip over several tokens is the only lever that raises it.
+///
+/// Returns `None` when the link cannot be priced (no bandwidth advertised, no
+/// latency sample), and the caller falls back to the flat constant — unknown
+/// must not become a number.
+fn required_tokens_per_round_x100(
+    logits_bytes: u64,
+    bandwidth_mbps: Option<f32>,
+    rtt_ms: Option<u32>,
+) -> Option<u32> {
+    let bw = bandwidth_mbps.filter(|b| *b > 0.0 && b.is_finite())?;
+    let rtt = rtt_ms.filter(|r| *r > 0)? as f32;
+    // bytes -> bits -> ms at Mbit/s: (bytes * 8) / (mbps * 1000)
+    let ship_ms = (logits_bytes as f32 * 8.0) / (bw * 1000.0);
+    if !ship_ms.is_finite() {
+        return None;
+    }
+    let required = 1.0 + ship_ms / rtt;
+    // A round can only ever return so many tokens; past the draft width the bar
+    // is unreachable and the honest answer is "never worth it", which the
+    // caller gets by comparing against it.
+    Some((required * 100.0).min(u32::MAX as f32) as u32)
+}
+
 /// Whether the loop has earned its bandwidth. Pure, so the policy is testable
 /// without a pipeline.
-fn payoff_justifies_the_wire(seen_x100: u32) -> bool {
-    seen_x100 == 0 || seen_x100 >= PAYOFF_WORTH_THE_WIRE_X100
+///
+/// `required_x100` is the link-priced bar where the link could be priced; the
+/// flat constant otherwise.
+fn payoff_justifies_the_wire(seen_x100: u32, required_x100: Option<u32>) -> bool {
+    seen_x100 == 0 || seen_x100 >= required_x100.unwrap_or(PAYOFF_WORTH_THE_WIRE_X100)
 }
 
 /// Fold one request's result into the running figure.
@@ -154,9 +205,32 @@ fn eligible(exec: &PipelineExecutor) -> bool {
     // `spec_payoff_justifies_diverting` on the local speculator, which learned
     // this lesson on 2026-08-23. This path never had it, so a workload it
     // cannot help paid the full cost on every token indefinitely.
-    if !payoff_justifies_the_wire(DIST_SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed))
-    {
+    // Price the actual link where we can. The tail is what returns the logits,
+    // so its bandwidth and our round trip to it are the two numbers that decide
+    // whether speculating beats a plain step — see
+    // `required_tokens_per_round_x100`.
+    let required = (|| {
+        let tail = exec.assignment.segments.last()?;
+        if &tail.node_id == local_node_id {
+            // A local tail returns its logits over a Unix socket; the payload
+            // is not what limits this and the flat bar is the honest answer.
+            return None;
+        }
+        let vocab = exec
+            .shared_state
+            .standalone_tokenizer(&exec.request.model_id)?
+            .as_ref()
+            .vocab_size() as u64;
+        let peer = exec.shared_state.peer_registry.get(&tail.node_id)?;
+        let bandwidth = peer.capability.as_ref().map(|c| c.bandwidth_mbps);
+        required_tokens_per_round_x100(vocab * 4, bandwidth, peer.latency_ms)
+    })();
+
+    let seen = DIST_SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed);
+    if !payoff_justifies_the_wire(seen, required) {
         tracing::debug!(
+            seen_x100 = seen,
+            required_x100 = ?required,
             "SWARM-SPEC L1: skipping the n-gram wire — it has not been accepting \
              enough tokens per round to pay for the logits it returns"
         );
@@ -502,7 +576,7 @@ mod payoff_tests {
     /// including the one it helps.
     #[test]
     fn unknown_payoff_lets_one_request_find_out() {
-        assert!(payoff_justifies_the_wire(0));
+        assert!(payoff_justifies_the_wire(0, None));
     }
 
     /// The measured failure: every round a miss, so the loop returned exactly
@@ -511,7 +585,7 @@ mod payoff_tests {
     #[test]
     fn one_token_per_round_does_not_pay_for_a_vocabulary() {
         assert!(
-            !payoff_justifies_the_wire(100),
+            !payoff_justifies_the_wire(100, None),
             "a round that yields one token is a plain decode step wearing a \
              513 KB hat"
         );
@@ -521,13 +595,99 @@ mod payoff_tests {
     /// tokens accepted per round.
     #[test]
     fn a_copying_workload_still_speculates() {
-        assert!(payoff_justifies_the_wire(880));
-        assert!(payoff_justifies_the_wire(PAYOFF_WORTH_THE_WIRE_X100));
+        assert!(payoff_justifies_the_wire(880, None));
+        assert!(payoff_justifies_the_wire(PAYOFF_WORTH_THE_WIRE_X100, None));
     }
 
     /// Just under the bar must be refused, or the constant is decorative.
     #[test]
     fn just_below_the_bar_is_refused() {
-        assert!(!payoff_justifies_the_wire(PAYOFF_WORTH_THE_WIRE_X100 - 1));
+        assert!(!payoff_justifies_the_wire(
+            PAYOFF_WORTH_THE_WIRE_X100 - 1,
+            None
+        ));
+    }
+}
+
+#[cfg(test)]
+mod link_price_tests {
+    use super::{payoff_justifies_the_wire, required_tokens_per_round_x100};
+
+    /// 128k vocab x 4 bytes — one miss round on llama-3.2-3b.
+    const MISS_BYTES: u64 = 128_256 * 4;
+
+    /// The whole point: the same payload is a bargain on a fast link and a
+    /// waste on a slow one, at identical round-trip time. A flat threshold
+    /// cannot express that.
+    #[test]
+    fn the_same_payload_costs_differently_on_different_links() {
+        let slow = required_tokens_per_round_x100(MISS_BYTES, Some(10.0), Some(200)).unwrap();
+        let fast = required_tokens_per_round_x100(MISS_BYTES, Some(100.0), Some(200)).unwrap();
+        // ~410ms of shipping against a 200ms trip -> needs >3 tokens a round.
+        assert!(
+            (290..=320).contains(&slow),
+            "10 Mbps at 200ms should need ~3.05 tokens/round, got {slow}"
+        );
+        // ~41ms against the same trip -> 1.2 is enough.
+        assert!(
+            (115..=125).contains(&fast),
+            "100 Mbps at 200ms should need ~1.21 tokens/round, got {fast}"
+        );
+        assert!(slow > fast, "a slower link must demand more per round");
+    }
+
+    /// A longer round trip makes speculating MORE attractive, because each
+    /// saved trip is worth more. This is the boomerang case.
+    #[test]
+    fn a_worse_round_trip_lowers_the_bar() {
+        let near = required_tokens_per_round_x100(MISS_BYTES, Some(100.0), Some(60)).unwrap();
+        let far = required_tokens_per_round_x100(MISS_BYTES, Some(100.0), Some(800)).unwrap();
+        assert!(
+            far < near,
+            "a distant peer should need FEWER tokens per round to justify \
+             speculating, not more: far={far} near={near}"
+        );
+        assert!(far >= 100, "the bar can never fall below one token a round");
+    }
+
+    /// Unknown must stay unknown. A peer that advertises no bandwidth, or that
+    /// we have never timed, falls back to the flat constant rather than being
+    /// assigned a number — the same rule the capacity bound follows.
+    #[test]
+    fn an_unpriceable_link_returns_none() {
+        assert_eq!(
+            required_tokens_per_round_x100(MISS_BYTES, None, Some(200)),
+            None
+        );
+        assert_eq!(
+            required_tokens_per_round_x100(MISS_BYTES, Some(100.0), None),
+            None
+        );
+        assert_eq!(
+            required_tokens_per_round_x100(MISS_BYTES, Some(0.0), Some(200)),
+            None
+        );
+        assert_eq!(
+            required_tokens_per_round_x100(MISS_BYTES, Some(f32::NAN), Some(200)),
+            None
+        );
+    }
+
+    /// And unknown-payoff still gets to try, whatever the link says.
+    #[test]
+    fn a_priced_link_still_lets_an_unmeasured_workload_find_out() {
+        let required = required_tokens_per_round_x100(MISS_BYTES, Some(1.0), Some(50));
+        assert!(
+            required.unwrap() > 1000,
+            "a 1 Mbps link should demand a lot"
+        );
+        assert!(
+            payoff_justifies_the_wire(0, required),
+            "nothing measured yet must still get one request to find out"
+        );
+        assert!(
+            !payoff_justifies_the_wire(400, required),
+            "4 tokens a round cannot pay for 513 KB on a 1 Mbps link"
+        );
     }
 }

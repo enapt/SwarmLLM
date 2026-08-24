@@ -238,6 +238,48 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### Prompt-length routing — VALIDATED on real hardware (2026-08-24)
+
+The v0.3.117 note said this shipped unvalidated. It has now been measured on the
+live swarm: one RTX 3070 laptop (the coordinator) against three CPU-only peers,
+meta-llama-3.1-8b, `max_tokens: 1` to isolate prefill, costs read straight out of
+`DIAG: pipeline candidate`.
+
+```text
+                        SHORT (11 tok)              LONG (4504 tok)
+                     prefill    total          prefill      total
+  local RTX 3070        3.3     2 099         243 553     381 984
+  7c10ea04 (CPU)      799      59 281         899 336     957 752
+  e561df35 (CPU)    1 085      75 334       1 084 896   1 155 489
+  96842635 (CPU)    1 030      75 334       1 159 742   1 233 902
+
+  prefill as a share of a CPU peer's cost:   ~1.4%   ->   ~94%
+```
+
+**The decisive number is the counterfactual.** Strip the prefill term — which is
+exactly the old cost model — and the long-prompt ranking is decided by the
+compute column alone: local 138 431 against 57 506 / 69 372 / 74 158, so the
+coordinator's own GPU **loses to all three processor-only peers**. With prefill
+priced, local wins by 2.5x. On a 4504-token prompt the old router would have
+shipped the work to machines needing roughly 15-19 minutes to read it.
+
+Two things worth knowing from the run:
+
+- **The priors are doing the work, not measurements.**
+  `observed_prefill_ms_per_layer_byte=None` on every candidate, because this node
+  had never prefilled through any of them. The research round predicted exactly
+  this. The device-class ratio is therefore load-bearing and should be
+  re-examined once real coefficients accumulate.
+- **The local node's compute figure jumped 2 095 -> 138 431 between the two
+  runs, and that is correct.** The first request gave it
+  `observed_ms_per_layer=Some(67.59)`, and the model prefers a measurement to a
+  static estimate; 67.59 x 32 x 64 = 138 424, which is the number. Anyone
+  A/B-ing this must hold that constant or they will attribute a measurement
+  taking over to the change under test.
+
+Short-prompt behaviour is the null control and it held: prefill was 0.16% of the
+local candidate's cost at 11 tokens, far too small to move any ranking.
+
 ### Two cost models are still prompt-blind (2026-08-24)
 
 Prompt length now reaches `parallax::vertex_cost` (the DP that picks the route)

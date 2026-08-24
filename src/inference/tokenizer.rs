@@ -96,6 +96,12 @@ pub struct BpeTokenizer {
 }
 
 impl BpeTokenizer {
+    /// Number of entries in the vocabulary. See
+    /// `SplitTokenizer::vocab_size` for why this is a network-cost figure.
+    pub fn vocab_size(&self) -> usize {
+        self.token_to_id.len()
+    }
+
     /// Build a BPE tokenizer from GGUF vocabulary tokens, merge rules,
     /// pre-tokenizer type, and tokenizer model type.
     pub(crate) fn from_gguf(
@@ -435,6 +441,12 @@ pub struct SpmTokenizer {
 }
 
 impl SpmTokenizer {
+    /// Number of entries in the vocabulary. See
+    /// `SplitTokenizer::vocab_size` for why this is a network-cost figure.
+    pub fn vocab_size(&self) -> usize {
+        self.piece_to_id.len()
+    }
+
     pub fn new(tokens: &[String], scores: &[f32], add_space_prefix: bool) -> Self {
         let mut piece_to_id = HashMap::new();
         for (i, (tok, &score)) in tokens.iter().zip(scores.iter()).enumerate() {
@@ -737,6 +749,20 @@ impl SpmTokenizer {
 }
 
 impl SplitTokenizer {
+    /// How many distinct tokens this model's vocabulary holds.
+    ///
+    /// Used to price what a speculative verify round drags back over the
+    /// network — `spec_logits` is one f32 per vocabulary entry per position,
+    /// so the vocabulary size IS the payload size, and on a 128k-vocab model
+    /// that is ~513 KB for a single token
+    /// (`ngram_only_spec::required_tokens_per_round_x100`).
+    pub fn vocab_size(&self) -> usize {
+        match &self.kind {
+            TokenizerKind::Bpe(b) => b.vocab_size(),
+            TokenizerKind::SentencePiece(s) => s.vocab_size(),
+        }
+    }
+
     /// Resolve the BOS id to use, preferring the GGUF's declared value.
     ///
     /// The fallback covers BOTH families' literals — `<s>` (Llama/Mistral/Phi)
