@@ -732,20 +732,26 @@ impl NetworkManager {
                             .and_then(|m| {
                                 m.shards.iter().find(|s| s.index == shard_id.index).cloned()
                             });
-                        // Only enforce when the manifest actually carries a
-                        // hash to check against.
+                        // Whether the manifest carries a hash decides HOW the
+                        // bytes are checked, not WHETHER they are trusted.
                         //
                         // `verify_shard` treats an all-zero hash as a FAILURE
                         // ("placeholder required"), which is right for a
-                        // deliberate integrity audit but wrong as a gate on
-                        // accepting a download: a manifest without hashes means
-                        // we have nothing to compare to, not that the bytes are
-                        // bad. Enforcing it unconditionally — as this did when
-                        // first written — rejected and quarantined every P2P
-                        // shard of any model whose manifest lacks hashes,
-                        // making that model impossible to acquire over the
-                        // network at all. Caught by a soak run against
-                        // meta-llama-3.1-8b within hours of shipping.
+                        // deliberate integrity audit but wrong as a gate here: a
+                        // manifest without hashes means we have nothing to
+                        // compare to, not that the bytes are bad. Enforcing it
+                        // unconditionally — as this did when first written —
+                        // rejected and quarantined every P2P shard of any model
+                        // whose manifest lacks hashes, making that model
+                        // impossible to acquire over the network at all. Caught
+                        // by a soak run against meta-llama-3.1-8b within hours
+                        // of shipping.
+                        //
+                        // But the answer to "nothing to compare to" is not to
+                        // accept anyway — that is what spread a corrupt shard
+                        // between peers. It is to get something to compare to:
+                        // `classify_p2p_shard_acceptance` sends that case to the
+                        // model's ORIGIN instead. See the branch below.
                         let manifest_has_hash =
                             shard_info.as_ref().is_some_and(|i| i.hash != [0u8; 32]);
                         if !manifest_has_hash {
