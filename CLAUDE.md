@@ -167,7 +167,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- **Counts** (re-measured 2026-08-23, after the speculation round): **2017 lib** + 11 ignored with `--features dev,claude-subscription`; **2007** + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 31 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 9 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
+- **Counts** (re-measured 2026-08-24, after the correctness round): **2036 lib** + 11 ignored with `--features dev,claude-subscription`; **2026** + 11 with default features — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 32 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 9 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
 - **Benches and harnesses — see `docs/DIAGNOSTICS.md` § Benchmarks for the full list and the traps.** The ones reached for most: `examples/prefill_bench.rs` (drives `SplitModel::forward` directly, no daemon — `SWARM_BENCH_MODEL`, `SWARM_BENCH_PROMPT`, `SWARM_BENCH_DECODE`, `SWARM_BENCH_REPS`, `SWARM_BENCH_DEVICE=cuda`, and `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` which prices a K-token forward against a 1-token one at the same history depth — the number that decides whether speculation pays; pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown), `examples/qmatmul_bench.rs` (asserts the tiled kernel is bit-identical to upstream), `examples/smoke_test.sh [binary] [port]` (8 checks on an isolated node — run it on the DOWNLOADED release artifact), `examples/soak_test.sh` (`HOURS=` must be a WHOLE number; data dir is per-`PORT`, so two soaks no longer kill each other).
 - **Measurement discipline** (paid for repeatedly): min-of-N on an IDLE box — the same unchanged code measured 0.42 ms and 0.97 ms across runs here, and a benchmark taken while a build runs is worthless. **min-of-N is for benchmarks, not for live measurement** (#367). A/B inside ONE binary via an env switch (`SWARMLLM_DECODE_CALIBRATE=0`, `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`, `SWARMLLM_FLASH_OFFSET_CAUSAL=0`, `SWARMLLM_GQA_DECODE_FLASH=1`, `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1`), never across two builds. **Verify the mechanism fired**, not just that the outcome improved. Pinned reference models: `docs/REFERENCE_MODELS.md`.
 - Unit tests: in-module `#[cfg(test)]` blocks
@@ -217,49 +217,55 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2017 lib (dev,claude-subscription) / 2007 (default) — re-measured 2026-08-23 at v0.3.116-alpha** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 31 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
+All 20 build phases complete. All subsystems wired — no stubs. **2036 lib (dev,claude-subscription) / 2026 (default) — re-measured 2026-08-24 at v0.3.117-alpha** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 32 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.116-alpha (2026-08-23): a model on your own machine drafts ahead of itself
+### Latest — v0.3.117-alpha (2026-08-24): things that were quietly not doing what they said
 
-Verified on the DOWNLOADED artifact (sha256, 25 assets, not a draft, `latest`
-published, `examples/smoke_test.sh` 8/8, three new feature markers present and
-absent in the .115 control). Local `225e6fe7` + Proxmox `96842635` on **.116**;
-anchor / Oz / Belgium auto-update. Detail: `memory/round_log_0823_speculation.md`.
+Correctness round, no new feature. Every item below was verified by reading the
+code AND by an artefact-level control where one existed. Detail:
+`memory/round_log_0824_correctness.md`.
 
-- **Local + peer-served speculative decoding.** An n-gram draft from the prompt
-  is verified in ONE forward: ~2x CPU / ~3x GPU on copy-heavy replies, 8.83
-  tokens per round. The machinery existed and was wired only into the
-  DISTRIBUTED path, which returned early for all-local pipelines, so the common
-  case — a whole model on one machine — got nothing.
-  **It shipped gated on `temperature == 0` and that gate was wrong** (the OpenAI
-  default is 0.7, Anthropic's 1.0, so it helped nobody): "draw `t ~ p`, keep the
-  draft iff `t == x`" IS the speculative-sampling rejection rule for a
-  point-mass draft, at any temperature. Pinned by a 60k-draw distribution test
-  plus a control. **NOT bit-identical** (#370) — a verify forward reassociates.
-- **#373, a 2.3x regression I shipped and then found by measuring.** Diverting a
-  solo request off the batched path was justified with this project's own ~3%
-  batching figure — **a CPU measurement, quoted about a GPU**, where batching
-  amortises kernel launches across requests. 8 concurrent open-ended requests:
-  29.07 s diverted against 12.48 s batched. Now gated on measured payoff.
-- **#368 GPU: a comment asserted a kernel limitation the kernel does not have.**
-  `mask.h` computes bottom-right causal, so a query block on a warm prefix never
-  needed diverting to standard: prompt chunks after the first 116 → 76 ms
-  (1.52x), 4-token verify 48 → 21 ms. Invisible to a bench that prefills in one
-  call. GQA decode routing also corrected — its `repeat_kv` premise died on 08-16.
-- **#369 CPU: every fast path was gated on `q_len == 1`**, so a 2-token forward
-  lost the grouping, the decode kernel and the narrow pool at once — 7.8x for one
-  extra token, now 1.8x. **Validated on the i5 too** (#367's lesson), where it is
-  stronger: break-even 1.5 of 4 against 2.5 on the Ryzen.
-- **Nodes now say WHY a reply came back empty** — stop sequence (naming it) or
-  the model ending its own turn. `finish_reason: "stop"` cannot distinguish them
-  and the schema has no field for it (#372).
-- **Two backlog items MEASURED and both worth far less than documented**: the
-  Q4_K repack ceiling is 1.24-1.27x here, not 1.8x (our multi-row kernel already
-  banked part of it); and GPU `rms_norm` is already fused, leaving ~6-9%.
-  See `docs/FUTURE_WORK.md` before picking either up.
-
+- **Settings could undo each other.** `PUT /api/admin/config` rebuilt the whole
+  config from **`state.config` (the boot snapshot)** and applied the one field
+  in the request, so the panel's section-at-a-time saves reverted each other —
+  live AND on disk. **Null control: the released .116 binary fails
+  `examples/smoke_test.sh`'s new "one setting does not revert another" check;
+  this build passes.** Same lesson as #281 one level up: that fix taught every
+  READER to use `cfg()` and left the WRITER on the snapshot.
+- **`UpdateChecker` read the update mode once above its loop**, and `Off`
+  *returned* — so turning updates back on did nothing until a restart.
+- **Prompt-cache sharing was default-on with no off switch** — a gossip
+  broadcast of prompt-block hashes (the seal is `network_id || epoch`, so it is
+  authenticity, not secrecy) plus `SnapshotHeader.tokens`, the verbatim prompt,
+  to any peer in `peer_registry`. The fetch side had a trust gate; the serve side
+  had none. Now `inference.share_prefix_cache_with_peers`, default false, both
+  directions, pinned by a test because the two sites are in different subsystems.
+- **Routing now prices PREFILL**, from `PeerSpeed::prefill_ms_per_layer_byte`
+  where measured and a device-class prior otherwise (i5 4.5x, Ryzen 5.6x, 3070
+  42x). `prompt_tokens: Option<u32>`; `None` is bit-identical to the old model.
+  **`find_standbys` got the same term** — it ranked on ping alone, so a long
+  request correctly sent to a GPU failed over to the slowest box.
+  **Two cost models are still prompt-blind** (`estimated_cost_per_layer`,
+  `delegation_target`) and pipeline reuse does not re-route: `docs/FUTURE_WORK.md`.
+- **A peer is not handed more layers than its advertised memory holds** — the
+  Belgium refusal (#563 in FUTURE_WORK). Unknown NEVER excludes (#330); routing
+  runs twice, bounded then unbounded, so a self-reported figure can only improve
+  a route. **I shipped this with a bug and corrected it the same night**: free
+  VRAM EXCLUDES a resident model, so a WARM holder looked incapable — the cap
+  now applies only to a cold peer (#329 from the other side).
+- **Distributed n-gram speculation asked for a full vocabulary per round** —
+  ~513 KB where a plain step returns 4 bytes — with no backoff, on by default.
+  Live log: three requests at `hit_rate 0.0%`, one at 30.5% (41 miss rounds).
+  Now gated on measured tokens-per-round. The wire is still wrong for a miss
+  round; blocked on carrying `truncate_kv_to` — written up, not guessed at.
+- **Private mode now scopes where a SHARD is fetched from**, not just inference.
+  Three of four peer-selection sites were unfiltered, including the P2P retry —
+  so private mode held until the first transfer error. One
+  `select_best_allowed_peer`, no unscoped variant left to call.
+- **Deep research round** (31 agents): `memory/research_0824_inference.md`. One
+  concept survived adversarial review; the value was in the defects it found.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 

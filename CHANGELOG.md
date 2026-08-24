@@ -4,6 +4,72 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.117-alpha] — 2026-08-24
+
+**Settings you change now stay changed, your prompts stay on your machine unless
+you say otherwise, and requests go to the machine that can actually answer them.**
+A maintenance and correctness release: no new feature, several things that were
+quietly not doing what they said.
+
+### Settings
+
+Changing one setting could silently undo another. The Settings panel saves one
+section at a time, and each save rebuilt the whole configuration from the values
+the daemon started with — so setting a storage limit and then changing your
+contribution level put the storage limit back where it began, in the running
+node and in the config file, with no error and the panel showing the new number.
+Verified against the released v0.3.116 binary, which fails the check this
+release adds.
+
+"Automatic updates" was read once when the node started and then never again, so
+changing it did nothing until a restart. Turning it *off* was worse: it ended
+the update task outright, so turning it back on later had no effect at all.
+
+### Privacy
+
+Your node offered its prompt cache to the rest of the swarm automatically, and
+there was no setting to stop it. Two things left the machine without you
+choosing either: a broadcast to every node listing fingerprints of the prompts
+this node had cached, and — to any node that asked about one of those
+fingerprints — the prompt's own tokens and its cached state. Meanwhile the
+dashboard said, with no conditions attached, "No peer can read your prompts or
+outputs."
+
+Sharing is now off unless you turn it on, so that sentence is true for anyone
+who changed no settings. Turning it on is worth it across machines you control,
+and says so in the log. **Your own local prompt cache is untouched and still on**
+— that is the one that makes a repeated system prompt nearly free, and it never
+involved another machine.
+
+### Where requests go
+
+- Routing could not tell a short prompt from a long one. Reading a prompt and
+  writing a reply are limited by different things, and the machines in a swarm
+  differ by about six times on writing and about fifty-five times on reading, so
+  a long prompt sent to the wrong machine is minutes instead of seconds.
+  Prompt length is now priced, from measurements where this node has them and a
+  measured device-class estimate otherwise.
+- The backup machine for a segment was picked by how fast it answered a ping,
+  which says nothing about how fast it computes. It is now priced the same way
+  the primary is, so failing over does not quietly land a long request on the
+  slowest node available.
+- A peer is no longer handed more layers of a model than the memory it reports
+  can hold. It used to be sent the whole model and refuse three seconds later.
+  A peer that reports nothing, or that is already running the model, is treated
+  exactly as before.
+- With private mode on, "Download this part" and the retry after a failed
+  transfer could still fetch from a node outside your pool. Both are scoped now.
+
+### Speed
+
+On a request split across machines, the speculative decoder asked the far end
+for a score over the entire vocabulary every round — about half a megabyte —
+where an ordinary step returns a single token in four bytes. Good when the model
+is copying its input back; a standing cost when it is not. This node's own log
+had requests where every single round missed. It now measures whether
+speculating is paying and stops when it is not.
+
+
 ## [0.3.116-alpha] — 2026-08-23
 
 **A model running on your own machine now works ahead of itself, and answers
