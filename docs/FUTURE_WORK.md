@@ -289,6 +289,18 @@ meaning "verified"**:
   unverified shard would stop the bytes being re-served, but for a model whose
   hashes nobody knows it means nobody ever announces and distribution dies —
   the soak failure in a different shape.
+- **The periodic rescan self-certifies a hash-less shard from its own bytes.**
+  `model/auto_manage/scan.rs` computes the BLAKE3 of a local file whose manifest
+  entry is a placeholder and writes that in as the hash — on disk, in the DB, and
+  onward by gossip. It exists for manually-placed shards, where there genuinely is
+  no other source of truth, but it means a shard that arrived corrupt through the
+  unverified accept path above can have its corruption promoted to canonical. Fix
+  1 narrows this a great deal — a hash known to any peer now survives in the
+  registry, so this branch fires only when nobody in the swarm has a hash at all —
+  but self-certified bytes arguably should not be gossiped as authoritative.
+  Not observed firing here: the on-disk manifest still carried placeholders for
+  all five shards hours after they landed, so whatever gates this did not open.
+  Worth establishing what those gates are before changing it.
 - **The re-download went back to the SAME peer that served the bad copy.**
   `select_best_allowed_peer` ranks LAN, then latency, then trust, and whether one
   verification failure moves trust enough to pick a different holder was not
