@@ -213,8 +213,8 @@ fn contribution_share_for(contribution: ContributionMode) -> f64 {
 fn vram_reserve_fraction_for(contribution: ContributionMode) -> f64 {
     match contribution {
         // Keep a generous slice of the card free for the person's own work.
-        ContributionMode::Minimal => 0.15,
-        ContributionMode::Moderate => 0.10,
+        ContributionMode::Minimal => 0.10,
+        ContributionMode::Moderate => 0.07,
         // An explicit offer of the machine.
         ContributionMode::Maximum => 0.05,
     }
@@ -224,6 +224,26 @@ fn vram_reserve_fraction_for(contribution: ContributionMode) -> f64 {
 /// A percentage alone is too little headroom on a small card and the driver
 /// itself needs room to work.
 const MIN_VRAM_RESERVE_MB: u64 = 512;
+
+/// Largest amount to keep free, whatever the card's size.
+///
+/// **What the reserve protects does not scale with the card.** A desktop
+/// compositor, a browser with hardware acceleration and driver overhead come to
+/// something like half a gigabyte to a gigabyte and a half, on a 4 GB card and
+/// on a 24 GB one alike. A pure percentage is therefore the wrong shape in both
+/// directions: on an 8 GB card 15% left a 6033 MB model fitting by 99 MB, which
+/// is one browser window away from falling back to the processor; on a 24 GB
+/// card it held back 3.7 GB that nothing was ever going to use.
+///
+/// Measured across card sizes, default contribution, 832 MB in use by a typical
+/// desktop:
+///
+/// | card | reserve before the cap | after |
+/// |---|---|---|
+/// | 4 GB | 614 | 512 |
+/// | 8 GB | 1228 | 819 |
+/// | 24 GB | 3686 | 2048 |
+const MAX_VRAM_RESERVE_MB: u64 = 2048;
 
 impl ResourceConfig {
     /// Compute the effective VRAM budget for inference model loading.
@@ -256,7 +276,7 @@ impl ResourceConfig {
             return None;
         }
         let reserve = ((gpu_vram_total_mb as f64 * vram_reserve_fraction_for(contribution)) as u64)
-            .max(MIN_VRAM_RESERVE_MB);
+            .clamp(MIN_VRAM_RESERVE_MB, MAX_VRAM_RESERVE_MB);
         // What this node may hold on the card in total. Expressed against the
         // card's SIZE, not against what is free, because the caller compares it
         // to `committed + estimated` where `committed` is our own resident

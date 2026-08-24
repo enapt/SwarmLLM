@@ -217,11 +217,11 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2045 lib (dev,claude-subscription) — re-measured 2026-08-24 at v0.3.118-alpha** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 33 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
+All 20 build phases complete. All subsystems wired — no stubs. **2045 lib (dev,claude-subscription) — re-measured 2026-08-24 at v0.3.119-alpha** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 33 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.118-alpha (2026-08-24): 25.7x, from a memory budget, on an idle card
+### Latest — v0.3.119-alpha (2026-08-24): 25.7x, from a memory budget, on an idle card
 
 Small release, one large measured effect. Detail:
 `memory/round_log_0824_correctness.md`.
@@ -238,7 +238,7 @@ Small release, one large measured effect. Detail:
 - **AND the default was the real bug: the budget was a fraction of TOTAL, not of
   what is free.** Half the card whatever was on it, so the cap could not tell an
   idle card from a busy one. Now **RESERVES** a slice and admits against the rest:
-  `usable = total - other_process_vram - max(512, 15%/10%/5% by contribution)`.
+  `usable = total - other_process_vram - clamp(10%/7%/5%, 512 MB, 2048 MB)`. **The reserve is CLAMPED because what it protects (desktop, browser, driver) does not scale with the card** — a flat 15% left the 8B fitting by 99 MB and held 3.7 GB back on a 24 GB card..
   **Strictly more protective where it matters** — with 4 GB in use elsewhere a
   default node admits LESS than the old 4096 cap; idle, it admits 6800 and the
   model runs. **The reserve is expressed against card SIZE, not free VRAM**,

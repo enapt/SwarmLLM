@@ -4,7 +4,7 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-## [0.3.118-alpha] — 2026-08-24
+## [0.3.119-alpha] — 2026-08-24
 
 **Your graphics card is now used when it is free.** A model that fits your card
 runs on it, without changing a setting. Measured on an 8B model and an 8 GB
@@ -18,22 +18,27 @@ that was sitting almost empty.
 The limit was a fixed share of the card's total size — half of it by default —
 whatever was actually running. So a model needing 6033 MB was turned away from a
 card with 7187 MB free and fell back to the processor, twenty-five times slower.
-The share could not tell an idle card from a busy one.
+The share could not tell an idle card from a busy one, and it double-counted
+besides: memory another program is using is already missing from what the card
+reports free.
 
-It now keeps a slice of the card in reserve and uses the rest. On an idle card
-that means a model which physically fits will run on it. When something else is
-using the card — a game, another application — there is simply less to work with
-and the node backs off on its own. That is **more** protective than the old share
-in the situation it was meant for: with 4 GB in use elsewhere, a default node now
-admits less than the old fixed limit ever did.
+It now keeps a slice of the card in reserve and uses the rest. On an idle card a
+model that physically fits will run on it. When something else is using the card
+there is less to work with and the node backs off on its own — which is **more**
+protective than the old share in the situation that share was written for: with
+4 GB in use elsewhere, a default node now admits less than the old fixed limit
+ever did.
 
-Contribution level still decides how much you keep back — 15%, 10% or 5% of the
-card, and never less than 512 MB — rather than being a ceiling that ignored what
-was happening.
+The reserve is bounded at both ends, because what it protects — a desktop, a
+browser, driver overhead — does not grow with the card. Somewhere between half a
+gigabyte and two is enough on a 4 GB card and on a 24 GB one alike. A plain
+percentage was wrong in both directions: it left a 6 GB model fitting an 8 GB
+card by 99 MB, one browser window from falling back, while holding 3.7 GB back
+on a 24 GB card that nothing would ever use.
 
-Separately: raising the limit by hand saved, said "ok", wrote the new number to
-the config file, and then did nothing until the daemon was restarted, because it
-was read from the snapshot taken at startup. It applies immediately now.
+Raising the limit by hand also now applies without a restart. It used to save,
+say "ok", write the new number to the config file, and then do nothing until the
+daemon restarted, because it was read from the snapshot taken at startup.
 
 ### Smaller things
 

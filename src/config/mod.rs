@@ -1260,8 +1260,47 @@ max_concurrent_requests = 42
              this card size the 512 MB floor binds, not the 5%"
         );
         assert_eq!(
-            minimal, 6800,
-            "the default keeps 15% of the card back, not 50% of it"
+            minimal, 7200,
+            "the default keeps a slice back, not half the card"
+        );
+    }
+
+    /// **What the reserve protects does not scale with the card**, so a pure
+    /// percentage is wrong at both ends: too little headroom on a mid-size card
+    /// and absurd on a large one.
+    ///
+    /// Measured with 832 MB in use by a typical desktop: at 15% an 8 GB card
+    /// left a 6033 MB model fitting by 99 MB — one browser window from falling
+    /// back to the processor — while a 24 GB card held back 3.7 GB nothing
+    /// would ever use.
+    #[test]
+    fn the_reserve_is_clamped_because_it_does_not_scale_with_the_card() {
+        let rc = ResourceConfig::default();
+        let usable = |total: u64| {
+            rc.inference_vram_budget_mb(total, Some(832), swarmllm_types::ContributionMode::Minimal)
+                .unwrap()
+        };
+
+        // The case that motivated the clamp: comfortable margin, not 99 MB.
+        let eight_gb = usable(8192);
+        assert!(
+            eight_gb >= 6033 + 400,
+            "a 6033 MB model must fit an 8 GB card with real margin, got {eight_gb}"
+        );
+
+        // A large card must not hold back a proportional slab.
+        let twenty_four = usable(24576);
+        assert!(
+            twenty_four >= 24576 - 832 - 2048,
+            "a 24 GB card must not reserve more than the cap, got {twenty_four}"
+        );
+
+        // And a small card still keeps the floor rather than a thin percentage.
+        let four_gb = usable(4096);
+        assert_eq!(
+            four_gb,
+            4096 - 832 - 512,
+            "on a small card the 512 MB floor binds, got {four_gb}"
         );
     }
 
@@ -1290,6 +1329,11 @@ max_concurrent_requests = 42
             idle > 6033,
             "an idle 8 GB card must fit the 6033 MB model that was measured being \
              refused, got {idle}"
+        );
+        assert!(
+            gaming < 4000 && idle > 6033,
+            "reserving must be more protective than the old cap when busy AND \
+             more permissive when idle — that is the whole point"
         );
     }
 
