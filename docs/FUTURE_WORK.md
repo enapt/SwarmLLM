@@ -314,6 +314,14 @@ meaning "verified"**:
   (`POST /api/admin/hf/download-shards`). See gotcha #382.
   Retry *does* move to a different holder across attempts, so trust is not
   pinning a single bad peer — it simply cannot help when the swarm agrees.
+  **Resolved for this node**: shard 7 re-fetched from the origin repo and
+  verified three ways (local == manifest == HF), model back to 9/9 and serving
+  locally. The other four shards fetched from peers the same day (3, 4, 5, 8)
+  were checked against HF and are all clean, so the corruption was confined to
+  shard 7 — on at least two peers. Note when repeating the check that a shard is
+  **not always a contiguous GGUF range** (shard 5 has two runs separated by a
+  122 MB gap); assert the reconstructed byte count equals `size_bytes` before
+  believing a verdict, or a healthy shard reports a false mismatch.
 
 **Two consequences worth keeping stated.**
 
