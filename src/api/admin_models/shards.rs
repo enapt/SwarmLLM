@@ -136,6 +136,29 @@ pub async fn load_shard(
 
 /// DELETE /api/admin/models/:model_id/shards/:shard_index — Remove a single shard.
 ///
+/// One shard's worth of `AcquisitionStatus`, for a download this node started
+/// on its own. Shared by the fresh-entry and stale-entry arms of
+/// `download_shard` so the two cannot describe the same thing differently.
+fn fresh_shard_download_status(
+    mid: &crate::types::ModelId,
+    shard_index: u32,
+    shard_size: u64,
+) -> crate::model::acquisition::AcquisitionStatus {
+    let mut st = crate::model::acquisition::AcquisitionStatus::new_downloading(
+        mid.clone(),
+        1,
+        shard_size,
+        "peers",
+        "user",
+        format!("Downloading shard {} from peer", shard_index + 1),
+    );
+    st.shard_progress.insert(
+        shard_index,
+        crate::model::acquisition::ShardProgress::new_downloading(shard_index, shard_size),
+    );
+    st
+}
+
 /// Deletes the shard file from disk, removes self from shard_holders in model_registry,
 /// and broadcasts updated ShardAnnounce. Keeps manifest, header, and other shards intact.
 pub async fn delete_shard(
@@ -402,25 +425,43 @@ pub async fn download_shard(
             .and_then(|p| p.peer_id_bytes.clone());
 
         if let Some(bytes) = peer_id_bytes {
-            // Create acquisition_progress for the download bar
-            let mut shard_progress = std::collections::HashMap::new();
-            shard_progress.insert(
-                shard_index,
-                crate::model::acquisition::ShardProgress::new_downloading(shard_index, shard_size),
-            );
-            let mut dl_status = crate::model::acquisition::AcquisitionStatus::new_downloading(
-                mid.clone(),
-                1,
-                shard_size,
-                "peers",
-                "user",
-                format!("Downloading shard {} from peer", shard_index + 1),
-            );
-            dl_status.shard_progress = shard_progress;
+            // Fold this shard into whatever download of this model is already
+            // in flight, rather than replacing it.
+            //
+            // `acquisition_progress` is keyed by MODEL, so a blind insert made
+            // every "Download this part" click discard the entry the previous
+            // click created — leaving `total_bytes` at the last shard's size
+            // while `downloaded_bytes` kept accumulating across all of them.
+            // Asking for five shards of an 8B model showed 1107 MB of 709, a
+            // progress bar at 156%. Observed 2026-08-24 doing exactly that.
             shared
                 .models
                 .acquisition_progress
-                .insert(mid.clone(), dl_status);
+                .entry(mid.clone())
+                .and_modify(|st| {
+                    // Only extend a download that is still running; a finished
+                    // or failed one is stale and this click starts afresh.
+                    if matches!(
+                        st.state,
+                        crate::model::acquisition::AcquisitionState::Downloading
+                    ) {
+                        if st.shard_progress.contains_key(&shard_index) {
+                            return; // already tracking this shard
+                        }
+                        st.total_shards = st.total_shards.saturating_add(1);
+                        st.total_bytes = st.total_bytes.saturating_add(shard_size);
+                        st.shard_progress.insert(
+                            shard_index,
+                            crate::model::acquisition::ShardProgress::new_downloading(
+                                shard_index,
+                                shard_size,
+                            ),
+                        );
+                    } else {
+                        *st = fresh_shard_download_status(&mid, shard_index, shard_size);
+                    }
+                })
+                .or_insert_with(|| fresh_shard_download_status(&mid, shard_index, shard_size));
 
             let request = crate::types::ShardRequest {
                 shard_id,
@@ -550,3 +591,54 @@ pub async fn lock_shard(
 }
 
 // ── LoRA Adapter Management ──
+
+#[cfg(test)]
+mod download_progress_tests {
+    use super::fresh_shard_download_status;
+    use crate::model::acquisition::{AcquisitionState, ShardProgress};
+    use crate::types::ModelId;
+
+    /// Asking for several shards of one model must describe ONE download of
+    /// several shards, not overwrite itself once per click.
+    ///
+    /// `acquisition_progress` is keyed by model, so a blind insert left
+    /// `total_bytes` at the last shard's size while `downloaded_bytes` kept
+    /// summing across every transfer. Observed live: 1107 MB of 709, a bar at
+    /// 156%.
+    #[test]
+    fn asking_for_five_shards_totals_five_shards() {
+        let mid = ModelId("m".into());
+        let sizes: [u64; 5] = [573, 523, 507, 539, 708];
+
+        // First click builds the entry; the rest fold into it.
+        let mut st = fresh_shard_download_status(&mid, 3, sizes[0]);
+        for (i, size) in sizes.iter().enumerate().skip(1) {
+            let idx = 3 + i as u32;
+            assert!(matches!(st.state, AcquisitionState::Downloading));
+            st.total_shards = st.total_shards.saturating_add(1);
+            st.total_bytes = st.total_bytes.saturating_add(*size);
+            st.shard_progress
+                .insert(idx, ShardProgress::new_downloading(idx, *size));
+        }
+
+        assert_eq!(st.total_shards, 5, "five shards were asked for");
+        assert_eq!(
+            st.total_bytes,
+            sizes.iter().sum::<u64>(),
+            "the total must cover every shard, not just the last one"
+        );
+        assert_eq!(st.shard_progress.len(), 5);
+    }
+
+    /// A repeat click on a shard already in flight must not double-count it.
+    #[test]
+    fn re_requesting_the_same_shard_does_not_inflate_the_total() {
+        let mid = ModelId("m".into());
+        let st = fresh_shard_download_status(&mid, 2, 500);
+        assert!(st.shard_progress.contains_key(&2));
+        // The handler's guard is `contains_key`, so a second click returns
+        // early and the figures below are what must survive it.
+        assert_eq!(st.total_shards, 1);
+        assert_eq!(st.total_bytes, 500);
+    }
+}
