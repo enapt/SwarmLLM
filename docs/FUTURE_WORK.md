@@ -299,6 +299,25 @@ n-gram lookup off in Settings did nothing until restart), and the call-site
 comment in `distributed.rs` claimed the path "falls through when segments
 aren't 1", which it never did.
 
+**The gate's threshold ignores the round trip it saves, and on the path where
+speculation matters most that is the wrong calculus.**
+`PAYOFF_WORTH_THE_WIRE_X100` was derived from the BYTE cost of the returned
+vocabulary against a 4-byte token id. But a plain decode step on a multi-segment
+pipeline also costs a full round trip, and speculation saves `(k-1)` of them —
+which the threshold does not model. Worked at 200 ms RTT: 513 KB is ~410 ms on a
+10 Mbps uplink (one saved RTT does NOT pay for it) and ~41 ms on 100 Mbps (it
+pays easily). So the honest threshold is a function of the peer's bandwidth and
+RTT, both of which `NodeCapability.bandwidth_mbps` and `peer_registry.latency_ms`
+already carry.
+
+This bites hardest on **boomerang** (`inference.encrypted_pipeline`), which is
+multi-segment by construction and therefore eligible for this path. Boomerang
+decode is latency-bound at ~1 RTT/token — a hard ceiling of ~5 tok/s at 200 ms
+and ~1.25 at 800 ms, regardless of hardware — and amortising one RTT over k
+tokens is the ONLY lever that breaks it. A flat byte-derived threshold is
+conservative in exactly the wrong direction there. Fix the threshold before
+concluding speculation does not help boomerang.
+
 **What shipped.** A payoff gate mirroring `spec_payoff_justifies_diverting` on
 the local speculator: the loop records accepted tokens per round, and declines
 the wire once that figure sits below `PAYOFF_WORTH_THE_WIRE_X100` (1.3). Unknown
