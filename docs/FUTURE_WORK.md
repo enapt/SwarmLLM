@@ -301,11 +301,19 @@ meaning "verified"**:
   Not observed firing here: the on-disk manifest still carried placeholders for
   all five shards hours after they landed, so whatever gates this did not open.
   Worth establishing what those gates are before changing it.
-- **The re-download went back to the SAME peer that served the bad copy.**
-  `select_best_allowed_peer` ranks LAN, then latency, then trust, and whether one
-  verification failure moves trust enough to pick a different holder was not
-  observed. If it does not, a peer with genuinely corrupt storage is an infinite
-  retry loop.
+- **The corruption has PROPAGATED — at least two peers serve identical bad
+  bytes.** Re-downloading shard 7 twice produced the same wrong digest
+  `ab5bc674…` from two distinct peers, against an expected `597dcfe8…`. Settled
+  against an independent reference: the shard is a contiguous GGUF byte range, so
+  fetching exactly that range from the source repo and hashing it gives ground
+  truth — it returned `597dcfe8…`, **confirming our expectation is correct and
+  the peers are wrong**. This is the unverified-accept path working as a
+  propagation channel: a shard taken on trust is announced as held and re-served,
+  so one bad copy becomes several, each making the bad copy look more
+  authoritative. Recovery has to bypass the swarm
+  (`POST /api/admin/hf/download-shards`). See gotcha #382.
+  Retry *does* move to a different holder across attempts, so trust is not
+  pinning a single bad peer — it simply cannot help when the swarm agrees.
 
 **Two consequences worth keeping stated.**
 
