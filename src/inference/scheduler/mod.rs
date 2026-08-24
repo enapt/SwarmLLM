@@ -108,7 +108,20 @@ struct NodeCandidate {
 fn max_hostable_layers(
     capability: Option<&swarmllm_types::NodeCapability>,
     bytes_per_layer: u64,
+    already_warm: bool,
 ) -> Option<u32> {
+    // A peer that is already serving this model has already paid for it. The
+    // advertised figure is free memory RIGHT NOW (`health/monitor` queries the
+    // card on every broadcast), so it EXCLUDES the weights of anything resident
+    // — meaning the one node that certainly can hold the model reports the
+    // least room for it, and capping it would route around the best-placed
+    // machine in the swarm.
+    //
+    // This is gotcha #329 from the other side: "is it loaded?" and "would it
+    // fit?" are different questions, and free memory only answers the second.
+    if already_warm {
+        return None;
+    }
     if bytes_per_layer == 0 {
         return None;
     }
@@ -153,6 +166,11 @@ fn max_hostable_layers(
 /// machine** whenever either node was busy — the feature would have shipped
 /// inert on exactly the loaded nodes that need it.
 const DELEGATE_MAX_LATENCY_MS: u32 = 200;
+
+/// How recently a peer must have served a model for us to treat it as still
+/// holding it. Matches `pipeline::local::PEER_MODEL_WARM_TTL_SECS`, which asks
+/// the same question to size a forward's budget.
+const PEER_MODEL_WARM_TTL_SECS: u64 = 900;
 
 /// Minimum trust before this node will hand a peer a whole prompt.
 ///
@@ -1128,10 +1146,15 @@ impl PipelineScheduler {
             let max_hostable_layers = if node_id == *local_node_id {
                 None
             } else {
+                let warm = self.shared_state.peer_model_is_warm(
+                    &node_id,
+                    &manifest.id,
+                    std::time::Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
+                );
                 self.shared_state
                     .peer_registry
                     .get(&node_id)
-                    .and_then(|p| max_hostable_layers(p.capability.as_ref(), bytes_per_layer))
+                    .and_then(|p| max_hostable_layers(p.capability.as_ref(), bytes_per_layer, warm))
             };
             let gpu_vram_available_mb = if node_id == *local_node_id {
                 // Never used for the local node — the loader's own admission

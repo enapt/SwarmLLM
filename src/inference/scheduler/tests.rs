@@ -1664,3 +1664,78 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
     let _ = near_slow;
     let _ = local;
 }
+
+/// A peer already serving this model must never be capped by its free memory.
+///
+/// `vram_available_mb` is what the card has spare RIGHT NOW, so a resident
+/// model's own weights are missing from it — the one node that certainly can
+/// hold the model advertises the least room for it. Capping on that figure
+/// routes around the best-placed machine in the swarm, which is the opposite of
+/// what the bound is for.
+/// A capability announcement carrying a card with `free_mb` free.
+fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
+    crate::types::NodeCapability {
+        node_id: NodeId([0u8; 32]),
+        gpu: free_mb.map(|free| crate::types::GpuInfo {
+            name: "test card".into(),
+            vram_total_mb: 8192,
+            vram_available_mb: free,
+            compute_capability: None,
+            memory_bandwidth_gbps: 0.0,
+        }),
+        cpu: None,
+        ram_total_mb: 0,
+        ram_available_mb: 0,
+        disk_available_mb: 0,
+        bandwidth_mbps: 0.0,
+        hosted_shards: vec![],
+        max_contribution: crate::types::ContributionLevel::Moderate,
+        uptime_seconds: 0,
+        version: String::new(),
+        region: None,
+        est_tokens_per_sec_7b: 0.0,
+        os: None,
+        observed_latencies: vec![],
+        relay_capable: false,
+        protocol_version: 0,
+        features: 0,
+        relay_reservations: vec![],
+        anchor_mode: false,
+    }
+}
+
+#[test]
+fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
+    // A 3 GB model over 32 layers, and a card reporting 200 MB free because it
+    // is busy running that very model.
+    let bytes_per_layer = 3_000u64 * 1_048_576 / 32;
+    let cap = capability_with_gpu(Some(200));
+
+    let cold = super::max_hostable_layers(Some(&cap), bytes_per_layer, false);
+    assert!(
+        cold.is_some_and(|k| k < 32),
+        "a COLD peer with 200 MB free cannot take a 3 GB model: {cold:?}"
+    );
+
+    let warm = super::max_hostable_layers(Some(&cap), bytes_per_layer, true);
+    assert_eq!(
+        warm, None,
+        "a peer already serving this model has already paid for it — the free \
+         figure excludes the weights it is running"
+    );
+}
+
+/// Unknown must still mean unknown: a peer that gossips nothing, or gossips the
+/// zero every node before v0.3.103 sent, is routed to exactly as before.
+#[test]
+fn an_unreadable_memory_figure_never_caps_a_peer() {
+    assert_eq!(super::max_hostable_layers(None, 1024, false), None);
+
+    let zeroed = capability_with_gpu(Some(0));
+    assert_eq!(
+        super::max_hostable_layers(Some(&zeroed), 1024, false),
+        None,
+        "zero free VRAM is what a pre-v0.3.103 node always advertised — it is \
+         no information, not 'no room' (gotcha #330)"
+    );
+}
