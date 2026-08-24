@@ -4,6 +4,47 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.118-alpha] — 2026-08-24
+
+**A graphics card that is sitting idle can now actually be used for a model that
+fits it** — if you have raised the limit. Measured on an 8B model with an
+otherwise-empty 8 GB card: 1.0 tokens a second on the processor against 25.7 on
+the card.
+
+### The graphics-memory limit
+
+Raising the graphics-memory limit saved, said "ok", wrote the new number to the
+config file, and then did nothing until the daemon was restarted. The limit was
+read from the snapshot taken at startup rather than from the live configuration.
+
+That is the setting which decides whether a model runs on your card or crawls on
+your processor, so the effect was large: a model needing 6033 MB was refused on a
+card with 7187 MB free and ran twenty-five times slower instead. It applies
+immediately now.
+
+**Note what this does and does not do.** It makes the override work. It does not
+change the default, which still reserves a fixed share of the card based on your
+contribution level regardless of what is actually running on it — so a model
+slightly too large for that share still falls to the processor even on an idle
+card. That is a real limitation and it is written up rather than quietly changed,
+because fixing it alters how every node admits models and deserves a deliberate
+decision.
+
+### Smaller things
+
+- The dashboard's download bar no longer runs past the end when you ask for
+  several parts of one model at once. Progress is tracked per model and each
+  request replaced the previous one's entry, so the total stayed at one part's
+  size while the bytes counted kept adding up. Asking for five parts of an 8B
+  model showed a bar at 156%.
+- Speculating across machines now weighs the round trip it saves, not only the
+  data it costs. Whether it pays depends on the link — half a megabyte is about
+  410ms on a slow home connection and about 41ms on a fast one — so a single
+  fixed threshold was too strict on slow links and too generous on fast ones. It
+  matters most for prompt-privacy mode, where a reply is limited by one round
+  trip per token however fast the machines are.
+
+
 ## [0.3.117-alpha] — 2026-08-24
 
 **Settings you change now stay changed, your prompts stay on your machine unless
