@@ -184,16 +184,46 @@ impl Default for NodeConfig {
 /// use it — the idle-unload path returns memory once the machine is quiet, so
 /// the ceiling only binds while work is actually being done. Anyone who wants a
 /// different figure sets `max_gpu_vram_mb` and that wins outright.
-fn vram_fraction_for(contribution: ContributionMode) -> f64 {
+/// The share of a resource a contribution level offers. Used to scale the
+/// system-RAM budget; VRAM uses [`vram_reserve_fraction_for`] instead, which
+/// reserves rather than caps — see the note there.
+fn contribution_share_for(contribution: ContributionMode) -> f64 {
     match contribution {
-        // Default. Leave the majority of the card to whatever else the person
-        // is doing with their computer.
         ContributionMode::Minimal => 0.5,
         ContributionMode::Moderate => 0.65,
-        // An explicit offer of the machine.
         ContributionMode::Maximum => 0.8,
     }
 }
+
+/// How much of the graphics card to keep back for whatever else the person is
+/// doing with their computer, as a fraction of the card's total size. A floor in
+/// MB applies alongside it (see [`ResourceConfig::inference_vram_budget_mb`]).
+///
+/// **This replaced a fraction of TOTAL that the budget was capped to**, and the
+/// difference is the whole point. Reserving half an 8 GB card left a 4096 MB
+/// budget whatever was actually running, so a 6033 MB model was refused while
+/// 7187 MB sat free and the request fell to the processor — 1.0 tok/s against
+/// 25.7 (measured 2026-08-24). The old shape also double-counted: memory another
+/// program is using is already missing from what the card reports free, so
+/// charging a fraction on top of that reserved for the same work twice.
+///
+/// Reserving rather than capping means an idle card can be used, and a busy one
+/// backs off on its own — a game holding 4 GB simply leaves less to admit
+/// against, with no setting to find.
+fn vram_reserve_fraction_for(contribution: ContributionMode) -> f64 {
+    match contribution {
+        // Keep a generous slice of the card free for the person's own work.
+        ContributionMode::Minimal => 0.15,
+        ContributionMode::Moderate => 0.10,
+        // An explicit offer of the machine.
+        ContributionMode::Maximum => 0.05,
+    }
+}
+
+/// Smallest amount of graphics memory to keep free, whatever the card's size.
+/// A percentage alone is too little headroom on a small card and the driver
+/// itself needs room to work.
+const MIN_VRAM_RESERVE_MB: u64 = 512;
 
 impl ResourceConfig {
     /// Compute the effective VRAM budget for inference model loading.
@@ -215,15 +245,31 @@ impl ResourceConfig {
     pub fn inference_vram_budget_mb(
         &self,
         gpu_vram_total_mb: u64,
+        // Graphics memory other programs are using right now, in MB — the
+        // card's used total minus what OUR OWN workers have reserved. `None`
+        // when it could not be read, which falls back to assuming the card is
+        // otherwise idle rather than inventing a restriction.
+        other_process_vram_mb: Option<u64>,
         contribution: ContributionMode,
     ) -> Option<u64> {
+        if gpu_vram_total_mb == 0 {
+            return None;
+        }
+        let reserve = ((gpu_vram_total_mb as f64 * vram_reserve_fraction_for(contribution)) as u64)
+            .max(MIN_VRAM_RESERVE_MB);
+        // What this node may hold on the card in total. Expressed against the
+        // card's SIZE, not against what is free, because the caller compares it
+        // to `committed + estimated` where `committed` is our own resident
+        // models — subtracting them here as well would charge for them twice.
+        let usable = gpu_vram_total_mb
+            .saturating_sub(other_process_vram_mb.unwrap_or(0))
+            .saturating_sub(reserve);
         if self.max_gpu_vram_mb > 0 {
-            // An explicit ceiling is the user's own decision and always wins.
-            Some(self.max_gpu_vram_mb)
-        } else if gpu_vram_total_mb > 0 {
-            Some((gpu_vram_total_mb as f64 * vram_fraction_for(contribution)) as u64)
+            // An explicit ceiling is the user's own decision, but it cannot
+            // conjure memory another program is holding.
+            Some(self.max_gpu_vram_mb.min(usable.max(1)))
         } else {
-            None
+            Some(usable)
         }
     }
 
@@ -396,15 +442,23 @@ impl ResourceConfig {
         } else {
             system_ram_total_mb as f64 * 0.8
         };
-        // Then scaled by what the owner agreed to give, exactly as VRAM is.
-        // A contribution level that governs one kind of memory and not the other
-        // is not a limit, it is a suggestion — and RAM exhaustion is worse than
-        // VRAM exhaustion, because the failure mode is swapping, which degrades
-        // the entire machine rather than just this daemon.
+        // Then scaled by what the owner agreed to give. RAM exhaustion is worse
+        // than VRAM exhaustion — the failure mode is swapping, which degrades
+        // the whole machine rather than just this daemon — so a cap here is
+        // worth keeping.
+        //
+        // This comment used to say "exactly as VRAM is", and since 2026-08-24
+        // that is no longer true: VRAM RESERVES a slice of the card and admits
+        // against the rest, rather than capping to a fraction of its size.
+        // Capping was measured refusing a 6033 MB model on a card with 7187 MB
+        // free. RAM is not in that position — `ram_budget_now` already judges
+        // the anti-swap headroom against memory free NOW, so the cap here sits
+        // on top of a live figure rather than replacing one.
         //
         // Expressed relative to Maximum so the documented CPU-only 80% and
         // GPU-node 50% still hold for a node that has explicitly offered itself.
-        let scale = vram_fraction_for(contribution) / vram_fraction_for(ContributionMode::Maximum);
+        let scale = contribution_share_for(contribution)
+            / contribution_share_for(ContributionMode::Maximum);
         Some((base * scale) as u64)
     }
 }

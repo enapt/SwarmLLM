@@ -6,29 +6,34 @@ All notable changes to SwarmLLM are documented here.
 
 ## [0.3.118-alpha] — 2026-08-24
 
-**A graphics card that is sitting idle can now actually be used for a model that
-fits it** — if you have raised the limit. Measured on an 8B model with an
-otherwise-empty 8 GB card: 1.0 tokens a second on the processor against 25.7 on
-the card.
+**Your graphics card is now used when it is free.** A model that fits your card
+runs on it, without changing a setting. Measured on an 8B model and an 8 GB
+card: 1.0 tokens a second before, 25.7 after.
 
 ### The graphics-memory limit
 
-Raising the graphics-memory limit saved, said "ok", wrote the new number to the
-config file, and then did nothing until the daemon was restarted. The limit was
-read from the snapshot taken at startup rather than from the live configuration.
+Two things were wrong, and together they meant a model could be refused a card
+that was sitting almost empty.
 
-That is the setting which decides whether a model runs on your card or crawls on
-your processor, so the effect was large: a model needing 6033 MB was refused on a
-card with 7187 MB free and ran twenty-five times slower instead. It applies
-immediately now.
+The limit was a fixed share of the card's total size — half of it by default —
+whatever was actually running. So a model needing 6033 MB was turned away from a
+card with 7187 MB free and fell back to the processor, twenty-five times slower.
+The share could not tell an idle card from a busy one.
 
-**Note what this does and does not do.** It makes the override work. It does not
-change the default, which still reserves a fixed share of the card based on your
-contribution level regardless of what is actually running on it — so a model
-slightly too large for that share still falls to the processor even on an idle
-card. That is a real limitation and it is written up rather than quietly changed,
-because fixing it alters how every node admits models and deserves a deliberate
-decision.
+It now keeps a slice of the card in reserve and uses the rest. On an idle card
+that means a model which physically fits will run on it. When something else is
+using the card — a game, another application — there is simply less to work with
+and the node backs off on its own. That is **more** protective than the old share
+in the situation it was meant for: with 4 GB in use elsewhere, a default node now
+admits less than the old fixed limit ever did.
+
+Contribution level still decides how much you keep back — 15%, 10% or 5% of the
+card, and never less than 512 MB — rather than being a ceiling that ignored what
+was happening.
+
+Separately: raising the limit by hand saved, said "ok", wrote the new number to
+the config file, and then did nothing until the daemon was restarted, because it
+was read from the snapshot taken at startup. It applies immediately now.
 
 ### Smaller things
 
@@ -43,7 +48,6 @@ decision.
   fixed threshold was too strict on slow links and too generous on fast ones. It
   matters most for prompt-privacy mode, where a reply is limited by one round
   trip per token however fast the machines are.
-
 
 ## [0.3.117-alpha] — 2026-08-24
 

@@ -1226,37 +1226,103 @@ max_concurrent_requests = 42
             swarmllm_types::ContributionMode::Moderate,
             swarmllm_types::ContributionMode::Maximum,
         ] {
-            assert_eq!(rc.inference_vram_budget_mb(8000, mode), Some(4000));
+            assert_eq!(rc.inference_vram_budget_mb(8000, None, mode), Some(4000));
         }
     }
 
     /// **The budget follows what the user agreed to contribute.**
     ///
-    /// It was a flat 80% whatever they had chosen — and `Minimal` is the
-    /// DEFAULT, so a stock install claimed 6.5 GB of an 8 GB card on machines
-    /// that are mostly gaming PCs and home desktops.
+    /// The concern this test was written to protect, and which still holds:
+    /// `Minimal` is the DEFAULT, and these are mostly gaming PCs and home
+    /// desktops, so a stock install must not take the card out from under the
+    /// person using the computer.
+    ///
+    /// It protects that by RESERVING a slice rather than CAPPING to a fraction
+    /// of the card's size, which is a change made 2026-08-24. Capping was
+    /// measured refusing a 6033 MB model on a card with 7187 MB free — the
+    /// request fell to the processor at 1.0 tok/s against 25.7 — because the
+    /// cap could not tell an idle card from a busy one.
     #[test]
     fn vram_budget_scales_with_contribution() {
         let rc = ResourceConfig::default(); // max_gpu_vram_mb = 0
-        let minimal = rc
-            .inference_vram_budget_mb(8000, swarmllm_types::ContributionMode::Minimal)
-            .unwrap();
-        let moderate = rc
-            .inference_vram_budget_mb(8000, swarmllm_types::ContributionMode::Moderate)
-            .unwrap();
-        let maximum = rc
-            .inference_vram_budget_mb(8000, swarmllm_types::ContributionMode::Maximum)
-            .unwrap();
+        let idle = |mode| rc.inference_vram_budget_mb(8000, Some(0), mode).unwrap();
+        let minimal = idle(swarmllm_types::ContributionMode::Minimal);
+        let moderate = idle(swarmllm_types::ContributionMode::Moderate);
+        let maximum = idle(swarmllm_types::ContributionMode::Maximum);
 
         assert!(
             minimal < moderate && moderate < maximum,
             "more contribution must mean more headroom, got {minimal}/{moderate}/{maximum}"
         );
-        assert_eq!(maximum, 6400, "an explicit offer of the machine keeps 80%");
-        assert!(
-            minimal <= 4000,
-            "the DEFAULT setting must leave most of the card to the person using              the computer, got {minimal} of 8000"
+        assert_eq!(
+            maximum, 7488,
+            "an explicit offer of the machine keeps only the safety reserve — at \
+             this card size the 512 MB floor binds, not the 5%"
         );
+        assert_eq!(
+            minimal, 6800,
+            "the default keeps 15% of the card back, not 50% of it"
+        );
+    }
+
+    /// The original concern, tested against the situation it is actually about:
+    /// the person is USING their graphics card for something else.
+    ///
+    /// Reserving is strictly more protective than the fraction-of-total cap it
+    /// replaced here — a game holding 4 GB leaves the default node less to admit
+    /// against than the old flat 4000 MB cap ever did, with no setting to find.
+    #[test]
+    fn a_busy_card_is_protected_better_than_the_old_cap_did() {
+        let rc = ResourceConfig::default();
+        let gaming = rc
+            .inference_vram_budget_mb(8000, Some(4000), swarmllm_types::ContributionMode::Minimal)
+            .unwrap();
+        assert!(
+            gaming < 4000,
+            "with 4 GB in use by something else, the default must admit LESS than \
+             the old fraction-of-total cap of 4000, got {gaming}"
+        );
+        // ...and an idle card admits a model the old cap refused outright.
+        let idle = rc
+            .inference_vram_budget_mb(8000, Some(0), swarmllm_types::ContributionMode::Minimal)
+            .unwrap();
+        assert!(
+            idle > 6033,
+            "an idle 8 GB card must fit the 6033 MB model that was measured being \
+             refused, got {idle}"
+        );
+    }
+
+    /// An explicit ceiling is the user's decision, but it cannot conjure memory
+    /// another program is holding.
+    #[test]
+    fn an_explicit_ceiling_still_respects_what_another_program_is_using() {
+        let rc = ResourceConfig {
+            max_gpu_vram_mb: 7000,
+            ..Default::default()
+        };
+        let busy = rc
+            .inference_vram_budget_mb(8000, Some(6000), swarmllm_types::ContributionMode::Maximum)
+            .unwrap();
+        assert!(
+            busy < 7000,
+            "6 GB is in use elsewhere; a 7000 MB ceiling must not be taken \
+             literally, got {busy}"
+        );
+    }
+
+    /// An unreadable figure must not invent a restriction — it falls back to
+    /// treating the card as otherwise idle, which is the pre-existing behaviour.
+    #[test]
+    fn an_unreadable_usage_figure_does_not_shrink_the_budget() {
+        let rc = ResourceConfig::default();
+        let unknown = rc
+            .inference_vram_budget_mb(8000, None, swarmllm_types::ContributionMode::Minimal)
+            .unwrap();
+        let idle = rc
+            .inference_vram_budget_mb(8000, Some(0), swarmllm_types::ContributionMode::Minimal)
+            .unwrap();
+        assert_eq!(unknown, idle);
     }
 
     /// RAM must follow the contribution level too. A limit that governs one
@@ -1458,7 +1524,7 @@ max_concurrent_requests = 42
     fn vram_budget_no_gpu() {
         let rc = ResourceConfig::default();
         assert_eq!(
-            rc.inference_vram_budget_mb(0, swarmllm_types::ContributionMode::Maximum),
+            rc.inference_vram_budget_mb(0, None, swarmllm_types::ContributionMode::Maximum),
             None
         );
     }

@@ -1453,7 +1453,7 @@ impl ModelProcessPool {
     }
 
     /// GPU memory already committed to live workers, in MB.
-    fn vram_committed_mb(&self) -> u64 {
+    pub(crate) fn vram_committed_mb(&self) -> u64 {
         self.vram_reserved_mb.iter().map(|e| *e.value()).sum()
     }
 

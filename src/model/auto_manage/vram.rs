@@ -858,10 +858,19 @@ pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     // Same lesson as gotcha #281, and the sibling `ram_budget_now` was given
     // exactly this treatment in August (gotcha #362) while this one was left
     // on the snapshot.
-    shared
-        .cfg()
-        .resources
-        .inference_vram_budget_mb(gpu_total, shared.contribution())
+    // What OTHER programs are holding on the card right now: the used total,
+    // less what our own workers have already reserved. Passing our own models'
+    // memory through here would charge for them twice, since the caller weighs
+    // this budget against `committed + estimated`.
+    let other_process_mb = query_gpu_vram_free_mb().map(|free| {
+        let used_total = gpu_total.saturating_sub(free);
+        used_total.saturating_sub(shared.model_process_pool.vram_committed_mb())
+    });
+    shared.cfg().resources.inference_vram_budget_mb(
+        gpu_total,
+        other_process_mb,
+        shared.contribution(),
+    )
 }
 
 /// Percentage of *currently free* system RAM a configured budget may claim.
