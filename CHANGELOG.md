@@ -4,6 +4,66 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.124-alpha] — 2026-08-25
+
+**Stability round.** Everything here was found by running the software and
+reading what it actually said, not by review.
+
+### A machine that is briefly busy is no longer treated as gone
+
+Each machine has a few seconds to acknowledge that it received work before the
+job is handed elsewhere. That deadline came from ping latency — which says
+nothing about how busy the machine is. The acknowledgement is sent by the same
+part of the program that is busy, so it arrives late exactly when the old
+estimate expected it to be quick.
+
+Measured on the live network: one machine spent about an hour failing every
+distributed request this way, then served the same request in six seconds once it
+settled. Its acknowledgements were arriving the whole time — late, not missing.
+
+- Each machine's deadline now comes from how long its own acknowledgements have
+  actually taken, and how much that varies, using the method TCP uses to decide a
+  packet is lost. It widens for a machine that is struggling and narrows again
+  when it recovers, within the same limits as before.
+- A machine that misses its deadline earns a longer one. Without this the
+  deadline could never learn: a missed acknowledgement is one we stopped waiting
+  for, so a machine needing longer could never demonstrate it.
+- Giving up early now only happens when another machine is ready to take over —
+  which is the entire reason for doing it. Where there is none, giving up cannot
+  hand the work on and can only turn a slow answer into a failed one. Measured:
+  one reply arrived 1.6 seconds after we stopped waiting, and was discarded.
+
+### Running out of memory no longer makes the next attempt worse
+
+When a conversation was refused for lack of memory, it kept whatever it had
+already reserved. A long prompt reserves memory in steps as it is read, so a
+request refused part-way through had usually taken several steps' worth — and
+those stayed until the conversation expired ten minutes later.
+
+Repeat that and each refusal starts from a higher floor. Measured: refusals at
+1152, then 2304, then 3456 MB against a 1166 MB limit, in exact one-step
+increments, until the graphics card sat at 97% full and generation had fallen
+from 29 tokens a second to 1. The refused request now gives its memory back.
+
+### Messages that told you to do something that could not work
+
+- The message shown when part of a model becomes unreachable promised that
+  retrying would help. Six consecutive retries showed it would not. It now says
+  what actually changes the outcome — in all 21 languages, not only English.
+- The warning about a model answering with almost nothing fired on short answers
+  people had asked for, such as "say OK in one word". Reported by a tester
+  chasing a genuine version of that fault, whose own probes kept tripping it. It
+  now requires a length that makes a near-empty answer surprising.
+
+### Prompt privacy can be switched back on
+
+Switching prompt privacy off for a model succeeded; switching it back on was
+refused whenever this machine did not hold the model's first and last parts — so
+you could drop to the less private option and not get back. The preference is now
+recorded and reported as not yet in effect, naming what is missing. Requests are
+refused rather than sent out unprotected.
+
+
 ## [0.3.123-alpha] — 2026-08-25
 
 **Completes the 0.3.122 fix.** 0.3.122 protected fingerprints on parts fetched

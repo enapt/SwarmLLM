@@ -167,7 +167,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- **Counts** (re-measured 2026-08-24, after the capacity round): **2056 lib** + 11 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 33 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
+- **Counts** (re-measured 2026-08-24, after the capacity round): **2064 lib** + 11 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 33 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
 - **Benches and harnesses — see `docs/DIAGNOSTICS.md` § Benchmarks for the full list and the traps.** The ones reached for most: `examples/prefill_bench.rs` (drives `SplitModel::forward` directly, no daemon — `SWARM_BENCH_MODEL`, `SWARM_BENCH_PROMPT`, `SWARM_BENCH_DECODE`, `SWARM_BENCH_REPS`, `SWARM_BENCH_DEVICE=cuda`, and `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` which prices a K-token forward against a 1-token one at the same history depth — the number that decides whether speculation pays; pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown), `examples/qmatmul_bench.rs` (asserts the tiled kernel is bit-identical to upstream), `examples/smoke_test.sh [binary] [port]` (8 checks on an isolated node — run it on the DOWNLOADED release artifact), `examples/soak_test.sh` (`HOURS=` must be a WHOLE number; data dir is per-`PORT`, so two soaks no longer kill each other).
 - **Measurement discipline** (paid for repeatedly): min-of-N on an IDLE box — the same unchanged code measured 0.42 ms and 0.97 ms across runs here, and a benchmark taken while a build runs is worthless. **min-of-N is for benchmarks, not for live measurement** (#367). A/B inside ONE binary via an env switch (`SWARMLLM_DECODE_CALIBRATE=0`, `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`, `SWARMLLM_FLASH_OFFSET_CAUSAL=0`, `SWARMLLM_GQA_DECODE_FLASH=1`, `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1`), never across two builds. **Verify the mechanism fired**, not just that the outcome improved. Pinned reference models: `docs/REFERENCE_MODELS.md`.
 - Unit tests: in-module `#[cfg(test)]` blocks
@@ -217,132 +217,78 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2056 lib (dev,claude-subscription) — re-measured 2026-08-24 at v0.3.119-alpha** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 33 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
+All 20 build phases complete. All subsystems wired — no stubs. **2064 lib (dev,claude-subscription) — re-measured 2026-08-24 at v0.3.119-alpha** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 33 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.120/.121/.122-alpha (2026-08-25): a corrupt shard PROVED to spread; then the fix turned on the good copy
+### Latest — v0.3.124-alpha (2026-08-25): stability round, all of it found by RUNNING the thing
 
-**Read #384 before touching shard hashes.** .121 added a re-check of a HELD shard
-when its expected hash changes — and within the hour, on the live node, it
-quarantined our GOOD shard 7 and began an unbounded ~500 MB refetch loop.
-The log gave the direction: `expected ab5bc674… (a peer's self-certified hash for
-its CORRUPT copy) got 597dcfe8… (our bytes, verified against HuggingFace)`. A peer
-gossiped the hash it had computed from its own bad bytes; `register_manifest` is
-last-writer-wins and a real hash replaces a real hash (deliberately, for
-re-publishes), so the wrong one displaced the right one and the new re-check
-faithfully destroyed the good copy.
-**The bug was not the re-check — it was that a hash carried no PROVENANCE**, so
-"verified against the origin" and "asserted by a stranger" were the same kind of
-fact. #382 had already established that only the origin settles a hash; the lesson
-was written down and not encoded. .122 adds `ModelRegistry::origin_verified`:
-origin-derived hashes outrank gossip, are applied BEFORE change-detection (so a
-disproved claim provokes no re-check), and are persisted. Deliberately local and
-never gossiped — provenance that travels the network is just another assertion.
-**A repair mechanism is a destruction mechanism pointed at whatever it believes is
-wrong; ask what happens when the REFERENCE is wrong.** And: ship it, then go and
-look.
+Six fixes, none from review. **Read #386 and #387 before touching the ACK
+deadline or the KV budget.**
 
-**.121 completes .120.** .120 stopped a corrupt shard being accepted and passed
-on, and made one that IS found bad get replaced rather than merely quarantined.
-But a node ALREADY holding a bad shard still could not find out: the only
-re-check of an already-held shard is the one-shot startup sweep, which runs ~2 s
-after boot against whatever the DB held, and the rescan skips shards already
-registered. The corrected hash arrived by gossip AFTER the only check that would
-have used it. **.121 re-checks a held shard whenever its expected hash changes**
-(`shards_pending_verification`), so a node can be told by the swarm that what it
-is serving is wrong. **The lesson is about the answer, not the code**: every
-individual piece of "detect and repair" was present and the mechanism still could
-not fire, because nothing re-asked the question after the reference changed.
-Trace the trigger; do not reason forward from the parts.
+- **The receipt-ACK deadline was derived from ping RTT, which cannot see a loaded
+  peer** (#386). The ACK is emitted by the network event loop, so it is late
+  exactly when that loop is busy — the one condition a ping cannot measure. One
+  peer failed EVERY distributed request for ~an hour, then served the same request
+  in 6.1 s. Its ACKs were arriving late, not missing; proved by running a node at
+  `-v` and seeing `kind="ack"` from six peers including the failing one.
+  Now per-peer **RFC 6298** (SRTT + 4·RTTVAR) over observed ACK latency, **plus
+  §5.5 backoff on a miss** — without the backoff the estimator is INERT exactly
+  where it is needed, because an abandoned forward is one whose ACK we stopped
+  waiting for, so a slow peer can never produce the sample that would widen its
+  deadline.
+- **The fast-fail now requires a standby.** It is justified by the failover it
+  enables (the premise of hedged requests in *The Tail at Scale* — a second copy
+  to a DIFFERENT replica). With none, abandoning can only turn a slow success into
+  a 503: measured, a reply arrived 1.6 s after we gave up and was discarded.
+- **A KV-budget refusal was a RATCHET** (#387). A chunked prefill claims a quantum
+  per boundary, so a request refused at chunk N had already taken N-1 — and kept
+  them until the 10-minute session TTL. Measured in exact 1152 MB steps: 1152 →
+  2304 → 3456 against a 1166 MB budget, card at 97%, decode 29 → 1.0 tok/s.
+  **A resource check that refuses but does not release is worse than no check
+  under repetition** — the failed attempts are the ones that accumulate.
+- **Two messages advised something that could not work**: the failover hint said
+  "try again" against six failing retries (fixed in all 21 locales), and the
+  short-reply warning fired on deliberate one-word answers (reported by a tester
+  whose own probes kept tripping it).
+- **Prompt privacy was one-way** — off succeeded, on was refused without the end
+  shards, so a state the system stores could not be restored through the API that
+  stores it. Now recorded with `ready: false`; requests fail CLOSED.
+- **⚠ Three of my own causal claims this session were WRONG and are corrected in
+  the repo**: "reproducible 6/6" and "model-size dependent" (both timing
+  coincidences — a failure that recovers on its own was never structural), and a
+  near-claim that a peer's repair proved the .123 path ran on it (no retraction in
+  our log). **The discriminator was WHEN, not WHAT.**
 
-Integrity round. Found on the live node by RUNNING it, and settled against an
-independent reference rather than reasoning. Detail: gotchas #381/#382,
-`docs/FUTURE_WORK.md`.
+### Earlier — v0.3.120-.123-alpha (2026-08-25): a corrupt shard PROVED to spread between peers
 
-- **"No hash to check against" silently meant "verified", in three places.** A
-  manifest is built from what its author holds on disk, so a partial holder
-  publishes real hashes for its own shards and all-zero placeholders for the
-  rest — and `register_manifest` was a blind `insert`, so a placeholder ERASED a
-  hash we already had. The P2P accept path verifies only when a hash exists, so
-  a lost hash meant the next copy was taken on trust, announced as held, and
-  re-served: **a propagation channel, not just a local hole**.
-- **Measured, not theorised**: shard 7 of meta-llama-3.1-8b failed verification
-  three times with the IDENTICAL wrong digest from **two distinct peers**. That
-  symmetry invites the wrong conclusion — I formed it — that our expectation was
-  the outlier. **Fetching the shard's exact GGUF byte range from the origin repo
-  and hashing it returned OUR expected hash**, so the peers were wrong and the
-  corruption had spread. **Agreement among peers is not evidence in a network
-  that copies from itself.**
-- **The verifier reported work it had not done** — `all shards OK verified=21`,
-  twice, over five shards it never hashed, because a zero-hash shard was counted
-  as `verified`. `unchecked` is now its own count and the all-clear is withheld.
-- **Fixes**: hash knowledge is MONOTONIC (`merge_known_shard_hashes`, unknown →
-  known, never back; a real re-publish still wins) and PERSISTED (a hash learned
-  by gossip used to die with the process). An uncheckable shard is now fetched
-  from the model's ORIGIN rather than trusted — **a node is never reduced to
-  trusting a peer**, which is what made the old carve-out look unavoidable. The
-  sender is NOT penalised: "cannot tell" is neither fine nor the peer's fault.
-  Self-limiting, not a retreat from P2P — the origin download supplies the hash,
-  which then spreads.
-- **Never throw away data you cannot replace.** The refetch runs OUTSIDE the
-  `auto_manage.enabled` gate (same distinction as `try_idle_vram_unload`); that
-  switch means "don't decide what to fetch for me", not "abandon a shard I asked
-  for".
-- **⚠ A shard is NOT always a contiguous GGUF range.** Shard 5 has two runs with
-  a 122 MB gap; reconstructing it as one span gave a confident FALSE mismatch on
-  a healthy file. Assert the reconstructed byte count equals `size_bytes` first.
+**Read #381-#384 before touching shard hashes.** A placeholder hash ERASED a
+known one (`register_manifest` was a blind insert), so P2P copies were accepted
+unverified, announced, and re-served — a PROPAGATION channel, not a local hole.
+Two distinct peers served byte-identical bad bytes; **the origin repo settled it
+— our expectation was RIGHT** (agreement among peers is not evidence in a network
+that copies from itself). The verifier also counted unchecked shards as
+`verified` ("all shards OK verified=21" over five it never hashed).
+Fixes: hash knowledge MONOTONIC + persisted; an uncheckable shard fetched from
+the ORIGIN; a corrupt one REPLACED not just quarantined; a held shard re-checked
+when its expected hash CHANGES; origin-derived hashes outrank gossip.
+**.121 shipped a regression that quarantined the GOOD copy** — a peer's
+self-certified hash displaced an origin-verified one and the new re-check
+faithfully destroyed the good bytes (#384). **A repair mechanism is a destruction
+mechanism pointed at whatever it believes is wrong: ask what happens when the
+REFERENCE is wrong.** And: ship it, then go and look — it was caught within the
+hour by watching the live node.
+⚠ A shard is NOT always a contiguous GGUF range (one has a 122 MB gap); assert
+the reconstructed byte count equals `size_bytes` or a healthy shard reports a
+false mismatch.
 
 ### Earlier — v0.3.119-alpha (2026-08-24): 25.7x, from a memory budget, on an idle card
 
-Small release, one large measured effect. Detail:
-`memory/round_log_0824_correctness.md`.
-
-- **`compute_vram_budget` read the BOOT SNAPSHOT.** Setting `max_gpu_vram_mb`
-  answered `{"status":"ok"}`, wrote to `config.toml`, and left the daemon on its
-  startup value. Measured end to end on the 3070: an 8B model needing 6033 MB
-  refused against a 4095 MB budget with **7187 MB free** (card 88% empty) →
-  **1.00 tok/s on the CPU against 25.7 on the card** (21.88/27.97/25.72).
-  Gotcha #281 for the THIRD time in one session, in the setting that decides
-  GPU-vs-CPU. Its sibling `ram_budget_now` got this fix in August (#362); this
-  one was left behind. Pinned by
-  `the_vram_budget_is_read_live_like_the_ram_budget_beside_it`.
-- **AND the default was the real bug: the budget was a fraction of TOTAL, not of
-  what is free.** Half the card whatever was on it, so the cap could not tell an
-  idle card from a busy one. Now **RESERVES** a slice and admits against the rest:
-  `usable = total - other_process_vram - clamp(10%/7%/5%, 512 MB, 2048 MB)`. **The reserve is CLAMPED because what it protects (desktop, browser, driver) does not scale with the card** — a flat 15% left the 8B fitting by 99 MB and held 3.7 GB back on a 24 GB card..
-  **Strictly more protective where it matters** — with 4 GB in use elsewhere a
-  default node admits LESS than the old 4096 cap; idle, it admits 6800 and the
-  model runs. **The reserve is expressed against card SIZE, not free VRAM**,
-  because `admit_to_gpu` weighs it against `committed + estimated` where
-  `committed` is our own resident models — a free-based budget subtracts them
-  twice. Unreadable usage = assume idle, never invent a restriction.
-- **The download bar overshot** — progress is keyed by model and each "Download
-  this part" click replaced the last one's entry, so the total stayed at one
-  shard while bytes summed across all in-flight transfers. Observed at **156%**.
-- **The distributed speculation gate now prices the RTT it saves**, not only the
-  bytes it costs (513 KB is ~410 ms on 10 Mbps, ~41 ms on 100). A more distant
-  peer now needs FEWER tokens/round — the boomerang case, pinned at ~1 RTT/token.
-  Unit-tested only; that path ran 25 times in 25 days here.
-
-**Two reframes worth reading before optimising the distributed path** (both in
-`docs/FUTURE_WORK.md`, both measured):
-- **Pipeline parallelism across the internet is a CAPACITY mechanism, not a
-  speed one.** For one request it is strictly negative — stages run in series,
-  every hop is a round trip, the slowest node sets the pace. An 8B request split
-  10 layers local / 22 on a 0.86 tok/s peer runs at the peer's speed.
-- **Prefill is 94% of a long request and the pipeline is idle (N-1)/N of it.**
-  GPipe microbatching would fix that and the machinery is ~80% built — but the
-  measured ceiling here is **1.45x**, not ~3x, because the 10/22 split is a
-  PLACEMENT failure, not a routing one. Taking that measurement first is what
-  stopped days going into the wrong thing.
-
-**⚠ A local `--no-default-features --features dev,claude-subscription` build has
-NO CUDA.** It logs `Split model using CPU (no CUDA available)` while admission
-logs `admitting model to GPU` and the loader logs `force_cpu=false` — it looks
-exactly like a placement bug. I overwrote the live node's CUDA release asset with
-one and chased it for several steps. Check
-`strings <binary> | grep -c ggml_cuda_init` before believing any placement result.
+`compute_vram_budget` read the BOOT SNAPSHOT (#281, third time in one session)
+AND was a fraction of TOTAL rather than of what is free — an 8B needing 6033 MB
+refused against a 4095 MB budget with 7187 MB free, 1.00 tok/s on the CPU against
+25.7 on the card. Now RESERVES a clamped slice and admits against the rest.
+Detail: `memory/round_log_0824_correctness.md`.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
