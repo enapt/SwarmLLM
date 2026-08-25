@@ -999,7 +999,9 @@ mod tests {
             SwarmError::SegmentFailoverExhausted(
                 "Segment 1 failed with no standby available".into(),
             ),
-            SwarmError::PipelineError(
+            // The typed variant a silent peer now wears (2026-08-25). Same
+            // verdict as before: the holders are known, one just went quiet.
+            SwarmError::PeerUnresponsive(
                 "Timed out waiting for segment result (30s, 6 layers)".into(),
             ),
             SwarmError::ModelNotAvailable(ModelId("m".to_string())),
@@ -1011,6 +1013,20 @@ mod tests {
                 "must not wait on: {e}"
             );
         }
+    }
+
+    /// A peer that accepted a forward and went silent IS attributable to that
+    /// peer — the case `failure_is_penalty_worthy`'s own comment names
+    /// ("timeouts waiting on a peer") and the one it could never see, because
+    /// the timeout site raised the penalty-exempt `PipelineError` instead.
+    #[test]
+    fn a_silent_peer_is_penalty_worthy() {
+        assert!(failure_is_penalty_worthy(
+            &SwarmError::PeerUnresponsive(
+                "Timed out waiting for segment result (52s, 26 layers)".into(),
+            ),
+            true,
+        ));
     }
 
     #[test]

@@ -392,14 +392,38 @@ impl PipelineExecutor {
                     activation_bytes,
                     "DIAG: segment TIMED OUT — no result received"
                 );
-                Err(SwarmError::PipelineError(format!(
-                    "Timed out waiting for segment result ({}s, {} layers)",
-                    timeout.as_secs(),
-                    num_layers
-                )))
+                Err(segment_timeout_error(timeout.as_secs(), num_layers))
             }
         }
     }
+}
+
+/// The error a segment forward gets when the peer holding it says nothing
+/// before the deadline.
+///
+/// **`PeerUnresponsive`, not `PipelineError`.** The peer accepted the forward
+/// and then went quiet, which is the exact case that variant exists for. Worn
+/// as a `PipelineError` it was wrong in four ways at once: the caller got
+/// **500 `server_error`** — a peer going quiet on the other side of the world
+/// reported as a bug in the node they are talking to; this node logged it at
+/// `ERROR`, which means "I am broken", for the same reason; it inherited
+/// `PipelineError`'s exemption from `failure_is_penalty_worthy`, so the silent
+/// peer was never docked even though that function's own comment names
+/// "timeouts waiting on a peer" as what the penalty is for; and the hint was
+/// the generic one rather than the "a fresh request usually routes to a
+/// different holder" that actually helps.
+///
+/// Observed live 2026-08-25 on `gemma-2-2b-it`: the single holder answered the
+/// prefill in 5.9 s, then said nothing for the whole 52 s decode deadline, and
+/// the request surfaced to the caller as a 500 with the peer un-penalised.
+///
+/// A named function rather than an inline `format!` so the variant is pinned by
+/// a test — the classification is the whole point, and it is invisible at the
+/// call site.
+fn segment_timeout_error(timeout_secs: u64, num_layers: u32) -> SwarmError {
+    SwarmError::PeerUnresponsive(format!(
+        "Timed out waiting for segment result ({timeout_secs}s, {num_layers} layers)"
+    ))
 }
 
 #[cfg(test)]
@@ -618,5 +642,53 @@ mod segment_budget_tests {
             ActivationUnits::HiddenStates,
         );
         assert!(b.duration() >= Duration::from_secs(SEGMENT_TIMEOUT_MIN_SECS));
+    }
+}
+
+#[cfg(test)]
+mod segment_timeout_classification_tests {
+    use super::*;
+
+    /// A peer that took the forward and went silent is not this node breaking.
+    /// Pins all three user-visible consequences of the variant at once, because
+    /// each of them was wrong while the error was a `PipelineError`.
+    #[test]
+    fn a_silent_peer_is_reported_as_a_peer_failure_not_as_our_bug() {
+        let err = segment_timeout_error(52, 26);
+        let (status, _msg, kind) = crate::error::classify_error(&err);
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "a peer going quiet must not be reported as a 500 from this node"
+        );
+        assert_eq!(kind, "server_error");
+        assert_eq!(
+            crate::error::failure_log_level(&err),
+            crate::error::FailureLevel::Warn,
+            "ERROR means this node is broken; a quiet peer is not that"
+        );
+    }
+
+    /// The advice has to be advice the caller can act on. The generic
+    /// `PipelineError` hint was picked by substring-matching prose, which is
+    /// how three failures came to be told to retry something retrying could not
+    /// fix (gotcha #295).
+    #[test]
+    fn the_hint_points_at_a_different_holder() {
+        let hint = crate::error::error_hint(&segment_timeout_error(52, 26))
+            .expect("a silent peer must carry a hint");
+        assert!(
+            !hint.is_empty(),
+            "a caller with no next step is a caller who retries blindly"
+        );
+    }
+
+    /// The deadline and the layer count stay in the message: an operator
+    /// reading the log needs to know WHICH wait expired and how long it was.
+    #[test]
+    fn the_message_still_names_the_deadline_and_the_span() {
+        let msg = segment_timeout_error(52, 26).to_string();
+        assert!(msg.contains("52s"), "{msg}");
+        assert!(msg.contains("26 layers"), "{msg}");
     }
 }
