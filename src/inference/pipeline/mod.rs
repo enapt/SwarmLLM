@@ -115,8 +115,6 @@ impl<'a> Drop for PendingLayerResultGuard<'a> {
 }
 /// Fallback EOS token ID when GGUF metadata is unavailable. Matches LLaMA family;
 /// other architectures (Qwen2, Phi-3, Gemma) have different EOS tokens.
-/// A warning is emitted when this fallback is used.
-pub(crate) const LLAMA_FALLBACK_EOS_TOKEN: u32 = 2;
 pub(crate) const PREFILL_ACTIVATION_THRESHOLD_BYTES: usize = 100_000;
 
 /// Which half of inference a forward represents, from its sequence number.

@@ -93,6 +93,8 @@ pub(super) fn validate_hf_inputs(repo_id: &str, filename: &str) -> Result<(), Ap
 pub(super) fn extract_eos_token_ids(path: &std::path::Path, arch: &str) -> Vec<u32> {
     match crate::inference::split::GgufTokenizerMeta::from_gguf_file(path) {
         Ok(tok) => tok.eos_tokens_with_arch_fallback(arch),
-        Err(_) => vec![crate::inference::pipeline::LLAMA_FALLBACK_EOS_TOKEN],
+        // An unreadable GGUF says nothing about where the model ends its turn,
+        // and Llama-2's id 2 is an ordinary token in every later family.
+        Err(_) => Vec::new(),
     }
 }

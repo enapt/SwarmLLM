@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::inference::chat_template;
 use crate::types::LayerResult;
 
-use super::{PipelineExecutor, LLAMA_FALLBACK_EOS_TOKEN};
+use super::PipelineExecutor;
 
 /// Extract chat template, BOS, and EOS strings from a GGUF header file on disk.
 /// Uses the centralized `GgufTokenizerMeta` extractor.
@@ -322,11 +322,24 @@ impl PipelineExecutor {
                         (ptc, eos, decoder)
                     }
                     None => {
-                        tracing::warn!(model_id = %model_id, "No GGUF header available — using LLaMA fallback EOS token");
+                        // No vocabulary, so no way to verify ANY end-of-turn id.
+                        // This used to hand back Llama-2's `</s>` (id 2), which
+                        // is an ordinary token in every later family — `#` in
+                        // Qwen2.5 — so a coding reply beginning with a Rust
+                        // attribute or a markdown heading was cut to ONE token
+                        // and reported as `finish_reason: "stop"`. Silently
+                        // truncating a good answer is worse than letting it run
+                        // to `max_tokens`, so say we do not know.
+                        tracing::warn!(
+                            model_id = %model_id,
+                            "No GGUF header available — this node cannot tell where this model \
+                             ends its turn, so the reply will run until max_tokens or a stop \
+                             sequence. Fetch the model's header to fix this"
+                        );
                         let ptc = (prompt.chars().count() / 4).max(1);
                         (
                             ptc,
-                            vec![LLAMA_FALLBACK_EOS_TOKEN],
+                            Vec::new(),
                             CachedDecoder {
                                 vocab: Vec::new(),
                                 byte_decoder: HashMap::new(),
@@ -376,11 +389,19 @@ impl PipelineExecutor {
                         }
                     }
                 }
-                tracing::warn!(model_id = %model_id, "No GGUF header or local model — using LLaMA fallback EOS token");
+                // Same reasoning as the branch above: with neither a loaded
+                // model nor a header there is no vocabulary to check an
+                // end-of-turn id against, and guessing Llama-2's `</s>` (id 2)
+                // silently truncates every later family at its first `#`.
+                tracing::warn!(
+                    model_id = %model_id,
+                    "No GGUF header or local model — this node cannot tell where this model ends \
+                     its turn, so the reply will run until max_tokens or a stop sequence"
+                );
                 let ptc = (prompt.chars().count() / 4).max(1);
                 (
                     ptc,
-                    vec![LLAMA_FALLBACK_EOS_TOKEN],
+                    Vec::new(),
                     CachedDecoder {
                         vocab: Vec::new(),
                         byte_decoder: HashMap::new(),

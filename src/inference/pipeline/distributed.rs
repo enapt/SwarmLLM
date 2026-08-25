@@ -7,7 +7,7 @@ use crate::inference::router::{InferenceOutput, StreamingTokenEvent, StreamingTo
 use crate::types::{LayerForward, LayerResult, NetworkCommand, NetworkFinishReason, TensorFormat};
 
 use super::prompt::{template_from_header, CachedDecoder};
-use super::{PipelineExecutor, LLAMA_FALLBACK_EOS_TOKEN, MAX_PENDING_LAYER_RESULTS};
+use super::{PipelineExecutor, MAX_PENDING_LAYER_RESULTS};
 
 impl PipelineExecutor {
     /// Execute across multiple network nodes.
@@ -188,8 +188,13 @@ impl PipelineExecutor {
         // only consulted on the very first forward (seq_num==0) before
         // `cached_eos` is populated; afterward `cached_eos` is always Some,
         // so allocating a fresh HashSet per token was pure waste.
-        let default_eos: std::collections::HashSet<u32> =
-            [LLAMA_FALLBACK_EOS_TOKEN].into_iter().collect();
+        //
+        // EMPTY, deliberately. It used to hold Llama-2's `</s>` (id 2), which is
+        // an ordinary token in every later family — `#` in Qwen2.5 — so any
+        // model whose EOS could not be resolved had its reply cut at the first
+        // `#`. An unknown end-of-turn lets the reply run long, which is visible;
+        // a wrong one truncates in silence.
+        let default_eos: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
         // Token generation loop
         let mut prompt_bytes_opt = Some(prompt_bytes);
@@ -522,8 +527,7 @@ impl PipelineExecutor {
         }
 
         // Strip EOS tokens before decoding (loaded from GGUF metadata)
-        let eos_tokens =
-            cached_eos.unwrap_or_else(|| [LLAMA_FALLBACK_EOS_TOKEN].into_iter().collect());
+        let eos_tokens = cached_eos.unwrap_or_default();
         let clean_tokens: Vec<u32> = generated_tokens
             .iter()
             .copied()

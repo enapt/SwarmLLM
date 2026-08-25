@@ -239,6 +239,27 @@ pub struct GgufTokenizerMeta {
     pub add_bos_token: bool,
 }
 
+/// Does this vocabulary entry look like an end-of-turn marker rather than an
+/// ordinary token?
+///
+/// Every family wraps its turn markers in angle brackets — `</s>`, `<|eot_id|>`,
+/// `<|im_end|>`, `<end_of_turn>` — while ordinary tokens (`#`, `$`, `the`) are
+/// bare. Byte tokens are wrapped too (`<0x0A>`) and are explicitly NOT turn
+/// markers, which is the one case a naive bracket check gets wrong.
+///
+/// This exists so a fallback EOS id can be VERIFIED instead of assumed. See
+/// [`GgufTokenizerMeta::eos_tokens_with_arch_fallback`] for what assuming cost.
+pub fn looks_like_end_of_turn(token: &str) -> bool {
+    let t = token.trim();
+    if t.len() <= 2 || !t.starts_with('<') || !t.ends_with('>') {
+        return false;
+    }
+    let inner = &t[1..t.len() - 1];
+    let inner = inner.strip_prefix('|').unwrap_or(inner);
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+    !inner.to_ascii_lowercase().starts_with("0x")
+}
+
 impl GgufTokenizerMeta {
     /// Extract tokenizer metadata from a GGUF header file on disk.
     pub fn from_gguf_file(path: &Path) -> Result<Self, SwarmError> {
@@ -366,21 +387,44 @@ impl GgufTokenizerMeta {
     }
 
     /// Get EOS token IDs with architecture-specific fallbacks.
+    ///
+    /// **Every candidate this adds is checked against the vocabulary first.**
+    /// The old `ids.push(2)` — commented "common default" — is Llama-2's `</s>`
+    /// and an ORDINARY TOKEN in every later family: `#` in Qwen2.5, an
+    /// unremarkable byte token in Llama-3 and Gemma. Treating it as end-of-turn
+    /// truncates a reply at its first `#`, which for a coding model is a Rust
+    /// attribute, a Python comment or a markdown heading — i.e. the first token
+    /// of a perfectly good answer. The caller sees `completion_tokens: 1` and
+    /// `finish_reason: "stop"` with no error and no stop sequence matched.
+    ///
+    /// A wrong EOS truncates SILENTLY; an unknown one at worst lets the reply
+    /// run to `max_tokens`. Those are not close in severity, so when nothing can
+    /// be verified this returns EMPTY rather than guessing.
     pub fn eos_tokens_with_arch_fallback(&self, arch: &str) -> Vec<u32> {
         let mut ids = self.eos_token_ids.clone();
-        if ids.is_empty() {
-            ids.push(2); // common default
+        // Verify against the vocabulary when we have one; trust the
+        // architecture when we do not, since an unreadable vocab is not
+        // evidence against an id the architecture is sure of.
+        let plausible = |id: u32| {
+            self.vocab.is_empty()
+                || self
+                    .vocab
+                    .get(id as usize)
+                    .is_some_and(|t| looks_like_end_of_turn(t))
+        };
+        if ids.is_empty() && plausible(2) {
+            ids.push(2); // Llama-2's `</s>`, and only when the vocab agrees
         }
         // Qwen2 uses additional EOS tokens
         if arch.starts_with("qwen") {
             for &extra in &[151643u32, 151645] {
-                if !ids.contains(&extra) {
+                if !ids.contains(&extra) && plausible(extra) {
                     ids.push(extra);
                 }
             }
         }
         // Gemma uses token 107 (<end_of_turn>) as EOS
-        if (arch == "gemma" || arch == "gemma2") && !ids.contains(&107) {
+        if (arch == "gemma" || arch == "gemma2") && !ids.contains(&107) && plausible(107) {
             ids.push(107);
         }
         ids
@@ -505,4 +549,84 @@ pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
         "Cannot create gguf_header.bin: no shard_000.bin or source GGUF found in {}",
         model_dir.display()
     )))
+}
+
+#[cfg(test)]
+mod eos_fallback_tests {
+    use super::*;
+
+    fn meta(vocab: Vec<&str>, declared: Vec<u32>) -> GgufTokenizerMeta {
+        GgufTokenizerMeta {
+            vocab: vocab.into_iter().map(String::from).collect(),
+            eos_token_ids: declared,
+            ..Default::default()
+        }
+    }
+
+    /// A vocabulary where id 2 is an ordinary character — the shape of every
+    /// modern family. Qwen2.5-Coder's real vocabulary starts `!`, `"`, `#`.
+    fn qwen_like() -> Vec<&'static str> {
+        let mut v = vec!["!", "\"", "#", "$", "%"];
+        v.resize(151_646, "tok");
+        v[151_643] = "<|endoftext|>";
+        v[151_645] = "<|im_end|>";
+        v
+    }
+
+    /// The reported failure, in miniature. A model whose GGUF declares no EOS
+    /// must NOT be given Llama-2's id 2 when its own vocabulary says that id is
+    /// `#` — a coding reply opening with `#[derive(...)]` or a markdown heading
+    /// was cut to one token and reported as `finish_reason: "stop"`.
+    #[test]
+    fn an_ordinary_token_is_never_adopted_as_end_of_turn() {
+        let ids = meta(qwen_like(), vec![]).eos_tokens_with_arch_fallback("qwen2");
+        assert!(
+            !ids.contains(&2),
+            "id 2 is '#' in this vocabulary and must not end a turn: {ids:?}"
+        );
+        assert!(ids.contains(&151_645), "the real <|im_end|> must be there");
+    }
+
+    /// The case the old default was actually written for still works: a
+    /// Llama-2-era vocabulary really does end its turn on id 2, and its own
+    /// vocabulary says so.
+    #[test]
+    fn a_genuine_llama2_end_of_turn_is_still_adopted() {
+        let mut v = vec!["<unk>", "<s>", "</s>", "a", "b"];
+        v.resize(32_000, "tok");
+        let ids = meta(v, vec![]).eos_tokens_with_arch_fallback("llama");
+        assert_eq!(ids, vec![2], "'</s>' is a real turn marker: {ids:?}");
+    }
+
+    /// What the model declares always wins — this must not start second-guessing
+    /// a GGUF that states its own EOS.
+    #[test]
+    fn a_declared_end_of_turn_is_left_alone() {
+        let ids = meta(qwen_like(), vec![151_645]).eos_tokens_with_arch_fallback("qwen2");
+        assert!(ids.contains(&151_645));
+        assert!(!ids.contains(&2));
+    }
+
+    /// An unreadable vocabulary is not evidence against an id the architecture
+    /// is sure of — otherwise a model with no vocab loses its EOS entirely.
+    #[test]
+    fn an_empty_vocabulary_still_trusts_the_architecture() {
+        let ids = meta(vec![], vec![]).eos_tokens_with_arch_fallback("qwen2");
+        assert!(ids.contains(&151_643) && ids.contains(&151_645));
+    }
+
+    #[test]
+    fn turn_markers_are_told_apart_from_ordinary_and_byte_tokens() {
+        for marker in ["</s>", "<|eot_id|>", "<|im_end|>", "<end_of_turn>", "<eos>"] {
+            assert!(looks_like_end_of_turn(marker), "{marker} is a turn marker");
+        }
+        // Byte tokens are bracketed but are NOT turn markers — the one case a
+        // naive bracket check gets wrong.
+        for ordinary in ["#", "$", "the", "<0x0A>", "<0xFF>", "<>", ""] {
+            assert!(
+                !looks_like_end_of_turn(ordinary),
+                "{ordinary:?} must not be treated as a turn marker"
+            );
+        }
+    }
 }
