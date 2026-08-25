@@ -50,8 +50,27 @@ SWARMLLM_NODE_DATA_DIR="$D" "$BIN" run -p "$PORT" > "$D/node.log" 2>&1 &
 PID=$!
 
 fails=0
+skipped=0
 check() { # name, condition-result
   if [ "$2" = "0" ]; then printf '  %-34s OK\n' "$1"; else printf '  %-34s FAIL\n' "$1"; fails=$((fails+1)); fi
+}
+# A check that could not RUN is not a check that passed. Counted separately so
+# the summary can never report "all checks passed" over work it never did — the
+# same reporting bug that hid a corrupt shard for hours (gotcha #381).
+skip() { printf '  %-34s SKIPPED (%s)\n' "$1" "$2"; skipped=$((skipped+1)); }
+
+# The daemon we started must still be running. Without this, a node that dies
+# mid-run is invisible: every later check just waits out its own curl timeout
+# against a dead port — three inference checks at -m 300, plus the model wait,
+# is twenty minutes of a script looking busy and testing nothing. Fail where the
+# failure is, and print the log tail that says why.
+alive() {
+  if kill -0 "$PID" 2>/dev/null; then return 0; fi
+  printf '  %-34s FAIL (the node exited)\n' "$1"
+  fails=$((fails+1))
+  echo "  --- last lines of node.log ---"
+  tail -12 "$D/node.log" | sed 's/^/  /'
+  return 1
 }
 
 for _ in $(seq 1 90); do
@@ -93,8 +112,22 @@ curl -s -m 8 -X POST -H "Authorization: Bearer $K" "http://localhost:$PORT/api/a
   | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if "applied" in d and "restart_required" in d else 1)' 2>/dev/null
 check "reload separates applied/restart" $?
 
-if curl -s -m 8 -H "Authorization: Bearer $K" "http://localhost:$PORT/api/admin/models" \
-     | grep -q "\"$MODEL\""; then
+# Wait for the model to be registered rather than probing once. A node with a
+# large models directory is still scanning it when the checks above finish, so a
+# single probe reported the model "not present" and quietly skipped every
+# inference check — on the machine most likely to have a big models directory.
+model_present=1
+for _ in $(seq 1 30); do
+  kill -0 "$PID" 2>/dev/null || break
+  if curl -s -m 8 -H "Authorization: Bearer $K" "http://localhost:$PORT/api/admin/models" \
+       | grep -q "\"$MODEL\""; then
+    model_present=0
+    break
+  fi
+  sleep 2
+done
+alive "node still running" || { echo; echo "smoke: $fails check(s) FAILED"; exit "$fails"; }
+if [ "$model_present" = "0" ]; then
   R=$(curl -s -m 300 -H "Authorization: Bearer $K" -H 'Content-Type: application/json' \
     "http://localhost:$PORT/v1/chat/completions" \
     -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Say the single word: fig\"}],\"max_tokens\":10,\"stream\":false}")
@@ -126,7 +159,9 @@ exit(0 if text.strip() else 1)
 " 2>/dev/null
   check "Anthropic endpoint returns text" $?
 else
-  echo "  (inference checks skipped — $MODEL not present)"
+  skip "chat completion returns text" "$MODEL not present"
+  skip "streaming yields chunks" "$MODEL not present"
+  skip "Anthropic endpoint returns text" "$MODEL not present"
 fi
 
 ERRS=$(grep -cE " ERROR " "$D/node.log" || true)
@@ -134,5 +169,14 @@ ERRS=$(grep -cE " ERROR " "$D/node.log" || true)
 [ "${ERRS:-0}" -eq 0 ] || grep -E " ERROR " "$D/node.log" | head -5
 
 echo
-if [ "$fails" -eq 0 ]; then echo "smoke: all checks passed"; else echo "smoke: $fails check(s) FAILED"; fi
+if [ "$fails" -ne 0 ]; then
+  echo "smoke: $fails check(s) FAILED${skipped:+, $skipped skipped}"
+elif [ "$skipped" -ne 0 ]; then
+  # Deliberately NOT "all checks passed": some never ran, and the ones that get
+  # skipped here are the inference checks — the only ones that prove the binary
+  # can actually answer a request.
+  echo "smoke: $skipped check(s) COULD NOT RUN; the rest passed"
+else
+  echo "smoke: all checks passed"
+fi
 exit "$fails"
