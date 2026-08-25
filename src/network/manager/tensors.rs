@@ -907,6 +907,32 @@ impl AckRttEstimator {
         self.samples = self.samples.saturating_add(1);
     }
 
+    /// This peer missed its deadline — widen it, RFC 6298 §5.5.
+    ///
+    /// **Without this the estimator cannot learn.** It only ever sees the
+    /// latency of acknowledgements that ARRIVE, and a forward abandoned at the
+    /// deadline is one whose acknowledgement we stopped waiting for — so a peer
+    /// that consistently takes longer than the current deadline can never
+    /// produce a sample that would widen it. That is exactly the case measured
+    /// on 2026-08-25: acknowledgements landing at ~11.6 s against a 10 s
+    /// deadline, forever (gotcha #386).
+    ///
+    /// TCP has the same problem and the same answer: on timeout, back the timer
+    /// off rather than waiting for a measurement that by definition cannot come.
+    /// (RFC 6298 also discards RTT samples from retransmitted segments — Karn's
+    /// algorithm — for the related reason that they cannot be attributed.)
+    /// Doubling is bounded by the same ceiling as everything else here, so a
+    /// peer that never answers costs at most `RR_ACK_TIMEOUT_MAX_SECS`.
+    pub(super) fn observe_timeout(&mut self) {
+        let current = self.deadline_secs().unwrap_or(super::RR_ACK_TIMEOUT_SECS) as f64 * 1000.0;
+        // Push the ESTIMATE out, not the variance: the next deadline should be
+        // about twice this one, and driving it through `srtt` keeps a later
+        // real measurement able to pull it back down again.
+        self.srtt_ms = (current * 2.0).min(super::RR_ACK_TIMEOUT_MAX_SECS as f64 * 1000.0);
+        self.rttvar_ms = 0.0;
+        self.samples = self.samples.max(1);
+    }
+
     /// The deadline this peer has earned, in whole seconds, or `None` while no
     /// sample has been seen (the caller falls back to the RTT-based estimate).
     pub(super) fn deadline_secs(&self) -> Option<u64> {
@@ -1066,5 +1092,60 @@ mod ack_estimator_tests {
             Some(super::super::RR_ACK_TIMEOUT_MAX_SECS)
         );
         assert_eq!(AckRttEstimator::default().deadline_secs(), None);
+    }
+}
+
+#[cfg(test)]
+mod ack_backoff_tests {
+    use super::AckRttEstimator;
+
+    /// The estimator must be able to learn from a peer it keeps abandoning.
+    ///
+    /// It only ever observes acknowledgements that arrive, so a peer whose
+    /// acknowledgements land just past the deadline produces no sample that
+    /// would widen it — the deadline that is cutting it off is the same one
+    /// preventing the measurement. Backing off on a miss is the way out
+    /// (RFC 6298 §5.5), and without it the whole adaptive scheme is inert
+    /// exactly where it was needed.
+    #[test]
+    fn a_missed_deadline_widens_the_next_one() {
+        let mut e = AckRttEstimator::default();
+        for _ in 0..10 {
+            e.observe(300.0);
+        }
+        let before = e.deadline_secs().unwrap();
+        assert_eq!(before, super::super::RR_ACK_TIMEOUT_SECS);
+
+        e.observe_timeout();
+        let after = e.deadline_secs().unwrap();
+        assert!(
+            after > before,
+            "a peer that missed its deadline must get a longer one, or it can \
+             never demonstrate that it needed one ({before}s -> {after}s)"
+        );
+    }
+
+    /// Backing off is bounded, and a peer that recovers is forgiven — otherwise
+    /// one bad spell would hold a peer at the ceiling for the process's life.
+    #[test]
+    fn backoff_is_bounded_and_reversible() {
+        let mut e = AckRttEstimator::default();
+        for _ in 0..12 {
+            e.observe_timeout();
+        }
+        assert_eq!(
+            e.deadline_secs(),
+            Some(super::super::RR_ACK_TIMEOUT_MAX_SECS),
+            "repeated misses must not exceed the existing ceiling"
+        );
+
+        for _ in 0..60 {
+            e.observe(200.0);
+        }
+        assert_eq!(
+            e.deadline_secs(),
+            Some(super::super::RR_ACK_TIMEOUT_SECS),
+            "a peer that is answering promptly again must return to the floor"
+        );
     }
 }

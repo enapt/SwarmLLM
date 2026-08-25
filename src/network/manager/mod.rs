@@ -1499,6 +1499,12 @@ impl NetworkManager {
                         for (req_id, uuid, target_peer, deadline_secs) in unacked {
                             let sent_at = self.pending_tensor_outbound.get(&req_id).map(|e| e.1);
                             self.pending_tensor_outbound.remove(&req_id);
+                            // Widen this peer's deadline (RFC 6298 §5.5). The
+                            // estimator only ever sees acknowledgements that
+                            // ARRIVE, so without backing off on a miss it can
+                            // never learn that a peer needs longer than the
+                            // deadline currently cutting it off.
+                            self.ack_rtt.entry(target_peer).or_default().observe_timeout();
                             if sent_at.is_some_and(|s| self.tensor_forward_is_superseded(uuid, s)) {
                                 continue;
                             }
