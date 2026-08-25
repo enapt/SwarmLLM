@@ -10450,3 +10450,72 @@ compile check — which is why it was not done in the same sitting it was found.
 **Related and already done**: the sibling rejection in `daemon/dispatch` DID have
 the sender in scope and was not logging it either; that one now reports model,
 model name, peer and shard count (commit `de7f3206`).
+
+## Peers that cannot speak our protocol are counted, called healthy, and retried for ever (measured 2026-08-26)
+
+**Measured on the live node**, 5h47m uptime, 13 peers in the list:
+
+```
+e561df35 v=0.3.124-alpha  shards=17  lat=351     <- real
+17c8bf6e v=0.3.123-alpha  shards=12  lat=554     <- real
+9684263 v=0.3.124-alpha  shards=13  lat=94      <- real
+bf7b3263 v=0.3.124-alpha  shards=38  lat=550     <- real
+7c10ea04 v=0.3.124-alpha  shards=33  lat=589     <- real
+0cc08975 v=0.3.123-alpha  shards=1   lat=304     <- real
+bfbfeebc v=0.3.124-alpha  shards=0   lat=593     <- the anchor, by design
+2cfbe62f v=None           shards=0   lat=None    healthy=true
+430bd138 v=None           shards=0   lat=None    healthy=true
+ce15efdd v=None           shards=0   lat=None    healthy=true
+51953a06 v=None           shards=0   lat=None    healthy=true
+b3bacb1b v=None           shards=0   lat=None    healthy=true
+4cecea29 v=None           shards=0   lat=None    healthy=true
+```
+
+Six of thirteen have no version, no latency and no shards, and every one is
+reported `healthy: true`. For one of them, over that same window:
+
+```
+100  rr-message OutboundFailure ... error=The remote supports none of the requested protocols
+ 64  identify
+ 38  connection established
+ 31  Peer disconnected
+  3  hole punch succeeded
+```
+
+Across six such peers that is ~600 `DirectMessage` sends that could never
+succeed, plus the dial/negotiate/disconnect churn behind them.
+
+**Two separate problems.**
+
+*1. `healthy` answers a different question than it appears to.* It is
+`now - last_seen < 90s` (`api/admin.rs::serialize_peer_to_json`). These peers
+connect and answer `identify`, so `last_seen` stays fresh while they have never
+completed one application-level exchange — no capability, so no version, no
+speed, no shard list. The dashboard therefore says thirteen peers when seven can
+do anything. This is gotcha #335's lesson again: a claim whose evidence does not
+support it.
+
+*2. A permanent condition is handled by a transient mechanism.* "The remote
+supports none of the requested protocols" is not a timeout — it means the peer
+does not implement `/swarmllm/1.0.0` and never will until it upgrades. It feeds
+the same failure counter as an unresponsive peer, so
+`Peer has not answered N requests in a row — closing the connection ... a re-dial
+is scheduled` fires, the peer is re-dialled, and the cycle repeats indefinitely
+(36 such closures in the window).
+
+**Why it was not fixed in the sitting it was found.** Both fixes touch peer
+selection. Changing `healthy` to require a known capability introduces an
+"unhealthy" window of up to one gossip interval after every connect — the same
+~30 s pre-gossip transient an external tester already reported once — so it needs
+to be thought through rather than flipped. Suppressing re-dials for
+protocol-incompatible peers needs care that a peer which later upgrades is picked
+up again. Neither can be verified on one machine, and this was found hours before
+a release.
+
+**Suggested shape.** Record protocol incompatibility distinctly from
+unresponsiveness (the relay path already has a precedent for remembering a proven
+peer property: `state.relay_proven_features`). Then: do not count such a peer as
+`healthy`, do not send it `DirectMessage`, and re-probe it on a long cadence
+rather than the transient-failure re-dial. Report them in the peer list as a
+separate, visible category rather than hiding them — an operator should be able
+to see that six machines nearby are running something incompatible.
