@@ -315,6 +315,7 @@ one and chased it for several steps. Check
 
 Read the named round log before re-deriving any of these.
 
+- **v0.3.120** (08-25): a corrupt shard PROVED to spread between peers — a placeholder hash ERASED a known one, so P2P copies were accepted unverified, announced and re-served. Hashes now monotonic + persisted; an uncheckable shard is fetched from the ORIGIN; a corrupt one is REPLACED, not just quarantined. Gotchas #381-#383.
 - **v0.3.113-.115** (08-22/23): the .114 decode-width calibration was right on the Ryzen and wrong on the i5 — **min-of-N is for benchmarks, not live measurement** (#367); a stale DHT provider record outranked a holder's own retraction (#364); peer refusals arrived cut mid-word (#365). `round_log_0822_perf_night.md`.
 - **v0.3.109-.112** (08-21/22): CPU prefill +20-40% / decode +25-37% (multi-row Q4_K/Q6_K kernels, decode attention kernel, AVX2 exp, mimalloc); direct peer chaining ON; relay-carried inbound no longer counted as "direct" (#356); receipt ACK cut a quiet peer's cost 300 s → ~26 s (#357).
 
