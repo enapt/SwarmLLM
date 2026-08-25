@@ -292,7 +292,11 @@ meaning "verified"**:
   `enabled` gate — the same distinction already drawn for `try_idle_vram_unload`.
   The switch means "do not decide what to fetch on my behalf", not "abandon a
   shard this node already asked for". The rule it protects still stands for any
-  future fallback: never discard data you cannot actually replace.
+  future fallback: **never discard data you cannot actually replace**, so every
+  condition that can stop the origin fetch must be folded into
+  `origin_fetch_available`. Offline mode is one — `trigger_download` skips the
+  HuggingFace branch by design when it is set — and was caught by reading that
+  function's gates rather than trusting the call to succeed.
 - ~~The on-disk manifest still persists placeholders.~~ **CLOSED**: a merge that
   recovers hashes now persists them to the DB via `ModelRegistry`'s persist hook,
   and `load_from_db` runs at boot BEFORE the local disk scan — whose placeholders
