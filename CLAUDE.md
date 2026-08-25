@@ -167,7 +167,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- **Counts** (re-measured 2026-08-24, after the capacity round): **2064 lib** + 11 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 33 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
+- **Counts** (re-measured 2026-08-26, after the overnight watch): **2084 lib** + 11 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 33 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
 - **Benches and harnesses — see `docs/DIAGNOSTICS.md` § Benchmarks for the full list and the traps.** The ones reached for most: `examples/prefill_bench.rs` (drives `SplitModel::forward` directly, no daemon — `SWARM_BENCH_MODEL`, `SWARM_BENCH_PROMPT`, `SWARM_BENCH_DECODE`, `SWARM_BENCH_REPS`, `SWARM_BENCH_DEVICE=cuda`, and `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` which prices a K-token forward against a 1-token one at the same history depth — the number that decides whether speculation pays; pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown), `examples/qmatmul_bench.rs` (asserts the tiled kernel is bit-identical to upstream), `examples/smoke_test.sh [binary] [port]` (9 checks on an isolated node — run it on the DOWNLOADED release artifact; it now reports checks that COULD NOT RUN separately and never says "all checks passed" over them, and fails fast if the node it started dies — before 2026-08-25 it skipped the three inference checks silently and still claimed success, so "smoke 8/8" had been passing here without ever exercising inference), `examples/soak_test.sh` (`HOURS=` must be a WHOLE number; data dir is per-`PORT`, so two soaks no longer kill each other).
 - **Measurement discipline** (paid for repeatedly): min-of-N on an IDLE box — the same unchanged code measured 0.42 ms and 0.97 ms across runs here, and a benchmark taken while a build runs is worthless. **min-of-N is for benchmarks, not for live measurement** (#367). A/B inside ONE binary via an env switch (`SWARMLLM_DECODE_CALIBRATE=0`, `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`, `SWARMLLM_FLASH_OFFSET_CAUSAL=0`, `SWARMLLM_GQA_DECODE_FLASH=1`, `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1`), never across two builds. **Verify the mechanism fired**, not just that the outcome improved. Pinned reference models: `docs/REFERENCE_MODELS.md`.
 - Unit tests: in-module `#[cfg(test)]` blocks
@@ -217,84 +217,50 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2064 lib (dev,claude-subscription) — re-measured 2026-08-25 at v0.3.124-alpha** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 33 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
+All 20 build phases complete. All subsystems wired — no stubs. **2084 lib (dev,claude-subscription) — re-measured 2026-08-26, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 33 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.124-alpha (2026-08-25): stability round, all of it found by RUNNING the thing
+### Unreleased on main (2026-08-25/26 overnight watch): seven fixes, all found by RUNNING it
 
-Six fixes, none from review. **Read #386 and #387 before touching the ACK
-deadline or the KV budget.**
+Detail in `memory/round_log_0825_overnight_watch.md`; gotchas **#388-#392**.
 
-- **The receipt-ACK deadline was derived from ping RTT, which cannot see a loaded
-  peer** (#386). The ACK is emitted by the network event loop, so it is late
-  exactly when that loop is busy — the one condition a ping cannot measure. One
-  peer failed EVERY distributed request for ~an hour, then served the same request
-  in 6.1 s. Its ACKs were arriving late, not missing; proved by running a node at
-  `-v` and seeing `kind="ack"` from six peers including the failing one.
-  Now per-peer **RFC 6298** (SRTT + 4·RTTVAR) over observed ACK latency, **plus
-  §5.5 backoff on a miss** — without the backoff the estimator is INERT exactly
-  where it is needed, because an abandoned forward is one whose ACK we stopped
-  waiting for, so a slow peer can never produce the sample that would widen its
-  deadline.
-- **The fast-fail now requires a standby.** It is justified by the failover it
-  enables (the premise of hedged requests in *The Tail at Scale* — a second copy
-  to a DIFFERENT replica). With none, abandoning can only turn a slow success into
-  a 503: measured, a reply arrived 1.6 s after we gave up and was discarded.
-- **A KV-budget refusal was a RATCHET** (#387). A chunked prefill claims a quantum
-  per boundary, so a request refused at chunk N had already taken N-1 — and kept
-  them until the 10-minute session TTL. Measured in exact 1152 MB steps: 1152 →
-  2304 → 3456 against a 1166 MB budget, card at 97%, decode 29 → 1.0 tok/s.
-  **A resource check that refuses but does not release is worse than no check
-  under repetition** — the failed attempts are the ones that accumulate.
-- **Two messages advised something that could not work**: the failover hint said
-  "try again" against six failing retries (fixed in all 21 locales), and the
-  short-reply warning fired on deliberate one-word answers (reported by a tester
-  whose own probes kept tripping it).
-- **Prompt privacy was one-way** — off succeeded, on was refused without the end
-  shards, so a state the system stores could not be restored through the API that
-  stores it. Now recorded with `ready: false`; requests fail CLOSED.
-- **⚠ Three of my own causal claims this session were WRONG and are corrected in
-  the repo**: "reproducible 6/6" and "model-size dependent" (both timing
-  coincidences — a failure that recovers on its own was never structural), and a
-  near-claim that a peer's repair proved the .123 path ran on it (no retraction in
-  our log). **The discriminator was WHEN, not WHAT.**
+- **An idle model kept the graphics card and everything else ran on the CPU** (#388).
+  Eviction frees against a *weights-only* estimate while admission charges
+  *weights + KV* — two figures for one quantity, and the smaller decides how much
+  to free, so eviction always stopped while admission was still short. The RAM
+  budget had had reclaim-then-retry since v0.3.111; VRAM never got it. Same prompt:
+  **72.7 s → 2.99 s**. And it is not merely slow — a CPU-bound model is then
+  DELEGATED to a peer, where it can fail outright (#391).
+- **Every streamed reply held its connection ~15 s after its last token** (#390).
+  Both SSE encoders had a byte-identical ticker that slept the whole keep-alive
+  interval and only THEN checked whether the response had finished. **→ 1-2 ms**,
+  verified over six runs with a 13 s cold-load run as the control.
+- **A reply stopped at its first `#` on Qwen models** (#392). `LLAMA_FALLBACK_EOS_TOKEN
+  = 2` was a universal end-of-turn default; id 2 is `#` in Qwen2.5-Coder, and `#` is
+  how a coding reply STARTS. Four sites, **including the arch-aware helper that
+  looked like the fix**. Now VERIFIES a candidate against the model's own vocabulary.
+  ⚠ Whether this is the external `pi` report's cause is UNCONFIRMED — it needs
+  `grep "using LLaMA fallback EOS token"` on their node.
+- **A silent peer was reported as this node's 500** (#389) — the per-segment wait
+  raised `PipelineError` where `PeerUnresponsive` exists; 500 not 503, ERROR not
+  WARN, and the peer went un-penalised.
+- A CPU-only node now reports its own measured speed (it gossips one to every peer
+  while its own API answered `null`); a rejected manifest names its model and
+  sender; a contradicted shard hash names its publisher.
 
-### Earlier — v0.3.120-.123-alpha (2026-08-25): a corrupt shard PROVED to spread between peers
-
-**Read #381-#384 before touching shard hashes.** A placeholder hash ERASED a
-known one (`register_manifest` was a blind insert), so P2P copies were accepted
-unverified, announced, and re-served — a PROPAGATION channel, not a local hole.
-Two distinct peers served byte-identical bad bytes; **the origin repo settled it
-— our expectation was RIGHT** (agreement among peers is not evidence in a network
-that copies from itself). The verifier also counted unchecked shards as
-`verified` ("all shards OK verified=21" over five it never hashed).
-Fixes: hash knowledge MONOTONIC + persisted; an uncheckable shard fetched from
-the ORIGIN; a corrupt one REPLACED not just quarantined; a held shard re-checked
-when its expected hash CHANGES; origin-derived hashes outrank gossip.
-**.121 shipped a regression that quarantined the GOOD copy** — a peer's
-self-certified hash displaced an origin-verified one and the new re-check
-faithfully destroyed the good bytes (#384). **A repair mechanism is a destruction
-mechanism pointed at whatever it believes is wrong: ask what happens when the
-REFERENCE is wrong.** And: ship it, then go and look — it was caught within the
-hour by watching the live node.
-⚠ A shard is NOT always a contiguous GGUF range (one has a 122 MB gap); assert
-the reconstructed byte count equals `size_bytes` or a healthy shard reports a
-false mismatch.
-
-### Earlier — v0.3.119-alpha (2026-08-24): 25.7x, from a memory budget, on an idle card
-
-`compute_vram_budget` read the BOOT SNAPSHOT (#281, third time in one session)
-AND was a fraction of TOTAL rather than of what is free — an 8B needing 6033 MB
-refused against a 4095 MB budget with 7187 MB free, 1.00 tok/s on the CPU against
-25.7 on the card. Now RESERVES a clamped slice and admits against the rest.
-Detail: `memory/round_log_0824_correctness.md`.
+⚠ **Open**: the swarm holds a `qwen2.5-coder` shard 3 whose bytes differ from the
+origin (all 8 sizes match, so same split). `origin_verified` is correctly ignoring
+it. Cannot yet say one bad copy or several — `register_manifest` takes no sender
+(`docs/FUTURE_WORK.md`).
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
-- **v0.3.120/.121** (08-25): a corrupt shard PROVED to spread between peers — a placeholder hash ERASED a known one, so P2P copies were accepted unverified, announced and re-served. Hashes now monotonic + persisted; an uncheckable shard is fetched from the ORIGIN; a corrupt one is REPLACED, not just quarantined. Gotchas #381-#383.
+- **v0.3.124-alpha** (08-25): stability round, every fix found by RUNNING it. **#386 the receipt-ACK deadline came from ping RTT, which cannot see a loaded peer** — one peer failed EVERY distributed request for ~an hour then served it in 6.1 s; now per-peer RFC 6298 **plus §5.5 backoff, without which the estimator is INERT exactly where needed**. Fast-fail now requires a standby. **#387 a KV refusal was a RATCHET** — kept the quanta it had taken (1152→2304→3456 MB vs a 1166 budget). **A check that refuses but does not release is worse than no check.** ⚠ Three of my causal claims that session were WRONG and corrected in-repo.
+- **v0.3.120-.123** (08-25): a corrupt shard PROVED to spread between peers — a placeholder hash ERASED a known one, so P2P copies were accepted unverified, announced and re-served. **The ORIGIN settled it; peer agreement is not evidence in a network that copies from itself.** Hashes now monotonic + persisted, origin hashes outrank gossip. **.121 shipped a regression that quarantined the GOOD copy (#384) — a repair mechanism is a destruction mechanism pointed at whatever it believes is wrong.** Gotchas #381-#385.
+- **v0.3.119-alpha** (08-24): **25.7x from a memory budget on an idle card** — `compute_vram_budget` read the BOOT SNAPSHOT (#281, third time in one session) AND was a fraction of TOTAL rather than of what is free. Now RESERVES a clamped slice. `memory/round_log_0824_correctness.md`.
 - **v0.3.113-.115** (08-22/23): the .114 decode-width calibration was right on the Ryzen and wrong on the i5 — **min-of-N is for benchmarks, not live measurement** (#367); a stale DHT provider record outranked a holder's own retraction (#364); peer refusals arrived cut mid-word (#365). `round_log_0822_perf_night.md`.
 - **v0.3.109-.112** (08-21/22): CPU prefill +20-40% / decode +25-37% (multi-row Q4_K/Q6_K kernels, decode attention kernel, AVX2 exp, mimalloc); direct peer chaining ON; relay-carried inbound no longer counted as "direct" (#356); receipt ACK cut a quiet peer's cost 300 s → ~26 s (#357).
 
