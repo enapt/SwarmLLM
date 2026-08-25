@@ -285,11 +285,14 @@ pub enum P2pShardAcceptance {
 /// makes such a model impossible to acquire at all.
 ///
 /// **`origin_fetch_available` means the fetch will actually HAPPEN, not merely
-/// that an origin exists.** The fallback is carried out by the auto-manage loop
-/// (woken via `shard_p2p_failed`), which does nothing while auto-manage is
-/// switched off — so passing a bare "we know the repo id" there would discard a
-/// perfectly usable copy and replace it with nothing. Never throw away data you
-/// cannot actually replace.
+/// that an origin exists.** Passing a bare "we know the repo id" would discard a
+/// perfectly usable copy and replace it with nothing. **Never throw away data
+/// you cannot actually replace** — so every condition that can stop the fetch
+/// has to be folded into that argument by the caller. Offline mode is one
+/// (`trigger_download` skips the HuggingFace branch by design). Auto-manage
+/// being switched off is deliberately NOT one: the fetch runs outside that gate,
+/// because it means "do not decide what to fetch for me", not "abandon a shard I
+/// already asked for".
 pub fn classify_p2p_shard_acceptance(
     manifest_has_hash: bool,
     origin_fetch_available: bool,

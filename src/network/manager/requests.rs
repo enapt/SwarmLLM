@@ -784,17 +784,28 @@ impl NetworkManager {
                             // have served perfect bytes — we cannot tell, and
                             // "cannot tell" must not be recorded as either fine
                             // or as the peer's fault.
-                            // Knowing the origin is enough: the fetch itself is
-                            // performed by `complete_pending_origin_fetches`,
-                            // which runs whether or not auto-manage is switched
-                            // on. That matters — discarding the peer's copy when
-                            // nothing would replace it is worse than keeping it,
-                            // so this must stay true of any future fallback.
+                            // "Will the origin fetch actually HAPPEN?" — not
+                            // "does an origin exist?". Discarding the peer's
+                            // copy when nothing would replace it is worse than
+                            // keeping it, so every condition that can stop the
+                            // fetch belongs here.
+                            //
+                            // Two so far. Auto-manage being off is NOT one of
+                            // them: `complete_pending_origin_fetches` runs
+                            // outside that gate deliberately. Offline mode IS —
+                            // `trigger_download` skips the HuggingFace branch
+                            // entirely when it is set, by design, since the
+                            // whole point is not to reach the internet.
                             let origin_fetch_available = self
                                 .shared_state
                                 .models
                                 .hf_sources
-                                .contains_key(&shard_id.model_id);
+                                .contains_key(&shard_id.model_id)
+                                && !self
+                                    .shared_state
+                                    .credits
+                                    .offline_mode
+                                    .load(std::sync::atomic::Ordering::Relaxed);
                             let decision = crate::model::manifest::classify_p2p_shard_acceptance(
                                 manifest_has_hash,
                                 origin_fetch_available,
