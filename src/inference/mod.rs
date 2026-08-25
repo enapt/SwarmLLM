@@ -163,6 +163,19 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
 /// a genuinely terse reply.
 const STOP_ATE_THE_REPLY_TOKENS: u32 = 2;
 
+/// The token budget above which a near-empty reply is worth reporting.
+///
+/// Below this the caller plainly wanted something short — a classification, a
+/// yes/no, one word — and getting it back is not evidence of anything. Agentic
+/// clients, which is where the real fault was seen, budget thousands.
+///
+/// Chosen from the false positives an external tester actually hit: their short
+/// probes used a budget of 10, the genuine failure used 4096. Set at 64 — above
+/// any "one word please" request, and below the 100-token budget the existing
+/// test already documents as worth reporting. A warning that cries wolf on
+/// ordinary traffic is the one nobody reads when it matters.
+const BUDGET_THAT_EXPECTED_PROSE: u32 = 64;
+
 /// Did the model end its own turn immediately, well inside the token budget?
 ///
 /// No stop sequence matched, so nothing external cut the reply short — the model
@@ -173,6 +186,15 @@ const STOP_ATE_THE_REPLY_TOKENS: u32 = 2;
 /// `max_tokens` is what separates it from a caller who asked for one token and
 /// got exactly one. Warning on that would fire on every deliberate
 /// single-token request, which is how a useful warning becomes noise.
+///
+/// **`completion_tokens < max_tokens` is not that separation**, which is what
+/// the first version used: it is true of almost every request, including
+/// "say OK in one word" with a budget of 10. A tester running down a real
+/// single-token bug reported this firing twice on their own short test requests
+/// where one token WAS the right answer, and asked whether the false-positive
+/// rate was worth tuning — it was. The budget has to be large enough that a
+/// near-empty reply is genuinely surprising, so the warning means something when
+/// it does fire.
 fn reply_ended_itself_early(
     completion_tokens: u32,
     max_tokens: u32,
@@ -180,7 +202,7 @@ fn reply_ended_itself_early(
 ) -> bool {
     matched.is_none()
         && completion_tokens <= STOP_ATE_THE_REPLY_TOKENS
-        && completion_tokens < max_tokens
+        && max_tokens >= BUDGET_THAT_EXPECTED_PROSE
 }
 
 /// Did a stop sequence leave the caller with essentially no reply?
@@ -641,6 +663,23 @@ mod finalize_reply_text_tests {
         // it off, so the model emitted end-of-turn straight away.
         assert!(reply_ended_itself_early(1, 100, None));
         assert!(reply_ended_itself_early(0, 100, None));
+    }
+
+    #[test]
+    fn a_caller_who_asked_for_something_short_is_not_reported() {
+        // Reported by an external tester chasing a real single-token bug: this
+        // warning fired twice on their own probes ("say OK in one word",
+        // max_tokens 10) where one token WAS the answer. The old rule only
+        // required completion < max, which is true of nearly every request, so
+        // the signal was diluted by exactly the traffic it had to be trusted
+        // against.
+        assert!(!reply_ended_itself_early(1, 10, None));
+        assert!(!reply_ended_itself_early(1, 32, None));
+        assert!(!reply_ended_itself_early(1, 1, None));
+
+        // ...while the shape that was the genuine fault still reports: an
+        // agentic client budgeting thousands and getting one token back.
+        assert!(reply_ended_itself_early(1, 4096, None));
     }
 
     #[test]
