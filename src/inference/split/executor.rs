@@ -419,6 +419,23 @@ impl SplitModel {
                         budget_mb = budget / (1024 * 1024),
                         "DIAG: refusing to grow the KV cache past this worker's budget"
                     );
+                    // Give back what THIS request already took.
+                    //
+                    // A long prompt is prefilled in chunks and claims a quantum
+                    // whenever it crosses one, so a request refused here has
+                    // usually allocated several already. Leaving them behind
+                    // makes a refusal a RATCHET: the request fails, its cache
+                    // survives until the session expires ten minutes later, and
+                    // the next attempt starts from a higher `in_use`. Measured
+                    // on this node 2026-08-25 — refusals at 1152, then 2304,
+                    // then 3456 MB against a 1166 MB budget, in exact
+                    // one-quantum steps, until the card was at 97% and decode
+                    // had fallen from 29 tok/s to 1.0 (gotcha #387).
+                    //
+                    // Freeing here is safe because the request is over: we are
+                    // returning an error, no later forward will reuse this
+                    // cache, and a retry rebuilds it from the prompt.
+                    kv_cache_store.clear_request(&self.kv_model_key, request_id);
                     return Err(SwarmError::ServiceUnavailable(format!(
                         "Not enough free memory on this node to continue this conversation \
                          ({} MB of KV cache already in use, budget {} MB). Shorter \

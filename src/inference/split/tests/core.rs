@@ -1338,3 +1338,52 @@ fn no_recorded_budget_means_no_refusal() {
         "an unknown budget must never be read as a zero one"
     );
 }
+
+/// A request refused for exceeding the KV budget must not leave its cache
+/// behind.
+///
+/// A long prompt is prefilled in chunks and claims a quantum each time it
+/// crosses one, so by the time a chunk is refused the request has usually
+/// allocated several. Leaving them made a refusal a RATCHET: the request failed,
+/// its cache survived until the session expired ten minutes later, and the next
+/// attempt started from a higher `in_use`. Measured on a live node 2026-08-25 —
+/// refusals at 1152, then 2304, then 3456 MB against a 1166 MB budget, in exact
+/// one-quantum steps, until the card sat at 97% and decode had fallen from
+/// 29 tok/s to 1.0 (gotcha #387).
+#[test]
+fn a_refused_request_gives_back_the_cache_it_had_taken() {
+    let mut model = super::common::make_test_split_model(2, 64);
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let dev = candle_core::Device::Cpu;
+
+    model.kv_bytes_per_token = 1024;
+    // Room for one 512-position quantum and very little else, so the first
+    // forward is admitted and the next claim is not.
+    model.kv_budget_bytes = Some(1024 * 600);
+
+    let input = candle_core::Tensor::zeros((1, 8, 64), candle_core::DType::F32, &dev).unwrap();
+    let req = "refused-request";
+    model
+        .forward(&input, 0, &store, req)
+        .expect("the first forward fits the budget");
+    assert_eq!(
+        store.active_entries(),
+        1,
+        "the first forward must have allocated a cache entry, or the test proves nothing"
+    );
+
+    // Claim another quantum with the budget already spent.
+    let err = model
+        .forward(&input, 0, &store, req)
+        .expect_err("a claim past the budget must be refused");
+    assert!(
+        matches!(err, crate::error::SwarmError::ServiceUnavailable(_)),
+        "a budget refusal is a 503 so a coordinator can re-route it: {err:?}"
+    );
+    assert_eq!(
+        store.active_entries(),
+        0,
+        "the refused request must give its cache back — otherwise every refusal \
+         permanently raises the floor and the node ratchets itself to a halt"
+    );
+}
