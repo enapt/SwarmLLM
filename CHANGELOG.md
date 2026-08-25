@@ -4,6 +4,19 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fingerprint your machine took from a model's original source is no longer
+  overridden by what another machine claims.** Machines share what they believe
+  each part's fingerprint to be, and the most recent claim used to win. A machine
+  that had earlier convinced itself a damaged part was fine would share that
+  wrong fingerprint — and your machine would adopt it over the one it had checked
+  against the original source, then set aside its own good copy and fetch a
+  replacement it judged against the same wrong answer. It could never settle.
+  Fingerprints taken from the original source now take precedence, are applied
+  before anything reacts to a change, and survive a restart.
+
+
 ## [0.3.121-alpha] — 2026-08-25
 
 **A machine can now be told by the network that a part it is sharing is

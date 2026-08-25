@@ -32,6 +32,9 @@ const MAX_RETRACTED_CLAIMS: usize = 10_000;
 /// Shard holder tracking is bounded: at most `MAX_HOLDERS_PER_SHARD` holders
 /// are cached per shard. The local node is never evicted. For accurate holder
 /// counts at scale, use DHT provider queries via `QueryShardProviders`.
+/// DB tree holding shard hashes derived from the model's ORIGIN.
+pub const ORIGIN_VERIFIED_TREE: &str = "origin_verified_hashes";
+
 /// Reacts to a manifest update: `(manifest, persist, recheck_shards)`.
 ///
 /// `persist` — this registry enriched the manifest's shard hashes, so the result
@@ -90,6 +93,23 @@ pub struct ModelRegistry {
     /// steady state is never: a peer re-gossiping the same placeholder manifest
     /// merges to bytes identical to the stored ones, so this would otherwise
     /// write on every gossip round, for every model, forever.
+    /// Shard hashes derived from bytes fetched from the model's ORIGIN, which
+    /// therefore outrank anything a peer gossips.
+    ///
+    /// **Only the origin settles a hash.** Without this, a peer that
+    /// self-certified a corrupt shard (hashing its own bad bytes) gossips that
+    /// hash, and the last-writer-wins `insert` below adopts it over one we
+    /// verified against the origin — after which the re-check quarantines our
+    /// GOOD copy and refetches, and every replacement is judged against the
+    /// wrong reference, so it can never converge. Observed live 2026-08-25:
+    /// `expected ab5bc674… got 597dcfe8…`, where the "got" was the copy checked
+    /// byte-for-byte against HuggingFace (gotcha #384).
+    ///
+    /// Deliberately local and NOT carried in the gossiped manifest: provenance
+    /// that travels over the network is just another assertion, and forgeable.
+    /// A node trusts only what IT fetched from the origin.
+    origin_verified: DashMap<ShardId, crate::types::Blake3Hash>,
+
     persist_hook: std::sync::OnceLock<ManifestUpdateHook>,
     /// Local node ID — never evicted from holder sets.
     local_node_id: Option<NodeId>,
@@ -103,6 +123,7 @@ impl ModelRegistry {
             node_shards: DashMap::new(),
             global_holder_count: DashMap::new(),
             retracted_claims: DashMap::new(),
+            origin_verified: DashMap::new(),
             persist_hook: std::sync::OnceLock::new(),
             local_node_id: None,
         }
@@ -118,6 +139,7 @@ impl ModelRegistry {
             node_shards: DashMap::new(),
             global_holder_count: DashMap::new(),
             retracted_claims: DashMap::new(),
+            origin_verified: DashMap::new(),
             persist_hook: std::sync::OnceLock::new(),
             local_node_id: Some(local_node_id),
         }
@@ -133,6 +155,20 @@ impl ModelRegistry {
     /// `merge_known_shard_hashes`. Idempotent; the first call wins.
     pub fn set_persist_hook(&self, hook: ManifestUpdateHook) {
         let _ = self.persist_hook.set(hook);
+    }
+
+    /// Record a shard hash derived from bytes fetched from the model's ORIGIN.
+    /// From now on no gossiped manifest can change this shard's hash here.
+    pub fn record_origin_verified_hash(&self, shard_id: ShardId, hash: crate::types::Blake3Hash) {
+        if hash != [0u8; 32] {
+            self.origin_verified.insert(shard_id, hash);
+        }
+    }
+
+    /// The origin-derived hash for a shard, if this node has ever fetched it
+    /// from the origin.
+    pub fn origin_verified_hash(&self, shard_id: &ShardId) -> Option<crate::types::Blake3Hash> {
+        self.origin_verified.get(shard_id).map(|h| *h)
     }
 
     pub fn register_manifest(&self, mut manifest: ModelManifest) {
@@ -215,6 +251,29 @@ impl ModelRegistry {
         // Gated on `changed` as well as `recovered` because a peer that keeps
         // gossiping a placeholder manifest merges to the same bytes every time;
         // without the gate this would write on every gossip round forever.
+        // A hash we derived from the ORIGIN's own bytes outranks anything a peer
+        // says. Applied BEFORE the change-detection below, so adopting a peer's
+        // contradicting hash never even registers as a change — otherwise the
+        // re-check fires against a reference we have already disproved.
+        for shard in manifest.shards.iter_mut() {
+            if let Some(known) = self.origin_verified_hash(&ShardId {
+                model_id: manifest.id.clone(),
+                index: shard.index,
+            }) {
+                if shard.hash != known {
+                    tracing::warn!(
+                        model = %manifest.id,
+                        shard = shard.index,
+                        claimed = %hex::encode(&shard.hash[..8]),
+                        origin = %hex::encode(&known[..8]),
+                        "Ignoring a shard hash that contradicts the one we took \
+                         from the model's origin"
+                    );
+                    shard.hash = known;
+                }
+            }
+        }
+
         // Shards WE HOLD whose expected hash just changed. Those bytes were
         // checked against a reference that no longer applies — or, for a hash we
         // never had, were never checked at all — so they must be re-checked.
@@ -739,6 +798,25 @@ impl ModelRegistry {
     pub fn load_from_db(db: &Database) -> Result<Self, SwarmError> {
         let registry = Self::new();
 
+        // Hashes we took from a model's origin, which outrank gossip. Loaded
+        // FIRST so the manifests below cannot be registered against a peer's
+        // contradicting claim during startup (#384).
+        if let Ok(entries) = db.iter_raw(ORIGIN_VERIFIED_TREE) {
+            for (key, value) in entries {
+                let Ok(key_str) = std::str::from_utf8(&key) else {
+                    continue;
+                };
+                let Ok(shard_id) = serde_json::from_str::<ShardId>(key_str) else {
+                    continue;
+                };
+                if value.len() == 32 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&value);
+                    registry.record_origin_verified_hash(shard_id, h);
+                }
+            }
+        }
+
         // Load model manifests from the "model_meta" tree
         let entries = db.iter_raw("model_meta")?;
         let mut purge_backup_ids: Vec<String> = Vec::new();
@@ -1022,6 +1100,76 @@ mod tests {
             writes.load(Ordering::SeqCst),
             1,
             "an unchanged re-gossip must not write; this fires every 30s per peer"
+        );
+    }
+
+    /// A hash we took from the model's ORIGIN outranks anything a peer gossips.
+    ///
+    /// Without this, a peer that self-certified a corrupt shard displaces the
+    /// right hash with its wrong one, the re-check then quarantines our GOOD
+    /// copy, and every replacement is judged against the same wrong reference,
+    /// so it can never converge. Observed live: `expected ab5bc674… got
+    /// 597dcfe8…`, where the "got" was verified byte-for-byte against the origin.
+    #[test]
+    fn an_origin_hash_outranks_a_peers_contradicting_claim() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me.clone());
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 7,
+        };
+        let good = [0x59u8; 32];
+        let bad = [0xabu8; 32];
+
+        registry.record_origin_verified_hash(sid.clone(), good);
+
+        let mut from_peer = test_manifest("m", "M");
+        from_peer.shards = vec![test_shard(7, bad)];
+        registry.register_manifest(from_peer);
+
+        let stored = registry.get_manifest(&ModelId("m".into())).unwrap();
+        assert_eq!(
+            stored.shards[0].hash, good,
+            "a peer's self-certified hash must not displace one taken from the \
+             origin — that is how a good shard gets quarantined and replaced \
+             with a bad one"
+        );
+    }
+
+    /// The re-check must not fire for a claim the origin has already disproved:
+    /// otherwise the node re-hashes a shard it has every reason to trust,
+    /// against a reference it has already rejected.
+    #[test]
+    fn a_disproved_claim_does_not_trigger_a_recheck() {
+        use std::sync::{Arc, Mutex};
+
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me.clone());
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 7,
+        };
+        let good = [0x59u8; 32];
+
+        let mut first = test_manifest("m", "M");
+        first.shards = vec![test_shard(7, good)];
+        registry.register_manifest(first);
+        registry.record_shard_holder(sid.clone(), me.clone());
+        registry.record_origin_verified_hash(sid.clone(), good);
+
+        let seen: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        registry.set_persist_hook(Box::new(move |_m, _p, recheck| {
+            s2.lock().unwrap().extend_from_slice(recheck);
+        }));
+
+        let mut from_peer = test_manifest("m", "M");
+        from_peer.shards = vec![test_shard(7, [0xabu8; 32])];
+        registry.register_manifest(from_peer);
+
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "a hash the origin has already disproved must not provoke a re-check"
         );
     }
 

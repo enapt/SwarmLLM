@@ -545,6 +545,17 @@ display
                                     {
                                         si.hash = hash;
                                     }
+                                    // These bytes came from the model's ORIGIN,
+                                    // so this hash outranks anything a peer
+                                    // gossips — including a peer that
+                                    // self-certified a corrupt copy (#384).
+                                    shared.record_origin_verified_hash(
+                                        crate::types::ShardId {
+                                            model_id: model_id.clone(),
+                                            index: shard_idx,
+                                        },
+                                        hash,
+                                    );
                                     manifest.manifest_hash = manifest.compute_hash();
                                     let model_dir = crate::model::shard::model_dir(
                                         &shared.config.node.data_dir,

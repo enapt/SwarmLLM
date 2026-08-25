@@ -78,6 +78,44 @@ impl SharedState {
                 .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Record a shard hash taken from the model's ORIGIN, in memory and on disk.
+    ///
+    /// **Only the origin settles a hash.** A peer that self-certified a corrupt
+    /// shard gossips the wrong hash, and manifest registration is
+    /// last-writer-wins — so without this the wrong hash displaces the right one
+    /// and the re-check quarantines our GOOD copy, refetches, and judges the
+    /// replacement against the same wrong reference, forever (gotcha #384).
+    ///
+    /// Persisted because the fact outlives the process: relearning it would mean
+    /// re-downloading from the origin, and until then gossip wins again.
+    pub fn record_origin_verified_hash(
+        &self,
+        shard_id: crate::types::ShardId,
+        hash: crate::types::Blake3Hash,
+    ) {
+        if hash == [0u8; 32] {
+            return;
+        }
+        let key = match serde_json::to_string(&shard_id) {
+            Ok(k) => k,
+            Err(_) => return,
+        };
+        if let Err(e) =
+            self.db
+                .insert_raw(crate::model::registry::ORIGIN_VERIFIED_TREE, &key, &hash)
+        {
+            tracing::warn!(
+                model = %shard_id.model_id,
+                shard = shard_id.index,
+                error = %e,
+                "Could not persist an origin-verified shard hash — a peer's \
+                 claim could displace it after a restart"
+            );
+        }
+        self.model_registry
+            .record_origin_verified_hash(shard_id, hash);
+    }
+
     /// Drop the repair request once the shard is back. Called when a download
     /// completes so the set stays bounded and nothing re-fetches a good shard.
     pub fn clear_shard_repair(&self, shard_id: &ShardId) {
