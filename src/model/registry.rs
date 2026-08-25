@@ -261,11 +261,22 @@ impl ModelRegistry {
                 index: shard.index,
             }) {
                 if shard.hash != known {
+                    // `publisher` is the nearest thing to attribution available
+                    // here: `register_manifest` is the funnel EVERY adoption path
+                    // goes through (gossip, DB reload, disk scan, acquisition) and
+                    // deliberately takes no sender. Without something, this line
+                    // cannot answer the only question that matters about a
+                    // contradicted hash — one bad copy, or several agreeing with
+                    // each other. It fired 1439 times here saying only that a
+                    // hash disagreed. Publisher is weaker than the gossiping peer
+                    // (see `manifests_to_gossip`: a holder re-broadcasts without
+                    // claiming publication) but it is not nothing.
                     tracing::warn!(
                         model = %manifest.id,
                         shard = shard.index,
                         claimed = %hex::encode(&shard.hash[..8]),
                         origin = %hex::encode(&known[..8]),
+                        publisher = %manifest.publisher,
                         "Ignoring a shard hash that contradicts the one we took \
                          from the model's origin"
                     );

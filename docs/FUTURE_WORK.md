@@ -10413,3 +10413,40 @@ holder it simply waits the same deadline twice. It wants
 exists and is currently applied only for missing-shard errors
 (`distributed.rs:1254`, `remote_generate.rs:494,507`). Do those two together or
 neither.
+
+## A contradicted shard hash cannot name the peer that claimed it (found 2026-08-26)
+
+`ModelRegistry::register_manifest` refuses a shard hash that contradicts one this
+node derived from the model's origin (gotcha #384) and logs:
+
+```
+Ignoring a shard hash that contradicts the one we took from the model's origin
+model=qwen2.5-coder-7b-instruct-q4-k-m shard=3 claimed=2e264275a21c8ca4 origin=9b99620ec8dfeb23
+```
+
+**It cannot say who claimed it.** `register_manifest` is the single funnel every
+adoption path goes through — gossip ingress, DB reload on startup, the local disk
+scan, acquisition — and takes only the manifest, deliberately, so that no path can
+skip the merge and origin-override rules. There is no sender to log. The warning
+now carries `publisher`, which is the nearest thing available, but that is the
+node that PUBLISHED the model rather than the one that just gossiped it: a holder
+re-broadcasts without claiming publication (`manifests_to_gossip`), so publisher
+is frequently not the sender.
+
+**Why it matters.** The only question worth asking about a contradicted hash is
+whether it is one bad copy or several peers agreeing with each other — that is the
+difference between a local fault and a propagation channel, and it is the whole
+lesson of gotcha #382. Observed on this node 2026-08-26: 1439 such warnings for
+one model and one shard, with three peers holding it, and no way to tell whether
+one of them or all three were claiming the divergent hash.
+
+**The fix is to thread the sender in.** `register_manifest(manifest,
+from: Option<&NodeId>)`, with the gossip-ingress caller in `daemon/dispatch`
+passing its `authenticated_sender` and the local paths passing `None`. Mechanical,
+but it changes the signature of the funnel every adoption path depends on, so it
+wants testing across all four callers on a real multi-node swarm rather than a
+compile check — which is why it was not done in the same sitting it was found.
+
+**Related and already done**: the sibling rejection in `daemon/dispatch` DID have
+the sender in scope and was not logging it either; that one now reports model,
+model name, peer and shard count (commit `de7f3206`).
