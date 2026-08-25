@@ -194,9 +194,17 @@ impl NetworkManager {
                     // a peer that answers even one request never accumulates.
                     self.rr_failures.remove(&peer);
                     // Clean up tensor outbound tracking (response received = not a failure)
-                    if let Some((uuid, _, _, _, _)) =
+                    if let Some((uuid, sent_at, _, _, _)) =
                         self.pending_tensor_outbound.remove(&request_id)
                     {
+                        // How long this peer actually took to acknowledge. Feeds
+                        // the per-peer deadline, so a peer whose loop is busy
+                        // widens its own window instead of being declared dead
+                        // on a ping-derived guess (gotcha #386).
+                        self.ack_rtt
+                            .entry(peer)
+                            .or_default()
+                            .observe(sent_at.elapsed().as_secs_f64() * 1000.0);
                         // The onward forward was received; its failure is no
                         // longer ours to report to the coordinator.
                         self.hop_reply_to.remove(&uuid);

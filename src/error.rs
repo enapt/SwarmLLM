@@ -719,9 +719,20 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
         )),
         SwarmError::SegmentFailoverExhausted(_) => Some((
             "segment_failover_exhausted",
-            "A computer running part of this model failed mid-request, and no \
-             other machine was free to take over its part. This is usually \
-             momentary — try again, and the swarm will build a fresh route.",
+            // Deliberately does NOT promise that retrying works. The condition
+            // is "no other machine was free to take over" — so where the failed
+            // node is the only reachable holder, a retry rebuilds the SAME route
+            // and fails identically. Measured on the live swarm 2026-08-25: six
+            // consecutive retries over about an hour, against a hint that said
+            // "usually momentary — try again". Advice that cannot work is the
+            // trap gotcha #295 exists for, so this now says what would actually
+            // change the outcome.
+            "A computer running part of this model stopped responding, and no \
+             other machine had the missing part free to take over. Retrying may \
+             work if it was a brief hiccup — but if it keeps failing, this model \
+             is being held by too few machines right now. Pick a model the \
+             dashboard marks as ready, or fetch this one with \
+             `swarmllm get-model <name> --all` so it no longer depends on them.",
         )),
         SwarmError::ModelIncompleteInSwarm { .. } => Some((
             "model_incomplete_in_swarm",
@@ -1299,8 +1310,23 @@ mod tests {
             Some(SwarmError::SegmentFailoverExhausted(_))
         ));
 
+        // Assert the ADVICE, not the wording. This used to require the literal
+        // phrase "try again", which passed while the hint was promising a retry
+        // that could not work: the condition is "no other machine had the part
+        // free", so where the failed node is the only reachable holder, a retry
+        // rebuilds the same route. Six consecutive retries were observed failing
+        // against that hint (gotcha #386).
         let hint = error_hint(&err).expect("transient failure needs a hint");
-        assert!(hint.to_lowercase().contains("try again"), "{hint}");
+        let lower = hint.to_lowercase();
+        assert!(
+            lower.contains("retry") || lower.contains("again"),
+            "a genuinely transient case must still be offered a retry: {hint}"
+        );
+        assert!(
+            lower.contains("get-model") || lower.contains("dashboard"),
+            "and a way out that does not depend on the same machines coming \
+             back, for when retrying does not help: {hint}"
+        );
     }
 
     /// The generic pipeline hint covers causes we cannot tell apart, so it must

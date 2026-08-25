@@ -337,6 +337,11 @@ pub struct NetworkManager {
     /// The Instant + workload info are used for adaptive stale tensor cleanup.
     pending_tensor_outbound:
         HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant, libp2p::PeerId, u32, usize)>,
+    /// Per-peer send→ACK latency estimator (RFC 6298). Sets each peer's
+    /// receipt-ACK deadline from its OWN observed acknowledgement latency and
+    /// its variance, instead of a ping RTT that says nothing about how loaded
+    /// the peer's event loop is. See `tensors::AckRttEstimator`.
+    ack_rtt: HashMap<libp2p::PeerId, tensors::AckRttEstimator>,
     /// For forwards THIS node sent onward as a chain hop: the coordinator the
     /// run must answer, by request id. When such a forward fails here — no
     /// receipt ACK, OutboundFailure — the error is reported to THAT node, not
@@ -675,6 +680,7 @@ impl NetworkManager {
             relay_disabled_explained: false,
             last_relay_attempt: None,
             pending_tensor_outbound: HashMap::new(),
+            ack_rtt: HashMap::new(),
             hop_reply_to: HashMap::new(),
             pending_tensor_result_outbound: HashMap::new(),
             pending_rr_observability: HashMap::new(),
@@ -826,6 +832,21 @@ impl NetworkManager {
     /// does not advertise `features::FORWARD_ACK` (it answers only with the
     /// result, which may legitimately take minutes). Scaled from the peer's
     /// measured round trip the same way streaming ACKs are.
+    /// Is there a standby this request could actually fail over to?
+    ///
+    /// The receipt-ACK fast-fail is only worth doing when the answer is yes —
+    /// see the call site. Absence of the pipeline entry is treated as "yes" so
+    /// the previous behaviour stands for anything that is not a coordinator-side
+    /// distributed request (a chain hop, say), rather than silently disabling
+    /// the fast-fail for paths this check cannot see.
+    fn request_has_standby(&self, request_id: &uuid::Uuid) -> bool {
+        self.shared_state
+            .active_pipelines
+            .get(request_id)
+            .map(|a| !a.standbys.is_empty())
+            .unwrap_or(true)
+    }
+
     fn forward_ack_deadline_secs(&self, peer: &libp2p::PeerId) -> Option<u64> {
         let node_id = self.peer_to_node.get(peer).map(|r| r.clone())?;
         let (features, rtt) = {
@@ -840,6 +861,12 @@ impl NetworkManager {
             swarmllm_types::node::features::FORWARD_ACK,
         ) {
             return None;
+        }
+        // What this peer's acknowledgements have ACTUALLY cost, when we have
+        // measured any. The ping-derived figure is the fallback for a peer we
+        // have not yet forwarded to.
+        if let Some(observed) = self.ack_rtt.get(peer).and_then(|e| e.deadline_secs()) {
+            return Some(observed);
         }
         Some(tensors::ack_deadline_from_rtt(rtt))
     }
@@ -1447,7 +1474,24 @@ impl NetworkManager {
                                 // seconds instead of minutes. Gated on the peer
                                 // advertising `FORWARD_ACK`; an older peer answers
                                 // only with the result, which may take minutes.
-                                if age.as_secs() > deadline_secs {
+                                //
+                                // ...but ONLY where there is somewhere to fail
+                                // over TO. This whole mechanism is justified by
+                                // the failover it enables — the same premise as
+                                // hedged requests in Dean & Barroso's "The Tail
+                                // at Scale", which issue a SECOND copy to a
+                                // different replica. With no standby there is no
+                                // second replica, so abandoning cannot buy a
+                                // failover; it can only convert a slow success
+                                // into a hard 503. Measured on the live swarm
+                                // 2026-08-25: the peer's result arrived 1.6 s
+                                // after we gave up on it, and was discarded
+                                // (gotcha #386). With no standby the compute
+                                // deadline governs, which is what bounds the
+                                // genuinely-dead case.
+                                if age.as_secs() > deadline_secs
+                                    && self.request_has_standby(uuid)
+                                {
                                     unacked.push((*req_id, *uuid, *target_peer, deadline_secs));
                                 }
                             }

@@ -512,7 +512,7 @@
   "error_hint.provider_generic": "云服务商返回了错误。请重试、更换模型，或改用集群中的本地模型。",
   "error_hint.provider_quota": "您的云服务商额度可能已用尽，或触发了速率限制。请在服务商网站为账户充值、改用提供免费额度的服务商（DeepSeek、Groq、NVIDIA NIM），或改用集群中的本地模型。",
   "error_hint.reply_truncated": "答复的一部分在从生成它的计算机返回途中丢失，因此收到的内容并不完整，也没有当作完整回复显示。请重试：新请求通常会被分配到另一台机器。",
-  "error_hint.segment_failover_exhausted": "运行该模型某一部分的计算机在请求进行中出现故障，且没有其他空闲机器可以接手这一部分。这通常只是暂时的——请重试，集群会重新组建链路。",
+  "error_hint.segment_failover_exhausted": "运行该模型某一部分的电脑停止响应，而其他机器都没有空闲的缺失部分。如果只是短暂故障，重试可能有效；但若持续失败，说明目前持有该模型的机器太少。请选择仪表板标记为就绪的模型，或用 `swarmllm get-model <名称> --all` 获取该模型，以后就不必依赖它们。",
   "error_hint.shard_incomplete": "某个模型文件未下载完整，系统将自动重新获取。这通常意味着连接中途断开。",
   "error_hint.shard_integrity": "某个模型文件已损坏，系统将自动重新下载。这通常是下载中断造成的——请稍候重试。",
   "error_hint.unauthorized": "需要身份验证。您的 API 密钥可在控制台的「设置」页面找到，请将其作为 Bearer 令牌放入 Authorization 请求头。",

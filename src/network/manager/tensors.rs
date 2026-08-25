@@ -861,6 +861,64 @@ impl NetworkManager {
     }
 }
 
+/// Per-peer estimator for how long that peer takes to acknowledge a forward.
+///
+/// **RFC 6298's retransmission-timer algorithm**, which is the standard answer to
+/// "how long before I declare this lost". The part that matters here is that it
+/// tracks VARIANCE as well as the mean: `RTO = SRTT + K*RTTVAR`, K=4,
+/// alpha=1/8, beta=1/4. A peer whose acknowledgements are usually fast but
+/// occasionally slow gets a deadline that reflects the spread, not the average.
+///
+/// **Why the RTT-only rule it replaces was wrong.** `ack_deadline_from_rtt`
+/// scales a ping RTT, and a ping says nothing about queueing delay on a loaded
+/// node — the ACK is emitted by the network event loop, so it is late exactly
+/// when that loop is busy. Measured on the live swarm 2026-08-25: a peer at
+/// ~500 ms RTT (so, the 10 s floor) spent about an hour failing every distributed
+/// request with "no receipt acknowledgement within 10s" while it was busy, and
+/// served the same request in 6.1 s once it settled. Its ACKs were arriving —
+/// late, not missing (gotcha #386).
+///
+/// Samples are the observed send→ACK latency, so a peer that is slow to
+/// acknowledge widens its own deadline; when it recovers, the estimate decays
+/// back. `RR_ACK_TIMEOUT_SECS` remains the floor and `RR_ACK_TIMEOUT_MAX_SECS`
+/// the ceiling, so this can only move the deadline within the range the fixed
+/// rule already allowed.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct AckRttEstimator {
+    srtt_ms: f64,
+    rttvar_ms: f64,
+    samples: u32,
+}
+
+impl AckRttEstimator {
+    /// Fold in one observed send→ACK latency. RFC 6298 §2, rules (2.2) and (2.3).
+    pub(super) fn observe(&mut self, sample_ms: f64) {
+        let r = sample_ms.max(0.0);
+        if self.samples == 0 {
+            self.srtt_ms = r;
+            self.rttvar_ms = r / 2.0;
+        } else {
+            // RTTVAR is updated FIRST, using the pre-update SRTT — reversing
+            // these makes the variance term collapse toward zero and the
+            // deadline too tight, which is the failure this exists to stop.
+            self.rttvar_ms = 0.75 * self.rttvar_ms + 0.25 * (self.srtt_ms - r).abs();
+            self.srtt_ms = 0.875 * self.srtt_ms + 0.125 * r;
+        }
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    /// The deadline this peer has earned, in whole seconds, or `None` while no
+    /// sample has been seen (the caller falls back to the RTT-based estimate).
+    pub(super) fn deadline_secs(&self) -> Option<u64> {
+        if self.samples == 0 {
+            return None;
+        }
+        let rto_ms = self.srtt_ms + 4.0 * self.rttvar_ms;
+        let secs = (rto_ms / 1000.0).ceil().max(0.0) as u64;
+        Some(secs.clamp(super::RR_ACK_TIMEOUT_SECS, super::RR_ACK_TIMEOUT_MAX_SECS))
+    }
+}
+
 /// Turn a measured round trip into an ACK deadline.
 ///
 /// Split out from the lookup so it can be tested without a swarm. An unknown
@@ -932,5 +990,81 @@ mod ack_deadline_tests {
     #[test]
     fn an_unknown_latency_takes_the_floor() {
         assert_eq!(ack_deadline_from_rtt(0), RR_ACK_TIMEOUT_SECS);
+    }
+}
+
+#[cfg(test)]
+mod ack_estimator_tests {
+    use super::AckRttEstimator;
+
+    /// A peer whose acknowledgements are consistently fast keeps the floor —
+    /// the estimator must never make a healthy peer's deadline tighter than the
+    /// fixed rule already allowed.
+    #[test]
+    fn a_fast_peer_keeps_the_floor() {
+        let mut e = AckRttEstimator::default();
+        for _ in 0..20 {
+            e.observe(40.0);
+        }
+        assert_eq!(e.deadline_secs(), Some(super::super::RR_ACK_TIMEOUT_SECS));
+    }
+
+    /// The case this exists for. A peer that is usually quick but sometimes
+    /// takes many seconds — a loaded event loop — must earn a deadline past the
+    /// 10s floor, or every forward to it fails while it is busy even though its
+    /// acknowledgements are arriving.
+    #[test]
+    fn a_peer_with_slow_spells_earns_a_longer_deadline() {
+        let mut e = AckRttEstimator::default();
+        for _ in 0..10 {
+            e.observe(300.0);
+        }
+        let calm = e.deadline_secs().unwrap();
+        for _ in 0..6 {
+            e.observe(12_000.0);
+        }
+        let busy = e.deadline_secs().unwrap();
+        assert_eq!(calm, super::super::RR_ACK_TIMEOUT_SECS);
+        assert!(
+            busy > calm,
+            "a peer that acknowledges late must widen its own deadline; \
+             got {busy}s, still at the {calm}s floor"
+        );
+    }
+
+    /// Variance is what makes it widen, not the mean alone — that is the whole
+    /// reason RFC 6298 carries RTTVAR, and the reason the ping-RTT rule this
+    /// replaces could not see a loaded peer.
+    #[test]
+    fn spread_widens_the_deadline_even_at_the_same_average() {
+        let mut steady = AckRttEstimator::default();
+        let mut jittery = AckRttEstimator::default();
+        for _ in 0..12 {
+            steady.observe(6_000.0);
+            jittery.observe(1_000.0);
+            jittery.observe(11_000.0);
+        }
+        assert!(
+            jittery.deadline_secs() > steady.deadline_secs(),
+            "same rough average, wider spread — the jittery peer needs more room \
+             (steady={:?} jittery={:?})",
+            steady.deadline_secs(),
+            jittery.deadline_secs()
+        );
+    }
+
+    /// It can only move within the range the fixed rule already allowed, so a
+    /// pathological peer cannot hold a forward open indefinitely.
+    #[test]
+    fn it_stays_within_the_existing_bounds() {
+        let mut e = AckRttEstimator::default();
+        for _ in 0..30 {
+            e.observe(10_000_000.0);
+        }
+        assert_eq!(
+            e.deadline_secs(),
+            Some(super::super::RR_ACK_TIMEOUT_MAX_SECS)
+        );
+        assert_eq!(AckRttEstimator::default().deadline_secs(), None);
     }
 }
