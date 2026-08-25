@@ -4,6 +4,65 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.120-alpha] — 2026-08-25
+
+**A damaged part of a model can no longer spread from machine to machine.**
+Parts downloaded from other machines are now always checked before they are
+kept, and when there is no fingerprint to check against, the part is fetched
+from the model's original source instead of being taken on trust.
+
+### What was wrong
+
+Every part of a model carries a fingerprint, but a machine only knows the
+fingerprint of a part it actually holds — the record it publishes is built from
+what is on its own disk. So a machine holding half a model publishes real
+fingerprints for its half and blanks for the rest. Reading in someone else's
+record overwrote blindly, so a blank could erase a fingerprint your machine
+already had.
+
+That mattered because a download was only checked when a fingerprint existed to
+check it against. Once one was lost, the next copy of that part was kept without
+any check, recorded as held, and passed on to other machines that also kept it
+without checking. One damaged copy could become several, and each extra machine
+holding it made it look more trustworthy.
+
+This was found on a live machine, not in theory: a part of an 8B model was
+damaged, had reached at least two machines, and was confirmed damaged by
+comparing against the original source. The model answered convincingly for hours
+beforehand — a damaged part does not necessarily produce visibly broken output,
+which is why the check matters rather than a spot inspection.
+
+### What changed
+
+- **Fingerprints are never forgotten.** Reading someone else's record can now
+  only teach your machine a fingerprint it did not have, never erase one it did.
+  A genuinely re-published model still updates the fingerprint as before.
+- **A part that cannot be checked is fetched from the original source.** Your
+  machine knows where the model came from, so it is never reduced to trusting
+  another machine. The source copy also supplies the missing fingerprint, which
+  then spreads normally — so this is a one-off for a model whose fingerprints
+  nobody knew yet, not a permanent fallback.
+- **The machine that sent the part is not blamed.** It may well have sent
+  perfect data; being unable to tell is not evidence against it.
+- **The background check no longer counts parts it could not check as checked.**
+  It had been reporting "all parts OK" over parts it had never examined. Parts
+  with nothing to check against are now counted and named separately.
+- **A fingerprint learned from another machine survives a restart.** It used to
+  live only in memory, so every restart went back to having nothing to check a
+  download against until the network re-supplied it.
+- **The fallback to the original source works even with automatic model
+  management switched off.** That setting means "do not decide what to fetch on
+  my behalf" — it should not mean abandoning a part your machine already asked
+  for and is halfway through getting.
+
+### If you are affected
+
+A damaged part is set aside automatically when it is next checked, and refetched.
+If a model that used to work reports a missing part, that is this check doing its
+job. Use "Download this part" to fetch it again — it will now come from the
+original source when peers cannot prove their copy is intact.
+
+
 ## [0.3.119-alpha] — 2026-08-24
 
 **Your graphics card is now used when it is free.** A model that fits your card

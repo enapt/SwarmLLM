@@ -32,6 +32,9 @@ const MAX_RETRACTED_CLAIMS: usize = 10_000;
 /// Shard holder tracking is bounded: at most `MAX_HOLDERS_PER_SHARD` holders
 /// are cached per shard. The local node is never evicted. For accurate holder
 /// counts at scale, use DHT provider queries via `QueryShardProviders`.
+/// Persists a manifest whose shard hashes the registry has just enriched.
+type ManifestPersistHook = Box<dyn Fn(&ModelManifest) + Send + Sync>;
+
 pub struct ModelRegistry {
     /// Known model manifests, keyed by model ID.
     manifests: DashMap<ModelId, ModelManifest>,
@@ -71,6 +74,18 @@ pub struct ModelRegistry {
     /// the shard is believed again as soon as it announces it itself. The DHT
     /// path deliberately does NOT clear it — that is the whole point.
     retracted_claims: DashMap<(ShardId, NodeId), Instant>,
+    /// Persists a manifest whose shard hashes this registry has just enriched.
+    ///
+    /// Installed once at startup (see `daemon::state`), in the same shape as
+    /// `ModelProcessPool::set_ram_budget_provider` — the registry cannot own a
+    /// `Database` handle, and a hook keeps the merge in one place rather than
+    /// obliging every caller of `register_manifest` to remember to persist.
+    ///
+    /// Fires ONLY when a merge actually changed what we hold, which in the
+    /// steady state is never: a peer re-gossiping the same placeholder manifest
+    /// merges to bytes identical to the stored ones, so this would otherwise
+    /// write on every gossip round, for every model, forever.
+    persist_hook: std::sync::OnceLock<ManifestPersistHook>,
     /// Local node ID — never evicted from holder sets.
     local_node_id: Option<NodeId>,
 }
@@ -83,6 +98,7 @@ impl ModelRegistry {
             node_shards: DashMap::new(),
             global_holder_count: DashMap::new(),
             retracted_claims: DashMap::new(),
+            persist_hook: std::sync::OnceLock::new(),
             local_node_id: None,
         }
     }
@@ -97,6 +113,7 @@ impl ModelRegistry {
             node_shards: DashMap::new(),
             global_holder_count: DashMap::new(),
             retracted_claims: DashMap::new(),
+            persist_hook: std::sync::OnceLock::new(),
             local_node_id: Some(local_node_id),
         }
     }
@@ -107,6 +124,12 @@ impl ModelRegistry {
     }
 
     /// Register a model manifest.
+    /// Install the hook that persists a manifest enriched by
+    /// `merge_known_shard_hashes`. Idempotent; the first call wins.
+    pub fn set_persist_hook(&self, hook: ManifestPersistHook) {
+        let _ = self.persist_hook.set(hook);
+    }
+
     pub fn register_manifest(&self, mut manifest: ModelManifest) {
         // Universal net against copied-folder model names (`<model>.FULLBACKUP`,
         // `<model>.old`). This is the single point every adoption path funnels
@@ -173,6 +196,25 @@ impl ModelRegistry {
             Some(prev) => prev.manifest_hash != manifest.manifest_hash,
             None => true,
         };
+        // Persist an enrichment so a restart does not throw it away.
+        //
+        // `load_from_db` is what repopulates this registry at boot, BEFORE the
+        // local disk scan, and the disk copy is exactly the thing that carries
+        // placeholders. Without this, hashes learned by gossip lasted only as
+        // long as the process: on the next boot the node was back to having
+        // nothing to check a download against, and (since an uncheckable shard
+        // is now fetched from its origin) would re-download it from the origin
+        // for no reason. Persisting to the DB alone is enough — the merge above
+        // already stops the disk copy's placeholders overwriting anything.
+        //
+        // Gated on `changed` as well as `recovered` because a peer that keeps
+        // gossiping a placeholder manifest merges to the same bytes every time;
+        // without the gate this would write on every gossip round forever.
+        if recovered > 0 && changed {
+            if let Some(persist) = self.persist_hook.get() {
+                persist(&manifest);
+            }
+        }
         if changed {
             tracing::info!(
                 model = %manifest.id,
@@ -892,6 +934,50 @@ mod tests {
             settled.manifest_hash, stored_hash,
             "an unchanged re-gossip must merge to the same bytes, or the \
              changed-detection logs on every repeat"
+        );
+    }
+
+    /// A recovered hash is persisted, but only when it actually changed what we
+    /// hold — otherwise a peer that keeps gossiping a placeholder manifest would
+    /// make this write on every gossip round, for every model, forever.
+    #[test]
+    fn a_recovered_hash_is_persisted_once_not_on_every_gossip_round() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let registry = ModelRegistry::new();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let w = writes.clone();
+        registry.set_persist_hook(Box::new(move |_m| {
+            w.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let mut complete = test_manifest("m", "M");
+        complete.shards = vec![test_shard(0, [7u8; 32])];
+        registry.register_manifest(complete);
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "nothing was recovered, so nothing needs persisting"
+        );
+
+        let mut blank = test_manifest("m", "M");
+        blank.shards = vec![test_shard(0, [0u8; 32])];
+        registry.register_manifest(blank.clone());
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            1,
+            "the recovered hash must survive a restart, so it is written once"
+        );
+
+        // The same peer gossiping the same placeholder manifest again merges to
+        // identical bytes — no new knowledge, so no write.
+        registry.register_manifest(blank.clone());
+        registry.register_manifest(blank);
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            1,
+            "an unchanged re-gossip must not write; this fires every 30s per peer"
         );
     }
 

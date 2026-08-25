@@ -287,16 +287,17 @@ meaning "verified"**:
   than counted as verified, and gets verified as soon as a hash arrives by gossip.
   In practice a locally-published model's publisher holds every shard and so
   publishes real hashes, making this rare.
-- **The origin fallback requires auto-manage to be running.** It is carried out by
-  the auto-manage loop (woken via `shard_p2p_failed`), which is inert when
-  auto-manage is switched off — so the policy asks whether the fetch will actually
-  *happen*, not merely whether an origin exists, and keeps the copy in hand
-  otherwise. Never discard data you cannot replace. Performing the fallback
-  directly, independent of auto-manage, would remove that caveat.
-- **The on-disk manifest still persists placeholders.** The registry now heals
-  itself as gossip arrives, but a fresh boot reloads the blank copy, so the
-  window reopens until the next gossip round — which is exactly when a queued
-  download may land. Persisting the merged manifest is the remaining half.
+- ~~The origin fallback requires auto-manage to be running.~~ **CLOSED**:
+  `complete_pending_origin_fetches` runs on the auto-manage loop but OUTSIDE its
+  `enabled` gate — the same distinction already drawn for `try_idle_vram_unload`.
+  The switch means "do not decide what to fetch on my behalf", not "abandon a
+  shard this node already asked for". The rule it protects still stands for any
+  future fallback: never discard data you cannot actually replace.
+- ~~The on-disk manifest still persists placeholders.~~ **CLOSED**: a merge that
+  recovers hashes now persists them to the DB via `ModelRegistry`'s persist hook,
+  and `load_from_db` runs at boot BEFORE the local disk scan — whose placeholders
+  the merge already refuses. Gated on the merge having actually changed something,
+  or a peer re-gossiping placeholders would write on every gossip round forever.
 
 - **The periodic rescan self-certifies a hash-less shard from its own bytes.**
   `model/auto_manage/scan.rs` computes the BLAKE3 of a local file whose manifest

@@ -358,6 +358,11 @@ impl AutoShardManager {
                     )
                     .await;
 
+                    // Finish origin fetches for shards a peer could not prove
+                    // intact. Deliberately OUTSIDE the enabled gate below —
+                    // same distinction as `try_idle_vram_unload` above.
+                    self.complete_pending_origin_fetches().await;
+
                     // Re-check enabled -- admin API can toggle at runtime
                     if self.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         self.evaluate().await;
@@ -437,6 +442,75 @@ impl AutoShardManager {
     /// prune over-replicated ones. A single pass ensures consistent target replicas
     /// and coordinates pruning with downloads (only prune when there's resource
     /// pressure or when making room for higher-value shards).
+    /// Fetch, from the model's origin, shards a peer transfer could not prove
+    /// intact — **even when auto-manage is switched off**.
+    ///
+    /// That switch means "do not decide what to fetch on my behalf". It does
+    /// not mean "abandon a shard this node already decided it wants and has
+    /// half-acquired" — the same distinction drawn for `try_idle_vram_unload`,
+    /// which was likewise gated behind `enabled` and should not have been.
+    ///
+    /// This is what lets `classify_p2p_shard_acceptance` return
+    /// `FetchFromOrigin` unconditionally. Without something that performs the
+    /// fetch regardless of the switch, discarding an uncheckable copy would
+    /// leave nothing to replace it, which is worse than keeping it.
+    async fn complete_pending_origin_fetches(&self) {
+        let pending: Vec<crate::types::ShardId> = self
+            .shared_state
+            .models
+            .shard_p2p_failed
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let store = self.shared_state.shard_store();
+        for sid in pending {
+            // Already on disk — nothing to fetch. This is also what stops the
+            // set re-triggering forever: it is cleared only by a SUCCESSFUL
+            // P2P transfer, so a shard fetched from the origin instead stays
+            // in it, and presence on disk is the terminating condition.
+            if store.shard_path(&sid.model_id, sid.index).exists() {
+                continue;
+            }
+            // No origin to fetch from — the accept path keeps the peer's copy
+            // in that case rather than discarding it, so there is nothing
+            // pending here.
+            if !self
+                .shared_state
+                .models
+                .hf_sources
+                .contains_key(&sid.model_id)
+            {
+                continue;
+            }
+            let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id)
+            else {
+                continue;
+            };
+            let Some(info) = manifest.shards.iter().find(|s| s.index == sid.index) else {
+                continue;
+            };
+            let candidate = ShardCandidate {
+                model_id: sid.model_id.clone(),
+                model_name: manifest.name.clone(),
+                shard_index: sid.index,
+                shard_size_bytes: info.size_bytes,
+                holder_count: self.shared_state.model_registry.shard_holders(&sid).len(),
+                // Not a scored choice: this shard was already asked for, and
+                // `trigger_download` does not rank, it fetches.
+                score: 0.0,
+            };
+            tracing::info!(
+                model = %sid.model_id,
+                shard = sid.index,
+                "Fetching from the model's origin — no peer copy could be verified"
+            );
+            self.trigger_download(&candidate).await;
+        }
+    }
+
     async fn evaluate(&self) {
         // Phase C.2: refresh Parallax stability counters before scoring so
         // both download and prune paths see the same up-to-date bias view.

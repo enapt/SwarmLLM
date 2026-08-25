@@ -1082,6 +1082,30 @@ impl SharedState {
                         .and_then(|s| crate::model::auto_manage::vram::ram_budget_now(&s))
                 }));
         }
+        // Keep a shard hash learned from a peer's manifest across a restart.
+        //
+        // `register_manifest` merges hashes a manifest leaves blank, but that
+        // lives in memory; `load_from_db` is what repopulates the registry at
+        // boot. Without this, every restart went back to having nothing to
+        // check a P2P download against. `Weak`, because the registry lives
+        // inside the state.
+        {
+            let weak = Arc::downgrade(&state);
+            state
+                .model_registry
+                .set_persist_hook(Box::new(move |manifest| {
+                    if let Some(s) = weak.upgrade() {
+                        if let Err(e) = s.model_registry.persist_manifest(&s.db, manifest) {
+                            tracing::warn!(
+                                model = %manifest.id,
+                                error = %e,
+                                "Could not persist recovered shard hashes — they will \
+                                 have to be relearned by gossip after a restart"
+                            );
+                        }
+                    }
+                }));
+        }
         // Whether there is a GPU here at all decides whether a model is charged
         // against RAM (`ModelProcessPool::charges_ram`); without this a CPU-only
         // node never ran RAM admission.

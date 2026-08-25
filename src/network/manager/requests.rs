@@ -784,23 +784,17 @@ impl NetworkManager {
                             // have served perfect bytes — we cannot tell, and
                             // "cannot tell" must not be recorded as either fine
                             // or as the peer's fault.
-                            // Both halves matter: an origin we know AND a
-                            // fallback that will actually run. The HF fetch is
-                            // performed by the auto-manage loop (woken below via
-                            // `shard_p2p_failed`), which is inert while
-                            // auto-manage is switched off — discarding the
-                            // peer's copy then would replace usable bytes with
-                            // nothing at all.
+                            // Knowing the origin is enough: the fetch itself is
+                            // performed by `complete_pending_origin_fetches`,
+                            // which runs whether or not auto-manage is switched
+                            // on. That matters — discarding the peer's copy when
+                            // nothing would replace it is worse than keeping it,
+                            // so this must stay true of any future fallback.
                             let origin_fetch_available = self
                                 .shared_state
                                 .models
                                 .hf_sources
-                                .contains_key(&shard_id.model_id)
-                                && self
-                                    .shared_state
-                                    .models
-                                    .auto_manage_enabled
-                                    .load(std::sync::atomic::Ordering::Acquire);
+                                .contains_key(&shard_id.model_id);
                             let decision = crate::model::manifest::classify_p2p_shard_acceptance(
                                 manifest_has_hash,
                                 origin_fetch_available,

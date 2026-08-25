@@ -954,12 +954,19 @@ silently break at the wire if duplicated:
   unchecked rather than counted as verified. The second case is self-limiting,
   not a retreat from P2P: the origin download hashes what it writes, so the
   manifest gains the real hash and this merge then spreads it by gossip.
-  Two things it must keep. The peer is NOT penalised — it may have served perfect
-  bytes, and "cannot tell" is neither fine nor the peer's fault. And it asks
-  whether the origin fetch will actually **happen**, not merely whether an origin
-  exists: the fallback runs on the auto-manage loop, inert while auto-manage is
-  off, so a bare "we know the repo id" would discard usable bytes and replace
-  them with nothing. **Never throw away data you cannot replace.**
+  Three things it must keep. The peer is NOT penalised — it may have served
+  perfect bytes, and "cannot tell" is neither fine nor the peer's fault. The
+  fetch must actually **happen** before a copy is discarded, which is why
+  `AutoShardManager::complete_pending_origin_fetches` sits OUTSIDE the
+  `auto_manage.enabled` gate — the same distinction already drawn for
+  `try_idle_vram_unload`: that switch means "do not decide what to fetch on my
+  behalf", not "abandon a shard this node already asked for". **Never throw away
+  data you cannot replace.** And a recovered hash is PERSISTED — via
+  `ModelRegistry::set_persist_hook`, installed at startup with a `Weak`, in the
+  same shape as `set_ram_budget_provider` — because `load_from_db` is what
+  repopulates the registry at boot and the disk copy is the thing carrying
+  placeholders. Persisting is gated on the merge having changed something, or a
+  peer re-gossiping placeholders writes to the DB every 30s for every model.
   The sibling half is `daemon/background.rs`: a shard with no hash is counted as
   `unchecked`, never as `verified`. It had been counted as verified, so the sweep
   reported "all shards OK verified=21" over five shards it had never hashed. **A
