@@ -221,7 +221,46 @@ All 20 build phases complete. All subsystems wired — no stubs. **2050 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.119-alpha (2026-08-24): 25.7x, from a memory budget, on an idle card
+### Latest — v0.3.120-alpha (2026-08-25): a corrupt shard was PROVED to spread between peers
+
+Integrity round. Found on the live node by RUNNING it, and settled against an
+independent reference rather than reasoning. Detail: gotchas #381/#382,
+`docs/FUTURE_WORK.md`.
+
+- **"No hash to check against" silently meant "verified", in three places.** A
+  manifest is built from what its author holds on disk, so a partial holder
+  publishes real hashes for its own shards and all-zero placeholders for the
+  rest — and `register_manifest` was a blind `insert`, so a placeholder ERASED a
+  hash we already had. The P2P accept path verifies only when a hash exists, so
+  a lost hash meant the next copy was taken on trust, announced as held, and
+  re-served: **a propagation channel, not just a local hole**.
+- **Measured, not theorised**: shard 7 of meta-llama-3.1-8b failed verification
+  three times with the IDENTICAL wrong digest from **two distinct peers**. That
+  symmetry invites the wrong conclusion — I formed it — that our expectation was
+  the outlier. **Fetching the shard's exact GGUF byte range from the origin repo
+  and hashing it returned OUR expected hash**, so the peers were wrong and the
+  corruption had spread. **Agreement among peers is not evidence in a network
+  that copies from itself.**
+- **The verifier reported work it had not done** — `all shards OK verified=21`,
+  twice, over five shards it never hashed, because a zero-hash shard was counted
+  as `verified`. `unchecked` is now its own count and the all-clear is withheld.
+- **Fixes**: hash knowledge is MONOTONIC (`merge_known_shard_hashes`, unknown →
+  known, never back; a real re-publish still wins) and PERSISTED (a hash learned
+  by gossip used to die with the process). An uncheckable shard is now fetched
+  from the model's ORIGIN rather than trusted — **a node is never reduced to
+  trusting a peer**, which is what made the old carve-out look unavoidable. The
+  sender is NOT penalised: "cannot tell" is neither fine nor the peer's fault.
+  Self-limiting, not a retreat from P2P — the origin download supplies the hash,
+  which then spreads.
+- **Never throw away data you cannot replace.** The refetch runs OUTSIDE the
+  `auto_manage.enabled` gate (same distinction as `try_idle_vram_unload`); that
+  switch means "don't decide what to fetch for me", not "abandon a shard I asked
+  for".
+- **⚠ A shard is NOT always a contiguous GGUF range.** Shard 5 has two runs with
+  a 122 MB gap; reconstructing it as one span gave a confident FALSE mismatch on
+  a healthy file. Assert the reconstructed byte count equals `size_bytes` first.
+
+### Earlier — v0.3.119-alpha (2026-08-24): 25.7x, from a memory budget, on an idle card
 
 Small release, one large measured effect. Detail:
 `memory/round_log_0824_correctness.md`.
