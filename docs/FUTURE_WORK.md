@@ -10519,3 +10519,61 @@ peer property: `state.relay_proven_features`). Then: do not count such a peer as
 rather than the transient-failure re-dial. Report them in the peer list as a
 separate, visible category rather than hiding them — an operator should be able
 to see that six machines nearby are running something incompatible.
+
+## A model can load onto the GPU with a ZERO conversation-cache budget, and then refuse everything (measured 2026-08-26)
+
+**Observed on the live node.** At 23:22:48 the loader reported:
+
+```
+Free GPU memory covers about 0 tokens of conversation, short of this model's
+8192-token context
+```
+
+and the model was loaded anyway. Six refusals followed within eleven minutes:
+
+```
+Not enough free memory on this node to continue this conversation
+(24 MB of KV cache already in use, budget 0 MB)
+```
+
+— including a **42-token** conversation. A 4-way concurrent batch failed outright
+(`0/4`) and one streamed reply came back empty in the same window.
+
+**Mechanism.** `loader/mod.rs` derives the worker's cache budget from free VRAM
+at load: `kv_budget_bytes = Some(kv_headroom_bytes(weight_bytes, free_bytes))`.
+When free VRAM is near zero at that instant the budget is `Some(0)`, and
+`executor.rs`'s guard — `if let Some(budget) = self.kv_budget_bytes` — enforces
+it literally, so `claim_exceeds_headroom` refuses every forward that claims a
+single position. The worker is alive, advertised, accepts requests, and 503s all
+of them.
+
+**The existing guard covers the neighbouring case only.** The comment there is
+explicit: *"A missing nvidia-smi means 'unknown', never 'zero' — a budget of zero
+would refuse every request, which is far worse than the no-budget behaviour that
+preceded this."* That protects the UNREADABLE path. This is the other way in —
+nvidia-smi read fine and honestly reported almost nothing free.
+
+**Why admission did not stop it.** `estimate_worker_vram_mb` charges KV at
+`ADMISSION_KV_CONTEXT`, so the placement should have been refused. Free memory
+evidently fell between the admission decision and the load — another worker took
+it in that window. Admission is serialised by `spawn_lock`, but the *card* is
+not: a model already admitted allocates lazily on its first message, so two
+admissions can both pass and then race for the same memory.
+
+**Suggested fix.** A zero budget means this placement cannot work at all, and the
+honest response is to run the model on the processor — slowly, but serving —
+rather than to come up in a state that refuses everything. The mechanism already
+exists: `worker_ipc::permanent_gpu_failure` / the CPU pin in
+`ModelProcessPool::classify_worker_error` is how "this model cannot run on the
+GPU" is expressed elsewhere. Wiring a zero-budget load into that path is the
+shape to aim for.
+
+**Done in the meantime**: the load-time warning no longer claims *"Shorter
+conversations are unaffected"* when the affordable count is zero — at zero,
+nothing is unaffected, and that sentence sent a reader looking for a length
+problem that does not exist. It now says plainly that every request will be
+refused until memory frees up.
+
+**Not fixed here** because the real change touches GPU placement and the
+admission/load race, and wants testing on a card under contention rather than a
+compile check — this was found in the last hour before a release.

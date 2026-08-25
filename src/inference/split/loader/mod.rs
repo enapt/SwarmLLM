@@ -483,6 +483,37 @@ impl SplitModel {
                         free_vram_mb = free_mb,
                         "GPU KV-cache budget comfortably covers this model's context"
                     );
+                } else if affordable == 0 {
+                    // NOT the same case as the one below, and it must not say
+                    // "shorter conversations are unaffected" — at zero, NOTHING
+                    // is unaffected. Every request to this worker is refused
+                    // whatever its length.
+                    //
+                    // The comment above guards nvidia-smi being UNREADABLE
+                    // ("unknown, never zero"). This is the other way in: it read
+                    // fine and reported so little free memory that the budget
+                    // came out at zero, which the `Some(budget)` check then
+                    // enforces literally. Measured on this node 2026-08-25
+                    // 23:22:48 — six refusals followed, including a 42-token
+                    // conversation, plus a 4-way concurrent batch that failed
+                    // outright and a streamed reply that came back empty.
+                    //
+                    // Admission charges KV at `ADMISSION_KV_CONTEXT` and so
+                    // should have refused this placement; free memory evidently
+                    // fell between the admission decision and the load. The
+                    // model still comes up here and then serves nothing, which
+                    // is worse than running slowly on the processor — see
+                    // `docs/FUTURE_WORK.md`.
+                    tracing::warn!(
+                        context = context_length,
+                        free_vram_mb = free_mb,
+                        weight_mb = weight_bytes / (1024 * 1024),
+                        kv_bytes_per_token = per_token,
+                        "There is no free graphics memory left for this model's conversation \
+                         cache, so EVERY request to it will be refused until memory frees up — \
+                         not just long ones. Close other GPU programs, or unload another model, \
+                         and this model will use the card again",
+                    );
                 } else {
                     tracing::warn!(
                         context = context_length,
