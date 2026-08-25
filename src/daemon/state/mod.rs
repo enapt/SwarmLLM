@@ -26,6 +26,7 @@ pub(crate) mod peer_speed;
 mod perf_history;
 mod relay;
 mod removed_shards;
+mod repair;
 mod tp_allreduce;
 
 pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};
@@ -890,6 +891,7 @@ impl SharedState {
                 resource_schedule: RwLock::new(config.resources.schedule.clone()),
                 prune_history: RwLock::new(VecDeque::new()),
                 shard_p2p_failed: dashmap::DashSet::new(),
+                shards_needing_repair: dashmap::DashSet::new(),
                 shard_download_backoff: DashMap::new(),
                 parallax_stability: DashMap::new(),
                 cross_node_prefix_index: DashMap::new(),

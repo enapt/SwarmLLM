@@ -303,6 +303,17 @@ meaning "verified"**:
   the merge already refuses. Gated on the merge having actually changed something,
   or a peer re-gossiping placeholders would write on every gossip round forever.
 
+- ~~**The periodic rescan self-certifies a hash-less shard from its own bytes.**~~
+  **CLOSED**: where `can_fetch_shard_from_origin` says yes, the rescan now
+  removes the unverifiable copy and fetches from the origin instead of
+  canonicalising whatever is on disk. Self-computing survives only where there is
+  genuinely no other source of truth (a manually-placed shard of a model with no
+  origin). Corruption caught by ANY of the three detection sites now also
+  requests a replacement via `SharedState::mark_shard_for_repair` — previously
+  all three quarantined and stopped, so repair happened only as a side effect of
+  auto-manage noticing the gap, and not at all when it was switched off.
+  Original description follows.
+
 - **The periodic rescan self-certifies a hash-less shard from its own bytes.**
   `model/auto_manage/scan.rs` computes the BLAKE3 of a local file whose manifest
   entry is a placeholder and writes that in as the hash — on disk, in the DB, and

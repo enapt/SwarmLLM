@@ -361,7 +361,7 @@ impl AutoShardManager {
                     // Finish origin fetches for shards a peer could not prove
                     // intact. Deliberately OUTSIDE the enabled gate below —
                     // same distinction as `try_idle_vram_unload` above.
-                    self.complete_pending_origin_fetches().await;
+                    self.complete_pending_shard_fetches().await;
 
                     // Re-check enabled -- admin API can toggle at runtime
                     if self.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
@@ -454,14 +454,25 @@ impl AutoShardManager {
     /// `FetchFromOrigin` unconditionally. Without something that performs the
     /// fetch regardless of the switch, discarding an uncheckable copy would
     /// leave nothing to replace it, which is worse than keeping it.
-    async fn complete_pending_origin_fetches(&self) {
-        let pending: Vec<crate::types::ShardId> = self
+    async fn complete_pending_shard_fetches(&self) {
+        let mut pending: std::collections::HashSet<crate::types::ShardId> = self
             .shared_state
             .models
             .shard_p2p_failed
             .iter()
             .map(|e| e.key().clone())
             .collect();
+        // Shards found CORRUPT and awaiting a good copy. Unlike the set above
+        // these are not steered to HuggingFace — detecting the corruption means
+        // we hold the real hash, so a peer copy will be checked against it.
+        pending.extend(
+            self.shared_state
+                .models
+                .shards_needing_repair
+                .iter()
+                .map(|e| e.key().clone()),
+        );
+
         if pending.is_empty() {
             return;
         }
@@ -472,16 +483,26 @@ impl AutoShardManager {
             // P2P transfer, so a shard fetched from the origin instead stays
             // in it, and presence on disk is the terminating condition.
             if store.shard_path(&sid.model_id, sid.index).exists() {
+                // Back on disk — the repair is done.
+                self.shared_state.clear_shard_repair(&sid);
                 continue;
             }
-            // No origin to fetch from — the accept path keeps the peer's copy
-            // in that case rather than discarding it, so there is nothing
-            // pending here.
-            if !self
+            // An origin is required only for the "could not be verified" case:
+            // the accept path keeps the peer's copy when there is none, so
+            // nothing is pending. A REPAIR has no such requirement — it may
+            // legitimately be fetched from a peer and checked against the hash
+            // whose mismatch is what detected the corruption.
+            let needs_repair = self
                 .shared_state
                 .models
-                .hf_sources
-                .contains_key(&sid.model_id)
+                .shards_needing_repair
+                .contains(&sid);
+            if !needs_repair
+                && !self
+                    .shared_state
+                    .models
+                    .hf_sources
+                    .contains_key(&sid.model_id)
             {
                 continue;
             }

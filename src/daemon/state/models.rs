@@ -36,6 +36,23 @@ pub struct ModelMgmt {
     /// Signals auto_manage to force the HF path even when peer holders are registered.
     /// Cleared when a download for the shard successfully completes.
     pub shard_p2p_failed: dashmap::DashSet<crate::types::ShardId>,
+    /// Shards whose bytes were found WRONG and which need a fresh, verified copy.
+    ///
+    /// Written only by `SharedState::mark_shard_for_repair`, from the three
+    /// places that can catch a bad shard: the P2P accept path, the background
+    /// verification sweep, and the auto-manage rescan. Drained by
+    /// `AutoShardManager::complete_pending_shard_fetches`, which runs OUTSIDE
+    /// the `auto_manage.enabled` gate — a shard this node already held and has
+    /// just lost to corruption is not a new acquisition decision, so repairing
+    /// it is not "managing your disk on your behalf".
+    ///
+    /// Deliberately NOT `shard_p2p_failed`: that flag forces the HuggingFace
+    /// path, and a repair should be free to fetch from a peer. Detecting the
+    /// corruption at all means we HAVE the real hash, so a peer copy will be
+    /// verified against it — and if that copy is bad too, the accept path
+    /// quarantines it and docks the sender, which is the behaviour we want.
+    /// An entry is dropped once the shard is back on disk.
+    pub shards_needing_repair: dashmap::DashSet<crate::types::ShardId>,
     /// Per-shard download backoff. A shard whose download fails (hard HF error,
     /// GGUF-probe failure, P2P give-up with no HF fallback, or stall-
     /// reconciliation in `health/monitor.rs`) records an exponentially-growing
@@ -490,6 +507,7 @@ mod tests {
             locked_shards: DashMap::new(),
             removed_by_user: DashMap::new(),
             shard_p2p_failed: dashmap::DashSet::new(),
+            shards_needing_repair: dashmap::DashSet::new(),
             shard_download_backoff: DashMap::new(),
             model_request_counts: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),

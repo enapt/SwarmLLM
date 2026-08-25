@@ -54,6 +54,20 @@ which is why the check matters rather than a spot inspection.
   management switched off.** That setting means "do not decide what to fetch on
   my behalf" — it should not mean abandoning a part your machine already asked
   for and is halfway through getting.
+- **A damaged part is now replaced, not just set aside.** Three separate checks
+  could catch a bad part, and all three removed it and stopped there — getting a
+  good one back happened only as a side effect of automatic model management
+  noticing something was missing. A machine not using that feature kept a
+  permanently incomplete model, and re-checked the same bad file every cycle to
+  reach the same conclusion. Replacement is now requested directly, and may come
+  from another machine or from the original source.
+- **A part with no known fingerprint is no longer given one from its own bytes.**
+  Computing a part's fingerprint from the copy on disk does not check anything —
+  it makes whatever is on disk the official answer, which is then shared with
+  everyone else as the thing to check against. Where the model's original source
+  is reachable, the part is fetched from there instead. Where it is not (a model
+  placed on the machine by hand), computing it locally remains the only option
+  and is still done.
 
 ### If you are affected
 

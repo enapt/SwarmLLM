@@ -175,6 +175,39 @@ pub async fn rescan_local_shards(
             // announces holder presence to the network using only a size
             // check — peers would download corrupted content from us.
             if shard_info.hash == [0u8; 32] {
+                // Nothing to check these bytes against. Computing their own
+                // hash and calling that the answer does not verify anything —
+                // it CANONICALISES whatever is on disk, writes it to the
+                // manifest, persists it, and gossips it, so a bad shard becomes
+                // the reference every other node then checks against.
+                //
+                // So when the model's origin is reachable, take the bytes from
+                // there instead: that supplies a copy worth trusting AND the
+                // real hash. Gated on the fetch actually being possible —
+                // never throw away data you cannot replace — which leaves
+                // self-computing as the last resort it should always have been
+                // (a manually-placed shard of a model with no origin, where
+                // there is genuinely no other source of truth).
+                if shared.can_fetch_shard_from_origin(&model_id) {
+                    tracing::warn!(
+                        model = %model_id_str,
+                        shard = shard_info.index,
+                        "Rescan: no hash to check this shard against — fetching a \
+                         fresh copy from the model's origin rather than trusting it"
+                    );
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!(
+                            model = %model_id_str,
+                            shard = shard_info.index,
+                            error = %e,
+                            "Rescan: could not remove the unverifiable shard — \
+                             leaving it rather than half-repairing"
+                        );
+                        continue;
+                    }
+                    shared.mark_shard_for_repair(&shard_id);
+                    continue;
+                }
                 let hash_path = path.clone();
                 let hash_result: Option<[u8; 32]> = tokio::task::spawn_blocking(move || {
                     crate::model::shard::hash_file_blake3(&hash_path).ok()
@@ -235,8 +268,14 @@ pub async fn rescan_local_shards(
                     model = %model_id_str,
                     shard = shard_info.index,
                     error = %e,
-                    "Rescan: shard verification failed, skipping"
+                    "Rescan: shard verification failed — quarantined, fetching a fresh copy"
                 );
+                // `verify_shard` has already quarantined the bad file. Asking
+                // for a replacement is the half that used to be missing: this
+                // arm simply skipped, so the same bad bytes were re-hashed on
+                // every rescan, to the same conclusion, forever, and the model
+                // stayed a shard short.
+                shared.mark_shard_for_repair(&shard_id);
                 shared.emit_activity(
                     crate::daemon::state::ActivityEvent::new(
                         "auto_manage",

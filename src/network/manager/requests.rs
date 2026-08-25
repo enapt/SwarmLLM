@@ -678,6 +678,9 @@ impl NetworkManager {
                         self.shared_state
                             .models
                             .clear_shard_download_backoff(&shard_id);
+                        // A verified copy has landed, so any repair request for
+                        // this shard is satisfied.
+                        self.shared_state.clear_shard_repair(&shard_id);
 
                         // Finalize: rename .tmp → .bin atomically
                         if let Err(e) = self
@@ -798,14 +801,7 @@ impl NetworkManager {
                             // whole point is not to reach the internet.
                             let origin_fetch_available = self
                                 .shared_state
-                                .models
-                                .hf_sources
-                                .contains_key(&shard_id.model_id)
-                                && !self
-                                    .shared_state
-                                    .credits
-                                    .offline_mode
-                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                .can_fetch_shard_from_origin(&shard_id.model_id);
                             let decision = crate::model::manifest::classify_p2p_shard_acceptance(
                                 manifest_has_hash,
                                 origin_fetch_available,
@@ -926,6 +922,10 @@ impl NetworkManager {
                                     .models
                                     .shard_p2p_failed
                                     .insert(shard_id.clone());
+                                // Ask for a good copy, not just discard the bad
+                                // one. Shares the one repair path with the
+                                // background sweep and the rescan.
+                                self.shared_state.mark_shard_for_repair(&shard_id);
                                 if !incomplete {
                                     if let Some(node) =
                                         self.peer_to_node.get(&peer).map(|n| n.clone())

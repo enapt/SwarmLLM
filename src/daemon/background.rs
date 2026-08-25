@@ -235,6 +235,10 @@ pub(super) fn spawn_shard_verification(
                         shared_state
                             .model_registry
                             .remove_shard_holder(&sid, shared_state.identity.node_id());
+                        // Removing the bad bytes is only half of it — ask for a
+                        // good copy, or the model stays permanently short of a
+                        // shard on any node that is not auto-managing.
+                        shared_state.mark_shard_for_repair(&sid);
                         shared_state.emit_activity(
                             crate::daemon::state::ActivityEvent::new(
                                 "model",
