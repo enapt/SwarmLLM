@@ -221,7 +221,27 @@ All 20 build phases complete. All subsystems wired — no stubs. **2056 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.120/.121-alpha (2026-08-25): a corrupt shard was PROVED to spread between peers
+### Latest — v0.3.120/.121/.122-alpha (2026-08-25): a corrupt shard PROVED to spread; then the fix turned on the good copy
+
+**Read #384 before touching shard hashes.** .121 added a re-check of a HELD shard
+when its expected hash changes — and within the hour, on the live node, it
+quarantined our GOOD shard 7 and began an unbounded ~500 MB refetch loop.
+The log gave the direction: `expected ab5bc674… (a peer's self-certified hash for
+its CORRUPT copy) got 597dcfe8… (our bytes, verified against HuggingFace)`. A peer
+gossiped the hash it had computed from its own bad bytes; `register_manifest` is
+last-writer-wins and a real hash replaces a real hash (deliberately, for
+re-publishes), so the wrong one displaced the right one and the new re-check
+faithfully destroyed the good copy.
+**The bug was not the re-check — it was that a hash carried no PROVENANCE**, so
+"verified against the origin" and "asserted by a stranger" were the same kind of
+fact. #382 had already established that only the origin settles a hash; the lesson
+was written down and not encoded. .122 adds `ModelRegistry::origin_verified`:
+origin-derived hashes outrank gossip, are applied BEFORE change-detection (so a
+disproved claim provokes no re-check), and are persisted. Deliberately local and
+never gossiped — provenance that travels the network is just another assertion.
+**A repair mechanism is a destruction mechanism pointed at whatever it believes is
+wrong; ask what happens when the REFERENCE is wrong.** And: ship it, then go and
+look.
 
 **.121 completes .120.** .120 stopped a corrupt shard being accepted and passed
 on, and made one that IS found bad get replaced rather than merely quarantined.

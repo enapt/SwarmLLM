@@ -4,7 +4,9 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-### Fixed
+## [0.3.122-alpha] — 2026-08-25
+
+**Fixes a fault introduced in 0.3.121.** If you are on 0.3.121, update.
 
 - **A fingerprint your machine took from a model's original source is no longer
   overridden by what another machine claims.** Machines share what they believe
@@ -15,6 +17,12 @@ All notable changes to SwarmLLM are documented here.
   replacement it judged against the same wrong answer. It could never settle.
   Fingerprints taken from the original source now take precedence, are applied
   before anything reacts to a change, and survive a restart.
+
+  **Who was affected**: only machines running 0.3.121, and only where another
+  machine on the network was sharing a wrong fingerprint for a part they held. On
+  an affected machine the symptom was a good part being repeatedly set aside and
+  re-fetched — roughly every five minutes, without ever settling. No data is lost:
+  a part set aside is kept, not deleted.
 
 
 ## [0.3.121-alpha] — 2026-08-25
