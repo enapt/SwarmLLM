@@ -203,6 +203,51 @@ deserialize on the other side. The rule that fixes this:
 - New `NodeCapability` fields MUST be `#[serde(default)]` so older nodes'
   announcements still deserialize.
 
+## A ticker merged into a response stream is a termination condition
+
+`api::sse::progress_ticker` is the ONE keep-alive/progress ticker for both SSE
+encoders. Its wait is cancellable — `tokio::select!` on the interval versus a
+`tokio::sync::watch` finish signal, which is why the signal is a `watch` and not
+an `AtomicBool`: the ticker has to *wait* on it, not merely read it.
+
+**Why it is shared.** OpenAI and Anthropic each had a byte-identical copy, and
+both carried the same defect: sleep the whole interval, THEN check whether the
+response had finished. `Stream::merge` ends only when both halves end, so every
+streamed reply stayed open for the remainder of that sleep — measured, an
+8-token reply delivered in 0.5 s held its connection to 15.0 s, while the same
+request answered non-streaming in 0.56 s (gotcha #390). Clients that stop at
+`[DONE]` never noticed; anything reading to end-of-stream waited, and the server
+held a task and a connection per stream either way.
+
+The comment above the old copy said *"the ticker MUST terminate"* and was right
+about the hazard it had in mind — an unbounded ticker holds the response open
+for ever. **Terminating late is the same bug with a bound on it.**
+
+Three things a change here must keep:
+
+- **A dropped sender ends the ticker.** The token stream is gone; there is
+  nothing left to keep alive. Without this, `changed()` returning `Err` in a
+  loop that ignored it would spin.
+- **An unfinished response still gets keep-alives**, or a slow request looks dead
+  to the client and to any intermediary. That is the hazard the original comment
+  was written about and it is still covered by a test.
+- **The interval is a `Duration`, not a count of seconds.** That is what lets a
+  test drive it at millisecond scale and assert exactly, with no `tokio`
+  `test-util` dev-dependency: an hour-long interval means a ticker that waits it
+  out cannot possibly answer inside the timeout.
+
+**A note on the observed period.** Keep-alive comments arrive at alternating
+gaps of 12.52 s and 15.00 s, not a flat 15 s, and end-of-stream used to land on
+whichever boundary came next — which is why the pre-fix measurements clustered at
+those same two values and why they looked inexplicable until the ticker itself
+was timed. The likely cause is two sources beating against each other: the merged
+ticker on its own interval, and axum's `KeepAlive`, which resets on every write.
+That explanation is *unverified* — it fits the numbers and nothing depends on it,
+since the hold it produced is gone.
+
+Ask of any periodic task merged into a response stream: when the thing it is
+keeping alive finishes, how long until this notices?
+
 ## Event System
 
 All events flow through `state.events.activity_tx` (ActivityEvent). Use the builder:

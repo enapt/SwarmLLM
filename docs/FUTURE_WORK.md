@@ -10347,3 +10347,69 @@ Speculative verification already batches γ+1 tokens into one round trip
 (`speculative_gamma = 4`, so five). That divides the per-token network cost by
 five on any topology, and `speculative_distributed` is off by default. It is the
 one lever that reduces round trips without changing the wire topology at all.
+
+## Speculative distributed decode has no failover (found 2026-08-25, NOT fixed)
+
+**What happens.** A distributed request that takes the n-gram-only speculative
+path dies outright when its peer goes quiet mid-decode, even where a standby
+exists and the ordinary path would have failed over.
+
+`inference/pipeline/ngram_only_spec.rs` prefills through
+`forward_through_segments`, which does per-segment failover. Every decode step
+after that is a bare
+
+```rust
+let spec_logits = super::forward_verify_through_segments(
+    &self.shared_state, &self.network_tx, request_id, current_pos as u32,
+    &self.assignment.segments, &verify_tokens, truncate_for_this_round,
+).await?;                                   // <-- no failover, no retry
+```
+
+The `?` propagates, `try_ngram_only_distributed` returns `Err`, and the request
+fails. `distributed.rs`'s `Err(e)` arm — the one that logs *"Remote segment timed
+out, attempting failover"* and calls `failover_segment` — is never reached,
+because this path does not go through that loop for decode.
+
+**Observed** 2026-08-25, request `8ecd1e36`, `gemma-2-2b-it`: prefill answered in
+5983 ms, the next decode step timed out after 52 s, and the request returned a
+503 (a 500 before `segment_timeout_error` was fixed the same day). That
+particular request had `standbys=0`, so failover could not have saved it — the
+gap is real regardless, it just was not what killed that one.
+
+**Why it was not fixed the same night.** Verifying it needs two holders of one
+model and a way to make one of them go silent on cue, which the development
+swarm could not do at the time. The alternative — writing new failover logic
+into the distributed decode hot path and shipping it unverified — is exactly the
+mistake `.claude/rules/diagnosis.md` exists to prevent. The machinery is already
+there and aware of this: the comment at `ngram_only_spec.rs:285` explains that
+per-segment peer ids are deliberately NOT cached upfront *because* "failover
+rewrites `assignment.segments[i].node_id` mid-request".
+
+**Two candidate shapes, and the trap in both.**
+
+1. *Fail over the segment*, reusing `failover_segment`. Direct, but it needs the
+   verify path to be re-entrant against a different holder.
+2. *Give up on speculation for the rest of the request* and continue on the
+   ordinary decode path — the same shape as the chained-run rewind in
+   `distributed.rs` (`chaining_disabled = true; continue`, "re-running this
+   segment unchained for the rest of the request").
+
+**Either way the hard part is the KV state, not the routing.** When a forward
+fails, whether the peer applied those positions is unknown. The chained rewind
+handles precisely this with `truncate_kv_to`; get it wrong and the request
+produces a *wrong answer* rather than an error, which is worse than the failure
+being fixed. Any implementation must carry a `truncate_kv_to` for the positions
+in doubt, and should be tested against a peer that fails *after* applying them as
+well as one that fails before.
+
+**Related, deliberately also unfixed:** `is_transient_remote_failure` in
+`inference/router/mod.rs` matches on message PROSE (`"never acknowledged"`,
+`"silent drop"`, `"remote-generate timed out"`) rather than on the error type, so
+a `PeerUnresponsive` whose wording differs gets no router-level retry either.
+Matching the type is the obvious fix and was not taken, because the retry
+re-assembles a fresh pipeline that can pick the same holder — with a single
+holder it simply waits the same deadline twice. It wants
+`blacklist_holder_for_request` applied on a segment timeout first; that helper
+exists and is currently applied only for missing-shard errors
+(`distributed.rs:1254`, `remote_generate.rs:494,507`). Do those two together or
+neither.

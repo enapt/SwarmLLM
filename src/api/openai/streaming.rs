@@ -1279,8 +1279,9 @@ fn stream_events_to_sse(
     // Set when the terminal frame is emitted, so the progress ticker below
     // knows to stop. `merge` ends only when BOTH sides end, so without this the
     // response would stay open forever after `[DONE]`.
-    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let finished_for_map = finished.clone();
+    // `watch` rather than an `AtomicBool`: the ticker has to WAIT on this, not
+    // merely read it — see `api::sse::progress_ticker`.
+    let (finished_tx, finished_rx) = tokio::sync::watch::channel(false);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {
         StreamEvent::Delta {
             content,
@@ -1384,7 +1385,7 @@ fn stream_events_to_sse(
             Ok(Event::default().data(json))
         }
         StreamEvent::Done => {
-            finished_for_map.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = finished_tx.send(true);
             Ok(Event::default().data("[DONE]"))
         }
     });
@@ -1394,26 +1395,17 @@ fn stream_events_to_sse(
     // while the receiver is blocked — which is precisely the situation being
     // reported on.
     //
-    // **The ticker MUST terminate.** `merge` ends only when both sides end, so
-    // an unbounded ticker would hold the SSE response open forever after
-    // `[DONE]`. It keys off a flag set by the mapper above rather than off the
-    // trace's lifetime: not every streaming path registers a trace, and a
-    // termination condition that depends on one would hang exactly the paths
-    // that have none.
-    let ticker = futures::stream::unfold((progress, finished), |(p, finished)| async move {
-        tokio::time::sleep(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)).await;
-        if finished.load(std::sync::atomic::Ordering::Relaxed) {
-            return None;
-        }
-        let text = p
-            .as_ref()
-            .and_then(|(state, rid)| state.active_traces.get(rid).and_then(|t| t.progress()))
-            .map(|s| crate::api::sse::format_progress_comment(&s))
-            // No snapshot yet, or already streaming: an empty comment is a
-            // valid keep-alive, which is what this subsumes.
-            .unwrap_or_default();
-        Some((Ok(Event::default().comment(text)), (p, finished)))
-    });
+    // **The ticker MUST terminate, and terminate PROMPTLY.** `merge` ends only
+    // when both sides end, so an unbounded ticker holds the SSE response open
+    // for ever — and one that only checks after a full interval holds it open
+    // for the rest of that interval, every time. Both live in
+    // `api::sse::progress_ticker`, shared with the Anthropic encoder, which had
+    // a byte-identical copy of this and the same defect.
+    let ticker = crate::api::sse::progress_ticker(
+        progress,
+        finished_rx,
+        std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS),
+    );
 
     Sse::new(StreamExt::merge(stream, ticker)).keep_alive(
         KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
