@@ -525,12 +525,28 @@ pub(super) async fn send_error_result(
 ///
 /// 512 matches the provider-body cap in `error::classify_error` — one number
 /// for "as much of a message as a caller may see".
+/// What a peer is told when it asked us for layers whose shards we do not have.
+///
+/// **Shared with `pipeline::remote_error_means_missing_shard`, which must
+/// recognise it.** The sanitiser below deliberately replaces every
+/// shard-related error with this one string before it crosses the wire, so the
+/// coordinator never sees the wordings the detector was originally written
+/// against ("is in a missing region", "Shard not found"). Two functions in two
+/// files had to agree on a phrase and one of them was rewriting it — so a peer
+/// that told us plainly it did not have the shards kept its stale claim, was
+/// re-selected, and refused again.
+///
+/// Measured on the live swarm 2026-08-26: one peer was segment 1 of ELEVEN
+/// consecutive failed pipelines in half an hour, refusing each in ~7 ms, with
+/// its trust score still at the untouched default.
+pub(crate) const PEER_FACING_MISSING_SHARDS: &str = "Required shards not available";
+
 pub(crate) fn sanitize_peer_facing_error(error: &str) -> String {
     if error.contains("layer range") || error.contains("layer_start") {
         return "Layer configuration error".to_string();
     }
     if error.contains("No local shards") || error.contains("shard") {
-        return "Required shards not available".to_string();
+        return PEER_FACING_MISSING_SHARDS.to_string();
     }
     error
         .chars()

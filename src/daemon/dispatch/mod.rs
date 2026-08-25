@@ -2343,7 +2343,7 @@ pub(crate) async fn dispatch_network_messages(
     }
 }
 
-mod layer_forward;
+pub(crate) mod layer_forward;
 mod remote_generate;
 mod vision;
 

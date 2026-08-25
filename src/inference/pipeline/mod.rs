@@ -158,6 +158,12 @@ pub(crate) fn remote_error_means_missing_shard(msg: &str) -> bool {
     msg.contains("is in a missing region")
         || msg.contains("missing shard region")
         || msg.contains("Shard not found")
+        // What a peer ACTUALLY sends. `sanitize_peer_facing_error` replaces
+        // every shard-related error with this before it leaves the serving
+        // node, so the wordings above — which are what the local code produces
+        // — never reach a coordinator over the network. Without this arm the
+        // detector was blind to the only form it ever sees.
+        || msg.contains(crate::daemon::dispatch::layer_forward::PEER_FACING_MISSING_SHARDS)
 }
 
 /// Pack a slice of u32 token IDs as i64 little-endian bytes — the
@@ -1448,5 +1454,74 @@ mod chain_planning_tests {
             .collect();
         assert_eq!(plan_chain(&segs, 0, &LOCAL, all_can_chain, 2).len(), 2);
         assert!(plan_chain(&segs, 0, &LOCAL, all_can_chain, 0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod missing_shard_over_the_wire_tests {
+    use super::remote_error_means_missing_shard;
+    use crate::daemon::dispatch::layer_forward::sanitize_peer_facing_error;
+
+    /// **The test that would have caught this.** The detector and the
+    /// sanitiser live in different files and had to agree on a phrase; one of
+    /// them was rewriting it. Testing either alone passes happily — the bug is
+    /// only visible when a real error is put through the transformation it
+    /// actually undergoes before a coordinator sees it.
+    ///
+    /// Live consequence, 2026-08-26: one peer was segment 1 of eleven
+    /// consecutive failed pipelines in half an hour, refusing each in ~7 ms
+    /// with "Required shards not available", and its stale claim was never
+    /// retracted because the detector did not recognise the sanitised form.
+    #[test]
+    fn a_missing_shard_error_is_still_recognised_after_sanitising() {
+        // REAL wordings only. Every one is produced somewhere in the tree:
+        // `ShardReader` emits the two "missing region" forms
+        // (`inference/split/shard_reader.rs`), and `layer_forward` emits
+        // "No local shards for model". An invented fixture proves nothing —
+        // an earlier draft of this test used "No local shards for this layer
+        // range", which exists nowhere, and its failure looked like a second
+        // bug until the string was grepped for.
+        for raw in [
+            "ShardReader: position is in a missing shard region",
+            "Internal error: blk.0.attn_q: ShardReader: position 345977248 is in a missing region",
+            "No local shards for model",
+        ] {
+            let over_the_wire = sanitize_peer_facing_error(raw);
+            assert!(
+                remote_error_means_missing_shard(&over_the_wire),
+                "detector must recognise what the peer actually sends. \
+                 raw {raw:?} was sanitised to {over_the_wire:?}"
+            );
+        }
+        // The same wordings unsanitised, which is what a LOCAL segment failure
+        // produces — that path never goes through the sanitiser.
+        for raw in [
+            "ShardReader: position is in a missing shard region",
+            "Internal error: blk.0.attn_q: ShardReader: position 345977248 is in a missing region",
+        ] {
+            assert!(
+                remote_error_means_missing_shard(raw),
+                "detector must recognise the local form: {raw:?}"
+            );
+        }
+    }
+
+    /// The converse still holds: an unrelated failure must not cost a healthy
+    /// peer its claim. Retracting on the wrong error moves work off a good
+    /// node, which is the failure this whole mechanism has to avoid.
+    #[test]
+    fn an_unrelated_failure_never_retracts_a_claim() {
+        for raw in [
+            "CUDA out of memory",
+            "peer never acknowledged the request",
+            "Timed out waiting for segment result (52s, 26 layers)",
+            "",
+        ] {
+            assert!(!remote_error_means_missing_shard(raw), "raw: {raw:?}");
+            assert!(
+                !remote_error_means_missing_shard(&sanitize_peer_facing_error(raw)),
+                "sanitised: {raw:?}"
+            );
+        }
     }
 }
