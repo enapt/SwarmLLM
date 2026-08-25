@@ -572,6 +572,11 @@ pub async fn set_model_encrypted_pipeline(
     validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());
 
+    // Set when privacy is switched on for a model whose ends this node does not
+    // hold: the preference is recorded, but requests will fail closed until the
+    // shards are here. See the branch that sets it.
+    let mut not_ready_note: Option<String> = None;
+
     // Validate: check if the local node has the required shards
     if body.enabled {
         let manifest = state.shared_state.model_registry.get_manifest(&mid);
@@ -603,11 +608,27 @@ pub async fn set_model_encrypted_pipeline(
                 if !has_last {
                     missing.push(format!("last shard (shard {last_idx}, output head)"));
                 }
-                return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                    "Cannot enable encrypted pipeline: this node is missing {}. \
-                     Download the missing shard(s) first.",
+                // Record the preference anyway, and say it is not yet
+                // deliverable.
+                //
+                // Refusing here made prompt privacy a ONE-WAY setting: turning
+                // it off succeeds and removes the override, and turning it back
+                // on is then rejected until the shards are fetched — so a state
+                // the system itself stores could not be restored through the API
+                // that stores it. Found by disabling it to test something and
+                // being unable to put it back.
+                //
+                // **Turning privacy ON should never be the blocked direction.**
+                // The consequence of enabling it early is that requests for this
+                // model are refused with `PromptPrivacyUnavailable`, whose hint
+                // already names the fix — that is failing CLOSED, which is what
+                // a privacy switch should do when it cannot be honoured.
+                not_ready_note = Some(format!(
+                    "Recorded, but not in effect yet: this node is missing {}. \
+                     Requests for this model will be refused rather than sent out \
+                     unprotected. Fetch the missing shard(s) to make it usable.",
                     missing.join(" and ")
-                ))));
+                ));
             }
 
             if m.shard_count <= 2 {
@@ -648,12 +669,15 @@ pub async fn set_model_encrypted_pipeline(
         "status": "ok",
         "model_id": model_id,
         "encrypted_pipeline": body.enabled,
-        "note": if body.enabled {
-            "Encrypted pipeline active. Both embedding (first shard) and sampling (last shard) \
-             run locally. Remote nodes only see intermediate activations. \
-             Adds ~1 extra RTT per token for the return hop."
-        } else {
-            "Encrypted pipeline disabled. Normal pipeline scheduling applies."
+        "ready": not_ready_note.is_none(),
+        "note": match (&not_ready_note, body.enabled) {
+            (Some(warning), _) => warning.as_str(),
+            (None, true) => {
+                "Encrypted pipeline active. Both embedding (first shard) and sampling (last shard) \
+                 run locally. Remote nodes only see intermediate activations. \
+                 Adds ~1 extra RTT per token for the return hop."
+            }
+            (None, false) => "Encrypted pipeline disabled. Normal pipeline scheduling applies.",
         },
     })))
 }

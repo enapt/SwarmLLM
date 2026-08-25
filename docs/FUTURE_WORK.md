@@ -296,7 +296,7 @@ longer listed as a holder of that shard — but **no retraction from it appears 
 this node's log**, so that is NOT evidence that the .123 repair path ran on it.
 Left as an observation, not a conclusion.
 
-### Prompt privacy can be turned off for a model but not back on (2026-08-25)
+### Prompt privacy can be turned off for a model but not back on — FIXED (2026-08-25)
 
 `PUT /api/admin/models/{id}/encrypted-pipeline {"enabled": false}` succeeds and
 REMOVES the per-model override. Setting it back to `true` is refused:
@@ -313,10 +313,13 @@ has_first_shard: false, ready: false` beforehand. So a stored setting cannot be
 restored through the API that stores it, and the only route back is to download
 shards.
 
-Worth deciding which side is wrong: either the enable path should accept a
-not-yet-deliverable "fail closed" preference (it already reports `ready: false`
-separately), or whatever created that state should not have been able to either.
-Found by changing it during testing and being unable to put it back.
+**FIXED**: the enable path now records the preference and reports
+`ready: false` with a note naming the missing shards, instead of refusing.
+Turning privacy ON should never be the blocked direction — the consequence of
+enabling it early is that requests are refused with `PromptPrivacyUnavailable`
+(whose hint already names the fix), which is failing CLOSED, exactly what a
+privacy switch should do when it cannot be honoured. Found by changing it during
+testing and being unable to put it back.
 
 ### A P2P shard accepted with nothing to verify it against — CLOSED (2026-08-24)
 
