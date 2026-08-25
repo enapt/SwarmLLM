@@ -36,6 +36,25 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
   `try_idle_vram_unload` does: a shard this node already held is not a new acquisition
   decision. And it refuses a shard in `removed_by_user` — a deletion is an instruction,
   not a gap.
+- `state.models.shards_pending_verification` — 2026-08-25. `DashSet<ShardId>` of shards
+  THIS NODE HOLDS whose expected hash just changed. Written by the registry's
+  manifest-update hook (`set_persist_hook`, which now carries
+  `(manifest, persist, recheck_shards)`); drained by
+  `AutoShardManager::verify_pending_shards`, which re-hashes and, on mismatch,
+  drops the holder claim and calls `mark_shard_for_repair`.
+  **This is how a node learns from the SWARM that what it is serving is wrong.**
+  The only other re-check of an already-held shard is the one-shot startup sweep,
+  which runs ~2 s after boot against whatever the DB held — i.e. BEFORE a corrected
+  hash can arrive by gossip — and the rescan explicitly skips shards already
+  registered. So a node holding a corrupt shard could not discover the fact from its
+  peers at all; it took a further restart, after the persist hook had written the
+  corrected hash to the DB. Measured on the live swarm (gotcha #382).
+  Three things to keep: only shards we ACTUALLY HOLD are queued (re-hashing one we do
+  not have is hundreds of MB of I/O for no answer — pinned by
+  `a_held_shard_is_rechecked_when_its_expected_hash_changes`); a shard with a download
+  in flight is skipped, since re-hashing a partly-written file is a false alarm; and
+  the drain runs OUTSIDE the `auto_manage.enabled` gate, because serving neighbours
+  bad bytes is not a disk-management preference.
 - **`SharedState::can_fetch_shard_from_origin`** — 2026-08-25 — the single answer to
   "will an origin fetch actually HAPPEN?", which is NOT "does an origin exist". Every
   caller about to discard local bytes in favour of an origin copy asks this first:

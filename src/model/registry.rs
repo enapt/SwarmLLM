@@ -32,8 +32,13 @@ const MAX_RETRACTED_CLAIMS: usize = 10_000;
 /// Shard holder tracking is bounded: at most `MAX_HOLDERS_PER_SHARD` holders
 /// are cached per shard. The local node is never evicted. For accurate holder
 /// counts at scale, use DHT provider queries via `QueryShardProviders`.
-/// Persists a manifest whose shard hashes the registry has just enriched.
-type ManifestPersistHook = Box<dyn Fn(&ModelManifest) + Send + Sync>;
+/// Reacts to a manifest update: `(manifest, persist, recheck_shards)`.
+///
+/// `persist` — this registry enriched the manifest's shard hashes, so the result
+/// must outlive the process. `recheck_shards` — shard indices THIS NODE HOLDS
+/// whose expected hash just changed, and whose bytes must therefore be checked
+/// against the new reference.
+type ManifestUpdateHook = Box<dyn Fn(&ModelManifest, bool, &[u32]) + Send + Sync>;
 
 pub struct ModelRegistry {
     /// Known model manifests, keyed by model ID.
@@ -85,7 +90,7 @@ pub struct ModelRegistry {
     /// steady state is never: a peer re-gossiping the same placeholder manifest
     /// merges to bytes identical to the stored ones, so this would otherwise
     /// write on every gossip round, for every model, forever.
-    persist_hook: std::sync::OnceLock<ManifestPersistHook>,
+    persist_hook: std::sync::OnceLock<ManifestUpdateHook>,
     /// Local node ID — never evicted from holder sets.
     local_node_id: Option<NodeId>,
 }
@@ -126,7 +131,7 @@ impl ModelRegistry {
     /// Register a model manifest.
     /// Install the hook that persists a manifest enriched by
     /// `merge_known_shard_hashes`. Idempotent; the first call wins.
-    pub fn set_persist_hook(&self, hook: ManifestPersistHook) {
+    pub fn set_persist_hook(&self, hook: ManifestUpdateHook) {
         let _ = self.persist_hook.set(hook);
     }
 
@@ -210,9 +215,46 @@ impl ModelRegistry {
         // Gated on `changed` as well as `recovered` because a peer that keeps
         // gossiping a placeholder manifest merges to the same bytes every time;
         // without the gate this would write on every gossip round forever.
-        if recovered > 0 && changed {
-            if let Some(persist) = self.persist_hook.get() {
-                persist(&manifest);
+        // Shards WE HOLD whose expected hash just changed. Those bytes were
+        // checked against a reference that no longer applies — or, for a hash we
+        // never had, were never checked at all — so they must be re-checked.
+        //
+        // Without this, a node holding a corrupt shard could not discover the
+        // fact from gossip: the only re-check of an already-held shard is the
+        // startup sweep, which runs seconds after boot against whatever the DB
+        // held, i.e. BEFORE the corrected hash arrives. It would take a further
+        // restart to notice. Measured on the live swarm — a shard corrupt on at
+        // least two peers, whose correct hash those peers could have been told
+        // (gotcha #382).
+        let recheck: Vec<u32> = match self.manifests.get(&manifest.id) {
+            Some(prev) => manifest
+                .shards
+                .iter()
+                .filter(|s| s.hash != [0u8; 32])
+                .filter(|s| {
+                    prev.shards
+                        .iter()
+                        .find(|p| p.index == s.index)
+                        .is_none_or(|p| p.hash != s.hash)
+                })
+                .filter(|s| {
+                    self.local_node_id.as_ref().is_some_and(|me| {
+                        self.shard_holders
+                            .get(&ShardId {
+                                model_id: manifest.id.clone(),
+                                index: s.index,
+                            })
+                            .is_some_and(|h| h.contains_key(me))
+                    })
+                })
+                .map(|s| s.index)
+                .collect(),
+            None => Vec::new(),
+        };
+        let persist = recovered > 0 && changed;
+        if persist || !recheck.is_empty() {
+            if let Some(hook) = self.persist_hook.get() {
+                hook(&manifest, persist, &recheck);
             }
         }
         if changed {
@@ -948,8 +990,10 @@ mod tests {
         let registry = ModelRegistry::new();
         let writes = Arc::new(AtomicUsize::new(0));
         let w = writes.clone();
-        registry.set_persist_hook(Box::new(move |_m| {
-            w.fetch_add(1, Ordering::SeqCst);
+        registry.set_persist_hook(Box::new(move |_m, persist, _recheck| {
+            if persist {
+                w.fetch_add(1, Ordering::SeqCst);
+            }
         }));
 
         let mut complete = test_manifest("m", "M");
@@ -978,6 +1022,51 @@ mod tests {
             writes.load(Ordering::SeqCst),
             1,
             "an unchanged re-gossip must not write; this fires every 30s per peer"
+        );
+    }
+
+    /// A shard WE HOLD whose expected hash changes must be re-checked against
+    /// the new reference — this is how a node learns from the swarm that what it
+    /// is serving is wrong. The startup sweep cannot do it: it runs seconds
+    /// after boot, before any corrected hash arrives by gossip.
+    #[test]
+    fn a_held_shard_is_rechecked_when_its_expected_hash_changes() {
+        use std::sync::{Arc, Mutex};
+
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me.clone());
+        let seen: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        registry.set_persist_hook(Box::new(move |_m, _persist, recheck| {
+            s2.lock().unwrap().extend_from_slice(recheck);
+        }));
+
+        let mut first = test_manifest("m", "M");
+        first.shard_count = 2;
+        first.shards = vec![test_shard(0, [1u8; 32]), test_shard(1, [1u8; 32])];
+        registry.register_manifest(first);
+
+        // We hold shard 0 only.
+        registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            },
+            me.clone(),
+        );
+
+        // The swarm now reports a different hash for BOTH shards.
+        let mut corrected = test_manifest("m", "M");
+        corrected.shard_count = 2;
+        corrected.shards = vec![test_shard(0, [2u8; 32]), test_shard(1, [2u8; 32])];
+        registry.register_manifest(corrected);
+
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![0],
+            "only the shard we actually hold needs re-checking — re-hashing one \
+             we do not have costs hundreds of MB of I/O for no answer"
         );
     }
 

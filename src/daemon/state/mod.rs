@@ -892,6 +892,7 @@ impl SharedState {
                 prune_history: RwLock::new(VecDeque::new()),
                 shard_p2p_failed: dashmap::DashSet::new(),
                 shards_needing_repair: dashmap::DashSet::new(),
+                shards_pending_verification: dashmap::DashSet::new(),
                 shard_download_backoff: DashMap::new(),
                 parallax_stability: DashMap::new(),
                 cross_node_prefix_index: DashMap::new(),
@@ -1095,8 +1096,9 @@ impl SharedState {
             let weak = Arc::downgrade(&state);
             state
                 .model_registry
-                .set_persist_hook(Box::new(move |manifest| {
-                    if let Some(s) = weak.upgrade() {
+                .set_persist_hook(Box::new(move |manifest, persist, recheck| {
+                    let Some(s) = weak.upgrade() else { return };
+                    if persist {
                         if let Err(e) = s.model_registry.persist_manifest(&s.db, manifest) {
                             tracing::warn!(
                                 model = %manifest.id,
@@ -1105,6 +1107,21 @@ impl SharedState {
                                  have to be relearned by gossip after a restart"
                             );
                         }
+                    }
+                    // A shard we hold now has a different expected hash than the
+                    // one its bytes were last checked against — or was never
+                    // checked at all. **This is how a node learns from the swarm
+                    // that what it is serving is wrong.**
+                    for &index in recheck {
+                        s.models
+                            .shards_pending_verification
+                            .insert(crate::types::ShardId {
+                                model_id: manifest.id.clone(),
+                                index,
+                            });
+                    }
+                    if !recheck.is_empty() {
+                        s.models.auto_manage_notify.notify_one();
                     }
                 }));
         }

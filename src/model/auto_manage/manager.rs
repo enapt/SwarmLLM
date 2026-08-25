@@ -361,7 +361,8 @@ impl AutoShardManager {
                     // Finish origin fetches for shards a peer could not prove
                     // intact. Deliberately OUTSIDE the enabled gate below —
                     // same distinction as `try_idle_vram_unload` above.
-                    self.complete_pending_shard_fetches().await;
+                    self.verify_pending_shards().await;
+            self.complete_pending_shard_fetches().await;
 
                     // Re-check enabled -- admin API can toggle at runtime
                     if self.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
@@ -442,6 +443,85 @@ impl AutoShardManager {
     /// prune over-replicated ones. A single pass ensures consistent target replicas
     /// and coordinates pruning with downloads (only prune when there's resource
     /// pressure or when making room for higher-value shards).
+    /// Re-check shards whose expected hash has changed, and repair any that no
+    /// longer match.
+    ///
+    /// **This is how a node learns from the SWARM that what it is serving is
+    /// wrong.** The only other re-check of an already-held shard is the startup
+    /// sweep, which runs seconds after boot against whatever the database held —
+    /// before any corrected hash can arrive by gossip — so a node holding a
+    /// corrupt shard could not discover the fact until some later restart.
+    /// Measured on the live swarm: one shard corrupt on at least two peers, each
+    /// of which could have been told the right hash (gotcha #382).
+    ///
+    /// Runs OUTSIDE the `auto_manage.enabled` gate for the same reason the
+    /// repair drain does: serving neighbours bad bytes is not a disk-management
+    /// preference.
+    async fn verify_pending_shards(&self) {
+        let pending: Vec<crate::types::ShardId> = self
+            .shared_state
+            .models
+            .shards_pending_verification
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let data_dir = self.shared_state.config.node.data_dir.clone();
+        for sid in pending {
+            self.shared_state
+                .models
+                .shards_pending_verification
+                .remove(&sid);
+            // A download in flight will be verified when it lands; re-hashing a
+            // partially-written file just raises a false alarm.
+            if self
+                .shared_state
+                .models
+                .is_shard_in_progress(&sid.model_id, sid.index)
+            {
+                continue;
+            }
+            let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id)
+            else {
+                continue;
+            };
+            let Some(info) = manifest
+                .shards
+                .iter()
+                .find(|s| s.index == sid.index)
+                .cloned()
+            else {
+                continue;
+            };
+            if info.hash == [0u8; 32] {
+                continue;
+            }
+            let mid = sid.model_id.clone();
+            let dir = data_dir.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::model::shard::ShardStore::new(&dir).verify_shard(&mid, &info)
+            })
+            .await;
+            if let Ok(Err(e)) = result {
+                // `verify_shard` has already quarantined the bad bytes. Stop
+                // advertising them, then get a good copy.
+                tracing::warn!(
+                    model = %sid.model_id,
+                    shard = sid.index,
+                    error = %e,
+                    "A shard we were serving does not match the hash the swarm \
+                     reports — quarantined, fetching a fresh copy"
+                );
+                self.shared_state
+                    .model_registry
+                    .remove_shard_holder(&sid, self.shared_state.identity.node_id());
+                self.shared_state.mark_shard_for_repair(&sid);
+            }
+        }
+    }
+
     /// Fetch, from the model's origin, shards a peer transfer could not prove
     /// intact — **even when auto-manage is switched off**.
     ///

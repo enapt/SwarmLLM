@@ -4,6 +4,17 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A machine now learns from the network that a part it is sharing is damaged.**
+  Until now the only re-check of a part already in use ran a couple of seconds
+  after startup, against whatever the machine already believed — so a machine
+  holding a damaged part could not find out from anyone else, and would only
+  notice after a later restart. When the network reports a different fingerprint
+  for a part your machine holds, that part is now re-checked straight away, and
+  set aside and replaced if it does not match.
+
+
 ## [0.3.120-alpha] — 2026-08-25
 
 **A damaged part of a model can no longer spread from machine to machine.**

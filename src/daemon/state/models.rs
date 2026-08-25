@@ -53,6 +53,21 @@ pub struct ModelMgmt {
     /// quarantines it and docks the sender, which is the behaviour we want.
     /// An entry is dropped once the shard is back on disk.
     pub shards_needing_repair: dashmap::DashSet<crate::types::ShardId>,
+    /// Shards this node HOLDS whose expected hash has just changed, and whose
+    /// bytes must therefore be re-checked against the new reference.
+    ///
+    /// Written by the registry's manifest-update hook; drained by
+    /// `AutoShardManager::verify_pending_shards`, which quarantines and requests
+    /// a replacement on mismatch.
+    ///
+    /// **This is how a node learns from the swarm that what it is serving is
+    /// wrong.** The only other re-check of an already-held shard is the startup
+    /// sweep, which runs seconds after boot against whatever the database held —
+    /// i.e. before any corrected hash arrives by gossip — so without this it took
+    /// a further restart to notice. Measured on the live swarm: a shard corrupt
+    /// on at least two peers, each of which could have been told the right hash
+    /// (gotcha #382).
+    pub shards_pending_verification: dashmap::DashSet<crate::types::ShardId>,
     /// Per-shard download backoff. A shard whose download fails (hard HF error,
     /// GGUF-probe failure, P2P give-up with no HF fallback, or stall-
     /// reconciliation in `health/monitor.rs`) records an exponentially-growing
@@ -508,6 +523,7 @@ mod tests {
             removed_by_user: DashMap::new(),
             shard_p2p_failed: dashmap::DashSet::new(),
             shards_needing_repair: dashmap::DashSet::new(),
+            shards_pending_verification: dashmap::DashSet::new(),
             shard_download_backoff: DashMap::new(),
             model_request_counts: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),
