@@ -1013,6 +1013,16 @@ e
                     .ok()
                     .flatten();
                     if let Some(hash) = hash_result {
+                        // From the model's ORIGIN, so this hash outranks gossip
+                        // (#384). The mmproj travels as a sentinel shard, so it
+                        // is protected the same way every other shard is.
+                        shared.record_origin_verified_hash(
+                            crate::types::ShardId {
+                                model_id: model_id.clone(),
+                                index: swarmllm_types::MMPROJ_SHARD_INDEX,
+                            },
+                            hash,
+                        );
                         if let Some(mut manifest) = shared.model_registry.get_manifest(&model_id) {
                             let mut updated = false;
                             if let Some(ref mut info) = manifest.mmproj {

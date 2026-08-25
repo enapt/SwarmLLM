@@ -4,6 +4,15 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.123-alpha] — 2026-08-25
+
+**Completes the 0.3.122 fix.** 0.3.122 protected fingerprints on parts fetched
+automatically, but not on parts you fetch yourself with "Download this part", nor
+on a vision projector — so those could still be argued out of existence by
+another machine's wrong claim. Every route that fetches from a model's original
+source now records where the fingerprint came from.
+
+
 ## [0.3.122-alpha] — 2026-08-25
 
 **Fixes a fault introduced in 0.3.121.** If you are on 0.3.121, update.

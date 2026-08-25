@@ -642,6 +642,20 @@ pub async fn hf_download_shards(
                     progress_task.abort();
                     cumulative_downloaded += layout.size_bytes;
 
+                    // These bytes came from the model's ORIGIN, so their hash
+                    // outranks anything a peer gossips. Recording it here as
+                    // well as on the auto-manage download path is the whole
+                    // point: this is the path behind "Download this part", and
+                    // a shard fetched that way was left with no provenance at
+                    // all — so a peer that had self-certified a corrupt copy
+                    // could still displace its hash and get the good copy
+                    // quarantined (#384).
+                    let sid = crate::types::ShardId {
+                        model_id: download_mid.clone(),
+                        index: shard_idx,
+                    };
+                    download_shared.record_origin_downloaded_shard(&sid);
+
                     if let Some(mut entry) = download_shared
                         .models
                         .acquisition_progress

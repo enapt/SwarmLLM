@@ -116,6 +116,51 @@ impl SharedState {
             .record_origin_verified_hash(shard_id, hash);
     }
 
+    /// A shard's bytes have just been written from the model's ORIGIN: hash
+    /// them, record that hash as origin-derived, and put it in the manifest.
+    ///
+    /// Called by BOTH origin-download paths — the auto-manage downloader and the
+    /// admin "download this part" handler. The second had no provenance
+    /// recording at all, and does not otherwise update the manifest hash for the
+    /// shard it just fetched, so a shard obtained that way could be argued out
+    /// of existence by a peer's self-certified claim (#384).
+    pub fn record_origin_downloaded_shard(&self, shard_id: &ShardId) {
+        let path = self
+            .shard_store()
+            .shard_path(&shard_id.model_id, shard_id.index);
+        let Ok(hash) = crate::model::shard::hash_file_blake3(&path) else {
+            tracing::warn!(
+                model = %shard_id.model_id,
+                shard = shard_id.index,
+                "Could not hash a shard just fetched from the origin — it keeps \
+                 no provenance, so a peer's claim could displace its hash"
+            );
+            return;
+        };
+        self.record_origin_verified_hash(shard_id.clone(), hash);
+        if let Some(mut manifest) = self.model_registry.get_manifest(&shard_id.model_id) {
+            if let Some(si) = manifest
+                .shards
+                .iter_mut()
+                .find(|s| s.index == shard_id.index)
+            {
+                if si.hash == hash {
+                    return;
+                }
+                si.hash = hash;
+            } else {
+                return;
+            }
+            manifest.manifest_hash =
+                crate::model::manifest::ModelManifestExt::compute_hash(&manifest);
+            let dir =
+                crate::model::shard::model_dir(&self.config.node.data_dir, &shard_id.model_id.0);
+            let _ = crate::model::manifest::ModelManifestExt::save_to_dir(&manifest, &dir);
+            self.model_registry.register_manifest(manifest.clone());
+            let _ = self.model_registry.persist_manifest(&self.db, &manifest);
+        }
+    }
+
     /// Drop the repair request once the shard is back. Called when a download
     /// completes so the set stays bounded and nothing re-fetches a good shard.
     pub fn clear_shard_repair(&self, shard_id: &ShardId) {
