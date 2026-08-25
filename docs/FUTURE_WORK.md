@@ -238,6 +238,77 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
+### Distributed inference fails for a large model with "no receipt acknowledgement within 10s" (2026-08-25)
+
+**Observed on the live swarm, reproducible 6/6.** Root cause on the serving side
+is UNDETERMINED — its logs were not available — so this records the evidence
+rather than a diagnosis.
+
+Requesting `qwen2.5-coder-7b-instruct-q4-k-m` (8 shards) from this node routes to
+the only connected full holder and fails every time:
+
+```text
+  route=distributed segments=1 nodes=7c10ea04 regions=BE  outcome=error
+  Remote segment returned error ... error=no receipt acknowledgement within 10s
+  NO standby available for failed segment — pipeline will fail
+  -> 503 Segment failover exhausted
+```
+
+**The discriminator**: the SAME peer serves `tinyllama-1.1b` (2 shards) over the
+same path successfully — `200`, real content, 22 s. So the peer, the route and
+the ACK mechanism all work; something about the larger model delays or loses the
+receipt.
+
+What is established:
+- The peer advertises `FORWARD_ACK`, is connected, RTT ~500 ms, so the deadline is
+  the 10 s floor from `ack_deadline_from_rtt`.
+- It genuinely holds all 8 shards (its own announcements).
+- **Its result arrived at 11 607 ms in one attempt — 1.6 s after we gave up, and
+  was discarded.** So at least once the peer was working, not dead.
+- Retrying does not help (the model stays unusable), and a second holder exists
+  but is not connected, so there is never a standby.
+- It reproduced identically with the peer on 0.3.119 and after it auto-updated to
+  0.3.123, so it is not version-specific on that side.
+
+Hypotheses NOT confirmed: cold model load blocking the peer's event loop (a retry
+after repeated attempts, which should have found it warm, failed identically).
+Worth checking next with access to the serving node's log — specifically whether
+its loop-stall tripwire fires, and whether the ACK is sent but late or never sent.
+
+**Two consequences worth stating.**
+- A model with two holders is effectively unusable from this node, and the
+  `SegmentFailoverExhausted` hint tells the user "this is usually momentary — try
+  again", which 6/6 retries disprove. Advice that cannot work is the trap gotcha
+  #295 exists for.
+- The ACK fast-fail is justified in its own comment by the failover it enables
+  ("so the pipeline fails over in seconds instead of minutes"), but it fires even
+  when there is no standby — where it cannot buy a failover and can only convert
+  a slow success into a hard failure. Whether it should be suppressed with no
+  standby is a real design question; note the counter-argument that for a genuinely
+  dead peer, failing at 10 s beats waiting out the compute deadline.
+
+### Prompt privacy can be turned off for a model but not back on (2026-08-25)
+
+`PUT /api/admin/models/{id}/encrypted-pipeline {"enabled": false}` succeeds and
+REMOVES the per-model override. Setting it back to `true` is refused:
+
+```text
+  400 Cannot enable encrypted pipeline: this node is missing first shard
+      (shard 0, embedding table) and last shard — download the missing shard(s) first.
+```
+
+The refusal is correct on its own terms — privacy that cannot be delivered should
+not be claimed. But the state it refuses to create is one the system was ALREADY
+storing: both models read `encrypted_pipeline: true, per_model_override: true,
+has_first_shard: false, ready: false` beforehand. So a stored setting cannot be
+restored through the API that stores it, and the only route back is to download
+shards.
+
+Worth deciding which side is wrong: either the enable path should accept a
+not-yet-deliverable "fail closed" preference (it already reports `ready: false`
+separately), or whatever created that state should not have been able to either.
+Found by changing it during testing and being unable to put it back.
+
 ### A P2P shard accepted with nothing to verify it against — CLOSED (2026-08-24)
 
 **Partly fixed the same day — this entry now covers only what is left.** Found
