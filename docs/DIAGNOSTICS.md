@@ -938,6 +938,60 @@ separated from a loop problem in four minutes. `grep "loop stalled" node.log |
 grep -oE "arm=[^ ]+ took_ms=[0-9]+" | sort | uniq -c | sort -rn` names the
 culprit when there is one.
 
+## "no receipt acknowledgement within Ns" — late, or missing? (2026-08-25)
+
+A peer that fails every distributed request with this looks dead. It may simply
+be busy: the ACK is emitted by the network event loop, so it arrives late exactly
+when that loop is loaded, and a ping RTT cannot see that.
+
+**The sender logs ACK receipt at `debug`**, so an info-level log shows nothing
+either way — absence there is not evidence. Run the node with `-v` and look:
+
+```bash
+grep 'DIAG: received response' node.log | grep 'kind="ack"'
+```
+
+ACKs present, including from the failing peer, means late-not-missing, and the
+deadline is the thing to look at rather than the peer. Measured 2026-08-25: a
+peer failed for about an hour, then served the same request in 6.1 s, with its
+ACKs arriving the whole time. Since v0.3.124 the deadline is per-peer
+(`AckRttEstimator`, RFC 6298) and backs off on a miss, so this should
+self-correct — if it does not, that estimator is the place to look.
+
+**A cheap way to reproduce without touching the live node**: start a throwaway
+node (`SWARMLLM_NODE_DATA_DIR=$(mktemp -d)`, its own port, `[auto_manage]
+enabled=false`) with `-v` and issue the same request to it. It joins the swarm
+from gossip within about a minute.
+
+## Is a shard actually corrupt? Ask the origin, not the swarm (2026-08-25)
+
+**Peer agreement is not evidence in a network that copies from itself.** Two
+independent peers served byte-identical bytes that failed verification here, which
+reads as "our expected hash must be wrong" — it was not; the corruption had
+spread. Only the model's ORIGIN settles it.
+
+A shard is a byte range of the upstream GGUF, so fetch exactly that range and hash
+it. The ranges come from `manifest.json`:
+
+```python
+# coalesce the shard's tensors into contiguous GGUF runs, in shard_offset order
+for t in sorted(shard["tensors"], key=lambda t: t["shard_offset"]):
+    if runs and t["gguf_offset"] == runs[-1][1]: runs[-1][1] = t["gguf_offset"] + t["size"]
+    else: runs.append([t["gguf_offset"], t["gguf_offset"] + t["size"]])
+# then Range-GET each run in order into one blake3 hasher
+```
+
+**⚠ A shard is NOT always one contiguous range.** One llama-3.1-8b shard has two
+runs separated by a 122 MB gap; reconstructing it as a single span from
+`min(gguf_offset)` to `max(gguf_offset+size)` produced 646021120 bytes against a
+declared 523304960 — and a confident FALSE mismatch on a healthy file. **Assert
+the reconstructed byte count equals the manifest's `size_bytes` before believing
+any verdict**; that one check catches it.
+
+Recovery, once the origin has spoken: `POST /api/admin/hf/download-shards` with
+`{"model_id": …, "shards": [n]}` refetches from the origin and (since v0.3.123)
+records the hash as origin-verified, so no peer's claim can displace it.
+
 ## Benchmarks
 
 Every harness below runs against an ISOLATED node or no daemon at all. None of

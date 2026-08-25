@@ -55,6 +55,65 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
   in flight is skipped, since re-hashing a partly-written file is a false alarm; and
   the drain runs OUTSIDE the `auto_manage.enabled` gate, because serving neighbours
   bad bytes is not a disk-management preference.
+- **`ModelRegistry::origin_verified`** (2026-08-25) — a shard hash derived from bytes
+  THIS node fetched from the model's origin, which outranks any gossiped claim. Applied
+  in `register_manifest` BEFORE change-detection, so a claim the origin has already
+  disproved does not even provoke a re-check. Persisted (`ORIGIN_VERIFIED_TREE`) and
+  loaded FIRST in `load_from_db`, or a restart hands the argument back to gossip.
+  Recorded by `SharedState::record_origin_downloaded_shard` from BOTH origin-download
+  paths — the auto-manage downloader and the admin "download this part" handler; the
+  second recorded nothing until it was added, which is the same one-invariant-N-paths
+  trap as everything else in this file.
+  **Why**: manifest registration is last-writer-wins, and a real hash replaces a real
+  hash (deliberately, for re-publishes). A peer that had self-certified a corrupt shard
+  gossiped its wrong hash, our node adopted it over one verified against the origin, and
+  v0.3.121's new re-check then faithfully **quarantined the GOOD copy** and refetched
+  against the same wrong reference — an unbounded ~500 MB loop, observed live within an
+  hour of shipping (gotcha #384).
+  **Deliberately local and NEVER gossiped**: provenance that travels the network is just
+  another assertion, and forgeable. A node trusts only what IT fetched.
+  **The general rule this encodes**: a repair mechanism is a destruction mechanism
+  pointed at whatever it believes is wrong. Before adding one, ask what happens when the
+  REFERENCE is the thing that is wrong.
+
+- **`network::manager::tensors::AckRttEstimator`** (2026-08-25) — how long a peer gets to
+  acknowledge a tensor forward before the pipeline gives up on it. **RFC 6298**, the same
+  algorithm TCP uses to decide a packet is lost: `deadline = SRTT + 4*RTTVAR`, alpha=1/8,
+  beta=1/4, clamped to `RR_ACK_TIMEOUT_SECS`..`RR_ACK_TIMEOUT_MAX_SECS`, over the
+  observed send→ACK latency of THAT peer.
+  **The variance term is the point.** The rule it replaces scaled a ping RTT, and a ping
+  cannot see queueing delay on a loaded node — the ACK is emitted by the network event
+  loop, so it is late exactly when that loop is busy. Measured: a peer at ~500 ms RTT (so
+  the 10 s floor) failed EVERY distributed request for about an hour, then served the
+  same request in 6.1 s once it settled. Its ACKs were arriving late, not missing —
+  proved by running a node at `-v` and seeing `kind="ack"` from six peers including that
+  one (gotcha #386).
+  **`observe_timeout` (RFC 6298 §5.5) is not optional.** The estimator only ever sees
+  acknowledgements that ARRIVE, and an abandoned forward is one whose ACK we stopped
+  waiting for — so a peer needing longer than the current deadline can never produce the
+  sample that would widen it. Without backing off on a miss the whole scheme is INERT
+  exactly where it is needed. Bounded by the same ceiling; a peer that recovers returns
+  to the floor.
+  **The fast-fail also requires a standby** (`request_has_standby`). It is justified by
+  the failover it enables — the premise of hedged requests in Dean & Barroso's *The Tail
+  at Scale*, which send a second copy to a DIFFERENT replica. With none, abandoning
+  cannot buy a failover and can only turn a slow success into a 503: measured, a reply
+  arrived 1.6 s after we gave up and was discarded. Absence of the pipeline entry counts
+  as "yes", so paths this check cannot see (a chain hop) keep the old behaviour.
+
+- **A KV-budget refusal MUST release what the request already took** (2026-08-25) —
+  `executor.rs` calls `kv_cache_store.clear_request` before returning the
+  `ServiceUnavailable`. A chunked prefill claims a quantum per boundary, so a request
+  refused at chunk N has already allocated N-1; leaving them made a refusal a RATCHET —
+  the request failed, its cache survived the 10-minute session TTL, and the next attempt
+  started from a higher floor. Measured in exact 1152 MB steps: 1152 → 2304 → 3456
+  against a 1166 MB budget, card at 97%, decode 29 → 1.0 tok/s (gotcha #387).
+  Safe because the request is over: an error is being returned, no later forward reuses
+  the cache, and a retry rebuilds it from the prompt.
+  **Generalise it**: a resource check that refuses but does not release is worse than no
+  check under repetition, because the failed attempts are exactly the ones that
+  accumulate. Ask of any admission check what happens to what the refused request took.
+
 - **`SharedState::can_fetch_shard_from_origin`** — 2026-08-25 — the single answer to
   "will an origin fetch actually HAPPEN?", which is NOT "does an origin exist". Every
   caller about to discard local bytes in favour of an origin copy asks this first:
