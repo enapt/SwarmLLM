@@ -32,9 +32,19 @@ impl SharedState {
             return;
         }
         self.models.shards_needing_repair.insert(shard_id.clone());
-        // Clear any stale per-shard progress entry, or `is_shard_in_progress`
+        // Clear the stale per-shard progress entry, or `is_shard_in_progress`
         // reports a download that is not running and the refetch is skipped
-        // forever.
+        // forever. (The accept path returns on verify failure before marking
+        // the shard Complete, so its entry is left mid-Downloading.)
+        //
+        // **Only call this when no download is actually running for the shard.**
+        // Nothing here can tell a stale entry from a live one — both read as
+        // `Downloading` — and clearing a live one lets a second task append to
+        // the same `.tmp` concurrently, producing the right size and wrong
+        // bytes, which is the failure this whole path exists to prevent. True
+        // of all three current callers: the transfer has finished (accept
+        // path), or `is_shard_in_progress` was already checked (rescan), or no
+        // download exists (background sweep).
         if let Some(mut entry) = self.models.acquisition_progress.get_mut(&shard_id.model_id) {
             entry.shard_progress.remove(&shard_id.index);
         }

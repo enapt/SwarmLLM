@@ -16,6 +16,35 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.models.quant_recommendations` — R133. `ArcSwap<QuantRecommendations>`; refreshed via `crate::model::auto_manage::quant::refresh_quant_recommendations(state)` on every auto-manage tick AND on every WS stats build. Read by `GET /api/admin/quant-recommendations` and the swarm-tab tips tile.
 - `state.models.shard_download_backoff` — external report 2026-07-23. `DashMap<ShardId, ShardDownloadBackoff { fail_count, retry_after: Instant }>`. Exponential per-shard download cooldown (30→60→120→240→300s cap, via the pure `shard_backoff_delay_secs`). Recorded via `record_shard_download_failure` at every terminal *transient* download-failure site (HF `download_shard` error + GGUF-probe failure in `model/auto_manage/download.rs`, P2P give-up-with-no-HF-source in `network/manager/shard_transfer.rs`, and stall-reconciliation in `health/monitor.rs::cleanup_acquisition_progress`). Checked by `shard_in_backoff` in `scoring.rs::gather_candidates` (skips the shard while cooling down). Cleared via `clear_shard_download_backoff` on success (HF success arm + P2P completion in `requests.rs`). Distinct from `shard_p2p_failed`, which only *forces* the HF path without throttling re-selection — the two solve different problems and a new failure site should touch whichever it needs. Do NOT record backoff on the P2P→HF fallback branch: that path wants an *immediate* HF retry. Entries self-evict from `shard_in_backoff` once idle past `SHARD_BACKOFF_FORGET_SECS` (1h), so the map stays bounded without a dedicated sweep.
 - `state.models.removed_by_user` — 2026-08-21 (gotcha #360). `DashMap<ShardId, bool>`, persisted in DB tree `removed_shards`, loaded in `SharedState::new` like `locked_shards`. A shard the USER deleted (`delete_shard`, `delete_model` — every manifest shard) is an instruction, not a gap: `gather_candidates` skips it unless `in_configured_range || pinned_to_us`; an explicit request clears it (`hf_download_shards` for the named shards, `download_shard`, `pool_add_pin` naming this node). Helpers live in `daemon/state/removed_shards.rs` (`mark_shard_removed_by_user`, `shard_removed_by_user`, `clear_shard_removed_by_user`, `clear_removed_by_user_for_model`); the shard listing emits `removed_by_user` (only when not local) and the dashboard shows a "Removed" badge. Never write the map or the tree directly.
+- `state.models.shards_needing_repair` — 2026-08-25 (gotchas #381/#382). `DashSet<ShardId>`
+  of shards whose bytes were found WRONG and which need a fresh, verified copy. Written
+  ONLY by `SharedState::mark_shard_for_repair`; drained by
+  `AutoShardManager::complete_pending_shard_fetches`; cleared by
+  `clear_shard_repair` on a landed copy.
+  **Why it exists**: three places can catch a bad shard — the P2P accept path, the
+  background verification sweep, the auto-manage rescan — and all three removed the file
+  and stopped. "Removed" was implemented three times and "and get a good one" nowhere, so
+  repair happened only as a side effect of auto-manage noticing the gap: a node with
+  auto-manage OFF kept a permanently incomplete model, and every rescan re-hashed the same
+  bad file to reach the same conclusion. A new site that detects a bad shard calls the
+  helper; it must not open-code the removal.
+  **Deliberately NOT `shard_p2p_failed`**, which forces the HuggingFace path. Having
+  DETECTED the corruption means we hold the real hash, so a peer copy is checked against
+  it — and if that one is bad too the accept path quarantines it and docks the sender,
+  which is the behaviour wanted. Repair therefore runs from peers OR the origin.
+  **It runs outside the `auto_manage.enabled` gate** for the same reason
+  `try_idle_vram_unload` does: a shard this node already held is not a new acquisition
+  decision. And it refuses a shard in `removed_by_user` — a deletion is an instruction,
+  not a gap.
+- **`SharedState::can_fetch_shard_from_origin`** — 2026-08-25 — the single answer to
+  "will an origin fetch actually HAPPEN?", which is NOT "does an origin exist". Every
+  caller about to discard local bytes in favour of an origin copy asks this first:
+  **never throw away data you cannot replace.** Two conditions, found one at a time and
+  each after concluding the other was the only one — a recorded `hf_source`, AND not
+  offline mode (`trigger_download` skips the HuggingFace branch entirely when set, by
+  design). Auto-manage being off is deliberately NOT one, since the drain runs outside
+  that gate. Consumed by the P2P accept path (`classify_p2p_shard_acceptance`) and by the
+  rescan's no-hash branch. A third condition belongs here, not at a call site.
 - `state.credits.foreign_pool_catalog` — R134. `DashMap<(PoolId, ModelId), received_at_ms>`; capped at 5000 with oldest-first eviction, 2h freshness window. Written by inbound `SwarmMessage::PoolModelAvailability` handler. Read by `GET /api/admin/foreign-pool-catalog` and by `pool::scope::cross_pool_extras` (R134.7) when `pool.allow_cross_pool_inference` AND `private_mode` are both on.
 - `state.metrics.node_stats` — NOT `state.node_stats`
 - `state.metrics.providers_config` — NOT `state.providers_config`

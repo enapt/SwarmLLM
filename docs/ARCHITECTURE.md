@@ -48,6 +48,7 @@ Single Rust binary, three simultaneous functions:
 │  │  │  acquisition_progress, hf_sources              │ │  │
 │  │  │  auto_manage_*, model_trust, locked_shards     │ │  │
 │  │  │  removed_by_user (deleted-shard tombstones)    │ │  │
+│  │  │  shards_needing_repair (corrupt → refetch)     │ │  │
 │  │  │  prune_history, download_cancel_flags          │ │  │
 │  │  │  wishlist (R111), hf_trending_cache (R112)     │ │  │
 │  │  │  foreign_wishlist (R130)                       │ │  │
