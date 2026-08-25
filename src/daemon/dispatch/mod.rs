@@ -1090,8 +1090,25 @@ pub(crate) async fn dispatch_network_messages(
                                                 }
                                             }
                                             Err(e) => {
+                                                // Name the model AND the sender.
+                                                // Without them this line is
+                                                // unattributable: it fired 3189
+                                                // times in 90 minutes on this
+                                                // node carrying nothing but two
+                                                // hex strings, so neither an
+                                                // operator nor a maintainer
+                                                // could tell which model was
+                                                // being rejected, whether it was
+                                                // one peer or thirteen, or
+                                                // whether it mattered. The
+                                                // sibling arm above already
+                                                // reports both.
                                                 tracing::warn!(
                                                     error = %e,
+                                                    model = %manifest.id,
+                                                    model_name = %manifest.name,
+                                                    from_peer = ?authenticated_sender,
+                                                    shard_count = manifest.shard_count,
                                                     "Manifest hash verification failed — rejecting"
                                                 );
                                             }
