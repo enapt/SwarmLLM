@@ -238,54 +238,63 @@ one-liner at that site (filter the holders the same way the scorer does, falling
 through to the HF path when none remain); left out of the .111 release to keep
 it to the reported causes.
 
-### Distributed inference fails for a large model with "no receipt acknowledgement within 10s" (2026-08-25)
+### A loaded peer misses the 10s receipt-ACK floor, and with no standby that is a hard failure (2026-08-25)
 
-**Observed on the live swarm, reproducible 6/6.** Root cause on the serving side
-is UNDETERMINED — its logs were not available — so this records the evidence
-rather than a diagnosis.
+**Corrected after further testing.** My first write-up of this called it
+"reproducible 6/6" and model-size-dependent. **Both were wrong** — the same
+request later succeeded from the same node against the same peer. What follows is
+what the evidence actually supports.
 
-Requesting `qwen2.5-coder-7b-instruct-q4-k-m` (8 shards) from this node routes to
-the only connected full holder and fails every time:
+**Observed**: over roughly an hour, every distributed request for
+`qwen2.5-coder-7b` failed:
 
 ```text
   route=distributed segments=1 nodes=7c10ea04 regions=BE  outcome=error
   Remote segment returned error ... error=no receipt acknowledgement within 10s
-  NO standby available for failed segment — pipeline will fail
-  -> 503 Segment failover exhausted
+  NO standby available for failed segment -> 503 Segment failover exhausted
 ```
 
-**The discriminator**: the SAME peer serves `tinyllama-1.1b` (2 shards) over the
-same path successfully — `200`, real content, 22 s. So the peer, the route and
-the ACK mechanism all work; something about the larger model delays or loses the
-receipt.
+Then it stopped failing. Same node, same peer, same model: `200` in 6.1 s.
 
-What is established:
-- The peer advertises `FORWARD_ACK`, is connected, RTT ~500 ms, so the deadline is
-  the 10 s floor from `ack_deadline_from_rtt`.
-- It genuinely holds all 8 shards (its own announcements).
-- **Its result arrived at 11 607 ms in one attempt — 1.6 s after we gave up, and
-  was discarded.** So at least once the peer was working, not dead.
-- Retrying does not help (the model stays unusable), and a second holder exists
-  but is not connected, so there is never a standby.
-- It reproduced identically with the peer on 0.3.119 and after it auto-updated to
-  0.3.123, so it is not version-specific on that side.
+**What the debug log settles.** Running a node at `-v` shows the sender side
+logging `DIAG: received response ... kind="ack"` — and ACKs were arriving from six
+peers, including the one that had been failing. So **the acknowledgement mechanism
+works**; the ACK is late, not absent. `ack_deadline_from_rtt` clamps to a 10 s
+floor, and RTT (~500 ms here) says nothing about queueing delay on a loaded node,
+so a peer that is busy — restarting after an update, re-scanning shards,
+re-downloading a large one — legitimately exceeds it.
 
-Hypotheses NOT confirmed: cold model load blocking the peer's event loop (a retry
-after repeated attempts, which should have found it warm, failed identically).
-Worth checking next with access to the serving node's log — specifically whether
-its loop-stall tripwire fires, and whether the ACK is sent but late or never sent.
+**Why that becomes a hard failure**: the fast-fail is justified in its own comment
+by the failover it enables ("so the pipeline fails over in seconds instead of
+minutes"), but it fires whether or not a standby exists. Here a second holder
+existed and was not connected, so there was never one. With nowhere to fail over
+to, abandoning the segment cannot buy a failover — it can only convert a slow
+success into a 503. Measured once: the peer's result arrived at **11 607 ms**,
+1.6 s after we gave up, and was discarded.
 
-**Two consequences worth stating.**
-- A model with two holders is effectively unusable from this node, and the
-  `SegmentFailoverExhausted` hint tells the user "this is usually momentary — try
-  again", which 6/6 retries disprove. Advice that cannot work is the trap gotcha
-  #295 exists for.
-- The ACK fast-fail is justified in its own comment by the failover it enables
-  ("so the pipeline fails over in seconds instead of minutes"), but it fires even
-  when there is no standby — where it cannot buy a failover and can only convert
-  a slow success into a hard failure. Whether it should be suppressed with no
-  standby is a real design question; note the counter-argument that for a genuinely
-  dead peer, failing at 10 s beats waiting out the compute deadline.
+**A keep-alive is NOT the fix**, though it is the intuitive one. The receipt ACK
+already IS the liveness signal and it is working; and if a peer's event loop is
+blocked, neither an ACK nor a heartbeat leaves it, so no heartbeat scheme rescues
+that case. A progress signal during compute would address a different question
+(death after receipt), which the compute deadline already bounds.
+
+**Candidate fixes, in order of confidence:**
+- Do not apply the ACK fast-fail when the segment has no standby. It cannot help
+  there, and it demonstrably hurts. Note the counter-argument: for a genuinely
+  dead peer with no standby, failing at 10 s beats waiting out the compute
+  deadline — so this trades a fast failure for a slow success.
+- Treat a late ACK as evidence to widen that peer's deadline, rather than a fixed
+  floor derived from RTT alone.
+- `SegmentFailoverExhausted`'s hint says "usually momentary — try again"; during
+  this window that was false for an hour. Where the failed node was the only
+  connected holder, retrying rebuilds the same route. Advice that cannot work is
+  the trap gotcha #295 exists for.
+
+**Still unexplained**: what loaded that peer for about an hour. It had just
+auto-updated, and is also the node that was serving a corrupt shard. It is no
+longer listed as a holder of that shard — but **no retraction from it appears in
+this node's log**, so that is NOT evidence that the .123 repair path ran on it.
+Left as an observation, not a conclusion.
 
 ### Prompt privacy can be turned off for a model but not back on (2026-08-25)
 
