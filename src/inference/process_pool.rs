@@ -4,7 +4,7 @@
 //! driver reclaims all GPU memory immediately — no restart required.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -99,6 +99,67 @@ type ResponseMap = Arc<DashMap<Uuid, (u64, ResponseTx)>>;
 
 /// Source of per-attempt tokens for `ResponseMap`. Process-wide; only equality
 /// matters, never ordering.
+/// One GPU-resident model considered for reclaim, as the planner sees it.
+#[derive(Debug, Clone)]
+struct VramReclaimCandidate {
+    model: ModelId,
+    /// What admission has charged for it — the figure the budget is spent in.
+    charge_mb: u64,
+    idle_secs: u64,
+    /// A request is in flight against it right now.
+    busy: bool,
+}
+
+/// Choose which resident models to unload so `needed_mb` fits in `budget`.
+///
+/// Pure so the policy can be tested without spawning a worker: the wiring is
+/// verified by running the node, this decides what the wiring does.
+///
+/// Returns an EMPTY plan when the request cannot be satisfied even by
+/// reclaiming everything eligible. That is the load-bearing case: unloading
+/// models and still not fitting costs the user a cold start and buys nothing,
+/// because the model was going to the CPU either way.
+fn plan_vram_reclaim(
+    budget_mb: u64,
+    committed_mb: u64,
+    needed_mb: u64,
+    candidates: Vec<VramReclaimCandidate>,
+) -> Vec<(ModelId, u64)> {
+    if committed_mb.saturating_add(needed_mb) <= budget_mb {
+        return Vec::new();
+    }
+    let mut eligible: Vec<VramReclaimCandidate> = candidates
+        .into_iter()
+        .filter(|c| !c.busy && c.charge_mb > 0 && c.idle_secs >= VRAM_MAKE_ROOM_MIN_IDLE_SECS)
+        .collect();
+    // Most idle first: `spawned_at` cannot tell a worker answering steadily for
+    // an hour from one loaded an hour ago and never used since.
+    eligible.sort_by_key(|a| std::cmp::Reverse(a.idle_secs));
+
+    let mut plan = Vec::new();
+    let mut freed = 0u64;
+    for c in eligible {
+        if committed_mb.saturating_sub(freed).saturating_add(needed_mb) <= budget_mb {
+            break;
+        }
+        freed = freed.saturating_add(c.charge_mb);
+        plan.push((c.model, c.charge_mb));
+    }
+    if committed_mb.saturating_sub(freed).saturating_add(needed_mb) > budget_mb {
+        return Vec::new();
+    }
+    plan
+}
+
+/// How long a GPU-resident model must have gone unused before another model
+/// may take the card from it.
+///
+/// Exists only to stop two models alternating faster than they load from
+/// evicting each other on every request; below it the pre-existing behaviour
+/// (the newcomer runs on the CPU) is kept, so this can only ever make the
+/// placement better than it was.
+const VRAM_MAKE_ROOM_MIN_IDLE_SECS: u64 = 60;
+
 static RESPONSE_ATTEMPT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// A handle to a running model worker subprocess.
@@ -155,6 +216,18 @@ struct WorkerHandle {
     /// seconds ago was evicted as though it had sat unused for the whole
     /// configured window, killing the request that had just loaded it.
     spawned_at: std::time::Instant,
+    /// Seconds since this worker last had a request registered against it.
+    ///
+    /// `spawned_at` is only an upper bound on idleness — it cannot tell a model
+    /// answering steadily for an hour from one loaded an hour ago and never
+    /// used since, and those deserve opposite treatment when something has to
+    /// give up the card. Stamped in `register_response`, which is the ONE place
+    /// every execution path (local, distributed, peer-served) passes through,
+    /// so no caller can forget it.
+    ///
+    /// Stored as seconds since `spawned_at` rather than a wall-clock stamp, so
+    /// a clock step cannot make a busy worker look idle for hours.
+    last_used: AtomicU64,
 }
 
 /// Pull the `request_id` field out of any `WorkerMsg` variant that carries one.
@@ -510,6 +583,8 @@ impl WorkerHandle {
         tx: ResponseTx,
         cancel_on_drop: bool,
     ) -> (ResponseGuard, Option<u64>) {
+        self.last_used
+            .store(self.spawned_at.elapsed().as_secs(), Ordering::Relaxed);
         let (token, displaced) = claim_response_slot(&self.responses, request_id, tx);
         if displaced.is_some() {
             tracing::warn!(
@@ -527,6 +602,17 @@ impl WorkerHandle {
             },
             displaced,
         )
+    }
+
+    /// Seconds since this worker last had a request registered against it.
+    ///
+    /// A worker that has never been used reports its full residency, which is
+    /// the honest answer: it has been idle for as long as it has existed.
+    fn idle_secs(&self) -> u64 {
+        self.spawned_at
+            .elapsed()
+            .as_secs()
+            .saturating_sub(self.last_used.load(Ordering::Relaxed))
     }
 
     /// True when `request_id`'s entry has been taken over by a later attempt.
@@ -1611,13 +1697,21 @@ impl ModelProcessPool {
             self.vram_reserved_mb.insert(model_id.clone(), estimated_mb);
             return true;
         }
-        tracing::warn!(
+        // Deliberately DEBUG, and deliberately silent about what happens next.
+        // This used to be a WARN asserting "loading it on the CPU instead" — and
+        // once `free_vram_for_admission` was added that became a statement the
+        // very next line could falsify. Verified on this machine 2026-08-25: the
+        // line was logged, an idle model was reclaimed 0.3 ms later, and the
+        // model loaded on the GPU. An operator reading the log would have
+        // concluded the opposite of what happened. A refusal here is one step in
+        // a decision, not the decision; the outcome is announced by the caller,
+        // where it is known.
+        tracing::debug!(
             model = %model_id,
             estimated_mb,
             committed_mb = committed,
             budget_mb = budget,
-            "Not enough GPU memory budget for this model — loading it on the CPU instead \
-             (slower, but it answers). It will use the GPU again once memory frees up"
+            "DIAG: GPU admission refused — not enough budget at this moment"
         );
         false
     }
@@ -1638,6 +1732,102 @@ impl ModelProcessPool {
             }
             tokio::time::sleep(WORKER_EXIT_POLL).await;
         }
+    }
+
+    /// Reclaim graphics memory from models nothing is using, so `model_id` can
+    /// have the card instead of being demoted to the CPU.
+    ///
+    /// Called when [`Self::admit_to_gpu`] refuses, BEFORE the refusal reaches
+    /// the caller — the same shape as [`Self::free_ram_for_admission`], which
+    /// has done exactly this for the RAM budget since v0.3.111. The GPU side
+    /// never had it, so a model that happened to load first kept the card for
+    /// as long as it stayed resident and everything asked for afterwards ran on
+    /// the processor.
+    ///
+    /// Observed on this development machine 2026-08-25: an 8B loaded at 14:17
+    /// and untouched since held a 6033 MB reservation against a 6722 MB budget;
+    /// a 3B requested fifteen minutes later needed 3138 MB, was refused the 689
+    /// MB that remained, and answered at 7 tok/s on the CPU while the card sat
+    /// idle. The background idle-unload could not help: it runs on a timer, and
+    /// its regional-demand clause deliberately keeps a model the swarm wants
+    /// warm for up to an hour. Neither can act on the request arriving *now*.
+    ///
+    /// Three properties this must keep.
+    ///
+    /// **Plan before destroying.** Unloading models and *still* not fitting
+    /// costs the user a reload for nothing, so the whole plan is costed first
+    /// and abandoned whole if it cannot succeed. The RAM sibling can unload
+    /// opportunistically because its alternative is failing the request
+    /// outright; here the alternative is a slower answer, so a wasted eviction
+    /// is a real regression rather than a lesser evil.
+    ///
+    /// **Take the card only from a model that has stopped being used.** A
+    /// worker with a request in flight is never a candidate, and neither is one
+    /// used within `VRAM_MAKE_ROOM_MIN_IDLE_SECS`. Without that, two models
+    /// alternating faster than they load would evict each other on every
+    /// request and each answer would pay a cold start. With it, that case
+    /// simply keeps today's behaviour — one of them runs on the CPU — while a
+    /// genuinely stale occupant is displaced.
+    ///
+    /// **Least-recently-used first**, by `idle_secs` rather than by residency:
+    /// a worker answering steadily for an hour and one loaded an hour ago and
+    /// never used since are indistinguishable by `spawned_at`, and deserve
+    /// opposite treatment.
+    ///
+    /// Returns the megabytes reclaimed.
+    async fn free_vram_for_admission(&self, exclude: &ModelId, needed_mb: u64) -> u64 {
+        let budget = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if budget == 0 || needed_mb == 0 {
+            return 0;
+        }
+        let committed = self.vram_committed_mb();
+        if committed.saturating_add(needed_mb) <= budget {
+            return 0;
+        }
+
+        // Candidates: workers holding a VRAM charge that are neither the model
+        // being loaded, nor busy, nor recently used.
+        let candidates: Vec<VramReclaimCandidate> = self
+            .vram_reserved_mb
+            .iter()
+            .filter(|e| e.key() != exclude && *e.value() > 0)
+            .filter_map(|e| {
+                let worker = self.workers.get(e.key())?;
+                Some(VramReclaimCandidate {
+                    model: e.key().clone(),
+                    charge_mb: *e.value(),
+                    idle_secs: worker.idle_secs(),
+                    busy: !worker.responses.is_empty(),
+                })
+            })
+            .collect();
+
+        let plan = plan_vram_reclaim(budget, committed, needed_mb, candidates);
+        if plan.is_empty() {
+            tracing::debug!(
+                model = %exclude,
+                needed_mb,
+                committed_mb = committed,
+                budget_mb = budget,
+                "No idle model could be reclaimed to fit this one — leaving the GPU as it is"
+            );
+            return 0;
+        }
+
+        let mut reclaimed = 0u64;
+        for (victim, charge) in plan {
+            tracing::info!(
+                model = %victim,
+                reclaimed_mb = charge,
+                for_model = %exclude,
+                "Freeing graphics memory from an idle model so the requested one can use the GPU"
+            );
+            self.unload_model(&victim).await;
+            reclaimed = reclaimed.saturating_add(charge);
+        }
+        reclaimed
     }
 
     /// Release a worker's charge. Must pair with every `admit_to_gpu`.
@@ -1971,7 +2161,37 @@ impl ModelProcessPool {
         let mut going_to_cpu = self.effective_gpu_layers(model_id) == 0;
         if !going_to_cpu {
             let estimated = self.estimate_gpu_footprint_mb(model_id);
-            if !self.admit_to_gpu(model_id, estimated) {
+            // Demoting to the CPU is the last resort, not the first answer:
+            // reclaim the card from models nothing is using, then ask again.
+            // Ask ONCE unless the answer was no — `admit_to_gpu` charges the
+            // reservation when it succeeds, so a second call would weigh the
+            // model against its own charge and refuse one already let in.
+            let mut admitted = self.admit_to_gpu(model_id, estimated);
+            if !admitted {
+                let freed = self.free_vram_for_admission(model_id, estimated).await;
+                if freed > 0 {
+                    tracing::info!(
+                        model = %model_id,
+                        freed_mb = freed,
+                        "Reclaimed graphics memory from idle models; retrying admission"
+                    );
+                    admitted = self.admit_to_gpu(model_id, estimated);
+                }
+            }
+            if !admitted {
+                // Now it IS true: the budget could not be made to fit, even
+                // after reclaiming every idle model that could be spared.
+                tracing::warn!(
+                    model = %model_id,
+                    estimated_mb = estimated,
+                    committed_mb = self.vram_committed_mb(),
+                    budget_mb = self
+                        .vram_budget_mb
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    "Not enough GPU memory budget for this model — loading it on the CPU \
+                     instead (slower, but it answers). It will use the GPU again once \
+                     memory frees up"
+                );
                 going_to_cpu = true;
                 self.cpu_pinned_models.insert(model_id.clone());
                 if let Some(tx) = self.activity_tx.get() {
@@ -2490,6 +2710,7 @@ impl ModelProcessPool {
             socket_name,
             reader_handle,
             spawned_at: std::time::Instant::now(),
+            last_used: AtomicU64::new(0),
         })
     }
 
@@ -3891,6 +4112,90 @@ mod admission_tests {
             !p.admit_to_gpu(&b, 3000),
             "must be refused rather than left to OOM"
         );
+    }
+
+    fn cand(model: &str, charge_mb: u64, idle_secs: u64) -> VramReclaimCandidate {
+        VramReclaimCandidate {
+            model: ModelId(model.into()),
+            charge_mb,
+            idle_secs,
+            busy: false,
+        }
+    }
+
+    /// The reported case, in miniature. An 8B loaded fifteen minutes ago holds
+    /// 6033 MB of a 6722 MB budget; a 3B needing 3138 MB arrives. Before this,
+    /// admission simply refused and the 3B answered at 7 tok/s on the CPU while
+    /// the card sat idle.
+    #[test]
+    fn an_idle_model_gives_up_the_card_to_the_one_being_asked_for() {
+        let plan = plan_vram_reclaim(6722, 6033, 3138, vec![cand("llama-8b", 6033, 900)]);
+        assert_eq!(
+            plan,
+            vec![(ModelId("llama-8b".into()), 6033)],
+            "the idle occupant must be reclaimed rather than the newcomer demoted"
+        );
+    }
+
+    /// Reclaiming must stop as soon as the model fits: taking more than needed
+    /// costs cold starts nobody asked for.
+    #[test]
+    fn only_as_many_models_are_freed_as_the_new_one_needs() {
+        let plan = plan_vram_reclaim(
+            8000,
+            7500,
+            1000,
+            vec![cand("stale", 600, 3600), cand("older", 900, 1800)],
+        );
+        assert_eq!(plan.len(), 1, "one is enough: 7500-600+1000 <= 8000");
+        assert_eq!(plan[0].0, ModelId("stale".into()), "most idle goes first");
+    }
+
+    /// The property that makes this safe to run on every refused admission:
+    /// when reclaiming everything eligible would STILL not fit, nothing is
+    /// unloaded. The model is going to the CPU either way, so a cold start
+    /// bought nothing.
+    #[test]
+    fn nothing_is_unloaded_when_it_would_still_not_fit() {
+        let plan = plan_vram_reclaim(6000, 5000, 5500, vec![cand("small", 1000, 3600)]);
+        assert!(
+            plan.is_empty(),
+            "must not pay a reload for a model that cannot fit anyway"
+        );
+    }
+
+    /// A worker with a request in flight is never taken, however idle it looks
+    /// by the clock — that is killing an answer mid-generation.
+    #[test]
+    fn a_busy_worker_is_never_reclaimed() {
+        let mut busy = cand("serving", 6033, 9999);
+        busy.busy = true;
+        assert!(plan_vram_reclaim(6722, 6033, 3138, vec![busy]).is_empty());
+    }
+
+    /// Two models alternating faster than they load must NOT evict each other
+    /// on every request: below the idle floor the previous behaviour (the
+    /// newcomer runs on the CPU) is kept, so this can only improve placement.
+    #[test]
+    fn a_recently_used_model_keeps_the_card() {
+        let plan = plan_vram_reclaim(
+            6722,
+            6033,
+            3138,
+            vec![cand(
+                "just-answered",
+                6033,
+                VRAM_MAKE_ROOM_MIN_IDLE_SECS - 1,
+            )],
+        );
+        assert!(plan.is_empty(), "displacing it would thrash both models");
+    }
+
+    /// Nothing to do when it already fits — this must not unload models to make
+    /// room that is already there.
+    #[test]
+    fn a_model_that_already_fits_reclaims_nothing() {
+        assert!(plan_vram_reclaim(8000, 1000, 2000, vec![cand("idle", 1000, 3600)]).is_empty());
     }
 
     /// Releasing a charge frees the budget for the next admission — otherwise

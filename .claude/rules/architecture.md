@@ -537,6 +537,43 @@ silently break at the wire if duplicated:
   re-broke the case above. `raising_the_context_no_longer_costs_a_model_its_place_on_the_gpu`
   and `the_cap_is_inert_at_the_context_it_was_derived_from` pin both halves.
 
+- **`ModelProcessPool::free_vram_for_admission` + `plan_vram_reclaim`** (2026-08-25)
+  — reclaim graphics memory from models nothing is using rather than demoting the
+  requested one to the processor. Called from the admission-refusal branch in
+  `get_or_spawn_worker`, BEFORE the CPU fallback is taken. **The exact sibling of
+  `free_ram_for_admission`**, which has done reclaim-then-retry for the RAM budget
+  since v0.3.111; the GPU side simply never had it, so a model that happened to
+  load first kept the card for as long as it stayed resident and everything asked
+  for afterwards ran on the CPU (gotcha #388).
+  **Why the pre-existing LRU eviction did not cover it**: `evict_split_models_lru`
+  frees against `estimate_vram_from_shard_dir` (shard bytes × layer fraction —
+  weights ONLY) while `admit_to_gpu` weighs `estimate_gpu_footprint_mb` (weights +
+  KV at `ADMISSION_KV_CONTEXT`). Two estimates of one quantity, and the SMALLER one
+  decides how much to free — so eviction reaches its own stop condition while
+  admission is still short, every time. Measured live: eviction freed 1202 MB, then
+  admission refused against a 2449 MB shortfall and the model loaded on the CPU at
+  ~7 tok/s with the card at 12%.
+  **Neither timer can do this job.** `try_idle_vram_unload` runs on the auto-manage
+  tick, so it cannot act on the request arriving *now*, and its regional-demand
+  clause deliberately keeps a model the SWARM wants resident for up to
+  `idle_hard_unload_secs` (1 hour) — precisely a popular 8B.
+  Three properties a change here must keep. **Plan before destroying**: the whole
+  plan is costed first and abandoned whole if it cannot succeed, because unloading
+  models and still not fitting costs a cold start and buys nothing. The RAM sibling
+  may unload opportunistically — its alternative is failing the request outright;
+  here the alternative is a slower answer, so a wasted eviction is a real
+  regression. **An idle floor** (`VRAM_MAKE_ROOM_MIN_IDLE_SECS`): two models
+  alternating faster than they load would otherwise evict each other on every
+  request; below the floor the previous behaviour is kept, so this can only improve
+  placement. **LRU by real idle time, not residency**: `spawned_at` cannot tell a
+  worker answering steadily for an hour from one loaded an hour ago and never used
+  since, so `WorkerHandle::last_used` is stamped in `register_response` — the ONE
+  place every execution path (local, distributed, peer-served) passes through.
+  **Do not "correct" the estimate.** 6033 MB charged against a measured
+  `vram_after_load_mb=4853` is not a 24% over-charge; the difference is the KV
+  headroom doing its job, and trusting the measured figure would admit a model and
+  then OOM it.
+
 - **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
   admission check against it. The loader records `kv_headroom_bytes` on the
   model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward
