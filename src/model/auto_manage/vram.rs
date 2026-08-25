@@ -552,6 +552,39 @@ pub fn estimate_model_vram_mb_arch(total_size_bytes: u64, arch: &ModelArchitectu
     (total_size_bytes as f64 * active_fraction * 1.15 / (1024.0 * 1024.0)) as u64
 }
 
+/// This node's memory bandwidth in GB/s — the figure every "how fast is this
+/// machine" answer is derived from.
+///
+/// A graphics card is looked up by name; a processor-only node reports what
+/// `mem_bandwidth::measured_gbps` actually measured on it, because generating a
+/// token is bandwidth-bound.
+///
+/// `None` means the measurement could not be taken, which is a different fact
+/// from "slow" and must not be reported as one. What to do about it is the
+/// CALLER's policy and the two callers differ on purpose: the capability gossip
+/// falls back to a nominal figure so a memory-starved node still advertises
+/// something rather than nothing, while `GET /api/admin/stats` reports unknown
+/// rather than state a number it did not derive.
+///
+/// **Why this is one function.** `health::monitor` measured the CPU case and
+/// gossiped it, so every peer on the swarm was told a real speed for a
+/// processor-only node — while that node's own `/api/admin/stats` answered
+/// `null`, because its `match` on `gpu_info` had no `None` arm that asked. The
+/// swarm knew a number about the machine that the machine would not state, and
+/// anyone diagnosing a slow CPU node from its own dashboard had nothing to read
+/// (observed 2026-08-25 on a node 44 minutes into a run). A new surface that
+/// wants this figure calls this rather than re-deriving it.
+/// Takes the card's NAME rather than a struct, because there are two `GpuInfo`
+/// types in this codebase — `inference::executor::GpuInfo` on `SharedState` and
+/// `swarmllm_types::GpuInfo` on the wire — and the name is the only thing this
+/// needs from either.
+pub fn node_memory_bandwidth_gbps(gpu_name: Option<&str>) -> Option<f32> {
+    match gpu_name {
+        Some(name) => Some(gpu_memory_bandwidth_gbps(name)),
+        None => crate::inference::mem_bandwidth::measured_gbps(),
+    }
+}
+
 /// Lookup table for GPU memory bandwidth in GB/s.
 /// Used for bandwidth-based speed estimation (tokens/s ≈ bandwidth / model_size * efficiency).
 pub fn gpu_memory_bandwidth_gbps(name: &str) -> f32 {
@@ -984,6 +1017,31 @@ mod tests {
     #[test]
     fn gpu_bandwidth_unknown_returns_default() {
         assert_eq!(gpu_memory_bandwidth_gbps("Unknown GPU XYZ"), 300.0);
+    }
+
+    /// A graphics card's figure comes from the table, by name.
+    #[test]
+    fn a_card_reports_its_table_bandwidth() {
+        assert_eq!(
+            node_memory_bandwidth_gbps(Some("NVIDIA GeForce RTX 3070")),
+            Some(448.0)
+        );
+    }
+
+    /// A processor-only node reports what its memory actually delivers, not
+    /// nothing. This is the case `/api/admin/stats` answered `null` for while
+    /// the same measurement was being gossiped to every peer.
+    #[test]
+    fn a_processor_only_node_still_reports_a_bandwidth() {
+        let measured = crate::inference::mem_bandwidth::measured_gbps();
+        assert_eq!(node_memory_bandwidth_gbps(None), measured);
+        if let Some(bw) = measured {
+            assert!(bw > 0.0, "a measurement of zero would be a broken probe");
+            assert!(
+                estimate_tokens_per_sec_7b(bw, false) > 0.0,
+                "a real bandwidth must yield a real speed estimate"
+            );
+        }
     }
 
     #[test]

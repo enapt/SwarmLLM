@@ -1586,14 +1586,27 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
     let gpu_inference = shared_state.gpu_info.is_some();
     let inference_backend = shared_state.gpu_info.as_ref().map(|g| g.backend.clone());
 
-    let (memory_bandwidth_gbps, est_tokens_per_sec_7b) = match &shared_state.gpu_info {
-        Some(gpu) => {
-            let bw = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&gpu.name);
-            let tps = crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(bw, true);
-            (Some(bw), Some(tps))
-        }
-        None => (None, None),
-    };
+    // One derivation of "how fast is this machine", shared with the capability
+    // gossip in `health::monitor` — see `node_memory_bandwidth_gbps` for why
+    // this endpoint used to answer `null` on a processor-only node while every
+    // peer on the swarm had been told a real figure for it.
+    //
+    // Unknown stays unknown here: the gossip path substitutes a nominal
+    // bandwidth so a node still advertises something, but a dashboard stating a
+    // number nobody measured is worse than one saying it does not know.
+    let is_gpu = shared_state.gpu_info.is_some();
+    let (memory_bandwidth_gbps, est_tokens_per_sec_7b) =
+        match crate::model::auto_manage::vram::node_memory_bandwidth_gbps(
+            shared_state.gpu_info.as_ref().map(|g| g.name.as_str()),
+        ) {
+            Some(bw) => (
+                Some(bw),
+                Some(crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(
+                    bw, is_gpu,
+                )),
+            ),
+            None => (None, None),
+        };
 
     serde_json::json!({
         "gpu_name": gpu_name,

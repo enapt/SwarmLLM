@@ -532,7 +532,8 @@ impl HealthMonitor {
                 // Falls back to the old assumption when the measurement cannot
                 // be taken, which keeps a memory-starved node advertising
                 // something rather than nothing.
-                let gbps = crate::inference::mem_bandwidth::measured_gbps().unwrap_or(50.0);
+                let gbps = crate::model::auto_manage::vram::node_memory_bandwidth_gbps(None)
+                    .unwrap_or(50.0);
                 crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(gbps, false)
             });
 
