@@ -4,15 +4,34 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-### Fixed
+## [0.3.121-alpha] — 2026-08-25
 
-- **A machine now learns from the network that a part it is sharing is damaged.**
-  Until now the only re-check of a part already in use ran a couple of seconds
-  after startup, against whatever the machine already believed — so a machine
-  holding a damaged part could not find out from anyone else, and would only
-  notice after a later restart. When the network reports a different fingerprint
-  for a part your machine holds, that part is now re-checked straight away, and
-  set aside and replaced if it does not match.
+**A machine can now be told by the network that a part it is sharing is
+damaged.** This completes what 0.3.120 started: that release stopped a damaged
+part being accepted and passed on, and made a damaged part get replaced rather
+than merely set aside — but a machine that was *already* holding one still could
+not find out.
+
+### Why it could not find out
+
+The only re-check of a part already in use ran a couple of seconds after startup,
+against whatever that machine already believed. The periodic rescan skips parts
+already in use, and the check on the download path only looks at parts being
+considered for download.
+
+So the correct fingerprint would arrive from the network *after* the only check
+that would have used it had already run. The machine would keep offering the
+damaged part until some later restart happened to re-check it.
+
+### What changed
+
+- When the network reports a different fingerprint for a part your machine holds,
+  that part is re-checked straight away. If it does not match, your machine stops
+  offering it and fetches a replacement.
+- Only parts actually held are re-checked — re-reading one the machine does not
+  have would cost hundreds of megabytes of disk for no answer.
+- A part with a download in flight is left alone, since re-reading a half-written
+  file only raises a false alarm.
 
 
 ## [0.3.120-alpha] — 2026-08-25

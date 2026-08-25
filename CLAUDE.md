@@ -221,7 +221,20 @@ All 20 build phases complete. All subsystems wired — no stubs. **2054 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.120-alpha (2026-08-25): a corrupt shard was PROVED to spread between peers
+### Latest — v0.3.120/.121-alpha (2026-08-25): a corrupt shard was PROVED to spread between peers
+
+**.121 completes .120.** .120 stopped a corrupt shard being accepted and passed
+on, and made one that IS found bad get replaced rather than merely quarantined.
+But a node ALREADY holding a bad shard still could not find out: the only
+re-check of an already-held shard is the one-shot startup sweep, which runs ~2 s
+after boot against whatever the DB held, and the rescan skips shards already
+registered. The corrected hash arrived by gossip AFTER the only check that would
+have used it. **.121 re-checks a held shard whenever its expected hash changes**
+(`shards_pending_verification`), so a node can be told by the swarm that what it
+is serving is wrong. **The lesson is about the answer, not the code**: every
+individual piece of "detect and repair" was present and the mechanism still could
+not fire, because nothing re-asked the question after the reference changed.
+Trace the trigger; do not reason forward from the parts.
 
 Integrity round. Found on the live node by RUNNING it, and settled against an
 independent reference rather than reasoning. Detail: gotchas #381/#382,
