@@ -381,19 +381,27 @@ impl HealthMonitor {
         // is the only signal that cannot be a transient.
         let store = self.shared_state.shard_store();
         let mut vanished = Vec::new();
-        hosted_shards.retain(|s| {
-            if store.shard_file_present(s) {
-                true
-            } else {
-                vanished.push(s.clone());
+        hosted_shards.retain(|s| match store.missing_shard_reason(s) {
+            None => true,
+            Some(why) => {
+                vanished.push((s.clone(), why));
                 false
             }
         });
-        for shard_id in vanished {
+        for (shard_id, why) in vanished {
+            // Say WHICH of the two this is. Both end the claim, but a
+            // quarantine is a verdict this node reached about bytes that are
+            // still on disk, while an absence is storage loss — and they send
+            // an operator in opposite directions. Reporting a quarantine as
+            // "gone from disk" is how a correct copy, moved aside under a
+            // reference that may itself have been wrong, left no trace anyone
+            // could follow (2026-08-26).
             tracing::warn!(
                 model = %shard_id.model_id,
                 index = shard_id.index,
-                "Shard file is gone from disk — no longer claiming it to the swarm"
+                reason = ?why,
+                "No longer claiming a shard to the swarm: {}",
+                why.explanation()
             );
             self.shared_state
                 .model_registry

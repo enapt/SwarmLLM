@@ -109,6 +109,36 @@ pub struct ShardStore {
 /// Returns `Some((actual, expected))` when a mismatch was found and quarantined.
 /// `expected == 0` means the manifest carries no size, which is the documented
 /// "unknown" escape hatch and is never treated as a mismatch.
+/// Why a shard this node claimed is no longer at its expected path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingShard {
+    /// Renamed aside by `verify_shard` after its bytes failed a hash check.
+    QuarantinedHashMismatch,
+    /// Renamed aside by `quarantine_shard_if_size_mismatch`.
+    QuarantinedSizeMismatch,
+    /// Not on disk under any name — a storage problem, not a verdict.
+    Absent,
+}
+
+impl MissingShard {
+    /// What to tell an operator. A quarantine is a DECISION this node made and
+    /// can be re-examined; an absence is data loss.
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Self::QuarantinedHashMismatch => {
+                "its bytes did not match the hash this node expected, so it was moved aside as \
+                 <name>.bin.quarantine — the file is still there. If the expected hash came from \
+                 the swarm rather than from the model's origin, the copy may have been the good one"
+            }
+            Self::QuarantinedSizeMismatch => {
+                "its size did not match the manifest, so it was moved aside as \
+                 <name>.bin.mismatched — the file is still there, most likely a truncated transfer"
+            }
+            Self::Absent => "the file is not on disk under any name",
+        }
+    }
+}
+
 pub fn quarantine_shard_if_size_mismatch(
     shard_path: &std::path::Path,
     expected_size: u64,
@@ -178,6 +208,40 @@ impl ShardStore {
     /// be a transient.
     pub fn shard_file_present(&self, shard_id: &crate::types::ShardId) -> bool {
         self.shard_path(&shard_id.model_id, shard_id.index).exists()
+    }
+
+    /// Why a shard file is not where it should be: moved aside by a check, or
+    /// genuinely gone.
+    ///
+    /// **"Gone from disk" and "quarantined" need opposite responses**, and the
+    /// reconcile sweep reported both as the former. A shard that failed
+    /// verification is renamed beside itself — `.bin.quarantine` for a hash
+    /// mismatch, `.bin.mismatched` for a size one — so the bytes are still
+    /// there and the question is which reference judged them. A shard that is
+    /// genuinely absent is a storage problem. Telling an operator the file is
+    /// "gone" when it is sitting next to where it was sends them looking for
+    /// disk loss.
+    ///
+    /// Found 2026-08-26: a `qwen2.5-coder` shard whose bytes matched BOTH the
+    /// hash this node took from the model's origin AND its own manifest was
+    /// quarantined, and the only trace in the log was this sweep announcing the
+    /// file was gone. It was not gone; it was one `mv` away, and correct. What
+    /// renamed it is still undetermined — which is the point: the one line that
+    /// did fire described the wrong thing, so there was nothing to trace.
+    pub fn missing_shard_reason(&self, shard_id: &crate::types::ShardId) -> Option<MissingShard> {
+        let path = self.shard_path(&shard_id.model_id, shard_id.index);
+        if path.exists() {
+            return None;
+        }
+        for (ext, why) in [
+            ("bin.quarantine", MissingShard::QuarantinedHashMismatch),
+            ("bin.mismatched", MissingShard::QuarantinedSizeMismatch),
+        ] {
+            if path.with_extension(ext).exists() {
+                return Some(why);
+            }
+        }
+        Some(MissingShard::Absent)
     }
 
     /// Scan disk for locally available shard files, returning (index, path) pairs.
@@ -916,5 +980,85 @@ mod size_mismatch_tests {
             None
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod missing_shard_tests {
+    use super::*;
+    use crate::types::{ModelId, ShardId};
+
+    fn store_with(name: &str) -> (tempfile::TempDir, ShardStore, ShardId) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ShardStore::new(dir.path());
+        let model_id = ModelId("m".into());
+        let sid = ShardId {
+            model_id: model_id.clone(),
+            index: 0,
+        };
+        let base = store.shard_path(&model_id, 0);
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        if !name.is_empty() {
+            let p = if name == "bin" {
+                base.clone()
+            } else {
+                base.with_extension(name)
+            };
+            std::fs::write(&p, b"bytes").unwrap();
+        }
+        (dir, store, sid)
+    }
+
+    /// A shard that is present is not missing, whatever else is lying around.
+    #[test]
+    fn a_present_shard_has_no_missing_reason() {
+        let (_d, store, sid) = store_with("bin");
+        assert_eq!(store.missing_shard_reason(&sid), None);
+    }
+
+    /// The case this exists for. A quarantined shard's bytes are STILL THERE,
+    /// and saying "gone from disk" sent an operator hunting for storage loss
+    /// while a correct copy sat one `mv` away.
+    #[test]
+    fn a_quarantined_shard_is_not_reported_as_lost() {
+        let (_d, store, sid) = store_with("bin.quarantine");
+        assert_eq!(
+            store.missing_shard_reason(&sid),
+            Some(MissingShard::QuarantinedHashMismatch)
+        );
+        let why = store.missing_shard_reason(&sid).unwrap();
+        assert!(
+            why.explanation().contains("still there"),
+            "the message must say the bytes survive: {}",
+            why.explanation()
+        );
+        assert!(
+            !why.explanation().contains("not on disk"),
+            "must not claim the file is absent"
+        );
+    }
+
+    /// A size mismatch is a different verdict with a different likely cause
+    /// (truncated transfer), and uses a different suffix.
+    #[test]
+    fn a_size_mismatch_quarantine_is_told_apart() {
+        let (_d, store, sid) = store_with("bin.mismatched");
+        assert_eq!(
+            store.missing_shard_reason(&sid),
+            Some(MissingShard::QuarantinedSizeMismatch)
+        );
+    }
+
+    /// Genuine loss must still be reported as loss — this must not turn every
+    /// absence into a reassuring "it's probably quarantined".
+    #[test]
+    fn a_genuinely_absent_shard_is_still_reported_as_absent() {
+        let (_d, store, sid) = store_with("");
+        assert_eq!(store.missing_shard_reason(&sid), Some(MissingShard::Absent));
+        assert!(store
+            .missing_shard_reason(&sid)
+            .unwrap()
+            .explanation()
+            .contains("not on disk"));
     }
 }
