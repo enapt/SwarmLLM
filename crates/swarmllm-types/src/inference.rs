@@ -292,6 +292,27 @@ pub struct LayerForward {
     /// LoRA adapter ID to apply during inference. When set, the worker loads the
     /// adapter from the data_dir and applies its low-rank deltas per-layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Sampling parameters for the segment that SAMPLES, carried in-process
+    /// only (`serde(skip)`), so the wire format is unchanged.
+    ///
+    /// **Why this exists.** The node holding the last segment is the one that
+    /// turns logits into a token, and nothing was telling it how. Both forward
+    /// entry points built their worker request with `sampling:
+    /// Default::default()`, so a request's temperature, top_p, top_k and stop
+    /// strings were replaced with 0.7/0.9/40 the moment it went through the
+    /// pipeline path instead of the local fast path — which is what every
+    /// COLD-START request does, because a model that is not loaded yet has no
+    /// entry for the fast path to find. The same request therefore sampled
+    /// differently depending on whether the model happened to be resident
+    /// (measured 2026-08-26).
+    ///
+    /// `None` means "no request context here" and keeps the previous
+    /// behaviour. That is the honest state for a segment served on behalf of
+    /// a REMOTE coordinator: the parameters are not on the wire, so a peer
+    /// still samples with defaults. Closing that needs a protocol field and
+    /// its own `build_layer_forward_aad` change — see `docs/FUTURE_WORK.md`.
+    #[serde(skip)]
+    pub sampling: Option<SamplingParams>,
     pub adapter_id: Option<String>,
     /// Speculative decoding: γ draft token IDs for the target model to verify.
     /// When non-empty, the worker runs a multi-position forward pass over these

@@ -109,6 +109,7 @@ impl PipelineExecutor {
                     spec_logits_requested: false,
                     truncate_kv_to: None,
                     chunk_meta: None,
+                    sampling: None,
                 };
                 self.shared_state
                     .model_process_pool
@@ -148,6 +149,7 @@ impl PipelineExecutor {
                         spec_logits_requested: false,
                         truncate_kv_to: None,
                         chunk_meta: None,
+                        sampling: None,
                     };
                     let _ = self
                         .network_tx
@@ -184,6 +186,7 @@ impl PipelineExecutor {
                     spec_logits_requested: false,
                     truncate_kv_to: None,
                     chunk_meta: None,
+                    sampling: None,
                 };
                 let attn_partial = self
                     .shared_state
@@ -267,6 +270,7 @@ impl PipelineExecutor {
                         spec_logits_requested: false,
                         truncate_kv_to: None,
                         chunk_meta: None,
+                        sampling: None,
                     };
                     let _ = self
                         .network_tx
@@ -303,6 +307,7 @@ impl PipelineExecutor {
                     spec_logits_requested: false,
                     truncate_kv_to: None,
                     chunk_meta: None,
+                    sampling: None,
                 };
                 let ffn_partial = self
                     .shared_state
@@ -392,6 +397,7 @@ impl PipelineExecutor {
                 spec_logits_requested: false,
                 truncate_kv_to: None,
                 chunk_meta: None,
+                sampling: None,
             };
             let layer_result = self
                 .shared_state

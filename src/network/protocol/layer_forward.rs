@@ -477,6 +477,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         spec_logits_requested,
         truncate_kv_to,
         chunk_meta,
+        sampling: None,
     })
 }
 
@@ -514,6 +515,7 @@ mod tests {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         }
     }
 

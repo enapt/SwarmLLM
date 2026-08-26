@@ -297,6 +297,12 @@ impl PipelineExecutor {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            // The segment that samples needs the caller's parameters. Without
+            // this the worker fell back to `SamplingParams::default()` —
+            // 0.7/0.9/40 — so a request's temperature, top_p, top_k and stop
+            // strings were silently discarded whenever it took the pipeline
+            // path, which is every COLD-START request.
+            sampling: Some(self.request.sampling_params.clone()),
         };
         let layer_result = self
             .shared_state

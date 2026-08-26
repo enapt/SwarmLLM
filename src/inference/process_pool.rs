@@ -2758,6 +2758,11 @@ impl ModelProcessPool {
         &self,
         forward: crate::types::LayerForward,
     ) -> Result<crate::types::LayerResult, SwarmError> {
+        // `None` means the caller had no request context — a segment served
+        // for a REMOTE coordinator, whose parameters are not on the wire.
+        // Defaulting there preserves the previous behaviour; see the field's
+        // documentation on `LayerForward`.
+        let forward_sampling = forward.sampling.clone().unwrap_or_default();
         let model_id = forward.model_id.clone();
         let handle = self.get_or_spawn(&model_id).await?;
 
@@ -2782,6 +2787,7 @@ impl ModelProcessPool {
             spec_logits_requested,
             truncate_kv_to,
             chunk_meta: _,
+            sampling: _,
         } = forward;
 
         // Split vision embeddings out of the JSON header into the binary
@@ -2810,7 +2816,7 @@ impl ModelProcessPool {
             vision_embeddings_len: vision_len,
             requester_node_id,
             pre_embedded,
-            sampling: Default::default(),
+            sampling: forward_sampling,
             adapter_id,
             draft_tokens,
             generated_ids,
@@ -2970,7 +2976,12 @@ impl ModelProcessPool {
                 spec_logits_requested,
                 truncate_kv_to,
                 chunk_meta: _,
+                // Per-item: a batch can carry forwards from different requests,
+                // so the parameters travel with each one rather than being
+                // taken from the batch head.
+                sampling,
             } = f;
+            let forward_sampling = sampling.unwrap_or_default();
             activation_lens.push(activations.len() as u32);
             concat_payload.extend_from_slice(&activations);
             ipc_requests.push(IpcForward {
@@ -2984,7 +2995,7 @@ impl ModelProcessPool {
                 vision_embeddings_len: 0,
                 requester_node_id,
                 pre_embedded,
-                sampling: Default::default(),
+                sampling: forward_sampling,
                 adapter_id,
                 draft_tokens,
                 generated_ids,

@@ -965,6 +965,7 @@ impl PipelineExecutor {
                         .filter(|(first, last, _)| idx >= *first && idx <= *last)
                         .map(|(_, _, pos)| pos),
                     chunk_meta: None,
+                    sampling: None,
                 };
 
                 let target_peer_bytes = self
@@ -1574,6 +1575,7 @@ impl PipelineExecutor {
                     spec_logits_requested: false,
                     truncate_kv_to: None,
                     chunk_meta: None,
+                    sampling: None,
                 };
 
                 let target_peer_bytes =

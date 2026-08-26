@@ -692,6 +692,7 @@ mod tests {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         }
     }
 

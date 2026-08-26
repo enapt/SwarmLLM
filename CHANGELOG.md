@@ -2,6 +2,31 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.128-alpha] — 2026-08-26
+
+### Fixed
+
+- **Your temperature and related settings were being ignored on the first
+  request to a model.** Anything sent before a model was loaded — which is
+  every first request, and every request after a model has been idle long
+  enough to be unloaded — was answered using built-in defaults (temperature
+  0.7) rather than the values you asked for. Asking for deterministic output
+  did not get it. The same request could answer differently depending only on
+  whether the model happened to already be in memory.
+
+  Requests served on behalf of another machine still use the defaults, because
+  those settings are not carried between nodes yet; that is recorded as
+  follow-up work.
+
+### Added
+
+- A pre-release check (`examples/release_shapes.sh`) that exercises the kinds
+  of request this project keeps getting wrong — a first request to an unloaded
+  model, a very long system prompt, a request carrying many tools, and a
+  determinism check — against the built artifact before it is published. The
+  three faults fixed today were all invisible to the existing tests and only
+  appeared when the software was actually run.
+
 ## [0.3.127-alpha] — 2026-08-26
 
 ### Fixed

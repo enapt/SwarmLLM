@@ -325,6 +325,7 @@ pub(super) async fn handle_layer_forward(
                         spec_logits_requested: false,
                         truncate_kv_to: None,
                         chunk_meta: None,
+                        sampling: None,
                     };
                     tracing::info!(
                         request_id = %request_id,

@@ -437,6 +437,7 @@ pub fn decode_layer_forward_encrypted(
         spec_logits_requested,
         truncate_kv_to,
         chunk_meta,
+        sampling: None,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -475,6 +476,7 @@ mod tests {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         }
     }
 

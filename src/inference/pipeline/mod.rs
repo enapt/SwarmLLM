@@ -223,6 +223,7 @@ pub(super) fn build_spec_verify_forward(
         spec_logits_requested: true,
         truncate_kv_to,
         chunk_meta: None,
+        sampling: None,
     }
 }
 
@@ -451,6 +452,7 @@ pub(super) fn build_kv_truncate_forward(
         spec_logits_requested: false,
         truncate_kv_to: Some(truncate_to),
         chunk_meta: None,
+        sampling: None,
     }
 }
 

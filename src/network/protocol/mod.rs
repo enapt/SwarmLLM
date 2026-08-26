@@ -979,6 +979,7 @@ mod tests {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1019,6 +1020,7 @@ mod tests {
                 spec_logits_requested: false,
                 truncate_kv_to: None,
                 chunk_meta: None,
+                sampling: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
             assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
@@ -1055,6 +1057,7 @@ mod tests {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1085,6 +1088,7 @@ mod tests {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1120,6 +1124,7 @@ mod tests {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         // Trim to remove the trailer — simulates an old encoder
@@ -1299,6 +1304,7 @@ mod tests {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
 
@@ -1342,6 +1348,7 @@ mod tests {
             spec_logits_requested: true,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1378,6 +1385,7 @@ mod tests {
             spec_logits_requested: true,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();
@@ -1412,6 +1420,7 @@ mod tests {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            sampling: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();
