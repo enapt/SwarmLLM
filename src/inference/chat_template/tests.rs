@@ -1187,3 +1187,50 @@ fn llama3_still_gets_llama3_format() {
     );
     assert!(!out.contains("<|user|>\n"), "must not be Zephyr: {out:?}");
 }
+
+/// The prompt shapes a correct template produces MUST pass. A false positive
+/// here would put a warning on every healthy request, which is worse than the
+/// silence it replaces.
+#[test]
+fn a_correctly_rendered_prompt_hands_over_to_the_model() {
+    use super::prompt_hands_over_to_the_model;
+    for good in [
+        // ChatML / Qwen
+        "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n",
+        // Llama-3
+        "<|start_header_id|>user<|end_header_id|>\n\nhi<|eot_id|>\
+         <|start_header_id|>assistant<|end_header_id|>\n\n",
+        // Gemma
+        "<start_of_turn>user\nhi<end_of_turn>\n<start_of_turn>model\n",
+        // Mistral / Llama-2
+        "[INST] hi [/INST]",
+        // A plain completion prompt has no turn structure at all.
+        "Once upon a time",
+    ] {
+        assert!(
+            prompt_hands_over_to_the_model(good),
+            "flagged a healthy prompt: {good:?}"
+        );
+    }
+}
+
+/// The failure this exists to name: the generation prompt was not appended, so
+/// the model is shown a finished conversation and ends its turn at once.
+#[test]
+fn a_prompt_that_closes_the_turn_is_caught() {
+    use super::prompt_hands_over_to_the_model;
+    for bad in [
+        "<|im_start|>user\nhi<|im_end|>",
+        // Trailing whitespace must not hide it — templates commonly emit a
+        // newline after the closing marker.
+        "<|im_start|>user\nhi<|im_end|>\n",
+        "<|start_header_id|>user<|end_header_id|>\n\nhi<|eot_id|>",
+        "<start_of_turn>user\nhi<end_of_turn>\n",
+        "[INST] hi [/INST] answer</s>",
+    ] {
+        assert!(
+            !prompt_hands_over_to_the_model(bad),
+            "missed a turn-closing prompt: {bad:?}"
+        );
+    }
+}

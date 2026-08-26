@@ -6,6 +6,14 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A reply that stops after one word now explains itself.** If the prompt sent
+  to a model ends by closing a conversation rather than opening the model's
+  turn, the model does the correct thing and says nothing — which arrives
+  looking like a one-word answer for no reason, and is very hard to chase
+  because it comes and goes. The node now notices that as it builds the prompt,
+  on every request, and says so plainly in the log along with the model
+  involved. Nothing to turn on.
+
 - **A model could take the graphics card and then refuse every request.** If
   memory ran out between the moment a model was accepted onto the card and the
   moment it finished loading, it came up with no room left for the conversation

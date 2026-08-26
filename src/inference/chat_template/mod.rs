@@ -190,6 +190,44 @@ pub fn with_template_stops(
 /// Llama-3 model whose template failed was asked to speak ChatML (which is
 /// where the stray `<|im_end|>` markers came from). Pass the model id unless
 /// you genuinely do not have one.
+/// Markers that CLOSE a turn. A rendered chat prompt that ends on one of these
+/// has handed the model a finished conversation.
+///
+/// Only closers appear here, never openers: `<|im_start|>assistant\n` and
+/// `<|start_header_id|>assistant<|end_header_id|>` are how a correct template
+/// ends, and both must pass.
+const TURN_ENDING_MARKERS: &[&str] = &[
+    "<|im_end|>",
+    "<|eot_id|>",
+    "<|end|>",
+    "<|endoftext|>",
+    "<end_of_turn>",
+    "</s>",
+];
+
+/// Does this rendered prompt hand the turn to the model?
+///
+/// A chat prompt is supposed to end where the model is meant to start writing —
+/// the generation prompt. When it ends on a turn-CLOSING marker instead, the
+/// model is looking at a completed conversation and the correct thing for it to
+/// do is end its turn, which it does: one token, `finish_reason: "stop"`, no
+/// stop sequence involved and nothing wrong with sampling.
+///
+/// **Why this is checked at render time rather than after a short reply.** That
+/// symptom is intermittent and maddening to chase from the outside — a tester
+/// spent three releases on a version of it, could not build a minimal repro,
+/// and neither could we. But the condition itself is deterministic and visible
+/// the moment the prompt is built, before a single token is generated. Checking
+/// the postcondition where it is established turns an unreproducible symptom
+/// into a line in the log on the request that caused it.
+///
+/// Returns `true` for a prompt with no control markers at all: that is an
+/// ordinary completion-style prompt and none of this applies to it.
+pub(crate) fn prompt_hands_over_to_the_model(prompt: &str) -> bool {
+    let tail = prompt.trim_end();
+    !TURN_ENDING_MARKERS.iter().any(|m| tail.ends_with(m))
+}
+
 pub fn build_prompt(
     messages: &[ChatMessage],
     template: Option<&str>,
@@ -197,7 +235,28 @@ pub fn build_prompt(
     eos_token: &str,
     model_name: Option<&str>,
 ) -> String {
-    build_prompt_with_model(messages, template, bos_token, eos_token, model_name)
+    let prompt = build_prompt_with_model(messages, template, bos_token, eos_token, model_name);
+    if !prompt_hands_over_to_the_model(&prompt) {
+        // WARN, not an error: the request still runs, and being wrong about
+        // this must never cost someone an answer. What it buys is that the
+        // next occurrence explains itself instead of looking like the model
+        // refusing to speak.
+        let closer = TURN_ENDING_MARKERS
+            .iter()
+            .find(|m| prompt.trim_end().ends_with(*m))
+            .copied()
+            .unwrap_or("");
+        tracing::warn!(
+            model = model_name.unwrap_or("<unknown>"),
+            ends_with = %closer,
+            prompt_chars = prompt.len(),
+            "the rendered prompt ends by CLOSING a turn rather than opening the model's, so the \
+             model is being shown a finished conversation and will most likely end its turn at \
+             once — one token, finish_reason \"stop\". This is the prompt, not sampling: the \
+             chat template for this model did not append its generation prompt"
+        );
+    }
+    prompt
 }
 
 /// Pick a fallback prompt format from the model name alone.
