@@ -4,6 +4,88 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+## [0.3.125-alpha] — 2026-08-26
+
+**An overnight watch of a running node.** Every fix here came from putting real
+work through the software and reading what it did, not from reviewing code. Two
+of them make a large difference to how fast it feels.
+
+### A model left idle no longer keeps the graphics card to itself
+
+Whichever model happened to load first kept the card for as long as it stayed in
+memory, and everything asked for afterwards ran on the processor — even with the
+card sitting idle and the first model untouched for a quarter of an hour.
+
+Measured on the same question, on the same machine, minutes apart: **72.7 seconds
+when the card was being squatted, 2.99 seconds once it was not.**
+
+The node now takes the card back from a model nothing is using, rather than
+demoting the one you actually asked for. It costs the whole plan first and does
+nothing if the model still would not fit, so you never pay a reload for nothing.
+It will not take the card from a model used in the last minute, so two models in
+alternating use cannot evict each other on every request.
+
+This also fixes something worse than slowness. A model pushed onto the processor
+is then treated as one this machine cannot run, so the work is sent out to other
+machines — where it can fail outright. Requests were failing on the network for a
+model held complete on the local disk.
+
+### A finished reply no longer holds its connection open for 15 seconds
+
+A streamed reply whose words had all arrived kept its connection open for up to
+another fifteen seconds. Anything that reads a reply to the end — command-line
+tools, scripts, some client libraries — waited that out every single time.
+Measured: an eight-word answer delivered in half a second did not finish until
+fifteen. **It now finishes in one or two thousandths of a second.**
+
+The server was also holding a connection and a task per reply for that whole
+time, whether or not the client noticed.
+
+### Coding answers are no longer cut off at their first "#"
+
+An answer that began with a Rust attribute, a Python comment, a Markdown heading
+or an `#include` could come back as a single character — no error, nothing in the
+response to say what happened. It looked like the model simply had nothing to
+say.
+
+Where a node could not read a model's own end-of-answer marker it substituted a
+default. That default belongs to one older family of models, and in Qwen's
+vocabulary the same number is an ordinary `#`. Any model whose marker could not
+be read therefore ended its answer the first time it wrote one.
+
+Reported three times over several days by a team running a coding assistant. The
+node now checks a candidate marker against the model's own vocabulary before
+believing it, and where there is nothing to check against it says so rather than
+guessing.
+
+### A machine that says it lacks part of a model now loses the claim
+
+A peer that answered "I do not have those parts" kept being picked for the same
+work. One machine was the middle step of eleven failed requests in half an hour,
+across three models, refusing each in about seven milliseconds — with its standing
+untouched the whole time, because nothing recognised what it had said.
+
+A serving node deliberately rewrites those errors before sending them, so it does
+not leak file paths to strangers. The check on the other side was looking for the
+wording before the rewrite — the one wording that can never arrive.
+
+### Clearer about whose fault a failure is
+
+- A machine that goes quiet mid-request is reported as a machine that went quiet,
+  not as a fault in the node you are talking to. It also no longer logs as an
+  error on your own machine, and the machine that went silent is now accounted
+  for.
+- A node without a graphics card reports its own measured speed. It already told
+  every other machine on the network; its own status page said nothing.
+- A refused model description now says which model and which machine it came from
+  — it used to print two long numbers and nothing else, thousands of times.
+- A part of a model set aside by a check is no longer described as gone from the
+  disk. It is still there, and the two need opposite responses.
+- When there is no graphics memory left for a model's conversation cache, the
+  node no longer says shorter conversations are unaffected. At that point none
+  are.
+
+
 ## [0.3.124-alpha] — 2026-08-25
 
 **Stability round.** Everything here was found by running the software and
