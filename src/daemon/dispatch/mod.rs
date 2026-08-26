@@ -1103,14 +1103,32 @@ pub(crate) async fn dispatch_network_messages(
                                                 // whether it mattered. The
                                                 // sibling arm above already
                                                 // reports both.
+                                                // Two peers re-gossiping ONE
+                                                // contradicted manifest every
+                                                // 30 s produced 4709 of these
+                                                // lines on this node — 14% of
+                                                // a month's warnings — all
+                                                // reporting the same condition,
+                                                // already handled correctly the
+                                                // first time. Keyed on the
+                                                // hash, so a publisher that
+                                                // fixes its copy is verified
+                                                // afresh rather than staying
+                                                // rejected.
+                                                if let Some(suppressed) = note_manifest_rejection(
+                                                    &manifest.id,
+                                                    manifest.manifest_hash,
+                                                ) {
                                                 tracing::warn!(
                                                     error = %e,
                                                     model = %manifest.id,
                                                     model_name = %manifest.name,
                                                     from_peer = ?authenticated_sender,
                                                     shard_count = manifest.shard_count,
+                                                    suppressed_since_last = suppressed,
                                                     "Manifest hash verification failed — rejecting"
                                                 );
+                                                }
                                             }
                                         }
                                     }
@@ -2343,6 +2361,67 @@ pub(crate) async fn dispatch_network_messages(
     }
 }
 
+/// A manifest we have already verified and rejected, so the next identical
+/// copy costs neither a re-hash nor another log line.
+///
+/// Keyed by `(model, the manifest hash we rejected)`. Keying on the HASH is
+/// what keeps this self-correcting: if the publisher fixes its copy the hash
+/// changes, the key misses, and the new manifest is verified normally. It can
+/// therefore never latch a model into permanent rejection.
+struct RejectedManifest {
+    last_logged: std::time::Instant,
+    /// Rejections swallowed since then, reported with the next emitted line so
+    /// the rate is visible even though the repetition is not.
+    suppressed: u64,
+}
+
+/// How long to hold an identical manifest rejection before logging it again.
+///
+/// Measured on the live node 2026-08-26: two peers re-gossiped one contradicted
+/// `qwen2.5-coder` manifest every 30 s, producing **4709 WARN lines** — 14% of
+/// every warning in a month-long log — for a condition correctly handled the
+/// first time. An hour against a 30-second cadence turns 120 lines into 1.
+const REJECTED_MANIFEST_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Bound on the rejection map. Reached only under deliberate manifest spam; a
+/// forgotten entry costs one extra verification and one extra log line.
+const MAX_REJECTED_MANIFESTS: usize = 512;
+
+static REJECTED_MANIFESTS: std::sync::LazyLock<
+    dashmap::DashMap<(crate::types::ModelId, [u8; 32]), RejectedManifest>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+/// Should this rejection be logged, and how many were swallowed since the last
+/// one? `None` means "already known and still inside the quiet window".
+///
+/// Returns `Some(suppressed_count)` the first time a given (model, hash) is
+/// rejected and once per window thereafter.
+fn note_manifest_rejection(model: &crate::types::ModelId, manifest_hash: [u8; 32]) -> Option<u64> {
+    let key = (model.clone(), manifest_hash);
+    if let Some(mut prev) = REJECTED_MANIFESTS.get_mut(&key) {
+        if prev.last_logged.elapsed() >= REJECTED_MANIFEST_LOG_WINDOW {
+            let n = prev.suppressed;
+            prev.last_logged = std::time::Instant::now();
+            prev.suppressed = 0;
+            return Some(n);
+        }
+        prev.suppressed = prev.suppressed.saturating_add(1);
+        return None;
+    }
+    if REJECTED_MANIFESTS.len() >= MAX_REJECTED_MANIFESTS {
+        // Full: log it rather than silently dropping the report.
+        return Some(0);
+    }
+    REJECTED_MANIFESTS.insert(
+        key,
+        RejectedManifest {
+            last_logged: std::time::Instant::now(),
+            suppressed: 0,
+        },
+    );
+    Some(0)
+}
+
 pub(crate) mod layer_forward;
 mod remote_generate;
 mod vision;
@@ -2398,5 +2477,67 @@ mod contribution_limits_tests {
                 "{c:?}: below 4 a tensor-parallel group cannot progress, got {per_peer}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod rejected_manifest_tests {
+    use super::{note_manifest_rejection, REJECTED_MANIFESTS};
+    use crate::types::ModelId;
+
+    fn fresh(name: &str) -> ModelId {
+        // Each test uses its own model id: the suppression map is a process-wide
+        // static, so sharing an id across tests would make them order-dependent.
+        REJECTED_MANIFESTS.retain(|k, _| k.0 .0 != name);
+        ModelId(name.to_string())
+    }
+
+    /// The first rejection is always reported — silence on a genuinely new
+    /// contradiction would hide the thing this line exists to surface.
+    #[test]
+    fn the_first_rejection_is_logged() {
+        let m = fresh("first-is-logged");
+        assert_eq!(note_manifest_rejection(&m, [7u8; 32]), Some(0));
+    }
+
+    /// The repeats are what produced 4709 lines. Same model, same hash, same
+    /// condition — report it once, then stay quiet inside the window.
+    #[test]
+    fn identical_repeats_are_suppressed() {
+        let m = fresh("repeats-suppressed");
+        assert_eq!(note_manifest_rejection(&m, [1u8; 32]), Some(0));
+        for _ in 0..200 {
+            assert_eq!(
+                note_manifest_rejection(&m, [1u8; 32]),
+                None,
+                "an identical rejection inside the window must not log again"
+            );
+        }
+    }
+
+    /// The self-correcting property, and the reason the key includes the hash:
+    /// a publisher that fixes its copy sends a DIFFERENT manifest, which must
+    /// be reported (and verified) rather than inheriting the old verdict.
+    #[test]
+    fn a_different_manifest_from_the_same_model_is_reported() {
+        let m = fresh("different-hash-reported");
+        assert_eq!(note_manifest_rejection(&m, [1u8; 32]), Some(0));
+        assert_eq!(note_manifest_rejection(&m, [1u8; 32]), None);
+        assert_eq!(
+            note_manifest_rejection(&m, [2u8; 32]),
+            Some(0),
+            "a changed manifest hash must never inherit the previous verdict"
+        );
+    }
+
+    /// Two models contradicting at once are two separate conditions; one must
+    /// not silence the other.
+    #[test]
+    fn one_model_does_not_silence_another() {
+        let a = fresh("model-a-independent");
+        let b = fresh("model-b-independent");
+        assert_eq!(note_manifest_rejection(&a, [9u8; 32]), Some(0));
+        assert_eq!(note_manifest_rejection(&a, [9u8; 32]), None);
+        assert_eq!(note_manifest_rejection(&b, [9u8; 32]), Some(0));
     }
 }

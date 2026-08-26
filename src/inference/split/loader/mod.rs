@@ -510,10 +510,41 @@ impl SplitModel {
                         weight_mb = weight_bytes / (1024 * 1024),
                         kv_bytes_per_token = per_token,
                         "There is no free graphics memory left for this model's conversation \
-                         cache, so EVERY request to it will be refused until memory frees up — \
-                         not just long ones. Close other GPU programs, or unload another model, \
-                         and this model will use the card again",
+                         cache, so it cannot serve from the card — moving it to the processor, \
+                         which is slower but answers. Close other GPU programs, or unload \
+                         another model, and it will use the card again",
                     );
+                    // REFUSE the placement rather than completing it.
+                    //
+                    // Coming up here means coming up broken: the worker is
+                    // alive, advertised and accepting requests, and 503s every
+                    // one of them — measured 2026-08-25, six refusals in eleven
+                    // minutes including a 42-token conversation, a 4-way batch
+                    // that failed outright, and a streamed reply that returned
+                    // empty. Serving slowly on the processor beats serving
+                    // nothing at all, and that is the choice being made here.
+                    //
+                    // The error carries `NO_KV_CACHE_ROOM_MARKER`, which
+                    // `worker_ipc::permanent_gpu_failure` matches to pin the
+                    // model to the CPU; the pool lifts that pin as soon as any
+                    // GPU memory is freed, so a transient shortage costs one
+                    // model load rather than the rest of the run.
+                    //
+                    // This is deliberately NOT a load-time device switch. The
+                    // daemon charged this model against the VRAM budget at
+                    // admission, so quietly landing it in RAM instead would
+                    // leave both budgets describing something that is not
+                    // there — see `ModelProcessPool::charges_ram`. Placement
+                    // changes go through the pool.
+                    return Err(SwarmError::ServiceUnavailable(format!(
+                        "{} — this model needs about {} MB for a {}-token conversation cache, \
+                         and the card has none left after its {} MB of weights; running it on \
+                         the processor instead, which is slower but answers",
+                        crate::inference::worker_ipc::NO_KV_CACHE_ROOM_MARKER,
+                        per_token.saturating_mul(context_length as u64) / (1024 * 1024),
+                        context_length,
+                        weight_bytes / (1024 * 1024),
+                    )));
                 } else {
                     tracing::warn!(
                         context = context_length,

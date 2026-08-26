@@ -2,6 +2,25 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A model could take the graphics card and then refuse every request.** If
+  memory ran out between the moment a model was accepted onto the card and the
+  moment it finished loading, it came up with no room left for the conversation
+  itself — alive, listed as available, and turning down everything sent to it,
+  including a 42-token question. It now runs on the processor instead: slower,
+  but answering. As soon as graphics memory frees up it goes back to the card on
+  its own.
+
+- **A rejected model description from another node was re-checked and re-logged
+  for ever.** Two peers were re-sending the same wrong description every thirty
+  seconds; each copy was correctly refused, and each refusal wrote another
+  warning — 4709 of them, 14% of every warning in a month of logs. The refusal
+  is now remembered, so the same copy costs nothing and is reported once an hour
+  with a count. A node that corrects its copy is re-checked normally.
+
 ## [0.3.126-alpha] — 2026-08-26
 
 ### Fixed

@@ -498,6 +498,11 @@ pub fn worker_error_is_fatal(message: &str) -> bool {
         "not enough memory",
         "failed to allocate",
         "allocation failed",
+        // A GPU placement with no room left for the conversation cache. Fatal
+        // in the sense this function means: the worker must be recycled, so the
+        // pool can bring the model back on the processor instead of leaving a
+        // worker up that refuses every request.
+        NO_KV_CACHE_ROOM_MARKER,
     ];
     let lower = message.to_ascii_lowercase();
     FATAL_PATTERNS.iter().any(|p| lower.contains(p))
@@ -519,7 +524,27 @@ pub enum PermanentGpuFailure {
     /// in `daemon::gpu_support` could not read the capability (no nvidia-smi,
     /// NVML mismatch) and so left the GPU enabled.
     ArchitectureTooOld,
+    /// The weights fit, but nothing is left for the conversation cache, so the
+    /// worker would come up and refuse every request — including a 42-token
+    /// one (measured 2026-08-25). Detected by the loader rather than reported
+    /// by the driver: see [`NO_KV_CACHE_ROOM_MARKER`].
+    ///
+    /// A retry on the same card requests the same bytes and gets the same
+    /// answer, which is what makes it belong here; it stops being true the
+    /// moment any GPU memory is freed, and the pool clears CPU pins then.
+    NoKvCacheRoom,
 }
+
+/// The token the loader puts in its error when a GPU placement has no room left
+/// for the conversation cache, and which [`permanent_gpu_failure`] matches to
+/// send that model to the processor instead.
+///
+/// It is deliberately a fixed machine token rather than the human sentence
+/// beside it. Matching prose is this codebase's recurring trap (#295) because
+/// wording gets rewritten; a message crossing the worker IPC boundary loses its
+/// type, so *something* in the text has to carry the meaning, and this is the
+/// part that is ours and stable. Both sides use this constant — never a copy.
+pub const NO_KV_CACHE_ROOM_MARKER: &str = "swarmllm:gpu-kv-budget-exhausted";
 
 /// Classify a fatal worker error as permanently-GPU-fatal, if it is one.
 ///
@@ -543,6 +568,11 @@ pub fn permanent_gpu_failure(message: &str) -> Option<PermanentGpuFailure> {
     ];
     if ARCH_PATTERNS.iter().any(|p| lower.contains(p)) {
         return Some(PermanentGpuFailure::ArchitectureTooOld);
+    }
+    // Checked before the OOM patterns: this is our own marker for a condition
+    // the driver never reports, and its text may legitimately mention memory.
+    if message.contains(NO_KV_CACHE_ROOM_MARKER) {
+        return Some(PermanentGpuFailure::NoKvCacheRoom);
     }
     const OOM_PATTERNS: &[&str] = &["out of memory", "out_of_memory", "outofmemory"];
     if OOM_PATTERNS.iter().any(|p| lower.contains(p)) {
@@ -806,5 +836,64 @@ mod tests {
         assert_eq!(restored.len(), 5);
         assert_eq!(restored[0].len(), 32000);
         assert_eq!(restored[4][31999].to_bits(), original[4][31999].to_bits());
+    }
+}
+
+#[cfg(test)]
+mod no_kv_cache_room_tests {
+    use super::*;
+
+    /// A GPU placement with no conversation-cache room must be classified as
+    /// permanently GPU-fatal, so the pool moves the model to the processor
+    /// instead of leaving a worker up that refuses every request.
+    #[test]
+    fn a_zero_kv_budget_load_sends_the_model_to_the_cpu() {
+        let msg = format!(
+            "{NO_KV_CACHE_ROOM_MARKER} — this model needs about 3072 MB for a 8192-token \
+             conversation cache, and the card has none left after its 2281 MB of weights"
+        );
+        assert_eq!(
+            permanent_gpu_failure(&msg),
+            Some(PermanentGpuFailure::NoKvCacheRoom)
+        );
+        // Both halves are needed: `classify_worker_error` only consults
+        // `permanent_gpu_failure` inside its fatal branch, so a marker that is
+        // not also fatal would never reach the CPU pin at all.
+        assert!(worker_error_is_fatal(&msg));
+    }
+
+    /// The marker is checked before the generic memory patterns on purpose —
+    /// its own message legitimately talks about memory, and misreading it as a
+    /// driver OOM would log the wrong cause.
+    #[test]
+    fn the_marker_outranks_the_generic_memory_patterns() {
+        let msg = format!("{NO_KV_CACHE_ROOM_MARKER} — out of memory for the cache");
+        assert_eq!(
+            permanent_gpu_failure(&msg),
+            Some(PermanentGpuFailure::NoKvCacheRoom),
+            "a driver OOM and a no-cache-room refusal are different causes and log differently"
+        );
+    }
+
+    /// A real driver OOM must still classify as one — the new arm must not
+    /// swallow the case it sits next to.
+    #[test]
+    fn a_driver_oom_is_still_an_oom() {
+        let msg = "Forward: Cuda(DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\"))";
+        assert_eq!(
+            permanent_gpu_failure(msg),
+            Some(PermanentGpuFailure::OutOfMemory)
+        );
+        assert!(worker_error_is_fatal(msg));
+    }
+
+    /// An ordinary failure must not be dragged onto the CPU by any of this.
+    #[test]
+    fn an_unrelated_failure_is_not_a_permanent_gpu_failure() {
+        assert_eq!(
+            permanent_gpu_failure("prompt exceeds the context window"),
+            None
+        );
+        assert!(!worker_error_is_fatal("prompt exceeds the context window"));
     }
 }

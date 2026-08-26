@@ -3371,6 +3371,9 @@ impl ModelProcessPool {
                     PermanentGpuFailure::ArchitectureTooOld => {
                         "GPU is older than this build's kernels"
                     }
+                    PermanentGpuFailure::NoKvCacheRoom => {
+                        "no GPU memory left for the conversation cache"
+                    }
                 };
                 tracing::warn!(
                     model = %model_id,
@@ -3386,7 +3389,17 @@ impl ModelProcessPool {
                     // English that they had run out of GPU memory — sending
                     // them to free VRAM that was never the problem.
                     let (event_kind, text) = match kind {
-                        PermanentGpuFailure::OutOfMemory => (
+                        // `NoKvCacheRoom` deliberately SHARES this kind rather
+                        // than getting its own. The rule above is that a
+                        // distinct cause needs a distinct kind because the
+                        // frontend translates by kind — but the reason it
+                        // exists is that the arch case sends people to free
+                        // VRAM that was never the problem. Here VRAM IS the
+                        // problem and freeing it IS the remedy, so this text is
+                        // already correct and already translated; a second key
+                        // saying the same thing in 21 locales would be
+                        // duplication, not precision.
+                        PermanentGpuFailure::OutOfMemory | PermanentGpuFailure::NoKvCacheRoom => (
                             "model_cpu_fallback",
                             format!(
                                 "{} ran out of GPU memory — switched to CPU (slower, but working)",

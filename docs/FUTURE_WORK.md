@@ -10414,7 +10414,27 @@ exists and is currently applied only for missing-shard errors
 (`distributed.rs:1254`, `remote_generate.rs:494,507`). Do those two together or
 neither.
 
-## A contradicted shard hash cannot name the peer that claimed it (found 2026-08-26)
+## A contradicted shard hash cannot name the peer that claimed it (found 2026-08-26, RESOLVED 2026-08-26)
+
+**RESOLVED in v0.3.125.** The manifest-rejection WARN now carries
+`from_peer`, and it worked the first time it was needed. Measured on the live
+node the same day, this had been recorded as unanswerable — *"cannot yet say one
+bad copy or several"* — and the answer is: **two publishers**,
+`17c8bf6efb16527b` (v0.3.123) and `7c10ea0444dc974d` (v0.3.124), both gossiping
+the SAME wrong hash `d408e0a3…` against our origin-verified `c21328ef…`.
+
+Their agreement is not corroboration — see gotcha #382, peer agreement is not
+evidence in a network that copies from itself. It is one bad artifact that has
+spread to at least two nodes, and the origin still settles it. Both holders
+predate v0.3.125.
+
+A follow-on found while confirming this: the rejection is correct but was logged
+unboundedly — 4709 lines, 14% of a month's warnings, because two peers re-gossip
+every 30 s. Fixed alongside; see `dispatch::note_manifest_rejection`.
+
+The original report follows.
+
+### Original report
 
 `ModelRegistry::register_manifest` refuses a shard hash that contradicts one this
 node derived from the model's origin (gotcha #384) and logs:
@@ -10451,7 +10471,26 @@ compile check — which is why it was not done in the same sitting it was found.
 the sender in scope and was not logging it either; that one now reports model,
 model name, peer and shard count (commit `de7f3206`).
 
-## Peers that cannot speak our protocol are counted, called healthy, and retried for ever (measured 2026-08-26)
+## Peers that cannot speak our protocol are counted, called healthy, and retried for ever (measured 2026-08-26, RESOLVED 2026-08-26)
+
+**RESOLVED in v0.3.126** — `identify::peer_speaks_swarmllm`, gated before the
+Kademlia insert, plus a bounded `foreign_peers` set consulted by BOTH the
+unregistered-peer re-dial branch and the PEX dial loop (declining to register
+alone would have traded a wrong peer-list entry for an endless dial loop).
+
+Verified on the live swarm: **9 peers / 5 blank / 5 on port 4001 → 5 peers /
+0 blank / 0 on 4001**, with the rejection firing exactly 5x on each node and
+**zero** SwarmLLM peers rejected across a swarm then running .123, .124 and .126
+of our own protocol. Gotcha #396.
+
+Note the peers were identified in the original report as IPFS. They are not:
+`openhydra/0.1.0` on `rust-libp2p/0.45.0`. Port 4001 is the libp2p convention
+and identifies nobody — the inference was wrong, and the rejection line now
+reports `agent_version` so it need not be inferred again.
+
+The original report follows.
+
+### Original report
 
 **Measured on the live node**, 5h47m uptime, 13 peers in the list:
 
@@ -10520,7 +10559,38 @@ rather than the transient-failure re-dial. Report them in the peer list as a
 separate, visible category rather than hiding them — an operator should be able
 to see that six machines nearby are running something incompatible.
 
-## A model can load onto the GPU with a ZERO conversation-cache budget, and then refuse everything (measured 2026-08-26)
+## A model can load onto the GPU with a ZERO conversation-cache budget, and then refuse everything (measured 2026-08-26, RESOLVED 2026-08-26)
+
+**RESOLVED.** The loader now REFUSES that placement instead of completing it.
+The error carries `worker_ipc::NO_KV_CACHE_ROOM_MARKER`, which
+`permanent_gpu_failure` classifies as `PermanentGpuFailure::NoKvCacheRoom`, so
+`classify_worker_error` evicts the worker and pins the model to the processor —
+slower, but answering, instead of a worker that is alive, advertised, and 503s
+every request including a 42-token one.
+
+Three things a change here must keep:
+
+- **The pin is not permanent.** `ModelProcessPool` clears CPU pins whenever GPU
+  memory is freed, so a transient shortage costs one model load rather than the
+  rest of the run. That is what makes this safe to treat as "permanent" at all,
+  and it was checked before the fix was written rather than assumed.
+- **It is NOT a device switch inside the loader.** The daemon charged this model
+  against the VRAM budget at admission; landing it in RAM instead would leave
+  both budgets describing something that is not there. Placement changes go
+  through the pool — see `ModelProcessPool::charges_ram`.
+- **The marker is a fixed machine token, not the sentence beside it.** A message
+  crossing the worker IPC boundary loses its type, so something in the text must
+  carry the meaning; matching prose is #295's trap because wording gets
+  rewritten. Both sides use the one constant.
+
+The marker is matched BEFORE the generic OOM patterns, because its own message
+legitimately mentions memory and a driver OOM is a different cause that logs
+differently. Pinned by `no_kv_cache_room_tests`, including a control that a real
+`CUDA_ERROR_OUT_OF_MEMORY` still classifies as `OutOfMemory`.
+
+The original report follows.
+
+### Original report
 
 **Observed on the live node.** At 23:22:48 the loader reported:
 
