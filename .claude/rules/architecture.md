@@ -1348,7 +1348,8 @@ Identify turns a connection into a peer — BEFORE the Kademlia insert, so a
 foreign node never enters the routing table either.
 
 **The trap.** libp2p's `identify` protocol is `/ipfs/id/1.0.0` — universal to
-every libp2p node on the internet, IPFS included. `handle_identify_received`
+every libp2p node on the internet, IPFS and every other rust-libp2p project
+included. `handle_identify_received`
 registered a peer on the strength of it alone: minting a `NodeId` from the
 peer's Ed25519 key, establishing an encryption session, and counting it in
 `connected_node_ids`, the number the dashboard shows. The field that carries
@@ -1357,7 +1358,11 @@ anywhere in the codebase.
 
 Measured on the live swarm 2026-08-25/26 (gotcha #396): five foreign nodes on
 Linode, port 4001, relaying through one another, appeared in every node's peer
-list with no version, no shards and no latency but `healthy=true`. Each one's
+list with no version, no shards and no latency but `healthy=true`. They
+identify as `openhydra/0.1.0` on `rust-libp2p/0.45.0` — port 4001 is the
+libp2p convention and identifies nobody, so reading IPFS into it was a guess;
+the rejection log line reports `agent_version` precisely so the next one does
+not have to be guessed at. Each one's
 first real SwarmLLM request answered `OutboundFailure … The remote supports
 none of the requested protocols` — the peer saying so in our own log, one
 second after we adopted it. They arrive via **PEX**, which dials an address

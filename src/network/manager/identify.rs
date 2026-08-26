@@ -15,7 +15,8 @@ use super::{NetworkManager, MAX_FOREIGN_PEERS};
 /// Does this peer speak SwarmLLM at all?
 ///
 /// The libp2p `identify` protocol (`/ipfs/id/1.0.0`) is spoken by EVERY libp2p
-/// node on the internet — IPFS/kubo included — so completing it says nothing
+/// node on the internet — IPFS and every other rust-libp2p project included —
+/// so completing it says nothing
 /// whatever about whether the peer is one of ours. This is the check that
 /// answers that question, and it uses the peer's own advertisement from the
 /// same Identify message we are already processing: our identify
@@ -533,12 +534,19 @@ mod foreign_peer_tests {
         assert!(peer_speaks_swarmllm("", ["/swarmllm/pipeline/1.0.0"]));
     }
 
-    /// The exact shape observed on the live swarm on 2026-08-25: an IPFS node
-    /// that completes libp2p Identify — which every libp2p node does — and
+    /// The exact shape observed on the live swarm on 2026-08-25/26: a foreign
+    /// node that completes libp2p Identify — which every libp2p node does — and
     /// speaks none of our protocols. Before the gate, this was registered as a
     /// SwarmLLM peer and shown in the dashboard with no version or shards.
+    ///
+    /// The real ones identified as `openhydra/0.1.0` on `rust-libp2p/0.45.0`,
+    /// which is only knowable because the rejection log line reports
+    /// `agent_version`. Their port (4001) is the libp2p convention and says
+    /// nothing about who they are — inferring IPFS from it was wrong. The test
+    /// keeps an IPFS-shaped protocol list anyway: the rule must reject any
+    /// foreign namespace, not one particular project.
     #[test]
-    fn an_ipfs_node_is_rejected() {
+    fn a_foreign_libp2p_node_is_rejected() {
         assert!(!peer_speaks_swarmllm(
             "ipfs/0.1.0",
             [
