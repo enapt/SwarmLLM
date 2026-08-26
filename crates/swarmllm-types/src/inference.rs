@@ -735,6 +735,9 @@ mod chunk_assembly_tests {
             spec_logits_requested: false,
             truncate_kv_to: None,
             chunk_meta: None,
+            // In-process only (`serde(skip)`): a decoded forward always has
+            // `None`, which is what these round-trip tests assert against.
+            sampling: None,
         }
     }
 
