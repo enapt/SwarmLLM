@@ -40,6 +40,16 @@ impl NetworkManager {
                     }
                 });
 
+                // Skip a peer Identify has already shown is not SwarmLLM.
+                // PEX hands out addresses without any claim about whose they
+                // are, so this is the only thing stopping us re-dialling the
+                // same foreign nodes every PEX round for the life of the
+                // process — which is how five of them stayed in the peer list.
+                if let Some(pid) = &maybe_peer_id {
+                    if self.foreign_peers.contains(pid) {
+                        continue;
+                    }
+                }
                 // Skip if already connected
                 if let Some(pid) = &maybe_peer_id {
                     if self.swarm.is_connected(pid) {

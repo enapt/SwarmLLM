@@ -1340,6 +1340,48 @@ The loop-stall tripwire in `NetworkManager::run` (per-arm, ≥100 ms → `DIAG:
 network event loop stalled`) exists because this investigation's first
 hypothesis was the loop; a shadow node cleared it in four minutes. Keep it.
 
+## Completing libp2p Identify does not make a peer one of ours
+
+**`network::manager::identify::peer_speaks_swarmllm`** is the single answer to
+"is this libp2p node a SwarmLLM node?", and it is gated at the one point where
+Identify turns a connection into a peer — BEFORE the Kademlia insert, so a
+foreign node never enters the routing table either.
+
+**The trap.** libp2p's `identify` protocol is `/ipfs/id/1.0.0` — universal to
+every libp2p node on the internet, IPFS included. `handle_identify_received`
+registered a peer on the strength of it alone: minting a `NodeId` from the
+peer's Ed25519 key, establishing an encryption session, and counting it in
+`connected_node_ids`, the number the dashboard shows. The field that carries
+the peer's own statement of what it speaks — `info.protocols` — was never read
+anywhere in the codebase.
+
+Measured on the live swarm 2026-08-25/26 (gotcha #396): five foreign nodes on
+Linode, port 4001, relaying through one another, appeared in every node's peer
+list with no version, no shards and no latency but `healthy=true`. Each one's
+first real SwarmLLM request answered `OutboundFailure … The remote supports
+none of the requested protocols` — the peer saying so in our own log, one
+second after we adopted it. They arrive via **PEX**, which dials an address
+without asking whose it is, so it spreads: a brand-new node with an empty data
+directory acquired all five within 90 seconds.
+
+**Both halves are load-bearing.** Declining to register is not sufficient:
+`handle_connection_closed` re-dials any peer with no registry entry, on the
+assumption it disconnected before Identify ran. So skipping registration alone
+trades a wrong peer-list entry for an endless dial loop — worse, and silent.
+`NetworkManager::foreign_peers` (bounded by `MAX_FOREIGN_PEERS`) records the
+verdict, and BOTH that re-dial branch and the PEX dial loop consult it. A new
+path that dials a peer learned from an untrusted source must do the same.
+
+**Safe to gate** because `/swarmllm/id/1.0.0` has been the identify
+`protocol_version` since the first P2P commit, so no released node fails it;
+the protocol-list arm is the belt-and-braces for a future build that changes it.
+Match the namespace as a PREFIX, never a substring — the peer controls those
+strings.
+
+**The general rule**: completing a handshake that everyone speaks proves nothing
+about who you are talking to. Before treating a successful negotiation as
+identity, ask which population could also complete it.
+
 ## Peer Cache: storable vs dialable
 
 `network/peer_cache.rs` answers two different questions and they must not be

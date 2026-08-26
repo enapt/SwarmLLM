@@ -163,6 +163,12 @@ const REDIAL_BACKOFF_MS: [u64; MAX_REDIAL_ATTEMPTS as usize] =
 /// Cap on `redial_attempts` so a churn storm cannot grow it without bound.
 const MAX_REDIAL_TRACKED_PEERS: usize = 256;
 
+/// Cap on `foreign_peers` — peers that completed libp2p Identify but do not
+/// speak SwarmLLM. Bounded because the set is fed by whatever we happen to
+/// dial, which on a public network is unbounded. Oldest-first eviction is not
+/// needed: re-learning a foreign peer costs exactly one Identify.
+const MAX_FOREIGN_PEERS: usize = 1024;
+
 /// One tracked outbound rr send: a label for logging, when it went out, and —
 /// when a streaming caller is blocked on it — that caller's request id together
 /// with the ACK deadline sized for the peer it was sent to.
@@ -424,6 +430,14 @@ pub struct NetworkManager {
     /// retry to peers we actually know rather than every failed dial target.
     /// Cleared when a connection to the peer is established.
     redial_attempts: HashMap<libp2p::PeerId, (Vec<Multiaddr>, u32)>,
+    /// Peers that completed libp2p Identify but advertise no `/swarmllm/…`
+    /// protocol — i.e. foreign libp2p nodes, not ours. Recorded so the
+    /// unregistered-peer re-dial path and PEX both skip them; without it,
+    /// declining to register such a peer would leave it being dialled forever
+    /// (`handle_connection_closed` re-dials any peer with no registry entry,
+    /// on the assumption it disconnected before Identify). See
+    /// `identify::peer_speaks_swarmllm`. Capped at `MAX_FOREIGN_PEERS`.
+    foreign_peers: std::collections::HashSet<libp2p::PeerId>,
     /// Consecutive request/response failures per peer, with when that peer last
     /// answered anything. Both are reset by any success. See
     /// `MAX_CONSECUTIVE_RR_FAILURES` and `RR_FAILURES_AFTER_SILENCE`.
@@ -692,6 +706,7 @@ impl NetworkManager {
             shutdown_rx,
             pending_redial: Vec::new(),
             redial_attempts: HashMap::new(),
+            foreign_peers: std::collections::HashSet::new(),
             rr_failures: HashMap::new(),
             dht_query_rx,
             pending_provider_queries: HashMap::new(),

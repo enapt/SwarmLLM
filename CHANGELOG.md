@@ -4,6 +4,22 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Strangers could show up in your peer list.** Nodes that are not running
+  SwarmLLM at all — ordinary peers from other networks built on the same
+  underlying library — were being adopted as if they were part of the swarm.
+  They appeared in the dashboard with no version, no models and no response
+  time, and every request sent to one could only fail. They spread on their
+  own: any node that joined picked up the same handful within a couple of
+  minutes.
+
+  The cause was that the handshake we used to recognise a peer is one that
+  *every* node on that library answers, whoever they are, so completing it
+  never meant what we were treating it as meaning. A node is now admitted only
+  if it says it speaks SwarmLLM, and one that does not is disconnected and not
+  dialled again.
+
 ## [0.3.125-alpha] — 2026-08-26
 
 **An overnight watch of a running node.** Every fix here came from putting real

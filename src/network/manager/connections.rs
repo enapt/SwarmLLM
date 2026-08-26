@@ -538,6 +538,14 @@ impl NetworkManager {
                     // Active pipeline needs this peer — reconnect immediately.
                     self.try_enqueue_redial(peer_id, redial_addrs, 500);
                 }
+            } else if self.foreign_peers.contains(&peer_id) {
+                // Identify succeeded and told us this peer does not speak
+                // SwarmLLM, so it has no registry entry BY DECISION rather than
+                // because Identify never ran. Without this arm the branch below
+                // reads that absence as "disconnected too early" and re-dials it
+                // forever — declining to register a foreign peer would otherwise
+                // trade a wrong peer-list entry for an endless dial loop.
+                tracing::trace!(%peer_id, "Not re-dialling a peer that does not speak SwarmLLM");
             } else {
                 // Peer was never registered (connection died before Identify).
                 // This typically happens during mDNS simultaneous-dial race.

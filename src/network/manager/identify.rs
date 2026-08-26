@@ -10,7 +10,45 @@
 use crate::network::helpers::{extract_ipv4_bytes, is_non_public_ipv4_bytes};
 use crate::types::PeerInfo;
 
-use super::NetworkManager;
+use super::{NetworkManager, MAX_FOREIGN_PEERS};
+
+/// Does this peer speak SwarmLLM at all?
+///
+/// The libp2p `identify` protocol (`/ipfs/id/1.0.0`) is spoken by EVERY libp2p
+/// node on the internet — IPFS/kubo included — so completing it says nothing
+/// whatever about whether the peer is one of ours. This is the check that
+/// answers that question, and it uses the peer's own advertisement from the
+/// same Identify message we are already processing: our identify
+/// `protocol_version` (`/swarmllm/id/1.0.0`, unchanged since the first P2P
+/// commit, so no released SwarmLLM node fails it) or any `/swarmllm/…` entry
+/// in its supported-protocol list.
+///
+/// **Why it exists.** Without it, `handle_identify_received` registered any
+/// libp2p peer we happened to dial as a SwarmLLM peer: minting a NodeId from
+/// its Ed25519 key, establishing an encryption session, and counting it in
+/// `connected_node_ids` — the number the dashboard shows. Measured on the live
+/// swarm 2026-08-25/26: five foreign nodes on Linode (port 4001, relaying
+/// through one another via `p2p-circuit`) appeared in every node's peer list
+/// with no version, no shards and no latency, and the first real SwarmLLM
+/// request to each answered
+/// `OutboundFailure … The remote supports none of the requested protocols` —
+/// the peer stating plainly that it does not speak our protocol. They arrive
+/// via PEX, which dials an address without ever asking whose it is, so every
+/// node that joins picks up the same cluster: a brand-new node with a fresh
+/// identity and an empty data directory acquired all five within 90 seconds.
+///
+/// Takes `&str`s rather than an `identify::Info` so the rule is testable
+/// without constructing a libp2p keypair.
+pub(crate) fn peer_speaks_swarmllm<S: AsRef<str>>(
+    protocol_version: &str,
+    protocols: impl IntoIterator<Item = S>,
+) -> bool {
+    const NAMESPACE: &str = "/swarmllm/";
+    protocol_version.starts_with(NAMESPACE)
+        || protocols
+            .into_iter()
+            .any(|p| p.as_ref().starts_with(NAMESPACE))
+}
 
 impl NetworkManager {
     /// Handle Identify protocol — peer identified, establish encryption, register in peer_registry.
@@ -31,6 +69,35 @@ impl NetworkManager {
             listen_addrs = ?info.listen_addrs,
             "Identified peer"
         );
+        // A foreign libp2p node is not a peer of ours. Gate BEFORE the
+        // Kademlia insert below, so it never enters the routing table either:
+        // this is the single point at which Identify turns a connection into a
+        // SwarmLLM peer, which is why the check lives here rather than at the
+        // several call sites that dial.
+        if !peer_speaks_swarmllm(&info.protocol_version, &info.protocols) {
+            let newly_seen = if self.foreign_peers.len() < MAX_FOREIGN_PEERS {
+                self.foreign_peers.insert(peer_id)
+            } else {
+                false
+            };
+            if newly_seen {
+                // INFO once per peer, not per Identify: Identify re-pushes
+                // constantly and these nodes reconnect on their own.
+                tracing::info!(
+                    %peer_id,
+                    protocol_version = %info.protocol_version,
+                    agent = %info.agent_version,
+                    "Ignoring a peer that does not speak SwarmLLM — it completed \
+                     libp2p Identify, which every libp2p node does, but advertises \
+                     no /swarmllm/ protocol"
+                );
+            }
+            // Drop the connection. Holding it costs a slot and buys nothing:
+            // every SwarmLLM request to this peer can only fail protocol
+            // negotiation.
+            let _ = self.swarm.disconnect_peer_id(peer_id);
+            return;
+        }
         // Add ONLY the connected address to Kademlia — not all listen_addrs.
         // Adding all addresses causes Kademlia to route DHT queries through
         // addresses we haven't connected on, triggering redundant dials that
@@ -431,5 +498,76 @@ mod tests {
         assert!(multiaddr_is_local(&a("/ip4/127.0.0.1/tcp/8810")));
         assert!(multiaddr_is_local(&a("/ip6/::1/tcp/8810")));
         assert!(multiaddr_is_local(&a("/ip6/fc00::1/tcp/8810")));
+    }
+}
+
+#[cfg(test)]
+mod foreign_peer_tests {
+    use super::peer_speaks_swarmllm;
+
+    /// The value `behaviour.rs` has passed to `identify::Config::new` since the
+    /// first P2P commit. If this ever changes, every node on the old string is
+    /// dropped by the gate — which is why the test names it explicitly rather
+    /// than importing it.
+    const OUR_IDENTIFY_VERSION: &str = "/swarmllm/id/1.0.0";
+
+    #[test]
+    fn our_own_identify_version_is_accepted() {
+        // No protocols advertised at all: protocol_version alone must carry it,
+        // because that is the field every released SwarmLLM node sets.
+        assert!(peer_speaks_swarmllm(
+            OUR_IDENTIFY_VERSION,
+            Vec::<&str>::new()
+        ));
+    }
+
+    #[test]
+    fn a_peer_is_accepted_on_its_protocol_list_alone() {
+        // Belt and braces for a future build that changes protocol_version:
+        // advertising the request_response protocol is equally conclusive.
+        assert!(peer_speaks_swarmllm(
+            "ipfs/0.1.0",
+            ["/swarmllm/1.0.0", "/ipfs/ping/1.0.0"]
+        ));
+        assert!(peer_speaks_swarmllm("", ["/swarmllm/kad/1.0.0"]));
+        assert!(peer_speaks_swarmllm("", ["/swarmllm/pipeline/1.0.0"]));
+    }
+
+    /// The exact shape observed on the live swarm on 2026-08-25: an IPFS node
+    /// that completes libp2p Identify — which every libp2p node does — and
+    /// speaks none of our protocols. Before the gate, this was registered as a
+    /// SwarmLLM peer and shown in the dashboard with no version or shards.
+    #[test]
+    fn an_ipfs_node_is_rejected() {
+        assert!(!peer_speaks_swarmllm(
+            "ipfs/0.1.0",
+            [
+                "/ipfs/id/1.0.0",
+                "/ipfs/kad/1.0.0",
+                "/ipfs/ping/1.0.0",
+                "/libp2p/circuit/relay/0.2.0/hop",
+                "/x/",
+            ]
+        ));
+    }
+
+    #[test]
+    fn a_bare_libp2p_node_advertising_nothing_is_rejected() {
+        assert!(!peer_speaks_swarmllm("", Vec::<&str>::new()));
+    }
+
+    /// The namespace must be matched as a PREFIX, not as a substring, or a
+    /// foreign peer could claim membership by naming us anywhere in a string
+    /// it fully controls.
+    #[test]
+    fn the_namespace_is_not_matched_as_a_substring() {
+        assert!(!peer_speaks_swarmllm(
+            "ipfs/0.1.0",
+            ["/evil/swarmllm/1.0.0", "/notswarmllm/1.0.0"]
+        ));
+        assert!(!peer_speaks_swarmllm(
+            "totally/swarmllm/id/1.0.0",
+            Vec::<&str>::new()
+        ));
     }
 }
