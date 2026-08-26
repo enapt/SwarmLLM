@@ -235,28 +235,7 @@ pub fn build_prompt(
     eos_token: &str,
     model_name: Option<&str>,
 ) -> String {
-    let prompt = build_prompt_with_model(messages, template, bos_token, eos_token, model_name);
-    if !prompt_hands_over_to_the_model(&prompt) {
-        // WARN, not an error: the request still runs, and being wrong about
-        // this must never cost someone an answer. What it buys is that the
-        // next occurrence explains itself instead of looking like the model
-        // refusing to speak.
-        let closer = TURN_ENDING_MARKERS
-            .iter()
-            .find(|m| prompt.trim_end().ends_with(*m))
-            .copied()
-            .unwrap_or("");
-        tracing::warn!(
-            model = model_name.unwrap_or("<unknown>"),
-            ends_with = %closer,
-            prompt_chars = prompt.len(),
-            "the rendered prompt ends by CLOSING a turn rather than opening the model's, so the \
-             model is being shown a finished conversation and will most likely end its turn at \
-             once — one token, finish_reason \"stop\". This is the prompt, not sampling: the \
-             chat template for this model did not append its generation prompt"
-        );
-    }
-    prompt
+    build_prompt_with_model(messages, template, bos_token, eos_token, model_name)
 }
 
 /// Pick a fallback prompt format from the model name alone.
@@ -372,6 +351,51 @@ fn with_system_message(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
 /// it and the user sees a blank reply reported as a successful completion. The
 /// same question with a system message is answered normally.
 pub fn build_prompt_with_model(
+    messages: &[ChatMessage],
+    template: Option<&str>,
+    bos_token: &str,
+    eos_token: &str,
+    model_name: Option<&str>,
+) -> String {
+    let prompt = build_prompt_inner(messages, template, bos_token, eos_token, model_name);
+    warn_if_the_prompt_closes_the_turn(&prompt, model_name);
+    prompt
+}
+
+/// Report a rendered prompt that ends by closing a turn instead of opening the
+/// model's. See [`prompt_hands_over_to_the_model`].
+///
+/// **Called from `build_prompt_with_model`, which is the choke point every
+/// prompt passes through — the local fast path via `build_prompt`, and the
+/// router/distributed paths via `pipeline::prompt::build_prompt_with_header`.**
+/// It lived in the `build_prompt` wrapper for one commit, which the router path
+/// does not call, so the distributed paths were silently exempt: the exact
+/// one-invariant-N-paths defect this repo keeps hitting, caught by tracing the
+/// second caller rather than by re-reading the diff.
+fn warn_if_the_prompt_closes_the_turn(prompt: &str, model_name: Option<&str>) {
+    if prompt_hands_over_to_the_model(prompt) {
+        return;
+    }
+    // WARN, not an error: the request still runs. Being wrong about this must
+    // never cost someone an answer; what it buys is that the next occurrence
+    // explains itself instead of looking like the model refusing to speak.
+    let closer = TURN_ENDING_MARKERS
+        .iter()
+        .find(|m| prompt.trim_end().ends_with(*m))
+        .copied()
+        .unwrap_or("");
+    tracing::warn!(
+        model = model_name.unwrap_or("<unknown>"),
+        ends_with = %closer,
+        prompt_chars = prompt.len(),
+        "the rendered prompt ends by CLOSING a turn rather than opening the model's, so the \
+         model is being shown a finished conversation and will most likely end its turn at \
+         once — one token, finish_reason \"stop\". This is the prompt, not sampling: the chat \
+         template for this model did not append its generation prompt"
+    );
+}
+
+fn build_prompt_inner(
     messages: &[ChatMessage],
     template: Option<&str>,
     bos_token: &str,

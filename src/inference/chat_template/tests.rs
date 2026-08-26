@@ -1234,3 +1234,44 @@ fn a_prompt_that_closes_the_turn_is_caught() {
         );
     }
 }
+
+/// Both entry points must apply the turn-closing check.
+///
+/// `build_prompt` is the local fast path; `build_prompt_with_model` is what the
+/// router and distributed paths reach through
+/// `pipeline::prompt::build_prompt_with_header`. The check lived in the
+/// `build_prompt` wrapper for one commit and the router path — which does not
+/// call it — was silently exempt. A shared rule implemented in one of two paths
+/// is this repo's most repeated defect, so both are pinned here rather than
+/// trusting the call graph to stay as it is.
+#[test]
+fn both_prompt_entry_points_go_through_the_same_renderer() {
+    // A template with no generation prompt: renders a closed turn either way.
+    // The same template the passing tests in this file use, with ONLY the
+    // `{% if add_generation_prompt %}` block removed — so it evaluates
+    // successfully and still leaves the turn closed. Using an invalid template
+    // instead makes the renderer fall back to ChatML, which appends the opener
+    // and quietly stops the test exercising anything.
+    let closing = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' \
+                   + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}";
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "hi".into(),
+        images: vec![],
+    }];
+
+    let via_wrapper = super::build_prompt(&msgs, Some(closing), "<s>", "</s>", Some("qwen2.5"));
+    let via_inner =
+        super::build_prompt_with_model(&msgs, Some(closing), "<s>", "</s>", Some("qwen2.5"));
+
+    assert_eq!(
+        via_wrapper, via_inner,
+        "the two entry points must render identically — a divergence here is what \
+         gotchas #169 and #171 were"
+    );
+    assert!(
+        !super::prompt_hands_over_to_the_model(&via_inner),
+        "this fixture is supposed to produce a turn-closing prompt; if it does not, \
+         the test is no longer exercising the check"
+    );
+}

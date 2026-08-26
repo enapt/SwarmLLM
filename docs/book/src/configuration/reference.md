@@ -246,8 +246,46 @@ a tailnet — devices you authorised — which is why the LAN case stays opt-in.
 | `wishlist_gossip_publish` | boolean | `false` | Opt-in: publish your wishlist as cross-pool demand gossip (R130) |
 | `auto_switch_quants` | boolean | `true` | **R141 default flip**: auto-acquire the recommended quant variant when the recommender (R133) suggests a better one. Set `false` on metered links to keep the current quant |
 | `parallax_auto_rebalance` | boolean | `true` | Bias scoring toward Parallax allocator recommendations (C.2) |
-| `default_model_shard_cap` | integer | `0` | Max shards auto-manage acquires per model. `0` = unlimited |
+| `default_model_shard_cap` | integer | `0` | Max shards auto-manage acquires per model. `0` = unlimited. **Set this if you want to add capacity rather than redundancy** — see below |
 | `idle_unload_secs` | integer | `900` | Free a loaded model's GPU memory after this long with no local requests AND little demand for it elsewhere in the network. Shards stay on disk, so the model reloads on the next request |
+
+
+### Contributing capacity vs. contributing redundancy
+
+`default_model_shard_cap = 0` (the default) lets auto-manage take every shard of
+a model it decides to host. With `min_replicas = 2` and a small number of
+participants, the usual outcome is that **every node ends up holding every model
+in full** — measured on a two-node setup as ~20 GB and ~18 GB of near-identical
+content.
+
+That is the right default: it maximises availability, and a model nobody holds
+completely cannot be served at all.
+
+It is not always what an operator wants. Holding a full copy of a model your
+neighbour already holds adds a spare, not throughput. If you are joining to add
+capacity — more machines able to serve *different* parts of more models — set a
+cap:
+
+```toml
+[auto_manage]
+default_model_shard_cap = 2   # at most 2 shards of any one model
+```
+
+Rough guidance:
+
+| Goal | Setting | Effect |
+|---|---|---|
+| Survive nodes going offline | `0` (default) | Full copies everywhere; any node can serve alone |
+| Host more distinct models on limited disk | small cap (1-3) | Partial coverage, requests span several nodes |
+| Dedicated always-on node | `0` | Be the copy others fall back to |
+
+A cap only limits what auto-manage acquires **on its own**. Shards you download
+explicitly, and shards pinned to this node by a pool owner, are unaffected.
+
+One caveat worth knowing before you tune this: holding fewer shards spreads
+storage, not necessarily load. A node that holds a model in full still serves
+requests for it locally rather than sharing them out, so capping shards is about
+what gets *stored* where, not about how work is distributed.
 
 ## `[pool]` — Device Pool
 
