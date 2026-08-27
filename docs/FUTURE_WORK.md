@@ -10647,3 +10647,87 @@ refused until memory frees up.
 **Not fixed here** because the real change touches GPU placement and the
 admission/load race, and wants testing on a card under contention rather than a
 compile check — this was found in the last hour before a release.
+
+## A model demoted to the processor is never promoted back (confirmed 2026-08-27)
+
+**Reported by an external tester, then confirmed in the code.** A model that
+lands on the CPU because the graphics card was momentarily full stays on the CPU
+for as long as its worker is resident — however much VRAM frees afterwards.
+
+The tester's sequence, which reproduces it exactly: `llama-3.2-3b` loaded onto
+the card; `gemma-2-2b-it` requested ~35 s later; gemma refused GPU admission and
+spawned on the CPU; the idle-unload timer then freed llama and logged `GPU
+memory freed — clearing CPU pins`; re-requesting gemma with the card confirmed
+idle (653/6141 MB) **reused the resident CPU worker** rather than retrying GPU
+admission.
+
+Two separate things combine, and only the second is a defect:
+
+1. **The admission reclaim correctly declined.** `free_vram_for_admission`
+   requires a candidate idle for `VRAM_MAKE_ROOM_MIN_IDLE_SECS` (60 s), and
+   llama had been used 35 s earlier. That floor exists so two models alternating
+   faster than they load do not evict each other on every request; it did its
+   job. The eviction the tester saw fire moments later was
+   `try_idle_vram_unload` — a different mechanism with a similar log line.
+2. **Nothing re-evaluates placement for a worker that already exists.**
+   `ModelProcessPool::get_or_spawn` opens with a fast path that returns any
+   resident worker regardless of which device it is on. `cpu_reason` (and so
+   `effective_gpu_layers`) is consulted only when SPAWNING. `clear_cpu_pin` is
+   documented as letting "the next worker spawn" use the GPU, and there is no
+   next spawn: the CPU worker survives until `idle_unload_secs` (900 s) of *no
+   requests at all*, which a user actively working with the model never reaches.
+
+So lifting the pin currently buys nothing for the model it was lifted for. This
+is the sibling of gotcha #388 — there, eviction stopped short because it freed
+against a smaller estimate than admission charged; here, the freed memory is
+never asked for again.
+
+**Shape of a fix.** When a CPU pin is lifted (or on the admission path) and a
+model has a CPU-resident worker that is idle and would now fit, retire that
+worker so the next request respawns it on the card. `WorkerHandle::last_used`
+already exists for exactly this kind of judgement, and the guards
+`free_vram_for_admission` established should carry over unchanged: an idle floor
+so two models cannot thrash each other, and cost the move before making it —
+retiring a worker and then failing admission costs a cold start and buys
+nothing.
+
+**How to verify it, because this cannot be done from the test suite.** Load a
+model that fits and use it; request a second that does not fit alongside it and
+watch it go to the CPU; let the first go idle past the floor; request the second
+again and assert it is now on the card — `device=Cuda` in the worker's own
+"Model loaded" line, not merely a faster reply. The wrong outcome to guard
+against is thrashing: run the two models alternately inside the idle floor and
+assert neither evicts the other.
+
+**Not attempted yet** deliberately: it evicts and respawns workers under VRAM
+pressure, and shipping that on the strength of a code reading — alongside a fix
+that had been measured — is the pattern that produced three releases in one day
+each followed immediately by a bug.
+
+## Foreign libp2p nodes are no longer adopted, but are still dialled (measured 2026-08-27)
+
+`identify::peer_speaks_swarmllm` (gotcha #396) stops a node that merely speaks
+libp2p from becoming a peer, and that half works: the peer list is clean, and
+`handle_connection_closed`'s re-dial branch consults `foreign_peers` and declines.
+
+The dialling did not stop. Measured on this development node over 14 minutes of
+uptime: **126 outbound connections (`is_dialer=true`) to 3 openhydra nodes on
+port 4001**, each followed by `Sent PEX request`, which the peer answers with
+`The remote supports none of the requested protocols`, then a close, then
+another dial — roughly 9 per node per minute, indefinitely.
+
+Two things to establish before fixing, neither of which was chased:
+
+- **Which dial path.** `foreign_peers` is consulted by the connection-closed
+  re-dial branch and by the DHT provider dial (`manager/dht.rs`). It is NOT
+  consulted at `manager/relay.rs:214`, `manager/commands.rs:130`,
+  `manager/events.rs:715` or `manager/mod.rs:1659`. One of those is re-dialling;
+  the fix is presumably the same gate, but which one it is should be measured
+  rather than assumed.
+- **Why we send PEX to a node we have already identified as foreign.** That
+  request cannot be answered by definition, so it is pure waste on both sides
+  and it is what the remote logs as an unsupported protocol.
+
+Severity is low — wasted connections and log noise, no incorrect behaviour — but
+it is ongoing on every node, and the addresses spread by PEX, so it does not
+decay on its own.
