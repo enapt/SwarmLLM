@@ -57,6 +57,7 @@ post() { curl -s -m 600 -H "Authorization: Bearer $K" -H "Content-Type: applicat
 unload() { curl -s -m 60 -X POST -H "Authorization: Bearer $K" \
             "$API/api/admin/models/$MODEL/unload" >/dev/null 2>&1; }
 ntok() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('usage',{}).get('completion_tokens',0) if 'error' not in d else 0)"; }
+ptok() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('usage',{}).get('prompt_tokens',0) if 'error' not in d else 0)"; }
 text() { python3 -c "import sys,json;d=json.load(sys.stdin);print('' if 'error' in d else d['choices'][0]['message']['content'])"; }
 
 # 1. COLD START — the path a first request actually takes.
@@ -65,14 +66,48 @@ N=$(post "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"N
 [ "${N:-0}" -gt 3 ]; check "cold start returns a real reply" $?
 
 # 2. LONG PROMPT, COLD — the agentic-client shape.
-LONG=$(python3 -c "print('You are a coding assistant. Be precise and complete. ' * 120)")
+#
+# The length matters, and 1400 tokens is not enough. This check existed, and
+# passed, all through v0.3.128 while a cold long request was answering with a
+# single token: the coordinator measured the prompt as `chars / 4` and used
+# that as the position the reply continues from, so the error scaled with
+# prompt length and a short prompt still read correctly (gotcha #400). The
+# shape that actually breaks is an agentic client's — tens of KB of system
+# prompt, several thousand tokens.
+# 460 repeats is ~24 KB and ~5500 tokens: large enough that the old estimate
+# missed by ~460 positions, and still inside the shipped 8192-token default so
+# the request is answered rather than refused. A refusal would fail this check
+# for the wrong reason, which is how the first attempt at it went.
+LONG=$(python3 -c "print('You are a coding assistant. Be precise and complete. ' * 460)")
+BODY=$(LONG="$LONG" MODEL="$MODEL" python3 -c "
+import json,os
+print(json.dumps({'model':os.environ['MODEL'],'max_tokens':40,'messages':[
+ {'role':'system','content':os.environ['LONG']},
+ {'role':'user','content':'Name three primary colours.'}]}))")
 unload; sleep 2
-N=$(post "$(python3 -c "
-import json,sys
-print(json.dumps({'model':'$MODEL','max_tokens':40,'messages':[
- {'role':'system','content':'''$LONG'''},
- {'role':'user','content':'Name three primary colours.'}]}))")" | ntok)
+COLD=$(post "$BODY")
+N=$(printf '%s' "$COLD" | ntok)
 [ "${N:-0}" -gt 3 ]; check "long system prompt, cold, returns a reply" $?
+
+# 2b. The SAME request, warm, must report the SAME prompt length.
+#
+# This is the check that discriminates, and reply length is not. The same fault
+# also produces one token repeated to the limit, which passes "more than 3
+# tokens" comfortably. But the number of tokens in a prompt is a property of
+# the prompt: cold and warm must agree exactly. They disagreed by 524 on the
+# request that was failing, and that disagreement IS the bug rather than a
+# symptom of it — the estimate was being handed to the model as a position.
+# No tokenizer is needed here; the node is asked the same question twice.
+WARM=$(post "$BODY")
+PCOLD=$(printf '%s' "$COLD" | ptok)
+PWARM=$(printf '%s' "$WARM" | ptok)
+if [ "${PCOLD:-0}" -eq 0 ] || [ "${PWARM:-0}" -eq 0 ]; then
+  printf '  %-40s COULD NOT RUN (no usage reported)\n' "prompt length agrees cold and warm"
+  skipped=$((skipped+1))
+else
+  [ "$PCOLD" = "$PWARM" ]; check "prompt length agrees cold and warm" $?
+  [ "$PCOLD" = "$PWARM" ] || echo "      cold=$PCOLD warm=$PWARM"
+fi
 
 # 3. GREEDY DETERMINISM — proves the caller's sampling reaches the sampler.
 unload; sleep 2
