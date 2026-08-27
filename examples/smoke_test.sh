@@ -112,15 +112,28 @@ curl -s -m 8 -X POST -H "Authorization: Bearer $K" "http://localhost:$PORT/api/a
   | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if "applied" in d and "restart_required" in d else 1)' 2>/dev/null
 check "reload separates applied/restart" $?
 
-# Wait for the model to be registered rather than probing once. A node with a
+# Wait for the model to be servable rather than probing once. A node with a
 # large models directory is still scanning it when the checks above finish, so a
 # single probe reported the model "not present" and quietly skipped every
 # inference check — on the machine most likely to have a big models directory.
+#
+# Ask `/v1/models`, not `/api/admin/models`. The admin listing waits on the
+# startup disk scan, which re-hashes every shard it finds: on a 15 GB models
+# directory that ran past 60 s and skipped all three inference checks on both
+# runs of the v0.3.129 verification, while `release_shapes.sh` — which asks
+# `/v1/models` — found the model after 12 s and served it immediately. The
+# client-facing listing is also the more meaningful oracle: it is what a caller
+# would consult before sending the request these checks are about to send.
+#
+# The window is generous because the cost of being wrong is asymmetric. Waiting
+# too long delays a release check; giving up too early reports a green run over
+# inference that was never exercised, which is the fault this block already
+# exists to prevent.
 model_present=1
-for _ in $(seq 1 30); do
+for _ in $(seq 1 120); do
   kill -0 "$PID" 2>/dev/null || break
-  if curl -s -m 8 -H "Authorization: Bearer $K" "http://localhost:$PORT/api/admin/models" \
-       | grep -q "\"$MODEL\""; then
+  if curl -s -m 8 -H "Authorization: Bearer $K" "http://localhost:$PORT/v1/models" \
+       | grep -q "$MODEL"; then
     model_present=0
     break
   fi
