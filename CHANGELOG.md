@@ -2,6 +2,33 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A long first request could come back as one word, or as the same word over
+  and over.** Sending a large prompt — the kind a coding assistant builds, with
+  a long system message and a page of tool descriptions — to a model that was
+  not yet loaded produced a reply of one or two tokens, or a reply that repeated
+  itself until it hit the length limit. Trying again usually worked, because by
+  then the model was in memory.
+
+  The node was measuring the prompt's length by dividing its characters by four
+  rather than counting its tokens, and then using that figure as the *position*
+  the reply starts from. On a 24 KB prompt the guess came out 524 places past
+  the real end, so the model was asked to continue from somewhere its own
+  memory of the conversation did not reach, and answered accordingly. Short
+  prompts missed by a place or two and still read correctly, which is why this
+  was so hard to pin down: it depended on prompt length and on whether the model
+  happened to be loaded.
+
+  The prompt is now counted with the model's own tokenizer, which the node was
+  already loading a few lines later. Where a node genuinely has no tokenizer for
+  a model it still has to estimate, and now says so in its log.
+
+  Reported by a tester who tracked it across seven releases and could not
+  reproduce it on demand.
+
 ## [0.3.128-alpha] — 2026-08-26
 
 ### Fixed

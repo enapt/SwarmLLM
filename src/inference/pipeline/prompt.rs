@@ -67,6 +67,54 @@ impl CachedDecoder {
     }
 }
 
+/// How many positions this prompt occupies in the KV cache.
+///
+/// **This is a position, not a statistic.** `index_pos` for the first generated
+/// token is set from it, so the value is handed to the model as the rotary
+/// position of that token and as the offset it attends from. Being wrong by N
+/// puts every generated token N places from where its keys and values actually
+/// live.
+///
+/// It used to be `chars / 4`, commented "approximate ... no tokenizer
+/// in-process" — accurate when written, and still there after
+/// `standalone_tokenizer` made one available three lines below. On a 24 KB
+/// tool-calling prompt the estimate came out 6053 against a true 5529, so the
+/// second token was computed 524 positions past the end of the cache; the
+/// resulting logits are noise and the model reliably answered with
+/// end-of-turn. That surfaces as `completion_tokens: 1`, `finish_reason:
+/// "stop"` and no stop sequence matched — an external tester chased exactly
+/// that across seven releases (2026-08-23 → 08-27) and could not build a small
+/// reproduction, because the error scales with prompt length: a short prompt
+/// misses by a position or two and still answers.
+///
+/// It only ever bit the pipeline path, which is the one every request takes
+/// while the model is not yet loaded — so the same request failed cold and
+/// succeeded warm, which is what made it look intermittent.
+///
+/// The estimate survives only where there is genuinely no tokenizer, and says
+/// so: a node with no `gguf_header.bin` cannot count, and refusing the request
+/// would be worse than a reply that may drift.
+fn prompt_positions(
+    prompt: &str,
+    tokenizer: Option<&crate::inference::split::SplitTokenizer>,
+    model_id: &crate::types::ModelId,
+) -> usize {
+    match tokenizer {
+        Some(tok) => tok.encode(prompt).len().max(1),
+        None => {
+            let estimate = (prompt.chars().count() / 4).max(1);
+            tracing::warn!(
+                model = %model_id,
+                estimate,
+                "no tokenizer for this model, so the prompt's length in tokens is being \
+                 ESTIMATED — generated tokens may be placed at the wrong position. Fetch \
+                 the model's gguf_header.bin to fix this"
+            );
+            estimate
+        }
+    }
+}
+
 impl PipelineExecutor {
     /// Build chat prompt by reading GGUF header from disk (convenience wrapper).
     pub(super) async fn build_prompt(&self) -> String {
@@ -257,10 +305,6 @@ impl PipelineExecutor {
             let eos = entry.value().eos_tokens.clone();
             let vocab = entry.value().vocab.clone().unwrap_or_default();
 
-            // Approximate prompt token count (no tokenizer in-process)
-            // Rough estimate: chars / 4 (average BPE token length), minimum 1
-            let ptc = (prompt.chars().count() / 4).max(1);
-
             // Use this node's standalone tokenizer when one can be loaded.
             //
             // These flags used to be hardcoded false, on the reasoning that
@@ -279,7 +323,7 @@ impl PipelineExecutor {
             // which is where the stray `<0x0A>` came from.
             let tokenizer = self.shared_state.standalone_tokenizer(model_id);
             let decoder = match tokenizer {
-                Some(tok) => CachedDecoder {
+                Some(ref tok) => CachedDecoder {
                     vocab,
                     byte_decoder: tok.byte_decoder(),
                     is_sentencepiece: tok.is_sentencepiece(),
@@ -296,7 +340,11 @@ impl PipelineExecutor {
                 },
             };
 
-            (ptc, eos, decoder)
+            (
+                prompt_positions(prompt, tokenizer.as_deref(), model_id),
+                eos,
+                decoder,
+            )
         } else {
             // No model loaded — try loading vocab from GGUF header on disk.
             // The header is always available from the probe/manifest exchange.
@@ -308,11 +356,7 @@ impl PipelineExecutor {
             if header_path.exists() {
                 match Self::decoder_from_header(&header_path) {
                     Some((eos, decoder, tokenizer_opt)) => {
-                        let ptc = if let Some(ref tok) = tokenizer_opt {
-                            tok.encode(prompt).len()
-                        } else {
-                            (prompt.chars().count() / 4).max(1)
-                        };
+                        let ptc = prompt_positions(prompt, tokenizer_opt.as_ref(), model_id);
                         tracing::debug!(
                             model = %model_id,
                             vocab_size = decoder.vocab.len(),
@@ -336,7 +380,7 @@ impl PipelineExecutor {
                              ends its turn, so the reply will run until max_tokens or a stop \
                              sequence. Fetch the model's header to fix this"
                         );
-                        let ptc = (prompt.chars().count() / 4).max(1);
+                        let ptc = prompt_positions(prompt, None, model_id);
                         (
                             ptc,
                             Vec::new(),
@@ -379,11 +423,8 @@ impl PipelineExecutor {
                             if let Some((eos, decoder, tokenizer_opt)) =
                                 Self::decoder_from_header(&path)
                             {
-                                let ptc = if let Some(ref tok) = tokenizer_opt {
-                                    tok.encode(prompt).len()
-                                } else {
-                                    prompt.chars().count() / 4
-                                };
+                                let ptc =
+                                    prompt_positions(prompt, tokenizer_opt.as_ref(), model_id);
                                 return (ptc, eos, decoder);
                             }
                         }
@@ -398,7 +439,7 @@ impl PipelineExecutor {
                     "No GGUF header or local model — this node cannot tell where this model ends \
                      its turn, so the reply will run until max_tokens or a stop sequence"
                 );
-                let ptc = (prompt.chars().count() / 4).max(1);
+                let ptc = prompt_positions(prompt, None, model_id);
                 (
                     ptc,
                     Vec::new(),
@@ -655,5 +696,59 @@ mod decoder_tests {
             "U+2581 must never reach the reply, got {out:?}"
         );
         assert_eq!(out, " Hello world", "got {out:?}");
+    }
+}
+
+#[cfg(test)]
+mod prompt_position_tests {
+    use super::prompt_positions;
+    use crate::inference::split::SplitTokenizer;
+    use crate::types::ModelId;
+
+    /// A tiny byte-level BPE over the characters used below, with no merges —
+    /// so `encode` yields exactly one token per character and the expected
+    /// count is arithmetic rather than a second implementation of the
+    /// tokenizer.
+    fn char_tokenizer() -> SplitTokenizer {
+        let mut vocab: Vec<String> = Vec::new();
+        for b in 0u8..=127 {
+            // GPT-2 byte-level alphabet: printable ASCII maps to itself.
+            vocab.push((b as char).to_string());
+        }
+        SplitTokenizer::from_bpe(&vocab, &[], "gpt-2", "gpt2", false, None)
+    }
+
+    /// The count handed back is the number of positions the model will occupy,
+    /// so it must be the tokenizer's answer and never an estimate. Without the
+    /// fix this returns `chars / 4` and the assertion fails by ~4x.
+    #[test]
+    fn a_prompt_is_measured_by_the_tokenizer_not_by_its_length() {
+        let tok = char_tokenizer();
+        let model = ModelId("test-model".into());
+        // 64 characters — `chars / 4` would say 16.
+        let prompt = "a".repeat(64);
+        let truth = tok.encode(&prompt).len();
+        assert_eq!(
+            prompt_positions(&prompt, Some(&tok), &model),
+            truth,
+            "the prompt's length in positions must come from the tokenizer"
+        );
+        assert_ne!(
+            truth,
+            prompt.chars().count() / 4,
+            "control: this prompt must be one the old estimate got wrong, \
+             or the test above passes for the wrong reason"
+        );
+    }
+
+    /// With no tokenizer there is nothing to count with, and refusing the
+    /// request would be worse than a reply that may drift — so the estimate
+    /// survives here, and only here.
+    #[test]
+    fn with_no_tokenizer_it_falls_back_to_an_estimate() {
+        let model = ModelId("test-model".into());
+        assert_eq!(prompt_positions(&"a".repeat(64), None, &model), 16);
+        // Never zero: position 0 is where the prompt starts, not where it ends.
+        assert_eq!(prompt_positions("ab", None, &model), 1);
     }
 }

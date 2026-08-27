@@ -1917,3 +1917,54 @@ Three things a change here must keep:
 - **A miss is not free** (gotcha #371): the forward the draft provokes costs
   even when nothing is accepted, which is what `SpecBackoff` exists for. Measure
   the workload speculation CANNOT help, not just the one it can.
+
+## A prompt's length in tokens is a POSITION, not a statistic
+
+**`inference::pipeline::prompt::prompt_positions`** is the single answer to "how
+many positions does this prompt occupy?", for all five sites in that module.
+Never open-code it, and never estimate it.
+
+`distributed.rs` sets `index_pos = ptc + vision_expand` after the prompt pass,
+and ships `index_pos` to the worker as the **rotary position of the next token
+and the offset it attends from**. It must equal the number of KV positions the
+prefill actually wrote. It is not a report; it is a coordinate.
+
+It was `(prompt.chars().count() / 4).max(1)`, commented *"approximate ... no
+tokenizer in-process"* — true when written, and left in place after
+`standalone_tokenizer` began lazily building one from `gguf_header.bin` three
+lines below it. On a 24 KB tool-calling prompt the estimate came out **6053
+against a true 5529**, so the first generated token was computed 524 positions
+past the end of the cache. The logits are noise, and the model answers with
+end-of-turn or with filler repeated to the token limit (gotcha #400).
+
+Three properties a change here must keep:
+
+- **It only ever bit the pipeline path**, which is the one every request takes
+  while the model is not loaded — so the same request failed cold and succeeded
+  warm. Anything that makes a placement or path decision differently for a cold
+  request inherits this shape: *test it cold*.
+- **The error scales with prompt length.** A short prompt misses by a position
+  or two and still reads correctly. That is why four releases of `curl`
+  reproduction attempts failed — a retry is warm and a minimal repro is short —
+  and why the fix's test uses a prompt the old estimate demonstrably got wrong,
+  with a control asserting exactly that.
+- **The estimate survives only where there is genuinely no tokenizer** (no
+  `gguf_header.bin`), and warns when it does. Refusing the request would be
+  worse than a reply that may drift, but a node navigating by a guess must say
+  so, because nothing else can tell it it is lost.
+
+**The rule this encodes.** A value that is *reported* may be approximate; a
+value that is *acted on* may not. `ptc` fed both `usage.prompt_tokens` and
+`index_pos`, and the comment justifying the approximation was written for the
+first while the second silently depended on it being exact. When one number
+serves two purposes it inherits the stricter requirement — so a comment
+explaining why an estimate is good enough is a place to go and check what else
+reads it.
+
+**And the diagnostic lesson**, which cost more than the fix: an earlier pass
+cleared position bookkeeping by observing that `index_pos` "jumps correctly to
+the prompt length and then increments by one". That compared the number against
+ITSELF. The discriminator is `index_pos` against the worker's `kv_offset` on the
+same forward — two values that must be equal, printed in adjacent log lines the
+whole time. Ask what a number is supposed to EQUAL, not whether it looks
+plausible.
