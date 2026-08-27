@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "Det här grafikkortet är för gammalt för GPU-stöd — {model} växlade till CPU (långsammare, men fungerar)",
   "activity.model_discovered": "Ny modell hittad: {model}",
   "activity.model_download_complete": "Alla shards av {model} klara",
+  "activity.model_gpu_restored": "{model} körs på GPU:n igen — det går snabbt igen",
   "activity.model_load_skipped": "Hoppade över att ladda {model}",
   "activity.model_loaded": "Laddade {model} i minnet — {detail}",
   "activity.model_promoted": "{model} är nu populär på nätverket",

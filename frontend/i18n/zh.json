@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "此显卡太旧，不支持 GPU 加速 — {model} 已切换到 CPU（较慢，但可正常运行）",
   "activity.model_discovered": "发现新模型：{model}",
   "activity.model_download_complete": "{model} 的所有分片已就绪",
+  "activity.model_gpu_restored": "{model} 已回到 GPU 运行 — 速度将恢复",
   "activity.model_load_skipped": "跳过加载 {model}",
   "activity.model_loaded": "已将 {model} 加载到内存 — {detail}",
   "activity.model_promoted": "{model} 在网络上正流行起来",

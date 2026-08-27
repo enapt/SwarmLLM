@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "بطاقة الرسوميات هذه قديمة جدًا لدعم المعالج الرسومي — تم تحويل {model} إلى المعالج المركزي (أبطأ، لكنه يعمل)",
   "activity.model_discovered": "تم اكتشاف نموذج جديد: {model}",
   "activity.model_download_complete": "جميع شظايا {model} جاهزة",
+  "activity.model_gpu_restored": "عاد {model} إلى وحدة معالجة الرسوميات — سيعمل بسرعة أكبر مجددًا",
   "activity.model_load_skipped": "تم تخطي تحميل {model}",
   "activity.model_loaded": "تم تحميل {model} في الذاكرة — {detail}",
   "activity.model_promoted": "أصبح {model} رائجاً الآن على الشبكة",

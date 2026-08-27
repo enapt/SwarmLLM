@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "Ця відеокарта застара для підтримки GPU — {model} перемкнено на CPU (повільніше, але працює)",
   "activity.model_discovered": "Виявлено нову модель: {model}",
   "activity.model_download_complete": "Усі шарди моделі {model} готові",
+  "activity.model_gpu_restored": "{model} знову працює на GPU — швидкість відновлено",
   "activity.model_load_skipped": "Завантаження {model} пропущено",
   "activity.model_loaded": "Модель {model} завантажено в пам'ять — {detail}",
   "activity.model_promoted": "{model} тепер популярна в мережі",

@@ -157,7 +157,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - 3 modal overlays (setup, settings, R127 `#welcome-modal` first-run tour) + 11 `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
 - All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`)
 - Dark/light/system theme toggle, CSS custom properties for theming
-- i18n: 1318 translation keys (1320 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key; parity + these counts are asserted by `tests/repo_consistency.rs` (update the count in BOTH CLAUDE.md and `docs/ARCHITECTURE.md` when adding keys). Every locale carries idiomatic native strings, not English fallback — a new key MUST be translated across all 21 locales (see `.claude/rules/i18n.md`). Per-batch history in `memory/`.
+- i18n: 1319 translation keys (1321 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key; parity + these counts are asserted by `tests/repo_consistency.rs` (update the count in BOTH CLAUDE.md and `docs/ARCHITECTURE.md` when adding keys). Every locale carries idiomatic native strings, not English fallback — a new key MUST be translated across all 21 locales (see `.claude/rules/i18n.md`). Per-batch history in `memory/`.
 - Frontend payload: **~1065 KB** (html 130 + css 247 + js 687), plus **one** locale at a time (~83 KB en; Thai is the largest at 150 KB) and **88 KB of bundled fonts** (`frontend/fonts/`, IBM Plex Latin subsets — NOT counted by the payload test, which sums `js|css|html` only) — the other 20 locales are never fetched. Measured byte-accurate and capped by `frontend_payload_stays_within_budget` in `tests/repo_consistency.rs`; the long-standing "< 200KB target" in this file was 5.6x out and nothing checked it. The cap is a regression budget, not a goal: it fails on a step change, not on ordinary growth.
 - Communication: WebSocket for real-time, REST for initial load, SSE for chat streaming
 - WebSocket message types (only 5): `activity_event` (unified event bus — all subsystem events, toasts, prune history), `stats_update` (2s interval — stats, shard registry, acquisitions, **swarm_capacity** (R110), **wishlist** (R111)), `peer_list` (full peer snapshot on change), `models_changed` (shard download/load/prune signals dashboard refresh), `update_available` (new version detected)
@@ -257,12 +257,19 @@ Detail in `memory/round_log_0827_pi_position.md`; gotcha **#400**.
   could be verified without a request ever reaching a model; it now asks
   `/v1/models`.
 
-⚠ **Open, both confirmed and written up in `docs/FUTURE_WORK.md`**: a model
-demoted to the processor is NEVER promoted back (`get_or_spawn`'s fast path
-returns a resident worker regardless of device, so `clear_cpu_pin`'s "next
-worker spawn" never happens); and foreign libp2p nodes are no longer adopted
-after #396 but are still DIALLED — 126 outbound dials to 3 nodes in 14 minutes,
-measured.
+- **A model demoted to the processor is promoted back again** (gotcha **#401**,
+  fixed after .129). A momentarily-full card demotes and pins a model; freeing
+  memory lifts the pin; and nothing then re-examined the worker that pin had
+  produced — `get_or_spawn`'s fast path returns any resident worker regardless
+  of device, so `clear_cpu_pin`'s "next worker spawn" never came. Reported
+  against a card at 653 of 6141 MB. `should_return_to_gpu` now retires the
+  processor worker on the next request once the pin is gone and the model fits,
+  reading the WORKER's own placement rather than `effective_gpu_layers` — which
+  answers for a spawn happening now, off the pin that has just been cleared.
+
+⚠ **Still open, confirmed and written up in `docs/FUTURE_WORK.md`**: foreign
+libp2p nodes are no longer adopted after #396 but are still DIALLED — 126
+outbound dials to 3 nodes in 14 minutes, measured.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 

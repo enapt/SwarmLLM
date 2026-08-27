@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "Deze videokaart is te oud voor GPU-ondersteuning — {model} is overgeschakeld naar de CPU (trager, maar werkend)",
   "activity.model_discovered": "Nieuw model ontdekt: {model}",
   "activity.model_download_complete": "Alle shards van {model} klaar",
+  "activity.model_gpu_restored": "{model} draait weer op de GPU — voortaan weer sneller",
   "activity.model_load_skipped": "Laden van {model} overgeslagen",
   "activity.model_loaded": "{model} in geheugen geladen — {detail}",
   "activity.model_promoted": "{model} is nu populair op het netwerk",

@@ -160,6 +160,74 @@ fn plan_vram_reclaim(
 /// placement better than it was.
 const VRAM_MAKE_ROOM_MIN_IDLE_SECS: u64 = 60;
 
+/// Everything the "should this worker go back to the card?" decision looks at.
+///
+/// Pure, for the same reason [`plan_vram_reclaim`] is: the policy can then be
+/// tested without spawning a worker or owning a GPU, and the method that
+/// gathers these values does nothing but gather them.
+#[derive(Debug, Clone, Copy)]
+struct PromotionInputs {
+    /// This node put the running worker on the processor (`--gpu-layers 0`).
+    cpu_placed: bool,
+    /// A reason the model would go to the processor *again* if respawned now.
+    /// `None` is the whole point: it means the demotion no longer applies.
+    still_cpu_bound: bool,
+    /// A request is in flight against the worker right now.
+    busy: bool,
+    idle_secs: u64,
+    /// What the card would have to give it, as admission priced it.
+    gpu_estimate_mb: u64,
+    budget_mb: u64,
+    committed_mb: u64,
+}
+
+/// Should this processor-resident worker be retired so the model reloads onto
+/// the graphics card?
+///
+/// **The alternative to acting is a model stuck on the processor for as long as
+/// it stays resident.** A GPU OOM (or a momentarily full card) pins a model to
+/// the CPU; freeing memory lifts the pin; and nothing then re-examined the
+/// worker that pin had produced. `get_or_spawn`'s fast path returns any
+/// resident worker regardless of device, and the CPU worker survives until
+/// `idle_unload_secs` (15 minutes) of *no requests at all* — which a user
+/// actively working with the model never reaches. So lifting the pin bought
+/// nothing for the model it was lifted for. Reported by an external tester
+/// 2026-08-27: llama-3.2-3b took the card, gemma-2-2b-it spawned on the
+/// processor 35 s later, the idle-unload then freed llama and logged `GPU
+/// memory freed — clearing CPU pins`, and re-requesting gemma against an idle
+/// card (653 of 6141 MB in use) reused the processor worker.
+///
+/// Four guards, three of them carried over from [`plan_vram_reclaim`] because
+/// this destroys something that is working and they are what makes that safe:
+///
+/// - **Only a worker this node demoted.** On a machine with no card,
+///   `cpu_placed` is false and there is nowhere to promote to.
+/// - **The reason must actually be gone.** Of the three causes in
+///   [`ModelProcessPool::cpu_reason`], only the OOM pin ever clears — so this
+///   fires on the event that lifted it rather than polling for one.
+/// - **Never a busy worker, and not one used inside
+///   [`VRAM_MAKE_ROOM_MIN_IDLE_SECS`].** Unloading kills the subprocess, and a
+///   request that arrives between the check and the kill dies with it. The idle
+///   floor makes that window empty rather than merely unlikely. A model under
+///   continuous load therefore waits for a gap in the traffic — the pin stays
+///   lifted, so the promotion happens at the first one.
+/// - **Cost the move before making it.** Retiring a worker and then failing
+///   admission costs a cold start and buys nothing, so the model must fit the
+///   budget as it stands *now*. An unreadable estimate (0) or an unset budget
+///   is not evidence, and leaves the model where it is.
+fn should_return_to_gpu(i: &PromotionInputs) -> bool {
+    if !i.cpu_placed || i.still_cpu_bound || i.busy {
+        return false;
+    }
+    if i.idle_secs < VRAM_MAKE_ROOM_MIN_IDLE_SECS {
+        return false;
+    }
+    if i.budget_mb == 0 || i.gpu_estimate_mb == 0 {
+        return false;
+    }
+    i.committed_mb.saturating_add(i.gpu_estimate_mb) <= i.budget_mb
+}
+
 static RESPONSE_ATTEMPT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// A handle to a running model worker subprocess.
@@ -228,6 +296,28 @@ struct WorkerHandle {
     /// Stored as seconds since `spawned_at` rather than a wall-clock stamp, so
     /// a clock step cannot make a busy worker look idle for hours.
     last_used: AtomicU64,
+    /// Why this node put this worker on the processor — `None` means it was
+    /// spawned for the graphics card.
+    ///
+    /// A property of the WORKER, not of the model: it records where the process
+    /// actually went and why, which is the only thing still true minutes later.
+    /// [`ModelProcessPool::cpu_reason`] answers for a spawn happening *now*, and
+    /// the pin it consults is deliberately cleared while the worker it produced
+    /// is still running — so asking it about a resident worker gives the wrong
+    /// answer precisely when the answer matters, both for the promotion decision
+    /// and for the dashboard's "why is this not on my GPU?".
+    ///
+    /// Note it is `None` on a node with no graphics card at all: nothing was
+    /// demoted, there is simply nowhere else to run.
+    placed_on_cpu_because: Option<CpuReason>,
+    /// What the card would have to give this model, as admission priced it at
+    /// spawn — 0 when the geometry could not be read.
+    ///
+    /// Carried here so a later request can ask "would it fit now?" without
+    /// going back to disk: `estimate_gpu_footprint_mb` re-reads
+    /// `gguf_header.bin` and scans the model directory, which is fine once per
+    /// spawn and not fine once per request.
+    gpu_estimate_mb: u64,
 }
 
 /// Pull the `request_id` field out of any `WorkerMsg` variant that carries one.
@@ -1352,10 +1442,25 @@ impl ModelProcessPool {
         None
     }
 
-    /// Public form of [`ModelProcessPool::cpu_reason`], for the admin API — so
-    /// "why is this model not on my GPU" is answerable without reading the log
+    /// Why this model is on the processor, for the admin API and the dashboard —
+    /// so "why is this model not on my GPU" is answerable without reading the log
     /// at the moment the decision was taken.
+    ///
+    /// **A running worker is a fact; [`ModelProcessPool::cpu_reason`] is a
+    /// prediction about the next spawn.** They differ whenever something has
+    /// changed since the worker started — an OOM pin lifted by freed memory, or
+    /// `gpu_layers` edited in Settings — and the question being asked here is
+    /// about the model that is running. Answering it from the prediction meant
+    /// the dashboard dropped its explanation from a model still sitting on the
+    /// processor waiting to move back, and would have explained a model happily
+    /// running on the card as "you configured CPU-only".
+    ///
+    /// With no worker resident there is nothing to contradict the prediction,
+    /// and it is exactly right: it is what the next spawn will do.
     pub fn cpu_placement_reason(&self, model_id: &ModelId) -> Option<&'static str> {
+        if let Some(handle) = self.workers.get(model_id) {
+            return handle.placed_on_cpu_because.map(CpuReason::as_str);
+        }
         self.cpu_reason(model_id).map(CpuReason::as_str)
     }
 
@@ -1575,7 +1680,18 @@ impl ModelProcessPool {
         //
         // A CPU-resident worker therefore falls through to the estimate below,
         // which is the right question for it: the VRAM is genuinely free.
-        if self.workers.contains_key(model_id) && self.cpu_reason(model_id).is_none() {
+        //
+        // The test is the WORKER's own placement, not `cpu_reason`. That asks
+        // where a spawn happening now would go, and its pin is cleared while
+        // the processor worker it produced is still running — so through that
+        // proxy a model waiting to move back to the card would report "already
+        // charged" while holding no graphics memory at all, which is the exact
+        // contradiction described above.
+        let resident_on_gpu = self
+            .workers
+            .get(model_id)
+            .map(|h| h.placed_on_cpu_because.is_none());
+        if resident_on_gpu == Some(true) {
             return Some(true);
         }
         let budget = self
@@ -1828,6 +1944,31 @@ impl ModelProcessPool {
             reclaimed = reclaimed.saturating_add(charge);
         }
         reclaimed
+    }
+
+    /// Gather the inputs for [`should_return_to_gpu`] and ask it.
+    ///
+    /// Cheap enough for the request path — which is where it has to run, since
+    /// the whole point is to act when the model is next wanted rather than on a
+    /// timer. `cpu_placed` is a plain field, so a worker on the card (and every
+    /// worker on a node without one) is dismissed by a bool read; the atomics
+    /// and the small `vram_reserved_mb` sum are only reached for a model this
+    /// node has actually demoted. Nothing here touches the disk.
+    fn worker_should_return_to_gpu(&self, model_id: &ModelId, handle: &WorkerHandle) -> bool {
+        if handle.placed_on_cpu_because.is_none() {
+            return false;
+        }
+        should_return_to_gpu(&PromotionInputs {
+            cpu_placed: true,
+            still_cpu_bound: self.cpu_reason(model_id).is_some(),
+            busy: !handle.responses.is_empty(),
+            idle_secs: handle.idle_secs(),
+            gpu_estimate_mb: handle.gpu_estimate_mb,
+            budget_mb: self
+                .vram_budget_mb
+                .load(std::sync::atomic::Ordering::Relaxed),
+            committed_mb: self.vram_committed_mb(),
+        })
     }
 
     /// Release a worker's charge. Must pair with every `admit_to_gpu`.
@@ -2123,17 +2264,29 @@ impl ModelProcessPool {
 
     /// Get or spawn a worker for this model.
     async fn get_or_spawn(&self, model_id: &ModelId) -> Result<Arc<WorkerHandle>, SwarmError> {
-        // Fast path: worker already exists
+        // Fast path: worker already exists — and, unless this node demoted it
+        // to the processor and the card has since made room, that is the answer.
         if let Some(handle) = self.workers.get(model_id) {
-            return Ok(handle.clone());
+            if !self.worker_should_return_to_gpu(model_id, &handle) {
+                return Ok(handle.clone());
+            }
         }
 
         // Slow path: serialize spawns to prevent duplicate workers
         let _guard = self.spawn_lock.lock().await;
-        // Re-check after acquiring lock (another task may have spawned it)
-        if let Some(handle) = self.workers.get(model_id) {
-            return Ok(handle.clone());
-        }
+        // Re-check after acquiring lock (another task may have spawned it), and
+        // re-take the promotion decision under the lock: nothing else can charge
+        // the budget while we hold it, so the "it fits" the retirement is
+        // justified by is still true at the admission below.
+        let retire_for_gpu = match self.workers.get(model_id) {
+            Some(handle) => {
+                if !self.worker_should_return_to_gpu(model_id, &handle) {
+                    return Ok(handle.clone());
+                }
+                true
+            }
+            None => false,
+        };
         // Crash-loop backoff: refuse to re-spawn while a recent failure is
         // still inside its cooldown window. Without this a permanently-broken
         // model (corrupt shards, GPU OOM on load) burns one
@@ -2152,6 +2305,27 @@ impl ModelProcessPool {
                 )));
             }
         }
+        // Deliberately AFTER the crash-loop check: retiring a worker we would
+        // then refuse to respawn would leave the model with nothing at all.
+        if retire_for_gpu {
+            tracing::info!(
+                model = %model_id,
+                committed_mb = self.vram_committed_mb(),
+                budget_mb = self
+                    .vram_budget_mb
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "Graphics memory has freed up — retiring this model's processor worker \
+                 so it can be admitted to the GPU again"
+            );
+            // Drops the worker and its RAM charge; the spawn below re-runs
+            // admission from scratch. Deliberately says nothing here about
+            // where the model ends up: admission has the last word and prices
+            // the model again from its own geometry, so announcing the outcome
+            // at this point is a claim the next line could falsify — the exact
+            // mistake `admit_to_gpu`'s own refusal log was corrected for. The
+            // user-facing event is emitted below, once it is a fact.
+            self.unload_model(model_id).await;
+        }
         // Admission control. Inside `spawn_lock`, so read-decide-charge cannot
         // interleave with another spawn — which matters because a worker is
         // admitted long before it allocates (the model loads lazily on its first
@@ -2159,8 +2333,12 @@ impl ModelProcessPool {
         // plenty free and both proceed. Refusing here means the model loads on
         // the CPU: slower, but not a dead worker and a lost GPU.
         let mut going_to_cpu = self.effective_gpu_layers(model_id) == 0;
+        // What the card would have to give this model. Read from disk ONCE per
+        // spawn: the admission gate weighs it, the CPU-fallback log reports it,
+        // and the worker carries it so a later request can ask whether the
+        // model would fit now without re-reading the geometry.
+        let estimated = self.estimate_gpu_footprint_mb(model_id);
         if !going_to_cpu {
-            let estimated = self.estimate_gpu_footprint_mb(model_id);
             // Demoting to the CPU is the last resort, not the first answer:
             // reclaim the card from models nothing is using, then ask again.
             // Ask ONCE unless the answer was no — `admit_to_gpu` charges the
@@ -2225,7 +2403,7 @@ impl ModelProcessPool {
                 model = %model_id,
                 reason,
                 configured_gpu_layers = self.configured_gpu_layers(),
-                estimated_vram_mb = self.estimate_gpu_footprint_mb(model_id),
+                estimated_vram_mb = estimated,
                 vram_budget_mb = self.vram_budget_mb.load(std::sync::atomic::Ordering::Relaxed),
                 "Model will run on the CPU"
             );
@@ -2328,12 +2506,32 @@ impl ModelProcessPool {
             self.record_cpu_kv_budget(model_id);
         }
 
-        match self.spawn_worker(model_id).await {
+        match self.spawn_worker(model_id, estimated).await {
             Ok(handle) => {
                 // Reset the failure counter on first success.
                 self.spawn_failures.remove(model_id);
                 let handle = Arc::new(handle);
                 self.workers.insert(model_id.clone(), handle.clone());
+                // Only now is it a fact. The user was told when this model was
+                // demoted to the processor, so they are told when it comes
+                // back — and if admission refused it a second time they were
+                // told that instead, above, rather than this.
+                if retire_for_gpu && !going_to_cpu {
+                    if let Some(tx) = self.activity_tx.get() {
+                        let _ = tx.send(
+                            crate::daemon::state::ActivityEvent::new(
+                                "inference",
+                                "model_gpu_restored",
+                                format!(
+                                    "{} is back on the GPU — it will run faster again",
+                                    model_id.0
+                                ),
+                            )
+                            .with_model(model_id.0.clone())
+                            .with_toast("info", 5000),
+                        );
+                    }
+                }
                 Ok(handle)
             }
             Err(e) => {
@@ -2383,7 +2581,14 @@ impl ModelProcessPool {
         }
     }
 
-    async fn spawn_worker(&self, model_id: &ModelId) -> Result<WorkerHandle, SwarmError> {
+    /// `gpu_estimate_mb` is what admission priced this model at — carried onto
+    /// the handle so a later request can re-ask whether it fits without going
+    /// back to disk for the geometry. 0 means it could not be read.
+    async fn spawn_worker(
+        &self,
+        model_id: &ModelId,
+        gpu_estimate_mb: u64,
+    ) -> Result<WorkerHandle, SwarmError> {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
 
         // Cross-platform socket naming:
@@ -2602,6 +2807,12 @@ impl ModelProcessPool {
         // and `inference.gpu_layers` was read only by the legacy llama.cpp
         // executor, so a CUDA build ignored the setting entirely.
         args.push("--gpu-layers".to_string());
+        // Where this worker is actually going, recorded on the handle as the
+        // ONE statement of it. By this point any admission refusal above has
+        // already taken its pin, so `cpu_reason` is `Some` for every one of the
+        // three ways a model runs on the processor — and `effective_gpu_layers`
+        // is defined as `match cpu_reason`, so the two cannot disagree.
+        let placed_on_cpu_because = self.cpu_reason(model_id);
         args.push(self.effective_gpu_layers(model_id).to_string());
         if let Some(b) = self.cpu_kv_budget_bytes.get(model_id) {
             args.push("--kv-budget-bytes".to_string());
@@ -2711,6 +2922,8 @@ impl ModelProcessPool {
             reader_handle,
             spawned_at: std::time::Instant::now(),
             last_used: AtomicU64::new(0),
+            placed_on_cpu_because,
+            gpu_estimate_mb,
         })
     }
 
@@ -3494,10 +3707,16 @@ impl ModelProcessPool {
 
     /// Unload all segments for a model (kills the worker subprocess).
     pub async fn unload_model(&self, model_id: &ModelId) {
-        // Was this worker holding GPU memory? Only then does killing it change
-        // the pressure that caused any outstanding CPU pins.
-        let freed_gpu_memory = self.effective_gpu_layers(model_id) != 0;
         if let Some((_, handle)) = self.workers.remove(model_id) {
+            // Was this worker holding GPU memory? Only then does killing it
+            // change the pressure that caused any outstanding CPU pins.
+            //
+            // Read from the WORKER, not from `effective_gpu_layers`. That asks
+            // where a spawn happening *now* would go, and its pin is cleared
+            // while the processor worker it produced is still running — so a
+            // model on its way back to the card answered "GPU" and lifted every
+            // other model's pin on the strength of memory it never held.
+            let freed_gpu_memory = handle.placed_on_cpu_because.is_none();
             // Try graceful shutdown first
             if let Ok(mut writer) = handle.writer.try_lock() {
                 let _ = send_daemon(&mut *writer, &DaemonMsg::Shutdown, &[]).await;
@@ -3527,7 +3746,11 @@ impl ModelProcessPool {
             // worker never had a VRAM charge and vice versa; releasing both is
             // correct and keeps the two budgets from drifting on churn.
             self.release_ram_charge(model_id);
-            tracing::info!(model_id = %model_id, "Model worker killed, GPU memory freed");
+            tracing::info!(
+                model_id = %model_id,
+                device = if freed_gpu_memory { "gpu" } else { "cpu" },
+                "Model worker stopped and its memory budget released"
+            );
 
             // A GPU OOM pins its model to the CPU, and that pin used to last for
             // the life of the process — a ~10x throughput loss that no API
@@ -4220,6 +4443,97 @@ mod admission_tests {
     #[test]
     fn a_model_that_already_fits_reclaims_nothing() {
         assert!(plan_vram_reclaim(8000, 1000, 2000, vec![cand("idle", 1000, 3600)]).is_empty());
+    }
+
+    /// The reported case, at the moment the user asks for the model again:
+    /// gemma-2-2b-it is resident on the processor, llama has since been idle-
+    /// unloaded so the pin is gone, and the card is nearly empty (653 of 6141
+    /// MB). Before this, `get_or_spawn`'s fast path handed back the processor
+    /// worker and the model stayed there for as long as it lived.
+    fn promotable() -> PromotionInputs {
+        PromotionInputs {
+            cpu_placed: true,
+            still_cpu_bound: false,
+            busy: false,
+            idle_secs: 300,
+            gpu_estimate_mb: 2200,
+            budget_mb: 6141,
+            committed_mb: 653,
+        }
+    }
+
+    #[test]
+    fn a_demoted_model_returns_to_the_card_once_it_fits_again() {
+        assert!(
+            should_return_to_gpu(&promotable()),
+            "the pin was lifted and the memory is there — retire the processor worker"
+        );
+    }
+
+    /// The gate that keeps this off every other node: a worker already on the
+    /// card, and every worker on a machine that has none, is not a candidate.
+    /// Nothing was demoted, so there is nowhere to promote to.
+    #[test]
+    fn a_worker_this_node_did_not_demote_is_left_alone() {
+        let mut i = promotable();
+        i.cpu_placed = false;
+        assert!(!should_return_to_gpu(&i));
+    }
+
+    /// The demotion must actually have stopped applying. `gpu_layers = 0`, a
+    /// card below the kernel floor, and a pin that has not been lifted all
+    /// present here as `still_cpu_bound` — respawning would land on the
+    /// processor again and cost a reload for nothing.
+    #[test]
+    fn a_model_still_bound_to_the_processor_is_not_retired() {
+        let mut i = promotable();
+        i.still_cpu_bound = true;
+        assert!(!should_return_to_gpu(&i));
+    }
+
+    /// Retiring a worker kills the subprocess. A request in flight dies with
+    /// it, so a busy worker is never touched however long ago it was started.
+    #[test]
+    fn a_busy_worker_is_never_retired() {
+        let mut i = promotable();
+        i.busy = true;
+        assert!(!should_return_to_gpu(&i));
+    }
+
+    /// The idle floor is what makes the busy check a guarantee rather than a
+    /// hope: with no request in the last minute there is no window between the
+    /// decision and the kill for one to arrive in. A model under continuous
+    /// load waits for a gap — the pin stays lifted, so it gets one.
+    #[test]
+    fn a_model_answering_right_now_waits_for_a_gap() {
+        let mut i = promotable();
+        i.idle_secs = VRAM_MAKE_ROOM_MIN_IDLE_SECS - 1;
+        assert!(!should_return_to_gpu(&i));
+    }
+
+    /// Cost the move before making it. Retiring a working worker and then
+    /// having admission refuse it costs a cold start and leaves the model
+    /// exactly where it was.
+    #[test]
+    fn a_model_that_still_would_not_fit_stays_on_the_processor() {
+        let mut i = promotable();
+        i.committed_mb = 4500; // 4500 + 2200 > 6141
+        assert!(!should_return_to_gpu(&i));
+    }
+
+    /// Unreadable geometry and an unset budget are not evidence. `admit_to_gpu`
+    /// treats the same gap as "do not judge" and lets a spawn through, but the
+    /// question here is whether to DESTROY something that works, and the answer
+    /// to that on no information is no.
+    #[test]
+    fn an_unknown_footprint_or_budget_leaves_the_model_where_it_is() {
+        let mut no_estimate = promotable();
+        no_estimate.gpu_estimate_mb = 0;
+        assert!(!should_return_to_gpu(&no_estimate));
+
+        let mut no_budget = promotable();
+        no_budget.budget_mb = 0;
+        assert!(!should_return_to_gpu(&no_budget));
     }
 
     /// Releasing a charge frees the budget for the next admission — otherwise

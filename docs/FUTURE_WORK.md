@@ -10648,61 +10648,29 @@ refused until memory frees up.
 admission/load race, and wants testing on a card under contention rather than a
 compile check — this was found in the last hour before a release.
 
-## A model demoted to the processor is never promoted back (confirmed 2026-08-27)
+## A model demoted to the processor waits for a gap in its own traffic (2026-08-27)
 
-**Reported by an external tester, then confirmed in the code.** A model that
-lands on the CPU because the graphics card was momentarily full stays on the CPU
-for as long as its worker is resident — however much VRAM frees afterwards.
+The bulk of this is **fixed** in `should_return_to_gpu` /
+`ModelProcessPool::worker_should_return_to_gpu`: a worker this node put on the
+processor is retired, on the next request for it, once the pin has been lifted
+and the model fits the budget again. What is left is the deliberate residual.
 
-The tester's sequence, which reproduces it exactly: `llama-3.2-3b` loaded onto
-the card; `gemma-2-2b-it` requested ~35 s later; gemma refused GPU admission and
-spawned on the CPU; the idle-unload timer then freed llama and logged `GPU
-memory freed — clearing CPU pins`; re-requesting gemma with the card confirmed
-idle (653/6141 MB) **reused the resident CPU worker** rather than retrying GPU
-admission.
+`VRAM_MAKE_ROOM_MIN_IDLE_SECS` (60 s) gates the retirement, because unloading
+kills the subprocess and a request arriving between the decision and the kill
+dies with it. So a model being used continuously — a request every few seconds,
+never a minute's gap — stays on the processor until the traffic breaks. The pin
+stays lifted, so it is promoted at the first gap; but under sustained load that
+gap may not come.
 
-Two separate things combine, and only the second is a defect:
+Closing it properly means retiring a worker *without* racing its in-flight
+requests: drain rather than kill — stop admitting new requests to the handle,
+wait for `responses` to empty, then unload. That is a change to how workers are
+retired everywhere (`free_vram_for_admission` has the same race against its
+victims, mitigated the same way), so it wants doing once, deliberately, rather
+than bolted onto this path.
 
-1. **The admission reclaim correctly declined.** `free_vram_for_admission`
-   requires a candidate idle for `VRAM_MAKE_ROOM_MIN_IDLE_SECS` (60 s), and
-   llama had been used 35 s earlier. That floor exists so two models alternating
-   faster than they load do not evict each other on every request; it did its
-   job. The eviction the tester saw fire moments later was
-   `try_idle_vram_unload` — a different mechanism with a similar log line.
-2. **Nothing re-evaluates placement for a worker that already exists.**
-   `ModelProcessPool::get_or_spawn` opens with a fast path that returns any
-   resident worker regardless of which device it is on. `cpu_reason` (and so
-   `effective_gpu_layers`) is consulted only when SPAWNING. `clear_cpu_pin` is
-   documented as letting "the next worker spawn" use the GPU, and there is no
-   next spawn: the CPU worker survives until `idle_unload_secs` (900 s) of *no
-   requests at all*, which a user actively working with the model never reaches.
-
-So lifting the pin currently buys nothing for the model it was lifted for. This
-is the sibling of gotcha #388 — there, eviction stopped short because it freed
-against a smaller estimate than admission charged; here, the freed memory is
-never asked for again.
-
-**Shape of a fix.** When a CPU pin is lifted (or on the admission path) and a
-model has a CPU-resident worker that is idle and would now fit, retire that
-worker so the next request respawns it on the card. `WorkerHandle::last_used`
-already exists for exactly this kind of judgement, and the guards
-`free_vram_for_admission` established should carry over unchanged: an idle floor
-so two models cannot thrash each other, and cost the move before making it —
-retiring a worker and then failing admission costs a cold start and buys
-nothing.
-
-**How to verify it, because this cannot be done from the test suite.** Load a
-model that fits and use it; request a second that does not fit alongside it and
-watch it go to the CPU; let the first go idle past the floor; request the second
-again and assert it is now on the card — `device=Cuda` in the worker's own
-"Model loaded" line, not merely a faster reply. The wrong outcome to guard
-against is thrashing: run the two models alternately inside the idle floor and
-assert neither evicts the other.
-
-**Not attempted yet** deliberately: it evicts and respawns workers under VRAM
-pressure, and shipping that on the strength of a code reading — alongside a fix
-that had been measured — is the pattern that produced three releases in one day
-each followed immediately by a bug.
+Not urgent: the case it costs is a model under continuous load, which is also
+the case where a cold start is most expensive.
 
 ## Foreign libp2p nodes are no longer adopted, but are still dialled (measured 2026-08-27)
 

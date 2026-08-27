@@ -2,6 +2,27 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A model that fell back to your processor now returns to the graphics card
+  once there is room again.** When the card is momentarily full, SwarmLLM loads
+  the model on the processor instead — slower, but it answers — and moves it
+  back when memory frees up. The second half was not happening: the model kept
+  running on the processor for as long as it stayed loaded, which in practice
+  meant until fifteen minutes passed with no requests to it at all. Anyone
+  actually using the model never got there.
+
+  A request for such a model now checks whether the card has room for it again,
+  and if it has, reloads it there. It waits for a quiet moment first — a model
+  answering right now is left alone — and it checks that the model really fits
+  before moving anything, so a reload is never paid for nothing. You are told in
+  the activity feed when a model goes back to the card, the same way you are
+  told when one falls back to the processor.
+
+  Reported by a tester with a 6 GB card, two models and a stopwatch.
+
 ## [0.3.129-alpha] — 2026-08-27
 
 ### Fixed

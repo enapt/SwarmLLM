@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "การ์ดจอนี้เก่าเกินไปสำหรับการรองรับ GPU — {model} เปลี่ยนไปใช้ CPU (ช้ากว่า แต่ยังทำงานได้)",
   "activity.model_discovered": "ค้นพบโมเดลใหม่: {model}",
   "activity.model_download_complete": "shards ทั้งหมดของ {model} พร้อมแล้ว",
+  "activity.model_gpu_restored": "{model} กลับมาทำงานบน GPU แล้ว — จะเร็วขึ้นอีกครั้ง",
   "activity.model_load_skipped": "ข้ามการโหลด {model}",
   "activity.model_loaded": "โหลด {model} เข้าหน่วยความจำแล้ว — {detail}",
   "activity.model_promoted": "{model} กำลังเป็นที่นิยมในเครือข่ายแล้ว",

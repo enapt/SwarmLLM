@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "Esta placa gráfica é demasiado antiga para suporte de GPU — {model} mudou para CPU (mais lento, mas a funcionar)",
   "activity.model_discovered": "Novo modelo descoberto: {model}",
   "activity.model_download_complete": "Todos os fragmentos de {model} prontos",
+  "activity.model_gpu_restored": "{model} voltou para a GPU — vai voltar a funcionar mais rápido",
   "activity.model_load_skipped": "Carregamento de {model} ignorado",
   "activity.model_loaded": "{model} carregado na memória — {detail}",
   "activity.model_promoted": "{model} agora é popular na rede",

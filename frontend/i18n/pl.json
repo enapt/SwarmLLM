@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "Ta karta graficzna jest zbyt stara, aby obsłużyć GPU — {model} przełączono na CPU (wolniej, ale działa)",
   "activity.model_discovered": "Odkryto nowy model: {model}",
   "activity.model_download_complete": "Wszystkie shardy modelu {model} gotowe",
+  "activity.model_gpu_restored": "{model} wrócił na GPU — znów będzie działać szybciej",
   "activity.model_load_skipped": "Pominięto ładowanie {model}",
   "activity.model_loaded": "Załadowano {model} do pamięci — {detail}",
   "activity.model_promoted": "{model} jest teraz popularny w sieci",

@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "Bu ekran kartı GPU desteği için çok eski — {model} CPU'ya geçirildi (daha yavaş ama çalışıyor)",
   "activity.model_discovered": "Yeni model keşfedildi: {model}",
   "activity.model_download_complete": "{model} modelinin tüm parçaları hazır",
+  "activity.model_gpu_restored": "{model} yeniden GPU'da çalışıyor — tekrar daha hızlı olacak",
   "activity.model_load_skipped": "{model} yüklenmesi atlandı",
   "activity.model_loaded": "{model} belleğe yüklendi — {detail}",
   "activity.model_promoted": "{model} artık ağda popüler",

@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "यह ग्राफ़िक्स कार्ड GPU समर्थन के लिए बहुत पुराना है — {model} CPU पर स्विच हो गया (धीमा, लेकिन काम कर रहा है)",
   "activity.model_discovered": "नया मॉडल मिला: {model}",
   "activity.model_download_complete": "{model} के सभी शार्ड तैयार",
+  "activity.model_gpu_restored": "{model} फिर से GPU पर चल रहा है — अब यह दोबारा तेज़ चलेगा",
   "activity.model_load_skipped": "{model} लोड करना छोड़ा गया",
   "activity.model_loaded": "{model} मेमोरी में लोड हुआ — {detail}",
   "activity.model_promoted": "{model} अब नेटवर्क पर लोकप्रिय है",

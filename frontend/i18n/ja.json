@@ -44,6 +44,7 @@
   "activity.model_cpu_fallback_gpu_too_old": "このグラフィックカードは古すぎて GPU に対応していません — {model} は CPU に切り替えました（低速ですが動作します）",
   "activity.model_discovered": "新しいモデルを発見：{model}",
   "activity.model_download_complete": "{model}のすべてのシャードが準備完了",
+  "activity.model_gpu_restored": "{model} が GPU に戻りました — 再び高速に動作します",
   "activity.model_load_skipped": "{model}の読み込みをスキップしました",
   "activity.model_loaded": "{model}をメモリに読み込みました — {detail}",
   "activity.model_promoted": "{model} がネットワーク上で人気になっています",

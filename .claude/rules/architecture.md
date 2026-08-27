@@ -619,6 +619,55 @@ silently break at the wire if duplicated:
   headroom doing its job, and trusting the measured figure would admit a model and
   then OOM it.
 
+- **`should_return_to_gpu` + `ModelProcessPool::worker_should_return_to_gpu`**
+  (2026-08-27) — the single answer to "is this resident worker still in the right
+  place?", asked on the request path in `get_or_spawn` rather than on a timer.
+  **A pin that clears buys nothing while the worker it produced is still running.**
+  A momentarily-full card demotes a model and pins it; `unload_model` lifts the pin
+  when a GPU tenant goes away and logs `clearing CPU pins`; and `get_or_spawn`'s
+  fast path then returned the processor worker regardless of device. `clear_cpu_pin`
+  is documented as letting "the next worker spawn" use the card, and there is no
+  next spawn — the worker survives until `idle_unload_secs` (15 min) of *no requests
+  at all*, which someone actively using the model never reaches. Reported by an
+  external tester: gemma-2-2b-it re-requested against a card at 653 of 6141 MB
+  reused its processor worker (gotcha #401).
+  **The decision reads the WORKER, not the model.**
+  `WorkerHandle::placed_on_cpu_because` records why the process actually went to
+  the processor, at the moment it was spawned; `cpu_reason` (and so
+  `effective_gpu_layers`) answers for a spawn happening *now*, off the pin that is
+  exactly the thing being cleared. **A running worker is a fact; `cpu_reason` is a
+  prediction**, and they differ precisely in the window this change creates. Three
+  callers were asking the prediction about a resident worker and are now corrected
+  to the fact: `unload_model` (whether killing this worker freed graphics memory —
+  a model on its way back to the card would have lifted every other model's pin on
+  the strength of memory it never held), `cpu_placement_reason` (the dashboard's
+  "why is this not on my GPU?" — which would have dropped its explanation from a
+  model still on the processor, and explained a model happily on the card as "you
+  configured CPU-only"), and `would_fit_on_gpu`'s already-charged short-circuit,
+  which would otherwise have re-created the 2026-08-18 contradiction its own
+  comment describes. **A new caller asking about a model that has a worker should
+  ask the worker.**
+  `WorkerHandle::gpu_estimate_mb` caches what admission priced the model at,
+  because `estimate_gpu_footprint_mb` re-reads `gguf_header.bin` and scans the
+  model directory: fine once per spawn, not fine once per request.
+  Four guards, three carried over from `plan_vram_reclaim` because this destroys
+  something that works. Only a worker THIS NODE demoted (on a machine with no card
+  `cpu_placed` is false, and there is nowhere to promote to). The demotion must have
+  stopped applying — of `cpu_reason`'s three causes only the OOM pin ever clears, so
+  this fires on the event that lifted it rather than polling. Never a busy worker,
+  and not one used inside `VRAM_MAKE_ROOM_MIN_IDLE_SECS`, because unloading kills
+  the subprocess and the idle floor makes the race window empty rather than merely
+  unlikely (the residual — a model under continuous load waits for a gap — is in
+  `docs/FUTURE_WORK.md`). And **cost the move before making it**: an unreadable
+  footprint or an unset budget is not evidence, and leaves the model where it is.
+  `admit_to_gpu` treats the same gap as "do not judge" and lets a spawn through;
+  the question here is whether to destroy something working, and the answer on no
+  information is no.
+  **The outcome is announced after admission, not before it.** The retirement logs
+  what it is doing; the user-facing `model_gpu_restored` event is emitted only once
+  the worker is on the card, because admission prices the model again and has the
+  last word — the same correction `admit_to_gpu`'s refusal log already carries.
+
 - **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
   admission check against it. The loader records `kv_headroom_bytes` on the
   model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward
