@@ -736,7 +736,21 @@ Empty stop sequences are rejected at the API validation layer (must be 1–256 c
 
 **Top-k sampling**: Uses `select_nth_unstable_by(k - 1, desc_cmp)` to partition the k largest logits into `[..k]`. The k-1 pivot ensures exactly k elements are retained (not k-1).
 
-**RoPE position tracking**: Prompt token count estimated as `max(chars / 4, 1)` when no tokenizer is available on the coordinating node. The minimum of 1 prevents zero-position RoPE for short prompts.
+**RoPE position tracking**: the prompt's length in tokens is a POSITION, not a
+statistic — `index_pos` for the first generated token is set from it, so it must
+equal the number of KV positions the prefill actually wrote.
+`inference::pipeline::prompt::prompt_positions` is the single answer, and it
+counts with the model's own tokenizer (`standalone_tokenizer`, lazily built from
+`gguf_header.bin`).
+
+`max(chars / 4, 1)` survives ONLY where a node genuinely has no tokenizer for the
+model, and warns when it does. It used to be the answer in every case, including
+when a tokenizer was available three lines below: on a 24 KB tool-calling prompt
+it came out 6053 against a true 5529, so the first generated token was computed
+524 positions past the end of the cache and the model answered with end-of-turn
+or with filler repeated to `max_tokens` (gotcha #400, fixed v0.3.129). The
+minimum of 1 remains, because position 0 is where a prompt starts rather than
+where it ends.
 
 ### KV-Cache Management
 

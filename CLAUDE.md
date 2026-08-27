@@ -221,45 +221,55 @@ All 20 build phases complete. All subsystems wired — no stubs. **2108 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Unreleased on main (2026-08-25/26 overnight watch): seven fixes, all found by RUNNING it
+### v0.3.129-alpha (2026-08-27) — the `pi` single-token bug, and it was position arithmetic
 
-Detail in `memory/round_log_0825_overnight_watch.md`; gotchas **#388-#392**.
+Detail in `memory/round_log_0827_pi_position.md`; gotcha **#400**.
 
-- **An idle model kept the graphics card and everything else ran on the CPU** (#388).
-  Eviction frees against a *weights-only* estimate while admission charges
-  *weights + KV* — two figures for one quantity, and the smaller decides how much
-  to free, so eviction always stopped while admission was still short. The RAM
-  budget had had reclaim-then-retry since v0.3.111; VRAM never got it. Same prompt:
-  **72.7 s → 2.99 s**. And it is not merely slow — a CPU-bound model is then
-  DELEGATED to a peer, where it can fail outright (#391).
-- **Every streamed reply held its connection ~15 s after its last token** (#390).
-  Both SSE encoders had a byte-identical ticker that slept the whole keep-alive
-  interval and only THEN checked whether the response had finished. **→ 1-2 ms**,
-  verified over six runs with a 13 s cold-load run as the control.
-- **A reply stopped at its first `#` on Qwen models** (#392). `LLAMA_FALLBACK_EOS_TOKEN
-  = 2` was a universal end-of-turn default; id 2 is `#` in Qwen2.5-Coder, and `#` is
-  how a coding reply STARTS. Four sites, **including the arch-aware helper that
-  looked like the fix**. Now VERIFIES a candidate against the model's own vocabulary.
-  ⚠ Whether this is the external `pi` report's cause is UNCONFIRMED — it needs
-  `grep "using LLaMA fallback EOS token"` on their node.
-- **A silent peer was reported as this node's 500** (#389) — the per-segment wait
-  raised `PipelineError` where `PeerUnresponsive` exists; 500 not 503, ERROR not
-  WARN, and the peer went un-penalised.
-- A CPU-only node now reports its own measured speed (it gossips one to every peer
-  while its own API answered `null`); a rejected manifest names its model and
-  sender; a contradicted shard hash names its publisher.
+- **A long FIRST request answered with one word, or repeated one word to the
+  cap.** `extract_model_cache` measured the prompt as `(chars / 4).max(1)` —
+  commented *"approximate … no tokenizer in-process"*, accurate when written and
+  still there after `standalone_tokenizer` made one available three lines below.
+  `distributed.rs` then does `index_pos = ptc`, and **`index_pos` is the rotary
+  position the next token is computed at**. An estimate of a statistic used as a
+  coordinate: 24213 chars → 6053 against a true 5529, so token 2 was computed
+  **524 positions past the end of the KV cache**. Fixed by `prompt_positions`,
+  one helper, five sites.
+- **Why nobody could reproduce it for seven releases.** It fires only on the
+  PIPELINE path — taken while the model is not loaded — so the same request
+  fails cold and succeeds warm, and every retry is warm. And the error scales
+  with prompt length, so a minimal repro is below the threshold. `curl` attempts
+  were short, warm, or both.
+- **⚠ This CORRECTS gotcha #398's fifth elimination**, which cleared position
+  bookkeeping by observing `index_pos` "jumps correctly to the prompt length and
+  then increments by one". That compared the number against ITSELF. The
+  discriminator is `index_pos` vs the worker's `kv_offset` on the same forward —
+  adjacent log lines all along. **Ask what a number should EQUAL, not whether it
+  looks plausible.**
+- **Both release harnesses were passing over it, and are fixed too.**
+  `release_shapes.sh` had a long-prompt cold check whose prompt was ~1400 tokens
+  (below the threshold) and which asserted only `completion_tokens > 3` (the
+  repetition shape passes that). It now asserts **the same request reports the
+  same `prompt_tokens` cold and warm** — a property of the prompt, needing no
+  tokenizer, and the fault itself rather than a symptom. Verified in both
+  directions: fails on .128, passes on .129. `smoke_test.sh` was reporting its
+  three inference checks as COULD NOT RUN on this machine — it asked
+  `/api/admin/models`, which waits on the startup shard-rehash — so a release
+  could be verified without a request ever reaching a model; it now asks
+  `/v1/models`.
 
-⚠ **Open**: the swarm holds a `qwen2.5-coder` shard 3 whose bytes differ from the
-origin (all 8 sizes match, so same split). `origin_verified` is correctly ignoring
-it. Cannot yet say one bad copy or several — `register_manifest` takes no sender
-(`docs/FUTURE_WORK.md`).
+⚠ **Open, both confirmed and written up in `docs/FUTURE_WORK.md`**: a model
+demoted to the processor is NEVER promoted back (`get_or_spawn`'s fast path
+returns a resident worker regardless of device, so `clear_cpu_pin`'s "next
+worker spawn" never happens); and foreign libp2p nodes are no longer adopted
+after #396 but are still DIALLED — 126 outbound dials to 3 nodes in 14 minutes,
+measured.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
-- **v0.3.124-alpha** (08-25): stability round, every fix found by RUNNING it. **#386 the receipt-ACK deadline came from ping RTT, which cannot see a loaded peer** — one peer failed EVERY distributed request for ~an hour then served it in 6.1 s; now per-peer RFC 6298 **plus §5.5 backoff, without which the estimator is INERT exactly where needed**. Fast-fail now requires a standby. **#387 a KV refusal was a RATCHET** — kept the quanta it had taken (1152→2304→3456 MB vs a 1166 budget). **A check that refuses but does not release is worse than no check.** ⚠ Three of my causal claims that session were WRONG and corrected in-repo.
-- **v0.3.120-.123** (08-25): a corrupt shard PROVED to spread between peers — a placeholder hash ERASED a known one, so P2P copies were accepted unverified, announced and re-served. **The ORIGIN settled it; peer agreement is not evidence in a network that copies from itself.** Hashes now monotonic + persisted, origin hashes outrank gossip. **.121 shipped a regression that quarantined the GOOD copy (#384) — a repair mechanism is a destruction mechanism pointed at whatever it believes is wrong.** Gotchas #381-#385.
+- **v0.3.125-.128** (08-26): **#396 ANY libp2p node on the internet could become a "peer"** — we registered on libp2p `identify` (`/ipfs/id/1.0.0`, which EVERY libp2p node speaks) and never read `info.protocols`; spreads via PEX. **Declining to register alone turns a wrong list entry into an ENDLESS DIAL LOOP** → bounded `foreign_peers`. **#399 the caller's sampling was discarded on the pipeline path**, i.e. every cold start. .127: a model that cannot fit a conversation falls back to the processor. **Plus the process fix: local verification had been a strict SUBSET of CI's** → `examples/release_shapes.sh`.
+- **v0.3.120-.124** (08-25): a corrupt shard PROVED to spread — a placeholder hash ERASED a known one, so P2P copies were accepted unverified and re-served. **The ORIGIN settled it; peer agreement is not evidence in a network that copies from itself.** **.121 quarantined the GOOD copy (#384) — a repair mechanism is a destruction mechanism pointed at whatever it believes is wrong.** .124: the receipt-ACK deadline came from ping RTT, which cannot see a loaded peer (#386, now RFC 6298 **+ §5.5 backoff, without which the estimator is INERT exactly where needed**); a KV refusal was a RATCHET (#387). Gotchas #381-#387.
 - **v0.3.119-alpha** (08-24): **25.7x from a memory budget on an idle card** — `compute_vram_budget` read the BOOT SNAPSHOT (#281, third time in one session) AND was a fraction of TOTAL rather than of what is free. Now RESERVES a clamped slice. `memory/round_log_0824_correctness.md`.
 - **v0.3.113-.115** (08-22/23): the .114 decode-width calibration was right on the Ryzen and wrong on the i5 — **min-of-N is for benchmarks, not live measurement** (#367); a stale DHT provider record outranked a holder's own retraction (#364); peer refusals arrived cut mid-word (#365). `round_log_0822_perf_night.md`.
 - **v0.3.109-.112** (08-21/22): CPU prefill +20-40% / decode +25-37% (multi-row Q4_K/Q6_K kernels, decode attention kernel, AVX2 exp, mimalloc); direct peer chaining ON; relay-carried inbound no longer counted as "direct" (#356); receipt ACK cut a quiet peer's cost 300 s → ~26 s (#357).

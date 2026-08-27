@@ -80,6 +80,51 @@ Neither of the first two fires when the caller legitimately asked for a short
 reply — `max_tokens: 1` yielding one token is not a fault and is deliberately
 silent, so the warning stays meaningful.
 
+**"ended its turn immediately" points at the prompt, and the prompt is not
+always the text.** That warning's own advice — check the chat template, check
+that the rendered prompt ends where the model expects to answer — was followed
+for seven releases against an external report and was a dead end every time:
+the template was fine and the prompt was well-formed (gotcha #400). What was
+wrong was WHERE the model was told to continue from.
+
+Two numbers must be equal, and they are printed in adjacent lines at `-v`:
+
+```bash
+grep -E "starting forward_through_segments|SplitModel forward pass complete" node.log
+```
+
+```
+seq_num=0  index_pos=0     seq_len=5529   kv_offset=0        <- prefill wrote 5529 positions
+seq_num=1  index_pos=6053  seq_len=1      kv_offset=5529     <- decode asked for 6053
+```
+
+`index_pos` is the rotary position the next token is computed at; `kv_offset` is
+where the model's cache actually ends. **A gap means the model is being asked to
+continue from somewhere its own memory of the prompt does not reach**, and the
+logits are noise — which surfaces either as end-of-turn at once, or as one token
+repeated to `max_tokens`. Both shapes, one cause.
+
+The check that needs no log at all, and works against a node you cannot see:
+
+```bash
+# Same body twice: once with the model unloaded, once warm.
+curl -X POST .../api/admin/models/$MODEL/unload -H "Authorization: Bearer $K"
+COLD=$(curl -s ... -d @body.json); WARM=$(curl -s ... -d @body.json)
+# usage.prompt_tokens MUST be identical. It is a property of the prompt.
+```
+
+A disagreement is the fault itself rather than a symptom of it, and it is what
+`examples/release_shapes.sh` now asserts. Reply length cannot substitute: the
+repetition shape passes any "more than N tokens" check comfortably.
+
+**Three things that make this class of bug look intermittent, all of which cost
+time on that report.** It fires only on the PIPELINE path, taken while the model
+is not loaded — so the same request fails cold and succeeds warm, and every
+retry is warm. The error scales with prompt length, so a minimal reproduction is
+below the threshold at which anything goes wrong. And `chars / 4` lands in the
+right ballpark, so an estimate reads as a plausible token count to anyone
+eyeballing it. Compare it against something, never against your expectations.
+
 **Was it served locally or by a peer?** That changes which code path to suspect
 entirely, and it is a response header rather than a log line:
 
