@@ -10672,6 +10672,45 @@ than bolted onto this path.
 Not urgent: the case it costs is a model under continuous load, which is also
 the case where a cold start is most expensive.
 
+## There are two VRAM budgets for one card, and they disagree (2026-08-27)
+
+Found while fixing gotcha #402, and deliberately not resolved in the same change.
+
+Two independent mechanisms decide what may sit on the graphics card:
+
+| | `ModelProcessPool` admission | split-model LRU |
+|---|---|---|
+| accounting | `vram_reserved_mb`, charged at spawn | `split_models[*].estimated_vram_mb` |
+| estimate | `estimate_worker_vram_mb` — weights **+ KV at `ADMISSION_KV_CONTEXT`** | `estimate_vram_from_shard_dir` — shard bytes × layer fraction, **weights only** |
+| reclaim | `free_vram_for_admission`: plans first, abandons whole if it cannot fit | evicts greedily, one at a time |
+| protects a busy model | yes — `VRAM_MAKE_ROOM_MIN_IDLE_SECS` (60 s) and an in-flight check | only `active_pipelines` |
+| runs when | a worker is about to spawn | a `split_models` entry is created |
+
+**This is gotcha #388's shape, unresolved at a larger scale**: two estimates of
+one quantity, and whichever fires first decides. Observed on this machine
+2026-08-27 with the fix in place: the split LRU evicted a GPU-resident 8B that
+had answered a request **three seconds earlier**, to make room for a 3B — a
+displacement `free_vram_for_admission` would have refused outright, because its
+idle floor exists precisely to stop two models evicting each other. The outcome
+happened to be fine (the 3B did want the card) but the protection was not
+consulted, and cannot be, because the two mechanisms do not know about each
+other.
+
+**The question to answer**: does the split-model LRU still need to drive GPU
+unloads at all? Its own job is bounding a metadata map. `free_vram_for_admission`
+did not exist when it was written (it landed 2026-08-25) and is now the
+authoritative reclaim, with the guards this one lacks. Reducing the LRU to
+metadata hygiene — cap the map, let admission own the card — would leave one
+budget, one estimate and one set of protections.
+
+**Do not simply delete the unload**: the "evict metadata but never free the
+memory" bug it fixed (open since 2026-07-21) was real and expensive, and the
+sequencing matters. The right change is to stop the LRU making placement
+decisions, not to stop it releasing what it evicts.
+
+Not urgent — with #402 fixed the remaining disagreement costs at worst an
+avoidable cold start, never a wrong device.
+
 ## Foreign libp2p nodes are no longer adopted, but are still dialled (measured 2026-08-27)
 
 `identify::peer_speaks_swarmllm` (gotcha #396) stops a node that merely speaks

@@ -41,6 +41,15 @@ pub(super) fn append_pos(cache: &mut KvCache, key: f32, val: f32) {
     cache.append(&k, &v).unwrap();
 }
 
+/// Eviction-test placement predicate: every model is on the card.
+///
+/// Reproduces the behaviour these tests were written against, so they keep
+/// pinning the LRU policy itself rather than the placement filter added on
+/// 2026-08-27 (which has its own tests).
+pub(super) fn all_on_gpu(_model: &crate::types::ModelId) -> bool {
+    true
+}
+
 pub(super) fn make_dummy_entry(vram_mb: u64) -> SplitModelEntry {
     // Construct a minimal metadata-only SplitModelEntry for eviction tests.
     SplitModelEntry {

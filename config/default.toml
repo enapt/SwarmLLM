@@ -128,6 +128,10 @@ shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommend
 # max_storage_mb = 0           # 0 = use 50% of max_disk_mb
 # interval_minutes = 5         # How often to check for new shards to download
 # max_shards = 0               # 0 = unlimited within disk budget
+# default_model_shard_cap = 0  # 0 = unlimited. Stops auto-manage acquiring MORE than this many
+                               # shards of any ONE model — it never removes shards already held,
+                               # so setting it on a node that already has a model in full does
+                               # nothing. To shrink an existing footprint, delete the shards.
 # max_concurrent_downloads = 3 # Max simultaneous shard downloads
 # prune_enabled = true         # Auto-prune over-replicated shards (default: on)
 # min_replicas = 2             # Minimum shard replicas to maintain across network

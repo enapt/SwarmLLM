@@ -1469,6 +1469,40 @@ impl ModelProcessPool {
         self.cpu_pinned_models.contains(model_id)
     }
 
+    /// Does this model occupy graphics memory — or, for one not yet loaded,
+    /// will it?
+    ///
+    /// The single answer to both halves of "may a graphics-memory budget be
+    /// enforced against this model": whether loading it consumes any, and
+    /// whether unloading it releases any. Resident answers from the worker's
+    /// own recorded placement; not resident predicts from
+    /// [`ModelProcessPool::cpu_reason`], which is what the next spawn will do.
+    ///
+    /// **Why it exists.** `SharedState::ensure_split_model_entry` runs an LRU
+    /// eviction against the graphics budget every time a split-model entry is
+    /// created, and knew nothing about placement — so creating an entry for a
+    /// segment bound for the PROCESSOR evicted and killed a model that was
+    /// running happily on the card, freeing memory for something that would
+    /// never touch it. Measured here 2026-08-27: an 8B holding 4685 MB was
+    /// unloaded 35 s after it loaded, on the load of a 1-layer `force_cpu=true`
+    /// segment, and the tester who reported the sibling defect saw exactly the
+    /// same shape (a 3B evicted 35 s in, `freed_by` naming itself).
+    ///
+    /// It reads through `charges_ram` so the three ways a model can only ever
+    /// land in system memory — sent to the processor, no card detected, a build
+    /// without CUDA — give one answer rather than three.
+    pub fn model_uses_gpu_memory(&self, model_id: &ModelId) -> bool {
+        let going_to_cpu = match self.workers.get(model_id) {
+            Some(handle) => handle.placed_on_cpu_because.is_some(),
+            None => self.cpu_reason(model_id).is_some(),
+        };
+        !charges_ram(
+            going_to_cpu,
+            self.gpu_detected.load(std::sync::atomic::Ordering::Relaxed),
+            cfg!(feature = "candle-cuda"),
+        )
+    }
+
     /// The configured value, before any override — so a log line can show what
     /// the user asked for next to what actually happened.
     pub fn configured_gpu_layers(&self) -> i32 {

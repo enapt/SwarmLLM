@@ -23,6 +23,32 @@ All notable changes to SwarmLLM are documented here.
 
   Reported by a tester with a 6 GB card, two models and a stopwatch.
 
+- **Loading a model onto your processor no longer takes the graphics card away
+  from one that is using it.** When a model was placed on the processor — because
+  it did not fit alongside what was already loaded — the daemon then made room
+  for it on the *card*, evicting and unloading a model that was running there
+  perfectly well, for memory the new one would never touch. On a 6 GB card, one
+  model landing on the processor could cost the other its place seconds after it
+  had loaded, and the next request for it paid a full reload.
+
+  The memory budget that governs this now knows which device each loaded model
+  is actually on: a model on the processor is neither counted against the
+  graphics card nor evicted to free it, and a model heading for the processor no
+  longer displaces anything.
+
+  Found in a tester's report of a related puzzle — an eviction firing well inside
+  the "don't take the card from a model used in the last minute" protection. They
+  were right that it did not add up; it was a second, unrelated mechanism.
+
+### Changed
+
+- **`auto_manage.default_model_shard_cap` now says what it does.** It stops
+  auto-manage acquiring more than that many shards of any one model; it never
+  removes shards already held, so setting it on a node that already has a model
+  in full does nothing. A tester set it to half a model's shard count, watched a
+  full cycle prune nothing, and reasonably concluded the setting was broken. The
+  behaviour is unchanged — the documentation is not.
+
 ## [0.3.129-alpha] — 2026-08-27
 
 ### Fixed

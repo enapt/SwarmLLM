@@ -668,6 +668,37 @@ silently break at the wire if duplicated:
   the worker is on the card, because admission prices the model again and has the
   last word — the same correction `admit_to_gpu`'s refusal log already carries.
 
+- **`evict_split_models_lru` + `SharedState::{split_model_budget, split_models_committed_mb}`
+  + `EvictionScope`** (2026-08-27) — the split-model LRU knows which DEVICE each
+  resident segment is on, and which memory the budget it is enforcing protects.
+  **`split_models` holds segments on both devices; the budget enforced against it
+  is usually the graphics card's.** Before this it was neither told nor asked, and
+  got the answer wrong three ways at once: it charged `needed_mb` for a segment
+  bound for the PROCESSOR, counted processor-resident segments as occupying the
+  card, and evicted them to release memory they were not holding. Measured here
+  2026-08-27 — an 8B holding 4685 MB evicted and its worker killed 35 s after it
+  loaded, on the line immediately before `Loading split model … force_cpu=true`;
+  an external tester saw the identical shape on their own card and read it as the
+  60-second reclaim protection failing. It was a different mechanism (gotcha #402).
+  **Both halves are needed and neither subsumes the other.** The per-candidate
+  filter stops a processor-resident segment being taken; only the `for_model`
+  guard stops a processor-bound LOAD evicting a genuine tenant, because that one
+  never reaches the candidate list — its cost enters as `needed_mb`. Each has its
+  own test, each verified red with the other still in place.
+  `ModelProcessPool::model_uses_gpu_memory` is the single answer both use, resident
+  from the worker's recorded placement and otherwise predicted from `cpu_reason`;
+  it reads through `charges_ram` so "sent to the processor", "no card detected" and
+  "a build without CUDA" give one answer rather than three.
+  **`EvictionScope` exists because two different budgets were reached through one
+  `.or()`**: `compute_vram_budget` is a statement about the card, while
+  `inference.max_split_model_memory_mb` is a general ceiling that only applies on a
+  node with no card. Filtering by graphics residency under the second would have
+  disabled it entirely on the machines it is for.
+  ⚠ **This mechanism is a SECOND VRAM budget, parallel to the pool's own admission,
+  with a different estimate and no idle floor — see `docs/FUTURE_WORK.md`.** It
+  will evict a model used seconds ago, which `free_vram_for_admission` deliberately
+  refuses to do.
+
 - **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
   admission check against it. The loader records `kv_headroom_bytes` on the
   model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward

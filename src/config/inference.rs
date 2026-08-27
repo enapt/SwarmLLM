@@ -709,7 +709,17 @@ pub struct AutoManageConfig {
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: usize,
     /// Default cap on auto-managed shards per model (0 = unlimited).
-    /// Prevents auto-manage from downloading ALL shards of a single model.
+    ///
+    /// **Forward-looking only: it stops auto-manage acquiring MORE than this
+    /// many shards of one model, and never removes shards already held.**
+    /// Setting it on a node that already holds a model in full therefore does
+    /// nothing at all, which is exactly how a tester read it as broken
+    /// (2026-08-27): they set it to half a model's shard count, restarted,
+    /// watched a full auto-manage cycle prune nothing, and reasonably concluded
+    /// the setting was inert. It was doing its job — there was simply nothing
+    /// left to acquire. Pruning is driven by replication and disk pressure
+    /// (`prune_enabled`, `max_storage_mb`), which do not consult this value; to
+    /// shrink an existing footprint, delete the shards.
     #[serde(default)]
     pub default_model_shard_cap: u32,
     /// Per-model auto-manage overrides keyed by model ID.
