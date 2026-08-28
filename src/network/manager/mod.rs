@@ -1656,7 +1656,7 @@ impl NetworkManager {
                                     .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
                                     .extend_addresses_through_behaviour()
                                     .build();
-                                match self.swarm.dial(opts) {
+                                match self.dial_checked(opts, "connection_race") {
                                     Ok(()) => tracing::info!(
                                         %peer_id, addr_count = addrs.len(),
                                         "Re-dialing peer after connection race"

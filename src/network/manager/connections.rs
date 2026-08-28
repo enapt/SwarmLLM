@@ -569,6 +569,48 @@ impl NetworkManager {
         } // end else (num_established == 0)
     }
 
+    /// **Every outbound dial goes through here.** Refuses a peer Identify has
+    /// already shown does not speak SwarmLLM, and names the site that asked so
+    /// a log can say which path dialled.
+    ///
+    /// A choke point rather than a check per site, because the check-per-site
+    /// version is what shipped and it did not hold: two of the six sites
+    /// consulted `foreign_peers` and the node still opened 17 connections to
+    /// three `openhydra` nodes in seven minutes — each one disconnected 43 ms
+    /// later by the Identify gate, then dialled again. Finding *which* of the
+    /// remaining four was responsible took a `-vv` capture and got no further
+    /// than "not the ones with the guard"; making the wrong call
+    /// unrepresentable is cheaper than the investigation, and
+    /// `every_dial_goes_through_the_foreign_peer_gate` in
+    /// `tests/repo_consistency.rs` keeps it that way.
+    ///
+    /// A dial with no peer id in it — an invite code, a bootstrap address —
+    /// cannot be checked and is passed through. That is correct rather than a
+    /// gap: those are addresses a user or operator named explicitly, and the
+    /// Identify gate still refuses whatever answers.
+    pub(super) fn dial_checked(
+        &mut self,
+        opts: impl Into<libp2p::swarm::dial_opts::DialOpts>,
+        site: &'static str,
+    ) -> Result<(), libp2p::swarm::DialError> {
+        let opts = opts.into();
+        if let Some(peer_id) = opts.get_peer_id() {
+            if self.foreign_peers.contains(&peer_id) {
+                // DEBUG, not TRACE: this is the line that says the gate is
+                // working, and looking for it at `-vv` and finding nothing is
+                // how a run that proved nothing was briefly read as a run that
+                // proved the gate useless.
+                tracing::debug!(
+                    %peer_id, site,
+                    "Not dialling a peer that does not speak SwarmLLM"
+                );
+                return Ok(());
+            }
+        }
+        tracing::trace!(peer_id = ?opts.get_peer_id(), site, "Dialing");
+        self.swarm.dial(opts)
+    }
+
     /// Enqueue a re-dial unless this peer already has one queued or the
     /// queue is at `MAX_PENDING_REDIAL`. Shared by both the active-pipeline
     /// and the unregistered-peer reconnect paths so the dedup+cap

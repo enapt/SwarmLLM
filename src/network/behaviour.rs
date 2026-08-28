@@ -69,6 +69,19 @@ pub struct SwarmBehaviour {
     pub relay_server: relay::Behaviour,
     /// NET-I5: Connection limits to prevent resource exhaustion.
     pub connection_limits: connection_limits::Behaviour,
+    /// Peers Identify has shown do not speak SwarmLLM. Blocking them refuses
+    /// both directions at the swarm level.
+    ///
+    /// **Declining to register them was not enough.** `identify::
+    /// peer_speaks_swarmllm` stops a foreign node becoming a peer and
+    /// disconnects it, and every one of our own six dial sites now routes
+    /// through `dial_checked`, which consults `foreign_peers` — and still, on a
+    /// public network, three `openhydra` nodes accounted for ~16 connections in
+    /// seven minutes, each closed 43 ms later by the Identify gate and then
+    /// re-established. `dial_checked` refused none of them across two runs, so
+    /// the dials come from inside libp2p rather than from us; which behaviour
+    /// was never pinned down, and with this it does not need to be.
+    pub blocked_peers: libp2p::allow_block_list::Behaviour<libp2p::allow_block_list::BlockedPeers>,
     /// mDNS for automatic LAN peer discovery (zero-config).
     pub mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
     /// Persistent bidirectional stream protocol for per-pipeline inference
@@ -344,6 +357,7 @@ pub fn build_behaviour(
         relay_client: relay_behaviour,
         relay_server,
         connection_limits,
+        blocked_peers: libp2p::allow_block_list::Behaviour::default(),
         mdns: mdns_behaviour.into(),
         pipeline_stream,
     })

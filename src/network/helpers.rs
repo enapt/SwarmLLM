@@ -49,6 +49,7 @@ pub(crate) fn swarm_event_name(event: &SwarmEvent<SwarmBehaviourEvent>) -> &'sta
             SwarmBehaviourEvent::RelayClient(_) => "RelayClient",
             SwarmBehaviourEvent::RelayServer(_) => "RelayServer",
             SwarmBehaviourEvent::ConnectionLimits(_) => "ConnectionLimits",
+            SwarmBehaviourEvent::BlockedPeers(_) => "BlockedPeers",
             SwarmBehaviourEvent::Mdns(_) => "mDNS",
             SwarmBehaviourEvent::PipelineStream(_) => "PipelineStream",
         },

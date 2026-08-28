@@ -93,9 +93,18 @@ impl NetworkManager {
                      no /swarmllm/ protocol"
                 );
             }
-            // Drop the connection. Holding it costs a slot and buys nothing:
+            // Block, then drop. Dropping alone was not enough: the node kept
+            // re-connecting to the same three foreign peers roughly every
+            // 20 s-4 min — measured over two 7-minute runs with every one of
+            // our own dial sites routed through `dial_checked`, which refused
+            // none of them. So the dials originate inside libp2p, and the
+            // swarm-level block list is the mechanism that stops them without
+            // having to identify which behaviour is responsible.
+            //
+            // Holding the connection costs a slot and buys nothing either:
             // every SwarmLLM request to this peer can only fail protocol
             // negotiation.
+            self.swarm.behaviour_mut().blocked_peers.block_peer(peer_id);
             let _ = self.swarm.disconnect_peer_id(peer_id);
             return;
         }

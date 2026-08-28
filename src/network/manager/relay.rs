@@ -211,7 +211,7 @@ impl NetworkManager {
             if peer_id == &local || self.swarm.is_connected(peer_id) {
                 continue;
             }
-            if self.swarm.dial(*peer_id).is_ok() {
+            if self.dial_checked(*peer_id, "relay_providers").is_ok() {
                 dialed += 1;
             }
         }

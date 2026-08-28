@@ -4,6 +4,18 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Nodes on the network that aren't SwarmLLM no longer get dialled over and
+  over.** Since v0.3.125 the daemon correctly refuses to treat any passing
+  libp2p node as a peer — but it kept reconnecting to them anyway, a few times a
+  minute each, dropping each connection 43 milliseconds later and then trying
+  again. Measured on a node joining the public network: three such nodes
+  accounted for sixteen connections in seven minutes. They are now refused at
+  the connection layer once identified, which takes it to a single unavoidable
+  first contact each. Wasted bandwidth and log noise only — nothing was ever
+  served to them.
+
 ### Changed
 
 - **Switching between two models that don't both fit is much faster.** The

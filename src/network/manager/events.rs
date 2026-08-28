@@ -712,7 +712,7 @@ impl NetworkManager {
                             .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
                             .addresses(addrs)
                             .build();
-                        if let Err(e) = self.swarm.dial(opts) {
+                        if let Err(e) = self.dial_checked(opts, "mdns") {
                             tracing::debug!(%peer_id, error = %e, "mDNS: dial skipped");
                         }
                     } else {

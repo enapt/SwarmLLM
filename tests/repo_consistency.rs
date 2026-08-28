@@ -2383,3 +2383,53 @@ fn the_vram_budget_is_read_live_like_the_ram_budget_beside_it() {
         "compute_vram_budget still reads shared.config (the boot snapshot)"
     );
 }
+
+/// Every outbound dial must go through `NetworkManager::dial_checked`, which
+/// refuses a peer Identify has shown does not speak SwarmLLM.
+///
+/// The per-site version of this check shipped and did not hold: two of six
+/// sites had it, and the node still opened 17 connections to three foreign
+/// nodes in seven minutes — each disconnected 43 ms later by the Identify gate,
+/// then dialled again. Working out *which* of the other four was responsible
+/// took a `-vv` capture and still did not settle it, which is the argument for
+/// a choke point over a checklist: a guard a caller can forget is one a caller
+/// will forget.
+#[test]
+fn every_dial_goes_through_the_foreign_peer_gate() {
+    let net = repo_root().join("src/network");
+    let mut sites: Vec<String> = Vec::new();
+    let mut stack = vec![net];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let Ok(text) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
+                for (i, line) in text.lines().enumerate() {
+                    if line.contains("self.swarm.dial(") {
+                        sites.push(format!("{}:{}", p.display(), i + 1));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        sites.len(),
+        1,
+        "`self.swarm.dial` may appear exactly once — inside `dial_checked`. \
+         Every other dial goes through that helper, or a foreign peer can be \
+         re-dialled for the life of the process.\nFound:\n  {}",
+        sites.join("\n  ")
+    );
+    assert!(
+        sites[0].contains("connections.rs"),
+        "the one permitted call is `dial_checked`'s own, in connections.rs; found {}",
+        sites[0]
+    );
+}

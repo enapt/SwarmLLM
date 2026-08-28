@@ -1476,6 +1476,20 @@ the protocol-list arm is the belt-and-braces for a future build that changes it.
 Match the namespace as a PREFIX, never a substring — the peer controls those
 strings.
 
+**Declining to register is still not sufficient, and the second half needed a
+third.** Not re-dialling was covered by `foreign_peers`, and every one of the six
+dial sites now routes through `NetworkManager::dial_checked`
+(`every_dial_goes_through_the_foreign_peer_gate` in `tests/repo_consistency.rs`
+keeps it that way) — and the node *still* opened 5-6 connections per foreign peer
+in seven minutes, each closed 43 ms later by this gate and then re-established.
+`dial_checked` refused none of them across two runs, which is the measurement
+that matters: **the dials come from inside libp2p, not from us.** Which behaviour
+was never pinned down and no longer needs to be — `SwarmBehaviour::blocked_peers`
+(`libp2p::allow_block_list`) refuses both directions at the swarm level, and
+`handle_identify_received` blocks the peer before disconnecting it. Measured
+5/6/6 connections → **1/1/1**, one unavoidable first contact each, healthy peers
+unaffected.
+
 **The general rule**: completing a handshake that everyone speaks proves nothing
 about who you are talking to. Before treating a successful negotiation as
 identity, ask which population could also complete it.

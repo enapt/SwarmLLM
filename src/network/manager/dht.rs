@@ -62,7 +62,20 @@ impl NetworkManager {
                 // attacker poison the routing table for eclipse attacks. The dial
                 // below triggers Noise + identify, and the identify handler adds
                 // the verified address to Kademlia post-handshake.
-                if let Err(e) = self.swarm.dial(addr) {
+                // Dial BY PEER ID with the address as a hint, not by bare
+                // address. `DialOpts::from(Multiaddr)` reports no peer id even
+                // when the address carries `/p2p/`, so a bare-address dial is
+                // invisible to `dial_checked` — and to libp2p's own per-peer
+                // dedup. PEX is the path that hands out foreign addresses, so
+                // it is the one that most needs the gate to see them.
+                let opts = match maybe_peer_id {
+                    Some(pid) => libp2p::swarm::dial_opts::DialOpts::peer_id(pid)
+                        .addresses(vec![addr])
+                        .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
+                        .build(),
+                    None => addr.into(),
+                };
+                if let Err(e) = self.dial_checked(opts, "pex") {
                     tracing::debug!(error = %e, "PEX: failed to dial peer");
                 } else {
                     dialed += 1;

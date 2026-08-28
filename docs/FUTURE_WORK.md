@@ -10720,31 +10720,3 @@ the constant entirely and is self-calibrating across machines, which is what
 gotcha #367 asks of any threshold. Not attempted here: it wants both figures
 measured on a machine where they differ from this one's, and the 12x already
 banked should not wait for it.
-
-## Foreign libp2p nodes are no longer adopted, but are still dialled (measured 2026-08-27)
-
-`identify::peer_speaks_swarmllm` (gotcha #396) stops a node that merely speaks
-libp2p from becoming a peer, and that half works: the peer list is clean, and
-`handle_connection_closed`'s re-dial branch consults `foreign_peers` and declines.
-
-The dialling did not stop. Measured on this development node over 14 minutes of
-uptime: **126 outbound connections (`is_dialer=true`) to 3 openhydra nodes on
-port 4001**, each followed by `Sent PEX request`, which the peer answers with
-`The remote supports none of the requested protocols`, then a close, then
-another dial — roughly 9 per node per minute, indefinitely.
-
-Two things to establish before fixing, neither of which was chased:
-
-- **Which dial path.** `foreign_peers` is consulted by the connection-closed
-  re-dial branch and by the DHT provider dial (`manager/dht.rs`). It is NOT
-  consulted at `manager/relay.rs:214`, `manager/commands.rs:130`,
-  `manager/events.rs:715` or `manager/mod.rs:1659`. One of those is re-dialling;
-  the fix is presumably the same gate, but which one it is should be measured
-  rather than assumed.
-- **Why we send PEX to a node we have already identified as foreign.** That
-  request cannot be answered by definition, so it is pure waste on both sides
-  and it is what the remote logs as an unsupported protocol.
-
-Severity is low — wasted connections and log noise, no incorrect behaviour — but
-it is ongoing on every node, and the addresses spread by PEX, so it does not
-decay on its own.

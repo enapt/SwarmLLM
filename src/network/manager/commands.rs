@@ -127,7 +127,7 @@ impl NetworkManager {
                     Ok(addr) => {
                         tracing::info!(%addr, "Dialing peer from invite code");
                         // Dial the original address
-                        if let Err(e) = self.swarm.dial(addr.clone()) {
+                        if let Err(e) = self.dial_checked(addr.clone(), "invite_code") {
                             tracing::warn!(%addr, error = %e, "Failed to dial invite peer");
                         }
                         // Also try localhost variant for same-machine peers
@@ -149,7 +149,7 @@ impl NetworkManager {
                                 .join("/ip4/");
                             if let Ok(lo_addr) = localhost_addr.parse::<libp2p::Multiaddr>() {
                                 tracing::debug!(%lo_addr, "Also trying localhost variant");
-                                let _ = self.swarm.dial(lo_addr);
+                                let _ = self.dial_checked(lo_addr, "invite_code_loopback");
                             }
                         }
                     }
