@@ -167,7 +167,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- **Counts** (re-measured 2026-08-28): **2121 lib** + 11 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 33 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
+- **Counts** (re-measured 2026-08-28): **2121 lib** + 11 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 34 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
 - **Benches and harnesses — see `docs/DIAGNOSTICS.md` § Benchmarks for the full list and the traps.** The ones reached for most: `examples/prefill_bench.rs` (drives `SplitModel::forward` directly, no daemon — `SWARM_BENCH_MODEL`, `SWARM_BENCH_PROMPT`, `SWARM_BENCH_DECODE`, `SWARM_BENCH_REPS`, `SWARM_BENCH_DEVICE=cuda`, and `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` which prices a K-token forward against a 1-token one at the same history depth — the number that decides whether speculation pays; pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown), `examples/qmatmul_bench.rs` (asserts the tiled kernel is bit-identical to upstream), `examples/smoke_test.sh [binary] [port]` (9 checks on an isolated node — run it on the DOWNLOADED release artifact; it now reports checks that COULD NOT RUN separately and never says "all checks passed" over them, and fails fast if the node it started dies — before 2026-08-25 it skipped the three inference checks silently and still claimed success, so "smoke 8/8" had been passing here without ever exercising inference), `examples/soak_test.sh` (`HOURS=` must be a WHOLE number; data dir is per-`PORT`, so two soaks no longer kill each other).
 - **Measurement discipline** (paid for repeatedly): min-of-N on an IDLE box — the same unchanged code measured 0.42 ms and 0.97 ms across runs here, and a benchmark taken while a build runs is worthless. **min-of-N is for benchmarks, not for live measurement** (#367). A/B inside ONE binary via an env switch (`SWARMLLM_DECODE_CALIBRATE=0`, `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`, `SWARMLLM_FLASH_OFFSET_CAUSAL=0`, `SWARMLLM_GQA_DECODE_FLASH=1`, `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1`), never across two builds. **Verify the mechanism fired**, not just that the outcome improved. Pinned reference models: `docs/REFERENCE_MODELS.md`.
 - Unit tests: in-module `#[cfg(test)]` blocks
@@ -217,86 +217,64 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2121 lib (dev,claude-subscription) — re-measured 2026-08-28, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 33 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
+All 20 build phases complete. All subsystems wired — no stubs. **2121 lib (dev,claude-subscription) — re-measured 2026-08-28, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 34 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### v0.3.130-alpha (2026-08-28) — which device your models run on
+### v0.3.131-alpha (2026-08-28) — two constants nobody had measured
 
-Detail in `memory/round_log_0827_cpu_to_gpu.md`; gotchas **#401**, **#402**.
-Three faults, all from one tester's report on a 6 GB card, all verified on the
-RTX 3070 rather than by reading.
+Detail in `memory/round_log_0827_cpu_to_gpu.md`; gotchas **#403**, **#404**.
+Both were open items I had written up rather than closed, and both closed by
+running the experiment instead of reasoning about it.
 
-- **A model demoted to the processor was never promoted back** (#401). A
-  momentarily-full card demotes and pins a model; freeing memory lifts the pin;
-  and nothing re-examined the worker that pin had produced —
-  `get_or_spawn`'s fast path returns any resident worker regardless of device.
-  `should_return_to_gpu` now retires it on the next request. **A/B-verified
-  against the released .129 binary**, same box, same config, budget pinned via
-  `resources.max_gpu_vram_mb` (free VRAM drifts with what Windows is doing).
-- **Loading a model onto the PROCESSOR evicted one from the CARD** (#402).
-  `ensure_split_model_entry` ran an LRU pass against the graphics budget on
-  every metadata entry, and had never been told which device anything runs on.
-  **It was in my own verification log and I read past it**; the tester raised it
-  as a puzzle, not a bug.
-- **The real fix was to delete the second accountant, not correct it.**
-  Researched first (diagnosis rule 0): Ollama's scheduler is the same shape and
-  keeps ONE owner. `split_models` is now a metadata cache bounded by entry
-  count, structurally unable to unload anything; graphics memory belongs to
-  `ModelProcessPool` alone, with the guards the other one lacked (idle floor,
-  an in-flight oracle that can see peer-served work, plan-before-destroy).
-- **And an admission refusal is no longer a standing verdict.** It used to pin,
-  and the pin outlived its cause — measured, 50 minutes on the processor with
-  the occupant idle and reclaimable throughout. The whole chain now runs in one
-  request: retire the processor copy, reclaim the card from the idle model,
-  admit, load — 4.9 s.
+- **The GPU swap floor was 3.65x WORSE than no floor** (#403), in the case it
+  was written for. `VRAM_MAKE_ROOM_MIN_IDLE_SECS = 60`, invented. A tester timed
+  one-shots and said it cost more than it saved; **I argued back** — their test
+  cannot see the prefix cache dying with the worker, so conversation would
+  vindicate it. Ran that: **299.3 s against 81.9 s over 8 turns**, 0 swaps
+  against 7. **The generalisable half: under alternation the incumbent has
+  ALWAYS just been used, so an idle-time floor is inert or total and never in
+  between** — a threshold that is only ever "always" or "never" is not a
+  threshold. Now 5 s. ⚠ **A "measured cold start" fix was shipped and reverted
+  inside the hour — it recorded the load of whichever DEVICE the worker landed
+  on, so a processor-only model contributed 230 s (#400's shape).** Harness kept
+  as `examples/swap_patience.sh`.
+- **Foreign libp2p nodes are no longer DIALLED either** (#404, closes #396).
+  **Two rounds of fixing our own code moved the number ZERO** — one choke point
+  for all six dial sites (+ repo test), then PEX dialling by peer id rather than
+  bare address. **The gate refusing NOTHING was the measurement**: the dials come
+  from inside libp2p. `libp2p::allow_block_list`, blocked at Identify.
+  **16 connections in 7 min → 3**, healthy peers unaffected.
 
-⚠ **Still open**: foreign libp2p nodes are no longer adopted after #396 but are
-still DIALLED — 126 outbound dials to 3 nodes in 14 minutes, measured.
-`docs/FUTURE_WORK.md`.
-
-### v0.3.129-alpha (2026-08-27) — the `pi` single-token bug, and it was position arithmetic
-
-Detail in `memory/round_log_0827_pi_position.md`; gotcha **#400**.
-
-- **A long FIRST request answered with one word, or repeated one word to the
-  cap.** `extract_model_cache` measured the prompt as `(chars / 4).max(1)` —
-  commented *"approximate … no tokenizer in-process"*, accurate when written and
-  still there after `standalone_tokenizer` made one available three lines below.
-  `distributed.rs` then does `index_pos = ptc`, and **`index_pos` is the rotary
-  position the next token is computed at**. An estimate of a statistic used as a
-  coordinate: 24213 chars → 6053 against a true 5529, so token 2 was computed
-  **524 positions past the end of the KV cache**. Fixed by `prompt_positions`,
-  one helper, five sites.
-- **Why nobody could reproduce it for seven releases.** It fires only on the
-  PIPELINE path — taken while the model is not loaded — so the same request
-  fails cold and succeeds warm, and every retry is warm. And the error scales
-  with prompt length, so a minimal repro is below the threshold. `curl` attempts
-  were short, warm, or both.
-- **⚠ This CORRECTS gotcha #398's fifth elimination**, which cleared position
-  bookkeeping by observing `index_pos` "jumps correctly to the prompt length and
-  then increments by one". That compared the number against ITSELF. The
-  discriminator is `index_pos` vs the worker's `kv_offset` on the same forward —
-  adjacent log lines all along. **Ask what a number should EQUAL, not whether it
-  looks plausible.**
-- **Both release harnesses were passing over it, and are fixed too.**
-  `release_shapes.sh` had a long-prompt cold check whose prompt was ~1400 tokens
-  (below the threshold) and which asserted only `completion_tokens > 3` (the
-  repetition shape passes that). It now asserts **the same request reports the
-  same `prompt_tokens` cold and warm** — a property of the prompt, needing no
-  tokenizer, and the fault itself rather than a symptom. Verified in both
-  directions: fails on .128, passes on .129. `smoke_test.sh` was reporting its
-  three inference checks as COULD NOT RUN on this machine — it asked
-  `/api/admin/models`, which waits on the startup shard-rehash — so a release
-  could be verified without a request ever reaching a model; it now asks
-  `/v1/models`.
-
+⚠ **Near-miss worth keeping**: I first read "zero refusals" as "the gate is
+useless" — the line was `trace!` and I ran at `-vv`. Right conclusion, invalid
+reasoning (diagnosis rule 2).
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
-- **v0.3.125-.128** (08-26): **#396 ANY libp2p node on the internet could become a "peer"** — we registered on libp2p `identify` (`/ipfs/id/1.0.0`, which EVERY libp2p node speaks) and never read `info.protocols`; spreads via PEX. **Declining to register alone turns a wrong list entry into an ENDLESS DIAL LOOP** → bounded `foreign_peers`. **#399 the caller's sampling was discarded on the pipeline path**, i.e. every cold start. .127: a model that cannot fit a conversation falls back to the processor. **Plus the process fix: local verification had been a strict SUBSET of CI's** → `examples/release_shapes.sh`.
+- **v0.3.130** (08-28): **which device your models run on** — three faults from one
+  tester report on a 6 GB card. **#401** a model demoted to the processor was
+  never promoted back (`get_or_spawn`'s fast path returns any resident worker
+  regardless of device); **#402** loading a model onto the PROCESSOR evicted one
+  from the CARD, and **the real fix was to delete the second accountant, not
+  correct it** — graphics memory now has ONE owner, `split_models` is a metadata
+  cache bounded by entry count. Then an **admission refusal turned out to take a
+  STICKY PIN** (50 min on the processor with the occupant idle and reclaimable
+  throughout); refusals no longer pin, and `spawn_worker` is HANDED the placement
+  rather than re-deriving it. `round_log_0827_cpu_to_gpu.md`.
+- **v0.3.129** (08-27): **a long FIRST request answered with one word** (#400) —
+  `extract_model_cache` measured the prompt as `chars/4` and `distributed.rs`
+  used that as `index_pos`, i.e. **an estimate of a statistic used as a
+  COORDINATE**: 24213 chars → 6053 against a true 5529, so token 2 was computed
+  524 positions past the end of the KV cache. **Cold-only** (the pipeline path)
+  and the error **scales with prompt length**, which is why 7 releases of short,
+  warm repros missed it. ⚠ **This corrects #398's fifth elimination, which
+  compared the number against ITSELF — ask what a number should EQUAL.** Both
+  release harnesses were passing over it and are fixed too.
+  `round_log_0827_pi_position.md`.
+- **v0.3.125-.128** (08-26): **#396 ANY libp2p node on the internet could become a "peer"** — we registered on libp2p `identify` (`/ipfs/id/1.0.0`, which EVERY libp2p node speaks) and never read `info.protocols`; spreads via PEX. **Declining to register alone turns a wrong list entry into an ENDLESS DIAL LOOP** → bounded `foreign_peers` (and the dialling itself only stopped in .131, #404). **#399 the caller's sampling was discarded on the pipeline path**, i.e. every cold start. .127: a model that cannot fit a conversation falls back to the processor. **Plus the process fix: local verification had been a strict SUBSET of CI's** → `examples/release_shapes.sh`.
 - **v0.3.120-.124** (08-25): a corrupt shard PROVED to spread — a placeholder hash ERASED a known one, so P2P copies were accepted unverified and re-served. **The ORIGIN settled it; peer agreement is not evidence in a network that copies from itself.** **.121 quarantined the GOOD copy (#384) — a repair mechanism is a destruction mechanism pointed at whatever it believes is wrong.** .124: the receipt-ACK deadline came from ping RTT, which cannot see a loaded peer (#386, now RFC 6298 **+ §5.5 backoff, without which the estimator is INERT exactly where needed**); a KV refusal was a RATCHET (#387). Gotchas #381-#387.
 - **v0.3.119-alpha** (08-24): **25.7x from a memory budget on an idle card** — `compute_vram_budget` read the BOOT SNAPSHOT (#281, third time in one session) AND was a fraction of TOTAL rather than of what is free. Now RESERVES a clamped slice. `memory/round_log_0824_correctness.md`.
 - **v0.3.113-.115** (08-22/23): the .114 decode-width calibration was right on the Ryzen and wrong on the i5 — **min-of-N is for benchmarks, not live measurement** (#367); a stale DHT provider record outranked a holder's own retraction (#364); peer refusals arrived cut mid-word (#365). `round_log_0822_perf_night.md`.
