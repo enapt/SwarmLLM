@@ -2,7 +2,11 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.130-alpha] — 2026-08-28
+
+This release is about one thing: which device your models run on, and why they
+sometimes stayed on the slower one. Three separate faults, all reported by the
+same tester on a 6 GB card.
 
 ### Fixed
 
@@ -23,6 +27,23 @@ All notable changes to SwarmLLM are documented here.
 
   Reported by a tester with a 6 GB card, two models and a stopwatch.
 
+- **A model sent to the processor once no longer stays there while the card
+  empties.** When a model did not fit, the daemon recorded that and stopped
+  asking — the note was only cleared when some other model was unloaded, which
+  can be an hour on a node the swarm is using. Measured here: a model ran on the
+  processor for 50 minutes while the model holding the card sat idle the whole
+  time and would have given it up on request.
+
+  Not fitting *at one moment* is no longer treated as a standing verdict. Every
+  time a model is loaded, the question is asked again — which costs almost
+  nothing, since nothing is loaded to find out — and the answer now includes
+  memory the daemon is willing to free. Only a graphics card that genuinely
+  failed for a model still holds it back until something changes.
+
+  End to end on a 6 GB card, in one request: the processor copy is retired, the
+  idle model gives up the card, the wanted model is admitted and loaded there —
+  4.9 seconds.
+
 - **Loading a model onto your processor no longer takes the graphics card away
   from one that is using it.** When a model was placed on the processor — because
   it did not fit alongside what was already loaded — the daemon then made room
@@ -41,6 +62,22 @@ All notable changes to SwarmLLM are documented here.
   were right that it did not add up; it was a second, unrelated mechanism.
 
 ### Changed
+
+- **Graphics memory is now managed in one place.** Two parts of the daemon were
+  independently deciding which models could keep the card, and the second had
+  none of the protections of the first: it could unload a model that had
+  answered a request seconds earlier, judged memory by a smaller measure than
+  the one used to admit models in the first place, and could not see requests
+  arriving from other nodes in the swarm. It has been removed. Loading a model
+  now goes through a single accountant that costs the move before making it,
+  leaves alone anything used in the last minute or currently answering, and
+  frees idle models on its own timer.
+
+  In practice: switching between two models that do not both fit is a little
+  more patient than before — the newcomer may answer from the processor for up
+  to a minute rather than immediately taking the card — and, with the fix above,
+  moves onto the card as soon as there is a gap. What it no longer does is take
+  the card away from a model you are actively using.
 
 - **`auto_manage.default_model_shard_cap` now says what it does.** It stops
   auto-manage acquiring more than that many shards of any one model; it never

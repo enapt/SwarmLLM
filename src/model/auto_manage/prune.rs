@@ -916,12 +916,12 @@ impl AutoShardManager {
         let vram_pressure = if let Some(ref gpu) = self.shared_state.gpu_info {
             if gpu.vram_total_mb > 0 {
                 let used_mb = live_vram_used.unwrap_or_else(|| {
-                    // Fallback: sum estimated VRAM of loaded models
-                    self.shared_state
-                        .split_models
-                        .iter()
-                        .map(|e| e.value().estimated_vram_mb)
-                        .sum()
+                    // Fallback when the card cannot be read: ask the one thing
+                    // that tracks what is actually ON it. Summing `split_models`
+                    // answered a different question — what has been REGISTERED,
+                    // on either device — and so reported pressure from models
+                    // sitting in system memory (gotcha #402).
+                    self.shared_state.model_process_pool.vram_committed_mb()
                 });
                 used_mb as f64 / gpu.vram_total_mb as f64
             } else {

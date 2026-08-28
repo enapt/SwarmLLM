@@ -134,10 +134,16 @@ pub struct BatchItem<'a> {
     pub request_id: &'a str,
 }
 
-/// Megabytes of the budgeted memory currently held by resident split models.
+/// Megabytes of the budgeted memory the resident split-model entries have
+/// been REGISTERED against.
 ///
-/// `holds_budgeted_memory` decides which of them count — see
-/// [`evict_split_models_lru`], which is the reason it is a parameter.
+/// `holds_budgeted_memory` decides which of them count: `split_models` holds
+/// segments on both devices, and counting a processor-resident one against the
+/// graphics card over-states what the card is carrying.
+///
+/// **This is a registration figure, not a residency figure.** What is actually
+/// on the card is `ModelProcessPool::vram_committed_mb`, charged at spawn — see
+/// [`trim_split_model_cache`] for why the two must not be confused.
 pub fn split_models_committed_mb(
     split_models: &dashmap::DashMap<SplitModelKey, SplitModelEntry>,
     holds_budgeted_memory: &dyn Fn(&crate::types::ModelId) -> bool,
@@ -149,50 +155,47 @@ pub fn split_models_committed_mb(
         .sum()
 }
 
-/// Evict least-recently-used split models from the cache until the total
-/// estimated usage is under `budget_mb`. Models that have active requests
-/// (present in `active_pipelines`) are never evicted.
+/// Bound the split-model METADATA cache to `max_entries`, least-recently-used
+/// first. Entries whose model has an active pipeline are kept.
 ///
-/// `holds_budgeted_memory` answers, per model, whether it occupies the memory
-/// this budget protects — so it decides both what is counted and what may be
-/// taken. **It is a parameter rather than an assumption because the budget is
-/// usually the GRAPHICS budget, and this map holds segments on both devices.**
-/// Counting a processor-resident segment as occupying graphics memory
-/// over-states what is in use, and evicting one frees none of it: the caller
-/// then believes it has made room it has not made, which is how a wrong budget
-/// becomes a real `CUDA_ERROR_OUT_OF_MEMORY` two steps later. Same shape as
-/// gotcha #388 — two estimates of one quantity, and the wrong one deciding.
+/// Returns the keys removed so the caller can synchronise the secondary
+/// `split_model_index` (without this, the index Vec accumulates stale
+/// `(layer_start, layer_end)` tuples indefinitely — readers compensate with a
+/// `split_models.contains_key` check per range, but every check pays for the
+/// stale entries until daemon restart).
 ///
-/// Returns the keys of evicted entries so the caller can synchronise the
-/// secondary `split_model_index` (without this, the index Vec would
-/// accumulate stale `(layer_start, layer_end)` tuples for evicted models
-/// indefinitely — readers compensate with a `split_models.contains_key`
-/// check per range, but every check pays for the stale entries until
-/// daemon restart).
-pub fn evict_split_models_lru(
+/// **This replaced a VRAM-budget eviction, and the difference is the whole
+/// point.** A `SplitModelEntry` is metadata read out of `gguf_header.bin`; it
+/// occupies no device memory, and the weights it describes belong to a worker
+/// subprocess that `ModelProcessPool` admits, charges and reclaims. Enforcing a
+/// graphics budget here made a SECOND accountant for one card — with a
+/// different estimate (weights only, against the pool's weights + KV), a
+/// different in-flight oracle (`active_pipelines`, which per gotcha #194 cannot
+/// see peer-served work or the split fast path), and no idle floor at all. It
+/// evicted a model that had answered a request three seconds earlier;
+/// `ModelProcessPool::free_vram_for_admission` refuses to touch one used inside
+/// the last minute. Ollama's scheduler is the same shape and keeps one owner:
+/// a single centralised free-space tracker, victims chosen by refCount then
+/// keep-alive then last-used.
+///
+/// **Do not restore the unload that used to hang off this.** It was added
+/// (2026-07-21) because evicting an entry was *supposed* to free graphics
+/// memory and did not, so the budget was enforced against a phantom. That
+/// premise is gone: this no longer claims to free anything, and the pool frees
+/// on its own schedule (`free_vram_for_admission` on demand,
+/// `try_idle_vram_unload` on the timer, which runs outside the auto-manage
+/// gate). Trimming an entry that is still wanted now costs a re-read of the
+/// header — `ensure_split_model_entry` rebuilds it — rather than a killed
+/// worker.
+pub fn trim_split_model_cache(
     split_models: &dashmap::DashMap<SplitModelKey, SplitModelEntry>,
     active_pipelines: &dashmap::DashMap<uuid::Uuid, crate::types::PipelineAssignment>,
-    budget_mb: u64,
-    needed_mb: u64,
-    for_model: &crate::types::ModelId,
-    holds_budgeted_memory: &dyn Fn(&crate::types::ModelId) -> bool,
+    max_entries: usize,
 ) -> Vec<SplitModelKey> {
-    // A model that will never occupy this budget's memory has no claim on it.
-    // **This is the half that the per-candidate filter below cannot cover**: a
-    // processor-bound load charges `needed_mb` against the card, and that alone
-    // pushes the total past the budget and evicts a genuine tenant. Measured
-    // 2026-08-27 — an 8B holding 4685 MB killed 35 s after it loaded, on the
-    // creation of a one-layer `force_cpu=true` entry.
-    if !holds_budgeted_memory(for_model) {
-        return Vec::new();
-    }
-    let mut total_mb: u64 = split_models_committed_mb(split_models, holds_budgeted_memory);
-
-    if total_mb + needed_mb <= budget_mb {
+    if split_models.len() <= max_entries {
         return Vec::new();
     }
 
-    // Collect all active model_ids from active pipelines to protect them
     let active_model_ids: std::collections::HashSet<crate::types::ModelId> = {
         let mut ids = std::collections::HashSet::new();
         for entry in active_pipelines.iter() {
@@ -203,40 +206,21 @@ pub fn evict_split_models_lru(
         ids
     };
 
-    // Collect eviction candidates sorted by last_used (ascending = LRU first).
-    // A segment that does not hold this budget's memory cannot release any, so
-    // taking it would be a cold start bought for nothing.
-    let mut candidates: Vec<(SplitModelKey, u64, u64)> = split_models
+    let mut candidates: Vec<(SplitModelKey, u64)> = split_models
         .iter()
         .filter(|e| !active_model_ids.contains(&e.key().0))
-        .filter(|e| holds_budgeted_memory(&e.key().0))
-        .map(|e| {
-            let key = e.key().clone();
-            let last_used = e.value().last_used_secs();
-            let vram = e.value().estimated_vram_mb;
-            (key, last_used, vram)
-        })
+        .map(|e| (e.key().clone(), e.value().last_used_secs()))
         .collect();
+    candidates.sort_by_key(|(_key, last_used)| *last_used);
 
-    candidates.sort_by_key(|(_key, last_used, _vram)| *last_used);
-
-    let mut evicted = Vec::new();
-    for (key, _last_used, vram) in candidates {
-        if total_mb + needed_mb <= budget_mb {
+    let mut removed = Vec::new();
+    for (key, _last_used) in candidates {
+        if split_models.len() <= max_entries {
             break;
         }
         if split_models.remove(&key).is_some() {
-            tracing::info!(
-                model = %key.0,
-                layer_start = key.1,
-                layer_end = key.2,
-                vram_mb = vram,
-                "Evicted LRU split model to free VRAM"
-            );
-            total_mb = total_mb.saturating_sub(vram);
-            evicted.push(key);
+            removed.push(key);
         }
     }
-
-    evicted
+    removed
 }

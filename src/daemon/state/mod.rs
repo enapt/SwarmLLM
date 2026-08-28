@@ -228,15 +228,28 @@ pub struct StreamingTokenSink {
     pub expected_peer: crate::types::NodeId,
 }
 
-/// Which memory a split-model eviction is protecting, and therefore which
-/// resident segments it may count and take.
+/// How many split-model metadata entries this node keeps cached.
+///
+/// A cap on a CACHE, not on memory: an entry is a few fields read out of
+/// `gguf_header.bin`, and trimming one costs a re-read next time it is needed.
+/// Entries are keyed by `(model, layer_start, layer_end)`, and a peer may ask
+/// this node to serve any range of a model it holds shards of — so the count is
+/// bounded by what peers request, not by what is on disk, and needs a ceiling.
+/// Generous on purpose: the cost of keeping one is bytes, and the cost of
+/// trimming one that is still wanted is a header read plus, briefly, the
+/// router rather than the local fast path.
+const MAX_SPLIT_MODEL_ENTRIES: usize = 64;
+
+/// Which memory a split-model registration budget describes, and therefore
+/// which registered segments count towards it.
 ///
 /// The distinction exists because `split_models` holds segments on BOTH
-/// devices, while the budget enforced against it is usually the graphics one.
+/// devices, while the budget weighed against it is usually the graphics one.
 /// Without it, a processor-resident segment was counted as occupying graphics
-/// memory it does not hold, and evicted to release memory it cannot release.
+/// memory it does not hold — and, while this budget could still evict, was
+/// taken to release memory it could not release (gotcha #402).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EvictionScope {
+pub enum MemoryScope {
     /// The graphics card's budget: only models actually on the card.
     GraphicsMemory,
     /// A general ceiling on a node with no card — every resident model counts.
@@ -2436,34 +2449,33 @@ impl SharedState {
         expected.all(|s| store.shard_file_present(&s))
     }
 
-    /// The memory budget resident split models are held to, and which memory
-    /// it protects.
+    /// The memory budget resident split-model REGISTRATIONS are held to, and
+    /// which memory it describes.
     ///
     /// Two different budgets have always been reached for here through one
     /// `.or()`, and the difference matters: `compute_vram_budget` is a
     /// statement about the GRAPHICS card, while
     /// `inference.max_split_model_memory_mb` is a general ceiling that only
-    /// applies on a node with no card for the first to describe. Enforcing the
-    /// graphics one against a processor-resident model — or on behalf of one —
-    /// is what let a CPU-bound segment load kill a model running on the card.
-    fn split_model_budget(&self) -> Option<(u64, EvictionScope)> {
-        self.split_model_budget_with(crate::model::auto_manage::compute_vram_budget(self))
-    }
-
+    /// applies on a node with no card for the first to describe.
+    ///
+    /// **This bounds what the node REGISTERS as locally servable; it never
+    /// takes memory from anything.** Graphics memory has one owner —
+    /// `ModelProcessPool` — which admits, charges and reclaims it. See
+    /// `inference::split::trim_split_model_cache`.
     /// [`Self::split_model_budget`] for a caller that already has the graphics
     /// figure in hand. The mapping lives in one place so the two entry points
     /// cannot disagree about which memory is being protected.
     pub fn split_model_budget_with(
         &self,
         vram_budget_mb: Option<u64>,
-    ) -> Option<(u64, EvictionScope)> {
+    ) -> Option<(u64, MemoryScope)> {
         match vram_budget_mb {
-            Some(mb) => Some((mb, EvictionScope::GraphicsMemory)),
+            Some(mb) => Some((mb, MemoryScope::GraphicsMemory)),
             None => self
                 .cfg()
                 .inference
                 .max_split_model_memory_mb
-                .map(|mb| (mb, EvictionScope::AllResident)),
+                .map(|mb| (mb, MemoryScope::AllResident)),
         }
     }
 
@@ -2471,20 +2483,18 @@ impl SharedState {
     /// closure the eviction helpers can apply per model.
     fn budgeted_memory_predicate(
         &self,
-        scope: EvictionScope,
+        scope: MemoryScope,
     ) -> impl Fn(&crate::types::ModelId) -> bool + '_ {
         move |model_id: &crate::types::ModelId| match scope {
-            EvictionScope::GraphicsMemory => {
-                self.model_process_pool.model_uses_gpu_memory(model_id)
-            }
+            MemoryScope::GraphicsMemory => self.model_process_pool.model_uses_gpu_memory(model_id),
             // No card on this node, so every resident model is holding the
             // only memory there is.
-            EvictionScope::AllResident => true,
+            MemoryScope::AllResident => true,
         }
     }
 
     /// Megabytes of `scope`'s memory currently held by resident split models.
-    pub fn split_models_committed_mb(&self, scope: EvictionScope) -> u64 {
+    pub fn split_models_committed_mb(&self, scope: MemoryScope) -> u64 {
         crate::inference::split::split_models_committed_mb(
             &self.split_models,
             &self.budgeted_memory_predicate(scope),
@@ -2526,23 +2536,24 @@ impl SharedState {
             vram_estimate,
         );
 
-        if let Some((budget_mb, scope)) = self.split_model_budget() {
-            let evicted = self.evict_split_models_and_free_vram(
-                budget_mb,
-                entry.estimated_vram_mb,
-                model_id,
-                scope,
+        // Bound the CACHE, not the card. Registering a metadata entry allocates
+        // no device memory — the worker subprocess loads the weights on its
+        // first request, and `ModelProcessPool` admits, charges and reclaims
+        // that. This used to run a VRAM-budget eviction here, which is how a
+        // metadata entry for a processor-bound segment came to kill a model
+        // running on the graphics card (gotcha #402).
+        let trimmed = crate::inference::split::trim_split_model_cache(
+            &self.split_models,
+            &self.active_pipelines,
+            MAX_SPLIT_MODEL_ENTRIES,
+        );
+        if !trimmed.is_empty() {
+            self.purge_split_model_index_entries(&trimmed);
+            tracing::debug!(
+                trimmed = trimmed.len(),
+                cap = MAX_SPLIT_MODEL_ENTRIES,
+                "Trimmed least-recently-used split-model metadata entries"
             );
-            if !evicted.is_empty() {
-                tracing::info!(
-                    evicted = evicted.len(),
-                    budget_mb,
-                    for_model = %model_id,
-                    needed_mb = entry.estimated_vram_mb,
-                    ?scope,
-                    "Evicted LRU split models to stay inside the memory budget"
-                );
-            }
         }
         self.index_split_model_insert(model_id, layer_start, layer_end);
         self.split_models.entry(split_key.clone()).or_insert(entry);
@@ -2560,85 +2571,6 @@ impl SharedState {
             .entry(model_id.clone())
             .or_default()
             .push((layer_start, layer_end));
-    }
-
-    /// Evict split-model entries for the VRAM budget **and actually free the
-    /// VRAM**.
-    ///
-    /// `evict_split_models_lru` only removes daemon-side metadata from
-    /// `split_models`. The memory itself belongs to the model worker
-    /// **subprocess**, and the only thing that returns it to the OS is killing
-    /// that child (`ModelProcessPool::unload_model`). Every eviction site
-    /// evicted and purged the index but never unloaded, so the budget was
-    /// enforced against a phantom: the daemon decided it had freed 2 GB, loaded
-    /// another model on top of memory that was never released, and the worker
-    /// hit a real `CUDA_ERROR_OUT_OF_MEMORY`. `classify_worker_error` then
-    /// pinned that model to the CPU for the rest of the run — a ~10x throughput
-    /// loss with nothing in the API response to show for it. Reported across
-    /// v0.3.53 and v0.3.54 as "GPU silently falls back to CPU from the daemon's
-    /// own background churn"; open since 2026-07-21.
-    ///
-    /// **A model is unloaded only when no split-model entry references it any
-    /// more.** Entries are keyed per layer range, so a node holding two
-    /// segments of one model shares a single worker; unloading on the first
-    /// eviction would kill a worker still serving the second.
-    ///
-    /// **And never while it is in use.** `active_pipelines` is the
-    /// COORDINATOR's map and never holds peer-served work, so `serving_models`
-    /// has to be checked too — otherwise this kills a worker mid-answer for a
-    /// peer, which is precisely the mistake gotcha #194 records.
-    ///
-    /// The unload is spawned rather than awaited because the callers are sync
-    /// and on the model-load path; the kill is a signal plus a process reap, so
-    /// the VRAM comes back promptly without blocking the loader.
-    pub fn evict_split_models_and_free_vram(
-        &self,
-        budget_mb: u64,
-        needed_mb: u64,
-        for_model: &crate::types::ModelId,
-        scope: EvictionScope,
-    ) -> Vec<crate::inference::split::SplitModelKey> {
-        let holds = self.budgeted_memory_predicate(scope);
-        let evicted = crate::inference::split::evict_split_models_lru(
-            &self.split_models,
-            &self.active_pipelines,
-            budget_mb,
-            needed_mb,
-            for_model,
-            &holds,
-        );
-        if evicted.is_empty() {
-            return evicted;
-        }
-        self.purge_split_model_index_entries(&evicted);
-
-        let mut to_unload: Vec<crate::types::ModelId> = Vec::new();
-        for key in &evicted {
-            let model_id = &key.0;
-            if to_unload.contains(model_id) {
-                continue;
-            }
-            // Another segment of the same model still resident → shared worker.
-            if self.split_models.iter().any(|e| &e.key().0 == model_id) {
-                continue;
-            }
-            if self.serving_models.contains_key(model_id) {
-                tracing::debug!(model = %model_id, "Evicted metadata but worker is serving a peer — leaving it loaded");
-                continue;
-            }
-            to_unload.push(model_id.clone());
-        }
-
-        if !to_unload.is_empty() {
-            let pool = self.model_process_pool.clone();
-            tokio::spawn(async move {
-                for model_id in to_unload {
-                    tracing::info!(model = %model_id, "Unloading evicted model to actually free its GPU memory");
-                    pool.unload_model(&model_id).await;
-                }
-            });
-        }
-        evicted
     }
 
     /// Purge a list of evicted split-model keys from the secondary index.
@@ -2869,8 +2801,8 @@ impl SharedState {
 }
 
 #[cfg(test)]
-mod split_eviction_scope_tests {
-    use super::EvictionScope;
+mod split_model_cache_tests {
+    use super::MemoryScope;
     use crate::inference::split::{SplitModelEntry, SplitModelKey};
     use crate::types::ModelId;
 
@@ -2909,69 +2841,34 @@ mod split_eviction_scope_tests {
         }
     }
 
-    /// **Loading a model onto the PROCESSOR must not take the graphics card
-    /// away from one that is using it.**
+    /// **A registration budget may refuse; it may never take.** Creating a
+    /// split-model metadata entry allocates no device memory, so it cannot
+    /// remove another model's — the graphics card has one owner,
+    /// `ModelProcessPool`, which admits, charges and reclaims with guards this
+    /// path never had (an idle floor, an in-flight check that can see
+    /// peer-served work, and plan-before-destroy).
     ///
-    /// Measured on this machine 2026-08-27, pre-fix: an 8B holding 4685 MB was
-    /// evicted and its worker killed 35 s after it loaded, on the creation of a
-    /// split entry for a one-layer `force_cpu=true` segment — the very next log
-    /// line. An external tester reported the identical shape on their own card
-    /// and reasonably read it as the 60-second reclaim protection failing; it
-    /// was a different mechanism entirely, one that had never been told where
-    /// anything was running.
-    ///
-    /// `gpu_layers = 0` stands in for "this model is going to the processor",
-    /// which is what `ModelProcessPool::model_uses_gpu_memory` reports on.
-    // A tokio test because the pre-fix path reaches `tokio::spawn` to unload
-    // the model it evicted: without a runtime it panics there instead of
-    // failing the assertion, which reads as a broken test rather than a caught
-    // regression.
+    /// Measured pre-fix 2026-08-27: an 8B holding 4685 MB was evicted and its
+    /// worker killed 35 s after it loaded, on the creation of a one-layer
+    /// `force_cpu=true` entry — the very next log line.
     #[tokio::test]
-    async fn a_processor_bound_load_never_evicts_from_the_graphics_card() {
+    async fn registering_a_split_model_entry_never_removes_another() {
         let state = test_state();
         let resident: SplitModelKey = (ModelId("already-on-the-card".into()), 0, 32);
         state.split_models.insert(resident.clone(), entry(4685));
+        // A second, equally large registration: under the old budget-driven
+        // eviction this pair blew any real card and unloaded the first.
+        let second: SplitModelKey = (ModelId("also-large".into()), 0, 28);
+        state.split_models.insert(second.clone(), entry(6033));
 
-        let incoming = ModelId("bound-for-the-processor".into());
-        state.model_process_pool.set_gpu_layers(0);
-
-        let evicted = state.evict_split_models_and_free_vram(
-            5553,
-            4685, // far past the budget together — the old code evicted here
-            &incoming,
-            EvictionScope::GraphicsMemory,
+        let trimmed = crate::inference::split::trim_split_model_cache(
+            &state.split_models,
+            &state.active_pipelines,
+            super::MAX_SPLIT_MODEL_ENTRIES,
         );
-        assert!(
-            evicted.is_empty(),
-            "a model that will never touch the card has no claim on it"
-        );
-        assert!(
-            state.split_models.contains_key(&resident),
-            "the card's tenant must still be resident"
-        );
-
-        // Control: the identical call for a model that IS going to the card
-        // evicts, so the test above is not passing for some unrelated reason.
-        state.model_process_pool.set_gpu_layers(-1);
-        state.model_process_pool.set_gpu_detected(true);
-        let evicted = state.evict_split_models_and_free_vram(
-            5553,
-            4685,
-            &incoming,
-            EvictionScope::GraphicsMemory,
-        );
-        if cfg!(feature = "candle-cuda") {
-            assert_eq!(
-                evicted,
-                vec![resident],
-                "control: a GPU-bound load does still reclaim the card"
-            );
-        } else {
-            // A build with no CUDA can put nothing on a card, so `charges_ram`
-            // answers "system memory" for every model and nothing is evicted
-            // for a graphics budget. That is the same guard, not a gap.
-            assert!(evicted.is_empty());
-        }
+        assert!(trimmed.is_empty());
+        assert!(state.split_models.contains_key(&resident));
+        assert!(state.split_models.contains_key(&second));
     }
 
     /// The sibling half: memory held on the processor is not graphics memory,
@@ -2985,12 +2882,12 @@ mod split_eviction_scope_tests {
         state.model_process_pool.set_gpu_layers(0);
 
         assert_eq!(
-            state.split_models_committed_mb(EvictionScope::GraphicsMemory),
+            state.split_models_committed_mb(MemoryScope::GraphicsMemory),
             0,
             "nothing is on the card, so the card is empty"
         );
         assert_eq!(
-            state.split_models_committed_mb(EvictionScope::AllResident),
+            state.split_models_committed_mb(MemoryScope::AllResident),
             4685,
             "the general ceiling on a card-less node still counts it"
         );

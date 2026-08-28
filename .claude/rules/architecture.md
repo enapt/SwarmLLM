@@ -668,36 +668,49 @@ silently break at the wire if duplicated:
   the worker is on the card, because admission prices the model again and has the
   last word — the same correction `admit_to_gpu`'s refusal log already carries.
 
-- **`evict_split_models_lru` + `SharedState::{split_model_budget, split_models_committed_mb}`
-  + `EvictionScope`** (2026-08-27) — the split-model LRU knows which DEVICE each
-  resident segment is on, and which memory the budget it is enforcing protects.
-  **`split_models` holds segments on both devices; the budget enforced against it
-  is usually the graphics card's.** Before this it was neither told nor asked, and
-  got the answer wrong three ways at once: it charged `needed_mb` for a segment
-  bound for the PROCESSOR, counted processor-resident segments as occupying the
-  card, and evicted them to release memory they were not holding. Measured here
-  2026-08-27 — an 8B holding 4685 MB evicted and its worker killed 35 s after it
-  loaded, on the line immediately before `Loading split model … force_cpu=true`;
-  an external tester saw the identical shape on their own card and read it as the
-  60-second reclaim protection failing. It was a different mechanism (gotcha #402).
-  **Both halves are needed and neither subsumes the other.** The per-candidate
-  filter stops a processor-resident segment being taken; only the `for_model`
-  guard stops a processor-bound LOAD evicting a genuine tenant, because that one
-  never reaches the candidate list — its cost enters as `needed_mb`. Each has its
-  own test, each verified red with the other still in place.
-  `ModelProcessPool::model_uses_gpu_memory` is the single answer both use, resident
-  from the worker's recorded placement and otherwise predicted from `cpu_reason`;
-  it reads through `charges_ram` so "sent to the processor", "no card detected" and
-  "a build without CUDA" give one answer rather than three.
-  **`EvictionScope` exists because two different budgets were reached through one
-  `.or()`**: `compute_vram_budget` is a statement about the card, while
-  `inference.max_split_model_memory_mb` is a general ceiling that only applies on a
-  node with no card. Filtering by graphics residency under the second would have
-  disabled it entirely on the machines it is for.
-  ⚠ **This mechanism is a SECOND VRAM budget, parallel to the pool's own admission,
-  with a different estimate and no idle floor — see `docs/FUTURE_WORK.md`.** It
-  will evict a model used seconds ago, which `free_vram_for_admission` deliberately
-  refuses to do.
+- **Graphics memory has ONE owner: `ModelProcessPool`** (2026-08-27). It admits
+  (`admit_to_gpu`), charges (`vram_reserved_mb`), and reclaims — on demand
+  (`free_vram_for_admission`) and on the idle timer (`try_idle_vram_unload`,
+  which runs outside the auto-manage gate). **Nothing else may take memory away
+  from a loaded model.**
+  **What this replaced.** `SharedState.split_models` — a cache of per-segment
+  metadata read out of `gguf_header.bin` — was governed by its own VRAM budget
+  that evicted entries *and unloaded their workers*. Two accountants for one
+  card, and the second was the weaker: a different estimate (weights only,
+  against the pool's weights + KV — gotcha #388's shape), a different in-flight
+  oracle (`active_pipelines`, which per gotcha #194 cannot see peer-served work
+  or the split fast path), and **no idle floor at all** — measured, it evicted a
+  model that had answered a request three seconds earlier, which
+  `free_vram_for_admission` refuses by design. Worse, it was placement-blind, so
+  registering a metadata entry for a segment bound for the PROCESSOR killed a
+  model running happily on the card (gotcha #402).
+  **Researched, not guessed.** Ollama's scheduler is the direct analogue and
+  keeps one owner: a single centralised free-space tracker, `runnerRef.vramSize`
+  reported by the runner, victims chosen by refCount (in-flight) → keep-alive →
+  `lastUsedAt`. Our pool already had the equivalent of all three.
+  **The split-model map is now a metadata CACHE**, bounded by
+  `MAX_SPLIT_MODEL_ENTRIES` via `inference::split::trim_split_model_cache` —
+  count-capped, LRU, active-pipeline-protected, and structurally unable to
+  unload anything (it takes no pool and returns only keys). **Do not restore the
+  unload**: it existed (2026-07-21) because eviction was *supposed* to free
+  graphics memory and did not, so the budget was enforced against a phantom.
+  That premise is gone — this no longer claims to free anything. Trimming an
+  entry still wanted now costs a header re-read, not a killed worker.
+  **A registration budget survives, and may refuse but never take.**
+  `SharedState::split_model_budget_with` + `split_models_committed_mb` + the
+  `MemoryScope` enum answer "should this node advertise another segment as
+  locally servable?" — `compute_vram_budget` (the card) or, on a node with no
+  card, `inference.max_split_model_memory_mb`. `MemoryScope` exists because
+  those two were reached through one `.or()` and describe different memory:
+  filtering by graphics residency under the second would disable it on exactly
+  the machines it is for. **`ModelProcessPool::model_uses_gpu_memory`** is the
+  single answer to "does this model occupy graphics memory", resident from the
+  worker's own `placed_on_cpu_because` and otherwise predicted from
+  `cpu_reason`, read through `charges_ram` so "sent to the processor", "no card
+  detected" and "a build without CUDA" give one answer rather than three.
+  **The rule to carry**: a budget over a collection whose members live in
+  different places must be told which place each one is in — and a component
+  that does not own a resource must not be able to reclaim it.
 
 - **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
   admission check against it. The loader records `kv_headroom_bytes` on the

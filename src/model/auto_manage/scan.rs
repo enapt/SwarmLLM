@@ -572,14 +572,16 @@ pub async fn check_and_load_model(
         // holds segments on both devices: a processor-resident model was
         // inflating the figure with memory it does not hold on the card, and so
         // blocking a load the card had room for.
-        if let Some(budget) = vram_budget_mb {
+        if let Some((budget, scope)) = shared.split_model_budget_with(vram_budget_mb) {
             let estimated = estimate_segment_vram_mb(&manifest, layer_start, layer_end);
-            let scope = crate::daemon::state::EvictionScope::GraphicsMemory;
             let total_loaded = shared.split_models_committed_mb(scope);
             if total_loaded + estimated > budget {
-                // Try LRU eviction first
-                shared.evict_split_models_and_free_vram(budget, estimated, model_id, scope);
-                let total_after = shared.split_models_committed_mb(scope);
+                // Refuse to register; never evict. What is already registered
+                // belongs to models this node is offering, and the graphics
+                // memory itself belongs to `ModelProcessPool`, which reclaims
+                // it on admission and on the idle timer with guards this path
+                // does not have (gotcha #402).
+                let total_after = total_loaded;
                 if total_after + estimated > budget {
                     tracing::info!(
                         model = %model_id,
@@ -650,15 +652,6 @@ manifest.name, budget.saturating_sub(total_after)
         let bos_token = new_entry.bos_token.clone();
         let eos_token = new_entry.eos_token_str.clone();
 
-        // Safety-net eviction: use VRAM budget (falls back to max_split_model_memory_mb)
-        if let Some((budget, scope)) = shared.split_model_budget_with(vram_budget_mb) {
-            shared.evict_split_models_and_free_vram(
-                budget,
-                new_entry.estimated_vram_mb,
-                model_id,
-                scope,
-            );
-        }
         shared.index_split_model_insert(&split_key.0, split_key.1, split_key.2);
         shared.split_models.insert(split_key, new_entry);
 

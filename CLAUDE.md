@@ -167,7 +167,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- **Counts** (re-measured 2026-08-27): **2120 lib** + 11 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 33 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
+- **Counts** (re-measured 2026-08-28): **2121 lib** + 11 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 33 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
 - **Benches and harnesses — see `docs/DIAGNOSTICS.md` § Benchmarks for the full list and the traps.** The ones reached for most: `examples/prefill_bench.rs` (drives `SplitModel::forward` directly, no daemon — `SWARM_BENCH_MODEL`, `SWARM_BENCH_PROMPT`, `SWARM_BENCH_DECODE`, `SWARM_BENCH_REPS`, `SWARM_BENCH_DEVICE=cuda`, and `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` which prices a K-token forward against a 1-token one at the same history depth — the number that decides whether speculation pays; pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown), `examples/qmatmul_bench.rs` (asserts the tiled kernel is bit-identical to upstream), `examples/smoke_test.sh [binary] [port]` (9 checks on an isolated node — run it on the DOWNLOADED release artifact; it now reports checks that COULD NOT RUN separately and never says "all checks passed" over them, and fails fast if the node it started dies — before 2026-08-25 it skipped the three inference checks silently and still claimed success, so "smoke 8/8" had been passing here without ever exercising inference), `examples/soak_test.sh` (`HOURS=` must be a WHOLE number; data dir is per-`PORT`, so two soaks no longer kill each other).
 - **Measurement discipline** (paid for repeatedly): min-of-N on an IDLE box — the same unchanged code measured 0.42 ms and 0.97 ms across runs here, and a benchmark taken while a build runs is worthless. **min-of-N is for benchmarks, not for live measurement** (#367). A/B inside ONE binary via an env switch (`SWARMLLM_DECODE_CALIBRATE=0`, `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`, `SWARMLLM_FLASH_OFFSET_CAUSAL=0`, `SWARMLLM_GQA_DECODE_FLASH=1`, `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1`), never across two builds. **Verify the mechanism fired**, not just that the outcome improved. Pinned reference models: `docs/REFERENCE_MODELS.md`.
 - Unit tests: in-module `#[cfg(test)]` blocks
@@ -217,9 +217,43 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2120 lib (dev,claude-subscription) — re-measured 2026-08-27, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 33 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
+All 20 build phases complete. All subsystems wired — no stubs. **2121 lib (dev,claude-subscription) — re-measured 2026-08-28, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 33 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
+
+### v0.3.130-alpha (2026-08-28) — which device your models run on
+
+Detail in `memory/round_log_0827_cpu_to_gpu.md`; gotchas **#401**, **#402**.
+Three faults, all from one tester's report on a 6 GB card, all verified on the
+RTX 3070 rather than by reading.
+
+- **A model demoted to the processor was never promoted back** (#401). A
+  momentarily-full card demotes and pins a model; freeing memory lifts the pin;
+  and nothing re-examined the worker that pin had produced —
+  `get_or_spawn`'s fast path returns any resident worker regardless of device.
+  `should_return_to_gpu` now retires it on the next request. **A/B-verified
+  against the released .129 binary**, same box, same config, budget pinned via
+  `resources.max_gpu_vram_mb` (free VRAM drifts with what Windows is doing).
+- **Loading a model onto the PROCESSOR evicted one from the CARD** (#402).
+  `ensure_split_model_entry` ran an LRU pass against the graphics budget on
+  every metadata entry, and had never been told which device anything runs on.
+  **It was in my own verification log and I read past it**; the tester raised it
+  as a puzzle, not a bug.
+- **The real fix was to delete the second accountant, not correct it.**
+  Researched first (diagnosis rule 0): Ollama's scheduler is the same shape and
+  keeps ONE owner. `split_models` is now a metadata cache bounded by entry
+  count, structurally unable to unload anything; graphics memory belongs to
+  `ModelProcessPool` alone, with the guards the other one lacked (idle floor,
+  an in-flight oracle that can see peer-served work, plan-before-destroy).
+- **And an admission refusal is no longer a standing verdict.** It used to pin,
+  and the pin outlived its cause — measured, 50 minutes on the processor with
+  the occupant idle and reclaimable throughout. The whole chain now runs in one
+  request: retire the processor copy, reclaim the card from the idle model,
+  admit, load — 4.9 s.
+
+⚠ **Still open**: foreign libp2p nodes are no longer adopted after #396 but are
+still DIALLED — 126 outbound dials to 3 nodes in 14 minutes, measured.
+`docs/FUTURE_WORK.md`.
 
 ### v0.3.129-alpha (2026-08-27) — the `pi` single-token bug, and it was position arithmetic
 
@@ -257,19 +291,6 @@ Detail in `memory/round_log_0827_pi_position.md`; gotcha **#400**.
   could be verified without a request ever reaching a model; it now asks
   `/v1/models`.
 
-- **A model demoted to the processor is promoted back again** (gotcha **#401**,
-  fixed after .129). A momentarily-full card demotes and pins a model; freeing
-  memory lifts the pin; and nothing then re-examined the worker that pin had
-  produced — `get_or_spawn`'s fast path returns any resident worker regardless
-  of device, so `clear_cpu_pin`'s "next worker spawn" never came. Reported
-  against a card at 653 of 6141 MB. `should_return_to_gpu` now retires the
-  processor worker on the next request once the pin is gone and the model fits,
-  reading the WORKER's own placement rather than `effective_gpu_layers` — which
-  answers for a spawn happening now, off the pin that has just been cleared.
-
-⚠ **Still open, confirmed and written up in `docs/FUTURE_WORK.md`**: foreign
-libp2p nodes are no longer adopted after #396 but are still DIALLED — 126
-outbound dials to 3 nodes in 14 minutes, measured.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 

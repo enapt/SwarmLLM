@@ -346,279 +346,120 @@ fn kv_cache_store_fresh_entry_survives_cleanup() {
     assert_eq!(store.active_entries(), 1);
 }
 
-// ── LRU eviction tests ──
+// ── Split-model metadata cache tests ──
+//
+// This map used to be governed by a VRAM budget that evicted entries AND
+// killed their workers — a second accountant for one graphics card, with a
+// different estimate and weaker guards than `ModelProcessPool`'s own admission
+// (gotcha #402). It is now a metadata cache bounded by entry count, and the
+// card has one owner. The first test below is the regression guard.
 
+/// **Memory is not a reason to trim.** Two entries whose recorded footprint
+/// dwarfs any plausible card are left alone while the cache is under its count
+/// cap — under the old budget-driven eviction, this shape unloaded a worker.
 #[test]
-fn lru_eviction_respects_budget() {
+fn a_full_card_is_not_a_reason_to_drop_metadata() {
     use crate::types::*;
 
     let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
     let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
         dashmap::DashMap::new();
 
-    // Add two models: one old, one newer
-    let key_a = (ModelId("model-a".into()), 0, 10);
-    let mut entry_a = make_dummy_entry(500);
-    entry_a.last_used = std::sync::atomic::AtomicU64::new(100); // older
-    split_models.insert(key_a.clone(), entry_a);
+    split_models.insert((ModelId("big".into()), 0, 32), make_dummy_entry(6033));
+    split_models.insert((ModelId("also-big".into()), 0, 28), make_dummy_entry(4685));
 
-    let key_b = (ModelId("model-b".into()), 0, 10);
-    let mut entry_b = make_dummy_entry(500);
-    entry_b.last_used = std::sync::atomic::AtomicU64::new(200); // newer
-    split_models.insert(key_b.clone(), entry_b);
-
-    // Budget is 1200MB, we need 400MB more → total 1000 + 400 = 1400 > 1200
-    // Must evict 1 model (oldest) to bring it under: 500 + 400 = 900 ≤ 1200
-    let evicted = evict_split_models_lru(
-        &split_models,
-        &active_pipelines,
-        1200,
-        400,
-        &ModelId("incoming".into()),
-        &all_on_gpu,
+    let trimmed = trim_split_model_cache(&split_models, &active_pipelines, 64);
+    assert!(
+        trimmed.is_empty(),
+        "10 GB of registered weights against any real card — and still nothing to do, \
+         because this cache holds header metadata, not graphics memory"
     );
-    assert_eq!(evicted.len(), 1);
-    assert_eq!(split_models.len(), 1);
-    // The older model (model-a, last_used=100) should have been evicted
-    assert!(!split_models.contains_key(&key_a));
-    assert!(split_models.contains_key(&key_b));
+    assert_eq!(split_models.len(), 2);
 }
 
+/// The cap is on the count, and the least recently used goes first.
 #[test]
-fn lru_eviction_no_eviction_under_budget() {
+fn the_metadata_cache_trims_least_recently_used_down_to_its_cap() {
     use crate::types::*;
 
     let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
     let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
         dashmap::DashMap::new();
 
-    let key = (ModelId("model".into()), 0, 10);
-    let entry = make_dummy_entry(200);
-    split_models.insert(key, entry);
-
-    // Budget is 1000MB, need 100MB → no eviction needed
-    let evicted = evict_split_models_lru(
-        &split_models,
-        &active_pipelines,
-        1000,
-        100,
-        &ModelId("incoming".into()),
-        &all_on_gpu,
-    );
-    assert_eq!(evicted.len(), 0);
-    assert_eq!(split_models.len(), 1);
-}
-
-#[test]
-fn lru_eviction_protects_active_models() {
-    use crate::types::*;
-
-    let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
-    let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
-        dashmap::DashMap::new();
-
-    // Add two models
-    let key_a = (ModelId("active-model".into()), 0, 10);
-    let mut entry_a = make_dummy_entry(500);
-    entry_a.last_used = std::sync::atomic::AtomicU64::new(100); // oldest
-    split_models.insert(key_a.clone(), entry_a);
-
-    let key_b = (ModelId("idle-model".into()), 0, 10);
-    let mut entry_b = make_dummy_entry(500);
-    entry_b.last_used = std::sync::atomic::AtomicU64::new(200);
-    split_models.insert(key_b.clone(), entry_b);
-
-    // Mark model-a as having an active pipeline
-    let pipeline = PipelineAssignment {
-        request_id: uuid::Uuid::new_v4(),
-        segments: vec![PipelineSegment {
-            node_id: NodeId([1u8; 32]),
-            shard_id: ShardId {
-                model_id: ModelId("active-model".into()),
-                index: 0,
-            },
-            layer_range: (0, 10),
-        }],
-        standbys: vec![],
-        tp_groups: vec![],
-        supports_speculative: false,
-    };
-    active_pipelines.insert(uuid::Uuid::new_v4(), pipeline);
-
-    // Budget is 800MB, need 400MB → should evict idle-model (not active one)
-    let evicted = evict_split_models_lru(
-        &split_models,
-        &active_pipelines,
-        800,
-        400,
-        &ModelId("incoming".into()),
-        &all_on_gpu,
-    );
-    assert_eq!(evicted.len(), 1);
-    assert!(split_models.contains_key(&key_a)); // Protected by active pipeline
-    assert!(!split_models.contains_key(&key_b)); // Evicted
-}
-
-#[test]
-fn lru_eviction_multiple_models() {
-    use crate::types::*;
-
-    let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
-    let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
-        dashmap::DashMap::new();
-
-    // Add 3 models of 400MB each (total 1200MB)
-    for i in 0..3 {
-        let key = (ModelId(format!("model-{i}")), 0, 10);
-        let mut entry = make_dummy_entry(400);
-        entry.last_used = std::sync::atomic::AtomicU64::new(i as u64 * 100);
-        split_models.insert(key, entry);
+    for i in 0..5u64 {
+        let mut e = make_dummy_entry(100);
+        e.last_used = std::sync::atomic::AtomicU64::new(i * 100);
+        split_models.insert((ModelId(format!("model-{i}")), 0, 10), e);
     }
 
-    // Budget 800MB, need 200MB → need to free 600MB → evict 2 oldest
-    let evicted = evict_split_models_lru(
-        &split_models,
-        &active_pipelines,
-        800,
-        200,
-        &ModelId("incoming".into()),
-        &all_on_gpu,
-    );
-    assert_eq!(evicted.len(), 2);
+    let trimmed = trim_split_model_cache(&split_models, &active_pipelines, 3);
+    assert_eq!(trimmed.len(), 2);
+    assert_eq!(split_models.len(), 3);
+    assert!(!split_models.contains_key(&(ModelId("model-0".into()), 0, 10)));
+    assert!(!split_models.contains_key(&(ModelId("model-1".into()), 0, 10)));
+    assert!(split_models.contains_key(&(ModelId("model-4".into()), 0, 10)));
+}
+
+/// Under the cap there is nothing to do.
+#[test]
+fn the_metadata_cache_is_left_alone_under_its_cap() {
+    use crate::types::*;
+
+    let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
+    let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
+        dashmap::DashMap::new();
+    split_models.insert((ModelId("m".into()), 0, 10), make_dummy_entry(200));
+
+    assert!(trim_split_model_cache(&split_models, &active_pipelines, 64).is_empty());
     assert_eq!(split_models.len(), 1);
-    // Only model-2 (last_used=200, newest) should remain
-    assert!(split_models.contains_key(&(ModelId("model-2".into()), 0, 10)));
 }
 
-/// A model on the PROCESSOR must not be evicted to make room on the CARD: it
-/// is holding none of that memory, so killing it costs a cold start and frees
-/// nothing.
-///
-/// Reported 2026-08-27, and reproduced here the same day: loading a
-/// `force_cpu=true` segment evicted a GPU-resident 8B holding 4685 MB, 35 s
-/// after that model had loaded.
+/// A model with a request in flight keeps its metadata, however stale it looks:
+/// rebuilding it mid-pipeline is avoidable work.
 #[test]
-fn a_processor_resident_model_is_not_evicted_for_graphics_memory() {
+fn the_metadata_cache_keeps_entries_for_models_with_active_pipelines() {
     use crate::types::*;
 
     let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
     let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
         dashmap::DashMap::new();
 
-    let on_cpu = (ModelId("runs-on-the-processor".into()), 0, 10);
-    let mut cpu_entry = make_dummy_entry(500);
-    cpu_entry.last_used = std::sync::atomic::AtomicU64::new(100); // the LRU pick
-    split_models.insert(on_cpu.clone(), cpu_entry);
+    let busy = (ModelId("active-model".into()), 0, 10);
+    let mut busy_entry = make_dummy_entry(500);
+    busy_entry.last_used = std::sync::atomic::AtomicU64::new(0); // the LRU pick
+    split_models.insert(busy.clone(), busy_entry);
 
-    let on_gpu = (ModelId("runs-on-the-card".into()), 0, 10);
-    let mut gpu_entry = make_dummy_entry(500);
-    gpu_entry.last_used = std::sync::atomic::AtomicU64::new(200);
-    split_models.insert(on_gpu.clone(), gpu_entry);
+    let idle = (ModelId("idle-model".into()), 0, 10);
+    let mut idle_entry = make_dummy_entry(500);
+    idle_entry.last_used = std::sync::atomic::AtomicU64::new(200);
+    split_models.insert(idle.clone(), idle_entry);
 
-    let holds = |m: &ModelId| m.0 == "runs-on-the-card";
-    // 500 MB is actually on the card, and 400 more is wanted, against 800.
-    let evicted = evict_split_models_lru(
-        &split_models,
-        &active_pipelines,
-        800,
-        400,
-        &on_gpu.0,
-        &holds,
+    active_pipelines.insert(
+        uuid::Uuid::new_v4(),
+        PipelineAssignment {
+            request_id: uuid::Uuid::new_v4(),
+            segments: vec![PipelineSegment {
+                node_id: NodeId([1u8; 32]),
+                shard_id: ShardId {
+                    model_id: ModelId("active-model".into()),
+                    index: 0,
+                },
+                layer_range: (0, 10),
+            }],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        },
     );
 
-    assert_eq!(
-        evicted,
-        vec![on_gpu.clone()],
-        "only a tenant of the card can give it up"
-    );
-    assert!(
-        split_models.contains_key(&on_cpu),
-        "the processor-resident model is older, and evicting it would free no graphics memory"
-    );
-    // The control: with the old placement-blind predicate the LRU pick — and
-    // the whole point of this test — goes the other way.
-    let split_models2: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
-    let mut a = make_dummy_entry(500);
-    a.last_used = std::sync::atomic::AtomicU64::new(100);
-    split_models2.insert(on_cpu.clone(), a);
-    let mut b = make_dummy_entry(500);
-    b.last_used = std::sync::atomic::AtomicU64::new(200);
-    split_models2.insert(on_gpu.clone(), b);
-    let blind = evict_split_models_lru(
-        &split_models2,
-        &active_pipelines,
-        800,
-        400,
-        &ModelId("incoming".into()),
-        &all_on_gpu,
-    );
-    assert_eq!(
-        blind,
-        vec![on_cpu, on_gpu],
-        "control: counting both as tenants of the card takes the processor one FIRST — and, \
-         because that frees no graphics memory, goes on to take the card's real tenant too"
-    );
-}
-
-/// **The live case, and the half the per-candidate filter cannot cover.** The
-/// card has one tenant and the model being loaded is bound for the processor:
-/// its estimate is charged against the card, that alone blows the budget, and
-/// the tenant is evicted for memory the newcomer will never touch.
-///
-/// Measured pre-fix on this machine 2026-08-27 — an 8B holding 4685 MB
-/// unloaded 35 s after it loaded, on the very next line after
-/// `Loading split model ... force_cpu=true`.
-#[test]
-fn a_processor_bound_load_does_not_charge_the_card_or_evict_from_it() {
-    use crate::types::*;
-
-    let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
-    let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
-        dashmap::DashMap::new();
-
-    let tenant: SplitModelKey = (ModelId("on-the-card".into()), 0, 32);
-    split_models.insert(tenant.clone(), make_dummy_entry(4685));
-
-    let incoming = ModelId("bound-for-the-processor".into());
-    let holds = |m: &ModelId| m.0 == "on-the-card";
-
-    // 4685 already on the card, 3138 more wanted, against a 5553 budget.
-    let evicted = evict_split_models_lru(
-        &split_models,
-        &active_pipelines,
-        5553,
-        3138,
-        &incoming,
-        &holds,
-    );
-    assert!(
-        evicted.is_empty(),
-        "the newcomer runs on the processor — the card's tenant keeps its place"
-    );
-    assert!(split_models.contains_key(&tenant));
-
-    // Control 1: the SAME numbers for a model that is going to the card do
-    // evict, so the assertion above is not passing because nothing would have.
-    let holds_both = |_: &ModelId| true;
-    let evicted = evict_split_models_lru(
-        &split_models,
-        &active_pipelines,
-        5553,
-        3138,
-        &incoming,
-        &holds_both,
-    );
-    assert_eq!(
-        evicted,
-        vec![tenant],
-        "control: a card-bound load of the same size does reclaim the card"
-    );
+    let trimmed = trim_split_model_cache(&split_models, &active_pipelines, 1);
+    assert_eq!(trimmed, vec![idle], "the busy model is protected");
+    assert!(split_models.contains_key(&busy));
 }
 
 /// Memory a processor-resident model holds is not graphics memory, so it must
-/// not be counted against the graphics budget — otherwise the card looks full
-/// while it is empty, and a model that fits is refused or something is evicted
-/// for nothing.
+/// not be counted against the graphics registration budget — otherwise the card
+/// looks full while it is empty, and a model that fits is refused.
 #[test]
 fn only_models_on_the_card_are_counted_against_the_graphics_budget() {
     use crate::types::*;
