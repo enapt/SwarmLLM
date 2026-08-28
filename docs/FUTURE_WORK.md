@@ -10672,6 +10672,38 @@ than bolted onto this path.
 Not urgent: the case it costs is a model under continuous load, which is also
 the case where a cold start is most expensive.
 
+## Is `VRAM_MAKE_ROOM_MIN_IDLE_SECS = 60` the right patience? (open 2026-08-28)
+
+The floor that stops two models evicting each other on every request. A tester
+timed the trade on a 6 GB card, v0.3.130, `llama-3.2-3b` resident and
+`gemma-2-2b-it` requested inside and outside the window:
+
+- inside (+41 s): answered from the processor, **8.1 s**, incumbent untouched;
+- outside (+113 s): full swap — reclaim, admit, load — **2.5 s**.
+
+**So the swap was cheaper than the patience.** On those numbers 60 s is too
+conservative, and their earlier 7B/6000-token cases (minutes on the processor)
+widen the gap rather than narrowing it.
+
+**Do not move it on that evidence.** Both measurements — theirs and ours — used
+one-shot prompts, and the cost the floor actually protects is invisible to those.
+Eviction kills the worker, and `inference::split::prefix_cache` is
+**per-worker-subprocess**: the evicted model loses every cached prefix and every
+live conversation's KV state. Alternate two models *in conversation* and each
+swap makes both re-prefill from scratch, which on a 6000-token prompt is the
+expensive part and lands on the model just returned to. Nobody has measured that.
+
+**What would settle it**: the same alternation with multi-turn conversations on
+both models, so the second turn should hit a warm prefix. Swapping still winning
+there means the floor is too high; the re-prefill eating the gain means it is
+doing its job and the answer is to make eviction cheaper, not sooner.
+
+**The shape it probably wants regardless.** A fixed threshold treats a 2B costing
+8 s on the processor the same as a 7B costing four minutes. Patience should scale
+with how bad the alternative is for that model — `peer_speed` / `mem_bandwidth`
+already measure processor throughput for other purposes. That is a policy change,
+not a constant change, and wants the measurement above first.
+
 ## Foreign libp2p nodes are no longer adopted, but are still dialled (measured 2026-08-27)
 
 `identify::peer_speaks_swarmllm` (gotcha #396) stops a node that merely speaks
