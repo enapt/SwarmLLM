@@ -10672,37 +10672,54 @@ than bolted onto this path.
 Not urgent: the case it costs is a model under continuous load, which is also
 the case where a cold start is most expensive.
 
-## Is `VRAM_MAKE_ROOM_MIN_IDLE_SECS = 60` the right patience? (open 2026-08-28)
+## Cost the GPU swap properly, instead of using idle time as a proxy (2026-08-28)
 
-The floor that stops two models evicting each other on every request. A tester
-timed the trade on a 6 GB card, v0.3.130, `llama-3.2-3b` resident and
-`gemma-2-2b-it` requested inside and outside the window:
+The swap floor was 60 s and is now 5 s, measured. What is left is that idle time
+is the wrong predicate for the question, and no value of it is right.
 
-- inside (+41 s): answered from the processor, **8.1 s**, incumbent untouched;
-- outside (+113 s): full swap — reclaim, admit, load — **2.5 s**.
+**What was measured.** Two models that each fit a 6 GB card but not together,
+alternating in multi-turn conversation, each turn resending the whole
+conversation so a warm prefix cache is worth something. Same binary, floor
+switched by `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS`
+(`scratchpad/swap_patience.sh`):
 
-**So the swap was cheaper than the patience.** On those numbers 60 s is too
-conservative, and their earlier 7B/6000-token cases (minutes on the processor)
-widen the gap rather than narrowing it.
+| floor | total, 8 turns | swaps | processor placements |
+|---|---|---|---|
+| 60 s (old) | 299.3 s | 0 | 2 |
+| 0 s | 81.9 s | 7 | 0 |
+| 5 s (new) | 88.8 s | 7 | 0 |
 
-**Do not move it on that evidence.** Both measurements — theirs and ours — used
-one-shot prompts, and the cost the floor actually protects is invisible to those.
-Eviction kills the worker, and `inference::split::prefix_cache` is
-**per-worker-subprocess**: the evicted model loses every cached prefix and every
-live conversation's KV state. Alternate two models *in conversation* and each
-swap makes both re-prefill from scratch, which on a 6000-token prompt is the
-expensive part and lands on the model just returned to. Nobody has measured that.
+Per turn at 60 s: the incumbent answered in 0.6 s while the other model took
+15-20 s on the processor *with* a warm prefix, and 230 s for its first. An
+external tester's one-shot measurement on different hardware found the same
+direction independently (8.1 s on the processor against 2.5 s to swap and run).
 
-**What would settle it**: the same alternation with multi-turn conversations on
-both models, so the second turn should hit a warm prefix. Swapping still winning
-there means the floor is too high; the re-prefill eating the gain means it is
-doing its job and the answer is to make eviction cheaper, not sooner.
+**Two things this contradicted, both of them prior reasoning of ours.** That
+discarding the prefix cache on eviction would make swapping lose in conversation
+— it does not, because a reload plus re-prefill on the card is cheaper than any
+turn on the processor. And that a floor prevents thrash — under alternation the
+incumbent has *always* just been used, so an idle-time floor is inert or total
+and never in between. At 60 s one model held the card for the whole conversation.
 
-**The shape it probably wants regardless.** A fixed threshold treats a 2B costing
-8 s on the processor the same as a 7B costing four minutes. Patience should scale
-with how bad the alternative is for that model — `peer_speed` / `mem_bandwidth`
-already measure processor throughput for other purposes. That is a policy change,
-not a constant change, and wants the measurement above first.
+**What is still wrong.** 5 s is defensible only as "do not take the card from a
+model still in active use", which is all an idle-time predicate can honestly say.
+The actual question is whether swapping costs less than the alternative, and that
+compares two things we can measure but do not:
+
+- **the load** — spawn to the worker's first message, since the model loads
+  lazily on the first request. A first attempt at this shipped and was reverted
+  the same hour: it recorded the cold start of whichever device the worker
+  landed on, so a model that had only ever run on the *processor* contributed a
+  230 s figure and the floor clamped to its 60 s ceiling and never swapped. The
+  figure has to be per device, and only a card load may produce it.
+- **what the processor would cost for this model** — `mem_bandwidth` and
+  `estimate_tokens_per_sec_7b` already exist for related purposes.
+
+Swap when `load < (processor cost − card cost) × expected turns`. That removes
+the constant entirely and is self-calibrating across machines, which is what
+gotcha #367 asks of any threshold. Not attempted here: it wants both figures
+measured on a machine where they differ from this one's, and the 12x already
+banked should not wait for it.
 
 ## Foreign libp2p nodes are no longer adopted, but are still dialled (measured 2026-08-27)
 

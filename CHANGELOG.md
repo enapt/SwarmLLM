@@ -2,6 +2,28 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- **Switching between two models that don't both fit is much faster.** The
+  daemon waited a full minute before letting a model take the graphics card from
+  another, on the reasoning that otherwise two models would keep evicting each
+  other. Measured, that wait cost far more than it saved: two models alternating
+  in conversation on one card took **299 seconds with the wait and 82 without**,
+  because the model left on the processor was slower at every turn than the
+  reload it was being spared. In practice one model simply kept the card for the
+  whole conversation while the other never got it.
+
+  The wait is now five seconds, which is what it can honestly do — don't take
+  the card from a model someone is still actively using. A model asked something
+  every few seconds keeps it; one that has gone quiet for the length of a turn
+  gives it up.
+
+  Found by a tester timing it on their own hardware, and confirmed by running
+  the experiment we had argued would show the opposite. The harness is in the
+  repository (`examples/swap_patience.sh`) with its numbers.
+
 ## [0.3.130-alpha] — 2026-08-28
 
 This release is about one thing: which device your models run on, and why they

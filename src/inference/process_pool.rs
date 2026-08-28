@@ -130,7 +130,7 @@ fn plan_vram_reclaim(
     }
     let mut eligible: Vec<VramReclaimCandidate> = candidates
         .into_iter()
-        .filter(|c| !c.busy && c.charge_mb > 0 && c.idle_secs >= VRAM_MAKE_ROOM_MIN_IDLE_SECS)
+        .filter(|c| !c.busy && c.charge_mb > 0 && c.idle_secs >= vram_make_room_min_idle_secs())
         .collect();
     // Most idle first: `spawned_at` cannot tell a worker answering steadily for
     // an hour from one loaded an hour ago and never used since.
@@ -154,11 +154,68 @@ fn plan_vram_reclaim(
 /// How long a GPU-resident model must have gone unused before another model
 /// may take the card from it.
 ///
-/// Exists only to stop two models alternating faster than they load from
-/// evicting each other on every request; below it the pre-existing behaviour
-/// (the newcomer runs on the CPU) is kept, so this can only ever make the
-/// placement better than it was.
-const VRAM_MAKE_ROOM_MIN_IDLE_SECS: u64 = 60;
+/// **Protects a model under active use from being displaced. It is not thrash
+/// prevention, and it was measured that thrash prevention is not worth buying.**
+///
+/// It was 60 s, invented on the reasoning that two models alternating faster
+/// than they load would evict each other on every request. Measured on
+/// 2026-08-28 — two models alternating in multi-turn conversation on one card,
+/// same binary, floor 60 s against floor 0 s: **299 s against 82 s, a 3.65x
+/// loss.** An external tester's one-shot measurement on different hardware had
+/// already found the same direction (8.1 s on the processor against 2.5 s to
+/// swap and run). Both arms are in `docs/FUTURE_WORK.md`.
+///
+/// Two things that measurement showed, both against my own prior reasoning:
+///
+/// - **The swap is the cheap side.** A reload plus re-prefill on the card cost
+///   7-14 s per turn; the same model on the processor cost 15-20 s per turn
+///   *with* a warm prefix cache, and 230 s for its first. I had argued the
+///   opposite — that discarding the prefix cache on eviction would eat the gain
+///   — and the multi-turn case I said would show it is the case that refutes it.
+/// - **Idle time cannot express "is swapping worth it".** Under alternation the
+///   incumbent has always just been used, so an idle-time floor is inert or
+///   total and never in between: at 60 s no swap ever happened and one model
+///   held the card indefinitely while the other ran on the processor for the
+///   whole conversation.
+///
+/// So this is now only what an idle-time predicate *can* honestly do: refuse to
+/// take the card from a model still in active use, on top of the in-flight
+/// check that `plan_vram_reclaim` already applies. Sized to a few seconds of
+/// continuing traffic rather than to the cost of a load — a model being asked
+/// something every few seconds keeps the card; one that has gone quiet for the
+/// length of a turn gives it up.
+///
+/// Costing the swap properly — load time against what the processor would cost
+/// for this model — is the real answer and needs per-model figures for both;
+/// `docs/FUTURE_WORK.md` carries it with the measurements that justify it.
+const VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT: u64 = 5;
+
+/// `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS` — pin the floor, for A/B measurement.
+///
+/// Same discipline as `SWARMLLM_DECODE_THREADS` and `SWARMLLM_DECODE_ATTN`:
+/// both arms must be the same binary or the comparison measures the build.
+/// `=0` makes every swap eligible, `=60` restores the old constant. Kept out of
+/// `config/default.toml` deliberately — it exists to measure the policy, not to
+/// hand users a dial in place of one.
+fn vram_make_room_min_idle_secs() -> u64 {
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        match std::env::var("SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            Some(secs) => {
+                tracing::info!(
+                    secs,
+                    default = VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT,
+                    "SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS override in force"
+                );
+                secs
+            }
+            None => VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT,
+        }
+    })
+}
 
 /// Everything the "should this worker go back to the card?" decision looks at.
 ///
@@ -215,7 +272,7 @@ struct PromotionInputs {
 ///   [`ModelProcessPool::cpu_reason`], only the OOM pin ever clears — so this
 ///   fires on the event that lifted it rather than polling for one.
 /// - **Never a busy worker, and not one used inside
-///   [`VRAM_MAKE_ROOM_MIN_IDLE_SECS`].** Unloading kills the subprocess, and a
+///   [`vram_make_room_min_idle_secs`].** Unloading kills the subprocess, and a
 ///   request that arrives between the check and the kill dies with it. The idle
 ///   floor makes that window empty rather than merely unlikely. A model under
 ///   continuous load therefore waits for a gap in the traffic — the pin stays
@@ -228,7 +285,7 @@ fn should_return_to_gpu(i: &PromotionInputs) -> bool {
     if !i.cpu_placed || i.permanently_cpu_bound || i.busy {
         return false;
     }
-    if i.idle_secs < VRAM_MAKE_ROOM_MIN_IDLE_SECS {
+    if i.idle_secs < vram_make_room_min_idle_secs() {
         return false;
     }
     if i.budget_mb == 0 || i.gpu_estimate_mb == 0 {
@@ -1932,7 +1989,7 @@ impl ModelProcessPool {
     ///
     /// **Take the card only from a model that has stopped being used.** A
     /// worker with a request in flight is never a candidate, and neither is one
-    /// used within `VRAM_MAKE_ROOM_MIN_IDLE_SECS`. Without that, two models
+    /// used within `vram_make_room_min_idle_secs()`. Without that, two models
     /// alternating faster than they load would evict each other on every
     /// request and each answer would pay a cold start. With it, that case
     /// simply keeps today's behaviour — one of them runs on the CPU — while a
@@ -4590,7 +4647,7 @@ mod admission_tests {
             vec![cand(
                 "just-answered",
                 6033,
-                VRAM_MAKE_ROOM_MIN_IDLE_SECS - 1,
+                VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT - 1,
             )],
         );
         assert!(plan.is_empty(), "displacing it would thrash both models");
@@ -4666,7 +4723,7 @@ mod admission_tests {
     #[test]
     fn a_model_answering_right_now_waits_for_a_gap() {
         let mut i = promotable();
-        i.idle_secs = VRAM_MAKE_ROOM_MIN_IDLE_SECS - 1;
+        i.idle_secs = VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT - 1;
         assert!(!should_return_to_gpu(&i));
     }
 
