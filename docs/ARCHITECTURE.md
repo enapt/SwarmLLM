@@ -271,7 +271,12 @@ libp2p Swarm
 ├── QUIC transport (port, fallback for NAT traversal)
 ├── mDNS (optional, LAN peer discovery — conditional dial, not added to Kademlia)
 ├── connection_limits (max 1/peer, 500 total)
-├── Identify (protocol identification + peer_to_node reverse map)
+├── allow_block_list (blocked_peers — nodes Identify showed do not speak SwarmLLM;
+│   refuses both directions at the swarm level. Declining to REGISTER them left
+│   something inside libp2p re-dialling them a few times a minute each, and every
+│   one of our own dial sites already refusing: gotcha #404, v0.3.131)
+├── Identify (protocol identification + peer_to_node reverse map;
+│   `peer_speaks_swarmllm` gates registration BEFORE the Kademlia insert)
 ├── AutoNAT v2 client+server (per-address reachability test → ExternalAddrConfirmed / relay activation; replaced v1 in R143 to fix false-"Public")
 ├── DCUtR (hole punching)
 ├── UPnP (IGD gateway port-mapping → auto-confirms public external address; default on, off on WSL2)
@@ -888,12 +893,48 @@ ModelProcessPool.forward()   ──socket──▶   runs forward passes / decod
 
 **Dashboard responsiveness**: since inference never runs on the main Tokio runtime, API and WebSocket handlers always get a fast response even under heavy inference load.
 
-### VRAM-Aware Cache Eviction
+### Graphics memory has one owner (v0.3.130)
 
-- `SplitModelEntry` tracks `last_used` timestamp and `estimated_vram_mb` (from shard file sizes)
-- Configurable `max_split_model_memory_mb` budget (default unlimited)
-- LRU eviction: `evict_split_models_lru` removes metadata entries and kills the corresponding worker subprocess — VRAM is guaranteed freed
-- Active models (with in-flight pipelines) are never evicted
+**`ModelProcessPool` admits, charges and reclaims graphics memory. Nothing else
+may take it from a loaded model.**
+
+- Admission: `admit_to_gpu` weighs `estimate_worker_vram_mb` (weights **+ KV** at
+  `ADMISSION_KV_CONTEXT`) against `vram_budget_mb`, charging `vram_reserved_mb`.
+- On-demand reclaim: `free_vram_for_admission` → `plan_vram_reclaim` — plans the
+  whole eviction first and abandons it if it still would not fit, never takes a
+  busy worker, and never one used within the swap floor.
+- Timed reclaim: `try_idle_vram_unload`, outside the `auto_manage.enabled` gate.
+- A refusal places the model on the processor for *that spawn* and takes no
+  standing pin; `cpu_pinned_models` means only that the card FAILED for a model
+  (`classify_worker_error`).
+- A processor-resident model returns to the card on its next request once there
+  is room, including room the pool is willing to make
+  (`should_return_to_gpu` + `reclaimable_vram_mb`).
+
+**`SharedState.split_models` is a metadata cache, not a memory manager.**
+`SplitModelEntry` caches `eos_tokens`, `vocab`, `chat_template`, `bos_token`,
+`eos_token_str` and `estimated_vram_mb` read from the GGUF header; the weights
+live in the worker. It is bounded by ENTRY COUNT
+(`trim_split_model_cache`, `MAX_SPLIT_MODEL_ENTRIES`), LRU, protecting models
+with an active pipeline — and cannot unload a worker. Trimming an entry that is
+still wanted costs a header re-read, not a killed worker.
+
+A separate **registration** budget decides whether to advertise another segment
+as locally servable (`split_model_budget_with` + `split_models_committed_mb` +
+`MemoryScope`: the graphics budget, or `inference.max_split_model_memory_mb` on
+a node with no card). **It may refuse; it may never take.**
+
+Until v0.3.130 this cache carried its own VRAM budget that evicted entries *and*
+killed their workers — a second accountant with a smaller estimate, a weaker
+in-flight oracle and no idle floor. See gotcha #402 and
+`.claude/rules/architecture.md`.
+
+**How long a model keeps the card** (`VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT`, 5 s
+since v0.3.131) protects a model in active use, not against thrash: at the
+previous 60 s, two models alternating in conversation took 299 s against 82 s
+with no floor, because the model left on the processor was slower at every turn
+than the reload it was spared. `examples/swap_patience.sh` is the harness;
+`SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS` pins the value for A/B.
 
 ### LoRA Adapter Support
 

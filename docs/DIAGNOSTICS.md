@@ -125,6 +125,70 @@ below the threshold at which anything goes wrong. And `chars / 4` lands in the
 right ballpark, so an estimate reads as a plausible token count to anyone
 eyeballing it. Compare it against something, never against your expectations.
 
+
+## "Why is my model on the processor?"
+
+The whole placement decision is greppable, in the order it is taken. On one
+request against a node whose card is occupied:
+
+```
+DIAG: admitting model to GPU  model=X estimated_mb= committed_mb= budget_mb= headroom_mb=
+DIAG: GPU admission refused — not enough budget at this moment          (DEBUG)
+Freeing graphics memory from an idle model ... reclaimed_mb= for_model=  (reclaim fired)
+No idle model could be reclaimed to fit this one                        (DEBUG; nothing eligible)
+Model will run on the CPU  model=X reason=  configured_gpu_layers= estimated_vram_mb=
+model-worker: Model loaded ... device=Cuda(...) | device=Cpu  vram_after_load_mb=
+```
+
+`reason=` is one of `not_enough_vram`, `configured_cpu_only`,
+`gpu_too_old_for_this_build` — three completely different situations that all
+produce `--gpu-layers 0` and were indistinguishable before v0.3.x.
+**`device=` in the worker's own line is the answer**, not the daemon's intent.
+
+Coming back the other way (v0.3.130+):
+
+```
+Graphics memory has freed up — retiring this model's processor worker ...
+Model worker stopped and its memory budget released  device="cpu"
+Freeing graphics memory from an idle model ... for_model=X
+DIAG: admitting model to GPU  model=X
+model-worker: Model loaded ... device=Cuda(...)
+```
+
+**Things that are NOT the explanation, each having cost a session:**
+
+- **An eviction is not necessarily the reclaim.** `try_idle_vram_unload` (timer,
+  keeps a model the swarm wants for up to an hour) and
+  `free_vram_for_admission` (on demand, 5 s idle floor, plans first) both log
+  about freeing memory. An external tester read the first as the second and
+  concluded the floor was broken; it was a third mechanism entirely (#402).
+- **A model on the processor does not occupy the card.** Anything summing
+  `split_models[*].estimated_vram_mb` without filtering by device is answering
+  a different question — that is what `MemoryScope` exists for.
+- **`cpu_reason` is a prediction about the next spawn, not a fact about what is
+  running.** For a resident worker, ask `placed_on_cpu_because` /
+  `cpu_placement_reason` (#401).
+
+## "Why is this node talking to a stranger?"
+
+```
+Ignoring a peer that does not speak SwarmLLM ... protocol_version= agent=   (INFO, once/peer)
+Not dialling a peer that does not speak SwarmLLM  peer_id= site=           (DEBUG)
+```
+
+The second names the dial site (`pex`, `mdns`, `relay_providers`,
+`connection_race`, `invite_code`). If foreign peers keep reconnecting and that
+line never appears, **the dials are not coming from our code** — that null
+result is what identified #404. Count connections per peer rather than trusting
+the peer list, which has been clean since v0.3.125 while the reconnections
+continued:
+
+```bash
+for p in $(grep -a "does not speak SwarmLLM" node.log | grep -ao "peer_id=12D3KooW[A-Za-z0-9]*" | cut -d= -f2 | sort -u); do
+  echo "$p: $(grep -ac "connection established peer_id=$p" node.log)"
+done   # 1 each is correct — a node must be spoken to before it can be identified
+```
+
 **Was it served locally or by a peer?** That changes which code path to suspect
 entirely, and it is a response header rather than a log line:
 
@@ -1048,7 +1112,9 @@ in this section came from.
 | `examples/prefill_bench.rs` | prompt processing + decode, driving `SplitModel::forward` directly | no daemon, no scheduler, no API in the way. `SWARM_BENCH_MODEL` (a model dir holding every shard), `SWARM_BENCH_PROMPT` (896), `SWARM_BENCH_DECODE` (32), `SWARM_BENCH_REPS` (3), `SWARM_BENCH_DEVICE=cuda`. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown |
 | `examples/qmatmul_bench.rs` | the quantized matmul against batch size | ALSO asserts the tiled path is bit-identical to the upstream ordering — run it after touching either kernel |
 | `examples/attn_bench.rs` | attention ops in isolation | ⚠ an isolated call is not a forward pass (#255/#266) |
-| `examples/smoke_test.sh [binary] [port]` | 8 end-to-end checks on an isolated node | run it on the DOWNLOADED release artifact, not a local build (#268) |
+| `examples/smoke_test.sh [binary] [port]` | 9 end-to-end checks on an isolated node | run it on the DOWNLOADED release artifact, not a local build (#268) |
+| `examples/release_shapes.sh [binary] [port]` | 7 pre-release shape checks — cold start, long cold prompt, `prompt_tokens` agreeing cold and warm (#400), greedy determinism WITH a live control, tool-heavy | also on the DOWNLOADED artifact, BEFORE tagging. Local verification used to be a strict subset of CI's |
+| `examples/swap_patience.sh` | what the GPU swap floor costs, in CONVERSATION | two models that each fit the card but not together, alternating multi-turn so a warm prefix is worth something. Arms switched by `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS`, never by rebuilding. Measured 2026-08-28: floor 60 s → 299 s, floor 0 → 82 s, floor 5 s → 89 s (#403) |
 | `examples/soak_test.sh [binary]` | sustained inference, sampling worker RSS / KV / threads / fds / ok-fail | `HOURS=` must be a WHOLE number (shell arithmetic); data dir is `/tmp/swarm_soak-$PORT`, per-port so two soaks cannot kill each other; analyse with `soak_report.sh` |
 | `examples/two_node_test.sh`, `3node_setup.sh`, `3node_sharded_setup.sh` | cross-node paths | EXPECTED to fail on a single multi-interface host — that is the documented connection-churn case, not a regression. Validate on two real machines |
 
@@ -1063,7 +1129,19 @@ in this section came from.
   lengths on a busy machine → the minimum is the LUCKIEST one.
 - **A/B inside ONE binary**, via an env switch — `SWARMLLM_DECODE_CALIBRATE=0`,
   `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`,
-  `SWARMLLM_DECODE_THREADS=0`. Comparing two builds compares two builds.
+  `SWARMLLM_DECODE_THREADS=0`, `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS`. Comparing two
+  builds compares two builds.
+- **A one-shot benchmark cannot see a cost that only appears across turns.** The
+  GPU swap floor was defended on the grounds that eviction discards a model's
+  warm prefix cache — true, and it still lost 3.65x once measured in
+  conversation, because the processor is slower at *every* turn than the reload
+  it spares (#403). If the mechanism you are arguing about only bites on the
+  second request, the benchmark has to make a second request.
+- **Do not start a node and run a long request in ONE bash call.** The 2-minute
+  harness timeout SIGTERMs the process group, which includes a node launched
+  with `nohup … &` in the same invocation — it kills the daemon mid-load and the
+  resulting "early eof / worker closed connection before reply" reads exactly
+  like a crash. Use `setsid`, and keep requests in separate calls.
 - **Verify the mechanism fired.** An outcome can improve for unrelated reasons;
   assert on the log line or counter the change emits.
 - **A short run magnifies a one-time cost** into what looks like a standing

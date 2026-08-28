@@ -10648,29 +10648,25 @@ refused until memory frees up.
 admission/load race, and wants testing on a card under contention rather than a
 compile check — this was found in the last hour before a release.
 
-## A model demoted to the processor waits for a gap in its own traffic (2026-08-27)
+## Retire a worker by draining it, not by killing it (2026-08-27, narrowed 08-28)
 
-The bulk of this is **fixed** in `should_return_to_gpu` /
-`ModelProcessPool::worker_should_return_to_gpu`: a worker this node put on the
-processor is retired, on the next request for it, once the pin has been lifted
-and the model fits the budget again. What is left is the deliberate residual.
+Unloading a model kills its subprocess, so a request arriving between the
+decision to unload and the kill dies with it. Both paths that displace a model
+mitigate this the same way — an idle floor plus a not-currently-busy check — and
+neither closes the window, it only makes it small.
 
-`VRAM_MAKE_ROOM_MIN_IDLE_SECS` (60 s) gates the retirement, because unloading
-kills the subprocess and a request arriving between the decision and the kill
-dies with it. So a model being used continuously — a request every few seconds,
-never a minute's gap — stays on the processor until the traffic breaks. The pin
-stays lifted, so it is promoted at the first gap; but under sustained load that
-gap may not come.
+Closing it properly: stop admitting new requests to the handle, wait for
+`responses` to empty, then unload. That is a change to how workers are retired
+everywhere (`free_vram_for_admission` against its victims,
+`worker_should_return_to_gpu` against the processor copy it is replacing), so it
+wants doing once rather than bolted onto one path.
 
-Closing it properly means retiring a worker *without* racing its in-flight
-requests: drain rather than kill — stop admitting new requests to the handle,
-wait for `responses` to empty, then unload. That is a change to how workers are
-retired everywhere (`free_vram_for_admission` has the same race against its
-victims, mitigated the same way), so it wants doing once, deliberately, rather
-than bolted onto this path.
+**Narrowed by the swap-floor measurement.** This entry originally said the
+residual was a model under continuous load never reaching the 60 s floor and so
+never returning to the card. The floor is 5 s since v0.3.131, which mostly
+dissolves that case — what remains is the in-flight race itself, which is small,
+rarely hit, and now the only reason the floor cannot simply be zero.
 
-Not urgent: the case it costs is a model under continuous load, which is also
-the case where a cold start is most expensive.
 
 ## Cost the GPU swap properly, instead of using idle time as a proxy (2026-08-28)
 
