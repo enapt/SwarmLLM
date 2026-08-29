@@ -216,6 +216,40 @@ means this workload has nothing to copy. `paused_rounds` counts rounds where the
 backoff suppressed drafting — high is CORRECT on prose, not a fault. A request
 that is not alone on the worker joins the batch instead and logs nothing.
 
+## "Something is slow" — split user time from kernel time FIRST
+
+Before theorising about which code is slow, spend one command finding out
+whether the CPU is running your code at all. Fields 14 and 15 of
+`/proc/<pid>/stat` are the process's user and system ticks (100 per second):
+
+```bash
+read u1 s1 <<< "$(awk '{print $14, $15}' /proc/<pid>/stat)"
+curl -s -m 60 -o /dev/null -w "wall=%{time_total}s\n" -H "Authorization: Bearer $KEY" <url>
+read u2 s2 <<< "$(awk '{print $14, $15}' /proc/<pid>/stat)"
+echo "user=$((u2-u1)) system=$((s2-s1))"
+```
+
+Read it like this:
+
+- **System ticks dominate** → syscalls. Something is doing an enormous number of
+  small operations against the kernel. This is what found gotcha #410:
+  `/api/admin/models` spent 962 of 1192 ticks in the kernel because GGUF headers
+  were being parsed off an unbuffered `File`, one syscall per tiny read.
+- **User ticks dominate** → your code. Parsing, allocation, arithmetic.
+  Optimisation and algorithms are on the table.
+- **Neither, but the wall clock is long** → waiting. A lock, a peer, a timeout.
+
+**Two readings that come free with it.** A *stable* wall time across runs
+(11.30 / 11.11 / 11.14 s) is a fixed amount of work, not contention — contention
+is noisy, so go and find the count. And a request whose CPU time is close to its
+wall time is running on ONE thread the whole way, which for an async handler
+means a worker thread is blocked for that long.
+
+The trap it saves you from is real: "parses a lot of metadata" and "makes 820k
+read calls" both fit the symptom, look identical in the source, and no amount of
+reading distinguishes them. It is also why the optimised release binary was no
+faster than a debug build on that path — optimisation cannot remove a syscall.
+
 ## No log file? Use the endpoint
 
 `GET /api/admin/diagnostics` renders plain text for a shell, and includes the

@@ -982,8 +982,7 @@ pub struct GgufModelMeta {
 /// Extract metadata from a GGUF file (name, chat template, special tokens).
 /// Returns None if the file can't be read. Uses centralized `GgufTokenizerMeta`.
 pub fn extract_gguf_metadata(path: &Path) -> Option<GgufModelMeta> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let ct = candle_core::quantized::gguf_file::Content::read(&mut file).ok()?;
+    let ct = crate::inference::split::read_gguf_header(path).ok()?;
 
     let name = ct
         .metadata

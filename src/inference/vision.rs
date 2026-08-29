@@ -631,8 +631,12 @@ pub fn load_from_mmproj_gguf(
 ) -> Result<VisionModule, SwarmError> {
     use candle_core::DType;
 
-    let mut file = std::fs::File::open(path)
+    // Buffered: the header walk is thousands of tiny reads and each one is a
+    // syscall on a bare `File` (see `split::read_gguf_header`). The reader is
+    // kept because the tensor loads below read through it too.
+    let file = std::fs::File::open(path)
         .map_err(|e| SwarmError::Inference(format!("Failed to open mmproj GGUF: {e}")))?;
+    let mut file = std::io::BufReader::new(file);
 
     let ct = candle_core::quantized::gguf_file::Content::read(&mut file)
         .map_err(|e| SwarmError::Inference(format!("Failed to parse mmproj GGUF: {e}")))?;

@@ -1385,6 +1385,40 @@ silently break at the wire if duplicated:
   loss of trust) requires the same one-place edit; do not soft-disable
   via wrappers because the trust delta is a real security event worth
   surfacing in the diff.
+- **`inference::split::read_gguf_header`** (2026-08-29) — the single way to parse
+  a GGUF header off a PATH, and the buffering is the entire reason it exists.
+  `gguf_file::Content::read` walks the metadata with many tiny reads — for every
+  string a length, then its bytes — so handing it a bare `std::fs::File` turns
+  each one into a syscall. A 7.8 MB header carrying a 128k-token vocabulary and
+  280k merges is roughly 820k of them.
+  **Measured on the live node** (gotcha #410): `GET /api/admin/models` took a
+  stable 11.2 s, of which **9.6 s was KERNEL time** — it parses every local
+  model's header and seven call sites were passing an unbuffered handle.
+  Optimisation cannot touch syscall count, which is why the release binary was
+  no faster than a debug one on that path. Direct A/B on one header: 980 ms
+  unbuffered against 98 ms buffered.
+  **Two sites deliberately do NOT use it** — `local_embedder` and `vision` keep
+  their own `BufReader`, because the same handle goes on to read tensors and the
+  helper's handle dies with it. They still buffer; that is the invariant, not the
+  helper. A `Cursor` over a slice or an mmap already holds the bytes and needs
+  neither.
+  **`ModelProcessPool::footprint_inputs` also parsed the same file twice** — once
+  through `GgufTokenizerMeta::from_gguf_file`, which materialises the whole
+  vocabulary and merge list as owned `String`s, purely to reach `vocab.len()` as
+  a fallback, and once through its own reader for everything else. The count was
+  already in the parsed `Content`; counting the array borrows it.
+  `a_gguf_header_is_never_parsed_straight_off_an_unbuffered_file` in
+  `tests/repo_consistency.rs` fails the build on a new unbuffered site. It checks
+  PROXIMITY — a `File::open` within a few lines of a `Content::read` with no
+  `BufReader` or `Cursor` between them — not naming. A naming rule was the first
+  cut and it silently missed the `match File::open { Ok(mut f) => Content::read(
+  &mut f)` form, which is the shape one of the seven sites actually had.
+  **The general rule**: before theorising about why something is slow, split
+  user from system time (`utime`/`stime` in `/proc/<pid>/stat`). It is two
+  numbers and it partitions the hypothesis space in one step — kernel-dominated
+  means syscalls or waiting, and no amount of reading the code distinguishes
+  "parses a lot of metadata" from "makes 820k read calls". A **stable** duration
+  is a fixed amount of work, not contention; go and find the count.
 - **`inference::split::GgufTensorMeta::tied_output_location`** — the single
   definition of "is this model weight-tied", i.e. does it reuse
   `token_embd.weight` as the LM head instead of shipping an `output.weight`.

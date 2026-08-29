@@ -136,11 +136,8 @@ fn write_api_key_file(data_dir: &std::path::Path, key: &str) {
 }
 
 pub(super) fn map_gguf_architecture(path: &std::path::Path) -> crate::types::ModelArchitecture {
-    let arch_str = match std::fs::File::open(path) {
-        Ok(mut f) => match candle_core::quantized::gguf_file::Content::read(&mut f) {
-            Ok(ct) => crate::inference::split::gguf_arch_str(&ct),
-            Err(_) => "llama".to_string(),
-        },
+    let arch_str = match crate::inference::split::read_gguf_header(path) {
+        Ok(ct) => crate::inference::split::gguf_arch_str(&ct),
         Err(_) => "llama".to_string(),
     };
     crate::model::manifest::gguf_arch_to_model_architecture(&arch_str)

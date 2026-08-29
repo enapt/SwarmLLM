@@ -2,6 +2,33 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **The Models page took eleven seconds to load, and it was making the whole
+  node work hard to do it.** Opening the Models tab — or anything that refreshes
+  it, which includes every part of a model finishing its download — sent the
+  node away for around eleven seconds and burned about twelve seconds of
+  processor time doing it. Every other page in the dashboard answers in
+  milliseconds. It looked like a slow page; it was a node with a core pegged.
+
+  SwarmLLM reads a small description file that ships with each model to work out
+  how much memory that model needs. Reading it involves thousands of very small
+  reads, and the code was making each one a separate request to the operating
+  system rather than reading ahead in blocks — around 820,000 of them for a
+  single large model's file, repeated for every model, on every refresh. Eight
+  parts in ten of the eleven seconds was the operating system servicing those
+  requests, which is also why the optimised build was no faster than an
+  unoptimised one here.
+
+  The same file was also being read twice over, the first time only to count how
+  many words the model knows — a number the second read already had.
+
+  Both are fixed. The same reading now happens when a model is placed on the
+  graphics card and when work is routed to another machine, so those get faster
+  too.
+
 ## [0.3.133-alpha] — 2026-08-29
 
 ### Fixed

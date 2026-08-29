@@ -2536,3 +2536,87 @@ fn documentation_contains_no_nul_bytes() {
         offenders.join("\n  ")
     );
 }
+
+/// A GGUF header is parsed through a buffered reader, never straight off a
+/// `File`.
+///
+/// `gguf_file::Content::read` walks the metadata with many tiny reads — for
+/// every string, a length and then its bytes — so a bare `File` turns each of
+/// those into a syscall. A 7.8 MB header carrying a 128k-token vocabulary and
+/// 280k merges is roughly 820k of them.
+///
+/// Measured on the live node 2026-08-29 (gotcha #410): `GET /api/admin/models`
+/// took 11.2 s, of which 9.6 s was KERNEL time, because it parses every local
+/// model's header and seven call sites were handing over an unbuffered `File`.
+/// Optimisation cannot touch syscall cost, which is why the release binary was
+/// no faster than a debug one on that path.
+///
+/// The check is proximity, not naming: a `File::open` a few lines above a
+/// `Content::read` with no `BufReader` or `Cursor` between them is the defect,
+/// whatever anything is called. Naming was the first cut and it is only as good
+/// as the naming — worse, it silently missed the `match File::open { Ok(mut f)
+/// => Content::read(&mut f)` form, which is the shape one of the seven sites
+/// actually had. A `Cursor` over a slice or an mmap is already in memory and
+/// correctly passes; so does a reader built further up, which no longer has an
+/// open file next to it.
+#[test]
+fn a_gguf_header_is_never_parsed_straight_off_an_unbuffered_file() {
+    /// How far above the call an `open` still counts as "and then parsed it".
+    const WINDOW: usize = 6;
+    let root = repo_root();
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                // Skip comments, or this trips over the doc comments that
+                // explain the rule — the trap a sibling test here already hit.
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                if !line.contains("Content::read(") {
+                    continue;
+                }
+                let window = &lines[i.saturating_sub(WINDOW)..=i];
+                let opens_a_file = window
+                    .iter()
+                    .any(|l| !l.trim_start().starts_with("//") && l.contains("File::open"));
+                let buffers_it = window.iter().any(|l| {
+                    !l.trim_start().starts_with("//")
+                        && (l.contains("BufReader") || l.contains("Cursor"))
+                });
+                if opens_a_file && !buffers_it {
+                    offenders.push(format!(
+                        "{}:{}",
+                        p.strip_prefix(&root).unwrap_or(&p).display(),
+                        i + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a GGUF header is being parsed off an unbuffered File — every tiny read \
+         becomes a syscall, which cost 9.6 s of kernel time per \
+         /api/admin/models request before this was caught:\n  {}\n\
+         Use `inference::split::read_gguf_header(path)`, or wrap the handle in \
+         a `BufReader` when the same handle is reused for tensor loads.",
+        offenders.join("\n  ")
+    );
+}

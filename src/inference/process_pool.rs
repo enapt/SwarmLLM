@@ -1662,10 +1662,12 @@ impl ModelProcessPool {
         use crate::model::auto_manage::vram::VramFootprintInputs;
         let model_dir = crate::model::shard::model_dir(&self.data_dir, &model_id.0);
         let header = model_dir.join(crate::model::shard::HEADER_FILENAME);
-        let meta = crate::inference::split::GgufTokenizerMeta::from_gguf_file(&header).ok()?;
-        let file = std::fs::File::open(&header).ok()?;
-        let mut reader = std::io::BufReader::new(file);
-        let ct = candle_core::quantized::gguf_file::Content::read(&mut reader).ok()?;
+        // ONE parse of the header, not two. This used to read the same file a
+        // second time through `GgufTokenizerMeta::from_gguf_file` — which
+        // materialises the entire vocabulary and merge list as owned `String`s
+        // — purely to reach `vocab.len()` as a fallback below. The token count
+        // is already in `ct`, and counting the array borrows it.
+        let ct = crate::inference::split::read_gguf_header(&header).ok()?;
         let tensor_meta = crate::inference::split::GgufTensorMeta::from_content(&ct).ok()?;
         let arch = crate::inference::split::gguf_arch_str(&ct);
         let md_u32 = |suffix: &str| -> Option<u64> {
@@ -1691,7 +1693,16 @@ impl ModelProcessPool {
                     None
                 }
             }) as u64;
-        let vocab = md_u32("vocab_size").unwrap_or(meta.vocab.len() as u64);
+        // Counting the token array reproduces what `GgufTokenizerMeta` reported
+        // here — it collects the same entries, discarding any that are not
+        // strings — without allocating one of them.
+        let vocab = md_u32("vocab_size").unwrap_or_else(|| {
+            ct.metadata
+                .get("tokenizer.ggml.tokens")
+                .and_then(|v| v.to_vec().ok())
+                .map(|arr| arr.iter().filter(|v| v.to_string().is_ok()).count() as u64)
+                .unwrap_or(0)
+        });
 
         // Only the shards actually on disk will be mapped.
         let shard_bytes: u64 = std::fs::read_dir(&model_dir)

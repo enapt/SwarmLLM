@@ -36,8 +36,12 @@ impl LocalEmbedder {
     /// and builds a tokenizer from GGUF metadata. This is lightweight
     /// compared to loading a full SplitModel (~64MB for a 7B Q4 model).
     pub fn load(shard0_path: &Path) -> Result<Self, SwarmError> {
-        let mut file = std::fs::File::open(shard0_path)
+        // Buffered: the header walk is thousands of tiny reads and each one is
+        // a syscall on a bare `File` (see `split::read_gguf_header`). The
+        // reader is kept because the tensor loads below read through it too.
+        let file = std::fs::File::open(shard0_path)
             .map_err(|e| SwarmError::Inference(format!("Failed to open shard_000: {e}")))?;
+        let mut file = std::io::BufReader::new(file);
         let ct = candle_core::quantized::gguf_file::Content::read(&mut file)
             .map_err(|e| SwarmError::Inference(format!("Failed to read GGUF content: {e}")))?;
 

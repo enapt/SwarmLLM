@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Read as IoRead, Seek, SeekFrom};
+use std::io::Read as IoRead;
 use std::path::Path;
 
 use candle_core::quantized::gguf_file;
@@ -15,6 +15,40 @@ use crate::inference::tokenizer::SplitTokenizer;
 /// be loaded without shard 0. Written by `extract_tied_output_weight` and
 /// `download_tied_output_weight`; read back by `ShardReader`.
 pub const TIED_OUTPUT_FILENAME: &str = "tied_output_weight.bin";
+
+/// Parse a GGUF header from a file on disk.
+///
+/// **The single way to read a GGUF header off a path**, and the buffering is
+/// the whole reason it exists. `gguf_file::Content::read` walks the metadata
+/// with many tiny reads — for every string, a length and then its bytes — so
+/// handing it a bare `File` turns each of those into a syscall. A 7.8 MB header
+/// carrying a 128k-token vocabulary and 280k merges is roughly 820k reads.
+///
+/// Measured on the live node 2026-08-29 (gotcha #410): `GET /api/admin/models`
+/// took 11.2 s of which **9.6 s was kernel time** — the request parses every
+/// local model's header, and seven call sites were passing an unbuffered
+/// `File`. Optimisation cannot touch that cost, which is why the release binary
+/// was no faster than a debug one on this path; only buffering removes it.
+/// Direct comparison on one 7.8 MB header: 980 ms unbuffered against 98 ms
+/// buffered.
+///
+/// The capacity is deliberately larger than `BufReader`'s 8 KB default: headers
+/// run to several MB, and at 1 MB a whole one costs single-digit syscalls. It
+/// is transient — freed when this returns.
+///
+/// Call sites that already hold the bytes in memory (a `Cursor` over a slice or
+/// an mmap) do not need this and must not pay for a second copy;
+/// `a_gguf_header_is_never_parsed_straight_off_an_unbuffered_file` in
+/// `tests/repo_consistency.rs` recognises exactly those.
+pub fn read_gguf_header(path: &Path) -> Result<gguf_file::Content, SwarmError> {
+    let file = std::fs::File::open(path).map_err(SwarmError::Io)?;
+    let mut reader = std::io::BufReader::with_capacity(GGUF_HEADER_READ_BUFFER_BYTES, file);
+    gguf_file::Content::read(&mut reader)
+        .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))
+}
+
+/// Read-ahead window for [`read_gguf_header`]. See that function for why.
+const GGUF_HEADER_READ_BUFFER_BYTES: usize = 1 << 20;
 
 /// Extract the GGUF `general.architecture` string, defaulting to `"llama"` when absent.
 pub fn gguf_arch_str(ct: &gguf_file::Content) -> String {
@@ -82,9 +116,7 @@ impl GgufTensorMeta {
     /// Extract tensor metadata from a GGUF file header on disk.
     /// Only needs to read the header, not the full file.
     pub fn from_gguf_file(path: &Path) -> Result<Self, SwarmError> {
-        let mut file = std::fs::File::open(path).map_err(SwarmError::Io)?;
-        let ct = gguf_file::Content::read(&mut file)
-            .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))?;
+        let ct = read_gguf_header(path)?;
         Self::from_content(&ct)
     }
 
@@ -263,9 +295,7 @@ pub fn looks_like_end_of_turn(token: &str) -> bool {
 impl GgufTokenizerMeta {
     /// Extract tokenizer metadata from a GGUF header file on disk.
     pub fn from_gguf_file(path: &Path) -> Result<Self, SwarmError> {
-        let mut file = std::fs::File::open(path).map_err(SwarmError::Io)?;
-        let ct = gguf_file::Content::read(&mut file)
-            .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))?;
+        let ct = read_gguf_header(path)?;
         Ok(Self::from_content(&ct))
     }
 
@@ -468,9 +498,7 @@ impl GgufTokenizerMeta {
 /// 512MB of the GGUF and always contains the complete header, since headers
 /// are typically only a few MB).
 pub fn save_gguf_header(gguf_or_shard0_path: &Path, output_path: &Path) -> Result<(), SwarmError> {
-    let mut file = std::fs::File::open(gguf_or_shard0_path).map_err(SwarmError::Io)?;
-    let ct = gguf_file::Content::read(&mut file)
-        .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))?;
+    let ct = read_gguf_header(gguf_or_shard0_path)?;
 
     let header_size = ct.tensor_data_offset as usize;
     // SEC: Cap header allocation to prevent OOM from malicious GGUF files
@@ -482,7 +510,10 @@ pub fn save_gguf_header(gguf_or_shard0_path: &Path, output_path: &Path) -> Resul
         )));
     }
     let mut header_buf = vec![0u8; header_size];
-    file.seek(SeekFrom::Start(0)).map_err(SwarmError::Io)?;
+    // A second, unbuffered handle on purpose: this is one `read_exact` of the
+    // whole header, not the parse's thousands of small reads, so a buffer would
+    // only copy the bytes twice. Freshly opened, so it is already at offset 0.
+    let mut file = std::fs::File::open(gguf_or_shard0_path).map_err(SwarmError::Io)?;
     file.read_exact(&mut header_buf).map_err(SwarmError::Io)?;
 
     if let Some(parent) = output_path.parent() {
