@@ -1616,6 +1616,39 @@ mod tests {
         );
     }
 
+    /// A model this node has FINISHED serving must become deletable again.
+    ///
+    /// `serving_models` entries are deliberately permanent — `last_served_at`
+    /// on a dropped-to-zero entry is what tells the prune timer how recently
+    /// this node was useful, and removing it on drop would make a pure-server
+    /// node read as never having served. But `model_is_in_use` asked
+    /// `contains_key`, i.e. presence, so serving a model for a peer ONCE made
+    /// it undeletable for the rest of the daemon's life: `delete_model` and
+    /// `delete_shard` answer 503 off this oracle. The question the guard exists
+    /// to answer is "is it being computed NOW", which is `in_flight`.
+    #[test]
+    fn a_model_that_has_finished_serving_can_be_deleted_again() {
+        let state = serving_test_state();
+        let mid = crate::types::ModelId("m".into());
+
+        {
+            let _g = ServingGuard::new(&state, mid.clone());
+            assert!(
+                state.model_is_in_use(&mid),
+                "a model being computed for a peer must be protected"
+            );
+        }
+
+        assert!(
+            state.serving_models.contains_key(&mid),
+            "the entry must survive — the prune timer reads last_served_at from it"
+        );
+        assert!(
+            !state.model_is_in_use(&mid),
+            "but the model is idle now, so deleting it must be allowed"
+        );
+    }
+
     /// Concurrent peer requests must not let the first one's completion mark
     /// the model idle while the second is still running.
     #[test]

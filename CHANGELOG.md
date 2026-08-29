@@ -6,6 +6,19 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A model could not be deleted once anyone else had used it.** If your node
+  ever answered a request from another machine using a model, that model became
+  permanently undeletable — the dashboard's delete button, and deleting a single
+  part of it, both refused with "this model is in use" for as long as the node
+  kept running. Restarting cleared it until the next time a peer used it.
+
+  The check that protects a model from being deleted while it is mid-answer was
+  asking whether this node had *ever* served it, rather than whether it is
+  serving it *right now*. The record it consults is kept on purpose — it is how
+  the node knows how recently it was useful, which decides what to keep — so the
+  record stays and the check now reads the in-progress count instead. Deleting a
+  model while it is genuinely answering is still refused, as before.
+
 - **A request could be killed part-way through by the model it was running on
   being put away.** When SwarmLLM makes room on the graphics card, or moves a
   model back onto it, it stops the old model — and it was telling that model to

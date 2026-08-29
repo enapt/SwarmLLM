@@ -2370,6 +2370,12 @@ impl SharedState {
     /// every in-flight request registers one for progress reporting regardless
     /// of which path serves it. The other two are kept as belt-and-braces: a
     /// path that somehow skips the trace is still caught.
+    ///
+    /// **Every clause must test being-used-NOW, not having-been-used.** The
+    /// `serving_models` clause tested presence, and its entries are never
+    /// removed by design, so one peer request permanently blocked deletion of
+    /// that model (found 2026-08-29). A map retained for its history is not an
+    /// activity oracle unless the liveness field is the thing consulted.
     pub fn model_is_in_use(&self, model_id: &crate::types::ModelId) -> bool {
         if self
             .active_traces
@@ -2378,7 +2384,21 @@ impl SharedState {
         {
             return true;
         }
-        if self.serving_models.contains_key(model_id) {
+        // `in_flight`, NOT presence. Entries here are deliberately permanent —
+        // the prune timer reads `last_served_at` off an entry that has fallen
+        // to zero to know how recently this node was useful, and removing it on
+        // the guard's drop would make a pure-server node read as never having
+        // served at all. So `contains_key` answers "has this node EVER served
+        // this model", and asking that here made a model undeletable for the
+        // rest of the daemon's life the first time a peer used it: both
+        // `delete_model` and `delete_shard` refuse with 503 off this oracle.
+        // The question the guard exists to answer is whether it is being
+        // computed *now*.
+        if self
+            .serving_models
+            .get(model_id)
+            .is_some_and(|s| s.in_flight > 0)
+        {
             return true;
         }
         self.active_pipelines.iter().any(|e| {
