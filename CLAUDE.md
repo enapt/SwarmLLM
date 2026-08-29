@@ -221,30 +221,41 @@ All 20 build phases complete. All subsystems wired — no stubs. **2140 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Unreleased — the forward that does the prefill was budgeted as a decode
+### v0.3.133-alpha (2026-08-29) — five things that had been quietly wrong
 
-Detail in `memory/round_log_0829_functional_check.md`; gotcha **#407**. Found by
-RUNNING a long prompt through the distributed pipeline, not by reading code.
+Detail in `memory/round_log_0829_functional_check.md`; gotchas **#407**, **#408**,
+**#409**. **All found by RUNNING or auditing the system, none by reading a diff**
+— and two because a TOOL lied.
 
-- **Segment 0 is handed the PROMPT; every later hop carries hidden states.**
-  `compute_segment_timeout` tested `activation_bytes > 100_000` — a
-  **hidden-state** scale — against prompt text, so the one forward that performs
-  the entire prefill was classified `is_prefill=false` and given
-  `DECODE_SECS_PER_LAYER = 2` instead of `15`. **32 s where it needed 240**, for
-  any prompt under ~25k tokens, i.e. essentially all of them. Live: a 4728-token
-  prompt, holder abandoned mid-prefill, standby answered — 176 s total, 32 wasted.
-  Fixed via `forward_is_prefill(bytes, units)`; `PromptBytes` IS a prefill.
-  ⚠ **The units were already explicit and already honoured on the MEASURED path**
-  (which refuses the hidden-state coefficient for them); the fallback beneath it
-  made exactly the unit error the comment above it warned about.
-  ⚠ **I expected the abandoned peer to be docked and it was NOT** — the log said
-  "Skipping credit penalty". Confirmed cost is a wasted deadline, nothing more.
-  **Nothing ever failed**, which is why it survived: a defect that only costs
-  latency raises no alarm.
-- Same sweep: **#400 confirmed dead in its own shape** (cold + distributed +
-  23,929-char prompt → correct answer from the END of the prompt,
-  `prompt_tokens=4728` against `chars/4`'s 5982). 4/4 peers healthy, zero foreign
-  nodes, **zero ERRORs** in the log, SSE closing in 0.76 s (#390 holding).
+- **#409 a model you had ever served could not be deleted.** `model_is_in_use`
+  asked `serving_models.contains_key`, whose entries are **never removed by
+  design** (`prune.rs` reads `last_served_at` off a zeroed one), so it answered
+  "EVER served" and one peer request made the model undeletable for the daemon's
+  life. ⚠ **Every test there asserted the PROTECTIVE direction, none the RELEASE
+  — a guard makes two promises and only one fails loudly.**
+- **#407 the forward doing the whole prefill was budgeted as a DECODE.** Segment
+  0 carries the **prompt text**; it was measured against a **hidden-state**
+  threshold. 2s/layer not 15 — **32 s where it needed 240**, any prompt under
+  ~25k tokens. ⚠ The units were explicit and honoured on the MEASURED path; the
+  fallback beneath made the exact error the comment above it warned of.
+- **#408 one NUL byte made `docs/DIAGNOSTICS.md` invisible to grep, SILENTLY**,
+  for two weeks. Found only because a search for a section that DOES exist came
+  back empty. ⚠ **`grep` here wraps ugrep `-I`, which skips binary files without
+  saying so — `command grep` is the escape hatch.**
+- **Worker retirement killed in-flight requests** (`Shutdown` sent undrained).
+  Open since 08-27 expecting a cross-cutting change; needed one bounded wait —
+  `workers.remove` already closed admission and the `Arc` refcount means the
+  DROP is not the killer.
+- **A per-shard WARN fired 16-28x/min for ever** (~10% of the log). Its
+  whole-manifest twin was rate-limited 08-26; the per-shard arm, which
+  multiplies by shard count, was missed.
+- **The leak detector cried leak on a CLEAN 2 h soak** — `soak_report.sh` judged
+  trend from three single samples on a series swinging ~380 MB, while quartile
+  means fell 2873→2652 MB. Now uses quartile means; a synthetic leak still trips.
+
+**Verified**: soak **3334 req / 0 fail / 2 h** (worker RSS -221 MB, no
+respawns); smoke **9/9**; shapes **7/7**; `cargo audit` = `SECURITY.md`'s six
+documented advisories, none new.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
@@ -287,9 +298,9 @@ Read the named round log before re-deriving any of these.
 - **v0.3.109-.112** (08-21/22): CPU prefill +20-40% / decode +25-37% (multi-row Q4_K/Q6_K kernels, decode attention kernel, AVX2 exp, mimalloc); direct peer chaining ON; relay-carried inbound no longer counted as "direct" (#356); receipt ACK cut a quiet peer's cost 300 s → ~26 s (#357).
 
 - **v0.3.101-.103** (08-18): models need ~750 MB less (quantized `token_embd` row gather); machine speed MEASURED (`mem_bandwidth`); peer delegation — **privacy changes the SHAPE (boomerang), not the verdict**. **#334 `cargo audit` runs in CI NOT Release — .102 shipped vulnerable.** `round_log_0818_quantized_embedding.md`.
-- **v0.3.96-.100** (08-12→17): credits switched OFF (they WERE enforced); **a failure could not report itself** — its type known in one place, a literal written in another (#300-#305 → `classify_error`); log severity follows blame (#315-#317); release build 54 → 16 min. `round_log_0817_honesty.md`.
-- **v0.3.97-.99** (08-15/16): **models you own could not be reached** — three id derivations, no two agreeing → `slugify_model_name` (#310); long prompts stalled for MINUTES, O(prompt²) KV snapshotting (#312); **1.41x CPU generation** from dropping `repeat_kv` in GQA decode.
-- **v0.3.88-.94** (08-09→12): four rounds of "make the one right answer reachable" — a new node could see the swarm's models and run NONE (#296); **settings saved, said "ok", did nothing** (`state.config` is a boot snapshot → **`SharedState::cfg()`**, #281); serving paid and reported nothing (#279/#280); distant-peer replies arrived SCRAMBLED (#282 → `StreamReassembler`); a "private network" shared PUBLIC topics (#285). **GPU decode is LAUNCH-BOUND. ⚠ #283: `pkill -x swarmllm` killed the live node — kill by PID.**
+- **v0.3.96-.100** (08-12→17): credits switched OFF (they WERE enforced); a failure could not report itself (#300-#305 → `classify_error`); log severity follows blame (#315-#317). `round_log_0817_honesty.md`.
+- **v0.3.97-.99** (08-15/16): models you own were unreachable — three id derivations, none agreeing → `slugify_model_name` (#310); O(prompt²) KV snapshotting stalled long prompts (#312); 1.41x CPU decode from dropping `repeat_kv` in GQA.
+- **v0.3.88-.94** (08-09→12): a new node could see the swarm's models and run NONE (#296); **settings saved, said ok, did nothing** (`state.config` is a boot snapshot → **`SharedState::cfg()`**, #281); replies from distant peers arrived SCRAMBLED (#282). **⚠ #283: `pkill -x swarmllm` killed the live node — kill by PID.**
 - **v0.3.78-.87** (08-05→09): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x and the system prompt rendered TWICE, invisible until diffed against `tokenizers`/`jinja2` (#246-#253). Releases had AVX2 kernels COMPILED OUT (**3.09x**); batching NEVER engaged (**2.4x** GPU). **⚠ #266 measure the FORWARD, not the isolated call. ⚠ #267 this box cannot resolve a GPU change below ~25%.**
 - **v0.3.15-.77** (07-23→08-05): our API key was sent to strangers — nothing in that code changed, its PREMISE did (#238); SPM tokenizer mis-tokenised **64.9%** (**a hash cannot tell "wrong bytes" from "not all the bytes"**, #203); **read #179 before touching connection selection**; **retraction alone is futile** (#163).
 - **R136-R150 and the 20 build phases**: NAT/reachability, SWARM-SPEC cascade, `swarmpool://` v2, cross-pool routing. `docs/ARCHITECTURE.md` § phase history.
