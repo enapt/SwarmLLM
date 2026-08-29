@@ -2468,3 +2468,71 @@ fn every_dial_goes_through_the_foreign_peer_gate() {
         sites[0]
     );
 }
+
+/// Documentation must be greppable, which means no NUL bytes.
+///
+/// A single NUL makes `file` report "data", makes GNU grep print
+/// "binary file matches" and suppress every hit, and makes any `grep`
+/// configured to skip binaries (ugrep `-I`, ripgrep by default) return **no
+/// matches at all, silently**. The failure is invisible: an empty result looks
+/// exactly like the thing not being there.
+///
+/// Found 2026-08-29 in `docs/DIAGNOSTICS.md`, which had carried one since
+/// 2026-08-15 — a shell snippet had a literal NUL where `tr '\0' ' '` was
+/// meant, so the documented command was broken too (a shell cannot pass a NUL
+/// in argv). The whole debugging guide had been ungreppable for two weeks, and
+/// that file's own header warns that "a guide whose greps come back empty is
+/// worse than no guide". It was caught only because a search for a section that
+/// *did* exist came back empty.
+///
+/// Deliberately covers every tracked doc, not just the one that broke: nothing
+/// about the mistake was specific to that file, and the Rust-side checks kept
+/// passing throughout because a NUL is valid UTF-8.
+#[test]
+fn documentation_contains_no_nul_bytes() {
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    // Just the root: `read_dir` returns hidden entries, so `.claude/` and
+    // `docs/` are reached by recursion. Seeding them explicitly as well walked
+    // them twice and reported every offender twice.
+    let mut stack = vec![root.clone()];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if p.is_dir() {
+                // `book/` holds generated output; target/ and .git are noise.
+                // `book/` is generated output and `vendor/` is upstream source:
+                // a NUL in either is not ours to fix, and both are large.
+                if !matches!(name, "target" | ".git" | "node_modules" | "book" | "vendor") {
+                    stack.push(p);
+                }
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "md") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&p) else {
+                continue;
+            };
+            if let Some(idx) = bytes.iter().position(|b| *b == 0) {
+                let line = bytes[..idx].iter().filter(|b| **b == b'\n').count() + 1;
+                offenders.push(format!(
+                    "{} (first NUL at byte {idx}, line {line})",
+                    p.strip_prefix(&root).unwrap_or(&p).display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "markdown files contain NUL bytes, which makes grep skip them silently:\n  {}\n\
+         Write the two-character escape (\\0) rather than a literal NUL.",
+        offenders.join("\n  ")
+    );
+}

@@ -375,7 +375,7 @@ whether a client walking away stopped the work. Use the worker's CPU instead:
 ```bash
 # worker pid for a given data dir
 pgrep -x swarmllm | while read p; do
-  tr ' ' ' ' < /proc/$p/cmdline | grep -q "model-worker.*$DATA_DIR" && echo $p
+  tr '\0' ' ' < /proc/$p/cmdline | grep -q "model-worker.*$DATA_DIR" && echo $p
 done
 # utime+stime from /proc/<pid>/stat fields 14,15, sampled over N seconds
 ```
@@ -1117,6 +1117,49 @@ in this section came from.
 | `examples/swap_patience.sh` | what the GPU swap floor costs, in CONVERSATION | two models that each fit the card but not together, alternating multi-turn so a warm prefix is worth something. Arms switched by `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS`, never by rebuilding. Measured 2026-08-28: floor 60 s → 299 s, floor 0 → 82 s, floor 5 s → 89 s (#403) |
 | `examples/soak_test.sh [binary]` | sustained inference, sampling worker RSS / KV / threads / fds / ok-fail | `HOURS=` must be a WHOLE number (shell arithmetic); data dir is `/tmp/swarm_soak-$PORT`, per-port so two soaks cannot kill each other; analyse with `soak_report.sh` |
 | `examples/two_node_test.sh`, `3node_setup.sh`, `3node_sharded_setup.sh` | cross-node paths | EXPECTED to fail on a single multi-interface host — that is the documented connection-churn case, not a regression. Validate on two real machines |
+
+### Current baseline — 2026-08-29, v0.3.132-alpha
+
+**Re-take with the same command before claiming a delta.** These were taken on
+an idle box (AMD Ryzen 7 5800H / RTX 3070 Laptop, WSL2) with the live node
+running but idle.
+
+```bash
+SWARM_BENCH_MODEL=~/.local/share/swarmllm/models/llama-3.2-3b-instruct-q4-k-m \
+RAYON_NUM_THREADS=4 SWARM_BENCH_REPS=3 \
+./target/release/examples/prefill_bench     # --no-default-features --features dev
+```
+
+| metric | 2026-08-15 (v0.3.97) | **2026-08-29 (v0.3.132)** | |
+|---|---|---|---|
+| CPU prompt processing | 20.97 tok/s | **32.58 tok/s** (896 tok in 27.51 s) | 1.55x |
+| CPU decode | 4.71 tok/s | **10.44 tok/s** (95.7 ms/tok @ ~912 KV) | 2.21x |
+| model load, 28 layers | 14.0 s | **5.3 s** warm | |
+| KV cache | 235 MB alloc / 213 used / 91% | unchanged | |
+| GPU, end-to-end via the API | — | **45.4 tok/s** warm (17.7 cold) | |
+
+`RAYON_NUM_THREADS=4` is half the physical cores and is kept only for
+comparability with the 0815 series — a run at 8 threads is a different
+configuration, not an improvement.
+
+The GPU row is **end-to-end through `/v1/chat/completions`** (200 tokens,
+`temperature=0`), so it includes prefill, templating and HTTP. It is a
+user-visible number and is **not** comparable with the CPU rows, which drive
+`SplitModel::forward` with no daemon in the way.
+
+Two things that will otherwise be misread:
+
+- **Decode spread is now 8.8%** (104.1 / 95.7 / 99.1 / 96.3 ms across four runs),
+  against the ~3.5% recorded in the 0815 baseline. Prefill is still tight
+  (2.4%). So this box currently cannot resolve a decode change below ~10% —
+  quoting the old 3.5% would license a false positive. Re-check the spread
+  before trusting a small delta, rather than assuming the recorded one still
+  holds.
+- **A first run after a build reports model load at ~68 s, not ~5 s.** That is
+  cold page cache — a release build evicts it and the shards are ~2 GB on the
+  WSL vhdx. An immediate re-run loaded in 5.3 s with prefill and decode
+  reproducing to within 2.4% and 0.6%. **Do not report a load-time regression
+  without a warm second run.**
 
 ### Traps that have cost real time
 
