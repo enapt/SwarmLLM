@@ -9706,7 +9706,7 @@ that are actually ON DISK (every manifest lists shards a node was never going to
 hold, and counting those would drown the number that matters). Additive:
 `status`, `count` and `models_updated` are unchanged for existing clients.
 
-## Prefix-cache retention is count-capped, not byte-capped (2026-08-16)
+## Prefix-cache retention is count-capped, not byte-capped (2026-08-16, DONE — verified 2026-08-29)
 
 The #312 fix made `PrefixCache` store ONE snapshot per insert (at the full
 prompt length) instead of one per 64-token block boundary, which removed the
@@ -9719,13 +9719,31 @@ pruning keeps a growing conversation at one entry, so the realistic exposure
 needs many *distinct* long prompts against one model on one worker — rare, but
 the cap does not express the thing that actually needs bounding (bytes).
 
-If this surfaces in practice: give `PrefixCache` a byte budget (sum of
-`token_count × bytes-per-token` per entry, evict LRU until under), defaulting
+**This was implemented and the entry was not updated.** `PrefixCache::max_bytes`
+exists, is enforced on insert (sum `snapshot.bytes()`, sort by `last_hit`, evict
+LRU until under), and defaults to **2048 MB** via
+`config::inference::default_prefix_cache_max_mb`. `max_entries` was kept as the
+secondary cap exactly as suggested below. The eviction deliberately never drops
+the last entry — a single over-budget entry means `prefix_cache_max_prompt_tokens`
+is too high, and holding nothing would make the prefill that just paid to
+snapshot itself keep nothing for it.
+
+Left here as a record of the reasoning, and as a reminder that
+**`docs/FUTURE_WORK.md` says "open" until somebody checks** — this entry claimed
+a ~30 GB exposure that had already been bounded. Verify before acting on one.
+
+The original plan, which is what shipped: give `PrefixCache` a byte budget (sum
+of `token_count × bytes-per-token` per entry, evict LRU until under), defaulting
 to a fraction of system RAM or the KV headroom the loader already computes
 (`kv_budget`). Snapshot size is cheap to compute at insert (tensor
 elem_count × dtype size). Keep `max_entries` as a secondary cap — the flat
 lookup walk is linear in entries, and vLLM's equivalent (prefix block pool) is
 bounded by the same bytes-not-count logic.
+
+`prefix_cache_max_mb` is read from the boot snapshot on purpose: it is
+config-file/CLI only, the Settings panel does not expose it, and it is handed to
+a worker as it spawns. Checked 2026-08-29 against the `#281` rule rather than
+assumed.
 
 ## CUDA GQA-decode routing: the premise is dead, the answer is unresolved (2026-08-17)
 
