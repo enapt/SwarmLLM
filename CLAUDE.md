@@ -221,39 +221,49 @@ All 20 build phases complete. All subsystems wired — no stubs. **2133 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### v0.3.131-alpha (2026-08-28) — two constants nobody had measured
+### v0.3.132-alpha (2026-08-29) — one dial per address, and a name is not an identity
 
-Detail in `memory/round_log_0827_cpu_to_gpu.md`; gotchas **#403**, **#404**.
-Both were open items I had written up rather than closed, and both closed by
-running the experiment instead of reasoning about it.
+Detail in `memory/round_log_0829_dial_identity.md`; gotchas **#405**, **#406**.
+Both found by watching a live node rather than reading code, and the first took
+**three** attempts at a cause.
 
-- **The GPU swap floor was 3.65x WORSE than no floor** (#403), in the case it
-  was written for. `VRAM_MAKE_ROOM_MIN_IDLE_SECS = 60`, invented. A tester timed
-  one-shots and said it cost more than it saved; **I argued back** — their test
-  cannot see the prefix cache dying with the worker, so conversation would
-  vindicate it. Ran that: **299.3 s against 81.9 s over 8 turns**, 0 swaps
-  against 7. **The generalisable half: under alternation the incumbent has
-  ALWAYS just been used, so an idle-time floor is inert or total and never in
-  between** — a threshold that is only ever "always" or "never" is not a
-  threshold. Now 5 s. ⚠ **A "measured cold start" fix was shipped and reverted
-  inside the hour — it recorded the load of whichever DEVICE the worker landed
-  on, so a processor-only model contributed 230 s (#400's shape).** Harness kept
-  as `examples/swap_patience.sh`.
-- **Foreign libp2p nodes are no longer DIALLED either** (#404, closes #396).
-  **Two rounds of fixing our own code moved the number ZERO** — one choke point
-  for all six dial sites (+ repo test), then PEX dialling by peer id rather than
-  bare address. **The gate refusing NOTHING was the measurement**: the dials come
-  from inside libp2p. `libp2p::allow_block_list`, blocked at Identify.
-  **16 connections in 7 min → 3**, healthy peers unaffected.
+- **A peer went unreachable for stretches of every hour** (#405). `discovery::
+  bootstrap_peers` dialled **one bare `swarm.dial(addr)` per ADDRESS**: no
+  `PeerCondition`, so libp2p's per-peer dedup could not see it, and it never
+  reached `dial_checked`, so #404's gate did not apply either. A peer cached at
+  two addresses reached `max_connections_per_peer=3`; rr then spread sends over
+  all three and the dead one ate its share. **Measured paired against the
+  unpatched live node, same 43 min: 13 establishments → 3.** Three more faults
+  fell out: the peer read from the FIRST `/p2p/` (a relay circuit names the
+  RELAY) in two places; `PeerCondition::Disconnected` where libp2p's own default
+  is stricter; and **223 dials to our OWN peer id in 45 min**, found only because
+  I had added dial attribution at DEBUG to answer a different question.
+  ⚠ **The repo test asserting every dial is gated matched `self.swarm.dial(` and
+  missed the free-function form — which is why .131's audit of exactly this
+  question missed the site that mattered.**
+- **A name is not a content identity** (#406). Three Q4_K_M builds of one model
+  were live at once — 4,683,073,536 / 4,683,074,144 / 4,683,074,336 bytes — all
+  slugifying to one id, sharing no shard hash. `origin_verified` guarded the
+  hashes; adoption was still **last-writer-wins on SHAPE**, so another build's
+  sizes overwrote ours, leaving a manifest describing one file and
+  authenticating another. Compare shape, never hashes (a partial holder
+  publishes placeholders), gated on origin knowledge so a re-publish still lands.
 
-⚠ **Near-miss worth keeping**: I first read "zero refusals" as "the gate is
-useless" — the line was `trace!` and I ran at `-vv`. Right conclusion, invalid
-reasoning (diagnosis rule 2).
+⚠ **Two published causal claims were WRONG before the third stuck** — the PEX
+`None` arm, then the dial condition. Both real defects; neither the cause. **The
+cross-tab that convinced me (52/52 duplicates bare) distinguished WHICH PATH
+DIALLED, not that PEX was dialling.** Corrected in-repo, not dropped.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
+- **v0.3.131** (08-28): **two constants nobody had measured** — the GPU swap floor
+  was 3.65x WORSE than no floor in the case it was written for (#403; 299.3 s vs
+  81.9 s over 8 turns), and **under alternation an idle-time floor is inert or
+  total, never in between**; foreign libp2p nodes stopped being DIALLED (#404) via
+  `allow_block_list` after two rounds of fixing our own code moved the number ZERO.
+  `round_log_0827_cpu_to_gpu.md`.
 - **v0.3.130** (08-28): **which device your models run on** — three faults from one
   tester report on a 6 GB card. **#401** a model demoted to the processor was
   never promoted back (`get_or_spawn`'s fast path returns any resident worker
