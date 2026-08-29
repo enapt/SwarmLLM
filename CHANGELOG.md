@@ -29,6 +29,19 @@ All notable changes to SwarmLLM are documented here.
   graphics card and when work is routed to another machine, so those get faster
   too.
 
+- **The same description file was still being read more times than the answer
+  needed.** Two further places asked for it twice: the Models page wanted both
+  "how much memory does this need" and "does it fit on the graphics card", which
+  come from one reading, and asked for them separately; and when routing a
+  request, the node worked out a model's size before checking whether it was
+  even in the situation where that size matters — on a healthy machine it did
+  that work and threw it away, on the path a first reply waits on.
+
+  Measured on an isolated node, alternating between the two versions to rule out
+  drift: the Models page went from 0.41 s to 0.21 s, with the processor time it
+  uses halving — which is what doing the reading once instead of twice should
+  look like. Together with the fix above, eleven seconds to a fifth of a second.
+
 ## [0.3.133-alpha] — 2026-08-29
 
 ### Fixed

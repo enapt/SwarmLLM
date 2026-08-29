@@ -1782,6 +1782,56 @@ impl ModelProcessPool {
         self.vram_reserved_mb.iter().map(|e| *e.value()).sum()
     }
 
+    /// Does a model of this size fit, given the budget and what is already
+    /// committed?
+    ///
+    /// The one arithmetic rule, shared by [`ModelProcessPool::would_fit_on_gpu`]
+    /// and [`ModelProcessPool::gpu_estimate_and_fit`]. They differ only in how
+    /// hard they work to avoid pricing the model at all; they must never differ
+    /// in the answer, and a second copy of this comparison is how they would.
+    /// `None` means unknowable — no budget set, or no local geometry to read —
+    /// and never "no".
+    fn fits_in_budget(&self, estimated_mb: u64, budget_mb: u64) -> Option<bool> {
+        if budget_mb == 0 || estimated_mb == 0 {
+            return None;
+        }
+        Some(self.vram_committed_mb().saturating_add(estimated_mb) <= budget_mb)
+    }
+
+    /// Both halves of "how big is this model, and does it fit" from ONE reading
+    /// of its geometry.
+    ///
+    /// For a caller that wants both — the admin model listing does, for every
+    /// model, on every request — asking [`ModelProcessPool::estimated_gpu_mb`]
+    /// and [`ModelProcessPool::would_fit_on_gpu`] separately reads
+    /// `gguf_header.bin` and scans the model directory TWICE for one answer
+    /// each. See `inference::split::read_gguf_header` for what that costs.
+    ///
+    /// The fit verdict is the same rule `would_fit_on_gpu` applies, in the same
+    /// order, and its comment there is the explanation. The one difference is
+    /// deliberate: a model already resident ON the card still gets priced here,
+    /// because the caller asked for the estimate too — so this does exactly the
+    /// work a caller wanting both would have done anyway, never more.
+    ///
+    /// Single-answer callers keep the single-answer methods; nothing is made
+    /// slower to make this faster.
+    pub fn gpu_estimate_and_fit(&self, model_id: &ModelId) -> (Option<u64>, Option<bool>) {
+        let resident_on_gpu = self
+            .workers
+            .get(model_id)
+            .map(|h| h.placed_on_cpu_because.is_none());
+        let budget = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let estimated = self.estimate_gpu_footprint_mb(model_id);
+        let fits = if resident_on_gpu == Some(true) {
+            Some(true)
+        } else {
+            self.fits_in_budget(estimated, budget)
+        };
+        ((estimated != 0).then_some(estimated), fits)
+    }
+
     /// Would this model fit on the GPU right now, without charging anything?
     ///
     /// The read-only half of [`Self::admit_to_gpu`], for callers that need to
@@ -1834,11 +1884,10 @@ impl ModelProcessPool {
         if budget == 0 {
             return None;
         }
-        let estimated = self.estimate_gpu_footprint_mb(model_id);
-        if estimated == 0 {
-            return None;
-        }
-        Some(self.vram_committed_mb().saturating_add(estimated) <= budget)
+        // The early returns above are about avoiding WORK — pricing a model
+        // means reading its header off disk. The verdict itself is shared, so
+        // this and `gpu_estimate_and_fit` cannot answer differently.
+        self.fits_in_budget(self.estimate_gpu_footprint_mb(model_id), budget)
     }
 
     /// This model's real GPU footprint in MB, or `None` when its geometry
@@ -4670,6 +4719,51 @@ mod admission_tests {
 
     fn pool() -> ModelProcessPool {
         ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-admission-test"))
+    }
+
+    /// The combined accessor and the single-answer methods must agree.
+    ///
+    /// `gpu_estimate_and_fit` exists ONLY to avoid reading a model's header
+    /// twice for two answers that come from one reading. If it also had its own
+    /// opinion it would be worse than the duplication it removes — the admin
+    /// listing would report a different verdict from the one admission
+    /// actually applies, which is the contradiction gotcha #329 was about.
+    #[test]
+    fn the_combined_accessor_agrees_with_the_single_answer_methods() {
+        let p = pool();
+        let m = ModelId("no-such-model".into());
+        // No geometry to read: both must say "unknowable", not "no".
+        assert_eq!(
+            p.gpu_estimate_and_fit(&m),
+            (p.estimated_gpu_mb(&m), p.would_fit_on_gpu(&m))
+        );
+        assert_eq!(p.gpu_estimate_and_fit(&m), (None, None));
+        // A budget alone does not make an unreadable model judgeable.
+        p.set_vram_budget_mb(6000);
+        assert_eq!(
+            p.gpu_estimate_and_fit(&m),
+            (p.estimated_gpu_mb(&m), p.would_fit_on_gpu(&m))
+        );
+    }
+
+    /// The arithmetic both of them share, over the cases neither can reach
+    /// without a model on disk.
+    #[test]
+    fn an_unknown_size_or_budget_is_never_reported_as_not_fitting() {
+        let p = pool();
+        assert_eq!(p.fits_in_budget(0, 6000), None, "no geometry is unknowable");
+        assert_eq!(p.fits_in_budget(4000, 0), None, "no budget is unknowable");
+        assert_eq!(p.fits_in_budget(4000, 6000), Some(true));
+        assert_eq!(p.fits_in_budget(6001, 6000), Some(false));
+        assert_eq!(
+            p.fits_in_budget(6000, 6000),
+            Some(true),
+            "exactly full fits"
+        );
+        // Charged models are counted against the budget, not ignored.
+        assert!(p.admit_to_gpu(&ModelId("resident".into()), 4000));
+        assert_eq!(p.fits_in_budget(2500, 6000), Some(false));
+        assert_eq!(p.fits_in_budget(2000, 6000), Some(true));
     }
 
     /// With no budget configured, behaviour must be exactly as before — this

@@ -634,20 +634,37 @@ impl PipelineScheduler {
         });
         if local_covers_everything {
             let pool = &self.shared_state.model_process_pool;
-            if let Some(peer) = delegation_target(
-                &candidates,
-                local_node_id,
-                num_layers,
-                pool.is_cpu_bound_for_lack_of_vram(model_id),
-                pool.estimated_gpu_mb(model_id).unwrap_or(0),
-                // OUR processor speed, not our graphics card's: this only runs
-                // when the model does not fit the card, so the processor is
-                // what the request would actually get here.
-                crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(
-                    crate::inference::mem_bandwidth::measured_gbps().unwrap_or(0.0),
-                    false,
-                ),
-            ) {
+            // Ask the cheap question first and only price the model if the
+            // answer was yes. `delegation_target` returns `None` on a node that
+            // is not degraded WITHOUT reading `model_vram_mb`, but Rust
+            // evaluates every argument before the call — and
+            // `estimated_gpu_mb` re-reads `gguf_header.bin` and scans the model
+            // directory. On a healthy node that whole reading was performed and
+            // thrown away, once per assembly, on the pipeline path — which is
+            // the COLD-START path a first reply waits on.
+            //
+            // This is exactly equivalent, because the flag being false is the
+            // first thing `delegation_target` tests.
+            let local_is_degraded = pool.is_cpu_bound_for_lack_of_vram(model_id);
+            let delegate_to = if local_is_degraded {
+                delegation_target(
+                    &candidates,
+                    local_node_id,
+                    num_layers,
+                    true,
+                    pool.estimated_gpu_mb(model_id).unwrap_or(0),
+                    // OUR processor speed, not our graphics card's: this only
+                    // runs when the model does not fit the card, so the
+                    // processor is what the request would actually get here.
+                    crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(
+                        crate::inference::mem_bandwidth::measured_gbps().unwrap_or(0.0),
+                        false,
+                    ),
+                )
+            } else {
+                None
+            };
+            if let Some(peer) = delegate_to {
                 if encrypted {
                     // Boomerang. Skipping the local fast path is the whole
                     // change: the distributed assembly below already forces the

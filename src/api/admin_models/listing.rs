@@ -450,7 +450,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         // reconstruct the real numbers by hand from `manifest.json`.
         let model_id = crate::types::ModelId(m.id.0.clone());
         let pool = &state.shared_state.model_process_pool;
-        let estimated_vram = pool.estimated_gpu_mb(&model_id).unwrap_or_else(|| {
+        // One reading of the model's geometry answers both. Asked separately
+        // these parse `gguf_header.bin` and scan the model directory twice per
+        // model, per request.
+        let (estimated_gpu_mb, fits_on_gpu) = pool.gpu_estimate_and_fit(&model_id);
+        let estimated_vram = estimated_gpu_mb.unwrap_or_else(|| {
             crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes)
         });
 
@@ -486,10 +490,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             // which is smaller, so the two could disagree even with a correct
             // estimate. `null` means unknowable (no budget set, or no local
             // geometry), never "no".
-            obj.insert(
-                "fits_on_gpu".to_string(),
-                serde_json::json!(pool.would_fit_on_gpu(&model_id)),
-            );
+            obj.insert("fits_on_gpu".to_string(), serde_json::json!(fits_on_gpu));
             obj.insert(
                 "gpu_budget_mb".to_string(),
                 serde_json::json!(pool.vram_budget_mb()),
