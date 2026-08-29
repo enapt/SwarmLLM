@@ -1424,6 +1424,21 @@ silently break at the wire if duplicated:
   verification catches it, so it costs a wasted transfer, never a wrong answer.
   Closing it needs a build discriminator on `ShardAnnounce`; see
   `docs/FUTURE_WORK.md`.
+
+  **Both rejection messages share ONE rate limiter**
+  (`manifest::note_manifest_rejection` over `manifest::RejectionKey`), because
+  they are the same event at two granularities and a peer re-gossips on a timer
+  for as long as it is up. The manifest arm was rate-limited on 2026-08-26
+  (4709 WARN lines, 14% of a month's warnings); **the per-shard arm was missed,
+  and it is the worse of the two — it fires once per SHARD**, so one publisher
+  with an 8-shard model on a 30 s cadence produced 16-28 lines a minute
+  indefinitely, ~10% of the whole log, measured live 2026-08-29. The key
+  distinguishes the two kinds so neither can silence the other, and each shard
+  is its own key so eight genuine disagreements still get eight lines. A new
+  "we are ignoring what this peer keeps telling us" warning belongs behind this
+  limiter, not beside it: **anything a peer repeats on a timer will be repeated
+  at you for ever, so the first question about such a log line is what silences
+  it.**
 - **`model::manifest::is_backup_artifact_id`** — canonical check for a
   model id that is a copied-folder backup (`<model>.FULLBACKUP`,
   `<model>.old`, `<model>~`, `… copy`) rather than a real model identity.

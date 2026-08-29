@@ -428,8 +428,32 @@ pub(crate) const REJECTED_MANIFEST_LOG_WINDOW: std::time::Duration =
 /// forgotten entry costs one extra verification and one extra log line.
 pub(crate) const MAX_REJECTED_MANIFESTS: usize = 512;
 
+/// What is being repeatedly rejected.
+///
+/// One rate limiter covers both because they are the same event seen at two
+/// granularities: a peer re-gossiping a manifest we disagree with. Keying them
+/// separately would let the finer-grained one flood while the coarser one was
+/// quiet, which is exactly what happened — the manifest arm was rate-limited on
+/// 2026-08-26 and the per-shard arm was not, so the same publisher on the same
+/// 30 s cadence produced **16-28 WARN lines a minute, indefinitely** (one per
+/// shard), measured live 2026-08-29.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RejectionKey {
+    /// A whole manifest describing a different build.
+    Manifest {
+        model: crate::types::ModelId,
+        manifest_hash: [u8; 32],
+    },
+    /// One shard hash contradicting what we took from the model's origin.
+    ShardHash {
+        model: crate::types::ModelId,
+        shard: u32,
+        claimed: [u8; 32],
+    },
+}
+
 pub(crate) static REJECTED_MANIFESTS: std::sync::LazyLock<
-    dashmap::DashMap<(crate::types::ModelId, [u8; 32]), RejectedManifest>,
+    dashmap::DashMap<RejectionKey, RejectedManifest>,
 > = std::sync::LazyLock::new(dashmap::DashMap::new);
 
 /// Should this rejection be logged, and how many were swallowed since the last
@@ -437,11 +461,7 @@ pub(crate) static REJECTED_MANIFESTS: std::sync::LazyLock<
 ///
 /// Returns `Some(suppressed_count)` the first time a given (model, hash) is
 /// rejected and once per window thereafter.
-pub(crate) fn note_manifest_rejection(
-    model: &crate::types::ModelId,
-    manifest_hash: [u8; 32],
-) -> Option<u64> {
-    let key = (model.clone(), manifest_hash);
+pub(crate) fn note_manifest_rejection(key: RejectionKey) -> Option<u64> {
     if let Some(mut prev) = REJECTED_MANIFESTS.get_mut(&key) {
         if prev.last_logged.elapsed() >= REJECTED_MANIFEST_LOG_WINDOW {
             let n = prev.suppressed;

@@ -1116,8 +1116,10 @@ pub(crate) async fn dispatch_network_messages(
                                                 // afresh rather than staying
                                                 // rejected.
                                                 if let Some(suppressed) = crate::model::manifest::note_manifest_rejection(
-                                                    &manifest.id,
-                                                    manifest.manifest_hash,
+                                                    crate::model::manifest::RejectionKey::Manifest {
+                                                        model: manifest.id.clone(),
+                                                        manifest_hash: manifest.manifest_hash,
+                                                    },
                                                 ) {
                                                 tracing::warn!(
                                                     error = %e,
@@ -2420,14 +2422,70 @@ mod contribution_limits_tests {
 
 #[cfg(test)]
 mod rejected_manifest_tests {
-    use crate::model::manifest::{note_manifest_rejection, REJECTED_MANIFESTS};
+    use crate::model::manifest::{note_manifest_rejection, RejectionKey, REJECTED_MANIFESTS};
     use crate::types::ModelId;
 
     fn fresh(name: &str) -> ModelId {
         // Each test uses its own model id: the suppression map is a process-wide
         // static, so sharing an id across tests would make them order-dependent.
-        REJECTED_MANIFESTS.retain(|k, _| k.0 .0 != name);
+        REJECTED_MANIFESTS.retain(|k, _| match k {
+            RejectionKey::Manifest { model, .. } | RejectionKey::ShardHash { model, .. } => {
+                model.0 != name
+            }
+        });
         ModelId(name.to_string())
+    }
+
+    /// Terser than spelling the variant out at every assertion.
+    fn manifest(m: &ModelId, h: u8) -> RejectionKey {
+        RejectionKey::Manifest {
+            model: m.clone(),
+            manifest_hash: [h; 32],
+        }
+    }
+
+    /// A contradicted SHARD hash is rate-limited too, and that arm matters
+    /// more than the manifest one: it fires once per shard, so an 8-shard model
+    /// re-gossiped every 30 s produced 16-28 WARN lines a minute, indefinitely,
+    /// about a disagreement handled correctly the first time (measured live
+    /// 2026-08-29, ~10% of the whole log).
+    #[test]
+    fn a_repeated_shard_hash_rejection_is_suppressed() {
+        let m = fresh("shard-hash-repeats");
+        let k = |shard| RejectionKey::ShardHash {
+            model: m.clone(),
+            shard,
+            claimed: [3u8; 32],
+        };
+        assert_eq!(note_manifest_rejection(k(0)), Some(0));
+        assert_eq!(
+            note_manifest_rejection(k(0)),
+            None,
+            "the repeat is the flood"
+        );
+
+        // Each shard is its own key: eight shards of one model are eight
+        // distinct disagreements and each deserves one line, which is why the
+        // key is not just the model.
+        assert_eq!(note_manifest_rejection(k(1)), Some(0));
+    }
+
+    /// A manifest rejection and a shard rejection must not silence each other.
+    /// They share one map, so a key collision would make the manifest arm go
+    /// quiet because a shard happened to be reported first.
+    #[test]
+    fn manifest_and_shard_rejections_do_not_collide() {
+        let m = fresh("no-collision");
+        assert_eq!(note_manifest_rejection(manifest(&m, 5)), Some(0));
+        assert_eq!(
+            note_manifest_rejection(RejectionKey::ShardHash {
+                model: m.clone(),
+                shard: 0,
+                claimed: [5u8; 32],
+            }),
+            Some(0),
+            "same model and same bytes, but a different KIND of rejection"
+        );
     }
 
     /// The first rejection is always reported — silence on a genuinely new
@@ -2435,7 +2493,7 @@ mod rejected_manifest_tests {
     #[test]
     fn the_first_rejection_is_logged() {
         let m = fresh("first-is-logged");
-        assert_eq!(note_manifest_rejection(&m, [7u8; 32]), Some(0));
+        assert_eq!(note_manifest_rejection(manifest(&m, 7)), Some(0));
     }
 
     /// The repeats are what produced 4709 lines. Same model, same hash, same
@@ -2443,10 +2501,10 @@ mod rejected_manifest_tests {
     #[test]
     fn identical_repeats_are_suppressed() {
         let m = fresh("repeats-suppressed");
-        assert_eq!(note_manifest_rejection(&m, [1u8; 32]), Some(0));
+        assert_eq!(note_manifest_rejection(manifest(&m, 1)), Some(0));
         for _ in 0..200 {
             assert_eq!(
-                note_manifest_rejection(&m, [1u8; 32]),
+                note_manifest_rejection(manifest(&m, 1)),
                 None,
                 "an identical rejection inside the window must not log again"
             );
@@ -2459,10 +2517,10 @@ mod rejected_manifest_tests {
     #[test]
     fn a_different_manifest_from_the_same_model_is_reported() {
         let m = fresh("different-hash-reported");
-        assert_eq!(note_manifest_rejection(&m, [1u8; 32]), Some(0));
-        assert_eq!(note_manifest_rejection(&m, [1u8; 32]), None);
+        assert_eq!(note_manifest_rejection(manifest(&m, 1)), Some(0));
+        assert_eq!(note_manifest_rejection(manifest(&m, 1)), None);
         assert_eq!(
-            note_manifest_rejection(&m, [2u8; 32]),
+            note_manifest_rejection(manifest(&m, 2)),
             Some(0),
             "a changed manifest hash must never inherit the previous verdict"
         );
@@ -2474,8 +2532,8 @@ mod rejected_manifest_tests {
     fn one_model_does_not_silence_another() {
         let a = fresh("model-a-independent");
         let b = fresh("model-b-independent");
-        assert_eq!(note_manifest_rejection(&a, [9u8; 32]), Some(0));
-        assert_eq!(note_manifest_rejection(&a, [9u8; 32]), None);
-        assert_eq!(note_manifest_rejection(&b, [9u8; 32]), Some(0));
+        assert_eq!(note_manifest_rejection(manifest(&a, 9)), Some(0));
+        assert_eq!(note_manifest_rejection(manifest(&a, 9)), None);
+        assert_eq!(note_manifest_rejection(manifest(&b, 9)), Some(0));
     }
 }

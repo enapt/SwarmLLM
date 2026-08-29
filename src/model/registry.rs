@@ -224,8 +224,10 @@ impl ModelRegistry {
                 let (our_total, our_shards) = (ours.total_size_bytes, ours.shard_count);
                 drop(ours);
                 if let Some(suppressed) = crate::model::manifest::note_manifest_rejection(
-                    &manifest.id,
-                    manifest.manifest_hash,
+                    crate::model::manifest::RejectionKey::Manifest {
+                        model: manifest.id.clone(),
+                        manifest_hash: manifest.manifest_hash,
+                    },
                 ) {
                     tracing::warn!(
                         model = %manifest.id,
@@ -328,15 +330,30 @@ impl ModelRegistry {
                     // hash disagreed. Publisher is weaker than the gossiping peer
                     // (see `manifests_to_gossip`: a holder re-broadcasts without
                     // claiming publication) but it is not nothing.
-                    tracing::warn!(
-                        model = %manifest.id,
-                        shard = shard.index,
-                        claimed = %hex::encode(&shard.hash[..8]),
-                        origin = %hex::encode(&known[..8]),
-                        publisher = %manifest.publisher,
-                        "Ignoring a shard hash that contradicts the one we took \
-                         from the model's origin"
-                    );
+                    // Rate-limited for the same reason the manifest arm above
+                    // is, and it matters MORE here: this fires once per SHARD,
+                    // so one peer re-gossiping an 8-shard model every 30 s
+                    // produced 16-28 lines a minute, for ever, about a
+                    // disagreement handled correctly the first time (measured
+                    // live 2026-08-29, ~10% of the log).
+                    if let Some(suppressed) = crate::model::manifest::note_manifest_rejection(
+                        crate::model::manifest::RejectionKey::ShardHash {
+                            model: manifest.id.clone(),
+                            shard: shard.index,
+                            claimed: shard.hash,
+                        },
+                    ) {
+                        tracing::warn!(
+                            model = %manifest.id,
+                            shard = shard.index,
+                            claimed = %hex::encode(&shard.hash[..8]),
+                            origin = %hex::encode(&known[..8]),
+                            publisher = %manifest.publisher,
+                            suppressed_since_last = suppressed,
+                            "Ignoring a shard hash that contradicts the one we took \
+                             from the model's origin"
+                        );
+                    }
                     shard.hash = known;
                 }
             }

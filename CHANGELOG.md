@@ -6,6 +6,21 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **The log no longer fills up with the same complaint about a model.** When
+  another machine on the network has a different build of a model you also have
+  — same name, different file, which happens whenever two people quantise a
+  model themselves — SwarmLLM correctly keeps its own copy's fingerprints and
+  ignores theirs. It was saying so **once per part of the model, every time that
+  machine announced it**: on a model in eight parts announced every thirty
+  seconds, that is 16 to 28 lines a minute, for as long as both machines are
+  running, about a disagreement that was handled correctly the first time.
+  Measured on a live node it was about a tenth of everything written to the log.
+
+  The same repetition had already been quietened for the whole-model version of
+  this message; the per-part version was missed. Both now report once and then
+  stay quiet for an hour, and say how many they held back — so the rate is still
+  visible without the noise. Nothing about which copy is trusted has changed.
+
 - **A long question sent to another machine gave up on it too early.** When your
   node asks a peer to run part of a model, it allows a certain amount of time
   before deciding that machine is not going to answer. Reading a long question is
