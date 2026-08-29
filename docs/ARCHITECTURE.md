@@ -213,10 +213,19 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 5. Dial user-configured --bootstrap peers and invite codes (if any)
 6. Trigger Kademlia bootstrap
 7. PEX fires on each ConnectionEstablished (exchanges peer lists)
-8. Periodic: Kademlia re-bootstrap every 60s, peer cache save every 5min
+8. Periodic: discovery tick every 5min (Kademlia bootstrap + re-dial cached
+   peers not currently connected), peer cache save every 5min. A bootstrap
+   RETRY loop polls every 5s but only acts while zero peers are connected,
+   on a backoff schedule.
 9. On shutdown: save peer cache
-10. mDNS race recovery: if simultaneous-dial kills both connections (max_per_peer=1),
-    pending_redial queue schedules re-dial with hash-based jitter (2-5s)
+10. mDNS race recovery: if simultaneous-dial kills both connections, the
+    pending_redial queue schedules a re-dial with hash-based jitter (2-5s).
+    `max_connections_per_peer` is 3, not 1 — DCUtR needs a relayed and a direct
+    connection open at once to hole-punch (see `network/behaviour.rs`).
+11. Dialling is ONE attempt per peer carrying all its known addresses, through
+    `dial_checked` (foreign-peer gate, self-dial guard) with
+    `DisconnectedAndNotDialing`. Never one dial per address — see
+    `.claude/rules/architecture.md` § "One dial per PEER".
 ```
 
 ### Peer Registry Scaling (S3)

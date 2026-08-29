@@ -1360,6 +1360,30 @@ silently break at the wire if duplicated:
   reconnect. **When adding such a gate, re-check any `else`/fallback arm below
   it** — the health-pong site had a `Broadcast` fallback that a naive `None`
   would have turned into mesh-wide traffic every 30s, worse than the bug.
+- **`ModelRegistry::describes_a_different_build`** (2026-08-29) — is this
+  manifest the same FILE as ours, or another build wearing the same name? A
+  model id comes from a display name (`slugify_model_name`), so every
+  independent GGUF build of one model collapses into one identity: three Q4_K_M
+  builds of Qwen2.5-Coder-7B-Instruct were live on the swarm at once —
+  4,683,073,536 / 4,683,074,144 / 4,683,074,336 bytes — sharing not one shard
+  hash (gotcha #406).
+  **Compares SHAPE, never hashes**: a manifest carries a real `size_bytes` for
+  every shard whether or not its author holds it, but a hash only for the ones
+  it does, so every partial holder would read as a different build under a hash
+  comparison. **Gated on `has_origin_knowledge`** — our own origin download is
+  the only evidence that is not just another node's assertion, the same
+  adjudicator `origin_verified` uses — so a genuine re-publish (new bytes, new
+  shape, no origin copy of ours to weigh against it) still lands.
+  **Why it matters**: adoption is `manifests.insert`, last-writer-wins, so
+  before this the other build's `shard_count`, `total_size_bytes` and per-shard
+  sizes overwrote ours while `origin_verified` kept our hashes — a manifest
+  describing one file and authenticating another, and `size_bytes` is what
+  decides byte-range requests.
+  **Still open**: `record_shard_holder` keys on `ShardId` alone, so holders of
+  different builds are pooled and the scheduler will route to either. Bounded —
+  verification catches it, so it costs a wasted transfer, never a wrong answer.
+  Closing it needs a build discriminator on `ShardAnnounce`; see
+  `docs/FUTURE_WORK.md`.
 - **`model::manifest::is_backup_artifact_id`** — canonical check for a
   model id that is a copied-folder backup (`<model>.FULLBACKUP`,
   `<model>.old`, `<model>~`, `… copy`) rather than a real model identity.
@@ -1477,10 +1501,15 @@ Match the namespace as a PREFIX, never a substring — the peer controls those
 strings.
 
 **Declining to register is still not sufficient, and the second half needed a
-third.** Not re-dialling was covered by `foreign_peers`, and every one of the six
+third.** Not re-dialling was covered by `foreign_peers`, and every one of the
 dial sites now routes through `NetworkManager::dial_checked`
 (`every_dial_goes_through_the_foreign_peer_gate` in `tests/repo_consistency.rs`
-keeps it that way) — and the node *still* opened 5-6 connections per foreign peer
+keeps it that way) — **though "every" was wrong when this was written: the test
+matched `self.swarm.dial(` and `discovery::bootstrap_peers` was a free function
+taking `&mut Swarm`, so the one site that mattered was invisible to it for
+another release (gotcha #405). The pattern is now both forms, comment lines
+excluded, with the loopback probe named as the single exception.** And the node
+*still* opened 5-6 connections per foreign peer
 in seven minutes, each closed 43 ms later by this gate and then re-established.
 `dial_checked` refused none of them across two runs, which is the measurement
 that matters: **the dials come from inside libp2p, not from us.** Which behaviour
@@ -1493,6 +1522,58 @@ unaffected.
 **The general rule**: completing a handshake that everyone speaks proves nothing
 about who you are talking to. Before treating a successful negotiation as
 identity, ask which population could also complete it.
+
+## One dial per PEER, never one per address
+
+**`NetworkManager::dial_bootstrap_peers` + `discovery::plan_bootstrap_dials`**
+are how bootstrap and cached addresses are dialled. Group by target peer, one
+`DialOpts::peer_id(..).addresses(all)` each, through `dial_checked`, with
+`PeerCondition::DisconnectedAndNotDialing`.
+
+**Why per-address dialling is wrong, not merely wasteful.** A bare
+`swarm.dial(addr)` carries no `PeerCondition`, so libp2p's per-peer dedup cannot
+see it, and it does not reach `dial_checked`, so the foreign-peer gate does not
+apply either. `discovery::bootstrap_peers` did exactly that, once per address,
+on every discovery tick. A peer cached at two addresses (TCP + QUIC) therefore
+got two simultaneous dials whenever it was momentarily disconnected; with
+request_response's own dial that reaches `max_connections_per_peer = 3`.
+The vendored rr layer then spreads sends across all three (ranked, but ranked
+among connections that should not all exist), and one that has quietly died
+swallows its share until the 8-failure rule closes the peer entirely. Measured
+paired against an unpatched node, same swarm, same 43 minutes: **13 connection
+establishments to one peer against 3** (gotcha #405).
+
+**It costs nothing.** `libp2p_swarm::connection::pool::concurrent_dial` is a
+`FuturesUnordered` — one dial attempt RACES every address it was given, bounded
+by `dial_concurrency_factor`, and yields exactly one connection. Handing one
+attempt every address is the same parallelism; it just stops keeping the losers.
+Do not "restore" per-address dialling for latency.
+
+Three rules a new dial site must follow:
+
+- **Read the peer from the LAST `/p2p/` component** (`target_peer_from_address`).
+  A relay circuit is `…/p2p/<relay>/p2p-circuit/p2p/<target>`; the first names
+  the RELAY, so every gate then asks about the wrong node and the dial asks
+  libp2p to reach the relay at an address belonging to someone else. This was
+  wrong in two independent places.
+- **Do not weaken the condition.** `PeerCondition::Disconnected` asks only
+  whether a connection is ESTABLISHED, so two dials issued before either
+  completes both pass. `DisconnectedAndNotDialing` is libp2p's own default and
+  our code had explicitly opted out of it at three sites. **The mDNS site keeps
+  the weaker condition deliberately** — a LAN rediscovery must be able to
+  override a stale bootstrap attempt; that one has a documented reason and the
+  WAN paths did not.
+- **Never dial yourself.** `dial_checked` refuses it for every source. A third
+  party hands your own address back — PEX relays whatever its registry holds,
+  and a circuit terminating at you names you in its last hop — and the
+  sender-side self-filter cannot help, because the sender is someone else.
+  libp2p refuses these, so nothing broke; it was 223 wasted dials in 45 minutes
+  that nothing surfaced.
+
+**Dial attribution is logged at DEBUG** (`site` field in `dial_checked`), not
+TRACE. Two investigations have turned on "was that dial ours?" and both had to
+rebuild to answer it; the second only found the self-dialling because the
+instrument was finally there to say so.
 
 ## Peer Cache: storable vs dialable
 
