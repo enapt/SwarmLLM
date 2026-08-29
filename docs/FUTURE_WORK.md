@@ -3074,7 +3074,18 @@ node in the same window succeeded. On an idle node the same greedy request
 completes normally.
 
 The timeout itself is fine — it already scales with layer count and
-prefill-vs-decode, and 32s is generous against 1.7s of real compute. Two things
+prefill-vs-decode, and 32s is generous against 1.7s of real compute.
+
+> **Correction (2026-08-29, gotcha #407).** The clause "it already scales with
+> prefill-vs-decode" was true for the mid-pipeline hops this entry is about, and
+> **false for segment 0**. That hop is handed the prompt itself rather than
+> hidden states, and the prefill test compared those prompt bytes against
+> `PREFILL_ACTIVATION_THRESHOLD_BYTES` — a hidden-state scale — so every prompt
+> under ~100 KB of text (~25k tokens) was budgeted at the *decode* rate. Measured
+> live: a 4728-token prompt got 32 s where it needed minutes, and its holder was
+> abandoned mid-prefill. Fixed by letting `ActivationUnits` decide
+> (`forward_is_prefill`); the rest of this entry, which is about decode forwards
+> queued behind a saturated peer, still stands. Two things
 would genuinely help, both listed above: making the split representable so a
 saturated single holder is no longer a single point of failure, and feeding the
 observed per-layer latency (which already includes peer-side queuing) into the

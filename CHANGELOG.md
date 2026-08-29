@@ -2,6 +2,32 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A long question sent to another machine gave up on it too early.** When your
+  node asks a peer to run part of a model, it allows a certain amount of time
+  before deciding that machine is not going to answer. Reading a long question is
+  the slowest step in answering it — far slower than writing the reply — so it
+  gets a much larger allowance. That allowance was being worked out from the size
+  of the data being sent, using a yardstick meant for a later stage of the
+  process, and a question written as plain text is thousands of times smaller
+  than the same question part-way through the model. So the one step that
+  actually does the slow work was consistently mistaken for the fast one and
+  given a fraction of the time it needed.
+
+  In practice: any question shorter than about 25,000 words got roughly 2 seconds
+  per layer instead of 15. The machine reading it was dropped part-way through
+  and the work handed to a standby, which then had to start over.
+
+  Measured on the live network: a 4,700-word question took 176 seconds, of which
+  32 were spent waiting out this mistake and abandoning a peer that was working
+  correctly. Nothing ever failed because of it — the standby answered, and the
+  answer was right — which is why it went unnoticed. Long questions sent to other
+  machines should now be noticeably quicker and less likely to bounce between
+  peers.
+
 ## [0.3.132-alpha] — 2026-08-29
 
 ### Fixed

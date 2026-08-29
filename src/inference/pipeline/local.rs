@@ -69,6 +69,9 @@ pub(super) struct SegmentBudget {
     /// Why this budget is what it is — logged so an operator can tell a
     /// measured deadline from a fallback one.
     basis: &'static str,
+    /// Whether this forward was budgeted as a prefill. Carried rather than
+    /// re-derived so the DIAG line cannot contradict the deadline it reports.
+    prefill: bool,
 }
 
 impl SegmentBudget {
@@ -103,7 +106,7 @@ impl SegmentBudget {
                 "measured",
             ),
             None => (
-                PipelineExecutor::compute_segment_timeout(num_layers, activation_bytes),
+                PipelineExecutor::compute_segment_timeout(num_layers, activation_bytes, units),
                 "default",
             ),
         };
@@ -147,6 +150,7 @@ impl SegmentBudget {
                 .clamp(Duration::from_secs(SEGMENT_TIMEOUT_MIN_SECS), ceiling)
                 .min(transport_ceiling),
             basis,
+            prefill: PipelineExecutor::forward_is_prefill(activation_bytes, units),
         }
     }
 
@@ -156,6 +160,10 @@ impl SegmentBudget {
 
     pub(super) fn basis(&self) -> &'static str {
         self.basis
+    }
+
+    pub(super) fn is_prefill(&self) -> bool {
+        self.prefill
     }
 }
 
@@ -325,11 +333,17 @@ impl PipelineExecutor {
     /// with no knowledge of the peer. The fallback used when we have not
     /// measured this peer doing this kind of work.
     ///
-    /// Prefill (large activation = many input tokens) is much slower than decode
-    /// (single token). Budget per-layer time with a floor and ceiling.
-    pub(super) fn compute_segment_timeout(num_layers: u32, activation_bytes: usize) -> Duration {
-        let is_prefill = activation_bytes > PREFILL_ACTIVATION_THRESHOLD_BYTES;
-        let per_layer_secs: u64 = if is_prefill {
+    /// Prefill (the whole prompt at once) is much slower than decode (a single
+    /// token), so the two get different per-layer rates. Which one this forward
+    /// is doing is decided by [`PipelineExecutor::forward_is_prefill`] — by the
+    /// activation UNITS, not by the byte count; read that before assuming a
+    /// large payload means prefill or a small one means decode.
+    pub(super) fn compute_segment_timeout(
+        num_layers: u32,
+        activation_bytes: usize,
+        units: ActivationUnits,
+    ) -> Duration {
+        let per_layer_secs: u64 = if Self::forward_is_prefill(activation_bytes, units) {
             PREFILL_SECS_PER_LAYER
         } else {
             DECODE_SECS_PER_LAYER
@@ -337,6 +351,33 @@ impl PipelineExecutor {
         let base = (num_layers as u64) * per_layer_secs;
         let timeout = base.clamp(SEGMENT_TIMEOUT_MIN_SECS, SEGMENT_TIMEOUT_MAX_SECS);
         Duration::from_secs(timeout)
+    }
+
+    /// Is this forward doing a prefill? The single answer, for the deadline and
+    /// for the DIAG that reports it.
+    ///
+    /// **The units decide it, not the size.** A `PromptBytes` payload is the
+    /// prompt itself — that is what the unit means — so the forward carrying it
+    /// performs the whole prefill by construction, however short the prompt.
+    /// Only `HiddenStates` can be classified by size, because
+    /// `PREFILL_ACTIVATION_THRESHOLD_BYTES` is a hidden-state scale: one token
+    /// of hidden state is thousands of bytes, whereas one token of prompt is a
+    /// few. Comparing prompt bytes against it asks a question in the wrong
+    /// units and answers "decode" for anything under ~100 KB of text — roughly
+    /// 25k tokens, i.e. essentially every real prompt.
+    ///
+    /// Measured on the live swarm 2026-08-29: a 4728-token prompt reached
+    /// segment 0 as `activation_bytes=24045`, was budgeted `2s/layer`, and its
+    /// holder was abandoned after 32 s of a job that needs minutes. The request
+    /// then succeeded on the standby, so the cost was a wasted 32 s of a 176 s
+    /// request plus a needless failover — not a failure, which is why it went
+    /// unnoticed. The peer-agnostic constants stay peer-agnostic; this only
+    /// stops the fallback asking the wrong question.
+    fn forward_is_prefill(activation_bytes: usize, units: ActivationUnits) -> bool {
+        match units {
+            ActivationUnits::PromptBytes => true,
+            ActivationUnits::HiddenStates => activation_bytes > PREFILL_ACTIVATION_THRESHOLD_BYTES,
+        }
     }
 
     /// Wait for a remote segment to return its result via the oneshot channel.
@@ -359,7 +400,7 @@ impl PipelineExecutor {
             timeout_basis = budget.basis(),
             num_layers,
             activation_bytes,
-            is_prefill = activation_bytes > super::PREFILL_ACTIVATION_THRESHOLD_BYTES,
+            is_prefill = budget.is_prefill(),
             "DIAG: waiting for remote segment result"
         );
         match tokio::time::timeout(timeout, rx).await {
@@ -542,6 +583,44 @@ mod segment_budget_tests {
             "slow {:?} should outrank fast {:?}",
             mk(&slow),
             mk(&fast)
+        );
+    }
+
+    /// A forward carrying the prompt performs the whole prefill, however few
+    /// bytes the prompt is — so it must not be budgeted at the decode rate.
+    ///
+    /// Measured on the live swarm 2026-08-29: a 4728-token prompt reached
+    /// segment 0 as `activation_bytes=24045`, fell under
+    /// `PREFILL_ACTIVATION_THRESHOLD_BYTES` (a hidden-state scale), and was
+    /// given 16 x 2s. Its holder was abandoned 32 s into a job needing minutes.
+    #[test]
+    fn a_forward_carrying_the_prompt_is_budgeted_as_a_prefill() {
+        let state = test_state();
+        let node = NodeId([9u8; 32]);
+        let model = ModelId("m".into());
+        // The exact shape observed live.
+        let (prompt_bytes, layers) = (24_045usize, 16u32);
+
+        let mk = |units, kind| {
+            SegmentBudget::for_forward(&state, &node, &model, kind, layers, prompt_bytes, units)
+        };
+        let prompt = mk(ActivationUnits::PromptBytes, WorkKind::Prefill);
+        assert!(
+            prompt.is_prefill(),
+            "a forward handed the prompt itself IS the prefill"
+        );
+
+        // Control: the SAME byte count as hidden states really is about one
+        // token's worth, and must still be budgeted as a decode. This is what
+        // makes the assertion above about the units rather than the size.
+        let hidden = mk(ActivationUnits::HiddenStates, WorkKind::Decode);
+        assert!(!hidden.is_prefill());
+        assert!(
+            prompt.duration() > hidden.duration(),
+            "prefill budget {:?} must exceed the decode budget {:?} at identical \
+             byte counts — before the fix they were equal",
+            prompt.duration(),
+            hidden.duration()
         );
     }
 

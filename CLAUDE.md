@@ -167,7 +167,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- **Counts** (re-measured 2026-08-29): **2133 lib** + 11 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 34 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
+- **Counts** (re-measured 2026-08-29): **2134 lib** + 11 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 34 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
 - **Benches and harnesses — see `docs/DIAGNOSTICS.md` § Benchmarks for the full list and the traps.** The ones reached for most: `examples/prefill_bench.rs` (drives `SplitModel::forward` directly, no daemon — `SWARM_BENCH_MODEL`, `SWARM_BENCH_PROMPT`, `SWARM_BENCH_DECODE`, `SWARM_BENCH_REPS`, `SWARM_BENCH_DEVICE=cuda`, and `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` which prices a K-token forward against a 1-token one at the same history depth — the number that decides whether speculation pays; pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown), `examples/qmatmul_bench.rs` (asserts the tiled kernel is bit-identical to upstream), `examples/smoke_test.sh [binary] [port]` (9 checks on an isolated node — run it on the DOWNLOADED release artifact; it now reports checks that COULD NOT RUN separately and never says "all checks passed" over them, and fails fast if the node it started dies — before 2026-08-25 it skipped the three inference checks silently and still claimed success, so "smoke 8/8" had been passing here without ever exercising inference), `examples/soak_test.sh` (`HOURS=` must be a WHOLE number; data dir is per-`PORT`, so two soaks no longer kill each other).
 - **Measurement discipline** (paid for repeatedly): min-of-N on an IDLE box — the same unchanged code measured 0.42 ms and 0.97 ms across runs here, and a benchmark taken while a build runs is worthless. **min-of-N is for benchmarks, not for live measurement** (#367). A/B inside ONE binary via an env switch (`SWARMLLM_DECODE_CALIBRATE=0`, `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`, `SWARMLLM_FLASH_OFFSET_CAUSAL=0`, `SWARMLLM_GQA_DECODE_FLASH=1`, `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1`), never across two builds. **Verify the mechanism fired**, not just that the outcome improved. Pinned reference models: `docs/REFERENCE_MODELS.md`.
 - Unit tests: in-module `#[cfg(test)]` blocks
@@ -217,47 +217,43 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2133 lib (dev,claude-subscription) — re-measured 2026-08-29, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 34 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
+All 20 build phases complete. All subsystems wired — no stubs. **2134 lib (dev,claude-subscription) — re-measured 2026-08-29, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 34 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 11 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### v0.3.132-alpha (2026-08-29) — one dial per address, and a name is not an identity
+### Unreleased — the forward that does the prefill was budgeted as a decode
 
-Detail in `memory/round_log_0829_dial_identity.md`; gotchas **#405**, **#406**.
-Both found by watching a live node rather than reading code, and the first took
-**three** attempts at a cause.
+Detail in `memory/round_log_0829_functional_check.md`; gotcha **#407**. Found by
+RUNNING a long prompt through the distributed pipeline, not by reading code.
 
-- **A peer went unreachable for stretches of every hour** (#405). `discovery::
-  bootstrap_peers` dialled **one bare `swarm.dial(addr)` per ADDRESS**: no
-  `PeerCondition`, so libp2p's per-peer dedup could not see it, and it never
-  reached `dial_checked`, so #404's gate did not apply either. A peer cached at
-  two addresses reached `max_connections_per_peer=3`; rr then spread sends over
-  all three and the dead one ate its share. **Measured paired against the
-  unpatched live node, same 43 min: 13 establishments → 3.** Three more faults
-  fell out: the peer read from the FIRST `/p2p/` (a relay circuit names the
-  RELAY) in two places; `PeerCondition::Disconnected` where libp2p's own default
-  is stricter; and **223 dials to our OWN peer id in 45 min**, found only because
-  I had added dial attribution at DEBUG to answer a different question.
-  ⚠ **The repo test asserting every dial is gated matched `self.swarm.dial(` and
-  missed the free-function form — which is why .131's audit of exactly this
-  question missed the site that mattered.**
-- **A name is not a content identity** (#406). Three Q4_K_M builds of one model
-  were live at once — 4,683,073,536 / 4,683,074,144 / 4,683,074,336 bytes — all
-  slugifying to one id, sharing no shard hash. `origin_verified` guarded the
-  hashes; adoption was still **last-writer-wins on SHAPE**, so another build's
-  sizes overwrote ours, leaving a manifest describing one file and
-  authenticating another. Compare shape, never hashes (a partial holder
-  publishes placeholders), gated on origin knowledge so a re-publish still lands.
-
-⚠ **Two published causal claims were WRONG before the third stuck** — the PEX
-`None` arm, then the dial condition. Both real defects; neither the cause. **The
-cross-tab that convinced me (52/52 duplicates bare) distinguished WHICH PATH
-DIALLED, not that PEX was dialling.** Corrected in-repo, not dropped.
+- **Segment 0 is handed the PROMPT; every later hop carries hidden states.**
+  `compute_segment_timeout` tested `activation_bytes > 100_000` — a
+  **hidden-state** scale — against prompt text, so the one forward that performs
+  the entire prefill was classified `is_prefill=false` and given
+  `DECODE_SECS_PER_LAYER = 2` instead of `15`. **32 s where it needed 240**, for
+  any prompt under ~25k tokens, i.e. essentially all of them. Live: a 4728-token
+  prompt, holder abandoned mid-prefill, standby answered — 176 s total, 32 wasted.
+  Fixed via `forward_is_prefill(bytes, units)`; `PromptBytes` IS a prefill.
+  ⚠ **The units were already explicit and already honoured on the MEASURED path**
+  (which refuses the hidden-state coefficient for them); the fallback beneath it
+  made exactly the unit error the comment above it warned about.
+  ⚠ **I expected the abandoned peer to be docked and it was NOT** — the log said
+  "Skipping credit penalty". Confirmed cost is a wasted deadline, nothing more.
+  **Nothing ever failed**, which is why it survived: a defect that only costs
+  latency raises no alarm.
+- Same sweep: **#400 confirmed dead in its own shape** (cold + distributed +
+  23,929-char prompt → correct answer from the END of the prompt,
+  `prompt_tokens=4728` against `chars/4`'s 5982). 4/4 peers healthy, zero foreign
+  nodes, **zero ERRORs** in the log, SSE closing in 0.76 s (#390 holding).
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
+- **v0.3.132** (08-29): one dial per ADDRESS not per peer (#405; paired 13→3
+  establishments), and a name is not a content identity — three Q4_K_M builds of
+  one model sharing an id (#406). ⚠ **TWO published causal claims were WRONG
+  first.** `round_log_0829_dial_identity.md`.
 - **v0.3.131** (08-28): **two constants nobody had measured** — the GPU swap floor
   was 3.65x WORSE than no floor in the case it was written for (#403; 299.3 s vs
   81.9 s over 8 turns), and **under alternation an idle-time floor is inert or

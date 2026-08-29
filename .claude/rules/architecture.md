@@ -203,6 +203,46 @@ deserialize on the other side. The rule that fixes this:
 - New `NodeCapability` fields MUST be `#[serde(default)]` so older nodes'
   announcements still deserialize.
 
+## The units decide whether a forward is a prefill, not the byte count
+
+**`inference::pipeline::local::PipelineExecutor::forward_is_prefill(activation_bytes, units)`**
+is the single answer to "is this forward doing a prefill?", for the deadline
+(`compute_segment_timeout`) and for the DIAG that reports it. `SegmentBudget`
+carries the resolved verdict (`is_prefill()`) so the log cannot contradict the
+budget it is describing.
+
+**`ActivationUnits::PromptBytes` means prefill, unconditionally.** Segment 0 of a
+non-pre-embedded pipeline is handed the prompt itself; every later hop carries
+hidden states. A forward carrying the prompt performs the whole prefill by
+construction, however short the prompt — so the size test does not apply to it.
+Only `HiddenStates` may be classified by size, because
+`PREFILL_ACTIVATION_THRESHOLD_BYTES` (100_000) is a **hidden-state** scale: one
+token of hidden state is thousands of bytes, one token of prompt is a few.
+
+**Why it is a rule.** The units were already explicit, and already honoured on
+the *measured* path — `for_forward` refuses to predict from the peer-speed
+coefficient for `PromptBytes`, with a comment saying that feeding those into the
+same average "would silently corrupt the estimate". It then fell through to a
+fallback that made exactly that unit error: prompt bytes compared against the
+hidden-state threshold answered "decode" for anything under ~100 KB of text
+(~25k tokens), i.e. essentially every real prompt. The forward that does the
+entire prefill got `DECODE_SECS_PER_LAYER = 2` rather than
+`PREFILL_SECS_PER_LAYER = 15` — 32 s instead of 240 s at 16 layers. Measured on
+the live swarm 2026-08-29 (gotcha #407): a 4728-token prompt, `activation_bytes
+= 24045`, holder abandoned after 32 s of a job needing minutes; the standby
+answered correctly and the request succeeded, so **nothing failed and nothing
+alerted** — the whole cost was a wasted deadline inside a 176 s request.
+
+The guard existed on the sophisticated path and was missing from the crude one
+beneath it. When a value's units depend on which path produced it, every
+consumer needs the units — the fallback included. A threshold is a comparison
+against a scale, so it is a unit conversion wearing a constant's clothes.
+
+**Do not re-derive the verdict at a call site**, and do not widen
+`PREFILL_ACTIVATION_THRESHOLD_BYTES` to "cover" prompts: that would break the
+`HiddenStates` classification it was chosen for. `SegmentBudget` remains
+constructible only through `for_forward` for the same reason it always was.
+
 ## A ticker merged into a response stream is a termination condition
 
 `api::sse::progress_ticker` is the ONE keep-alive/progress ticker for both SSE
