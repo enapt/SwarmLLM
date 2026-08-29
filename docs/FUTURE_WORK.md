@@ -10711,7 +10711,7 @@ refused until memory frees up.
 admission/load race, and wants testing on a card under contention rather than a
 compile check — this was found in the last hour before a release.
 
-## Retire a worker by draining it, not by killing it (2026-08-27, narrowed 08-28)
+## Retire a worker by draining it, not by killing it (2026-08-27, narrowed 08-28, FIXED 2026-08-29)
 
 Unloading a model kills its subprocess, so a request arriving between the
 decision to unload and the kill dies with it. Both paths that displace a model
@@ -10729,6 +10729,29 @@ residual was a model under continuous load never reaching the 60 s floor and so
 never returning to the card. The floor is 5 s since v0.3.131, which mostly
 dissolves that case — what remains is the in-flight race itself, which is small,
 rarely hit, and now the only reason the floor cannot simply be zero.
+
+**FIXED 2026-08-29.** `ModelProcessPool::unload_model` now waits for the
+worker's `responses` map to empty (`await_responses_drained`, bounded by
+`WORKER_DRAIN_WAIT`) *before* sending `DaemonMsg::Shutdown`.
+
+Two things the investigation established that this entry had not. The
+"stop admitting new requests" half was **already done**: `workers.remove` runs
+first and every forward path re-acquires the handle from that map, so a request
+arriving afterwards spawns a fresh worker. And **dropping the handle is not what
+kills the in-flight request** — the map holds an `Arc` and the in-flight caller
+holds another, so the child outlives the drop; the explicit `Shutdown` message
+is the entire race. So the fix is one wait in one place, not the cross-cutting
+change to "how workers are retired everywhere" that was anticipated above:
+`free_vram_for_admission` and `worker_should_return_to_gpu` both reach
+`unload_model`, so both inherit it.
+
+The wait is deliberately **bounded and reported**: a request that never
+completes must not hold that model's memory for the daemon's lifetime, which
+would refuse every later load on the device — a worse failure than the race.
+When it gives up it logs how many it stranded. Retirement only ever targets
+*idle* models, so the common path finds an empty map and returns without
+sleeping; a test asserts that, so no unload pays for a race that is not
+happening.
 
 
 ## Cost the GPU swap properly, instead of using idle time as a proxy (2026-08-28)

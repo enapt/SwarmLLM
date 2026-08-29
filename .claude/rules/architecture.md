@@ -752,6 +752,28 @@ silently break at the wire if duplicated:
   different places must be told which place each one is in — and a component
   that does not own a resource must not be able to reclaim it.
 
+  **Retirement DRAINS, it does not kill** (2026-08-29).
+  `unload_model` waits for the worker's `responses` map to empty
+  (`await_responses_drained`, bounded by `WORKER_DRAIN_WAIT`) before sending
+  `DaemonMsg::Shutdown`. Every retirement funnels through `unload_model` —
+  `free_vram_for_admission` against its victims, `worker_should_return_to_gpu`
+  against the processor copy it replaces, the idle timer — so all of them
+  inherit it, and a new displacement path gets it for free.
+  **Two things worth knowing before touching it.** The "stop admitting" half is
+  already done by `workers.remove`, because every forward path re-acquires the
+  handle from that map; a request arriving after the remove spawns a fresh
+  worker. And **dropping the handle is not what kills the in-flight request** —
+  the map holds an `Arc` and the caller holds another, so the child outlives the
+  drop. The explicit `Shutdown` is the entire race, which is why one wait in one
+  place closes it rather than the cross-cutting change `docs/FUTURE_WORK.md`
+  anticipated.
+  The bound is not negotiable: a request that never completes must not hold that
+  model's memory for the daemon's lifetime, since that would refuse every later
+  load on the device — the same trade `WORKER_EXIT_WAIT` already makes, and a
+  worse failure than the race. It reports what it stranded. Retirement only ever
+  targets idle models, so the common path returns without sleeping at all, and a
+  test pins that so no unload pays for a race that is not happening.
+
 - **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
   admission check against it. The loader records `kv_headroom_bytes` on the
   model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward

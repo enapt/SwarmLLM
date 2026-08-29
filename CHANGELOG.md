@@ -6,6 +6,20 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A request could be killed part-way through by the model it was running on
+  being put away.** When SwarmLLM makes room on the graphics card, or moves a
+  model back onto it, it stops the old model — and it was telling that model to
+  stop without checking whether it was still answering something. A request that
+  had started moments earlier died with it.
+
+  It was rare, because SwarmLLM only ever puts away a model that has been idle,
+  and it was narrow — a fraction of a second between deciding and stopping. It
+  now waits for work already underway to finish first. If something never
+  finishes it still gives up after ten seconds and says how many requests it
+  cut off, because holding a model's memory indefinitely would block every
+  later one. Putting away a model that was doing nothing — which is nearly
+  always — is unchanged and costs no extra time.
+
 - **The log no longer fills up with the same complaint about a model.** When
   another machine on the network has a different build of a model you also have
   — same name, different file, which happens whenever two people quantise a

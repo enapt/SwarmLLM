@@ -659,6 +659,19 @@ async fn dispatch_batch_result(
 /// eviction triggered from the request path.
 const WORKER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long a retiring worker is given to finish the requests already in flight
+/// before it is told to shut down.
+///
+/// Retirement is triggered by models that are *idle* (both displacement paths
+/// impose an idle floor), so in practice there is nothing to wait for and the
+/// drain returns immediately. This bounds the exception, not the rule.
+///
+/// **Finite deliberately.** A request that never completes must not hold a
+/// model's memory for the life of the daemon — that would refuse every later
+/// load on the device, which is a worse failure than the one being closed here.
+/// Same trade, and same reasoning, as `WORKER_EXIT_WAIT` below it.
+const WORKER_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Poll interval while waiting for a worker to be reaped.
 const WORKER_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
@@ -1955,6 +1968,30 @@ impl ModelProcessPool {
             }
             if std::time::Instant::now() >= deadline {
                 return false;
+            }
+            tokio::time::sleep(WORKER_EXIT_POLL).await;
+        }
+    }
+
+    /// Wait for a retiring worker's in-flight requests to finish.
+    ///
+    /// Returns the number still outstanding when it gave up — `0` means the
+    /// worker drained. Polls rather than signals because `responses` is a
+    /// `DashMap` shared with the reader actor, and the common case exits on the
+    /// first check without sleeping at all.
+    ///
+    /// Takes the map rather than the handle so it is reachable from a test: a
+    /// `WorkerHandle` owns a child process and a socket, and the thing being
+    /// verified here is only the waiting.
+    async fn await_responses_drained(responses: &ResponseMap, limit: std::time::Duration) -> usize {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            let outstanding = responses.len();
+            if outstanding == 0 {
+                return 0;
+            }
+            if std::time::Instant::now() >= deadline {
+                return outstanding;
             }
             tokio::time::sleep(WORKER_EXIT_POLL).await;
         }
@@ -3932,6 +3969,35 @@ impl ModelProcessPool {
             // model on its way back to the card answered "GPU" and lifted every
             // other model's pin on the strength of memory it never held.
             let freed_gpu_memory = handle.placed_on_cpu_because.is_none();
+
+            // Retire by DRAINING, not by killing under a live request.
+            //
+            // The `remove` above already closed new admission: every forward
+            // path re-acquires the handle from `workers`, so a request arriving
+            // now spawns a fresh worker rather than joining this one. What is
+            // left is a request that took the handle just before the remove and
+            // is still in flight — and `DaemonMsg::Shutdown` below stops the
+            // worker immediately, so sending it under that request kills the
+            // reply. Dropping the handle does not, since the map holds an `Arc`
+            // and the in-flight caller holds another; the explicit shutdown is
+            // the whole race.
+            //
+            // Both displacement paths mitigated this with an idle floor plus a
+            // not-busy check, which makes the window small without closing it
+            // (`docs/FUTURE_WORK.md`). This closes it, in the one place every
+            // retirement funnels through.
+            let stranded =
+                Self::await_responses_drained(&handle.responses, WORKER_DRAIN_WAIT).await;
+            if stranded > 0 {
+                tracing::warn!(
+                    model_id = %model_id,
+                    stranded_requests = stranded,
+                    waited_ms = WORKER_DRAIN_WAIT.as_millis(),
+                    "Retiring a worker with requests still in flight — they will fail; \
+                     waiting longer would hold this model's memory indefinitely"
+                );
+            }
+
             // Try graceful shutdown first
             if let Ok(mut writer) = handle.writer.try_lock() {
                 let _ = send_daemon(&mut *writer, &DaemonMsg::Shutdown, &[]).await;
@@ -4070,6 +4136,67 @@ impl ModelProcessPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker with nothing in flight retires immediately — the common case,
+    /// since both displacement paths only retire idle models. If this ever
+    /// sleeps, every unload pays for a race that is not happening.
+    #[tokio::test]
+    async fn an_idle_worker_drains_at_once() {
+        let map: ResponseMap = Arc::new(DashMap::new());
+        let t0 = std::time::Instant::now();
+        let stranded =
+            ModelProcessPool::await_responses_drained(&map, std::time::Duration::from_secs(30))
+                .await;
+        assert_eq!(stranded, 0);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(200),
+            "an empty map must not wait; took {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// The point of the change: a request still in flight is WAITED for, rather
+    /// than having `DaemonMsg::Shutdown` sent under it.
+    #[tokio::test]
+    async fn a_request_in_flight_is_waited_for() {
+        let map: ResponseMap = Arc::new(DashMap::new());
+        let id = Uuid::new_v4();
+        map.insert(id, (1, dummy_tx()));
+
+        let finisher = map.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            finisher.remove(&id);
+        });
+
+        let t0 = std::time::Instant::now();
+        let stranded =
+            ModelProcessPool::await_responses_drained(&map, std::time::Duration::from_secs(30))
+                .await;
+        assert_eq!(stranded, 0, "it should have drained, not timed out");
+        assert!(
+            t0.elapsed() >= std::time::Duration::from_millis(100),
+            "it must actually have waited for the in-flight request"
+        );
+    }
+
+    /// ...but the wait is BOUNDED. A request that never completes must not hold
+    /// this model's memory for the life of the daemon: that would refuse every
+    /// later load on the device, which is worse than the race being closed.
+    #[tokio::test]
+    async fn a_stuck_request_does_not_block_retirement_for_ever() {
+        let map: ResponseMap = Arc::new(DashMap::new());
+        map.insert(Uuid::new_v4(), (1, dummy_tx()));
+        map.insert(Uuid::new_v4(), (2, dummy_tx()));
+
+        let stranded =
+            ModelProcessPool::await_responses_drained(&map, std::time::Duration::from_millis(120))
+                .await;
+        assert_eq!(
+            stranded, 2,
+            "it must give up and report what it stranded, so the log can say so"
+        );
+    }
 
     /// Builds a guard the way `register_response` does, for map-level tests.
     fn guard_for(map: &ResponseMap, request_id: Uuid, token: u64) -> ResponseGuard {
