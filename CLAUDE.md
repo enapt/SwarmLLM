@@ -221,46 +221,54 @@ All 20 build phases complete. All subsystems wired — no stubs. **2142 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### v0.3.133-alpha (2026-08-29) — five things that had been quietly wrong
+### v0.3.134-alpha (2026-08-29) — the dashboard's Models tab, and how it was found
 
-Detail in `memory/round_log_0829_functional_check.md`; gotchas **#407**, **#408**,
-**#409**. **All found by RUNNING or auditing the system, none by reading a diff**
-— and two because a TOOL lied.
+Detail in `memory/round_log_0829_dashboard_syscalls.md`; gotchas **#410**,
+**#411**. **Found by timing an endpoint that WORKED** — nothing failed, nothing
+warned, no test caught it; a `curl -m 10` timed out and returned empty.
 
-- **#409 a model you had ever served could not be deleted.** `model_is_in_use`
-  asked `serving_models.contains_key`, whose entries are **never removed by
-  design** (`prune.rs` reads `last_served_at` off a zeroed one), so it answered
-  "EVER served" and one peer request made the model undeletable for the daemon's
-  life. ⚠ **Every test there asserted the PROTECTIVE direction, none the RELEASE
-  — a guard makes two promises and only one fails loudly.**
-- **#407 the forward doing the whole prefill was budgeted as a DECODE.** Segment
-  0 carries the **prompt text**; it was measured against a **hidden-state**
-  threshold. 2s/layer not 15 — **32 s where it needed 240**, any prompt under
-  ~25k tokens. ⚠ The units were explicit and honoured on the MEASURED path; the
-  fallback beneath made the exact error the comment above it warned of.
-- **#408 one NUL byte made `docs/DIAGNOSTICS.md` invisible to grep, SILENTLY**,
-  for two weeks. Found only because a search for a section that DOES exist came
-  back empty. ⚠ **`grep` here wraps ugrep `-I`, which skips binary files without
-  saying so — `command grep` is the escape hatch.**
-- **Worker retirement killed in-flight requests** (`Shutdown` sent undrained).
-  Open since 08-27 expecting a cross-cutting change; needed one bounded wait —
-  `workers.remove` already closed admission and the `Arc` refcount means the
-  DROP is not the killer.
-- **A per-shard WARN fired 16-28x/min for ever** (~10% of the log). Its
-  whole-manifest twin was rate-limited 08-26; the per-shard arm, which
-  multiplies by shard count, was missed.
-- **The leak detector cried leak on a CLEAN 2 h soak** — `soak_report.sh` judged
-  trend from three single samples on a series swinging ~380 MB, while quartile
-  means fell 2873→2652 MB. Now uses quartile means; a synthetic leak still trips.
+- **#410 `GET /api/admin/models` took a stable 11.2 s, and 9.6 s of it was
+  KERNEL time.** GGUF headers were parsed off an **unbuffered `File`** at seven
+  sites, so each of the metadata walk's thousands of tiny reads became a syscall
+  — ~820k for one 7.8 MB header, per model, per refresh. Each header was also
+  parsed TWICE, the second time only to reach `vocab.len()`, a count the first
+  parse already had. → `inference::split::read_gguf_header`.
+- **#411 Rust evaluates every argument, including the expensive one the callee
+  never reads.** `delegation_target` returns `None` before touching
+  `model_vram_mb`, so a healthy node priced a model and discarded it once per
+  pipeline assembly — on the cold-start path. Plus the listing asked two
+  questions that come from one reading. → `gpu_estimate_and_fit`, sharing
+  `fits_in_budget` so the two verdicts cannot drift.
 
-**Verified**: soak **3334 req / 0 fail / 2 h** (worker RSS -221 MB, no
-respawns); smoke **9/9**; shapes **7/7**; `cargo audit` = `SECURITY.md`'s six
-documented advisories, none new.
+⚠ **Split utime/stime BEFORE theorising about slowness.** Two numbers from
+`/proc/<pid>/stat` partitioned the hypothesis space in one step; "parses a lot of
+metadata" and "makes 820k read calls" look identical in the source. It also
+explains why the optimised release binary was no faster than a debug build —
+optimisation cannot remove a syscall. ⚠ **A STABLE duration is fixed work, not
+load.**
+
+**Verified**: A/B/A/B alternated, release CUDA both arms, same data —
+**12.1 s → 0.21 s (~57x)**, system ticks **962 → 4**, user ticks halving again on
+the second fix (the number that proves the mechanism, not just the outcome). All
+nine models' VRAM estimates byte-identical. The new repo-consistency test goes
+red without the fix.
+
+**Two hypotheses measured and REJECTED rather than shipped**: an open dashboard
+costs ~0.75% of a core, not the 10% idle gap it was blamed for; and a dropped
+first token under batching was the model, identical alone five times.
 
 ### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these.
 
+- **v0.3.133** (08-29): five things quietly wrong, ALL found by RUNNING or
+  auditing — a model you had EVER served could not be deleted (#409,
+  `contains_key` on a map whose entries are never removed by design); the
+  forward doing the whole PREFILL was budgeted as a DECODE (#407, 32 s where it
+  needed 240); one NUL byte made `docs/DIAGNOSTICS.md` invisible to grep
+  SILENTLY for two weeks (#408); worker retirement killed in-flight requests; a
+  per-shard WARN fired 16-28x/min for ever. ⚠ **TWO were found because a TOOL
+  lied.** `round_log_0829_functional_check.md`.
 - **v0.3.132** (08-29): one dial per ADDRESS not per peer (#405; paired 13→3
   establishments), and a name is not a content identity — three Q4_K_M builds of
   one model sharing an id (#406). ⚠ **TWO published causal claims were WRONG
