@@ -393,6 +393,79 @@ pub fn build_shard_infos_from_layouts(
         .collect()
 }
 
+// ── Repeat-rejection suppression ────────────────────────────────────────────
+//
+// Lives here rather than beside any one caller: a manifest we have decided
+// against is a manifest-identity fact, and there are now two places that reach
+// that verdict — the gossip ingress (hash verification) and the registry (a
+// different BUILD of the same model). Two suppression maps would each report
+// the other's rejections as new.
+
+/// A manifest we have already verified and rejected, so the next identical
+/// copy costs neither a re-hash nor another log line.
+///
+/// Keyed by `(model, the manifest hash we rejected)`. Keying on the HASH is
+/// what keeps this self-correcting: if the publisher fixes its copy the hash
+/// changes, the key misses, and the new manifest is verified normally. It can
+/// therefore never latch a model into permanent rejection.
+pub(crate) struct RejectedManifest {
+    last_logged: std::time::Instant,
+    /// Rejections swallowed since then, reported with the next emitted line so
+    /// the rate is visible even though the repetition is not.
+    suppressed: u64,
+}
+
+/// How long to hold an identical manifest rejection before logging it again.
+///
+/// Measured on the live node 2026-08-26: two peers re-gossiped one contradicted
+/// `qwen2.5-coder` manifest every 30 s, producing **4709 WARN lines** — 14% of
+/// every warning in a month-long log — for a condition correctly handled the
+/// first time. An hour against a 30-second cadence turns 120 lines into 1.
+pub(crate) const REJECTED_MANIFEST_LOG_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(3600);
+
+/// Bound on the rejection map. Reached only under deliberate manifest spam; a
+/// forgotten entry costs one extra verification and one extra log line.
+pub(crate) const MAX_REJECTED_MANIFESTS: usize = 512;
+
+pub(crate) static REJECTED_MANIFESTS: std::sync::LazyLock<
+    dashmap::DashMap<(crate::types::ModelId, [u8; 32]), RejectedManifest>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+/// Should this rejection be logged, and how many were swallowed since the last
+/// one? `None` means "already known and still inside the quiet window".
+///
+/// Returns `Some(suppressed_count)` the first time a given (model, hash) is
+/// rejected and once per window thereafter.
+pub(crate) fn note_manifest_rejection(
+    model: &crate::types::ModelId,
+    manifest_hash: [u8; 32],
+) -> Option<u64> {
+    let key = (model.clone(), manifest_hash);
+    if let Some(mut prev) = REJECTED_MANIFESTS.get_mut(&key) {
+        if prev.last_logged.elapsed() >= REJECTED_MANIFEST_LOG_WINDOW {
+            let n = prev.suppressed;
+            prev.last_logged = std::time::Instant::now();
+            prev.suppressed = 0;
+            return Some(n);
+        }
+        prev.suppressed = prev.suppressed.saturating_add(1);
+        return None;
+    }
+    if REJECTED_MANIFESTS.len() >= MAX_REJECTED_MANIFESTS {
+        // Full: log it rather than silently dropping the report.
+        return Some(0);
+    }
+    REJECTED_MANIFESTS.insert(
+        key,
+        RejectedManifest {
+            last_logged: std::time::Instant::now(),
+            suppressed: 0,
+        },
+    );
+    Some(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{classify_p2p_shard_acceptance as classify, P2pShardAcceptance as A};

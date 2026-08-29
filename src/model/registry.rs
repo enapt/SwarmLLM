@@ -171,6 +171,19 @@ impl ModelRegistry {
         self.origin_verified.get(shard_id).map(|h| *h)
     }
 
+    /// Did THIS node fetch any part of this model from its origin?
+    ///
+    /// The adjudicator for a disagreement about what the model *is*. Our own
+    /// download is the only evidence available that is not just another node's
+    /// assertion, so it is what lets [`Self::register_manifest`] tell "someone
+    /// re-published this model" (adopt it) from "someone else built it
+    /// differently" (keep ours).
+    fn has_origin_knowledge(&self, model_id: &ModelId) -> bool {
+        self.origin_verified
+            .iter()
+            .any(|e| &e.key().model_id == model_id)
+    }
+
     pub fn register_manifest(&self, mut manifest: ModelManifest) {
         // Universal net against copied-folder model names (`<model>.FULLBACKUP`,
         // `<model>.old`). This is the single point every adoption path funnels
@@ -186,6 +199,50 @@ impl ModelRegistry {
                  the real model id if this is genuine."
             );
             return;
+        }
+        // A different BUILD of this model is not an update to it.
+        //
+        // A model id is derived from a display name, so every independent GGUF
+        // build of one model answers to the same id — three Q4_K_M builds of
+        // Qwen2.5-Coder-7B-Instruct were observed on the live swarm within 800
+        // bytes of each other, sharing no shard hash (gotcha #406). Adoption is
+        // last-writer-wins, so without this the other build's `shard_count`,
+        // `total_size_bytes` and per-shard sizes overwrite ours while
+        // `origin_verified` keeps our hashes — leaving a manifest that
+        // describes one file and authenticates another.
+        //
+        // Our own origin download is the adjudicator, exactly as it is for a
+        // contradicted hash: provenance we fetched ourselves outranks any
+        // gossiped claim, and a claim travelling the network is just another
+        // assertion. With NO origin knowledge we have no grounds to argue and
+        // adopt as before — which is also what keeps a genuine re-publish
+        // (same author, new bytes, new shape) working.
+        if let Some(ours) = self.manifests.get(&manifest.id) {
+            if Self::describes_a_different_build(&ours, &manifest)
+                && self.has_origin_knowledge(&manifest.id)
+            {
+                let (our_total, our_shards) = (ours.total_size_bytes, ours.shard_count);
+                drop(ours);
+                if let Some(suppressed) = crate::model::manifest::note_manifest_rejection(
+                    &manifest.id,
+                    manifest.manifest_hash,
+                ) {
+                    tracing::warn!(
+                        model = %manifest.id,
+                        publisher = %manifest.publisher,
+                        their_bytes = manifest.total_size_bytes,
+                        their_shards = manifest.shard_count,
+                        our_bytes = our_total,
+                        our_shards = our_shards,
+                        suppressed_since_last = suppressed,
+                        "Ignoring a manifest that describes a different build of \
+                         this model — same name, different file. Ours came from \
+                         its origin, so it is kept; theirs is not corrupt, it is \
+                         a different one."
+                    );
+                }
+                return;
+            }
         }
         // Announce at INFO only when something actually changed.
         //
@@ -339,6 +396,36 @@ impl ModelRegistry {
             tracing::debug!(model = %manifest.id, "DIAG: register_manifest (unchanged)");
         }
         self.manifests.insert(manifest.id.clone(), manifest);
+    }
+
+    /// Do these two manifests describe the same *file*, or two different builds
+    /// that happen to share a name?
+    ///
+    /// A model id comes from a display name ([`crate::types::slugify_model_name`]),
+    /// so every independent GGUF build of one model collapses into a single
+    /// identity. Measured on the live swarm: three Q4_K_M builds of
+    /// Qwen2.5-Coder-7B-Instruct — 4,683,073,536 / 4,683,074,144 /
+    /// 4,683,074,336 bytes — all answering to
+    /// `qwen2.5-coder-7b-instruct-q4-k-m`, within 800 bytes of each other and
+    /// sharing not one shard hash (gotcha #406).
+    ///
+    /// The comparison is on SHAPE, never on hashes. Sizes are structural — a
+    /// manifest carries the real `size_bytes` for every shard, held or not,
+    /// because they come from the GGUF layout — whereas a hash is only known
+    /// for a shard its author actually holds, and is all-zero otherwise. So
+    /// shape answers this question for a partial holder, where hashes cannot.
+    fn describes_a_different_build(ours: &ModelManifest, theirs: &ModelManifest) -> bool {
+        if ours.shard_count != theirs.shard_count
+            || ours.total_size_bytes != theirs.total_size_bytes
+        {
+            return true;
+        }
+        theirs.shards.iter().any(|t| {
+            ours.shards
+                .iter()
+                .find(|o| o.index == t.index)
+                .is_some_and(|o| o.size_bytes != t.size_bytes)
+        })
     }
 
     /// Record that a node holds a specific shard.
@@ -1246,6 +1333,118 @@ mod tests {
 
         let stored = registry.get_manifest(&ModelId("m".into())).unwrap();
         assert_eq!(stored.shards[0].hash, [2u8; 32]);
+    }
+
+    /// Two independent GGUF builds of one model answer to the same id, because
+    /// the id comes from a display name. Three Q4_K_M builds of
+    /// Qwen2.5-Coder-7B-Instruct were live on the swarm at once — 4,683,073,536
+    /// / 4,683,074,144 / 4,683,074,336 bytes — within 800 bytes of each other
+    /// and sharing not one shard hash.
+    ///
+    /// Adoption is last-writer-wins, so the other build's shape used to
+    /// overwrite ours while `origin_verified` held our hashes in place: a
+    /// manifest describing one file and authenticating another.
+    #[test]
+    fn a_different_build_of_the_same_model_does_not_overwrite_the_one_we_fetched() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me);
+        let sid = ShardId {
+            model_id: ModelId("qwen2.5-coder-7b-instruct-q4-k-m".into()),
+            index: 0,
+        };
+
+        // Ours, fetched from its origin — the only evidence here that is not
+        // just another node's assertion.
+        let mut ours = test_manifest(&sid.model_id.0, "Qwen2.5 Coder 7B Instruct");
+        ours.total_size_bytes = 4_683_074_144;
+        ours.shards = vec![test_shard(0, [7u8; 32])];
+        registry.record_origin_verified_hash(sid.clone(), [7u8; 32]);
+        registry.register_manifest(ours);
+
+        // Somebody else's build: same name, 192 bytes larger, different bytes.
+        let mut theirs = test_manifest(&sid.model_id.0, "Qwen2.5 Coder 7B Instruct");
+        theirs.total_size_bytes = 4_683_074_336;
+        theirs.manifest_hash = [9u8; 32];
+        theirs.publisher = NodeId([2u8; 32]);
+        theirs.shards = vec![ShardInfo {
+            size_bytes: 700,
+            ..test_shard(0, [8u8; 32])
+        }];
+        registry.register_manifest(theirs);
+
+        let stored = registry.get_manifest(&sid.model_id).expect("manifest kept");
+        assert_eq!(
+            stored.total_size_bytes, 4_683_074_144,
+            "the build we fetched from the origin must survive another build's gossip"
+        );
+        assert_eq!(
+            stored.shards[0].size_bytes, 512,
+            "per-shard sizes decide byte-range requests — they must describe OUR file"
+        );
+    }
+
+    /// The control, and the reason the guard is gated on origin knowledge
+    /// rather than on shape alone: an author re-publishing a model genuinely
+    /// changes its shape, and with nothing of our own to weigh against theirs
+    /// we have no grounds to refuse it.
+    #[test]
+    fn a_reshaped_manifest_is_still_adopted_when_we_have_no_origin_copy() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me);
+        let model = ModelId("m".into());
+
+        let mut first = test_manifest(&model.0, "M");
+        first.total_size_bytes = 1000;
+        first.shards = vec![test_shard(0, [7u8; 32])];
+        registry.register_manifest(first);
+
+        let mut republished = test_manifest(&model.0, "M");
+        republished.total_size_bytes = 2000;
+        republished.manifest_hash = [9u8; 32];
+        republished.shards = vec![test_shard(0, [8u8; 32])];
+        registry.register_manifest(republished);
+
+        assert_eq!(
+            registry
+                .get_manifest(&model)
+                .expect("manifest")
+                .total_size_bytes,
+            2000,
+            "with no origin copy of our own, a re-publish must still land"
+        );
+    }
+
+    /// Shape, never hashes. A manifest carries a real `size_bytes` for every
+    /// shard whether or not its author holds it, but a hash only for the ones
+    /// it does — so a partial holder's manifest is full of placeholder hashes
+    /// and would read as a different build under any hash-based comparison.
+    #[test]
+    fn build_comparison_reads_shape_and_ignores_unknown_hashes() {
+        let mut ours = test_manifest("m", "M");
+        ours.shards = vec![test_shard(0, [7u8; 32]), test_shard(1, [7u8; 32])];
+        ours.shard_count = 2;
+
+        let mut partial_holder = ours.clone();
+        partial_holder.shards[1].hash = [0u8; 32];
+        assert!(
+            !ModelRegistry::describes_a_different_build(&ours, &partial_holder),
+            "a partial holder publishes placeholder hashes — that is not another build"
+        );
+
+        let mut bigger = ours.clone();
+        bigger.total_size_bytes += 192;
+        assert!(ModelRegistry::describes_a_different_build(&ours, &bigger));
+
+        let mut reshaped = ours.clone();
+        reshaped.shards[1].size_bytes += 64;
+        assert!(
+            ModelRegistry::describes_a_different_build(&ours, &reshaped),
+            "same total, different split — still a different file"
+        );
+
+        let mut fewer = ours.clone();
+        fewer.shard_count = 1;
+        assert!(ModelRegistry::describes_a_different_build(&ours, &fewer));
     }
 
     fn test_shard(index: u32, hash: Blake3Hash) -> ShardInfo {

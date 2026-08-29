@@ -222,6 +222,58 @@ the newest; (3) on a forward timeout, retry once on a different connection
 before failing over to another holder. `max_connections_per_peer = 1` is not
 an option (gotcha #163: it disables DCUtR).
 
+### Shard holders are pooled across different BUILDS of one model (2026-08-29)
+
+`ModelRegistry::record_shard_holder` keys on `ShardId { model_id, index }` and
+nothing else, so a node holding a *different GGUF build* of a model is recorded
+as a holder of "the" shard and the scheduler will route to it.
+
+**How two builds share an id.** `slugify_model_name` derives identity from a
+display name (deliberately — gotcha #310 unified three disagreeing
+derivations), so every independent quantisation of one model collapses into one
+identity. Measured live: three Q4_K_M builds of Qwen2.5-Coder-7B-Instruct on
+the swarm at once — `Qwen/…` 4,683,073,536, `stefancosma/…` 4,683,074,144,
+`bartowski/…` 4,683,074,336 — within 800 bytes of each other, sharing not one
+shard hash. This repo's own docs cite all three repos in different places.
+
+**What is already handled** (2026-08-29, gotcha #406): a manifest describing a
+different build no longer overwrites the one we fetched from the model's origin
+(`ModelRegistry::describes_a_different_build`, adjudicated by
+`has_origin_knowledge` exactly as a contradicted hash is). Before that, the
+other build's `shard_count`, `total_size_bytes` and per-shard `size_bytes` won
+by last-writer-wins while `origin_verified` kept our hashes — a manifest
+describing one file and authenticating another.
+
+**What remains.** The holder map. Consequences, in order of how much they
+matter:
+
+- **Correctness is safe.** Every shard is hash-verified before load, so a model
+  assembled from two builds fails loudly rather than answering wrongly.
+- **Bandwidth is not.** A node fetching from a different-build holder downloads
+  the whole shard, fails the hash, quarantines it and refetches from the
+  origin. Bounded by `can_fetch_shard_from_origin` and the per-shard backoff,
+  but it is a guaranteed wasted transfer per (shard, wrong holder).
+- **The diagnostic misleads.** Two nodes are each right about their own file.
+
+**Why it was not fixed with the manifest guard.** A `ShardAnnounce` carries a
+node id and shard ids and *no build information at all*, so there is nothing to
+attribute a build to an announcing node with. `manifest.publisher` is the
+nearest thing available and it is not the same question — a holder re-gossips a
+manifest without claiming publication (`manifests_to_gossip`), so the publisher
+identifies the build, not who is announcing it.
+
+**What it would take.** A build discriminator on the wire — the manifest hash,
+or a short prefix of it — carried by `ShardAnnounce` and stored alongside each
+holder. Additive per the protocol rules: a new `#[serde(default)]` field plus a
+feature bit, with an absent discriminator meaning "unknown, treat as today" so
+a mixed-version swarm keeps working. `shard_holders` then keys on
+`(ShardId, build)` or filters on read.
+
+**Worth doing when** more than one build of a popular model is common on the
+swarm. Today it is one model and the cost is bounded; the manifest half was the
+urgent part because it silently corrupted metadata rather than wasting a
+transfer.
+
 ### Manual shard download ignores private mode when picking a peer (2026-08-21)
 
 `api/admin_models/shards.rs::download_shard` ("Download this part" in the

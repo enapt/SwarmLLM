@@ -2,6 +2,24 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A model with the same name but different contents no longer overwrites
+  yours.** The same model, quantised by two different people, produces two
+  different files that SwarmLLM knew by the same name — three such builds of one
+  popular model were live on the network at once, within 800 bytes of each other
+  and sharing no part in common. Details about *someone else's* build could
+  overwrite the details of the one you actually downloaded, leaving a
+  description of one file paired with the fingerprints of another.
+
+  SwarmLLM now keeps the copy it fetched from the model's own source and ignores
+  descriptions of a different build, saying so plainly rather than reporting it
+  as a mismatch. Your files were never at risk — every part is checked against
+  its fingerprint before it loads — and a model genuinely re-published by its
+  author is still picked up as before.
+
 ## [0.3.131-alpha] — 2026-08-28
 
 ### Fixed
