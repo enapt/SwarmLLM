@@ -595,6 +595,21 @@ impl NetworkManager {
     ) -> Result<(), libp2p::swarm::DialError> {
         let opts = opts.into();
         if let Some(peer_id) = opts.get_peer_id() {
+            // Never dial ourselves. A third party can hand our own address back
+            // to us — PEX relays whatever its registry holds, and a relay
+            // circuit terminating at us names us in its last `/p2p/` hop — and
+            // the sender-side self-filter cannot help, because the sender is
+            // someone else. libp2p refuses it, so this was never harmful, just
+            // permanently wasteful: measured on a test node, 36 dials to its
+            // own peer id in nine minutes, every one failing.
+            //
+            // `peer_cache::filter_storable` already drops self-routing
+            // addresses for the cache; this is the same rule for every other
+            // source, applied where all of them meet.
+            if &peer_id == self.swarm.local_peer_id() {
+                tracing::debug!(site, "Not dialling ourselves");
+                return Ok(());
+            }
             if self.foreign_peers.contains(&peer_id) {
                 // DEBUG, not TRACE: this is the line that says the gate is
                 // working, and looking for it at `-vv` and finding nothing is
@@ -607,8 +622,76 @@ impl NetworkManager {
                 return Ok(());
             }
         }
-        tracing::trace!(peer_id = ?opts.get_peer_id(), site, "Dialing");
+        // DEBUG, not TRACE, and for the same reason the refusal above is: the
+        // only way to answer "was that connection our doing?" is to have said
+        // so at a level a running node actually emits. Twice now an
+        // investigation has turned on that question (#404, #405) and had to
+        // rebuild to answer it.
+        tracing::debug!(peer_id = ?opts.get_peer_id(), site, "Dialing");
         self.swarm.dial(opts)
+    }
+
+    /// Dial bootstrap / cached peers — **one dial per peer**, through the
+    /// foreign-peer gate.
+    ///
+    /// Replaces `discovery::bootstrap_peers`, which dialled every address
+    /// separately with a bare `swarm.dial(addr)`: no `PeerCondition`, so
+    /// libp2p's per-peer dedup could not see it, and no foreign-peer gate,
+    /// because it never reached [`Self::dial_checked`]. That is how a peer
+    /// cached at two addresses collected three connections (gotcha #405), and
+    /// why the #404 audit missed this site — the repo test looked for
+    /// `self.swarm.dial(` and this was a free function taking `&mut Swarm`.
+    ///
+    /// `DisconnectedAndNotDialing` is libp2p's own default and the point of the
+    /// change: it refuses a second dial while one is still in flight, which
+    /// `Disconnected` does not.
+    ///
+    /// Handing one attempt every address is not slower than dialling each
+    /// separately — libp2p races them concurrently inside the attempt and keeps
+    /// only the first to connect.
+    pub(super) fn dial_bootstrap_peers(&mut self, addrs: &[String]) -> usize {
+        let mut dialed = 0;
+        for entry in crate::network::discovery::plan_bootstrap_dials(addrs) {
+            let opts = match entry.peer {
+                Some(peer_id) => {
+                    if self.swarm.is_connected(&peer_id) {
+                        continue;
+                    }
+                    for addr in &entry.addrs {
+                        self.swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr.clone());
+                    }
+                    libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
+                        .addresses(entry.addrs.clone())
+                        .condition(
+                            libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                        )
+                        .build()
+                }
+                // Names nobody, so there is nothing to dedup against and
+                // nothing for the gate to check. Genuine first contact.
+                None => match entry.addrs.first() {
+                    Some(addr) => addr.clone().into(),
+                    None => continue,
+                },
+            };
+            match self.dial_checked(opts, "bootstrap") {
+                Ok(()) => {
+                    dialed += 1;
+                    tracing::debug!(
+                        peer_id = ?entry.peer,
+                        addr_count = entry.addrs.len(),
+                        "Dialing bootstrap peer"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(peer_id = ?entry.peer, error = %e, "DIAG: bootstrap dial failed");
+                }
+            }
+        }
+        dialed
     }
 
     /// Enqueue a re-dial unless this peer already has one queued or the

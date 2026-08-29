@@ -13,7 +13,7 @@
 use libp2p::request_response::{self, OutboundRequestId};
 
 use crate::model::acquisition::AcquisitionCommand;
-use crate::network::helpers::is_non_public_addr;
+use crate::network::helpers::{is_non_public_addr, label_address_with_peer};
 use crate::network::protocol::{PrefixKvDataResp, SwarmRequest, SwarmResponse};
 use crate::types::{NetworkCommand, SwarmMessage};
 
@@ -49,14 +49,36 @@ impl NetworkManager {
                         }
                         self.pex_inbound_timestamps.push(now_pex);
                         tracing::debug!(%peer, "Handling PEX request");
-                        // Respond with up to 20 known peer addresses (filter out self)
+                        // Respond with up to 20 known peer addresses (filter out self).
+                        //
+                        // Every address is terminated with `/p2p/<peer_id>`.
+                        // The receiver's only way to tell whose address it has
+                        // been handed is to read it off the address itself, and
+                        // it needs that answer twice: to skip a peer it is
+                        // already connected to, and to run the not-a-SwarmLLM-node
+                        // gate. A bare address answers neither, so it becomes an
+                        // unconditional dial — which is how one peer with a
+                        // reachable public TCP address collected a fresh
+                        // duplicate connection on every PEX round, up to
+                        // `max_connections_per_peer`, until the request_response
+                        // layer started picking a dead one (gotcha #405).
                         let local_node_id = self.shared_state.identity.node_id();
                         let peers: Vec<String> = self
                             .shared_state
                             .peer_registry
                             .iter()
                             .filter(|entry| entry.key() != local_node_id)
-                            .flat_map(|entry| entry.addresses.clone())
+                            .flat_map(|entry| {
+                                let peer_id = entry
+                                    .peer_id_bytes
+                                    .as_deref()
+                                    .and_then(|b| libp2p::PeerId::from_bytes(b).ok());
+                                entry
+                                    .addresses
+                                    .iter()
+                                    .map(|addr| label_address_with_peer(addr, peer_id))
+                                    .collect::<Vec<_>>()
+                            })
                             .filter(|addr| !is_non_public_addr(addr))
                             .take(20)
                             .collect();

@@ -19,7 +19,7 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::Multiaddr;
 
 use crate::network::behaviour::SwarmBehaviourEvent;
-use crate::network::helpers::swarm_event_name;
+use crate::network::helpers::{ensure_p2p_suffix, swarm_event_name};
 use crate::network::protocol::{self, SwarmRequest, SwarmResponse};
 use crate::types::SwarmMessage;
 
@@ -1088,23 +1088,6 @@ fn build_reachable_multiaddr_list(
     addrs.sort();
     addrs.dedup();
     addrs
-}
-
-/// Append `/p2p/<local_peer_id>` to `addr` unless it already terminates in a
-/// peer-id component. A relay-circuit listener ends in `/p2p-circuit`, so it
-/// correctly gets our id appended (`.../p2p-circuit/p2p/<us>` — the canonical
-/// relayed dial form). A bare `/ip4/.../tcp/port` external address gets our id
-/// appended. An address a user already suffixed is returned verbatim so we
-/// never double-append.
-fn ensure_p2p_suffix(addr: Multiaddr, local_peer_id: libp2p::PeerId) -> Multiaddr {
-    if matches!(
-        addr.iter().last(),
-        Some(libp2p::multiaddr::Protocol::P2p(_))
-    ) {
-        addr
-    } else {
-        addr.with(libp2p::multiaddr::Protocol::P2p(local_peer_id))
-    }
 }
 
 /// What one AutoNAT probe result actually tells us about NAT.

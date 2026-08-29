@@ -10,11 +10,42 @@
 
 use libp2p::Multiaddr;
 
-use crate::network::helpers::is_non_public_addr;
+use crate::network::helpers::{is_non_public_addr, target_peer_from_address};
 
 use super::{NetworkManager, MAX_PENDING_PROVIDER_QUERIES};
 
 impl NetworkManager {
+    /// Who owns this address, according to our own peer registry?
+    ///
+    /// The fallback for a PEX address that names nobody, so the caller can run
+    /// the already-connected and not-a-SwarmLLM-node gates on it anyway. Peers
+    /// on a build that labels its PEX addresses make this unnecessary; it is
+    /// what keeps a mixed-version swarm from re-dialling the peers it is
+    /// already talking to.
+    ///
+    /// Compared against the address as the owner advertised it, ignoring any
+    /// `/p2p/` suffix on our side so a labelled record still matches a bare
+    /// address. A miss is not an error — it means a node we have never seen,
+    /// which is exactly what PEX is for.
+    fn peer_id_for_known_address(&self, addr: &Multiaddr) -> Option<libp2p::PeerId> {
+        let wanted = addr.to_string();
+        self.shared_state.peer_registry.iter().find_map(|entry| {
+            let matches = entry.addresses.iter().any(|known| {
+                known == &wanted
+                    || known
+                        .rsplit_once("/p2p/")
+                        .is_some_and(|(head, _)| head == wanted)
+            });
+            if !matches {
+                return None;
+            }
+            entry
+                .peer_id_bytes
+                .as_deref()
+                .and_then(|b| libp2p::PeerId::from_bytes(b).ok())
+        })
+    }
+
     /// Handle PEX response — dial unknown peers from the exchanged address list.
     /// Limits to 5 dials per response to prevent connection storms.
     pub(super) fn handle_pex_response(&mut self, peer_addrs: &[String]) {
@@ -31,14 +62,19 @@ impl NetworkManager {
                     continue;
                 }
 
-                // Extract peer ID to check if already connected
-                let maybe_peer_id = addr.iter().find_map(|proto| {
-                    if let libp2p::multiaddr::Protocol::P2p(pid) = proto {
-                        Some(pid)
-                    } else {
-                        None
-                    }
-                });
+                // Whose address is this? Both gates below need the answer, and
+                // so does the dial itself.
+                let mut maybe_peer_id = target_peer_from_address(&addr);
+
+                // A peer that has not yet been upgraded sends bare addresses,
+                // which name nobody. Ask our own registry who owns it before
+                // falling through to an unconditional dial: that fallback is
+                // the discovery path for a genuinely unknown node, and it is
+                // also what re-dialled an already-connected peer on every PEX
+                // round (gotcha #405).
+                if maybe_peer_id.is_none() {
+                    maybe_peer_id = self.peer_id_for_known_address(&addr);
+                }
 
                 // Skip a peer Identify has already shown is not SwarmLLM.
                 // PEX hands out addresses without any claim about whose they
@@ -68,10 +104,24 @@ impl NetworkManager {
                 // invisible to `dial_checked` — and to libp2p's own per-peer
                 // dedup. PEX is the path that hands out foreign addresses, so
                 // it is the one that most needs the gate to see them.
+                // `DisconnectedAndNotDialing` — libp2p's own default, and
+                // stricter than the `Disconnected` that was here. `Disconnected`
+                // asks only whether a connection is ESTABLISHED, so two dials
+                // issued before either completes both pass, and a peer ends up
+                // with as many connections as the per-peer cap allows. PEX is a
+                // discovery path with no urgency: if a dial to this peer is
+                // already in flight there is nothing a second one can add, and
+                // the swarm's dial timeout bounds how long that lasts.
+                //
+                // The mDNS site deliberately keeps the weaker condition — see
+                // the comment there; a LAN rediscovery has to be able to
+                // override a stale bootstrap attempt.
                 let opts = match maybe_peer_id {
                     Some(pid) => libp2p::swarm::dial_opts::DialOpts::peer_id(pid)
                         .addresses(vec![addr])
-                        .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
+                        .condition(
+                            libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                        )
                         .build(),
                     None => addr.into(),
                 };

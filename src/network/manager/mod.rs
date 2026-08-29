@@ -1055,7 +1055,7 @@ impl NetworkManager {
         } else {
             let cached_peers = self.dialable_peer_cache();
             if !cached_peers.is_empty() {
-                let cached_count = discovery::bootstrap_peers(&mut self.swarm, &cached_peers)?;
+                let cached_count = self.dial_bootstrap_peers(&cached_peers);
                 if cached_count > 0 {
                     tracing::info!(
                         count = cached_count,
@@ -1065,8 +1065,7 @@ impl NetworkManager {
             }
 
             // Bootstrap with configured peers
-            let bootstrap_count =
-                discovery::bootstrap_peers(&mut self.swarm, &config.network.bootstrap_peers)?;
+            let bootstrap_count = self.dial_bootstrap_peers(&config.network.bootstrap_peers);
             if bootstrap_count > 0 || !cached_peers.is_empty() {
                 discovery::trigger_bootstrap(&mut self.swarm)?;
             }
@@ -1186,7 +1185,7 @@ impl NetworkManager {
                         // This handles peers that went offline and came back.
                         let cached = self.dialable_peer_cache();
                         if !cached.is_empty() {
-                            let _ = discovery::bootstrap_peers(&mut self.swarm, &cached);
+                            let _ = self.dial_bootstrap_peers(&cached);
                         }
                         // NETWORKING_PLAN Phase 3 — DHT relay discovery.
                         // Register ourselves as a relay provider (once Kademlia
@@ -1232,13 +1231,11 @@ impl NetworkManager {
                             );
                             let _ = discovery::trigger_bootstrap(&mut self.swarm);
                             // Re-dial bootstrap + cached peers
-                            let _ = discovery::bootstrap_peers(
-                                &mut self.swarm,
-                                &self.shared_state.config.network.bootstrap_peers,
-                            );
+                            let boots = self.shared_state.config.network.bootstrap_peers.clone();
+                            let _ = self.dial_bootstrap_peers(&boots);
                             let cached = self.dialable_peer_cache();
                             if !cached.is_empty() {
-                                let _ = discovery::bootstrap_peers(&mut self.swarm, &cached);
+                                let _ = self.dial_bootstrap_peers(&cached);
                             }
                             discovery::probe_loopback_peers(
                                 &mut self.swarm,
@@ -1653,7 +1650,9 @@ impl NetworkManager {
                                 // case that previously got no dial at all.
                                 let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(*peer_id)
                                     .addresses(addrs.clone())
-                                    .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
+                                    .condition(
+                                        libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                                    )
                                     .extend_addresses_through_behaviour()
                                     .build();
                                 match self.dial_checked(opts, "connection_race") {

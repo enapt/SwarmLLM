@@ -2412,13 +2412,48 @@ fn every_dial_goes_through_the_foreign_peer_gate() {
                     continue;
                 };
                 for (i, line) in text.lines().enumerate() {
-                    if line.contains("self.swarm.dial(") {
+                    // Match the FREE-FUNCTION form too, not just `self.swarm`.
+                    // This test read `self.swarm.dial(` only, and
+                    // `discovery::bootstrap_peers` took `&mut Swarm` and called
+                    // `swarm.dial(addr)` — so the one dial site that mattered
+                    // was invisible to the audit that added this test, and went
+                    // on dialling every cached address unconditionally and
+                    // ungated for another release (gotcha #405).
+                    let call = line.trim_start();
+                    // Skip comments, or this trips over the doc comments that
+                    // explain the rule — which is what happened the first time.
+                    let is_comment = call.starts_with("//");
+                    if !is_comment && call.contains("swarm.dial(") {
                         sites.push(format!("{}:{}", p.display(), i + 1));
                     }
                 }
             }
         }
     }
+    // Two sites are permitted, and each is named: `dial_checked`'s own, and
+    // the loopback probe, which dials fixed `127.0.0.1` candidate ports that
+    // name no peer — nothing for the gate to check and nothing to dedup
+    // against. Excluding the whole FILE instead would re-open the hole this
+    // test just had, one directory down.
+    let loopback: Vec<String> = sites
+        .iter()
+        .filter(|s| s.contains("discovery.rs"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        loopback.len(),
+        1,
+        "`discovery.rs` may dial exactly once — the loopback probe. Anything \
+         else there must go through `dial_checked`.\nFound:\n  {}",
+        loopback.join("\n  ")
+    );
+    assert!(
+        std::fs::read_to_string(repo_root().join("src/network/discovery.rs"))
+            .is_ok_and(|t| t.contains("pub fn probe_loopback_peers")),
+        "the permitted discovery.rs dial is the loopback probe; that function is gone, \
+         so re-check what is dialling there"
+    );
+    sites.retain(|s| !s.contains("discovery.rs"));
     assert_eq!(
         sites.len(),
         1,

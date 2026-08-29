@@ -6,6 +6,34 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A peer could stop answering for half an hour at a time, then recover on its
+  own.** When SwarmLLM re-dialled peers it already knew — from its saved peer
+  list, every few minutes — it opened one connection per *address* rather than
+  one per peer. A machine reachable at two addresses therefore got two
+  simultaneous connections, and with a third opened elsewhere it hit the limit
+  of three. Requests were then spread across all three, and any one that had
+  quietly died swallowed its share until the daemon gave up on that peer
+  entirely and reconnected from scratch.
+
+  Measured on a node with one such peer: sixty-two connections opened in ten
+  hours, and the peer dropping out and coming back six times. Nothing was ever
+  lost — requests are retried elsewhere — but the peer spent part of every hour
+  looking unhealthy when it was not, and was passed over for work while it did.
+
+  SwarmLLM now makes a single connection attempt per peer that carries all the
+  addresses it knows for them, and declines to start a second attempt while one
+  is still in progress. Peers reachable at one address only were never affected.
+  This costs nothing in connection speed: the addresses are still tried at the
+  same time as each other, and only the winner is kept.
+
+  Measured against an unpatched node on the same network over the same
+  three-quarters of an hour: **13 connections opened to that peer without the
+  fix, 3 with it** — and those three were a single genuine reconnection after
+  the peer briefly dropped off, not the same peer being re-dialled for no
+  reason. A separate fault in the same area had the daemon dialling *itself*
+  whenever another node handed its own address back to it, 223 times in that
+  same window; those are gone too.
+
 - **A model with the same name but different contents no longer overwrites
   yours.** The same model, quantised by two different people, produces two
   different files that SwarmLLM knew by the same name — three such builds of one

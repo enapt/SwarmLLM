@@ -9,60 +9,62 @@ use crate::error::SwarmError;
 use crate::network::behaviour::SwarmBehaviour;
 use crate::types::ShardId;
 
-/// Parse and dial bootstrap peers.
+/// One dial's worth of bootstrap work: a peer, and every address we know for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapDial {
+    /// The peer these addresses lead to, when the addresses name one.
+    pub peer: Option<libp2p::PeerId>,
+    /// Every known address for that peer, in the order they were supplied.
+    pub addrs: Vec<Multiaddr>,
+}
+
+/// Group bootstrap and cached addresses by the peer they lead to — **one dial
+/// per peer, never one per address**.
 ///
-/// Takes a list of multiaddr strings from the config, parses them,
-/// and dials each peer to join the network.
-pub fn bootstrap_peers(
-    swarm: &mut Swarm<SwarmBehaviour>,
-    addrs: &[String],
-) -> Result<usize, SwarmError> {
-    let mut dialed = 0;
-
+/// This used to issue a separate bare `swarm.dial(addr)` for every string in
+/// the list. A bare-address dial carries no `PeerCondition`, so libp2p's
+/// per-peer dedup cannot see it, and nothing stopped N addresses for one peer
+/// becoming N simultaneous dials. Each that completed became another
+/// connection, up to `network.max_connections_per_peer`. Measured on the live
+/// swarm: a peer cached at two addresses (TCP and QUIC) reached the cap of
+/// three routinely, after which request_response spread sends across all three
+/// and whichever had quietly died swallowed its share (gotcha #405).
+///
+/// libp2p already does the right thing when asked properly: a dial by peer id
+/// carrying several addresses RACES them concurrently within one attempt
+/// (`libp2p_swarm::connection::pool::concurrent_dial`, a `FuturesUnordered`
+/// bounded by `dial_concurrency_factor`) and yields exactly ONE connection —
+/// the first to succeed, with the rest dropped. So this costs no connection
+/// latency against the per-address version; it just stops keeping the losers.
+///
+/// The peer is read from the LAST `/p2p/` component. A relay circuit is
+/// `…/p2p/<relay>/p2p-circuit/p2p/<target>` and the first component is the
+/// relay, so reading that grouped a peer's circuit address under the relay and
+/// asked "are we connected?" about the wrong node.
+///
+/// Addresses that name no peer keep their own entry with `peer: None` — the
+/// caller can only dial those bare, which is correct for genuine discovery of
+/// somebody we have never seen.
+pub fn plan_bootstrap_dials(addrs: &[String]) -> Vec<BootstrapDial> {
+    let mut plan: Vec<BootstrapDial> = Vec::new();
     for addr_str in addrs {
-        match addr_str.parse::<Multiaddr>() {
-            Ok(addr) => {
-                // Extract peer ID from the multiaddr if present
-                let maybe_peer_id = addr.iter().find_map(|proto| {
-                    if let libp2p::multiaddr::Protocol::P2p(pid) = proto {
-                        Some(pid)
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(ref peer_id) = maybe_peer_id {
-                    // Skip if already connected to this peer
-                    if swarm.is_connected(peer_id) {
-                        continue;
-                    }
-                    swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(peer_id, addr.clone());
-                }
-
-                match swarm.dial(addr.clone()) {
-                    Ok(_) => {
-                        // Per-address at debug: this runs on every bootstrap
-                        // retry, so at info an idle node emitted one line per
-                        // cached address per minute, forever. Callers log a
-                        // single line with the returned count.
-                        tracing::debug!(addr = %addr, peer_id = ?maybe_peer_id, "Dialing bootstrap peer");
-                        dialed += 1;
-                    }
-                    Err(e) => {
-                        tracing::debug!(addr = %addr, peer_id = ?maybe_peer_id, error = %e, "DIAG: bootstrap dial failed");
-                    }
-                }
-            }
+        let addr = match addr_str.parse::<Multiaddr>() {
+            Ok(a) => a,
             Err(e) => {
                 tracing::warn!(addr = %addr_str, error = %e, "Invalid bootstrap address");
+                continue;
             }
+        };
+        let peer = crate::network::helpers::target_peer_from_address(&addr);
+        match plan.iter_mut().find(|d| d.peer.is_some() && d.peer == peer) {
+            Some(existing) => existing.addrs.push(addr),
+            None => plan.push(BootstrapDial {
+                peer,
+                addrs: vec![addr],
+            }),
         }
     }
-
-    Ok(dialed)
+    plan
 }
 
 /// Trigger a Kademlia bootstrap query to discover new peers.
@@ -501,5 +503,95 @@ mod tests {
         let code = format!("  {}  ", encode_network_code(&addr));
         let decoded = decode_network_code(&code).unwrap();
         assert_eq!(decoded, addr.to_string());
+    }
+
+    /// The bug, directly: a peer cached at two addresses used to become two
+    /// simultaneous unconditional dials, and each that landed was another
+    /// connection — up to the per-peer cap, routinely, on the live swarm.
+    /// libp2p tries several addresses within ONE dial when asked by peer id.
+    #[test]
+    fn every_address_for_one_peer_becomes_a_single_dial() {
+        let pid = libp2p::PeerId::random();
+        let plan = plan_bootstrap_dials(&[
+            format!("/ip4/81.241.51.1/tcp/8810/p2p/{pid}"),
+            format!("/ip4/81.241.51.1/udp/8800/quic-v1/p2p/{pid}"),
+        ]);
+        assert_eq!(
+            plan.len(),
+            1,
+            "one peer must produce one dial, not one per address"
+        );
+        assert_eq!(plan[0].peer, Some(pid));
+        assert_eq!(
+            plan[0].addrs.len(),
+            2,
+            "both addresses ride along on that single dial"
+        );
+    }
+
+    /// A relay circuit names the relay FIRST and the destination last. Reading
+    /// the first grouped a peer's circuit address under the relay, so the
+    /// already-connected check asked about the wrong node entirely.
+    #[test]
+    fn a_relay_circuit_groups_under_the_destination_not_the_relay() {
+        let relay = libp2p::PeerId::random();
+        let target = libp2p::PeerId::random();
+        let plan = plan_bootstrap_dials(&[
+            format!("/ip4/81.241.51.1/tcp/8810/p2p/{target}"),
+            format!("/dns4/relay.example/tcp/8810/p2p/{relay}/p2p-circuit/p2p/{target}"),
+        ]);
+        assert_eq!(
+            plan.len(),
+            1,
+            "the direct address and the circuit both lead to the same peer"
+        );
+        assert_eq!(plan[0].peer, Some(target));
+    }
+
+    /// Distinct peers must not be merged, or dialling one would carry
+    /// another's addresses.
+    #[test]
+    fn distinct_peers_stay_distinct() {
+        let a = libp2p::PeerId::random();
+        let b = libp2p::PeerId::random();
+        let plan = plan_bootstrap_dials(&[
+            format!("/ip4/10.0.0.1/tcp/8810/p2p/{a}"),
+            format!("/ip4/10.0.0.2/tcp/8810/p2p/{b}"),
+            format!("/ip4/10.0.0.3/tcp/8810/p2p/{a}"),
+        ]);
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].peer, Some(a));
+        assert_eq!(plan[0].addrs.len(), 2);
+        assert_eq!(plan[1].peer, Some(b));
+    }
+
+    /// An address naming nobody keeps its own entry and is never merged with
+    /// another unnamed one — they may be different machines, and there is no
+    /// evidence either way. This is genuine first contact.
+    #[test]
+    fn unnamed_addresses_are_never_merged_with_each_other() {
+        let plan = plan_bootstrap_dials(&[
+            "/ip4/10.0.0.1/tcp/8810".to_string(),
+            "/ip4/10.0.0.2/tcp/8810".to_string(),
+        ]);
+        assert_eq!(
+            plan.len(),
+            2,
+            "two unnamed addresses are two unknowns, not one peer"
+        );
+        assert!(plan.iter().all(|d| d.peer.is_none()));
+    }
+
+    /// A malformed entry is skipped, not fatal — the list comes from a config
+    /// file and a saved cache.
+    #[test]
+    fn an_unparseable_address_is_skipped() {
+        let pid = libp2p::PeerId::random();
+        let plan = plan_bootstrap_dials(&[
+            "not-a-multiaddr".to_string(),
+            format!("/ip4/10.0.0.1/tcp/8810/p2p/{pid}"),
+        ]);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].peer, Some(pid));
     }
 }
