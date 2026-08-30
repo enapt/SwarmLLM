@@ -2695,20 +2695,20 @@ fn every_dial_goes_through_the_foreign_peer_gate() {
                 let Ok(text) = std::fs::read_to_string(&p) else {
                     continue;
                 };
-                for (i, line) in text.lines().enumerate() {
-                    // Match the FREE-FUNCTION form too, not just `self.swarm`.
-                    // This test read `self.swarm.dial(` only, and
-                    // `discovery::bootstrap_peers` took `&mut Swarm` and called
-                    // `swarm.dial(addr)` — so the one dial site that mattered
-                    // was invisible to the audit that added this test, and went
-                    // on dialling every cached address unconditionally and
-                    // ungated for another release (gotcha #405).
-                    let call = line.trim_start();
-                    // Skip comments, or this trips over the doc comments that
-                    // explain the rule — which is what happened the first time.
-                    let is_comment = call.starts_with("//");
-                    if !is_comment && call.contains("swarm.dial(") {
-                        sites.push(format!("{}:{}", p.display(), i + 1));
+                // Match the FREE-FUNCTION form too, not just `self.swarm`.
+                // This test read `self.swarm.dial(` only, and
+                // `discovery::bootstrap_peers` took `&mut Swarm` and called
+                // `swarm.dial(addr)` — so the one dial site that mattered was
+                // invisible to the audit that added this test, and went on
+                // dialling every cached address unconditionally and ungated for
+                // another release (gotcha #405).
+                //
+                // Statements rather than lines, and comments are dropped by the
+                // scanner — the doc comments that explain this rule tripped the
+                // line-based version the first time round.
+                for (line_no, call) in statements(&text) {
+                    if call.contains("swarm.dial(") {
+                        sites.push(format!("{}:{}", p.display(), line_no));
                     }
                 }
             }
