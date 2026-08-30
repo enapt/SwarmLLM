@@ -2,6 +2,63 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.135-alpha] — 2026-08-30
+
+### Fixed
+
+- **A node left running for a long time could start filling its log with the
+  same warning over and over.** When another machine on the network tells this
+  node something about a model that contradicts what this node checked for
+  itself, that disagreement is worth one line in the log. It is not worth a line
+  every thirty seconds for ever, which is what it used to be, so SwarmLLM
+  remembers what it has already complained about and stays quiet for an hour.
+
+  That memory was capped at 512 entries and nothing ever cleared it. Once full,
+  every new disagreement was logged every single time it came up, for as long as
+  the node kept running — the exact flood the quiet hour exists to prevent, and
+  the log even said "0 suppressed" on each line, which was untrue. The cap is
+  not as remote as it sounds: each entry is a model, a part of that model, and
+  the specific value being disputed, and several different builds of one popular
+  model circulate at once.
+
+  Entries whose quiet hour has already passed are now cleared to make room.
+  Nothing is lost by doing so — the next occurrence would have been logged
+  anyway.
+
+- **Removed a leftover that could have ranked other machines by a figure the
+  product does not stand behind.** Credit balances are switched off: each node
+  mints its own number and it is reconciled with nobody, so nothing displays or
+  ranks by it. The cleanup that removed every part of the dashboard showing the
+  figure missed one — the peer list could still sort by it.
+
+  Nothing was actually sorting: that column is not offered, and the figure has
+  not been sent to the dashboard for several releases, so it read as zero. It
+  would have started working again the moment anyone restored the column, and
+  nothing would have flagged it.
+
+### Notes
+
+- **Most of this release is work you cannot see: the project's own safety nets
+  were checked, and most of them were not catching what they claimed to.**
+  SwarmLLM has a set of automated checks that fail the build when a known past
+  mistake is about to be repeated — reading a setting in a way that ignores
+  changes until restart, sending anything derived from your prompts without
+  permission, counting work twice, and so on.
+
+  Five of those checks were tested by deliberately re-introducing the mistake
+  each one guards against. Four did not notice. They had been reporting success
+  for months, which is what a check that cannot fail looks like from the outside.
+
+  In each case the check was looking for one particular way of writing the
+  mistake, and the code could be written another way that means the same thing.
+  All are fixed, and each now has a test of its own that re-introduces the
+  mistake and confirms it is caught — so a check quietly losing its grip is
+  itself something the build will now fail on.
+
+  No behaviour changed as a result. The checks were wrong, not the code they
+  were checking — with one exception, the credit-sorting leftover above, which
+  was found because a strengthened check finally pointed at it.
+
 ## [0.3.134-alpha] — 2026-08-29
 
 ### Fixed
