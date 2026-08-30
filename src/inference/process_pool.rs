@@ -1050,10 +1050,18 @@ pub struct ModelProcessPool {
     /// `InferenceConfig::gpu_layers`: `-1` auto, `0` CPU only, `>0` GPU.
     gpu_layers: std::sync::atomic::AtomicI32,
     // (see `CpuReason` for why the three CPU causes are kept distinct)
-    /// Models forced onto the CPU for the rest of this daemon's life because
-    /// a worker died of a GPU OOM while serving them. Without this, the
-    /// respawned worker makes the identical allocation and dies the same way,
-    /// and the user sees an unbroken run of 500s with no path out.
+    /// Models forced onto the CPU because a worker died of a GPU OOM while
+    /// serving them. Without this, the respawned worker makes the identical
+    /// allocation and dies the same way, and the user sees an unbroken run of
+    /// 500s with no path out.
+    ///
+    /// **The pin is NOT for the life of the daemon**, and this doc used to say
+    /// it was. `unload_model` clears every pin whenever unloading actually
+    /// freed graphics memory, because the condition that caused the OOM has
+    /// then changed — see the `freed_gpu_memory` branch there, and
+    /// `worker_should_return_to_gpu` for the resident-worker half. Reasoning
+    /// about this field as permanent is how a model that could move back to
+    /// the card gets left on the processor (gotcha #401).
     cpu_pinned_models: dashmap::DashSet<ModelId>,
     /// GPU memory budget in MB, 0 = unset (no admission control).
     ///
@@ -3914,7 +3922,7 @@ impl ModelProcessPool {
                 tracing::warn!(
                     model = %model_id,
                     reason,
-                    "Pinning this model to CPU for the rest of this run"
+                    "Pinning this model to CPU until graphics memory frees up"
                 );
                 if let Some(tx) = self.activity_tx.get() {
                     // Distinct `kind` per cause, NOT one kind with two
