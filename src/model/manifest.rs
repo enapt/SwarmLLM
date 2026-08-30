@@ -424,8 +424,21 @@ pub(crate) struct RejectedManifest {
 pub(crate) const REJECTED_MANIFEST_LOG_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(3600);
 
-/// Bound on the rejection map. Reached only under deliberate manifest spam; a
-/// forgotten entry costs one extra verification and one extra log line.
+/// Bound on the rejection map.
+///
+/// The bound is only safe because entries that have outlived the window are
+/// evicted to make room (see `note_rejection_in`). Without that this map is
+/// insert-only, and the cap becomes a CLIFF rather than a limit: once full,
+/// every key not already present logs on EVERY rejection for the life of the
+/// process, which is precisely the flood the window exists to stop — and it
+/// reports `suppressed_since_last=0` while doing it, so the log claims nothing
+/// was swallowed.
+///
+/// It is not a spam-only threshold. A key is `(model, shard, claimed hash)`,
+/// and gotcha #406 established that several independent builds of one popular
+/// model are live on the swarm at once, each with its own per-shard hashes —
+/// so the count grows with models x shards x builds. A peer sending fabricated
+/// hashes reaches it deliberately in one round.
 pub(crate) const MAX_REJECTED_MANIFESTS: usize = 512;
 
 /// What is being repeatedly rejected.
@@ -462,8 +475,28 @@ pub(crate) static REJECTED_MANIFESTS: std::sync::LazyLock<
 /// Returns `Some(suppressed_count)` the first time a given (model, hash) is
 /// rejected and once per window thereafter.
 pub(crate) fn note_manifest_rejection(key: RejectionKey) -> Option<u64> {
-    if let Some(mut prev) = REJECTED_MANIFESTS.get_mut(&key) {
-        if prev.last_logged.elapsed() >= REJECTED_MANIFEST_LOG_WINDOW {
+    note_rejection_in(
+        &REJECTED_MANIFESTS,
+        key,
+        REJECTED_MANIFEST_LOG_WINDOW,
+        MAX_REJECTED_MANIFESTS,
+    )
+}
+
+/// The policy, over an explicit map, window and bound.
+///
+/// Split out from the globals so the full-map behaviour can be tested against a
+/// four-entry map and a zero-length window, rather than against a 512-entry
+/// process-wide map and an hour of wall clock — and so a test cannot perturb the
+/// real map that other tests share.
+fn note_rejection_in(
+    map: &dashmap::DashMap<RejectionKey, RejectedManifest>,
+    key: RejectionKey,
+    window: std::time::Duration,
+    max: usize,
+) -> Option<u64> {
+    if let Some(mut prev) = map.get_mut(&key) {
+        if prev.last_logged.elapsed() >= window {
             let n = prev.suppressed;
             prev.last_logged = std::time::Instant::now();
             prev.suppressed = 0;
@@ -472,11 +505,24 @@ pub(crate) fn note_manifest_rejection(key: RejectionKey) -> Option<u64> {
         prev.suppressed = prev.suppressed.saturating_add(1);
         return None;
     }
-    if REJECTED_MANIFESTS.len() >= MAX_REJECTED_MANIFESTS {
-        // Full: log it rather than silently dropping the report.
-        return Some(0);
+    if map.len() >= max {
+        // Full. Drop the entries that have outlived the window before giving
+        // up. Such an entry suppresses NOTHING — the next rejection matching it
+        // would be logged anyway — so it is pure occupancy, and evicting it
+        // costs at most the suppressed-count on a line that was going to be
+        // emitted regardless.
+        //
+        // This is what keeps the bound a limit rather than a cliff. No guard is
+        // held here (the `get_mut` above returns inside its own block), so
+        // taking the map's shard locks is safe.
+        map.retain(|_, v| v.last_logged.elapsed() < window);
+        if map.len() >= max {
+            // Still full, so every entry is actively suppressing something.
+            // Log rather than silently dropping the report.
+            return Some(0);
+        }
     }
-    REJECTED_MANIFESTS.insert(
+    map.insert(
         key,
         RejectedManifest {
             last_logged: std::time::Instant::now(),
@@ -489,6 +535,98 @@ pub(crate) fn note_manifest_rejection(key: RejectionKey) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{classify_p2p_shard_acceptance as classify, P2pShardAcceptance as A};
+    use super::{note_rejection_in, RejectionKey};
+    use std::time::Duration;
+
+    fn shard_key(shard: u32) -> RejectionKey {
+        RejectionKey::ShardHash {
+            model: crate::types::ModelId("m".to_string()),
+            shard,
+            claimed: [0u8; 32],
+        }
+    }
+
+    /// A full map must still make room for a new key by dropping entries that
+    /// have outlived the window, or the bound is a cliff: every key not already
+    /// present logs on every rejection, for ever.
+    ///
+    /// Zero-length window, so every entry is inert the moment it is written —
+    /// the same state the real map reaches an hour after an entry's last line,
+    /// without an hour of wall clock.
+    #[test]
+    fn a_full_rejection_map_makes_room_by_dropping_entries_that_suppress_nothing() {
+        let map = dashmap::DashMap::new();
+        for shard in 0..4 {
+            note_rejection_in(&map, shard_key(shard), Duration::ZERO, 4);
+        }
+        assert_eq!(map.len(), 4, "map should be full");
+
+        let fresh = shard_key(99);
+        note_rejection_in(&map, fresh.clone(), Duration::ZERO, 4);
+
+        // Without the eviction this returns early and the key is never stored,
+        // so the next rejection of it logs again, and the one after that.
+        assert!(
+            map.contains_key(&fresh),
+            "a new key must be admitted to a full map of inert entries"
+        );
+    }
+
+    /// The converse, and the reason eviction is filtered rather than wholesale:
+    /// an entry still inside its window is actively swallowing repeats, so it
+    /// must survive. Dropping it would let the same rejection log twice.
+    #[test]
+    fn entries_still_inside_their_window_are_never_evicted() {
+        let map = dashmap::DashMap::new();
+        let window = Duration::from_secs(3600);
+        for shard in 0..4 {
+            note_rejection_in(&map, shard_key(shard), window, 4);
+        }
+
+        let fresh = shard_key(99);
+        assert_eq!(
+            note_rejection_in(&map, fresh.clone(), window, 4),
+            Some(0),
+            "a full map of live entries still reports rather than dropping silently"
+        );
+        assert_eq!(map.len(), 4, "live entries must not be evicted");
+        assert!(!map.contains_key(&fresh));
+    }
+
+    /// The suppression contract the window exists for, checked on the same
+    /// helper the production path uses: the first rejection logs, identical
+    /// repeats inside the window do not, and the count comes back with the next
+    /// emitted line.
+    #[test]
+    fn repeats_inside_the_window_are_swallowed_and_counted() {
+        let map = dashmap::DashMap::new();
+        let window = Duration::from_secs(3600);
+        let k = shard_key(0);
+
+        assert_eq!(note_rejection_in(&map, k.clone(), window, 8), Some(0));
+        assert_eq!(note_rejection_in(&map, k.clone(), window, 8), None);
+        assert_eq!(note_rejection_in(&map, k.clone(), window, 8), None);
+
+        // Window elapsed: the two swallowed repeats are reported.
+        assert_eq!(note_rejection_in(&map, k, Duration::ZERO, 8), Some(2));
+    }
+
+    /// A distinct key is its own budget — eight shards disagreeing is eight
+    /// genuine reports, not one. Guards the granularity the shared limiter was
+    /// given so neither arm can silence the other.
+    #[test]
+    fn each_shard_keeps_its_own_suppression_budget() {
+        let map = dashmap::DashMap::new();
+        let window = Duration::from_secs(3600);
+        for shard in 0..8 {
+            assert_eq!(
+                note_rejection_in(&map, shard_key(shard), window, 64),
+                Some(0),
+                "shard {shard} is a different disagreement"
+            );
+        }
+        assert_eq!(map.len(), 8);
+    }
 
     /// Bytes we cannot check are never simply accepted when the origin is
     /// reachable — that is what let a corrupt shard spread between peers.
