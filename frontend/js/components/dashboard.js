@@ -1993,7 +1993,6 @@
         if (sortKey === 'latency') { va = a.latency_ms || 99999; vb = b.latency_ms || 99999; }
         else if (sortKey === 'shards') { va = a.hosted_shards || 0; vb = b.hosted_shards || 0; }
         else if (sortKey === 'trust') { va = a.trust_score || 0; vb = b.trust_score || 0; }
-        else if (sortKey === 'credits') { va = a.credits || 0; vb = b.credits || 0; }
         else { va = a.healthy ? 1 : 0; vb = b.healthy ? 1 : 0; }
         return sortDir === 'asc' ? va - vb : vb - va;
       });

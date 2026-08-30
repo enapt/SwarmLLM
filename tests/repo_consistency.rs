@@ -2167,6 +2167,57 @@ fn credits_stay_dormant() {
              expose a self-minted balance (docs/CREDITS_DESIGN.md § 4)"
         );
     }
+
+    // 4. And no dashboard code reads a credit figure. The backend half of this
+    //    was checked and the frontend half was not, so an unreachable
+    //    `sortKey === 'credits'` branch survived the cleanup that removed every
+    //    element which rendered the balance — ranking peers by a self-minted
+    //    number, one restored column header away from working again, with
+    //    nothing to catch it. It sorted on a `credits` field the peer payload
+    //    has not carried for releases, which is why nobody noticed.
+    //
+    //    Comments may discuss the figure — one of them documents exactly why
+    //    nothing renders it — so only code is scanned.
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![root.join("frontend/js")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "js") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            for (i, line) in text.lines().enumerate() {
+                let l = line.trim();
+                if l.starts_with("//") || l.starts_with("*") || l.starts_with("/*") {
+                    continue;
+                }
+                if l.contains("credits") {
+                    offenders.push(format!(
+                        "{}:{}: {l}",
+                        p.strip_prefix(&root).unwrap_or(&p).display(),
+                        i + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "dashboard code reads a credit figure. Credits are dormant: the balance \
+         is self-minted and reconciled with nobody, so nothing may rank, sort or \
+         display it (docs/CREDITS_DESIGN.md § 4).\n{}",
+        offenders.join("\n")
+    );
 }
 
 /// Every `var(--x)` written without a fallback must name a property something
