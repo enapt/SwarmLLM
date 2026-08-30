@@ -15,6 +15,14 @@ single-token verify, which is an ordinary decode step. Pinned by
 `a_single_token_verify_teaches_the_scheduler_what_the_peer_cost` and its
 negative sibling `a_speculative_batch_is_deliberately_not_recorded_as_a_decode_step`.
 
+**Verified on the live swarm**, which is the part the unit tests cannot show —
+whether recording the number actually changes the choice. A fresh node made two
+identical requests: the first went to a peer 1032 ms away and took 16.87 s with
+`observed_ms_per_layer=None`; the verify rounds recorded 97.52 ms/layer, which
+tripled that peer's cost from 59,994 to 166,781 and pushed it past a LAN
+holder's 61,990; the second request went to the LAN holder and took **1.36 s**.
+12x, on the second attempt rather than never, between two third-party peers.
+
 **What is still open**: the multi-token batch case, for the reason in
 "The design question" below.
 

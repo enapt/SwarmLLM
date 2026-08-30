@@ -20,6 +20,12 @@ All notable changes to SwarmLLM are documented here.
   estimate. Those answers are now timed, and a machine that answers slowly stops
   being preferred.
 
+  Measured on the live network after the change: the same question asked twice
+  from a machine that had just joined took 16.9 seconds and then **1.4 seconds**
+  — the first answer was enough to make the slow machine three times more
+  expensive to choose than one nearby, and the second question went there
+  instead.
+
   One case is deliberately still not timed — when the shortcut that guesses
   ahead succeeds, several words are checked at once, and counting that as one
   word would make the machine look slower than it is. That is recorded in
