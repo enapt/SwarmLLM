@@ -221,55 +221,55 @@ All 20 build phases complete. All subsystems wired — no stubs. **2146 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.134-alpha.** Local (CUDA asset) and Proxmox (.deb)
-both on it and serving; the anchor self-updated, and so did one remote peer —
-which is the update pipeline confirmed end to end on a machine nobody here
-touched. **`main` carries one UNRELEASED commit** (`9e6aa3b0`): a log-message
-string and doc comments only, CI green, deliberately held because nothing in it
-is user-visible and every release is broadcast to users. Let it ride with the
-next substantive change.
+**Last deployed: v0.3.134-alpha** — local (CUDA asset) and Proxmox (.deb) both
+on it and serving; the anchor self-updated, and so did one remote peer, which is
+the update pipeline confirmed end to end on a machine nobody here touched.
+**`main` is at v0.3.135-alpha, prepared and awaiting the tag** — the two
+doc-only commits that were being held rode along with it.
 
-### v0.3.134-alpha (2026-08-29) — the dashboard's Models tab, and how it was found
+### v0.3.135-alpha (2026-08-30) — the guards were the defect
 
-Detail in `memory/round_log_0829_dashboard_syscalls.md`; gotchas **#410**,
-**#411**. **Found by timing an endpoint that WORKED** — nothing failed, nothing
-warned, no test caught it; a `curl -m 10` timed out and returned empty.
+Detail in `memory/round_log_0830_guard_audit.md`; gotcha **#413**. **Five
+repo-consistency guards were tested by PLANTING the violation each one exists to
+catch. Four did not notice**, having reported success for months — which is what
+a check that cannot fail looks like from outside.
 
-- **#410 `GET /api/admin/models` took a stable 11.2 s, and 9.6 s of it was
-  KERNEL time.** GGUF headers were parsed off an **unbuffered `File`** at seven
-  sites, so each of the metadata walk's thousands of tiny reads became a syscall
-  — ~820k for one 7.8 MB header, per model, per refresh. Each header was also
-  parsed TWICE, the second time only to reach `vocab.len()`, a count the first
-  parse already had. → `inference::split::read_gguf_header`.
-- **#411 Rust evaluates every argument, including the expensive one the callee
-  never reads.** `delegation_target` returns `None` before touching
-  `model_vram_mb`, so a healthy node priced a model and discarded it once per
-  pipeline assembly — on the cold-start path. Plus the listing asked two
-  questions that come from one reading. → `gpu_estimate_and_fit`, sharing
-  `fits_in_budget` so the two verdicts cannot drift.
+- **Line-based scanning cannot see a chain rustfmt WRAPPED.**
+  `self.shared_state.metrics.node_stats.requests_served_atomic.fetch_add(1,
+  Ordering::Relaxed)` is 99 chars at two indent levels, so one more nesting level
+  splits it across four lines and the field name no longer shares a line with
+  `fetch_add`. Hit six guards, including the one against **#281's fourth
+  recurrence**. All now share a `statements()` scanner.
+- **A 1600-char window on a 1698-char function** (the VRAM live-config guard) —
+  blind to its last 100 chars, where a planted boot-snapshot read passed; and its
+  `cfg()` assertion sat **20 chars inside the cap**, so it was brittle in both
+  directions. Its negative check was pinned to one exact indentation.
+- **File-level `contains()` standing in for a site claim** (prompt privacy):
+  each file mentions the send somewhere, the setting somewhere, `cfg()`
+  somewhere — and both files make unrelated `cfg()` calls, so that assertion was
+  unconditional.
 
-⚠ **Split utime/stime BEFORE theorising about slowness.** Two numbers from
-`/proc/<pid>/stat` partitioned the hypothesis space in one step; "parses a lot of
-metadata" and "makes 820k read calls" look identical in the source. It also
-explains why the optimised release binary was no faster than a debug build —
-optimisation cannot remove a syscall. ⚠ **A STABLE duration is fixed work, not
-load.**
+**Two production fixes.** The manifest-warning rate limiter was **capped at 512
+with nothing ever evicting**, so past that it logged every time for ever — the
+exact flood it exists to stop, while printing `suppressed_since_last=0`. It was
+the **lone outlier**: every other capped collection already prunes before
+testing its cap. And the peer table could still **rank peers by a dormant credit
+balance** through an unreachable sort branch, one restored column from working.
 
-**Verified**: A/B/A/B alternated, release CUDA both arms, same data —
-**12.1 s → 0.21 s (~57x)**, system ticks **962 → 4**, user ticks halving again on
-the second fix (the number that proves the mechanism, not just the outcome). All
-nine models' VRAM estimates byte-identical. The new repo-consistency test goes
-red without the fix.
-
-**Two hypotheses measured and REJECTED rather than shipped**: an open dashboard
-costs ~0.75% of a core, not the 10% idle gap it was blamed for; and a dropped
-first token under batching was the model, identical alone five times.
+⚠ **Plant the violation and watch it fail.** For a source scanner that costs a
+stray `.rs` under `src/` that no `mod` references — the scanner walks it, the
+compiler never sees it, so it need not compile. ⚠ **A guard too weak to fire is
+also too weak to be checked for correctness**: strengthening the #281 guard is
+what exposed a real contradiction in its own field list (it forbade all 17
+`auto_manage` fields while its comment said only the 4 in the Settings panel
+count).
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.134** (08-29): the Models page took 11 s and **9.6 of them were the KERNEL** (#410) — GGUF headers parsed off an UNBUFFERED `File` at 7 sites (~820k syscalls each), and parsed TWICE, the second only for `vocab.len()`; #411 Rust evaluates EVERY argument, so a healthy node priced a model and discarded it once per assembly. **11.2 s → 0.21 s in production, system ticks 962 → 22.** ⚠ **Split utime/stime BEFORE theorising; a STABLE duration is fixed work, not load.** `round_log_0829_dashboard_syscalls.md`.
 - **v0.3.133** (08-29): a model you had EVER served could not be deleted (#409); the forward doing the whole PREFILL was budgeted as a DECODE (#407); one NUL byte made a doc invisible to grep SILENTLY (#408). ⚠ **TWO of five found because a TOOL lied.** `round_log_0829_functional_check.md`.
 - **v0.3.132** (08-29): one dial per ADDRESS not per peer (#405, paired 13→3); a name is not a content identity (#406). ⚠ **TWO published causal claims were WRONG first.** `round_log_0829_dial_identity.md`.
 - **v0.3.130-.131** (08-28): which device your models run on (#401/#402) — **the fix was to DELETE the second accountant**, so graphics memory has ONE owner; the GPU swap floor was 3.65x WORSE than no floor (#403); foreign nodes stopped being DIALLED (#404). ⚠ **A gate refusing NOTHING is the measurement.** `round_log_0827_cpu_to_gpu.md`.
