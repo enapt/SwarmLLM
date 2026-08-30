@@ -1248,7 +1248,19 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
     // Whole sections where every field is a resource cap the user can move...
     let mutable = [
         ".config.resources.",
-        ".config.auto_manage.",
+        // Only the auto-manage fields the Settings panel actually exposes.
+        // This was the whole `.config.auto_manage.` section, which contradicted
+        // the principle stated for `inference` just below: a field the panel
+        // does not offer is config-file/CLI only, and reading its boot value is
+        // CORRECT. Thirteen of the seventeen fields in that section are in that
+        // category — `max_concurrent_downloads` among them, which sizes a
+        // semaphore once at construction and appears nowhere in the dashboard.
+        // The contradiction was invisible while the scan was line-based,
+        // because the one read it would have flagged is a wrapped chain.
+        ".config.auto_manage.enabled",
+        ".config.auto_manage.max_shards",
+        ".config.auto_manage.max_storage_mb",
+        ".config.auto_manage.prune_enabled",
         ".config.node.contribution",
         ".config.model.shard_size_mb",
         // ...and the three `inference` fields the Settings panel exposes. The
@@ -1302,17 +1314,23 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            let mut in_tests = false;
-            for (i, line) in text.lines().enumerate() {
-                let l = line.trim();
-                if l.starts_with("#[cfg(test)]") {
-                    in_tests = true;
-                }
-                if in_tests || l.starts_with("//") || l.starts_with("///") {
+            // Everything from the first `#[cfg(test)]` on is test code.
+            let cutoff = text
+                .find("#[cfg(test)]")
+                .map(|i| text[..i].lines().count() + 1)
+                .unwrap_or(usize::MAX);
+            // Statements, not lines. Every pattern here is a contiguous dotted
+            // path, and rustfmt breaks a long chain across lines — so
+            // `shared\n    .config\n    .resources\n    .max_gpu_vram_mb`
+            // matched nothing at all, which is this guard's own defect wearing
+            // the shape of the bug it exists to catch (gotcha #281, three
+            // recurrences).
+            for (line_no, l) in statements(&text) {
+                if line_no >= cutoff {
                     continue;
                 }
                 if mutable.iter().any(|m| l.contains(m)) {
-                    offenders.push(format!("{rel}:{}: {l}", i + 1));
+                    offenders.push(format!("{rel}:{line_no}: {l}"));
                 }
             }
         }
@@ -1847,11 +1865,8 @@ fn update_reporting_uses_the_effective_mode_not_the_legacy_field() {
                 let Ok(src) = std::fs::read_to_string(&p) else {
                     continue;
                 };
-                for (i, line) in src.lines().enumerate() {
-                    let l = line.trim();
-                    if l.starts_with("//") || l.starts_with("///") {
-                        continue;
-                    }
+                // Statements, not lines — a wrapped chain hides a dotted path.
+                for (line_no, l) in statements(&src) {
                     // Reading the legacy field anywhere under the HTTP surface
                     // means something user-facing is describing update
                     // behaviour from a value that does not determine it.
@@ -1859,7 +1874,7 @@ fn update_reporting_uses_the_effective_mode_not_the_legacy_field() {
                         offenders.push(format!(
                             "{}:{}: {}",
                             p.strip_prefix(&root).unwrap_or(&p).display(),
-                            i + 1,
+                            line_no,
                             l
                         ));
                     }
@@ -2338,11 +2353,8 @@ fn advertised_load_counts_every_kind_of_work() {
         // destroy the comparison it exists to make.
         let raw_comparison_is_the_point =
             rel == "src/api/admin.rs" && text.contains("in_flight: {} traces, {} pipelines");
-        for (i, line) in text.lines().enumerate() {
-            let l = line.trim();
-            if l.starts_with("//") || l.starts_with("///") {
-                continue;
-            }
+        // Statements, not lines — a wrapped chain hides a dotted path.
+        for (line_no, l) in statements(text) {
             if l.contains("active_pipelines.len()") {
                 if raw_comparison_is_the_point && l.contains("ss.active_pipelines.len()") {
                     continue;
@@ -2356,7 +2368,7 @@ fn advertised_load_counts_every_kind_of_work() {
                 if l.contains("active_pipelines =") {
                     continue;
                 }
-                offenders.push(format!("{rel}:{}: {l}", i + 1));
+                offenders.push(format!("{rel}:{line_no}: {l}"));
             }
         }
     }
