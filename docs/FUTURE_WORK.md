@@ -2,6 +2,90 @@
 
 Captures items deliberately deferred from the model-management redesign and from prior sweeps. Each entry has enough context that a future implementer (or a future me) can pick it up without re-deriving the rationale.
 
+## Routing never learns a peer is slow on the speculative path (measured 2026-08-30)
+
+**Measured, reproducible, and costing about 250x on the case below.** Not fixed
+here because the fix has a real design question in it — see the end.
+
+### What was measured
+
+A peer-held model (`gemma-2-2b-it-q4-k-m`, 4 shards) asked for `"Say exactly:
+hello"`, `max_tokens=20`. Four requests from the local node: **244 s, 210 s, 200 s, 182 s**. Every one
+returned the correct `"Hello \n"`.
+
+The same request, on the LAN peer that holds that model, measured on that box
+itself: **0.80 s warm** (2.20 s cold), three reps. That peer was a candidate the
+whole time — 99 ms away, `region_score=1.0` against the chosen peer's 0.2.
+
+The scheduler's own cost table for the third request:
+
+```
+node=9684263580c6660f  latency_ms=99    est_tokens_per_sec=0.863  observed_ms_per_layer=None  cost_total_ms=62152
+node=4a3ac72ece5a85cb  latency_ms=1471  est_tokens_per_sec=2.000  observed_ms_per_layer=None  cost_total_ms=29670  <- CHOSEN
+node=e561df35d8c9a3ac  latency_ms=541   est_tokens_per_sec=0.923  observed_ms_per_layer=None  cost_total_ms=59012
+```
+
+The advertised speed decides it: 2.00 against 0.863 is 2.3x, which swamps a 15x
+network difference. Predicted 29,670 ms; actual ~200,000 ms — **under-predicted
+by ~6.7x, four times in a row**, with no memory of it between attempts.
+
+### Why nothing is learned
+
+`observed_ms_per_layer` comes from `SharedState::observed_latency_ms_per_layer`
+→ `peer_speed.ranking_ms_per_layer()`, fed by `record_peer_segment_latency`.
+**In production that is called from exactly two places** —
+`pipeline/distributed.rs` (2 sites, both inside `forward_through_segments_inner`)
+and `pipeline/remote_generate.rs` (1). `local.rs` appears to have six, but all
+six are inside its `#[cfg(test)]` block.
+
+This request took the SWARM-SPEC L1 path (`ngram_only_spec`), which reported
+`ngram_rounds=0 fallback_rounds=3`. Its forwards go to:
+
+- the prompt pass → `forward_through_segments` → **does** reach a recorder;
+- each decode round → `forward_verify_through_segments`, or
+  `hedge_dispatch::forward_verify_with_hedge` on a fallback round → **neither
+  records anything**.
+
+So three forwards of 77.5 s, 76.6 s and 53.8 s were never observed. And the one
+forward that did reach a recorder was a Prefill whose `LayerResult` carried
+`activations_bytes=0` — which `peer_speed::observe` rejects by an explicit early
+return (`if activation_bytes == 0 { return; }`, correct for a coefficient that
+divides by it). Net: a 200-second request teaches the scheduler nothing.
+
+`RANKING_STALE_AFTER` (600 s) is a red herring here and was my first wrong
+theory — the third request was fired immediately after the second finished, well
+inside the window, and still saw `None`.
+
+### The design question, which is why this is not just a missing call
+
+A verify forward is not a decode step. `peer_speed::observe` divides by `layers`
+to get ms/layer for `WorkKind::Decode`, and a speculative verify batch carries K
+draft tokens through the same layers — so recording it as a decode sample
+inflates the per-token figure by roughly K, and recording it as prefill needs an
+`activation_bytes` these results do not carry. Getting that wrong pollutes the
+EWMA that sizes segment timeouts as well as ranking, which is a worse failure
+than the present one.
+
+Two candidate directions, neither costed yet:
+
+1. **A `WorkKind::Verify`** with its own coefficient and its own conversion to a
+   ranking figure, so a verify sample never masquerades as a decode one.
+2. **Record at the transport boundary instead** — `local.rs::wait_for_result` is
+   the single place every remote segment result arrives through, whatever
+   coordinator asked for it, and it already knows `elapsed_ms`, the node and the
+   layer range. That is the choke-point shape this codebase prefers (§ "One
+   invariant, N paths"), but it needs the work kind threading through to it.
+
+Direction 2 is the more likely right answer and would cover `dsd.rs` and
+`speculative.rs` at the same time, which have the same gap.
+
+### Watch out for
+
+The under-prediction is not evidence the chosen peer is permanently slow — it is
+a third-party node that cannot be observed from here, and it may simply have been
+loaded. **That does not weaken the finding**: the point is that the system cannot
+tell the difference either, and re-picks it every time at the same wrong price.
+
 ## Two smaller costs found beside #417 (open, 2026-08-30)
 
 Both surfaced while pricing `GET /api/admin/stats` (gotcha #417, fixed). Neither
