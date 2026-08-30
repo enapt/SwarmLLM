@@ -221,70 +221,66 @@ All 20 build phases complete. All subsystems wired — no stubs. **2155 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.135-alpha (2026-08-30).** Local (CUDA asset) and
-Proxmox (.deb) both on it and serving, each verified after restart: local
-answers on the GPU with zero errors since restart and the installed binary's
-sha256 matches the published asset byte for byte; Proxmox upgraded in place with
-`dpkg -i`, stayed `enabled` and `active` (so the #313 prerm fix still holds),
-logs no errors, and answers inference over the LAN. Both keep their node ids and
-5 peers. **The anchor is still on v0.3.134** and is expected to self-update.
+**Released and deployed: v0.3.136-alpha (2026-08-30).** Local (CUDA asset) and
+Proxmox (.deb) both on it and serving, verified after restart: local answers on
+the GPU, 0 errors, and the installed binary's sha256 matches the published asset
+byte for byte; Proxmox upgraded with `dpkg -i`, stayed `enabled` and `active`
+(#313 prerm fix holds), 0 errors. Both keep their node ids and 5 peers.
 
-Verification before tagging: 25 assets, not a draft, `latest` correct, sha256 on
-the CUDA asset and the .deb, and **smoke 9/9 + shapes 7/7 on the DOWNLOADED CUDA
-artifact** (`strings | grep ggml_cuda_init` confirms it really is the CUDA
-build). CI, Cache warm and Docker green; `cargo audit` run BEFORE tagging
-against the six advisories in `SECURITY.md`, none new, and libp2p is still 0.56
-so the two hickory findings remain genuinely unfixable. Soak stopped early by
-request at 616 requests / 0 failures, memory flat, no worker respawn.
+Release gate: 25 assets, not a draft, `latest` correct, sha256 on the CUDA asset
+and the .deb, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact**
+(`strings | grep ggml_cuda_init` = 1), CI + Cache warm green BEFORE tagging,
+`cargo audit` before tagging against the six advisories in `SECURITY.md` — none
+new, libp2p still 0.56 so both hickory findings remain unfixable.
 
-⚠ **Bump the version BEFORE starting the release build.** It was bumped after,
-so `target/release/swarmllm` reported `0.3.133-alpha` from the previous day's
-build while `Cargo.toml` said `.135`; checking `swarmllm version` against the
-file's mtime is what caught it, and that stale binary would otherwise have been
-what got smoke-tested.
+**All three fixes verified in production against a PEER-HELD model**, which is
+the only place any of them showed: `🌊` / `🚀 ⭐ 🔥 ❤️ 🌕` / a French sentence
+(was a 503 "reply truncated" on .135), a streamed `1\n2\n3` with no duplicate or
+`<|eot_id|>`, and an over-long prompt answered `400` naming the tokens to cut
+rather than blaming the network.
 
-### v0.3.135-alpha (2026-08-30) — the guards were the defect
+### v0.3.136-alpha (2026-08-30) — three faults only visible over the network
 
-Detail in `memory/round_log_0830_guard_audit.md`; gotcha **#413**. **Five
-repo-consistency guards were tested by PLANTING the violation each one exists to
-catch. Four did not notice**, having reported success for months — which is what
-a check that cannot fail looks like from outside.
+Found by a post-release functional check of .135, all invisible on a
+locally-held model. Detail in `memory/round_log_0830_network_path.md`; gotchas
+**#414**, **#415**, **#416**.
 
-- **Line-based scanning cannot see a chain rustfmt WRAPPED.**
-  `self.shared_state.metrics.node_stats.requests_served_atomic.fetch_add(1,
-  Ordering::Relaxed)` is 99 chars at two indent levels, so one more nesting level
-  splits it across four lines and the field name no longer shares a line with
-  `fetch_add`. Hit six guards, including the one against **#281's fourth
-  recurrence**. All now share a `statements()` scanner.
-- **A 1600-char window on a 1698-char function** (the VRAM live-config guard) —
-  blind to its last 100 chars, where a planted boot-snapshot read passed; and its
-  `cfg()` assertion sat **20 chars inside the cap**, so it was brittle in both
-  directions. Its negative check was pinned to one exact indentation.
-- **File-level `contains()` standing in for a site claim** (prompt privacy):
-  each file mentions the send somewhere, the setting somewhere, `cfg()`
-  somewhere — and both files make unrelated `cfg()` calls, so that assertion was
-  unconditional.
+- **#416 — non-English replies were refused as lost.** A multi-byte character is
+  several GENERATED tokens but ONE thing to SEND (`decode_token` returns empty
+  until the codepoint completes; the server skips empty-text events). The
+  truncation check compared generated-vs-arrived. Measured on the released
+  binary: Chinese `1 of 3 tokens arrived`, emoji `9 of 12`, both complete. 21
+  locales ship and most are multi-byte.
+- **#414 — streamed replies arrived twice** with `<|eot_id|>` between the
+  copies. The SSE encoder re-sends the whole reply when a path finishes without
+  streaming; `ngram_only_spec.rs` was the ONLY one of five coordinators never
+  sending a terminal finish event. The EOS leak was in all THREE speculative
+  paths — the filter now lives in the shared emit helpers.
+- **#415 — an over-long prompt blamed the network.** Three prefill sites
+  discarded the peer's stated reason; failover retried a refusal every holder
+  would repeat, then reported the model as under-replicated. The peer was also
+  docked for the caller's mistake.
 
-**Two production fixes.** The manifest-warning rate limiter was **capped at 512
-with nothing ever evicting**, so past that it logged every time for ever — the
-exact flood it exists to stop, while printing `suppressed_since_last=0`. It was
-the **lone outlier**: every other capped collection already prunes before
-testing its cap. And the peer table could still **rank peers by a dormant credit
-balance** through an unreachable sort branch, one restored column from working.
+⚠ **THREE wrong stories were told before the right one on #416, and the third
+nearly shipped.** A "hang" blamed on code was a cold serving node (the released
+binary later served it in 2 s); the truncation was then blamed on tool-call
+tokens, and the paired test showed released and fixed binaries failing
+IDENTICALLY, which disproved it. Only reading `decode_token`'s carry buffer gave
+a falsifiable prediction that reproduced first try. **The fix was correct while
+its justification was wrong.**
 
-⚠ **Plant the violation and watch it fail.** For a source scanner that costs a
-stray `.rs` under `src/` that no `mod` references — the scanner walks it, the
-compiler never sees it, so it need not compile. ⚠ **A guard too weak to fire is
-also too weak to be checked for correctness**: strengthening the #281 guard is
-what exposed a real contradiction in its own field list (it forbade all 17
-`auto_manage` fields while its comment said only the 4 in the Settings panel
-count).
+⚠ **`cargo clippy` does NOT rebuild the binary** — one "verification" ran against
+an 11-minute-old build. And after `cargo build`, a running process's
+`/proc/<pid>/exe` reads `...(deleted)`, so a kill loop globbing the plain path
+misses it; the new node then dies on the redb lock while the OLD binary answers
+on the same port, its output following the open fd into the log you renamed.
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.135** (08-30): **the guards were the defect** — five repo-consistency guards tested by PLANTING the violation, **four could not see what they guard** (#413); line-based scanning cannot see a chain rustfmt WRAPPED. Two production fixes: a rate limiter **capped at 512 with nothing evicting**, and a peer table that could still rank by a dormant credit balance. ⚠ **A guard too weak to fire is too weak to be checked for correctness.** `round_log_0830_guard_audit.md`.
 - **v0.3.134** (08-29): the Models page took 11 s and **9.6 of them were the KERNEL** (#410) — GGUF headers parsed off an UNBUFFERED `File` at 7 sites (~820k syscalls each), and parsed TWICE, the second only for `vocab.len()`; #411 Rust evaluates EVERY argument, so a healthy node priced a model and discarded it once per assembly. **11.2 s → 0.21 s in production, system ticks 962 → 22.** ⚠ **Split utime/stime BEFORE theorising; a STABLE duration is fixed work, not load.** `round_log_0829_dashboard_syscalls.md`.
 - **v0.3.133** (08-29): a model you had EVER served could not be deleted (#409); the forward doing the whole PREFILL was budgeted as a DECODE (#407); one NUL byte made a doc invisible to grep SILENTLY (#408). ⚠ **TWO of five found because a TOOL lied.** `round_log_0829_functional_check.md`.
 - **v0.3.132** (08-29): one dial per ADDRESS not per peer (#405, paired 13→3); a name is not a content identity (#406). ⚠ **TWO published causal claims were WRONG first.** `round_log_0829_dial_identity.md`.
