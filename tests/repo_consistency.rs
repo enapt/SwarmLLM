@@ -1034,6 +1034,91 @@ fn every_asset_the_updater_can_request_is_published_by_the_release_workflow() {
     );
 }
 
+/// Logical statements, each paired with the 1-indexed line it starts on, with
+/// interior newlines collapsed to spaces.
+///
+/// Line-by-line matching cannot see a method chain that rustfmt has wrapped,
+/// and wrapping is the ordinary shape for the writes the two guards below
+/// forbid: `self.shared_state.metrics.node_stats.requests_served_atomic
+/// .fetch_add(1, Ordering::Relaxed);` is 99 characters at two levels of
+/// indentation, so one more nesting level splits it across four lines and the
+/// field name no longer shares a line with `fetch_add`. Both guards were
+/// verified blind to exactly that, which mattered because the architecture
+/// notes say each of them "fails the build" on a stray write.
+///
+/// Full-line comments are dropped before joining, so a comment inside a
+/// statement's span cannot inject a false match.
+/// Collapse a statement's whitespace, closing the gap a wrapped method chain
+/// leaves before its `.` — `s.metrics\n    .node_stats` must read back as
+/// `s.metrics.node_stats`, or a guard looking for `field.remove(` still misses
+/// it and the whole exercise is pointless.
+fn join_statement(raw: &str) -> String {
+    raw.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" .", ".")
+}
+
+fn statements(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut start = 0usize;
+    let mut started = false;
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.starts_with("//") {
+            continue;
+        }
+        for ch in line.chars() {
+            if !started && !ch.is_whitespace() {
+                start = i + 1;
+                started = true;
+            }
+            cur.push(ch);
+            if matches!(ch, ';' | '{' | '}') {
+                if started {
+                    out.push((start, join_statement(&cur)));
+                }
+                cur.clear();
+                started = false;
+            }
+        }
+        cur.push(' ');
+    }
+    if started {
+        out.push((start, join_statement(&cur)));
+    }
+    out
+}
+
+/// The scanner both "exactly one place" guards depend on must see a wrapped
+/// chain, or those guards assert far less than they claim.
+#[test]
+fn the_statement_scanner_sees_a_chain_rustfmt_has_wrapped() {
+    let src = "fn f() {\n    s.metrics\n        .node_stats\n        .requests_served_atomic\n        .fetch_add(1, Ordering::Relaxed);\n}\n";
+    let sts = statements(src);
+    let hit = sts
+        .iter()
+        .find(|(_, t)| t.contains("requests_served_atomic") && t.contains("fetch_add"))
+        .expect("a wrapped chain must arrive as one statement");
+    assert_eq!(
+        hit.0, 2,
+        "reported line should be where the statement starts"
+    );
+
+    // The same for a wrapped `.remove(` on a guarded map.
+    let src2 = "fn f() {\n    s.active_traces\n        .remove(&id);\n}\n";
+    assert!(statements(src2)
+        .iter()
+        .any(|(_, t)| t.contains("active_traces.remove(")));
+
+    // A full-line comment inside the span must not inject a match.
+    let src3 = "fn f() {\n    let a = 1;\n    // s.active_traces.remove(&id);\n    let b = 2;\n}\n";
+    assert!(!statements(src3)
+        .iter()
+        .any(|(_, t)| t.contains("active_traces.remove(")));
+}
+
 /// Serving must be counted and paid in exactly one place, reached only from the
 /// two inbound paths that do work for a peer.
 ///
@@ -1095,11 +1180,9 @@ fn serving_is_counted_and_paid_in_exactly_one_place() {
         let is_ledger = rel == "src/credit/ledger.rs";
         // Construction of the zeroed initial state is not a write.
         let is_ctor = rel == "src/daemon/state/mod.rs" || rel == "src/daemon/state/credits.rs";
-        for (i, line) in text.lines().enumerate() {
-            let l = line.trim();
-            if l.starts_with("//") || l.starts_with("///") {
-                continue;
-            }
+        // Statements, not lines: rustfmt wraps these chains, and a wrapped
+        // write was invisible to this guard.
+        for (line_no, l) in statements(text) {
             for name in guarded {
                 if !l.contains(name) {
                     continue;
@@ -1115,7 +1198,7 @@ fn serving_is_counted_and_paid_in_exactly_one_place() {
                 if (is_ledger || is_ctor) && name == "pending_credit_earn" {
                     continue;
                 }
-                offenders.push(format!("{rel}:{}: {l}", i + 1));
+                offenders.push(format!("{rel}:{line_no}: {l}"));
             }
         }
     }
@@ -1295,18 +1378,19 @@ fn per_request_state_is_released_in_one_place() {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            let mut in_tests = false;
-            for (i, line) in text.lines().enumerate() {
-                let l = line.trim();
-                if l.starts_with("#[cfg(test)]") {
-                    in_tests = true;
-                }
-                if in_tests || l.starts_with("//") || l.starts_with("///") {
+            // Everything from the first `#[cfg(test)]` on is test code.
+            let cutoff = text
+                .find("#[cfg(test)]")
+                .map(|i| text[..i].lines().count() + 1)
+                .unwrap_or(usize::MAX);
+            // Statements, not lines — see `statements`.
+            for (line_no, l) in statements(&text) {
+                if line_no >= cutoff {
                     continue;
                 }
                 for name in guarded {
                     if l.contains(&format!("{name}.remove(")) {
-                        offenders.push(format!("{rel}:{}: {l}", i + 1));
+                        offenders.push(format!("{rel}:{line_no}: {l}"));
                     }
                 }
             }
