@@ -56,15 +56,26 @@ divides by it). Net: a 200-second request teaches the scheduler nothing.
 theory — the third request was fired immediately after the second finished, well
 inside the window, and still saw `None`.
 
-### The design question, which is why this is not just a missing call
+### The design question — narrower than it first looks
 
-A verify forward is not a decode step. `peer_speed::observe` divides by `layers`
-to get ms/layer for `WorkKind::Decode`, and a speculative verify batch carries K
-draft tokens through the same layers — so recording it as a decode sample
-inflates the per-token figure by roughly K, and recording it as prefill needs an
-`activation_bytes` these results do not carry. Getting that wrong pollutes the
-EWMA that sizes segment timeouts as well as ranking, which is a worse failure
-than the present one.
+The measured case is the EASY half, and it is worth being precise about that.
+`ngram_only_spec`'s module doc: *"on HIT send the draft batch via
+send_verify_batch + accept-reject; on MISS send a **single-token** verify as the
+fallback path."* This request reported `ngram_rounds=0 fallback_rounds=3`, so
+all three of its 54-77 s forwards were single-token — **ordinary decode steps
+wearing a verify's name**. Recording those as `WorkKind::Decode` is simply
+correct, and `verify_tokens.len() == 1` distinguishes them at the call site.
+
+The genuinely open half is the HIT path: a verify batch carries K draft tokens
+through the same layers, and `peer_speed::observe` divides by `layers` alone —
+so recording a batch as a decode sample inflates ms/layer by roughly K, and
+recording it as prefill needs an `activation_bytes` these results do not carry.
+That pollutes the EWMA sizing segment timeouts as well as ranking, which is a
+worse failure than the present one.
+
+So a safe first step exists: record the single-token case, leave the batch case
+alone, and the workload that provoked this — speculation missing, which is when
+it is slowest and matters most — is covered.
 
 Two candidate directions, neither costed yet:
 
