@@ -524,7 +524,14 @@ pub(in crate::inference::pipeline) async fn emit_first_streaming_token(
     token_tx: &Option<StreamingTokenTx>,
     decoder: &prompt::CachedDecoder,
     token: u32,
+    eos: &std::collections::HashSet<u32>,
 ) {
+    // `eos` is REQUIRED, with no convenience wrapper that omits it, because
+    // every one of these call sites emitted the token BEFORE testing whether
+    // it was end-of-turn. See `emit_streaming_batch` for what that produced.
+    if eos.contains(&token) {
+        return;
+    }
     if let Some(tx) = token_tx {
         let text = decoder.decode_tokens(&[token]);
         let _ = tx
@@ -546,6 +553,7 @@ pub(in crate::inference::pipeline) async fn emit_streaming_batch(
     token_tx: &Option<StreamingTokenTx>,
     decoder: &prompt::CachedDecoder,
     tokens: &[u32],
+    eos: &std::collections::HashSet<u32>,
     finish_reason: &mut String,
 ) -> bool {
     let tx = match token_tx {
@@ -553,6 +561,21 @@ pub(in crate::inference::pipeline) async fn emit_streaming_batch(
         None => return false,
     };
     for &t in tokens {
+        // End-of-turn is a CONTROL token: it ends the reply, it is not part of
+        // it. Every caller keeps it in its own `emitted` vector so the decode
+        // loop still stops on it, and every caller passed that vector straight
+        // here — so all three speculative coordinators streamed `<|eot_id|>` to
+        // the client as reply text, while `finish_speculative` filtered it out
+        // of the non-streaming content. The same answer therefore differed by
+        // transport (gotcha #414, measured on the live swarm 2026-08-30).
+        //
+        // Filtering HERE rather than at the call sites is deliberate: the
+        // R105 fix truncated each caller's vector to `eos_at + 1` — stopping
+        // post-EOS junk but keeping EOS itself — and was copied into all three
+        // files, so the defect was copied with it.
+        if eos.contains(&t) {
+            continue;
+        }
         let text = decoder.decode_tokens(&[t]);
         if tx
             .send(crate::inference::router::StreamingTokenEvent {

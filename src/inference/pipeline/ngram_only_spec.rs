@@ -353,7 +353,7 @@ impl PipelineExecutor {
         let mut fallback_rounds: u32 = 0;
 
         // Stream first token
-        super::emit_first_streaming_token(&token_tx, &decoder, first_token).await;
+        super::emit_first_streaming_token(&token_tx, &decoder, first_token, &eos_tokens).await;
         if eos_tokens.contains(&first_token) {
             finish_reason = "stop".into();
         }
@@ -422,25 +422,19 @@ impl PipelineExecutor {
                 last_token = bonus;
                 generated.push(bonus);
                 current_pos += 1;
-                // End-of-turn is a CONTROL token: it ends the reply, it is not
-                // part of it. `finish_speculative` already filters it out of
-                // the non-streaming content, so streaming it here made the same
-                // reply differ by transport — `<|eot_id|>` appeared mid-stream
-                // for every client reading deltas (measured 2026-08-30).
-                let is_eos = eos_tokens.contains(&bonus);
-                if !is_eos {
-                    if let Some(ref tx) = token_tx {
-                        let text = decoder.decode_tokens(&[bonus]);
-                        let _ = tx
-                            .send(StreamingTokenEvent {
-                                text,
-                                finish_reason: None,
-                                matched_stop_sequence: None,
-                            })
-                            .await;
-                    }
-                }
-                if is_eos {
+                // Through the shared helper rather than a direct send, so this
+                // arm inherits the end-of-turn filter like every other emission
+                // point. A hand-rolled send here is exactly how a control token
+                // reaches a client (gotcha #414).
+                super::emit_streaming_batch(
+                    &token_tx,
+                    &decoder,
+                    &[bonus],
+                    &eos_tokens,
+                    &mut finish_reason,
+                )
+                .await;
+                if eos_tokens.contains(&bonus) {
                     finish_reason = "stop".into();
                     break;
                 }
@@ -514,14 +508,16 @@ impl PipelineExecutor {
             }
 
             // Emit (stream + accumulate). The EOS token stays in `emitted` so
-            // the accumulator below still sees it and stops, but it is a
-            // control token and must never be streamed as reply text — see the
-            // fallback arm above.
-            let streamable = match emitted.iter().position(|t| eos_tokens.contains(t)) {
-                Some(eos_at) => &emitted[..eos_at],
-                None => &emitted[..],
-            };
-            super::emit_streaming_batch(&token_tx, &decoder, streamable, &mut finish_reason).await;
+            // the accumulator below still sees it and stops; `emit_streaming_batch`
+            // is what keeps it off the wire, for every path at once.
+            super::emit_streaming_batch(
+                &token_tx,
+                &decoder,
+                &emitted,
+                &eos_tokens,
+                &mut finish_reason,
+            )
+            .await;
             for &t in &emitted {
                 generated.push(t);
                 if eos_tokens.contains(&t) {

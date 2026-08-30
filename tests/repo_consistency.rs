@@ -3027,3 +3027,75 @@ fn a_streaming_pipeline_path_sends_its_terminal_finish_event() {
         offenders.join("\n  ")
     );
 }
+
+/// Reply text reaches a streaming client through the shared emit helpers, never
+/// through a hand-rolled `StreamingTokenEvent`.
+///
+/// `emit_streaming_batch` / `emit_first_streaming_token` own the end-of-turn
+/// filter. A coordinator that builds its own event with decoded text bypasses
+/// that filter, which is how `<|eot_id|>` reached clients as reply text from
+/// all three speculative paths at once (gotcha #414): each had copied the R105
+/// truncation, which stops post-EOS junk but keeps EOS itself.
+///
+/// Terminal events (`text: String::new()`) are fine — they carry no content,
+/// and sending one is separately required by
+/// `a_streaming_pipeline_path_sends_its_terminal_finish_event`.
+#[test]
+fn streamed_reply_text_goes_through_the_shared_emit_helpers() {
+    let dir = std::path::Path::new("src/inference/pipeline");
+    let mut offenders = Vec::new();
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(dir).expect("pipeline dir") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        // `mod.rs` DEFINES the helpers, so it is the one place that may build a
+        // content event. `remote_generate.rs` forwards `t.text` verbatim from
+        // the serving peer, which produced it through its own local executor —
+        // there is no token id here to test, only text someone else decoded.
+        // `distributed.rs` decodes inline and is already inside its own
+        // `if !eos.contains(&tid)` guard at its single decode site; it does not
+        // use the helper pattern at all. LIMITATION, stated rather than hidden:
+        // a NEW content send added to that file outside its guard is not caught
+        // here. The three speculative coordinators are where the defect lived
+        // and where the helpers are the established mechanism.
+        if name == "mod.rs" || name == "remote_generate.rs" || name == "distributed.rs" {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read");
+        let stmts = statements(&src);
+        for (i, (line, stmt)) in stmts.iter().enumerate() {
+            if !stmt.contains("StreamingTokenEvent {") {
+                continue;
+            }
+            checked += 1;
+            // The `text:` field is within a couple of statements of the literal.
+            let window: String = stmts[i..(i + 4).min(stmts.len())]
+                .iter()
+                .map(|(_, s)| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let text_is_empty = window.contains("text: String::new()");
+            if !text_is_empty {
+                offenders.push(format!(
+                    "{}:{} builds a StreamingTokenEvent carrying reply text — \
+                     route it through emit_streaming_batch so it inherits the \
+                     end-of-turn filter",
+                    path.display(),
+                    line
+                ));
+            }
+        }
+    }
+    assert!(
+        checked >= 3,
+        "expected several StreamingTokenEvent sites, found {checked} — scan is not reaching them"
+    );
+    assert!(
+        offenders.is_empty(),
+        "hand-rolled streaming content sends:\n  {}",
+        offenders.join("\n  ")
+    );
+}

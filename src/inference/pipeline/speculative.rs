@@ -245,7 +245,7 @@ impl PipelineExecutor {
         let mut pending_truncate: Option<u32> = None;
 
         // Stream the first token if we have a streaming channel.
-        super::emit_first_streaming_token(&token_tx, &decoder, first_token).await;
+        super::emit_first_streaming_token(&token_tx, &decoder, first_token, &eos_tokens).await;
 
         let mut acceptance_proposed: u32 = 0;
         let mut acceptance_accepted: u32 = 0;
@@ -452,7 +452,14 @@ impl PipelineExecutor {
             }
 
             // Streaming per token.
-            super::emit_streaming_batch(&token_tx, &decoder, &emitted, &mut finish_reason).await;
+            super::emit_streaming_batch(
+                &token_tx,
+                &decoder,
+                &emitted,
+                &eos_tokens,
+                &mut finish_reason,
+            )
+            .await;
 
             // Bail before the per-round bookkeeping (KV tracking,
             // `draft_sync_after_round` which holds a `block_in_place`) when the

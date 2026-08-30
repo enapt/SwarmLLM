@@ -147,6 +147,43 @@ impl StreamReassembler {
             .unwrap_or(0)
     }
 
+    /// Did tokens the peer actually SENT fail to arrive?
+    ///
+    /// The only honest truncation oracle, and deliberately NOT
+    /// `usage.completion_tokens > emitted()`. That figure counts tokens the
+    /// model GENERATED, while the serving node skips forwarding any whose text
+    /// is empty (`dispatch/remote_generate.rs`: `if evt.text.is_empty()
+    /// { continue; }`) — so the two differ BY CONSTRUCTION on any reply
+    /// containing tokens that decode to nothing. The done token carries
+    /// `streamed_count`, which is what this compares against.
+    ///
+    /// The tokens that decode to nothing are MULTI-BYTE CHARACTERS.
+    /// `decode_token` accumulates bytes in a `carry` buffer and returns empty
+    /// until the codepoint completes, so one CJK character or emoji is several
+    /// generated tokens and ONE sent token. Pure ASCII has almost none, which
+    /// is why the counts agreed in testing and the fault stayed hidden.
+    ///
+    /// Measured against the released v0.3.135, same data dir, only the binary
+    /// changed (gotcha #416): "one sentence in Chinese" answered
+    /// `503 Reply truncated in transit: 1 of 3 tokens arrived`, and five emoji
+    /// answered `9 of 12`. Both replies had arrived COMPLETE. The hint told the
+    /// user their answer was lost and to try a different machine — advice that
+    /// could never help, for a reply that was already correct. The product
+    /// ships 21 locales and most are multi-byte, so this refused a large share
+    /// of non-English replies from peer-held models.
+    ///
+    /// An unsequenced peer cannot say what to expect, so it can never be judged
+    /// truncated — the same degradation `is_complete` makes.
+    pub(super) fn truncated(&self) -> bool {
+        self.sequenced && self.missing() > 0
+    }
+
+    /// How many content tokens the peer says it sent. Falls back to what
+    /// arrived, so an error message can never read "3 of 0".
+    pub(super) fn sent_by_peer(&self) -> u32 {
+        self.expected_total.unwrap_or_else(|| self.emitted())
+    }
+
     pub(super) fn emitted(&self) -> u32 {
         self.next_seq
     }
@@ -644,17 +681,17 @@ impl PipelineExecutor {
         let delivered = stream.emitted();
         // Tokens went missing in transit. Remembered because it also disqualifies
         // this request as a speed measurement — see the sample below.
-        let stream_was_truncated = completion_tokens > delivered;
-        // Captured BEFORE the clamp below overwrites it. Without this the
-        // truncation error read "3 of 3 tokens arrived", which is exactly the
-        // reassuring shape the whole change exists to stop.
-        let claimed_by_peer = completion_tokens;
-        if completion_tokens > delivered {
+        let stream_was_truncated = stream.truncated();
+        // What the peer says it PUT ON THE WIRE, which is what `delivered` is
+        // comparable to. Not `completion_tokens` — see `truncated()`.
+        let claimed_by_peer = stream.sent_by_peer();
+        if stream_was_truncated {
             tracing::warn!(
                 %request_id,
-                claimed = completion_tokens,
+                claimed = claimed_by_peer,
                 delivered,
-                "remote-generate: peer reported more tokens than were delivered — \
+                generated = completion_tokens,
+                "remote-generate: tokens the peer sent did not all arrive — \
                  reporting and billing the delivered count"
             );
             completion_tokens = delivered;
@@ -867,6 +904,70 @@ mod stream_reassembly_tests {
 
     fn joined(toks: Vec<StreamingToken>) -> String {
         toks.into_iter().map(|t| t.text).collect()
+    }
+
+    /// The measured failure this oracle exists for. One emoji is several
+    /// generated tokens and ONE sent token, because `decode_token` returns
+    /// empty until the multi-byte codepoint completes and the serving node
+    /// skips forwarding an empty-text event. Judging arrivals against
+    /// `usage.completion_tokens` therefore called a perfectly delivered reply
+    /// truncated: on the released v0.3.135, five emoji came back as
+    /// `503 Reply truncated in transit: 9 of 12 tokens arrived` (gotcha #416).
+    #[test]
+    fn a_multi_byte_reply_is_not_truncated_just_because_it_generated_more_tokens() {
+        let mut s = StreamReassembler::new();
+        // What actually goes on the wire for "🚀 ⭐ 🔥 ❤️ 🌕": one send per
+        // completed codepoint, densely numbered.
+        for (i, t) in ["🚀", " ⭐", " 🔥", " ❤️", " 🌕"].iter().enumerate() {
+            s.push_content(content(i as u32, t));
+        }
+        // The peer sent 5 content tokens and says so, though it GENERATED 12.
+        s.mark_done(5);
+        assert_eq!(s.emitted(), 5);
+        // The control: the predicate this replaced DOES fire here, so the test
+        // is not passing merely because the situation is benign.
+        let generated_by_the_model = 12u32;
+        assert!(
+            generated_by_the_model > s.emitted(),
+            "the old `completion_tokens > delivered` check fires on this input"
+        );
+        assert!(
+            !s.truncated(),
+            "every token the peer sent arrived — the model generating more that \
+             decoded to nothing is not a delivery failure"
+        );
+        assert_eq!(
+            s.sent_by_peer(),
+            5,
+            "must report what was SENT, not generated"
+        );
+    }
+
+    /// The control, and the reason the oracle cannot simply be deleted: a real
+    /// loss must still be caught. Without this the fix above would read as
+    /// "never report truncation", which is the failure mode #282 exists for.
+    #[test]
+    fn a_genuinely_lost_token_is_still_truncated() {
+        let mut s = StreamReassembler::new();
+        s.push_content(content(0, "a"));
+        s.push_content(content(1, "b"));
+        // Token 2 never arrives.
+        s.mark_done(4);
+        assert!(s.truncated(), "two of four tokens arrived — that is a loss");
+        assert_eq!(s.missing(), 2);
+        assert_eq!(s.sent_by_peer(), 4);
+    }
+
+    /// A peer too old to sequence sends zeros throughout and cannot tell us
+    /// what to expect, so it must never be judged truncated — the same
+    /// degradation `is_complete` makes for mixed-version swarms.
+    #[test]
+    fn an_unsequenced_peer_is_never_called_truncated() {
+        let mut s = StreamReassembler::new();
+        s.push_content(content(0, "a"));
+        s.push_content(content(0, "b"));
+        s.mark_done(0);
+        assert!(!s.truncated());
     }
 
     /// The measured failure. A peer at ~6s RTT answered "Cherry" as two tokens,

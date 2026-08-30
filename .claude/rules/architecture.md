@@ -2398,3 +2398,33 @@ helpers — ending the stream is the coordinator's job, since only it knows why
 generation stopped.
 
 Ask of any "did this happen?" flag what its consumer does when it stays false.
+
+## Two counters both called "tokens" — write down which event each one counts
+
+`StreamReassembler::truncated()` is the single answer to "did tokens the peer
+SENT fail to arrive?". It is deliberately NOT `usage.completion_tokens >
+emitted()`.
+
+`decode_token` accumulates bytes in a `carry` buffer and returns EMPTY until a
+multi-byte codepoint completes, and the serving node skips forwarding an
+empty-text event without numbering it. So `streamed_count` — what the done token
+carries and what `token_id` densely numbers — counts NETWORK SENDS, while
+`usage.completion_tokens` counts MODEL STEPS. They are equal only for pure
+ASCII, which is what everything got tested with.
+
+Comparing the two therefore refused correct replies: on the released v0.3.135,
+"one sentence in Chinese" answered `503 Reply truncated in transit: 1 of 3
+tokens arrived` and five emoji answered `9 of 12`, both having arrived complete,
+with a hint telling the user to try a different machine (gotcha #416). The
+product ships 21 locales and most are multi-byte.
+
+Three properties a change here must keep. **`missing()` is derived from the done
+token**, which is the only figure comparable to what arrived. **An unsequenced
+peer is never judged truncated** — it cannot say what to expect, the same
+degradation `is_complete` makes for mixed-version swarms. And **a genuine loss
+must still be caught**: `a_genuinely_lost_token_is_still_truncated` is the
+control, because "never report truncation" would silently reintroduce the
+truncated replies of gotcha #282.
+
+The clamp of `completion_tokens` down to `delivered` now happens only on a real
+truncation, so usage stops under-reporting every multi-byte reply.
