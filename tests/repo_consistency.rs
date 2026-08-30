@@ -2552,6 +2552,78 @@ fn documentation_contains_no_nul_bytes() {
 /// no faster than a debug one on that path.
 ///
 /// The check is proximity, not naming: a `File::open` a few lines above a
+/// Lines in `text` (1-indexed) where a GGUF header is parsed straight off a
+/// file handle that was opened, unbuffered, within `WINDOW` lines above.
+///
+/// Split out from the test so the guard's own effectiveness can be asserted on
+/// planted violations. A repo-wide scan that finds nothing is indistinguishable
+/// from a scan that cannot find anything, and this one had already been silently
+/// blind twice — once to a `match File::open` form, once to `OpenOptions`.
+fn unbuffered_gguf_parse_lines(text: &str) -> Vec<usize> {
+    /// How far above the call an `open` still counts as "and then parsed it".
+    const WINDOW: usize = 6;
+    let lines: Vec<&str> = text.lines().collect();
+    let is_code = |l: &&str| !l.trim_start().starts_with("//");
+    let mut hits = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        // Skip comments, or this trips over the doc comments that explain the
+        // rule — the trap a sibling test here already hit.
+        if !is_code(line) || !line.contains("Content::read(") {
+            continue;
+        }
+        let window = &lines[i.saturating_sub(WINDOW)..=i];
+        // `OpenOptions` counts as opening a file, and is not a corner case: it
+        // is what anyone reaching for specific flags writes, and it yields
+        // exactly the same unbuffered `File`.
+        let opens_a_file = window
+            .iter()
+            .any(|l| is_code(l) && (l.contains("File::open") || l.contains("OpenOptions")));
+        let buffers_it = window
+            .iter()
+            .any(|l| is_code(l) && (l.contains("BufReader") || l.contains("Cursor")));
+        if opens_a_file && !buffers_it {
+            hits.push(i + 1);
+        }
+    }
+    hits
+}
+
+/// The guard must actually catch each way of writing the defect, and must not
+/// fire on the buffered forms the codebase legitimately uses. Without this the
+/// scan above can quietly become a no-op and still report success.
+#[test]
+fn the_unbuffered_gguf_guard_catches_every_form_of_the_defect() {
+    let caught = |src: &str| !unbuffered_gguf_parse_lines(src).is_empty();
+
+    // The plain form, and the `match` form that a naming-based rule missed.
+    assert!(caught(
+        "let mut f = File::open(p)?;\nContent::read(&mut f)?;"
+    ));
+    assert!(caught(
+        "match File::open(p) {\n  Ok(mut f) => Content::read(&mut f),\n}"
+    ));
+    // `OpenOptions` — the same unbuffered handle, missed until 2026-08-30.
+    assert!(caught(
+        "let mut f = OpenOptions::new().read(true).open(p)?;\nContent::read(&mut f)?;"
+    ));
+
+    // Buffered handles are correct and must stay quiet, or the guard becomes
+    // noise and gets suppressed rather than fixed.
+    assert!(!caught(
+        "let f = File::open(p)?;\nlet mut r = BufReader::new(f);\nContent::read(&mut r)?;"
+    ));
+    assert!(!caught(
+        "let mut r = Cursor::new(&bytes);\nContent::read(&mut r)?;"
+    ));
+    // A reader built further up has no open next to it and is not this defect.
+    assert!(!caught("Content::read(&mut reader)?;"));
+    // A comment describing the defect is not the defect — the trap a sibling
+    // test in this file actually hit.
+    assert!(!caught(
+        "// let mut f = File::open(p)?;\n// Content::read(&mut f)?;"
+    ));
+}
+
 /// `Content::read` with no `BufReader` or `Cursor` between them is the defect,
 /// whatever anything is called. Naming was the first cut and it is only as good
 /// as the naming — worse, it silently missed the `match File::open { Ok(mut f)
@@ -2559,10 +2631,15 @@ fn documentation_contains_no_nul_bytes() {
 /// actually had. A `Cursor` over a slice or an mmap is already in memory and
 /// correctly passes; so does a reader built further up, which no longer has an
 /// open file next to it.
+///
+/// "Opens a file" means `File::open` **or** `OpenOptions` — the second was
+/// missing until 2026-08-30 and is the ordinary way to open a file when any
+/// flag is wanted, so the guard was mute on a site it exists to catch. Both
+/// directions are pinned below: a planted violation of each form must fail this
+/// test, or it is only a guard against the one spelling someone happened to
+/// think of.
 #[test]
 fn a_gguf_header_is_never_parsed_straight_off_an_unbuffered_file() {
-    /// How far above the call an `open` still counts as "and then parsed it".
-    const WINDOW: usize = 6;
     let root = repo_root();
     let mut offenders: Vec<String> = Vec::new();
     let mut stack = vec![root.join("src")];
@@ -2582,31 +2659,12 @@ fn a_gguf_header_is_never_parsed_straight_off_an_unbuffered_file() {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            let lines: Vec<&str> = text.lines().collect();
-            for (i, line) in lines.iter().enumerate() {
-                // Skip comments, or this trips over the doc comments that
-                // explain the rule — the trap a sibling test here already hit.
-                if line.trim_start().starts_with("//") {
-                    continue;
-                }
-                if !line.contains("Content::read(") {
-                    continue;
-                }
-                let window = &lines[i.saturating_sub(WINDOW)..=i];
-                let opens_a_file = window
-                    .iter()
-                    .any(|l| !l.trim_start().starts_with("//") && l.contains("File::open"));
-                let buffers_it = window.iter().any(|l| {
-                    !l.trim_start().starts_with("//")
-                        && (l.contains("BufReader") || l.contains("Cursor"))
-                });
-                if opens_a_file && !buffers_it {
-                    offenders.push(format!(
-                        "{}:{}",
-                        p.strip_prefix(&root).unwrap_or(&p).display(),
-                        i + 1
-                    ));
-                }
+            for line_no in unbuffered_gguf_parse_lines(&text) {
+                offenders.push(format!(
+                    "{}:{}",
+                    p.strip_prefix(&root).unwrap_or(&p).display(),
+                    line_no
+                ));
             }
         }
     }
