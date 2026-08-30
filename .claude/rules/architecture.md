@@ -912,8 +912,15 @@ silently break at the wire if duplicated:
   fails the build if that changes, and it scans the WHOLE of `api/identity.rs`
   rather than the lines that were fixed: the leaderboard's *self* entry is built
   by different code from its peer entries, so the first fix left the node still
-  publishing its own (gotcha #317). Design and exit criteria in
-  `docs/CREDITS_DESIGN.md`.
+  publishing its own (gotcha #317). **It also scans `frontend/js` for code that
+  reads a credit figure** (2026-08-30) — the backend half was checked and the
+  dashboard half was not, so an unreachable `sortKey === 'credits'` branch
+  survived the cleanup that removed every element rendering the balance. It
+  sorted on a field the peer payload has not carried for releases, so it read
+  `undefined` and nobody noticed; one restored column header would have had the
+  peer list ranking by a self-minted number with nothing to catch it. Comments
+  are excluded, because one of them documents precisely why nothing renders the
+  figure. Design and exit criteria in `docs/CREDITS_DESIGN.md`.
 - **`AnthropicSseEvent::Error`** (2026-08-12) — the ONLY way the Anthropic
   streaming surface reports a failure. Emit `event: error`; never write the
   reason into assistant content, and never invent a `stop_reason` for it.
@@ -1880,6 +1887,63 @@ The CI `flash-attn` compile-check cell points the build script at a
 non-existent temp dir with `CANDLE_FLASH_ATTN_CHECK_ONLY=1`, which exercises this
 patch in ~50 s on every push — nothing else in CI compiles that crate, because
 compiling it is the cost being avoided.
+
+## A source-scanning guard is only as good as the spellings it knows (2026-08-30)
+
+`tests/repo_consistency.rs` is where this project stops known past mistakes from
+coming back. Five of those guards were tested by **planting the violation each
+one exists to catch. Four did not notice** — all had been reporting success for
+months (gotcha #413).
+
+Three rules follow, and they are cheap.
+
+**Scan statements, not lines.** `statements(text)` joins continuation lines and
+closes the gap a wrapped chain leaves before its `.`, so
+`s.metrics\n    .node_stats` reads back as `s.metrics.node_stats`. Every guard
+matching a dotted path or a field-plus-operation must use it.
+`self.shared_state.metrics.node_stats.requests_served_atomic.fetch_add(1,
+Ordering::Relaxed)` is 99 characters at two levels of indentation, so **one more
+nesting level and rustfmt splits it across four lines** — which is the ordinary
+shape, not an edge case. It blinded the serving-accounting guard, the
+per-request-state guard, the live-config guard (the one against #281's fourth
+recurrence), the update-reporting guard, the advertised-load guard and the dial
+guard.
+
+**Take the whole body, never a character window.** The VRAM guard read
+`src[start..start + 1600]` of a function 1698 characters long and was blind to
+its last 100, where a planted boot-snapshot read passed. It was brittle in both
+directions: the `cfg()` call its positive assertion depended on sat at offset
+1568, **twenty characters inside the cap**, so twenty characters of unrelated
+growth would have failed it on correct code. `fn_body(src, signature)` takes to
+the closing brace in column zero. For the same reason, never match a literal
+carrying indentation (`"shared\n        .config\n        .resources"`) — that is
+pinned to whatever rustfmt produced the day it was written.
+
+**A file-level `contains` is not a site-level claim.** The prompt-privacy guard
+asserted each FILE mentions the send somewhere, the setting somewhere and
+`cfg()` somewhere. Both files make unrelated `cfg()` calls, so the third
+assertion was satisfied unconditionally and none of the three established the
+gate was on the path; a second ungated send in either file kept it green. Use a
+proximity window sized from the real code.
+
+**And give every scan a self-test that plants the violation.** A repo-wide scan
+that finds nothing is indistinguishable from one that *cannot* find anything, so
+the scanner's reach has to be pinned the way any other behaviour is —
+`the_statement_scanner_sees_a_chain_rustfmt_has_wrapped`,
+`the_unbuffered_gguf_guard_catches_every_form_of_the_defect`,
+`the_boot_snapshot_check_is_not_pinned_to_one_formatting`,
+`the_prefix_sharing_guard_catches_an_ungated_send`.
+
+**How to test one by hand**: a stray `.rs` under `src/` that no `mod`
+references. The scanner walks the directory and finds it; the compiler never
+sees it, so it need not even compile. Delete it afterwards.
+
+**A guard too weak to fire is also too weak to be checked for correctness.**
+Strengthening the #281 guard is what surfaced a real contradiction in its own
+field list — it forbade all seventeen `.config.auto_manage.` fields while its
+own comment stated the principle that only the four the Settings panel exposes
+are live-settable, the rest being config-file/CLI where the boot value is
+CORRECT.
 
 ## One invariant, N paths — the recurring bug of this codebase
 
