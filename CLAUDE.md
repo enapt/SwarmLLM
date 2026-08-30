@@ -221,18 +221,27 @@ All 20 build phases complete. All subsystems wired — no stubs. **2146 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released: v0.3.135-alpha (2026-08-30)** — published and fully verified, NOT
-yet deployed anywhere. 25 assets, not a draft, `latest` points at it, sha256
-checked on the CUDA asset and the .deb, and **smoke 9/9 + shapes 7/7 run on the
-DOWNLOADED CUDA artifact** (which `strings | grep ggml_cuda_init` confirms is
-really the CUDA build). CI, Cache warm and Docker all green; `cargo audit` run
-BEFORE tagging against the six advisories in `SECURITY.md`, none new, and
-libp2p is still 0.56 so the two hickory findings remain genuinely unfixable.
-Soak stopped early by request at 616 requests / 0 failures, memory flat, no
-worker respawn.
+**Released and deployed: v0.3.135-alpha (2026-08-30).** Local (CUDA asset) and
+Proxmox (.deb) both on it and serving, each verified after restart: local
+answers on the GPU with zero errors since restart and the installed binary's
+sha256 matches the published asset byte for byte; Proxmox upgraded in place with
+`dpkg -i`, stayed `enabled` and `active` (so the #313 prerm fix still holds),
+logs no errors, and answers inference over the LAN. Both keep their node ids and
+5 peers. **The anchor is still on v0.3.134** and is expected to self-update.
 
-**Still on v0.3.134-alpha and serving: local (CUDA asset), Proxmox (.deb), the
-anchor.** Deployment is the outstanding step.
+Verification before tagging: 25 assets, not a draft, `latest` correct, sha256 on
+the CUDA asset and the .deb, and **smoke 9/9 + shapes 7/7 on the DOWNLOADED CUDA
+artifact** (`strings | grep ggml_cuda_init` confirms it really is the CUDA
+build). CI, Cache warm and Docker green; `cargo audit` run BEFORE tagging
+against the six advisories in `SECURITY.md`, none new, and libp2p is still 0.56
+so the two hickory findings remain genuinely unfixable. Soak stopped early by
+request at 616 requests / 0 failures, memory flat, no worker respawn.
+
+⚠ **Bump the version BEFORE starting the release build.** It was bumped after,
+so `target/release/swarmllm` reported `0.3.133-alpha` from the previous day's
+build while `Cargo.toml` said `.135`; checking `swarmllm version` against the
+file's mtime is what caught it, and that stale binary would otherwise have been
+what got smoke-tested.
 
 ### v0.3.135-alpha (2026-08-30) — the guards were the defect
 
