@@ -2,6 +2,24 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- **The dashboard's statistics call is about three times faster.** Opening the
+  dashboard, or switching to a tab that refreshes the node's figures, spent
+  roughly a quarter of a second gathering them. Most of that was spent building
+  a description of every program running on the machine — twice over — in order
+  to read four numbers: total memory, memory in use, how much this node itself
+  is using, and the processor's name and core count. It now asks only for those.
+  Measured in isolation on a machine running 105 programs: 182 ms before,
+  0.43 ms after. The figures reported are unchanged.
+
+  Measured on a running node rather than in a benchmark: the call now answers in
+  6 milliseconds where it took 273. The remaining cost on a machine with a
+  graphics card is a single live reading of its memory, which is real
+  information and has been left as it is.
+
 ## [0.3.136-alpha] — 2026-08-30
 
 ### Fixed

@@ -2,6 +2,58 @@
 
 Captures items deliberately deferred from the model-management redesign and from prior sweeps. Each entry has enough context that a future implementer (or a future me) can pick it up without re-deriving the rationale.
 
+## Two smaller costs found beside #417 (open, 2026-08-30)
+
+Both surfaced while pricing `GET /api/admin/stats` (gotcha #417, fixed). Neither
+was fixed with it — recorded here so the next person has the measurement rather
+than the hunch.
+
+### `detect_hardware`'s no-GPU branch forks `nvidia-smi` twice
+
+`api::admin::detect_hardware` reads live graphics-card figures. The
+`gpu_info: Some(..)` branch forks `nvidia-smi` once (`query_gpu_vram_used`).
+The `None` branch forks it **twice** — `detect_gpu_nvidia_smi()` for the name
+and total, then `query_gpu_vram_used()` for the used figure. Measured at ~80 ms
+per fork on this box, so ~160 ms on that branch.
+
+`vram::query_gpu_vram_free_mb` already exists for exactly this reason and its
+doc comment says so: *"One combined query rather than `detect_gpu_nvidia_smi` +
+`query_gpu_vram_used` because the two would be sampled at different instants,
+and the subtraction of two racing samples can go negative."* The `None` branch
+predates it and needs a sibling that also returns the name
+(`--query-gpu=name,memory.total,memory.used`).
+
+**Who actually pays it**: a machine that HAS an NVIDIA card but is running a
+build that did not bind to it — i.e. the `-cpu` release asset on a GPU box. A
+machine with no `nvidia-smi` at all fails both calls fast and pays little, and
+a normal CUDA node takes the one-fork branch. So this is real but narrow, which
+is why it was left.
+
+**Do not "fix" it by caching without deciding the staleness question first.**
+The figure is live VRAM, and the dashboard's whole point on that tile is telling
+you what the card is doing right now.
+
+### The `DIAG: request complete` trace under-reports `prompt_tokens`
+
+On the split fast path (`segments=0`), a STREAMING request whose caller did not
+ask for `stream_options.include_usage` is traced as `prompt_tokens=0`:
+
+```
+route=local segments=0 ... ttft_ms=225 total_ms=432 prompt_tokens=0  tokens=5   <- streaming, no include_usage
+route=local segments=0 ... ttft_ms=248 total_ms=401 prompt_tokens=42 tokens=5   <- same prompt, include_usage set
+route=local segments=1 ... total_ms=90                prompt_tokens=40 tokens=2  <- non-streaming
+```
+
+**The API itself is correct** — verified directly, streaming and non-streaming
+both report `prompt_tokens: 42` for the same prompt. This is trace fidelity
+only. It matters because `docs/DIAGNOSTICS.md` tells people to trace by
+`request_id`, most clients do not set `include_usage`, and gotcha #400 was
+found by asking what a number in exactly this trace was supposed to EQUAL. A
+zero there is the kind of thing that sends the next investigation sideways.
+
+Either populate it from the prompt the path already tokenised, or omit the
+field when it is unknown — a missing field is honest, a `0` is not.
+
 ## NETWORKING_PLAN — fully implemented (2026-07-24) ✅
 
 The networking plan's Phases 1–3 + the version handshake shipped (see

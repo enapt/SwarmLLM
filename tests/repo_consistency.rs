@@ -2908,6 +2908,155 @@ fn the_unbuffered_gguf_guard_catches_every_form_of_the_defect() {
     ));
 }
 
+/// Lines that ask sysinfo to describe the WHOLE machine.
+///
+/// `System::new_all()` enumerates every process on the box; `refresh_all()`
+/// then does the same scan again. Both are whole-machine sweeps, and a caller
+/// wanting four numbers pays for all 105 processes twice.
+///
+/// Comments are skipped by `statements`, so the paragraph above — which names
+/// both calls — is not itself an offender.
+fn whole_machine_sysinfo_lines(text: &str) -> Vec<usize> {
+    statements(text)
+        .into_iter()
+        .filter(|(_, st)| {
+            st.contains("System::new_all()")
+                || st.contains(".refresh_all()")
+                || asks_for_every_subsystem(st)
+        })
+        .map(|(line, _)| line)
+        .collect()
+}
+
+/// `RefreshKind::everything()` is the same whole-machine sweep spelled through
+/// `new_with_specifics`, so the guard has to know it — otherwise it forbids two
+/// spellings of one idea and waves the third through.
+///
+/// It must NOT match `CpuRefreshKind::everything()` or
+/// `ProcessRefreshKind::everything()`: those are narrow kinds, and the second is
+/// exactly right inside a `refresh_processes` scoped to one pid. The check is
+/// therefore on the character BEFORE the match — a letter means it is part of a
+/// longer type name.
+fn asks_for_every_subsystem(st: &str) -> bool {
+    const NEEDLE: &str = "RefreshKind::everything()";
+    st.match_indices(NEEDLE).any(|(i, _)| {
+        i == 0
+            || !st[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// No site may ask sysinfo to describe the whole machine.
+///
+/// `GET /api/admin/stats` did, through `detect_hardware`: `System::new_all()`
+/// followed by `refresh_all()`, i.e. a full enumeration of every process on the
+/// box, twice, to read four numbers — total RAM, used RAM, this process's RSS,
+/// and the CPU name and count. Measured on a 105-process machine: **182 ms**
+/// against **0.43 ms** for a targeted refresh, which was essentially the whole
+/// cost of the endpoint (273 ms, of which 178 ms was kernel time).
+///
+/// It was the LONE outlier — `vram.rs`, `health/monitor.rs` and
+/// `pool/manager/gossip.rs` all already build a bare `System::new()` and
+/// refresh only what they read, one of them commenting that this makes it
+/// "cheap enough to call at every admission".
+///
+/// This is gotcha #410's shape on a second endpoint: the dashboard paying
+/// kernel time for data it did not ask for. Splitting utime from stime is what
+/// found both.
+#[test]
+fn sysinfo_is_never_asked_to_describe_the_whole_machine() {
+    let root = repo_root();
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            for line_no in whole_machine_sysinfo_lines(&text) {
+                offenders.push(format!(
+                    "{}:{}",
+                    p.strip_prefix(&root).unwrap_or(&p).display(),
+                    line_no
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "sysinfo is being asked to describe the whole machine:\n  {}\n\
+         `System::new_all()` and `refresh_all()` enumerate every process on the \
+         box. Build a bare `System::new()` and refresh only what you read \
+         (`refresh_memory`, `refresh_cpu_list`, `refresh_processes` scoped to \
+         one pid) — 182 ms against 0.43 ms when this was last measured.",
+        offenders.join("\n  ")
+    );
+}
+
+/// The guard above must actually fire on the shape it forbids — including the
+/// one rustfmt produces, which is what four guards in this file could not see
+/// before 2026-08-30.
+#[test]
+fn the_whole_machine_sysinfo_guard_catches_the_shape_it_forbids() {
+    let caught = |src: &str| !whole_machine_sysinfo_lines(src).is_empty();
+
+    assert!(caught("let mut sys = System::new_all();"));
+    assert!(caught("sys.refresh_all();"));
+    assert!(caught("let mut sys = sysinfo::System::new_all();"));
+    // Wrapped by rustfmt across lines — the form that blinded six guards.
+    // A method chain is what rustfmt actually breaks, and `join_statement`
+    // closes the " ." gap it leaves; it does NOT split a `::` path, so there
+    // is no such shape to test for.
+    assert!(caught(
+        "self.shared_state\n    .system\n    .refresh_all();"
+    ));
+    assert!(caught("let mut sys =\n    System::new_all();"));
+
+    // The targeted pattern every other site uses must stay quiet, or the guard
+    // is noise and gets suppressed rather than obeyed.
+    assert!(!caught(
+        "let mut sys = System::new();\nsys.refresh_memory();"
+    ));
+    assert!(!caught(
+        "sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);"
+    ));
+    // The same sweep spelled through `new_with_specifics`.
+    assert!(caught(
+        "System::new_with_specifics(sysinfo::RefreshKind::everything());"
+    ));
+    assert!(caught("let k = RefreshKind::everything();"));
+    // ...but the NARROW kinds share that suffix and must not be caught. The
+    // second is exactly right inside a pid-scoped `refresh_processes`.
+    assert!(!caught(
+        "sys.refresh_cpu_list(sysinfo::CpuRefreshKind::everything());"
+    ));
+    assert!(!caught(
+        "sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), ProcessRefreshKind::everything());"
+    ));
+    // The one real `new_with_specifics` in the tree asks for nothing but a CPU
+    // list, and must stay quiet.
+    assert!(!caught(
+        "System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing()));"
+    ));
+    // `Disks` genuinely needs its list refreshed and costs ~1 ms.
+    assert!(!caught("sysinfo::Disks::new_with_refreshed_list();"));
+    // A comment naming the call is not the call.
+    assert!(!caught("// System::new_all() enumerates every process"));
+}
+
 /// `Content::read` with no `BufReader` or `Cursor` between them is the defect,
 /// whatever anything is called. Naming was the first cut and it is only as good
 /// as the naming — worse, it silently missed the `match File::open { Ok(mut f)

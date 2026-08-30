@@ -1533,19 +1533,30 @@ pub async fn shutdown_node(
 fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Value {
     use sysinfo::System;
 
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    // Refresh ONLY the four facts read below. `System::new_all()` enumerates
+    // every process on the box, and the `refresh_all()` that followed it did
+    // the whole scan a second time — measured at 182 ms against 0.43 ms for
+    // the targeted refresh on a 105-process machine, which was essentially all
+    // of this endpoint's cost (gotcha #417). Every other sysinfo site in the
+    // tree already refreshes narrowly; this was the lone outlier.
+    //
+    // `refresh_processes` is scoped to our OWN pid because the only per-process
+    // fact wanted is this node's RSS. Widening any of these to a full scan
+    // silently puts the 182 ms back.
+    let pid = sysinfo::Pid::from_u32(std::process::id());
+    let mut sys = System::new();
+    sys.refresh_memory();
+    sys.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
 
     let total_ram_mb = sys.total_memory() / (1024 * 1024);
     let used_ram_mb = sys.used_memory() / (1024 * 1024);
 
     // Per-process memory (RSS) — actual memory this node is using
-    let process_rss_mb = {
-        let pid = sysinfo::Pid::from_u32(std::process::id());
-        sys.process(pid)
-            .map(|p| p.memory() / (1024 * 1024))
-            .unwrap_or(0)
-    };
+    let process_rss_mb = sys
+        .process(pid)
+        .map(|p| p.memory() / (1024 * 1024))
+        .unwrap_or(0);
 
     let cpu_name = sys
         .cpus()
