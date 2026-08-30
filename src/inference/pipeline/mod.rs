@@ -400,6 +400,7 @@ pub(super) async fn forward_verify_through_segments(
                     local::ActivationUnits::HiddenStates
                 },
             );
+            let seg_start = std::time::Instant::now();
             let result = PipelineExecutor::wait_for_result(
                 rx,
                 request_id,
@@ -411,6 +412,37 @@ pub(super) async fn forward_verify_through_segments(
             )
             .await?;
             pending_guard.disarm();
+            // A SINGLE-token verify is an ordinary decode step wearing a
+            // verify's name — `ngram_only_spec` sends `vec![last_token]` on a
+            // cascade MISS — so it is exactly the sample `peer_speed` wants,
+            // and this is the one place both verify callers funnel through
+            // (`hedge_dispatch` reaches it on all five of its return paths).
+            //
+            // Without it the scheduler learned NOTHING from a speculative
+            // request, however long it took. Measured 2026-08-30: four
+            // consecutive requests to a peer-held model took 244/210/200/182 s
+            // while a peer on the LAN served the identical request in 0.80 s,
+            // and every one of them was ranked on the slow peer's own
+            // ADVERTISED 2.0 tok/s because `observed_ms_per_layer` was `None`
+            // every time. The prefill that DID reach a recorder carried
+            // `activations.len() == 0`, which `peer_speed::observe` rejects for
+            // a coefficient that divides by it — so nothing was ever learned.
+            //
+            // A MULTI-token batch is deliberately NOT recorded: `observe`
+            // divides by `layers` alone, so K drafts through the same layers
+            // would inflate ms/layer by roughly K and corrupt the same EWMA
+            // that sizes segment timeouts — a worse failure than the one this
+            // fixes. See `docs/FUTURE_WORK.md`.
+            if verify_tokens.len() == 1 {
+                shared_state.record_peer_segment_latency(
+                    &segment.node_id,
+                    &segment.shard_id.model_id,
+                    crate::daemon::state::WorkKind::Decode,
+                    seg_start.elapsed().as_millis() as u64,
+                    num_layers,
+                    result.activations.len(),
+                );
+            }
             result
         } else {
             shared_state.model_process_pool.forward(forward).await?
@@ -1276,6 +1308,136 @@ mod tests {
         assert!(
             state.pending_layer_results.is_empty(),
             "pending_layer_results leak after network-drop failure path"
+        );
+    }
+
+    /// Drive one verify round to completion and answer it, so
+    /// `forward_verify_through_segments` reaches its `wait_for_result`.
+    ///
+    /// Returns how long the round was measured at, which the caller ignores —
+    /// what matters is the side effect on `peer_speed`.
+    async fn run_one_verify_round(
+        state: &Arc<SharedState>,
+        segments: &[PipelineSegment],
+        verify_tokens: Vec<u32>,
+    ) {
+        let (tx, mut rx) = mpsc::channel::<NetworkCommand>(8);
+        let request_id = uuid::Uuid::new_v4();
+        let s2 = state.clone();
+        let segs = segments.to_vec();
+        let handle = tokio::spawn(async move {
+            forward_verify_through_segments(&s2, &tx, request_id, 0, &segs, &verify_tokens, None)
+                .await
+        });
+
+        // The forward is dispatched, then the waiter blocks on its oneshot.
+        let _cmd = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a forward must be dispatched")
+            .expect("channel open");
+
+        // Answer as the peer would: no error, one logit row for the single
+        // verified position.
+        let mut reply = LayerResult::error(request_id, "unused");
+        reply.finish_reason = None;
+        reply.spec_logits = vec![vec![0.0f32; 4]];
+        // The waiter registers before the send, but yield anyway so this is
+        // not a race on a loaded machine.
+        for _ in 0..50 {
+            if state.pending_layer_results.contains_key(&request_id) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        // The waiter is pinned to the node the forward went to
+        // (`awaiting: Some(..)`), and `accepts` rejects a `None` sender
+        // outright — answering as "nobody" is exactly the late-result case
+        // gotcha #229 exists to stop.
+        assert!(
+            state.resolve_pending_layer_result(Some(&segments[0].node_id), reply),
+            "the pending waiter must still be there to answer"
+        );
+        handle
+            .await
+            .expect("task joined")
+            .expect("verify round must succeed");
+    }
+
+    /// A single-token verify must teach the scheduler what that peer cost.
+    ///
+    /// **The regression test for four consecutive 200-second requests.**
+    /// Measured 2026-08-30: a peer-held model answered in 244/210/200/182 s
+    /// while a peer on the LAN served the identical request in 0.80 s. The LAN
+    /// peer was a candidate every time and lost every time on the slow peer's
+    /// own ADVERTISED speed, because `observed_ms_per_layer` was `None` — the
+    /// speculative path never recorded anything, so a three-minute answer
+    /// taught the scheduler nothing and it re-picked the same peer at the same
+    /// wrong price.
+    ///
+    /// Two rounds because the first is COLD: `peer_speed::observe` deliberately
+    /// drops a cold decode sample ("a load time wearing a compute figure's
+    /// clothes") and the same call marks the peer warm, so the second round is
+    /// the one that can be believed. That is the production sequence too — the
+    /// prefill marks it warm before any verify round runs.
+    #[tokio::test]
+    async fn a_single_token_verify_teaches_the_scheduler_what_the_peer_cost() {
+        let state = make_test_state();
+        let peer = NodeId([42u8; 32]);
+        state.peer_id_map.insert(peer.clone(), vec![1, 2, 3, 4]);
+        let segments = vec![PipelineSegment {
+            node_id: peer.clone(),
+            shard_id: ShardId {
+                model_id: ModelId("test-model".into()),
+                index: 0,
+            },
+            layer_range: (0, 8),
+        }];
+
+        assert!(
+            state.observed_latency_ms_per_layer(&peer).is_none(),
+            "nothing measured yet — if this starts as Some the test proves nothing"
+        );
+
+        run_one_verify_round(&state, &segments, vec![7]).await;
+        run_one_verify_round(&state, &segments, vec![7]).await;
+
+        assert!(
+            state.observed_latency_ms_per_layer(&peer).is_some(),
+            "a single-token verify is an ordinary decode step and MUST be \
+             recorded — without this the scheduler ranks a peer on the speed it \
+             advertises about itself no matter how slowly it actually answered"
+        );
+    }
+
+    /// ...but a MULTI-token batch must NOT be, and that is deliberate.
+    ///
+    /// `peer_speed::observe` divides by `layers` alone, so K drafts through the
+    /// same layers would inflate ms/layer by roughly K — corrupting the same
+    /// EWMA that sizes segment timeouts, which is a worse failure than the one
+    /// the sibling test above pins. See `docs/FUTURE_WORK.md`.
+    #[tokio::test]
+    async fn a_speculative_batch_is_deliberately_not_recorded_as_a_decode_step() {
+        let state = make_test_state();
+        let peer = NodeId([43u8; 32]);
+        state.peer_id_map.insert(peer.clone(), vec![9, 9, 9, 9]);
+        let segments = vec![PipelineSegment {
+            node_id: peer.clone(),
+            shard_id: ShardId {
+                model_id: ModelId("test-model".into()),
+                index: 0,
+            },
+            layer_range: (0, 8),
+        }];
+
+        // Same two rounds as the sibling, so "cold sample dropped" cannot be
+        // the reason this one stays empty.
+        run_one_verify_round(&state, &segments, vec![7, 8, 9]).await;
+        run_one_verify_round(&state, &segments, vec![7, 8, 9]).await;
+
+        assert!(
+            state.observed_latency_ms_per_layer(&peer).is_none(),
+            "a batch of drafts is not one decode step; recording it as one \
+             overstates ms/layer by roughly the draft width"
         );
     }
 }

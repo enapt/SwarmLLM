@@ -2,10 +2,21 @@
 
 Captures items deliberately deferred from the model-management redesign and from prior sweeps. Each entry has enough context that a future implementer (or a future me) can pick it up without re-deriving the rationale.
 
-## Routing never learns a peer is slow on the speculative path (measured 2026-08-30)
+## Routing never learns a peer is slow on the speculative path (single-token half FIXED 2026-08-30; batch half open)
 
-**Measured, reproducible, and costing about 250x on the case below.** Not fixed
-here because the fix has a real design question in it — see the end.
+**Measured, reproducible, and costing about 250x on the case below.** The half
+that caused it is now FIXED; the other half is still open and is described at
+the end.
+
+**What was fixed**: `pipeline/mod.rs::forward_verify_through_segments` — the one
+place both verify callers funnel through — now calls
+`record_peer_segment_latency` when `verify_tokens.len() == 1`, i.e. for a
+single-token verify, which is an ordinary decode step. Pinned by
+`a_single_token_verify_teaches_the_scheduler_what_the_peer_cost` and its
+negative sibling `a_speculative_batch_is_deliberately_not_recorded_as_a_decode_step`.
+
+**What is still open**: the multi-token batch case, for the reason in
+"The design question" below.
 
 ### What was measured
 
@@ -73,9 +84,18 @@ recording it as prefill needs an `activation_bytes` these results do not carry.
 That pollutes the EWMA sizing segment timeouts as well as ranking, which is a
 worse failure than the present one.
 
-So a safe first step exists: record the single-token case, leave the batch case
-alone, and the workload that provoked this — speculation missing, which is when
-it is slowest and matters most — is covered.
+That safe first step is what shipped: the single-token case is recorded, the
+batch case is left alone, and the workload that provoked this — speculation
+MISSING, which is when it is slowest and matters most — is now covered.
+
+**Still to do, and how to tell whether it matters**: a workload where the n-gram
+cascade HITS repeatedly never sends a single-token round, so it still teaches
+the scheduler nothing. `ngram_rounds` vs `fallback_rounds` in the
+`SWARM-SPEC L1 ngram-only: complete` log line says which workload you have.
+Closing it needs either a `WorkKind::Verify` with its own coefficient, or
+recording at `local.rs::wait_for_result` with the work kind threaded through —
+the latter would also cover `dsd.rs` and `speculative.rs`, which have the same
+gap.
 
 Two candidate directions, neither costed yet:
 

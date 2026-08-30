@@ -4,6 +4,35 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A model on another machine could answer three minutes late, repeatedly, when
+  a machine on your own network could have answered in under a second.** Asking
+  for a model held only by other machines took 244, 210, 200 and 182 seconds on
+  four consecutive attempts. A machine on the same local network held that model
+  and serves the identical question in 0.8 seconds — it was one of the choices
+  available every time, and lost every time to a machine fifteen times further
+  away that simply claims to be faster than it is.
+
+  Nothing corrected that, because the measurement that would was never taken on
+  this route: a three-minute answer taught the system nothing about the machine
+  that gave it, so the next question went to the same place at the same wrong
+  estimate. Those answers are now timed, and a machine that answers slowly stops
+  being preferred.
+
+  One case is deliberately still not timed — when the shortcut that guesses
+  ahead succeeds, several words are checked at once, and counting that as one
+  word would make the machine look slower than it is. That is recorded in
+  `docs/FUTURE_WORK.md` rather than guessed at.
+
+- **The first-run message said your key had been saved to a file it had not
+  written yet.** It named a path and told you to read it back, moments before
+  anything existed there. Harmless on a normal first run, where the file appears
+  a moment later — but it also printed during development against whatever node
+  the developer had running, announcing that it had just replaced that node's
+  key. It had not; the message had simply outlived a fix made underneath it. It
+  now says where the key actually is.
+
 ### Changed
 
 - **The dashboard's statistics call is about three times faster.** Opening the

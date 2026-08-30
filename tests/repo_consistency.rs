@@ -3006,6 +3006,138 @@ fn sysinfo_is_never_asked_to_describe_the_whole_machine() {
     );
 }
 
+/// Resolving an API key must not ANNOUNCE a file write it does not perform.
+///
+/// `resolve_api_key` deliberately does not touch the data directory — only the
+/// daemon's own startup calls `publish_api_key_file` — and
+/// `tests/api_key_side_effects.rs` guards that behaviour, because the write
+/// really did overwrite running nodes' keys twice (2026-07-31, 2026-08-01).
+///
+/// The BANNER outlived that fix. It kept printing `Saved to: <path>` and
+/// `Recover anytime: cat <path>`, so every test that builds a `SharedState`
+/// announced, on a developer's machine, that it had just overwritten the
+/// api_key of whatever node they had running. The message is indistinguishable
+/// from the regression it sits next to, and cost a real investigation on
+/// 2026-08-30 before the file's mtime proved nothing had been written.
+///
+/// A message asserting something the code deliberately stopped doing is a stale
+/// comment that the user can see.
+#[test]
+fn resolving_an_api_key_does_not_announce_a_file_write() {
+    let root = repo_root();
+    let src = std::fs::read_to_string(root.join("src/daemon/helpers.rs")).expect("helpers.rs");
+    let body = fn_body(
+        &src,
+        "pub(super) fn resolve_api_key(config: &Config, db: &Database) -> String {",
+    )
+    .expect("resolve_api_key must still exist with this signature");
+
+    // Scan STATEMENTS, not raw text: the comment above the banner quotes both
+    // phrases to explain why they were removed, and a raw `contains` trips on
+    // its own explanation — the trap a sibling test in this file already hit.
+    let code: String = statements(body)
+        .into_iter()
+        .map(|(_, st)| st)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for claim in ["Saved to", "Recover anytime"] {
+        assert!(
+            !code.contains(claim),
+            "`resolve_api_key` prints {claim:?}, but it does NOT write the api_key \
+             file — `publish_api_key_file` does, from daemon startup only. Printing \
+             this makes every SharedState-building test look like it just clobbered \
+             a running node's key. Say what was actually done, or move the line to \
+             where the write happens."
+        );
+    }
+    // The banner must still exist — first-run users need the key, and deleting
+    // it to satisfy the assertions above would be the wrong fix.
+    assert!(
+        code.contains("Generated new API key") && code.contains("KEY:"),
+        "the first-run key banner has gone; users need to see the key they were given"
+    );
+}
+
+/// Every test count the README quotes, as `(count, label)` pairs.
+///
+/// The README states the figure twice — once in the status banner near the top,
+/// once in the disclosure note at the bottom — and nothing tied them together.
+fn readme_test_counts(text: &str) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for (i, _) in text.match_indices(" lib tests + ") {
+        let before: String = text[..i]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let lib: u32 = match before.chars().rev().collect::<String>().parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let after = &text[i + " lib tests + ".len()..];
+        let integ: u32 = match after
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+        {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        out.push((lib, integ));
+    }
+    out
+}
+
+/// The README's test counts must agree with each other AND with `CLAUDE.md`.
+///
+/// The README quoted the figure in two places and they **disagreed** — "1218
+/// lib tests + 79 integration" in the status banner, "1169 lib tests + 75
+/// integration" in the disclosure note at the bottom — while the real number
+/// was 2155. Both had been wrong for months and nothing looked at either.
+///
+/// It matters more than an ordinary stale number because of where it sits: the
+/// disclosure note offers the count as the evidence on which to "judge the
+/// project on its technical merits". A figure produced for that purpose has to
+/// be right, and one that contradicts itself two screens further up is worse
+/// than none.
+///
+/// `CLAUDE.md` is the single source of truth (it is the file re-measured after
+/// a run), so updating it is what this test asks for. Same shape as the MSRV
+/// guard above, which exists because one version was promised in seven places.
+#[test]
+fn the_readme_test_counts_agree_with_each_other_and_with_claude_md() {
+    let root = repo_root();
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("README.md");
+    let claude = std::fs::read_to_string(root.join("CLAUDE.md")).expect("CLAUDE.md");
+
+    let canonical_lib: u32 = claude
+        .split("**")
+        .find_map(|seg| seg.strip_suffix(" lib").and_then(|n| n.parse().ok()))
+        .expect("CLAUDE.md must state the lib-test count as `**<n> lib**`");
+    let canonical_integ: u32 = claude
+        .split(" integration (")
+        .next()
+        .and_then(|s| {
+            let tail: String = s.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+            tail.chars().rev().collect::<String>().parse().ok()
+        })
+        .expect("CLAUDE.md must state the integration count as `<n> integration (`");
+
+    let found = readme_test_counts(&readme);
+    assert!(
+        !found.is_empty(),
+        "README.md no longer states a test count in the `<n> lib tests + <n> integration tests`          form this guard reads. Either restore that wording or update the guard."
+    );
+    for (lib, integ) in &found {
+        assert_eq!(
+            (*lib, *integ),
+            (canonical_lib, canonical_integ),
+            "README.md claims {lib} lib + {integ} integration tests; CLAUDE.md says              {canonical_lib} + {canonical_integ}. The README states this figure in more than one              place and they must all match CLAUDE.md, which is the one re-measured after a run.              All README occurrences found: {found:?}"
+        );
+    }
+}
+
 /// The guard above must actually fire on the shape it forbids — including the
 /// one rustfmt produces, which is what four guards in this file could not see
 /// before 2026-08-30.

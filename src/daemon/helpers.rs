@@ -59,13 +59,25 @@ pub(super) fn resolve_api_key(config: &Config, db: &Database) -> String {
 
     // Print API key to stderr — visually distinct so first-run users don't
     // miss it. Stderr only (NOT tracing) so it never lands in shipped logs.
+    //
+    // It must NOT claim the file has been written, because the comment above
+    // explains that this function deliberately does not write it. It said
+    // "Saved to: <path>" and "Recover anytime: cat <path>" for a file only
+    // `publish_api_key_file` creates, moments later and only on the daemon's
+    // own startup path. Every test that builds a `SharedState` therefore
+    // announced that it had just overwritten the api_key of whatever node the
+    // developer had running — which is the exact bug
+    // `tests/api_key_side_effects.rs` was written for after it happened twice
+    // for real, so the message is indistinguishable from the regression. It
+    // cost a real investigation on 2026-08-30. The banner had simply outlived
+    // the fix beneath it.
     let key_path = config.node.data_dir.join("api_key");
     eprintln!();
     eprintln!("============================================================");
     eprintln!("  Generated new API key");
     eprintln!("  KEY:        {key}");
-    eprintln!("  Saved to:   {}", key_path.display());
-    eprintln!("  Recover anytime: cat {}", key_path.display());
+    eprintln!("  Stored in:  this node's database");
+    eprintln!("  Once the node is running: cat {}", key_path.display());
     eprintln!("============================================================");
     eprintln!();
 
