@@ -221,11 +221,18 @@ All 20 build phases complete. All subsystems wired — no stubs. **2146 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Last deployed: v0.3.134-alpha** — local (CUDA asset) and Proxmox (.deb) both
-on it and serving; the anchor self-updated, and so did one remote peer, which is
-the update pipeline confirmed end to end on a machine nobody here touched.
-**`main` is at v0.3.135-alpha, prepared and awaiting the tag** — the two
-doc-only commits that were being held rode along with it.
+**Released: v0.3.135-alpha (2026-08-30)** — published and fully verified, NOT
+yet deployed anywhere. 25 assets, not a draft, `latest` points at it, sha256
+checked on the CUDA asset and the .deb, and **smoke 9/9 + shapes 7/7 run on the
+DOWNLOADED CUDA artifact** (which `strings | grep ggml_cuda_init` confirms is
+really the CUDA build). CI, Cache warm and Docker all green; `cargo audit` run
+BEFORE tagging against the six advisories in `SECURITY.md`, none new, and
+libp2p is still 0.56 so the two hickory findings remain genuinely unfixable.
+Soak stopped early by request at 616 requests / 0 failures, memory flat, no
+worker respawn.
+
+**Still on v0.3.134-alpha and serving: local (CUDA asset), Proxmox (.deb), the
+anchor.** Deployment is the outstanding step.
 
 ### v0.3.135-alpha (2026-08-30) — the guards were the defect
 
