@@ -221,6 +221,14 @@ All 20 build phases complete. All subsystems wired — no stubs. **2142 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
+**Released and deployed: v0.3.134-alpha.** Local (CUDA asset) and Proxmox (.deb)
+both on it and serving; the anchor self-updated, and so did one remote peer —
+which is the update pipeline confirmed end to end on a machine nobody here
+touched. **`main` carries one UNRELEASED commit** (`9e6aa3b0`): a log-message
+string and doc comments only, CI green, deliberately held because nothing in it
+is user-visible and every release is broadcast to users. Let it ride with the
+next substantive change.
+
 ### v0.3.134-alpha (2026-08-29) — the dashboard's Models tab, and how it was found
 
 Detail in `memory/round_log_0829_dashboard_syscalls.md`; gotchas **#410**,
@@ -257,60 +265,19 @@ red without the fix.
 costs ~0.75% of a core, not the 10% idle gap it was blamed for; and a dropped
 first token under batching was the model, identical alone five times.
 
-### Earlier rounds — one line each; full detail in `memory/round_log_*.md` + CHANGELOG
+### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
-Read the named round log before re-deriving any of these.
+Read the named round log before re-deriving any of these. Gotcha numbers index
+into `memory/gotchas.md`.
 
-- **v0.3.133** (08-29): five things quietly wrong, ALL found by RUNNING or
-  auditing — a model you had EVER served could not be deleted (#409,
-  `contains_key` on a map whose entries are never removed by design); the
-  forward doing the whole PREFILL was budgeted as a DECODE (#407, 32 s where it
-  needed 240); one NUL byte made `docs/DIAGNOSTICS.md` invisible to grep
-  SILENTLY for two weeks (#408); worker retirement killed in-flight requests; a
-  per-shard WARN fired 16-28x/min for ever. ⚠ **TWO were found because a TOOL
-  lied.** `round_log_0829_functional_check.md`.
-- **v0.3.132** (08-29): one dial per ADDRESS not per peer (#405; paired 13→3
-  establishments), and a name is not a content identity — three Q4_K_M builds of
-  one model sharing an id (#406). ⚠ **TWO published causal claims were WRONG
-  first.** `round_log_0829_dial_identity.md`.
-- **v0.3.131** (08-28): **two constants nobody had measured** — the GPU swap floor
-  was 3.65x WORSE than no floor in the case it was written for (#403; 299.3 s vs
-  81.9 s over 8 turns), and **under alternation an idle-time floor is inert or
-  total, never in between**; foreign libp2p nodes stopped being DIALLED (#404) via
-  `allow_block_list` after two rounds of fixing our own code moved the number ZERO.
-  `round_log_0827_cpu_to_gpu.md`.
-- **v0.3.130** (08-28): **which device your models run on** — three faults from one
-  tester report on a 6 GB card. **#401** a model demoted to the processor was
-  never promoted back (`get_or_spawn`'s fast path returns any resident worker
-  regardless of device); **#402** loading a model onto the PROCESSOR evicted one
-  from the CARD, and **the real fix was to delete the second accountant, not
-  correct it** — graphics memory now has ONE owner, `split_models` is a metadata
-  cache bounded by entry count. Then an **admission refusal turned out to take a
-  STICKY PIN** (50 min on the processor with the occupant idle and reclaimable
-  throughout); refusals no longer pin, and `spawn_worker` is HANDED the placement
-  rather than re-deriving it. `round_log_0827_cpu_to_gpu.md`.
-- **v0.3.129** (08-27): **a long FIRST request answered with one word** (#400) —
-  `extract_model_cache` measured the prompt as `chars/4` and `distributed.rs`
-  used that as `index_pos`, i.e. **an estimate of a statistic used as a
-  COORDINATE**: 24213 chars → 6053 against a true 5529, so token 2 was computed
-  524 positions past the end of the KV cache. **Cold-only** (the pipeline path)
-  and the error **scales with prompt length**, which is why 7 releases of short,
-  warm repros missed it. ⚠ **This corrects #398's fifth elimination, which
-  compared the number against ITSELF — ask what a number should EQUAL.** Both
-  release harnesses were passing over it and are fixed too.
-  `round_log_0827_pi_position.md`.
-- **v0.3.125-.128** (08-26): **#396 ANY libp2p node on the internet could become a "peer"** — we registered on libp2p `identify` (`/ipfs/id/1.0.0`, which EVERY libp2p node speaks) and never read `info.protocols`; spreads via PEX. **Declining to register alone turns a wrong list entry into an ENDLESS DIAL LOOP** → bounded `foreign_peers` (and the dialling itself only stopped in .131, #404). **#399 the caller's sampling was discarded on the pipeline path**, i.e. every cold start. .127: a model that cannot fit a conversation falls back to the processor. **Plus the process fix: local verification had been a strict SUBSET of CI's** → `examples/release_shapes.sh`.
-- **v0.3.120-.124** (08-25): a corrupt shard PROVED to spread — a placeholder hash ERASED a known one, so P2P copies were accepted unverified and re-served. **The ORIGIN settled it; peer agreement is not evidence in a network that copies from itself.** **.121 quarantined the GOOD copy (#384) — a repair mechanism is a destruction mechanism pointed at whatever it believes is wrong.** .124: the receipt-ACK deadline came from ping RTT, which cannot see a loaded peer (#386, now RFC 6298 **+ §5.5 backoff, without which the estimator is INERT exactly where needed**); a KV refusal was a RATCHET (#387). Gotchas #381-#387.
-- **v0.3.119-alpha** (08-24): **25.7x from a memory budget on an idle card** — `compute_vram_budget` read the BOOT SNAPSHOT (#281, third time in one session) AND was a fraction of TOTAL rather than of what is free. Now RESERVES a clamped slice. `memory/round_log_0824_correctness.md`.
-- **v0.3.113-.115** (08-22/23): the .114 decode-width calibration was right on the Ryzen and wrong on the i5 — **min-of-N is for benchmarks, not live measurement** (#367); a stale DHT provider record outranked a holder's own retraction (#364); peer refusals arrived cut mid-word (#365). `round_log_0822_perf_night.md`.
-- **v0.3.109-.112** (08-21/22): CPU prefill +20-40% / decode +25-37% (multi-row Q4_K/Q6_K kernels, decode attention kernel, AVX2 exp, mimalloc); direct peer chaining ON; relay-carried inbound no longer counted as "direct" (#356); receipt ACK cut a quiet peer's cost 300 s → ~26 s (#357).
-
-- **v0.3.101-.103** (08-18): models need ~750 MB less (quantized `token_embd` row gather); machine speed MEASURED (`mem_bandwidth`); peer delegation — **privacy changes the SHAPE (boomerang), not the verdict**. **#334 `cargo audit` runs in CI NOT Release — .102 shipped vulnerable.** `round_log_0818_quantized_embedding.md`.
-- **v0.3.96-.100** (08-12→17): credits switched OFF (they WERE enforced); a failure could not report itself (#300-#305 → `classify_error`); log severity follows blame (#315-#317). `round_log_0817_honesty.md`.
-- **v0.3.97-.99** (08-15/16): models you own were unreachable — three id derivations, none agreeing → `slugify_model_name` (#310); O(prompt²) KV snapshotting stalled long prompts (#312); 1.41x CPU decode from dropping `repeat_kv` in GQA.
-- **v0.3.88-.94** (08-09→12): a new node could see the swarm's models and run NONE (#296); **settings saved, said ok, did nothing** (`state.config` is a boot snapshot → **`SharedState::cfg()`**, #281); replies from distant peers arrived SCRAMBLED (#282). **⚠ #283: `pkill -x swarmllm` killed the live node — kill by PID.**
-- **v0.3.78-.87** (08-05→09): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x and the system prompt rendered TWICE, invisible until diffed against `tokenizers`/`jinja2` (#246-#253). Releases had AVX2 kernels COMPILED OUT (**3.09x**); batching NEVER engaged (**2.4x** GPU). **⚠ #266 measure the FORWARD, not the isolated call. ⚠ #267 this box cannot resolve a GPU change below ~25%.**
-- **v0.3.15-.77** (07-23→08-05): our API key was sent to strangers — nothing in that code changed, its PREMISE did (#238); SPM tokenizer mis-tokenised **64.9%** (**a hash cannot tell "wrong bytes" from "not all the bytes"**, #203); **read #179 before touching connection selection**; **retraction alone is futile** (#163).
+- **v0.3.133** (08-29): a model you had EVER served could not be deleted (#409); the forward doing the whole PREFILL was budgeted as a DECODE (#407); one NUL byte made a doc invisible to grep SILENTLY (#408). ⚠ **TWO of five found because a TOOL lied.** `round_log_0829_functional_check.md`.
+- **v0.3.132** (08-29): one dial per ADDRESS not per peer (#405, paired 13→3); a name is not a content identity (#406). ⚠ **TWO published causal claims were WRONG first.** `round_log_0829_dial_identity.md`.
+- **v0.3.130-.131** (08-28): which device your models run on (#401/#402) — **the fix was to DELETE the second accountant**, so graphics memory has ONE owner; the GPU swap floor was 3.65x WORSE than no floor (#403); foreign nodes stopped being DIALLED (#404). ⚠ **A gate refusing NOTHING is the measurement.** `round_log_0827_cpu_to_gpu.md`.
+- **v0.3.125-.129** (08-26/27): `chars/4` used as `index_pos` — **an estimate of a statistic used as a COORDINATE** (#400, cold-only, scales with prompt length); ANY libp2p node could become a "peer" (#396); the caller's sampling was discarded on every cold start (#399). ⚠ **Local verification had been a strict SUBSET of CI's** → `examples/release_shapes.sh`. `round_log_0827_pi_position.md`.
+- **v0.3.120-.124** (08-25): a corrupt shard PROVED to spread — **the ORIGIN settled it; peer agreement is not evidence in a network that copies from itself** (#382); **.121 quarantined the GOOD copy (#384) — a repair mechanism is a destruction mechanism**; receipt-ACK deadline came from ping RTT (#386); a KV refusal was a RATCHET (#387). `round_log_0825_overnight_watch.md`.
+- **v0.3.101-.119** (08-18→24): CPU prefill +20-40% / decode +25-37%; ~750 MB less per model (quantized `token_embd` gather); 25.7x from a memory budget read off the BOOT SNAPSHOT (#281, third time); peer delegation — **privacy changes the SHAPE (boomerang), not the verdict**; stale DHT record outranked a retraction (#364). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement. #334 `cargo audit` ran in CI NOT Release — .102 shipped vulnerable.** `round_log_0824_correctness.md`, `round_log_0822_perf_night.md`.
+- **v0.3.88-.100** (08-09→17): credits switched OFF (they WERE enforced); a failure could not report itself (#300-#305 → `classify_error`); three id derivations, none agreeing → `slugify_model_name` (#310); O(prompt²) KV snapshotting (#312); **settings saved, said ok, did nothing** (boot snapshot → **`SharedState::cfg()`**, #281); distant peers' replies SCRAMBLED (#282). ⚠ **#283 kill by PID.** `round_log_0817_honesty.md`.
+- **v0.3.15-.87** (07-23→08-09): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE (#246-#253); AVX2 COMPILED OUT of releases (3.09x); batching NEVER engaged (2.4x GPU); our API key was sent to strangers — its PREMISE changed (#238); SPM mis-tokenised 64.9% (#203). ⚠ **#266 measure the FORWARD, not the isolated call. #267 this box cannot resolve a GPU change below ~25%. #179 before touching connection selection. #163 retraction alone is futile.**
 - **R136-R150 and the 20 build phases**: NAT/reachability, SWARM-SPEC cascade, `swarmpool://` v2, cross-pool routing. `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)
