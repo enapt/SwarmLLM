@@ -198,6 +198,13 @@ impl PipelineExecutor {
             // remove on drop.
             prefill_guard.disarm();
 
+            // This path waits on `wait_for_result` directly rather than going
+            // through `forward_through_segments`, so it does not inherit that
+            // wrapper's check and needs its own — the same recovery its verify
+            // sibling `send_verify_batch` already does.
+            if let Some(err) = super::peer_error_from_result(&prefill_result) {
+                return Err(err);
+            }
             if prefill_result.token_ids.is_empty() {
                 return Err(SwarmError::Inference(
                     "speculative: prefill returned no tokens".into(),

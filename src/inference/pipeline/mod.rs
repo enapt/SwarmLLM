@@ -24,10 +24,68 @@ use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::inference::router::{InferenceOutput, StreamingTokenTx, TokenLogProbEntry};
 use crate::types::{
-    InferenceError, InferenceRequest, ModelId, NetworkCommand, PipelineAssignment, SwarmMessage,
+    InferenceError, InferenceRequest, LayerResult, ModelId, NetworkCommand, NetworkFinishReason,
+    PipelineAssignment, SwarmMessage,
 };
 
 pub use prompt::template_from_header;
+
+/// Recover a peer's failure from a completed [`LayerResult`].
+///
+/// A serving node reports why it refused a forward in
+/// `finish_reason: NetworkFinishReason::Error(msg)`, and
+/// [`LayerResult::error`] leaves `token_ids` empty when it does. A caller that
+/// tests only `token_ids.is_empty()` therefore throws the peer's stated reason
+/// away and substitutes one of its own — which is how the SAME over-long prompt
+/// came back as `400 invalid_request_error` with an actionable message when the
+/// model was local, and `500 server_error: ngram-only: prefill returned no
+/// tokens` when it was reached over the network (measured on the live swarm
+/// 2026-08-30). That is gotcha #304's shape: whose fault a mistake was decided
+/// by which machine happened to hold the model.
+///
+/// It also mis-attributes blame. `failure_is_penalty_worthy` exempts
+/// `Validation`, but never sees one when the class has been flattened into
+/// `Inference`, so the peer is docked a serve-failure penalty for the caller's
+/// mistake.
+///
+/// Returns `None` when the result carries no error, so a caller keeps its own
+/// "the peer returned nothing and said nothing" message for the genuinely
+/// silent case.
+/// Would every other holder refuse this forward in exactly the same way?
+///
+/// A peer's `Validation` describes the REQUEST — a prompt longer than the
+/// model's context, a malformed argument — so every machine holding that model
+/// reproduces it identically. Failing over then spends a round trip per standby
+/// collecting the same refusal, and when the standbys run out the caller is
+/// handed `SegmentFailoverExhausted`, whose hint says this model "is being held
+/// by too few machines right now" and suggests `swarmllm get-model`. That
+/// advice cannot work: the prompt is simply too long, and fetching the model
+/// changes nothing. Measured on the live swarm 2026-08-30, where a 12041-token
+/// prompt against an 8192-token model produced exactly that 503.
+///
+/// This is the retry half of gotcha #295 — a permanent failure given advice to
+/// retry — and the reason the check belongs at the failover DECISION rather
+/// than at the point the error is finally rendered.
+///
+/// Deliberately narrow: only `Validation` is provably the caller's own input.
+/// A missing shard or an unresponsive worker says nothing about the next
+/// holder, and those must still fail over.
+pub(super) fn every_holder_would_refuse(err_msg: &str) -> Option<SwarmError> {
+    match crate::error::reclassify_flattened_error(err_msg) {
+        Some(e @ SwarmError::Validation(_)) => Some(e),
+        _ => None,
+    }
+}
+
+pub(super) fn peer_error_from_result(result: &LayerResult) -> Option<SwarmError> {
+    match &result.finish_reason {
+        Some(NetworkFinishReason::Error(msg)) => Some(
+            crate::error::reclassify_flattened_error(msg)
+                .unwrap_or_else(|| SwarmError::Inference(msg.clone())),
+        ),
+        _ => None,
+    }
+}
 
 // Timeout constants for remote operations
 const VISION_ENCODE_TIMEOUT_SECS: u64 = 120;
@@ -1525,5 +1583,118 @@ mod missing_shard_over_the_wire_tests {
                 "sanitised: {raw:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod peer_error_recovery_tests {
+    use super::*;
+
+    fn result_with(finish: Option<NetworkFinishReason>) -> LayerResult {
+        LayerResult {
+            request_id: uuid::Uuid::nil(),
+            token_ids: Vec::new(),
+            finish_reason: finish,
+            activations: Vec::new(),
+            sealed_token_ids: None,
+            spec_logits: Vec::new(),
+            matched_stop_sequence: None,
+            token_logprobs: Vec::new(),
+        }
+    }
+
+    /// The defect this exists for: a prompt too long for a PEER-held model came
+    /// back as `500 server_error` naming an internal mechanism, while the same
+    /// prompt on a LOCAL model was a `400 invalid_request_error` that said how
+    /// much to cut. Measured on the live swarm 2026-08-30.
+    #[test]
+    fn an_over_long_prompt_refused_by_a_peer_stays_the_callers_mistake() {
+        // Verbatim shape of what the serving node put on the wire.
+        let from_peer = "Worker: Validation error: This conversation is 12041 tokens, \
+                         longer than the model's limit of 8192";
+        let err = peer_error_from_result(&result_with(Some(NetworkFinishReason::Error(
+            from_peer.to_string(),
+        ))))
+        .expect("an Error finish_reason must produce an error");
+
+        let (status, _msg, kind) = crate::error::classify_error(&err);
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "the caller's own over-long prompt must not be reported as this server breaking; got {err:?}"
+        );
+        assert_eq!(kind, "invalid_request_error");
+
+        // The second consequence: blame. `failure_is_penalty_worthy` exempts
+        // `Validation` but not `Inference`, so flattening the class docks a
+        // peer for a mistake that was the caller's.
+        assert!(
+            matches!(err, SwarmError::Validation(_)),
+            "must stay Validation so the peer is not penalised; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_result_that_carries_no_error_is_left_alone() {
+        assert!(peer_error_from_result(&result_with(None)).is_none());
+        assert!(peer_error_from_result(&result_with(Some(NetworkFinishReason::Stop))).is_none());
+        assert!(
+            peer_error_from_result(&result_with(Some(NetworkFinishReason::MaxTokens))).is_none(),
+            "a normal finish must not be turned into a failure"
+        );
+    }
+
+    /// A peer that returns nothing and says nothing keeps the caller's own
+    /// message — the helper must not invent a reason it was not given.
+    #[test]
+    fn an_unexplained_empty_result_is_not_given_a_reason() {
+        assert!(peer_error_from_result(&result_with(None)).is_none());
+    }
+
+    /// Failing over cannot help when the request itself is the problem: every
+    /// holder refuses it identically, and the caller ends up told the model is
+    /// under-replicated. Measured on the live swarm 2026-08-30.
+    #[test]
+    fn a_refusal_of_the_request_itself_does_not_fail_over() {
+        let from_peer = "Worker: Validation error: This conversation is 12041 tokens, \
+                         longer than the model's limit of 8192";
+        let err = every_holder_would_refuse(from_peer)
+            .expect("a peer's Validation must stop the failover search");
+        assert!(matches!(err, SwarmError::Validation(_)), "got {err:?}");
+        assert_eq!(
+            crate::error::classify_error(&err).0,
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// The control, and the more important half: a peer that is missing the
+    /// shard or has died says NOTHING about the next holder, so those must
+    /// still fail over. Narrowing this predicate too far would disable
+    /// failover itself.
+    #[test]
+    fn a_failure_that_is_the_peers_own_still_fails_over() {
+        for from_peer in [
+            "Worker: Shard not found: shard 3 of llama-3.2-3b",
+            "Service unavailable: worker died",
+            "Internal error: index out of bounds",
+            "the card fell out",
+            "Model not available: llama-3.2-3b",
+        ] {
+            assert!(
+                every_holder_would_refuse(from_peer).is_none(),
+                "{from_peer:?} must remain failover-eligible"
+            );
+        }
+    }
+
+    /// An error whose class cannot be recovered still surfaces the peer's own
+    /// words rather than a message written at the call site.
+    #[test]
+    fn an_unrecognised_peer_error_still_carries_what_the_peer_said() {
+        let err = peer_error_from_result(&result_with(Some(NetworkFinishReason::Error(
+            "the card fell out".to_string(),
+        ))))
+        .expect("an Error finish_reason must produce an error");
+        assert!(err.to_string().contains("the card fell out"), "got {err:?}");
     }
 }

@@ -2962,3 +2962,68 @@ fn a_gguf_header_is_never_parsed_straight_off_an_unbuffered_file() {
         offenders.join("\n  ")
     );
 }
+
+/// Every pipeline coordinator that streams tokens must also send the TERMINAL
+/// finish event.
+///
+/// The SSE encoder treats "no finish event arrived" as "this path never
+/// streamed", and falls back to emitting the whole reply from the final
+/// `InferenceOutput` — on top of the tokens it already sent. So a path that
+/// streams but never finishes does not merely omit a marker, it DUPLICATES the
+/// entire response.
+///
+/// Measured on the live swarm 2026-08-30 against the released v0.3.135:
+/// `ngram_only_spec.rs` was the only coordinator missing it, and "Count 1 to 3"
+/// came back as `1\n2\n3<|eot_id|>1\n2\n3` from every peer-held model with the
+/// default settings. Its five siblings all had it, which is why nothing else
+/// showed the fault — the one-invariant-N-paths shape this repo keeps paying
+/// for.
+#[test]
+fn a_streaming_pipeline_path_sends_its_terminal_finish_event() {
+    let dir = std::path::Path::new("src/inference/pipeline");
+    let mut offenders = Vec::new();
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(dir).expect("pipeline dir") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read");
+        let code = statements(&src)
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Only files that actually stream tokens are in scope. `StreamingTokenEvent`
+        // is the one type used to push a token at a waiting client.
+        if !code.contains("StreamingTokenEvent") {
+            continue;
+        }
+        // `mod.rs` holds the shared emit helpers (`emit_streaming_batch`,
+        // `emit_first_streaming_token`). They push content tokens by design;
+        // ending the stream is the COORDINATOR's job, because only it knows
+        // why generation stopped. Excluded on that basis, not to make the
+        // scan pass.
+        if path.file_name().and_then(|f| f.to_str()) == Some("mod.rs") {
+            continue;
+        }
+        checked += 1;
+        if !code.contains("finish_reason: Some(") {
+            offenders.push(format!(
+                "{} streams tokens but never sends a terminal finish event — the SSE \
+                 encoder will re-emit the whole reply on top of the streamed tokens",
+                path.display()
+            ));
+        }
+    }
+    assert!(
+        checked >= 4,
+        "expected to find several streaming pipeline paths, found {checked} — \
+         the scan is no longer reaching them"
+    );
+    assert!(
+        offenders.is_empty(),
+        "streaming pipeline paths missing their terminal finish event:\n  {}",
+        offenders.join("\n  ")
+    );
+}

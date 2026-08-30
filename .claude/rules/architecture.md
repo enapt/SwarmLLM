@@ -2331,3 +2331,70 @@ ITSELF. The discriminator is `index_pos` against the worker's `kv_offset` on the
 same forward — two values that must be equal, printed in adjacent log lines the
 whole time. Ask what a number is supposed to EQUAL, not whether it looks
 plausible.
+
+## A peer's stated reason is the answer; do not substitute one of your own
+
+Two helpers in `inference::pipeline` own what happens when a serving node
+refuses a forward. Both exist because the correct handling was implemented on
+the **verify** hops and missing on the **prefill** hops, in the same files, with
+a comment on one of them explaining exactly why it mattered.
+
+- **`peer_error_from_result`** — recovers the peer's failure from a completed
+  `LayerResult`. A serving node reports why it refused in
+  `finish_reason: NetworkFinishReason::Error(msg)`, and `LayerResult::error`
+  leaves `token_ids` empty when it does, so a caller testing only
+  `token_ids.is_empty()` throws the reason away. It is applied at the single
+  choke point: `forward_through_segments` is now a thin wrapper over
+  `forward_through_segments_inner`, because the inner function has SIX `Ok`
+  return sites and checking each one is the mistake being fixed. The one path
+  that does not go through it — `speculative.rs`'s prefill, which awaits
+  `wait_for_result` directly — carries its own call and says so.
+- **`every_holder_would_refuse`** — asked BEFORE failing over. Deliberately
+  narrow: only `Validation`, because that describes the REQUEST and every holder
+  reproduces it identically. A missing shard or a dead worker says nothing about
+  the next holder and must still fail over; narrowing this predicate too far
+  would disable failover itself, which is why the negative control test lists
+  five such errors by name.
+
+**What was measured (2026-08-30, released v0.3.135).** One over-long prompt gave
+three different answers depending on topology — `500 server_error` naming an
+internal mechanism, `503 Segment failover exhausted` advising
+`swarmllm get-model` for a prompt that is simply too long, and `400` after a
+wasted round trip per peer — while the same prompt on a LOCAL model was always a
+clean `400` naming the exact number of tokens to cut. Whose fault a mistake was
+depended on which machine held the model: gotcha #304's shape, on a path #304's
+fix did not reach. And because the class was flattened to `Inference`,
+`failure_is_penalty_worthy` (which exempts `Validation`) docked the serving peer
+for the caller's mistake. Gotcha #415.
+
+**The rule to carry.** Before failing over, ask whether the next holder could
+possibly answer differently — and never replace a reason you were given with one
+you invented.
+
+## A streaming path must announce that it finished
+
+`api/openai/streaming.rs` treats "no finish event arrived" as "this path never
+streamed" and falls back to emitting the whole `InferenceOutput.content` as one
+delta. So a coordinator that streams tokens and then returns without sending a
+terminal `finish_reason: Some(..)` does not merely omit a marker — it
+**duplicates the entire reply**.
+
+`ngram_only_spec.rs` was the only coordinator missing it;
+`distributed.rs`, `remote_generate.rs`, `dsd.rs` and `speculative.rs` all had
+it, which is why nothing else showed the fault. Measured on the released
+v0.3.135: "Count 1 to 3, digits only" came back as `1\n2\n3<|eot_id|>1\n2\n3`
+from every peer-held model on default settings (gotcha #414).
+
+The same file also streamed the EOS token as reply text at two sites, while
+`finish_speculative` filters it out of the non-streaming content — so one reply
+differed by transport. **End-of-turn is a control token: it ends the reply, it
+is not part of it.** Keep it in the accumulator so the loop still stops on it,
+and exclude it from what is streamed.
+
+`a_streaming_pipeline_path_sends_its_terminal_finish_event` in
+`tests/repo_consistency.rs` fails the build on a streaming coordinator with no
+terminal send. `pipeline/mod.rs` is excluded because it holds the shared emit
+helpers — ending the stream is the coordinator's job, since only it knows why
+generation stopped.
+
+Ask of any "did this happen?" flag what its consumer does when it stays false.

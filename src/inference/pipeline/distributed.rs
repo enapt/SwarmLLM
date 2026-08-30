@@ -658,7 +658,50 @@ impl PipelineExecutor {
     /// the executor uses layer-by-layer AllReduce across the TP group instead
     /// of sending the full layer range to a single node.
     #[allow(clippy::too_many_arguments)]
+    /// Run one forward through the pipeline, surfacing a peer's stated failure.
+    ///
+    /// The whole body lives in `forward_through_segments_inner`; this wrapper
+    /// exists so the error check cannot be skipped. The inner function has six
+    /// `Ok` return sites (local last segment, remote last segment, and four
+    /// failover paths), and checking each one is the "one invariant, N paths"
+    /// mistake this codebase keeps paying for — the verify hops
+    /// (`forward_verify_through_segments`, `send_verify_batch`) had the check
+    /// and the prefill hops did not, in the same files.
+    ///
+    /// See [`super::peer_error_from_result`] for what was measured.
     pub(super) async fn forward_through_segments(
+        &mut self,
+        request_id: uuid::Uuid,
+        sequence_num: u32,
+        index_pos: usize,
+        initial_activations: Vec<u8>,
+        precomputed_vision: Option<Vec<u8>>,
+        pre_embedded: bool,
+        generated_ids: &[u32],
+    ) -> Result<LayerResult, SwarmError> {
+        let result = self
+            .forward_through_segments_inner(
+                request_id,
+                sequence_num,
+                index_pos,
+                initial_activations,
+                precomputed_vision,
+                pre_embedded,
+                generated_ids,
+            )
+            .await?;
+        if let Some(err) = super::peer_error_from_result(&result) {
+            return Err(err);
+        }
+        Ok(result)
+    }
+
+    // The argument list is the one `forward_through_segments` has always had —
+    // this is that function's body, extracted verbatim so the wrapper above can
+    // own the error check. Clippy skips the `pub(super)` wrapper under
+    // `avoid-breaking-exported-api` and flags only this private half.
+    #[allow(clippy::too_many_arguments)]
+    async fn forward_through_segments_inner(
         &mut self,
         request_id: uuid::Uuid,
         sequence_num: u32,
@@ -1234,6 +1277,22 @@ impl PipelineExecutor {
                         // Check if the remote node returned an error — if so, failover
                         if let Some(NetworkFinishReason::Error(ref err_msg)) = result.finish_reason
                         {
+                            // A refusal that describes the REQUEST is reproduced
+                            // by every holder, so there is nothing to fail over
+                            // TO. Return it as the caller's own error instead of
+                            // spending a standby per peer and then reporting the
+                            // model as under-replicated.
+                            if let Some(err) = super::every_holder_would_refuse(err_msg) {
+                                tracing::info!(
+                                    request_id = %request_id,
+                                    segment = idx,
+                                    node = %segment.node_id,
+                                    error = %err_msg,
+                                    "Remote segment refused the request itself — not failing over"
+                                );
+                                self.shared_state.pending_layer_results.remove(&request_id);
+                                return Err(err);
+                            }
                             tracing::warn!(
                                 request_id = %request_id,
                                 segment = idx,

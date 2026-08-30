@@ -422,17 +422,25 @@ impl PipelineExecutor {
                 last_token = bonus;
                 generated.push(bonus);
                 current_pos += 1;
-                if let Some(ref tx) = token_tx {
-                    let text = decoder.decode_tokens(&[bonus]);
-                    let _ = tx
-                        .send(StreamingTokenEvent {
-                            text,
-                            finish_reason: None,
-                            matched_stop_sequence: None,
-                        })
-                        .await;
+                // End-of-turn is a CONTROL token: it ends the reply, it is not
+                // part of it. `finish_speculative` already filters it out of
+                // the non-streaming content, so streaming it here made the same
+                // reply differ by transport — `<|eot_id|>` appeared mid-stream
+                // for every client reading deltas (measured 2026-08-30).
+                let is_eos = eos_tokens.contains(&bonus);
+                if !is_eos {
+                    if let Some(ref tx) = token_tx {
+                        let text = decoder.decode_tokens(&[bonus]);
+                        let _ = tx
+                            .send(StreamingTokenEvent {
+                                text,
+                                finish_reason: None,
+                                matched_stop_sequence: None,
+                            })
+                            .await;
+                    }
                 }
-                if eos_tokens.contains(&bonus) {
+                if is_eos {
                     finish_reason = "stop".into();
                     break;
                 }
@@ -505,8 +513,15 @@ impl PipelineExecutor {
                 emitted.truncate(eos_at + 1);
             }
 
-            // Emit (stream + accumulate)
-            super::emit_streaming_batch(&token_tx, &decoder, &emitted, &mut finish_reason).await;
+            // Emit (stream + accumulate). The EOS token stays in `emitted` so
+            // the accumulator below still sees it and stops, but it is a
+            // control token and must never be streamed as reply text — see the
+            // fallback arm above.
+            let streamable = match emitted.iter().position(|t| eos_tokens.contains(t)) {
+                Some(eos_at) => &emitted[..eos_at],
+                None => &emitted[..],
+            };
+            super::emit_streaming_batch(&token_tx, &decoder, streamable, &mut finish_reason).await;
             for &t in &emitted {
                 generated.push(t);
                 if eos_tokens.contains(&t) {
@@ -555,6 +570,22 @@ impl PipelineExecutor {
             ),
             "SWARM-SPEC L1 ngram-only: complete"
         );
+
+        // Every other pipeline path sends this, and the API layer depends on
+        // it: without a finish event `got_finish` stays false, so the SSE
+        // encoder takes its "pipeline never streamed" fallback and emits the
+        // WHOLE reply again as one delta — on top of the tokens already sent.
+        // Measured on the live swarm 2026-08-30: "1\n2\n3" came back as
+        // "1\n2\n3<|eot_id|>1\n2\n3".
+        if let Some(ref tx) = token_tx {
+            let _ = tx
+                .send(StreamingTokenEvent {
+                    text: String::new(),
+                    finish_reason: Some(finish_reason.clone()),
+                    matched_stop_sequence: None,
+                })
+                .await;
+        }
 
         Ok(Some(self.finish_speculative(
             request_id,
