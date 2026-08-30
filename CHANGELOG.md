@@ -2,6 +2,52 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.136-alpha] — 2026-08-30
+
+### Fixed
+
+- **Replies in languages other than English were refused when another machine
+  ran the model.** Asking a peer-held model for anything outside plain ASCII
+  came back as an error saying part of the answer had been lost on the way, and
+  suggesting you try a different machine. The answer had actually arrived
+  complete. One sentence of Chinese was reported as "1 of 3 tokens arrived";
+  five emoji as "9 of 12". Most of the 21 languages SwarmLLM ships are affected,
+  as is any English reply containing an emoji or an accented character.
+
+  A character outside plain ASCII is built from several pieces internally, and
+  only the last of them produces any visible text — so the machine running the
+  model has several steps to do but only one thing to send. The check for a lost
+  reply compared the number of steps taken against the number of pieces that
+  arrived, two figures that only match when the reply is plain ASCII. It now
+  compares against what the sending machine says it actually sent, a number the
+  connection was already keeping track of. Replies genuinely lost on the way are
+  still caught. Token usage also stops under-reporting these replies.
+
+- **Streamed replies from a peer-held model arrived twice, with a stray marker
+  between the copies.** Asking for "count 1 to 3" gave back the answer, then an
+  internal end-of-turn marker, then the whole answer again. Replies from a model
+  on your own machine were unaffected, as were non-streamed replies.
+
+  SwarmLLM re-sends a complete reply when a path finishes without ever having
+  streamed anything — a safety net for paths that cannot stream. One of the five
+  paths that coordinate work across machines never announced that it had
+  finished, so the safety net fired on top of what it had already sent. The same
+  path, and its two siblings, also sent the end-of-turn marker to clients as
+  though it were part of the reply. That marker is now filtered in the one place
+  every path shares, and a build check fails if a new path sends reply text
+  without going through it.
+
+- **A prompt too long for the model blamed the wrong thing when a peer ran it.**
+  Locally, SwarmLLM has always answered with the exact number of tokens to cut.
+  Over the network the same prompt produced either an internal error, or a
+  message saying the model was held by too few machines and suggesting you
+  download it — advice that cannot help a prompt that is simply too long. The
+  machine running the model states its reason plainly; three places threw that
+  reason away and substituted one of their own. SwarmLLM also no longer retries
+  a refusal across other machines when every one of them would refuse it
+  identically, and the machine that refused is no longer marked down for a
+  mistake in the request.
+
 ## [0.3.135-alpha] — 2026-08-30
 
 ### Fixed
