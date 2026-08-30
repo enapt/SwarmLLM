@@ -2429,6 +2429,67 @@ fn nothing_leaves_this_node_with_a_prompt_in_it_unless_sharing_is_on() {
     );
 }
 
+/// A function's whole body, from its signature to the closing brace in column
+/// zero. `None` if the signature is not present.
+///
+/// Replaces a fixed 1600-character window, which did not reach the end of the
+/// function it was reading. `compute_vram_budget` runs to 1698 characters, so
+/// the guard below was blind to its last 100 — and a `shared.config.resources`
+/// read planted there passed the test, which is gotcha #281's exact defect and
+/// the one that cost a 26x slowdown. The `cfg()` call it asserts on sat at
+/// offset 1568, twenty characters inside the cap, so twenty characters of
+/// unrelated growth anywhere above it would also have failed the test on
+/// correct code. Take the body, not a guess at how long the body is.
+fn fn_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
+    let start = src.find(signature)?;
+    let rest = &src[start..];
+    let end = rest.find("\n}\n").map(|i| i + 2).unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+/// Does this code read the boot-time config snapshot rather than the live one?
+///
+/// Whitespace is stripped first, because the check it replaces matched one
+/// exact indentation (`"shared\n        .config\n        .resources"`). That
+/// string is pinned to whatever rustfmt produced on the day it was written, so
+/// nesting the call one level deeper would have silently retired the
+/// assertion.
+///
+/// `.config.` is the whole marker: nothing in these budget functions has any
+/// business reading the snapshot, so there is no legitimate use to exclude, and
+/// naming the receiver (`shared`, `shared_state`, `self.shared`) would just be
+/// the same brittleness in another form.
+fn reads_the_boot_snapshot(body: &str) -> bool {
+    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    flat.contains(".config.")
+}
+
+/// Both halves of the guard above must actually work, on the real shapes.
+#[test]
+fn the_boot_snapshot_check_is_not_pinned_to_one_formatting() {
+    assert!(reads_the_boot_snapshot(
+        "shared.config.resources.max_gpu_vram_mb"
+    ));
+    // The multi-line chain, at any indentation — the form the old check froze.
+    assert!(reads_the_boot_snapshot(
+        "shared\n        .config\n        .resources"
+    ));
+    assert!(reads_the_boot_snapshot("shared\n  .config\n  .resources"));
+    // A different receiver is the same defect.
+    assert!(reads_the_boot_snapshot("shared_state.config.resources"));
+    // The live read must not be mistaken for it.
+    assert!(!reads_the_boot_snapshot(
+        "shared.cfg().resources.inference_vram_budget_mb(gpu_total)"
+    ));
+
+    // And the body must be taken whole, or a read in its tail is invisible.
+    let src = "pub fn f(x: u32) -> u32 {\n    let a = 1;\n    shared.config.resources.y\n}\n";
+    let body = fn_body(src, "pub fn f").expect("body");
+    assert!(body.contains("shared.config.resources"));
+    assert!(reads_the_boot_snapshot(body));
+    assert!(fn_body(src, "pub fn absent").is_none());
+}
+
 /// The VRAM budget decides whether a model runs on the graphics card or crawls
 /// on the processor, so it must be read from the LIVE config.
 ///
@@ -2446,12 +2507,8 @@ fn the_vram_budget_is_read_live_like_the_ram_budget_beside_it() {
     let root = repo_root();
     let src = std::fs::read_to_string(root.join("src/model/auto_manage/vram.rs")).expect("vram.rs");
 
-    let start = src
-        .find("pub fn compute_vram_budget")
+    let body = fn_body(&src, "pub fn compute_vram_budget")
         .expect("compute_vram_budget must exist — if it moved, move this test with it");
-    // The body is short; take a generous window and check what it reads from.
-    let body = &src[start..(start + 1600).min(src.len())];
-    let body = &body[..body.find("\n}\n").map(|i| i + 2).unwrap_or(body.len())];
 
     assert!(
         body.contains("cfg()"),
@@ -2459,8 +2516,7 @@ fn the_vram_budget_is_read_live_like_the_ram_budget_beside_it() {
          snapshot — raising max_gpu_vram_mb has to take effect without a restart"
     );
     assert!(
-        !body.contains("shared\n        .config\n        .resources")
-            && !body.contains("shared.config.resources"),
+        !reads_the_boot_snapshot(body),
         "compute_vram_budget still reads shared.config (the boot snapshot)"
     );
 }
