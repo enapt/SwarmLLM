@@ -2287,6 +2287,89 @@ fn advertised_load_counts_every_kind_of_work() {
 }
 
 /// Everything that puts a prompt, or anything derived from one, on the wire
+/// Non-comment lines (1-indexed) in `text` mentioning `marker`.
+fn marker_lines(text: &str, marker: &str) -> Vec<usize> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim_start().starts_with("//") && l.contains(marker))
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+/// Is there a `share_prefix_cache_with_peers` read, taken from the LIVE config,
+/// close enough to line `at` to be gating it?
+///
+/// Site-level on purpose. This was a whole-FILE check — "the file mentions the
+/// marker somewhere, and the words `share_prefix_cache_with_peers` somewhere,
+/// and `.cfg()` somewhere" — and the last of those three is satisfied by any of
+/// the unrelated `.cfg()` calls these files already make, so it asserted very
+/// nearly nothing. A second, ungated send added to either file would have kept
+/// it green. Both files are large and the doc comment above is explicit that
+/// nothing but this test connects the two paths.
+fn live_sharing_gate_near(text: &str, at: usize) -> bool {
+    /// How far from the send a gate can sit and still plausibly guard it. The
+    /// gate precedes the announce by 9 lines and follows the fetch marker by
+    /// 16, so the window has to reach both ways.
+    const GATE_WINDOW: usize = 25;
+    /// `cfg()` and the field are on one line at one site and five apart at the
+    /// other, where the call is a multi-line method chain.
+    const CFG_WINDOW: usize = 6;
+
+    let lines: Vec<&str> = text.lines().collect();
+    let is_code = |l: &&str| !l.trim_start().starts_with("//");
+    let lo = at.saturating_sub(GATE_WINDOW + 1);
+    let hi = (at + GATE_WINDOW).min(lines.len());
+    (lo..hi).any(|i| {
+        if !is_code(&lines[i]) || !lines[i].contains("share_prefix_cache_with_peers") {
+            return false;
+        }
+        // The field alone is not enough: read from the boot snapshot it is a
+        // privacy toggle that needs a restart to take effect.
+        let clo = i.saturating_sub(CFG_WINDOW);
+        let chi = (i + CFG_WINDOW + 1).min(lines.len());
+        lines[clo..chi]
+            .iter()
+            .any(|l| is_code(l) && l.contains("cfg()"))
+    })
+}
+
+/// The guard must catch an ungated send and a send gated on the boot snapshot,
+/// and must not fire on the two shapes the codebase actually uses. Without this
+/// the check can silently weaken back into the whole-file version it replaced.
+#[test]
+fn the_prefix_sharing_guard_catches_an_ungated_send() {
+    // Gate on one line, send below — the announce site's shape.
+    let ok_before = "if !state.cfg().inference.share_prefix_cache_with_peers {\n  return;\n}\nsend(SwarmMessage::PrefixCacheAnnounce(a));";
+    // Multi-line cfg() chain above, marker above that — the fetch site's shape.
+    let ok_after = "SwarmRequest::PrefixKvFetch(req) => {\nlet on = self\n.shared_state\n.cfg()\n.inference\n.share_prefix_cache_with_peers;\nif !on { return; }";
+    assert!(live_sharing_gate_near(ok_before, 4));
+    assert!(live_sharing_gate_near(ok_after, 1));
+
+    // No gate at all.
+    assert!(!live_sharing_gate_near(
+        "send(SwarmMessage::PrefixCacheAnnounce(a));",
+        1
+    ));
+    // Gated, but read from the boot snapshot — the #281 shape. A privacy
+    // toggle that needs a restart is the bug, not the fix.
+    assert!(!live_sharing_gate_near(
+        "if !state.config.inference.share_prefix_cache_with_peers { return; }\nsend(a);",
+        2
+    ));
+    // A gate far away in the same file must not count — this is exactly what
+    // the whole-file check got wrong.
+    let far = format!(
+        "if !state.cfg().inference.share_prefix_cache_with_peers {{ return; }}\n{}send(a);",
+        "\n".repeat(60)
+    );
+    assert!(!live_sharing_gate_near(&far, 62));
+    // A commented-out gate is not a gate.
+    assert!(!live_sharing_gate_near(
+        "// if !state.cfg().inference.share_prefix_cache_with_peers { return; }\nsend(a);",
+        2
+    ));
+}
+
 /// must be gated on `inference.share_prefix_cache_with_peers`.
 ///
 /// There are two such paths and they are easy to fix one at a time. The
@@ -2317,24 +2400,22 @@ fn nothing_leaves_this_node_with_a_prompt_in_it_unless_sharing_is_on() {
 
     for (rel, what, marker) in sites {
         let src = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        let uses = marker_lines(&src, marker);
         assert!(
-            src.contains(marker),
+            !uses.is_empty(),
             "{rel}: expected to find {what} ({marker}). If this path moved, move \
              the gate with it and update this test — do not delete the assertion."
         );
-        assert!(
-            src.contains("share_prefix_cache_with_peers"),
-            "{rel}: {what} is not gated on inference.share_prefix_cache_with_peers. \
-             This path puts prompt-derived data on the wire and must be opt-in."
-        );
-        assert!(
-            src.contains("cfg().inference.share_prefix_cache_with_peers")
-                || src.contains("cfg()\n                    .inference\n                    .share_prefix_cache_with_peers")
-                || src.contains(".cfg()"),
-            "{rel}: the sharing gate must be read from the LIVE config via cfg(), \
-             not from the boot snapshot — turning a privacy setting off has to take \
-             effect without a restart (gotcha #281)."
-        );
+        for line_no in uses {
+            assert!(
+                live_sharing_gate_near(&src, line_no),
+                "{rel}:{line_no}: {what} is not gated on \
+                 inference.share_prefix_cache_with_peers read through cfg(). This \
+                 path puts prompt-derived data on the wire, so it must be opt-in, \
+                 and the gate must come from the LIVE config — turning a privacy \
+                 setting off has to take effect without a restart (gotcha #281)."
+            );
+        }
     }
 
     // The default is the whole point: a node nobody configured must not publish
