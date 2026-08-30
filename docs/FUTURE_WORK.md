@@ -10820,3 +10820,40 @@ the constant entirely and is self-calibrating across machines, which is what
 gotcha #367 asks of any threshold. Not attempted here: it wants both figures
 measured on a machine where they differ from this one's, and the 12x already
 banked should not wait for it.
+
+## Intermittent token loss on the remote-generate fast path (observed 2026-08-30)
+
+**Status: observed and reproduced, NOT diagnosed.** Distinct from gotcha #416,
+which was the false-positive half of the same error and is fixed.
+
+**What was seen.** On the whole-model fast path (`pipeline/remote_generate.rs`),
+a tool-calling request returned
+`503 Reply truncated in transit: 5 of 38 tokens arrived` and, on another
+attempt, `3 of 38`. Here the count really is comparable — the peer said it sent
+38 and 5 arrived — so 33 tokens genuinely never turned up inside the 15 s
+`STRAGGLER_TIMEOUT`. The coordinator behaved correctly: it waited, then refused
+to present a partial reply rather than passing off a truncated answer as
+complete (the guarantee gotcha #282 exists for). The identical request succeeded
+in ~1.5 s minutes later, and again on the released binary, so it is intermittent.
+
+**Why it is not simply burst size.** Plain replies of 20, 60 and 142 tokens
+arrived complete through the same path, same node, same session. Whatever the
+trigger is, it is not "many tokens".
+
+**Where to look first.** Each token is its own `request_response` send
+(`NetworkCommand::SendStreamingToken`), and this codebase already documents that
+libp2p rr can silently drop sends under load — that is the entire reason the
+ACK-timeout sweep exists. A fix probably belongs at the send layer (batching
+several tokens per message, or acknowledging and retrying a dropped one), not in
+`StreamReassembler`, which is doing its job.
+
+**Before theorising, reproduce.** The failure did not recur on demand, so the
+first task is a reliable trigger — drive the fast path with concurrent requests
+and count `SendStreamingToken` sends against arrivals on both sides at `-v`.
+Note the serving node logs its `streamed_count` only at DEBUG, so a node at the
+default `info` cannot answer "how many did I actually send?".
+
+**Impact while it stands:** a user occasionally gets a 503 telling them the
+reply was lost and to retry, which is honest and which retrying does fix. It is
+a reliability annoyance, not a correctness hazard — nothing truncated is ever
+shown as if it were whole.

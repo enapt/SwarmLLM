@@ -222,58 +222,48 @@ All 20 build phases complete. All subsystems wired — no stubs. **2155 lib (dev
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
 **Released and deployed: v0.3.136-alpha (2026-08-30).** Local (CUDA asset) and
-Proxmox (.deb) both on it and serving, verified after restart: local answers on
-the GPU, 0 errors, and the installed binary's sha256 matches the published asset
-byte for byte; Proxmox upgraded with `dpkg -i`, stayed `enabled` and `active`
-(#313 prerm fix holds), 0 errors. Both keep their node ids and 5 peers.
+Proxmox (.deb) both on it and serving with 0 errors; the installed local binary's
+sha256 matches the published asset byte for byte, and Proxmox stayed `enabled` +
+`active` through `dpkg -i` (so the #313 prerm fix holds). Both keep their node
+ids and 5 peers. The anchor self-updated to .136 within minutes.
 
-Release gate: 25 assets, not a draft, `latest` correct, sha256 on the CUDA asset
-and the .deb, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact**
-(`strings | grep ggml_cuda_init` = 1), CI + Cache warm green BEFORE tagging,
-`cargo audit` before tagging against the six advisories in `SECURITY.md` — none
-new, libp2p still 0.56 so both hickory findings remain unfixable.
+Release gate, unchanged and followed every time: bump the version FIRST,
+`cargo audit` and CI **and Cache warm** green BEFORE tagging, then verify on the
+**DOWNLOADED** artifact — 25 assets, not a draft, `latest` correct, sha256 on
+CUDA + deb, `strings | grep ggml_cuda_init` = 1, **smoke 9/9 + shapes 7/7**.
 
-**All three fixes verified in production against a PEER-HELD model**, which is
-the only place any of them showed: `🌊` / `🚀 ⭐ 🔥 ❤️ 🌕` / a French sentence
-(was a 503 "reply truncated" on .135), a streamed `1\n2\n3` with no duplicate or
-`<|eot_id|>`, and an over-long prompt answered `400` naming the tokens to cut
-rather than blaming the network.
+### v0.3.136-alpha (2026-08-30) — three faults visible ONLY over the network
 
-### v0.3.136-alpha (2026-08-30) — three faults only visible over the network
+Found by a functional check of .135; every one was clean on a locally-held
+model, which is why all three survived release, CI, smoke and shapes. Detail in
+`memory/round_log_0830_network_path.md`; gotchas **#414**, **#415**, **#416**.
 
-Found by a post-release functional check of .135, all invisible on a
-locally-held model. Detail in `memory/round_log_0830_network_path.md`; gotchas
-**#414**, **#415**, **#416**.
-
-- **#416 — non-English replies were refused as lost.** A multi-byte character is
+- **#416 — non-English replies were REFUSED as lost.** A multi-byte character is
   several GENERATED tokens but ONE thing to SEND (`decode_token` returns empty
-  until the codepoint completes; the server skips empty-text events). The
-  truncation check compared generated-vs-arrived. Measured on the released
-  binary: Chinese `1 of 3 tokens arrived`, emoji `9 of 12`, both complete. 21
-  locales ship and most are multi-byte.
-- **#414 — streamed replies arrived twice** with `<|eot_id|>` between the
-  copies. The SSE encoder re-sends the whole reply when a path finishes without
+  until the codepoint completes; the server skips empty-text events), and the
+  truncation check compared generated-vs-arrived — equal only for ASCII, which
+  is what everything was tested with. Measured on the released binary: Chinese
+  `1 of 3 tokens arrived`, emoji `9 of 12`, both COMPLETE. 21 locales ship and
+  most are multi-byte.
+- **#414 — streamed replies arrived TWICE** with `<|eot_id|>` between the copies.
+  The SSE encoder re-sends the whole reply when a path finishes without ever
   streaming; `ngram_only_spec.rs` was the ONLY one of five coordinators never
   sending a terminal finish event. The EOS leak was in all THREE speculative
   paths — the filter now lives in the shared emit helpers.
-- **#415 — an over-long prompt blamed the network.** Three prefill sites
-  discarded the peer's stated reason; failover retried a refusal every holder
-  would repeat, then reported the model as under-replicated. The peer was also
-  docked for the caller's mistake.
+- **#415 — an over-long prompt blamed the network**, giving three different
+  answers by topology against a clean actionable 400 locally, and docking the
+  peer for the caller's mistake.
 
-⚠ **THREE wrong stories were told before the right one on #416, and the third
-nearly shipped.** A "hang" blamed on code was a cold serving node (the released
-binary later served it in 2 s); the truncation was then blamed on tool-call
-tokens, and the paired test showed released and fixed binaries failing
-IDENTICALLY, which disproved it. Only reading `decode_token`'s carry buffer gave
-a falsifiable prediction that reproduced first try. **The fix was correct while
-its justification was wrong.**
+⚠ **THREE wrong stories were told about #416 before the right one, and the
+second was already written as code** — a paired test showing released and fixed
+binaries failing IDENTICALLY is what killed it. **The fix was correct while its
+justification was wrong**, which is the dangerous shape: get the prediction to
+fail before believing the story.
 
-⚠ **`cargo clippy` does NOT rebuild the binary** — one "verification" ran against
-an 11-minute-old build. And after `cargo build`, a running process's
-`/proc/<pid>/exe` reads `...(deleted)`, so a kill loop globbing the plain path
-misses it; the new node then dies on the redb lock while the OLD binary answers
-on the same port, its output following the open fd into the log you renamed.
+⚠ **`cargo clippy` does NOT rebuild the binary**, and after `cargo build` a live
+process's `/proc/<pid>/exe` reads `...(deleted)` — a plain-path kill loop misses
+it, the new node dies on the redb lock, and the OLD binary answers on the same
+port while logging into the file you renamed.
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
@@ -288,8 +278,7 @@ into `memory/gotchas.md`.
 - **v0.3.125-.129** (08-26/27): `chars/4` used as `index_pos` — **an estimate of a statistic used as a COORDINATE** (#400, cold-only, scales with prompt length); ANY libp2p node could become a "peer" (#396); the caller's sampling was discarded on every cold start (#399). ⚠ **Local verification had been a strict SUBSET of CI's** → `examples/release_shapes.sh`. `round_log_0827_pi_position.md`.
 - **v0.3.120-.124** (08-25): a corrupt shard PROVED to spread — **the ORIGIN settled it; peer agreement is not evidence in a network that copies from itself** (#382); **.121 quarantined the GOOD copy (#384) — a repair mechanism is a destruction mechanism**; receipt-ACK deadline came from ping RTT (#386); a KV refusal was a RATCHET (#387). `round_log_0825_overnight_watch.md`.
 - **v0.3.101-.119** (08-18→24): CPU prefill +20-40% / decode +25-37%; ~750 MB less per model (quantized `token_embd` gather); 25.7x from a memory budget read off the BOOT SNAPSHOT (#281, third time); peer delegation — **privacy changes the SHAPE (boomerang), not the verdict**; stale DHT record outranked a retraction (#364). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement. #334 `cargo audit` ran in CI NOT Release — .102 shipped vulnerable.** `round_log_0824_correctness.md`, `round_log_0822_perf_night.md`.
-- **v0.3.88-.100** (08-09→17): credits switched OFF (they WERE enforced); a failure could not report itself (#300-#305 → `classify_error`); three id derivations, none agreeing → `slugify_model_name` (#310); O(prompt²) KV snapshotting (#312); **settings saved, said ok, did nothing** (boot snapshot → **`SharedState::cfg()`**, #281); distant peers' replies SCRAMBLED (#282). ⚠ **#283 kill by PID.** `round_log_0817_honesty.md`.
-- **v0.3.15-.87** (07-23→08-09): **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE (#246-#253); AVX2 COMPILED OUT of releases (3.09x); batching NEVER engaged (2.4x GPU); our API key was sent to strangers — its PREMISE changed (#238); SPM mis-tokenised 64.9% (#203). ⚠ **#266 measure the FORWARD, not the isolated call. #267 this box cannot resolve a GPU change below ~25%. #179 before touching connection selection. #163 retraction alone is futile.**
+- **v0.3.15-.100** (07-23→08-17): the era that produced most of the rules. Credits switched OFF (they WERE enforced); **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE (#246-#253); AVX2 COMPILED OUT of releases (3.09x); batching NEVER engaged (2.4x GPU); a failure could not report itself (#300-#305 → `classify_error`); three id derivations, none agreeing → `slugify_model_name` (#310); settings saved, said ok, did nothing (#281 → **`SharedState::cfg()`**); distant peers' replies SCRAMBLED (#282); our API key was sent to strangers — its PREMISE changed (#238). ⚠ **#283 kill by PID. #334 `cargo audit` ran in CI NOT Release — .102 shipped vulnerable. #266 measure the FORWARD, not the isolated call. #267 this box cannot resolve a GPU change below ~25%. #179 before touching connection selection. #163 retraction alone is futile.** `round_log_0817_honesty.md` and siblings.
 - **R136-R150 and the 20 build phases**: NAT/reachability, SWARM-SPEC cascade, `swarmpool://` v2, cross-pool routing. `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)
