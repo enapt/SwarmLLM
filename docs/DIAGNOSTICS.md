@@ -1141,6 +1141,24 @@ Every harness below runs against an ISOLATED node or no daemon at all. None of
 them touch a running node; several used to, and that is where most of the traps
 in this section came from.
 
+**Before quoting a GPU number, check WHICH DEVICE the model is actually on.**
+`GET /api/admin/models` reports `cpu_placement_reason` per model, read from the
+worker's recorded placement rather than re-predicted, so it stays truthful even
+after the memory frees. A model demoted at admission — because another model
+took the budget first — runs perhaps 5x slower and nothing about the request
+says so. Measured 2026-08-31: llama-3.2-3b read a stable 9.0-9.5 tok/s against
+41.0 on the same box and binary, purely because phi-3.5 had taken 5676 MB of a
+6616 MB budget.
+
+**And a back-to-back benchmark loop can prevent the recovery it is measuring.**
+`worker_should_return_to_gpu` refuses to promote a worker used within
+`VRAM_MAKE_ROOM_MIN_IDLE_SECS` (5 s), so a loop that issues requests with no gap
+holds the model on the processor indefinitely. Inserting a 12 s gap between reps
+produced 9.7 -> 15.6 -> 33.1 tok/s as it walked back onto the card. Note the
+shape: **a large change with a TIGHT spread is a different configuration, not
+noise** — the opposite of the contention signature, where the mean moves and the
+spread widens with it. See gotcha #422.
+
 | harness | what it measures | notes |
 |---|---|---|
 | `examples/prefill_bench.rs` | prompt processing + decode, driving `SplitModel::forward` directly | no daemon, no scheduler, no API in the way. `SWARM_BENCH_MODEL` (a model dir holding every shard), `SWARM_BENCH_PROMPT` (896), `SWARM_BENCH_DECODE` (32), `SWARM_BENCH_REPS` (3), `SWARM_BENCH_DEVICE=cuda`. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown |
