@@ -2428,3 +2428,37 @@ truncated replies of gotcha #282.
 
 The clamp of `completion_tokens` down to `delivered` now happens only on a real
 truncation, so usage stops under-reporting every multi-byte reply.
+
+## A vocabulary piece becomes token ids in exactly one place
+
+**`inference::tokenizer::BpeTokenizer::push_piece_ids`** is the only way a merged
+piece is turned into ids on the BPE path. There are two sites that need it — the
+single-character early return and the output walk — and **both were
+`.unwrap_or(0)`**, i.e. `<unk>`.
+
+**What that cost.** A SentencePiece vocabulary deliberately contains no bare tab
+or newline; it carries `<0x09>` / `<0x0A>` and expects byte fallback, which
+`spm_encode` has always done. The BPE path did not. So on any GGUF taking that
+branch — `tokenizer_model == "llama"` that ALSO ships merges: TinyLlama,
+Llama-2, Mistral, Vicuna — **every newline in every prompt was handed to the
+model as `<unk>`**, chat-template newlines included, so essentially every
+multi-line prompt was structurally corrupted (gotcha #421).
+
+**Byte fallback is gated on `is_sentencepiece` and must stay that way.** A GPT-2
+vocabulary maps every byte through `byte_encoder` into a character it does
+contain and carries no `<0xNN>` tokens, so a miss there is a genuine vocabulary
+problem and falling back would invent tokens. Pinned in both directions by
+`a_character_with_no_vocabulary_entry_falls_back_to_its_byte_token` (with a
+control: a character having neither a piece nor a byte token must still land on
+`<unk>`) and `a_gpt2_vocabulary_does_not_get_byte_fallback`.
+
+**The general rule, and why this one is worth writing down.** Nothing internal
+could have found it: the tokenizer round-trips against itself perfectly, and the
+equivalence tests written the same day compare it to an *earlier version of
+itself* — both were equally wrong. It took HuggingFace `tokenizers` as an
+outside reference, and nine minutes. **A component that is only ever checked
+against its own past cannot be shown to be correct, only unchanged.**
+`examples/tokenizer_scaling` with `SWARM_TOK_TEXT` is the harness; 17/17 samples
+now agree on the fixed path and 6/6 on the untouched GPT-2 one.
+
+**Do not add a third site that maps a piece to an id.** Call the helper.
