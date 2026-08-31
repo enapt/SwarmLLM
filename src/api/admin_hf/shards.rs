@@ -24,7 +24,21 @@ pub struct HfShardDownloadRequest {
     /// When true AND `shards` is empty: compute a deterministic fair share of shards
     /// based on the node's identity and peer count. Each node claims `ceil(shard_count / (peers + 1))`
     /// shards, with assignment determined by BLAKE3(node_id || model_id) for consistency.
-    /// Peers with auto-manage enabled will auto-acquire the remaining shards.
+    ///
+    /// Peers with auto-manage enabled then acquire the rest — **but only once the
+    /// model clears the auto-manage trust gate** (`ModelTrustLevel::DemandVerified`),
+    /// which is a property of its ORIGIN, not of us seeding it. A peer cannot make
+    /// another node download gigabytes by gossiping a manifest, and that gate is
+    /// what stops it.
+    ///
+    /// This comment used to promise the acquisition unconditionally, and it was
+    /// measured false on 2026-08-31: a seeded 16-shard model sat at 1/16 with six
+    /// auto-managing peers ignoring it, because trust was only ever granted to
+    /// models appearing in the HuggingFace *trending* feed. Promotion now also
+    /// asks the origin directly (`promote_trust_for_known_sources`), so a seeded
+    /// model from a repo that meets the download and age thresholds is picked up
+    /// within an hourly tick — and one that does not meet them still is not,
+    /// which is the intended behaviour rather than a gap.
     #[serde(default)]
     pub peer_fair_share: bool,
 }

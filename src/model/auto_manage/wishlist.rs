@@ -71,6 +71,26 @@ impl WishlistStatus {
     }
 }
 
+/// How much a model the swarm cannot yet serve is worth surfacing, on the
+/// 0..100 wishlist scale. Split into a flat part (any incomplete model is
+/// worth more than a complete one nobody is missing) and a progress part
+/// (the closer to complete, the sooner a contributor unlocks it).
+///
+/// **Sized against the two populations this list actually mixes.** Registry
+/// entries score on rarity, region and memory fit — roughly 0..35 — while
+/// HuggingFace candidates score on download popularity, up to ~70. Sorted
+/// together, a registry entry could essentially never outrank a candidate, so
+/// the swarm's own unservable models sat permanently below models nobody was
+/// missing. Measured 2026-08-31: a seeded model at 1/16 shards scored 11
+/// against 70 for models already served in full.
+///
+/// At these values a nearly-complete model clears that 70 and a barely-started
+/// one lands mid-list, which is the intended ordering: an unservable model one
+/// shard from completion is the most actionable entry the list can carry, and
+/// a fifteen-shard bet is worth seeing but not worth leading with.
+const ASPIRATIONAL_BASE_BOOST: f64 = 35.0;
+const ASPIRATIONAL_PROGRESS_BOOST: f64 = 35.0;
+
 /// Single wishlist entry — one per known model. Aggregates per-shard
 /// scoring and capacity coverage into a model-level summary.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -388,6 +408,23 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
             WishlistStatus::Aspirational => {
                 let missing = total_shards.saturating_sub(shards_covered);
                 if missing > 0 {
+                    // **A model the swarm cannot serve AT ALL, but nearly can,
+                    // is the most valuable thing on this list**, and it used to
+                    // rank at the bottom. Measured 2026-08-31: a freshly seeded
+                    // 16-shard model sitting at 1/16 scored 11, while models the
+                    // swarm already serves in full — where another copy changes
+                    // nothing — scored 70. The one entry that actually needed a
+                    // contributor was buried under the ones that did not.
+                    //
+                    // Scaled by how close it is, so the boost rewards finishing
+                    // over starting: a model needing its last shard outranks one
+                    // needing fifteen, because completing the first unlocks a
+                    // model today and the second is a longer bet. It cannot
+                    // reach the top of the range on its own — it is added to the
+                    // existing signals rather than replacing them.
+                    let covered_fraction = (shards_covered as f64) / (total_shards.max(1) as f64);
+                    score +=
+                        ASPIRATIONAL_BASE_BOOST + ASPIRATIONAL_PROGRESS_BOOST * covered_fraction;
                     why_tags.push(format!("wishlist.why.parts_missing|missing={missing}"));
                 }
             }
@@ -761,5 +798,62 @@ mod tests {
             json.get("task_tags").is_none(),
             "task_tags should not serialise when empty: {json}"
         );
+    }
+}
+
+/// A model the swarm cannot serve at all, but nearly can, is the most useful
+/// thing the wishlist can point at. It used to be the least visible.
+#[cfg(test)]
+mod aspirational_ranking {
+    /// The score a fully-served, popular model reaches — measured on the live
+    /// wishlist on 2026-08-31, and the bar an actionable entry has to clear to
+    /// be seen at all.
+    const POPULAR_COMPLETE_MODEL: f64 = 70.0;
+    /// What a seeded model scored from the ordinary signals alone, same day.
+    const SEEDED_MODEL_BASE: f64 = 11.0;
+
+    fn boost(shards_covered: u32, total_shards: u32) -> f64 {
+        let covered = (shards_covered as f64) / (total_shards.max(1) as f64);
+        super::ASPIRATIONAL_BASE_BOOST + super::ASPIRATIONAL_PROGRESS_BOOST * covered
+    }
+
+    /// The case that motivated this: one shard short of unlocking a model the
+    /// swarm cannot otherwise serve is the most actionable row possible, and it
+    /// must outrank a model that is already served in full.
+    #[test]
+    fn a_nearly_complete_model_outranks_one_the_swarm_already_serves() {
+        let nearly = SEEDED_MODEL_BASE + boost(15, 16);
+        assert!(
+            nearly > POPULAR_COMPLETE_MODEL,
+            "one shard from unlocking a model should lead the list, got {nearly}"
+        );
+    }
+
+    /// A long bet is worth seeing but not worth leading with — visible, not top.
+    #[test]
+    fn a_barely_started_model_is_visible_but_does_not_lead() {
+        let barely = SEEDED_MODEL_BASE + boost(1, 16);
+        assert!(
+            barely > SEEDED_MODEL_BASE + 30.0,
+            "a seeded model must rise well clear of the floor, got {barely}"
+        );
+        assert!(
+            barely < POPULAR_COMPLETE_MODEL,
+            "fifteen shards outstanding should not outrank a served model, got {barely}"
+        );
+    }
+
+    /// Finishing beats starting, monotonically.
+    #[test]
+    fn closer_to_complete_ranks_higher() {
+        assert!(boost(15, 16) > boost(8, 16));
+        assert!(boost(8, 16) > boost(1, 16));
+    }
+
+    /// Additive, not overriding: it cannot alone saturate the 0..100 scale, so
+    /// the rarity, region and fit signals still order entries within the band.
+    #[test]
+    fn the_boost_cannot_saturate_the_scale_on_its_own() {
+        assert!(boost(16, 16) < 100.0);
     }
 }

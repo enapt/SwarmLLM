@@ -80,6 +80,12 @@ const MIN_DOWNLOADS_FOR_TRUST: u64 = 100_000;
 const MIN_DOWNLOADS_FOR_TRUST_TRUSTED: u64 = 10_000;
 const MIN_AGE_FOR_TRUST_HOURS: i64 = 24;
 
+/// How many origins to ask about per tick for models that are NOT in the
+/// trending feed. Bounded because this is one HTTP request each against a
+/// third party; the watcher runs hourly, so a handful per tick clears any
+/// realistic backlog within a few hours while never looking like a scraper.
+const MAX_ORIGIN_TRUST_PROBES_PER_TICK: usize = 8;
+
 /// Curator allowlist: HF publishers whose releases are known-good
 /// quantisations / official model weights. Maintainers earn this slot
 /// through track record (years of clean releases) — adding a name here
@@ -380,8 +386,9 @@ impl HfWatcher {
             });
         }
 
-        // Promote any local model with a matching HF entry above thresholds.
-        promote_trust_for_trending(&self.shared_state, &entries);
+        // Decide trust for every model we know an origin for — from this feed
+        // where it appears, and by asking the origin directly where it does not.
+        promote_trust_for_known_sources(&self.shared_state, &self.client, &entries).await;
 
         // Publish the new snapshot.
         let snapshot = HfTrendingSnapshot {
@@ -468,76 +475,158 @@ pub(crate) fn should_auto_promote(trust: &crate::types::ModelTrustInfo) -> bool 
 /// R134: skips models in cooldown after one or more failed promotions
 /// (auto-promoted but the model never attracted real swarm requests
 /// during the inactivity window — see `should_auto_promote`).
-fn promote_trust_for_trending(state: &SharedState, entries: &[HfTrendingEntry]) {
+/// Decide trust for every model we know an origin for — from the trending
+/// feed when it is there, and by **asking the origin directly** when it is not.
+///
+/// **Trending membership is a discovery signal, not a verification one, and
+/// conflating the two left a hole.** Promotion used to require the repo to
+/// appear in the current trending snapshot, so a model that someone
+/// deliberately seeded onto the swarm could never be promoted, and every peer
+/// on auto-manage therefore declined to help host it — `AutoShardManager: no
+/// candidate shards to download` with budget to spare, for ever. Measured
+/// 2026-08-31: a 16-shard model seeded with `peer_fair_share` sat at 1/16
+/// shards with one holder while six peers with auto-manage enabled ignored it,
+/// because a two-year-old 14B is not "trending" and never will be.
+///
+/// The thresholds are unchanged and are what makes this safe: a peer's
+/// manifest cannot make this node download anything. It can only make us ASK
+/// HuggingFace about a repo, and we act only on what HuggingFace itself
+/// reports — downloads over the bar for that publisher, and old enough to
+/// defeat a download pump. That is the same evidence the trending path uses,
+/// obtained the same way, about a repo we were told about rather than one that
+/// happened to be popular this week. Peer agreement still proves nothing; the
+/// origin does (see `origin_verified`, gotcha #382).
+async fn promote_trust_for_known_sources(
+    state: &SharedState,
+    client: &reqwest::Client,
+    entries: &[HfTrendingEntry],
+) {
     use std::collections::HashMap;
 
-    if entries.is_empty() {
-        return;
-    }
-    // Index trending by repo_id for O(1) lookup. Repo ids are
-    // case-sensitive on HF.
     let by_repo: HashMap<&str, &HfTrendingEntry> =
         entries.iter().map(|e| (e.repo_id.as_str(), e)).collect();
 
-    let now = chrono::Utc::now().timestamp();
-    let age_threshold = MIN_AGE_FOR_TRUST_HOURS * 3600;
+    // Snapshot first: holding a DashMap iterator across an await would keep a
+    // shard of the map locked for the length of an HTTP request.
+    let sources: Vec<(crate::types::ModelId, String)> = state
+        .models
+        .hf_sources
+        .iter()
+        .map(|e| (e.key().clone(), e.value().repo_id.clone()))
+        .collect();
 
-    for hf in state.models.hf_sources.iter() {
-        let model_id = hf.key().clone();
-        let repo_id = hf.value().repo_id.as_str();
-        let Some(entry) = by_repo.get(repo_id) else {
-            continue;
-        };
-        if entry.downloads < min_downloads_for_repo(repo_id) {
+    let mut probes = 0usize;
+    for (model_id, repo_id) in sources {
+        if already_trusted_enough(state, &model_id) {
             continue;
         }
-        if entry.created_at_secs > 0 && (now - entry.created_at_secs) < age_threshold {
-            continue;
-        }
-        // Promote — only if currently Discovered (don't override an
-        // explicit user pin, and don't downgrade higher trust) AND
-        // the anti-gaming cooldown allows it.
-        let mut upgraded = false;
-        let mut cooldown_skip = false;
-        state
-            .models
-            .model_trust
-            .entry(model_id.clone())
-            .and_modify(|t| {
-                if !should_auto_promote(t) {
-                    if matches!(t.trust_level, crate::types::ModelTrustLevel::Discovered)
-                        && t.failed_promotions > 0
-                    {
-                        cooldown_skip = true;
-                    }
-                    return;
+        let stats = match by_repo.get(repo_id.as_str()) {
+            Some(e) => Some((e.downloads, e.created_at_secs)),
+            None => {
+                if probes >= MAX_ORIGIN_TRUST_PROBES_PER_TICK {
+                    continue;
                 }
-                t.trust_level = crate::types::ModelTrustLevel::DemandVerified;
-                t.last_auto_promoted_at = Some(chrono::Utc::now());
-                upgraded = true;
-            })
-            .or_insert_with(|| {
-                upgraded = true;
-                let mut info = crate::types::ModelTrustInfo::new_discovered();
-                info.trust_level = crate::types::ModelTrustLevel::DemandVerified;
-                info.last_auto_promoted_at = Some(chrono::Utc::now());
-                info
-            });
-        if upgraded {
-            tracing::info!(
-                model = %model_id,
-                repo = %repo_id,
-                downloads = entry.downloads,
-                "HfWatcher: promoted to DemandVerified"
-            );
-        } else if cooldown_skip {
-            tracing::debug!(
-                model = %model_id,
-                repo = %repo_id,
-                "HfWatcher: re-promotion blocked by failed-promotion cooldown"
-            );
+                probes += 1;
+                fetch_repo_stats(client, &repo_id).await
+            }
+        };
+        if let Some((downloads, created_at_secs)) = stats {
+            apply_trust_promotion(state, &model_id, &repo_id, downloads, created_at_secs);
         }
     }
+}
+
+/// Ask HuggingFace about one repo: downloads and creation time, the two
+/// figures the trust thresholds are expressed in. `None` on any failure —
+/// an unreachable origin is not evidence of anything, so the model simply
+/// keeps whatever trust it already had.
+async fn fetch_repo_stats(client: &reqwest::Client, repo_id: &str) -> Option<(u64, i64)> {
+    let url = format!("https://huggingface.co/api/models/{repo_id}");
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        tracing::debug!(repo = %repo_id, status = %resp.status(), "HfWatcher: origin lookup failed");
+        return None;
+    }
+    let m: HfApiModel = resp.json().await.ok()?;
+    let created = m
+        .created_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc).timestamp())
+        .unwrap_or(0);
+    Some((m.downloads, created))
+}
+
+/// Apply the trust thresholds to ONE model whose origin statistics we have,
+/// wherever they came from. Idempotent.
+fn apply_trust_promotion(
+    state: &SharedState,
+    model_id: &crate::types::ModelId,
+    repo_id: &str,
+    downloads: u64,
+    created_at_secs: i64,
+) {
+    let now = chrono::Utc::now().timestamp();
+    if downloads < min_downloads_for_repo(repo_id) {
+        return;
+    }
+    if created_at_secs > 0 && (now - created_at_secs) < MIN_AGE_FOR_TRUST_HOURS * 3600 {
+        return;
+    }
+    // Promote — only if currently Discovered (don't override an
+    // explicit user pin, and don't downgrade higher trust) AND
+    // the anti-gaming cooldown allows it.
+    let mut upgraded = false;
+    let mut cooldown_skip = false;
+    state
+        .models
+        .model_trust
+        .entry(model_id.clone())
+        .and_modify(|t| {
+            if !should_auto_promote(t) {
+                if matches!(t.trust_level, crate::types::ModelTrustLevel::Discovered)
+                    && t.failed_promotions > 0
+                {
+                    cooldown_skip = true;
+                }
+                return;
+            }
+            t.trust_level = crate::types::ModelTrustLevel::DemandVerified;
+            t.last_auto_promoted_at = Some(chrono::Utc::now());
+            upgraded = true;
+        })
+        .or_insert_with(|| {
+            upgraded = true;
+            let mut info = crate::types::ModelTrustInfo::new_discovered();
+            info.trust_level = crate::types::ModelTrustLevel::DemandVerified;
+            info.last_auto_promoted_at = Some(chrono::Utc::now());
+            info
+        });
+    if upgraded {
+        tracing::info!(
+            model = %model_id,
+            repo = %repo_id,
+            downloads,
+            "HfWatcher: promoted to DemandVerified"
+        );
+    } else if cooldown_skip {
+        tracing::debug!(
+            model = %model_id,
+            repo = %repo_id,
+            "HfWatcher: re-promotion blocked by failed-promotion cooldown"
+        );
+    }
+}
+
+/// Does this model already sit at or above `DemandVerified`? Used to avoid
+/// asking HuggingFace about a repo whose answer cannot change anything.
+fn already_trusted_enough(state: &SharedState, model_id: &crate::types::ModelId) -> bool {
+    state
+        .models
+        .model_trust
+        .get(model_id)
+        .map(|t| t.trust_level >= crate::types::ModelTrustLevel::DemandVerified)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
