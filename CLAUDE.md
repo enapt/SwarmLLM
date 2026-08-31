@@ -221,7 +221,20 @@ All 20 build phases complete. All subsystems wired — no stubs. **2157 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.136-alpha (2026-08-30).** Local (CUDA asset) and
+**Released and VERIFIED, not yet deployed: v0.3.137-alpha (2026-08-31).** Full
+gate passed on the DOWNLOADED artifact — 25 assets, not a draft, `latest`
+correct, sha256 OK on CUDA + deb, `ggml_cuda_init` = 1, **smoke 9/9 + shapes
+7/7**, CI + Cache warm green before tagging, `cargo audit` clean against the six
+documented advisories. Local (`225e6fe7`) and Proxmox (`96842635`) are still on
+.136 — deploy is the only outstanding step.
+
+⚠ **Cache warm and Release each take ~17 and ~19 minutes**, measured over the
+last six runs of each. `cache-warm.yml` used to say "~1h" in a comment; that was
+the COLD cost from before the kernel cache landed (#318) and it got quoted back
+as a release estimate, doubling it. The comment now carries measured figures and
+says that a ~40 min jump means #318 has returned.
+
+**Previously released and deployed: v0.3.136-alpha (2026-08-30).** Local (CUDA asset) and
 Proxmox (.deb) both on it and serving with 0 errors; the installed local binary's
 sha256 matches the published asset byte for byte, and Proxmox stayed `enabled` +
 `active` through `dpkg -i` (so the #313 prerm fix holds). Both keep their node

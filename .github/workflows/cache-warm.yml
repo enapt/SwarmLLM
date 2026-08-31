@@ -16,10 +16,18 @@
 # This workflow runs the same builds on `main` with the same `shared-key`,
 # so the cache lands on `refs/heads/main` where tag runs can restore it.
 #
-# It is deliberately NOT on every push: the CUDA build is the long pole
-# (~1h). It runs when the dependency graph actually changes, weekly to
-# stay ahead of cache eviction (GitHub evicts after 7 days unused), and
-# on demand.
+# It is deliberately NOT on every push: the CUDA build is the long pole.
+# It runs when the dependency graph actually changes, weekly to stay ahead
+# of cache eviction (GitHub evicts after 7 days unused), and on demand.
+#
+# Duration, measured 2026-08-31 over the last six runs: 16.1-18.2 min.
+# The figure here used to say "~1h", which was the COLD cost before the
+# kernel cache landed (see the CANDLE_FLASH_ATTN_BUILD_DIR note in
+# .github/actions/gpu-build-env and gotcha #318). It outlived that fix and
+# was then quoted back as a release-time estimate, roughly doubling it.
+# If this run starts taking ~40 min longer again, that is #318 returning:
+# the kernels are recompiling despite a reported cache hit. Read the
+# compile lines, not the restore line.
 #
 # Failure here never blocks a release — a cold release build is exactly
 # the old behaviour.
