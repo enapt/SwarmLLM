@@ -3,6 +3,22 @@ use crate::types::{ModelId, NodeId, ShardId};
 use super::manager::{hash_ring_position, AutoShardManager, ShardCandidate};
 use super::vram::estimate_model_vram_mb_arch;
 
+/// How much more a shard is worth when it EXTENDS a run this node already
+/// holds, and when it CLOSES A HOLE in one.
+///
+/// Sized against the signals it sits beside: `rarity_bonus` spans 1-10x and
+/// must stay in charge of WHERE a node starts on a model, so these are
+/// deliberately smaller than its full range — enough to steer which way a
+/// holding grows, not enough to drag a node onto a model the swarm already
+/// covers well. `source_bonus` and `PARALLAX_ACQUIRE_BONUS` are both 1.5x, so
+/// extending sits alongside them and closing a hole is worth twice that.
+///
+/// Gap-filling scores highest because it removes TWO pipeline hops rather than
+/// one: a hole in a holder's range forces the chain out to another machine and
+/// back again, and each crossing is a network round trip per token.
+const CONTIGUITY_EXTEND_BONUS: f64 = 1.5;
+const CONTIGUITY_GAP_FILL_BONUS: f64 = 3.0;
+
 impl AutoShardManager {
     /// Compute remaining download budget in bytes.
     pub(super) fn remaining_budget_bytes(
@@ -157,6 +173,21 @@ impl AutoShardManager {
                     registry.shard_holders(&sid).contains(local_node_id)
                 })
                 .count() as u32;
+
+            // Which shard indices we already hold, for the contiguity bonus
+            // below. Computed once per model rather than per shard.
+            let local_indices: std::collections::HashSet<u32> = manifest
+                .shards
+                .iter()
+                .filter(|s| {
+                    let sid = ShardId {
+                        model_id: manifest.id.clone(),
+                        index: s.index,
+                    };
+                    registry.shard_holders(&sid).contains(local_node_id)
+                })
+                .map(|s| s.index)
+                .collect();
 
             let effective_cap = self
                 .shared_state
@@ -440,6 +471,50 @@ impl AutoShardManager {
                     1.0
                 };
 
+                // -- Contiguity: prefer a shard that EXTENDS what we already hold --
+                //
+                // **A pipeline pays a network round trip every time it changes
+                // machine, so where a node's shards sit matters as much as how
+                // many it has.** Scoring each shard only on rarity scatters a
+                // node's holdings across the model, and a scattered holder
+                // makes the pipeline leave and come back. Measured on the live
+                // swarm 2026-08-31 for a 48-layer model: one peer held layers
+                // 0-8 AND 12-47 but not the four between, so the chain went
+                // peer → other → same peer → third — four hops and four WAN
+                // round trips per token, against a possible two. The tester
+                // measured ~1.5 tok/s, most of it round trip rather than
+                // compute.
+                //
+                // Petals treats this as an invariant rather than a preference:
+                // "the interval of blocks allocated to each server is always
+                // contiguous, since splitting it would harm the inference
+                // latency", and a joining server picks a contiguous interval
+                // positioned where the swarm is weakest — rarity and
+                // contiguity together, not traded off (arXiv 2209.01188).
+                //
+                // We keep rarity in charge of WHERE to start and let this
+                // decide WHICH WAY TO GROW: neutral when we hold nothing of a
+                // model, so a first acquisition is unbiased; a bonus for
+                // extending a run; the largest bonus for closing a hole,
+                // because that removes two hops rather than one.
+                let contiguity_bonus = if local_indices.is_empty() {
+                    1.0
+                } else {
+                    // `checked_sub`, not `wrapping_sub`: shard 0 has no shard
+                    // below it, and wrapping would let a (nonexistent) u32::MAX
+                    // holding read as its neighbour.
+                    let below = shard
+                        .index
+                        .checked_sub(1)
+                        .is_some_and(|i| local_indices.contains(&i));
+                    let above = local_indices.contains(&(shard.index + 1));
+                    match (below, above) {
+                        (true, true) => CONTIGUITY_GAP_FILL_BONUS,
+                        (true, false) | (false, true) => CONTIGUITY_EXTEND_BONUS,
+                        (false, false) => 1.0,
+                    }
+                };
+
                 let configured_bonus = if in_configured_range { 100.0 } else { 1.0 };
 
                 // Shard pinning bonus: if this shard is pinned to us, massive bonus.
@@ -515,6 +590,7 @@ impl AutoShardManager {
                 let score = model_popularity
                     * regional_rarity
                     * configured_bonus
+                    * contiguity_bonus
                     * pin_bonus
                     * vram_fitness
                     * spread_bonus
@@ -874,5 +950,71 @@ mod tests {
                 .any(|c| c.model_id == s1.model_id && c.shard_index == 1),
             "the config explicitly claims this shard, which is itself an instruction"
         );
+    }
+}
+
+/// Where a node's shards sit matters as much as how many it has: a pipeline
+/// pays a network round trip every time it changes machine.
+#[cfg(test)]
+mod contiguity {
+    use std::collections::HashSet;
+
+    /// Reproduces the arithmetic the scoring loop applies, so the ordering
+    /// property can be asserted without standing up a whole registry.
+    fn bonus(local: &HashSet<u32>, index: u32) -> f64 {
+        if local.is_empty() {
+            return 1.0;
+        }
+        let below = index.checked_sub(1).is_some_and(|i| local.contains(&i));
+        let above = local.contains(&(index + 1));
+        match (below, above) {
+            (true, true) => super::CONTIGUITY_GAP_FILL_BONUS,
+            (true, false) | (false, true) => super::CONTIGUITY_EXTEND_BONUS,
+            (false, false) => 1.0,
+        }
+    }
+
+    /// The case measured on the live swarm: a peer held layers 0-8 and 12-47
+    /// but not the four between, so the pipeline went out to another machine
+    /// and back — two extra WAN round trips per token. Closing that hole is
+    /// worth more than extending an end, because it removes two hops not one.
+    #[test]
+    fn closing_a_hole_beats_extending_a_run() {
+        let held: HashSet<u32> = [0u32, 1, 2, 4, 5].into_iter().collect();
+        // 3 sits between 2 and 4 — a hole.
+        assert!(bonus(&held, 3) > bonus(&held, 6));
+        // 6 extends the run upward, which still beats an unrelated shard.
+        assert!(bonus(&held, 6) > bonus(&held, 9));
+    }
+
+    /// **Rarity stays in charge of where a node starts.** Holding nothing of a
+    /// model must leave the score untouched, or a node would be nudged toward
+    /// models it has already begun regardless of what the swarm is missing —
+    /// which is the opposite of what `rarity_bonus` is for.
+    #[test]
+    fn a_model_we_hold_nothing_of_is_unbiased() {
+        let none: HashSet<u32> = HashSet::new();
+        for i in [0u32, 1, 7, 15] {
+            assert_eq!(bonus(&none, i), 1.0);
+        }
+    }
+
+    /// Shard 0 has no shard below it; the wrapping subtraction must not make
+    /// `u32::MAX` look like a neighbour we hold.
+    #[test]
+    fn shard_zero_does_not_wrap_into_a_false_neighbour() {
+        let held: HashSet<u32> = [u32::MAX].into_iter().collect();
+        assert_eq!(bonus(&held, 0), 1.0);
+    }
+
+    /// It steers, it does not dominate: a contiguous shard must not outrank the
+    /// 1-10x rarity signal at its top end, or a node would fill its own holes
+    /// in preference to a shard nobody in the swarm holds at all.
+    #[test]
+    fn contiguity_cannot_outweigh_a_shard_nobody_holds() {
+        let held: HashSet<u32> = [0u32, 2].into_iter().collect();
+        let contiguous_common = bonus(&held, 1) * 1.0; // gap fill, plentiful
+        let scattered_rare = 1.0 * 10.0; // no contiguity, rarest possible
+        assert!(scattered_rare > contiguous_common);
     }
 }
