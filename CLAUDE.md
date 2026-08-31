@@ -221,7 +221,11 @@ All 20 build phases complete. All subsystems wired — no stubs. **2157 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and VERIFIED, not yet deployed: v0.3.137-alpha (2026-08-31).** Full
+**Released and deployed: v0.3.137-alpha (2026-08-31).** Local `225e6fe7` (CUDA
+asset, GPU serving, installed sha256 == published asset, rollback
+`~/.local/bin/swarmllm.0.3.136.bak`) and Proxmox `96842635` (.deb, stayed
+`enabled`+`active`) are both on it, both keeping their node ids and 5 peers. Two
+peers self-updated to .137 within minutes. Full
 gate passed on the DOWNLOADED artifact — 25 assets, not a draft, `latest`
 correct, sha256 OK on CUDA + deb, `ggml_cuda_init` = 1, **smoke 9/9 + shapes
 7/7**, CI + Cache warm green before tagging, `cargo audit` clean against the six
