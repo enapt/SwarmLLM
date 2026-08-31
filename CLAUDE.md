@@ -222,78 +222,67 @@ All 20 build phases complete. All subsystems wired — no stubs. **2157 lib (dev
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
 **Released and deployed: v0.3.137-alpha (2026-08-31).** Local `225e6fe7` (CUDA
-asset, GPU serving, installed sha256 == published asset, rollback
+asset, GPU serving, installed sha256 == published asset byte for byte, rollback
 `~/.local/bin/swarmllm.0.3.136.bak`) and Proxmox `96842635` (.deb, stayed
-`enabled`+`active`) are both on it, both keeping their node ids and 5 peers. Two
-peers self-updated to .137 within minutes. Full
-gate passed on the DOWNLOADED artifact — 25 assets, not a draft, `latest`
-correct, sha256 OK on CUDA + deb, `ggml_cuda_init` = 1, **smoke 9/9 + shapes
-7/7**, CI + Cache warm green before tagging, `cargo audit` clean against the six
-documented advisories. Local (`225e6fe7`) and Proxmox (`96842635`) are still on
-.136 — deploy is the only outstanding step.
-
-⚠ **Cache warm and Release each take ~17 and ~19 minutes**, measured over the
-last six runs of each. `cache-warm.yml` used to say "~1h" in a comment; that was
-the COLD cost from before the kernel cache landed (#318) and it got quoted back
-as a release estimate, doubling it. The comment now carries measured figures and
-says that a ~40 min jump means #318 has returned.
-
-**Previously released and deployed: v0.3.136-alpha (2026-08-30).** Local (CUDA asset) and
-Proxmox (.deb) both on it and serving with 0 errors; the installed local binary's
-sha256 matches the published asset byte for byte, and Proxmox stayed `enabled` +
-`active` through `dpkg -i` (so the #313 prerm fix holds). Both keep their node
-ids and 5 peers. The anchor self-updated to .136 within minutes.
+`enabled` + `active` through `dpkg -i`, so the #313 prerm fix holds) are both on
+it, keeping their node ids and 5 peers. Two peers self-updated within minutes.
 
 Release gate, unchanged and followed every time: bump the version FIRST,
-`cargo audit` and CI **and Cache warm** green BEFORE tagging, then verify on the
-**DOWNLOADED** artifact — 25 assets, not a draft, `latest` correct, sha256 on
-CUDA + deb, `strings | grep ggml_cuda_init` = 1, **smoke 9/9 + shapes 7/7**.
+`cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
+on the **DOWNLOADED** artifact — 25 assets, not a draft, `latest` correct,
+sha256 on CUDA + deb, `strings | grep ggml_cuda_init` = 1, **smoke 9/9 + shapes
+7/7** — then **deploy local + Proxmox, which is part of the release and is not
+asked about**. ⚠ Background the tag push (it runs the pre-push hook). ⚠ Set
+`SWARM_SMOKE_MODEL` or smoke silently SKIPS its three inference checks.
+⚠ **Cache warm takes ~17 min and Release ~19**, measured over six runs each; the
+`~1h` that used to sit in `cache-warm.yml` was the pre-#318 COLD cost and got
+quoted back as a release estimate, doubling it. A ~40 min jump means #318 is
+back — the kernels are recompiling behind a reported cache hit.
 
-### v0.3.136-alpha (2026-08-30) — three faults visible ONLY over the network
+### v0.3.137-alpha (2026-08-31) — three faults found by RUNNING the released .136
 
-Found by a functional check of .135; every one was clean on a locally-held
-model, which is why all three survived release, CI, smoke and shapes. Detail in
-`memory/round_log_0830_network_path.md`; gotchas **#414**, **#415**, **#416**.
+Detail in `memory/round_log_0830_functional_bench.md`; gotchas **#417**, **#418**,
+**#419**.
 
-- **#416 — non-English replies were REFUSED as lost.** A multi-byte character is
-  several GENERATED tokens but ONE thing to SEND (`decode_token` returns empty
-  until the codepoint completes; the server skips empty-text events), and the
-  truncation check compared generated-vs-arrived — equal only for ASCII, which
-  is what everything was tested with. Measured on the released binary: Chinese
-  `1 of 3 tokens arrived`, emoji `9 of 12`, both COMPLETE. 21 locales ship and
-  most are multi-byte.
-- **#414 — streamed replies arrived TWICE** with `<|eot_id|>` between the copies.
-  The SSE encoder re-sends the whole reply when a path finishes without ever
-  streaming; `ngram_only_spec.rs` was the ONLY one of five coordinators never
-  sending a terminal finish event. The EOS leak was in all THREE speculative
-  paths — the filter now lives in the shared emit helpers.
-- **#415 — an over-long prompt blamed the network**, giving three different
-  answers by topology against a clean actionable 400 locally, and docking the
-  peer for the caller's mistake.
+- **#418 — a peer-held model took 244/210/200/182 s where the LAN holder answers
+  in 0.80 s.** That holder was a candidate every time and lost every time on the
+  slow peer's own ADVERTISED speed, because `record_peer_segment_latency` had
+  only TWO production callers and the speculative path was neither — so a
+  three-minute answer taught the scheduler nothing and it re-picked the same peer
+  at the same wrong price. Fixed at the choke point both verify callers funnel
+  through, for the single-token case only (a batch of K drafts is not one decode
+  step; that half is open in `docs/FUTURE_WORK.md`). **Proven live: 16.87 s →
+  1.36 s, the observation tripling the slow peer's cost past a LAN holder's.**
+- **#417 — `/api/admin/stats` took a stable 273 ms, 178 of it KERNEL.**
+  `detect_hardware` built its sysinfo handle with `System::new_all()` then
+  `refresh_all()` — every process on the box, twice — to read four numbers.
+  182 ms → 0.43 ms isolated; **273 ms → 6.1 ms verified end to end.** The lone
+  outlier; every other sysinfo site already refreshes narrowly.
+- **#419 — the first-run banner announced a file write `resolve_api_key`
+  deliberately does NOT do**, which is indistinguishable from the regression
+  `tests/api_key_side_effects.rs` guards (real, twice) and cost an investigation
+  to rule out. A message asserting what the code stopped doing is a stale comment
+  the USER can see.
+- **README carried three factual errors, none guarded**: the test count stated
+  twice and disagreeing (1218 vs 1169, against a real 2157), in the paragraph
+  offering it as grounds to judge the project; and install commands pinned 54
+  releases stale. Now guarded against CLAUDE.md.
 
-⚠ **THREE wrong stories were told about #416 before the right one, and the
-second was already written as code** — a paired test showing released and fixed
-binaries failing IDENTICALLY is what killed it. **The fix was correct while its
-justification was wrong**, which is the dangerous shape: get the prediction to
-fail before believing the story.
-
-⚠ **`cargo clippy` does NOT rebuild the binary**, and after `cargo build` a live
-process's `/proc/<pid>/exe` reads `...(deleted)` — a plain-path kill loop misses
-it, the new node dies on the redb lock, and the OLD binary answers on the same
-port while logging into the file you renamed.
+⚠ **FOUR wrong theories killed by measurement before they reached a commit**, and
+one claim that HAD reached one was corrected in its own commit. ⚠ **CPU decode
+unchanged; prefill −15.5% NOT attributable — its spread went 2.4% → 8.9% while
+decode's held, with a core occupied. A moved mean with a STABLE spread is a
+regression; this is the opposite shape.** ⚠ **The GPU benchmark (87% spread) was
+deliberately NOT published to the README.**
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
-- **v0.3.135** (08-30): **the guards were the defect** — five repo-consistency guards tested by PLANTING the violation, **four could not see what they guard** (#413); line-based scanning cannot see a chain rustfmt WRAPPED. Two production fixes: a rate limiter **capped at 512 with nothing evicting**, and a peer table that could still rank by a dormant credit balance. ⚠ **A guard too weak to fire is too weak to be checked for correctness.** `round_log_0830_guard_audit.md`.
-- **v0.3.134** (08-29): the Models page took 11 s and **9.6 of them were the KERNEL** (#410) — GGUF headers parsed off an UNBUFFERED `File` at 7 sites (~820k syscalls each), and parsed TWICE, the second only for `vocab.len()`; #411 Rust evaluates EVERY argument, so a healthy node priced a model and discarded it once per assembly. **11.2 s → 0.21 s in production, system ticks 962 → 22.** ⚠ **Split utime/stime BEFORE theorising; a STABLE duration is fixed work, not load.** `round_log_0829_dashboard_syscalls.md`.
-- **v0.3.133** (08-29): a model you had EVER served could not be deleted (#409); the forward doing the whole PREFILL was budgeted as a DECODE (#407); one NUL byte made a doc invisible to grep SILENTLY (#408). ⚠ **TWO of five found because a TOOL lied.** `round_log_0829_functional_check.md`.
-- **v0.3.132** (08-29): one dial per ADDRESS not per peer (#405, paired 13→3); a name is not a content identity (#406). ⚠ **TWO published causal claims were WRONG first.** `round_log_0829_dial_identity.md`.
-- **v0.3.130-.131** (08-28): which device your models run on (#401/#402) — **the fix was to DELETE the second accountant**, so graphics memory has ONE owner; the GPU swap floor was 3.65x WORSE than no floor (#403); foreign nodes stopped being DIALLED (#404). ⚠ **A gate refusing NOTHING is the measurement.** `round_log_0827_cpu_to_gpu.md`.
-- **v0.3.125-.129** (08-26/27): `chars/4` used as `index_pos` — **an estimate of a statistic used as a COORDINATE** (#400, cold-only, scales with prompt length); ANY libp2p node could become a "peer" (#396); the caller's sampling was discarded on every cold start (#399). ⚠ **Local verification had been a strict SUBSET of CI's** → `examples/release_shapes.sh`. `round_log_0827_pi_position.md`.
-- **v0.3.120-.124** (08-25): a corrupt shard PROVED to spread — **the ORIGIN settled it; peer agreement is not evidence in a network that copies from itself** (#382); **.121 quarantined the GOOD copy (#384) — a repair mechanism is a destruction mechanism**; receipt-ACK deadline came from ping RTT (#386); a KV refusal was a RATCHET (#387). `round_log_0825_overnight_watch.md`.
+- **v0.3.136** (08-30): **three faults visible ONLY over the network** — clean on every locally-held model, so all three survived release, CI and smoke. Non-English replies REFUSED as lost (#416 — a multi-byte char is several GENERATED tokens but ONE SEND); streamed replies arrived TWICE (#414 — one of five coordinators never sent a terminal finish event); an over-long prompt blamed the network and docked the peer (#415). ⚠ **THREE wrong stories on #416; the second fix was WRITTEN and killed by a paired test — the fix was correct while its justification was wrong.** `round_log_0830_network_path.md`.
+- **v0.3.132-.135** (08-29/30): **the guards were the defect** — five repo-consistency guards tested by PLANTING the violation, **four could not see what they guard** (#413); line scanning cannot see a chain rustfmt WRAPPED. The Models page took 11 s and **9.6 were the KERNEL** (#410 — GGUF headers off an UNBUFFERED `File` at 7 sites; **11.2 s → 0.21 s**). A model you had EVER served could not be deleted (#409); the forward doing the whole PREFILL was budgeted as a DECODE (#407); one NUL byte hid a doc from grep (#408); one dial per ADDRESS not per peer (#405, paired 13→3); a name is not a content identity (#406). ⚠ **Split utime/stime BEFORE theorising. A guard too weak to fire is too weak to be checked. TWO published causal claims were WRONG first.** `round_log_0830_guard_audit.md`, `round_log_0829_*.md`.
+- **v0.3.120-.131** (08-25→28): a corrupt shard PROVED to spread — **only the ORIGIN settles it; peer agreement is not evidence in a network that copies from itself** (#382); **.121 quarantined the GOOD copy (#384) — a repair mechanism is a destruction mechanism**; ACK deadline from ping RTT → RFC 6298 (#386); a KV refusal was a RATCHET (#387); `chars/4` used as `index_pos` — **an estimate of a statistic used as a COORDINATE** (#400, cold-only); ANY libp2p node could become a "peer" (#396) and only `allow_block_list` stopped the dialling (#404); device placement — **the fix was to DELETE the second accountant** (#401/#402). ⚠ **A gate refusing NOTHING is the measurement. Local verification had been a strict SUBSET of CI's** → `examples/release_shapes.sh`. `round_log_0825_overnight_watch.md`, `round_log_0827_*.md`.
 - **v0.3.101-.119** (08-18→24): CPU prefill +20-40% / decode +25-37%; ~750 MB less per model (quantized `token_embd` gather); 25.7x from a memory budget read off the BOOT SNAPSHOT (#281, third time); peer delegation — **privacy changes the SHAPE (boomerang), not the verdict**; stale DHT record outranked a retraction (#364). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement. #334 `cargo audit` ran in CI NOT Release — .102 shipped vulnerable.** `round_log_0824_correctness.md`, `round_log_0822_perf_night.md`.
 - **v0.3.15-.100** (07-23→08-17): the era that produced most of the rules. Credits switched OFF (they WERE enforced); **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE (#246-#253); AVX2 COMPILED OUT of releases (3.09x); batching NEVER engaged (2.4x GPU); a failure could not report itself (#300-#305 → `classify_error`); three id derivations, none agreeing → `slugify_model_name` (#310); settings saved, said ok, did nothing (#281 → **`SharedState::cfg()`**); distant peers' replies SCRAMBLED (#282); our API key was sent to strangers — its PREMISE changed (#238). ⚠ **#283 kill by PID. #334 `cargo audit` ran in CI NOT Release — .102 shipped vulnerable. #266 measure the FORWARD, not the isolated call. #267 this box cannot resolve a GPU change below ~25%. #179 before touching connection selection. #163 retraction alone is futile.** `round_log_0817_honesty.md` and siblings.
 - **R136-R150 and the 20 build phases**: NAT/reachability, SWARM-SPEC cascade, `swarmpool://` v2, cross-pool routing. `docs/ARCHITECTURE.md` § phase history.
