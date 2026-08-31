@@ -2,6 +2,35 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.138-alpha] — 2026-08-31
+
+### Fixed
+
+- **A long prompt could take minutes to tokenize before anything else could
+  happen.** Sending a long message to a model in the TinyLlama / Llama-2 /
+  Mistral / Vicuna family made your node spend **200 seconds of processor time**
+  just turning the text into tokens — before it had even started answering, or,
+  if the model lives on another machine, before it had sent anything at all.
+  Measured on the released 0.3.137: a 90 KB prompt took 141 seconds to tokenize,
+  and an over-long prompt to such a model on another machine took 201 seconds to
+  come back with the "this conversation is too long" message it was always going
+  to give.
+
+  The cost grew with the square of the prompt: every doubling of the text
+  quadrupled the time. Merging was done by scanning the entire text to apply one
+  merge at a time, which is fine for a single word and is all that most models
+  ever hand it — those are split into words first. The affected family is not
+  split into words, so the whole prompt arrived as one enormous "word".
+
+  Now done with a priority queue, which is linear-ish rather than quadratic:
+  **141.83 s → 0.040 s** for that 90 KB prompt, and a node's own processor time
+  for one such request drops from 200.25 s to 1.19 s.
+
+  **No model's tokenization changes** — the replacement produces the same tokens
+  in the same order, which is checked against the algorithm it replaces both on
+  a synthetic vocabulary and, id by id, on a real 32,000-piece one. Models
+  outside that family were never affected and are untouched.
+
 ## [0.3.137-alpha] — 2026-08-31
 
 ### Fixed
