@@ -461,14 +461,42 @@ fn try_generic(text: &str) -> Option<Vec<ParsedToolCall>> {
         .and_then(|f| f.get("name"))
         .and_then(Value::as_str)
         .map(|_| std::slice::from_ref(&v));
-    let arr = match v.get("tool_calls").and_then(Value::as_array) {
-        Some(a) => a.as_slice(),
-        None => single?,
-    };
-    let calls: Vec<ParsedToolCall> = arr
+    // Gather the call entries from whichever shape came back.
+    //
+    // **A model may wrap the object we asked for in an array**, and that is not
+    // it being creative — `format_tool_prompt` asks for
+    // `{"tool_calls": [...]}` and `qwen2.5-14b-instruct` reproducibly answers
+    // `[{"tool_calls": [...]}]`, which is the requested shape inside a
+    // one-element list. Refusing it returned two perfectly good calls to the
+    // user as raw JSON prose with `finish_reason: stop`, so an agentic client
+    // executed nothing and reported no error — the silent failure this parser
+    // exists to prevent. Reported from the field 2026-08-31 and reproduced
+    // here; `qwen2.5-coder-7b` on the identical chat template does not do it,
+    // so it is a per-model habit rather than anything about the prompt.
+    //
+    // A bare array of entries (`[{"id": …, "function": …}]`, the wrapper
+    // dropped) is accepted for the same reason the single-entry case below is.
+    // Nothing is swept up by this: an entry only survives if it yields a
+    // string `name`, and an all-junk array collapses to zero calls, which
+    // `parse_tool_calls` discards.
+    let mut entries: Vec<&Value> = Vec::new();
+    if let Some(a) = v.get("tool_calls").and_then(Value::as_array) {
+        entries.extend(a.iter());
+    } else if let Some(outer) = v.as_array() {
+        for item in outer {
+            match item.get("tool_calls").and_then(Value::as_array) {
+                Some(inner) => entries.extend(inner.iter()),
+                None => entries.push(item),
+            }
+        }
+    } else {
+        entries.extend(single?.iter());
+    }
+    let calls: Vec<ParsedToolCall> = entries
         .iter()
         .enumerate()
         .filter_map(|(i, entry)| {
+            let entry: &Value = entry;
             let id = entry
                 .get("id")
                 .and_then(Value::as_str)
@@ -1035,6 +1063,59 @@ mod bare_call_tests {
         ] {
             assert!(parse_tool_calls(s).is_none(), "false positive on: {s}");
         }
+    }
+}
+
+/// `format_tool_prompt` asks for `{"tool_calls": [...]}`. Models comply in
+/// shapes that are recognisably that object without being exactly it, and
+/// refusing those hands the user raw JSON prose with `finish_reason: stop` —
+/// an agentic client then executes nothing and reports no error.
+#[cfg(test)]
+mod array_wrapped_calls {
+    use super::parse_tool_calls;
+
+    /// Captured verbatim from `qwen2.5-14b-instruct` on 2026-08-31, served
+    /// distributed across the swarm: the requested object inside a
+    /// one-element array. `qwen2.5-coder-7b` on the identical chat template
+    /// does not do this, so it is a per-model habit.
+    #[test]
+    fn the_requested_object_wrapped_in_an_array_is_still_a_tool_call() {
+        let text = r#"[
+  {
+    "tool_calls": [
+      {"id": "call_0", "type": "function",
+       "function": {"name": "write",
+                    "arguments": {"content": "print(1)", "path": "fizzbuzz.py"}}},
+      {"id": "call_1", "type": "function",
+       "function": {"name": "bash", "arguments": {"command": "python3 fizzbuzz.py"}}}
+    ]
+  }
+]"#;
+        let calls = parse_tool_calls(text).expect("array-wrapped calls must parse");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "write");
+        assert_eq!(calls[1].name, "bash");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(args["path"], "fizzbuzz.py");
+    }
+
+    /// The wrapper dropped entirely — a bare array of entries.
+    #[test]
+    fn a_bare_array_of_entries_parses() {
+        let text = r#"[{"id":"call_0","type":"function",
+                       "function":{"name":"bash","arguments":{"command":"ls"}}}]"#;
+        let calls = parse_tool_calls(text).expect("bare entry array must parse");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+    }
+
+    /// The control. An array of ordinary JSON must NOT be read as tool calls,
+    /// or every model that answers a question about JSON starts "calling
+    /// tools". Nothing here yields a string `name`.
+    #[test]
+    fn an_array_of_ordinary_json_is_not_a_tool_call() {
+        assert!(parse_tool_calls(r#"[{"city":"Paris"},{"city":"Rome"}]"#).is_none());
+        assert!(parse_tool_calls(r#"[1, 2, 3]"#).is_none());
     }
 }
 
