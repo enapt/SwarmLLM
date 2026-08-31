@@ -221,12 +221,12 @@ All 20 build phases complete. All subsystems wired — no stubs. **2173 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.139-alpha (2026-08-31).** Local `225e6fe7` (CUDA
+**Released and deployed: v0.3.140-alpha (2026-08-31).** Local `225e6fe7` (CUDA
 asset, GPU serving, installed sha256 == published asset byte for byte, rollback
-`~/.local/bin/swarmllm.0.3.138.bak`) and Proxmox `96842635` (.deb, stayed
+`~/.local/bin/swarmllm.0.3.139.bak`) and Proxmox `96842635` (.deb, stayed
 `enabled` + `active`, no `.dpkg-old`) are both on it, node ids and peers kept.
-⚠ **`cdcfb6af` (the retried-download fix) is on main but NOT in .139** — it
-landed after the tag, so it ships in .140.
+**.140 carries #424 alone** (the retried-download fix, which had missed .139's
+tag by minutes); **.139 carried #423 and the delegation/wishlist work.**
 
 Release gate, unchanged and followed every time: bump the version FIRST,
 `cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
@@ -241,7 +241,7 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.139-alpha (2026-08-31) — models the network is asked to host now actually spread
+### v0.3.139/.140-alpha (2026-08-31) — models the network is asked to host now actually spread
 
 Detail in `memory/round_log_0831_tokenizer_quadratic.md`; gotchas **#423**, **#424**.
 
