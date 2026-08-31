@@ -2,6 +2,28 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.140-alpha] — 2026-08-31
+
+### Fixed
+
+- **A download that had to retry part of itself no longer throws away the parts
+  it had already fetched.** Reported from the field as a shard failing with
+  "expected 523493376 bytes ... wrote 0 bytes", straight after a message saying
+  one of its byte ranges had come back incomplete and was being retried.
+
+  When a range arrives short, the file is rewound to the length recorded before
+  that range started, so the retry does not write a second copy of what it
+  already had. That length was read without first flushing the file, and a
+  file's reported length covers what has reached the operating system rather
+  than what is still waiting in its write buffer — so it can come back smaller
+  than what was really written. Rewinding to it then cuts away ranges that had
+  already succeeded, and the finished download fails its size check having
+  genuinely received the data.
+
+  Whether the two figures agree is a matter of timing, which is why this struck
+  intermittently. Downloads that had to retry a range will now keep what they
+  had.
+
 ## [0.3.139-alpha] — 2026-08-31
 
 ### Fixed

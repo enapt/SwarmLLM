@@ -221,11 +221,12 @@ All 20 build phases complete. All subsystems wired — no stubs. **2173 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.138-alpha (2026-08-31).** Local `225e6fe7` (CUDA
+**Released and deployed: v0.3.139-alpha (2026-08-31).** Local `225e6fe7` (CUDA
 asset, GPU serving, installed sha256 == published asset byte for byte, rollback
-`~/.local/bin/swarmllm.0.3.137.bak`) and Proxmox `96842635` (.deb, stayed
-`enabled` + `active` with no `.dpkg-old`, so the #313 prerm fix holds) are both
-on it, keeping their node ids and 6 peers.
+`~/.local/bin/swarmllm.0.3.138.bak`) and Proxmox `96842635` (.deb, stayed
+`enabled` + `active`, no `.dpkg-old`) are both on it, node ids and peers kept.
+⚠ **`cdcfb6af` (the retried-download fix) is on main but NOT in .139** — it
+landed after the tag, so it ships in .140.
 
 Release gate, unchanged and followed every time: bump the version FIRST,
 `cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
@@ -235,47 +236,57 @@ sha256 on CUDA + deb, `strings | grep ggml_cuda_init` = 1, **smoke 9/9 + shapes
 asked about**. ⚠ Background the tag push (it runs the pre-push hook). ⚠ Set
 `SWARM_SMOKE_MODEL` or smoke silently SKIPS its three inference checks.
 ⚠ **`nohup setsid <script>` returns IMMEDIATELY — setsid forks, so the exit code
-is setsid's. Poll the log for its completion line.** ⚠ **Cache warm is
-deliberately NOT per-push** (dependency-graph changes, weekly, on demand), so a
-source-only commit correctly shows no run and the tag restores `main`'s cache.
-⚠ Cache warm ~17 min; Release was ~19 and took **28m41s** for .138.
+is setsid's. Poll the log for its completion line.** ⚠ **Cache warm is NOT
+per-push** (dependency-graph changes, weekly, on demand), so a source-only
+commit correctly shows no run and the tag restores `main`'s cache. Cache warm
+~17 min; Release ~19-29.
 
-### v0.3.138-alpha (2026-08-31) — two tokenizer faults, one found by timing a request and one by an INDEPENDENT reference
+### v0.3.139-alpha (2026-08-31) — models the network is asked to host now actually spread
 
-Detail in `memory/round_log_0831_tokenizer_quadratic.md`; gotchas **#420**, **#421**.
+Detail in `memory/round_log_0831_tokenizer_quadratic.md`; gotchas **#423**, **#424**.
 
-- **#420 — a prompt took 141 s to TOKENIZE.** `bpe_encode_word` scanned every
-  adjacent pair to apply ONE merge — fine for a word, and all a GPT-2-style
-  vocabulary ever hands it, because those are pre-tokenized into words first.
-  The SentencePiece-style branch (`tokenizer_model == "llama"` that ALSO ships
-  merges: TinyLlama, Llama-2, Mistral, Vicuna) has **no pre-tokenizer step**, so
-  `encode` hands it the WHOLE prompt as one "word" and the quadratic lands on
-  the prompt length. Isolated **141.83 s → 0.040 s (3546x)**, token counts
-  identical; **paired end-to-end A/B, same box/request/peers: the daemon's own
-  CPU 200.25 s → 1.19 s (168x)**, all of it USER time — the mirror of #410/#417,
-  where the tell was kernel time.
-- **#421 — every tab and newline went to the model as `<unk>`.** Found by
-  answering #420's own deferred follow-up ("is it even CORRECT?") against
-  HuggingFace `tokenizers`. A SentencePiece vocabulary carries no bare tab or
-  newline — it carries `<0x09>`/`<0x0A>` and expects byte fallback, which
-  `spm_encode` always did and the BPE path never did. **Chat templates are full
-  of newlines**, so essentially every multi-line prompt to that family was
-  structurally corrupted. **17/17 samples now match the reference** (and 6/6 on
-  the untouched GPT-2 path, which was already correct).
+- **#423 — a model nobody was currently excited about could never be picked up.**
+  Auto-manage refuses anything below `DemandVerified`, and the ONLY promotion
+  path required the repo to be in HuggingFace's **trending** feed — a DISCOVERY
+  signal used as a VERIFICATION one. The gate hid because a node that already
+  holds a shard is EXEMPT, so machines finish models they started and never
+  start new ones. Trust now asks the **ORIGIN** directly with the same
+  thresholds; a node with the fix promoted **7** models on its first tick.
+  **Proven live: a seeded 16-shard model went 1/16 → 16/16 across 6 real
+  holders.** A peer's manifest still cannot make you download anything — only
+  ask HuggingFace, and you act on what HuggingFace reports (#382's rule).
+- **Delegation was unreachable**: `DELEGATE_MAX_LATENCY_MS` 200 → 1000. The old
+  value meant "LAN or metro" and excluded every peer — the only one inside it
+  had no GPU, while a 600 ms GPU peer measured **21-25 tok/s against our own
+  9-10 tok/s CPU fallback**. Safe because candidates arrive sorted nearest-first,
+  so a wider bound only ADDS fallbacks.
+- **The wishlist could not tell a 0.6B from a 120B** — candidates carried
+  `size_mb: 0`, which reads as "fits perfectly" everywhere downstream — and
+  **sparse MoE models were sized 10x too small** (`30B-A3B` picked the ACTIVE
+  count). An unservable model one shard from ready scored **11 against 70**; it
+  now leads the list.
+- **#424 — a retried download truncated away the ranges it had already fetched.**
+  The rewind target was a file length read WITHOUT flushing, and that length is
+  a RACE against tokio's background writer (measured 8192 vs 65536 on one run,
+  equal on the next). Field-reported by a tester as `wrote 0 bytes`.
 
-⚠ **Internal tests could NEVER have found #421**: #420's equivalence tests
-compare the tokenizer to an older version of ITSELF, and both were equally
-wrong. ⚠ **The perf bug was the LEAD, not the bug.** ⚠ **Nearly benchmarked a
-`RUSTFLAGS=""` build against `target-cpu=native` baselines** — `.cargo/config.toml`
-sets native deliberately for local benchmarking; match the baseline's flags.
-⚠ **Decode varied 19% run-to-run on the SAME binary, so this box cannot resolve
-it**; the 0829-vs-now prefill question is still open and needs a quiet box.
+⚠ **THREE published claims of mine were wrong today, all the same error: reading
+ONE node's log, or ONE moment's peer list, as the state of the SWARM.** Check a
+second vantage point (`swarm_capacity` aggregates; a node you control is a
+different vantage, not a confirmation).
+⚠ **Serving a model no single node can hold is STILL NOT DEMONSTRATED.**
+Assembly works — parallax builds a real 4-to-7-segment chain — but execution
+fails at segment 1. The one clean-ish datum is contaminated: the failing node
+was my own test node (`Could not decrypt forward`). A tester reports the
+matching `parallax: no valid source vertex (starts at layer 0, can_be_first)`.
+
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.138** (08-31): two tokenizer faults. **#420** `bpe_encode_word` was naive BPE — fine for a word, and the SentencePiece branch has no pre-tokenizer so it got the WHOLE PROMPT as one "word": 90 KB took **141 s**, daemon CPU **200.25 s → 1.19 s (168x)**, output identical. **#421** every tab and newline went to the model as `<unk>` (chat templates are full of newlines) — found only by checking against HuggingFace `tokenizers`, since the internal tests compare the tokenizer to an older version of ITSELF. **17/17 samples now agree.** ⚠ **The perf bug was the LEAD, not the bug.** `round_log_0831_tokenizer_quadratic.md`.
 - **v0.3.137** (08-31): three faults found by RUNNING the released .136. A peer-held model took 244/210/200/182 s where the LAN holder answers in 0.80 s — it was a candidate every time and lost on ADVERTISED speed, because `record_peer_segment_latency` had only TWO production callers and the speculative path was neither (#418; **proven live 16.87 → 1.36 s**). `/api/admin/stats` took 273 ms, **178 of it KERNEL** — `detect_hardware` enumerated every process TWICE for four numbers (#417, 273 → 6.1 ms). The first-run banner announced a file write the code deliberately does NOT do (#419). ⚠ **FOUR wrong theories killed by measurement before they reached a commit.** `round_log_0830_functional_bench.md`.
 - **v0.3.136** (08-30): **three faults visible ONLY over the network** — clean on every locally-held model, so all three survived release, CI and smoke. Non-English replies REFUSED as lost (#416 — a multi-byte char is several GENERATED tokens but ONE SEND); streamed replies arrived TWICE (#414 — one of five coordinators never sent a terminal finish event); an over-long prompt blamed the network and docked the peer (#415). ⚠ **THREE wrong stories on #416; the second fix was WRITTEN and killed by a paired test — the fix was correct while its justification was wrong.** `round_log_0830_network_path.md`.
 - **v0.3.132-.135** (08-29/30): **the guards were the defect** — five repo-consistency guards tested by PLANTING the violation, **four could not see what they guard** (#413); line scanning cannot see a chain rustfmt WRAPPED. The Models page took 11 s and **9.6 were the KERNEL** (#410 — GGUF headers off an UNBUFFERED `File` at 7 sites; **11.2 s → 0.21 s**). A model you had EVER served could not be deleted (#409); the forward doing the whole PREFILL was budgeted as a DECODE (#407); one NUL byte hid a doc from grep (#408); one dial per ADDRESS not per peer (#405, paired 13→3); a name is not a content identity (#406). ⚠ **Split utime/stime BEFORE theorising. A guard too weak to fire is too weak to be checked. TWO published causal claims were WRONG first.** `round_log_0830_guard_audit.md`, `round_log_0829_*.md`.
