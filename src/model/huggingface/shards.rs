@@ -403,6 +403,24 @@ pub async fn download_shard(
         };
         // Where to rewind to if this range fails: buffering used to give
         // per-range atomicity for free, streaming has to restore it explicitly.
+        //
+        // **Flush before asking how long the file is.** `tokio::fs::File`
+        // buffers writes, and `metadata()` reports what the OS has, not what
+        // is still sitting in that buffer — so without this the length reads
+        // SHORT by however much of the previous ranges had not been written
+        // out yet. That number is then used as a truncation target on the
+        // retry path below, so a single incomplete range would rewind the file
+        // past its own start and destroy ranges that had already succeeded,
+        // leaving a download that reports far fewer bytes than it wrote.
+        //
+        // The retry path already flushes for exactly this reason before its
+        // `set_len`; capturing the length without the same flush was the half
+        // that was missed. Reported from the field 2026-08-31 as
+        // `Shard 14 size mismatch: expected 523493376 bytes ... wrote 0 bytes`
+        // following a `Coalesced range received incomplete data, retrying`.
+        file.flush()
+            .await
+            .map_err(|e| format!("Flush before range checkpoint failed: {e}"))?;
         let file_len_before_range = file
             .metadata()
             .await
@@ -661,3 +679,45 @@ pub async fn download_shards(
 }
 
 // ---- HF API response types ----
+
+/// The rewind checkpoint rests on a property of `tokio::fs::File`.
+#[cfg(test)]
+mod rewind_checkpoint {
+    /// **`metadata()` reports what the OS has, not what is still in the write
+    /// buffer, and whether those agree is a RACE** — tokio's writes complete on
+    /// a background pool. Observed both ways on the same machine minutes apart:
+    /// after two writes totalling 64 KiB, `metadata()` returned **8192** on one
+    /// run and the full **65536** on the next.
+    ///
+    /// That is why the download loop flushes before capturing the file length
+    /// it will later use as a `set_len` truncation target. Reading it short
+    /// means the retry rewinds past ranges that had already succeeded and
+    /// destroys them, so the finished file is smaller than the tensors it was
+    /// built from and fails its size check having actually received the bytes.
+    /// The retry path already flushed before its own `set_len`; capturing the
+    /// checkpoint without the same flush was the half that was missed.
+    ///
+    /// The race itself cannot be asserted without flakiness — this pins the
+    /// property the flush GUARANTEES, which is what the fix relies on.
+    #[tokio::test]
+    async fn a_flushed_file_reports_everything_written_to_it() {
+        use tokio::io::AsyncWriteExt;
+        let dir = std::env::temp_dir().join(format!("swarm_rewind_probe_{}", std::process::id()));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let path = dir.join("probe.bin");
+        let mut f = tokio::fs::File::create(&path).await.unwrap();
+
+        f.write_all(&[7u8; 100]).await.unwrap();
+        f.write_all(&vec![7u8; 64 * 1024 - 100]).await.unwrap();
+        f.flush().await.unwrap();
+
+        let flushed = f.metadata().await.unwrap().len();
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        assert_eq!(
+            flushed,
+            64 * 1024,
+            "after a flush the checkpoint must be the whole file, or the rewind \
+             target is short and a retry truncates good ranges away"
+        );
+    }
+}
