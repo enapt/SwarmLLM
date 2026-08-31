@@ -308,6 +308,30 @@ fn greedy_never_hands_a_node_more_layers_than_it_can_hold() {
     );
 }
 
+/// **The cap is a preference, not a gate.** If honouring every node's memory
+/// bound leaves layers uncovered, assigning anyway beats refusing the request —
+/// which is the same judgement `parallax_assign` makes when it logs "no route
+/// fits the peers' advertised memory". A swarm exists precisely for models its
+/// members cannot comfortably hold; declining to try would make the capacity
+/// check worse than not having one.
+#[test]
+fn a_model_that_fits_nobody_is_still_assigned_rather_than_refused() {
+    let state = make_shared_state();
+    let scheduler = PipelineScheduler::new(state);
+    // One holder, 48 layers, and it admits to holding only 8 at a time.
+    let mut only = simple_candidate(1, vec![(0, 48)]);
+    only.max_hostable_layers = Some(8);
+
+    let segments = scheduler
+        .greedy_assign(48, &[only], false)
+        .expect("must fall back to an unbounded route rather than refuse");
+    assert_eq!(
+        segments.last().unwrap().layer_range.1,
+        48,
+        "the whole model must be covered by the fallback"
+    );
+}
+
 /// `None` means UNKNOWN and must never exclude — an unreadable capability is
 /// not evidence that a node is small, which is the distinction
 /// [`max_hostable_layers`] exists to preserve.

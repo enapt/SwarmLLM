@@ -1462,11 +1462,47 @@ impl PipelineScheduler {
     ///   `can_be_last` (has the final shard for output.weight)
     /// - When `encrypted_pipeline` is true, both first AND last segments must be
     ///   the local (requesting) node — ensures no remote node sees plaintext.
+    ///
+    /// Each node's memory bound shapes the assignment where it can, and is
+    /// dropped rather than refusing the request when it cannot.
+    ///
+    /// **Trying beats refusing here, and that is `parallax_assign`'s judgement
+    /// too** — it logs "no route fits the peers' advertised memory — routing
+    /// without that bound" and proceeds. A model whose holders' advertised
+    /// memory admits no complete route is exactly the case a swarm exists for;
+    /// answering slowly, or even failing on one segment, beats declining to
+    /// try. So the bound shapes the assignment when it can and is dropped when
+    /// it cannot, which is the difference between a preference and a gate.
     fn greedy_assign(
         &self,
         num_layers: u32,
         candidates: &[NodeCandidate],
         encrypted_pipeline: bool,
+    ) -> Result<Vec<PipelineSegment>, SwarmError> {
+        match self.greedy_assign_inner(num_layers, candidates, encrypted_pipeline, true) {
+            Ok(segments) => Ok(segments),
+            Err(capped_err) => {
+                // Only worth a second pass if a cap could have been what
+                // stopped it; with no caps in play the two runs are identical.
+                if !candidates.iter().any(|c| c.max_hostable_layers.is_some()) {
+                    return Err(capped_err);
+                }
+                tracing::info!(
+                    num_layers,
+                    "DIAG: no greedy route fits the peers' advertised memory — \
+                     routing without that bound, a holder may be overcommitted"
+                );
+                self.greedy_assign_inner(num_layers, candidates, encrypted_pipeline, false)
+            }
+        }
+    }
+
+    fn greedy_assign_inner(
+        &self,
+        num_layers: u32,
+        candidates: &[NodeCandidate],
+        encrypted_pipeline: bool,
+        respect_capacity: bool,
     ) -> Result<Vec<PipelineSegment>, SwarmError> {
         let mut segments = Vec::new();
         let mut current_layer = 0u32;
@@ -1693,8 +1729,10 @@ impl PipelineScheduler {
                     // (see [`max_hostable_layers`]). At least one layer always
                     // moves, or the loop cannot terminate.
                     let layer_end = match candidate.max_hostable_layers {
-                        Some(cap) => range.1.min(current_layer.saturating_add(cap.max(1))),
-                        None => range.1,
+                        Some(cap) if respect_capacity => {
+                            range.1.min(current_layer.saturating_add(cap.max(1)))
+                        }
+                        _ => range.1,
                     };
                     segments.push(PipelineSegment {
                         node_id: candidate.node_id.clone(),
