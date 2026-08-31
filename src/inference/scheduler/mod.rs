@@ -160,12 +160,42 @@ fn max_hostable_layers(
 /// | same machine / LAN | 2-134 ms (2-3 ms once idle) |
 /// | other continent | 447-484 ms |
 ///
-/// 200 ms sits 1.5x above the worst local reading and 2.2x below the best
+/// 200 ms sat 1.5x above the worst local reading and 2.2x below the best
 /// remote one. The first attempt at this constant was 50 ms, which read as
 /// obviously generous for a LAN and in fact **excluded a peer on the same
 /// machine** whenever either node was busy — the feature would have shipped
 /// inert on exactly the loaded nodes that need it.
-const DELEGATE_MAX_LATENCY_MS: u32 = 200;
+///
+/// **Raised to 1000 ms on 2026-08-31, because the premise behind 200 changed.**
+/// That value was chosen to admit LAN and metro peers and exclude another
+/// continent, on the reasoning that a nearby peer bounds the damage of a wrong
+/// decision. In a swarm this size the nearest GPU frequently IS a continent
+/// away, and the measurement says delegating to it is not the damage — it is
+/// the win:
+///
+/// | route | measured |
+/// |---|---|
+/// | GPU peer at 585-611 ms, whole model (the delegation shape) | **21-25 tok/s** |
+/// | this node's own processor fallback, same class of model | 9-10 tok/s |
+///
+/// So a peer 3x outside the old bound served **~2.3x faster than not
+/// delegating at all**, and 200 ms made the feature unreachable for every peer
+/// in the fleet — the only one inside it had no GPU. That is the same failure
+/// the 50 ms value had, one order of magnitude out.
+///
+/// **Raising the ceiling cannot make a near peer lose to a far one.**
+/// `candidates` arrives sorted pool-first, then reachability, then latency, so
+/// the first survivor is still the nearest qualifying peer; a wider bound only
+/// adds fallbacks where there were none. The compute advantage is gated
+/// separately and unchanged ([`DELEGATE_MIN_CPU_SPEEDUP`]), so this bounds the
+/// network cost only.
+///
+/// 1000 ms covers the observed fleet (worst peer 665 ms) with room for the
+/// queueing this figure carries — that headroom is #331's lesson, not padding.
+/// **This is still a threshold on a proxy.** The honest version compares
+/// predicted delegated time against local processor time and needs no constant
+/// at all; see `docs/FUTURE_WORK.md`.
+const DELEGATE_MAX_LATENCY_MS: u32 = 1000;
 
 /// How recently a peer must have served a model for us to treat it as still
 /// holding it. Matches `pipeline::local::PEER_MODEL_WARM_TTL_SECS`, which asks

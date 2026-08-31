@@ -11032,3 +11032,38 @@ default `info` cannot answer "how many did I actually send?".
 reply was lost and to retry, which is honest and which retrying does fix. It is
 a reliability annoyance, not a correctness hazard — nothing truncated is ever
 shown as if it were whole.
+
+## Delegation distance should be a comparison, not a constant
+
+`DELEGATE_MAX_LATENCY_MS` was raised 200 -> 1000 on 2026-08-31 because 200 made
+the feature unreachable for every peer in the fleet: the only node inside it had
+no GPU, while the swarm's fastest peer sat at ~600 ms and, measured, served a
+whole-model generation at **21-25 tok/s against this node's own 9-10 tok/s
+processor fallback** — 2.3x better than not delegating.
+
+**The constant is still a threshold on a proxy.** `peer_registry.latency_ms` is
+an application-level health round trip carrying queueing and processing time
+(gotcha #331), so any fixed bound on it is a guess about a quantity that moves
+with load. The honest version needs no constant: `predict_segment_ms` already
+estimates a peer's time for a segment of a given shape, and
+`is_cpu_bound_for_lack_of_vram` already knows the local alternative is the
+processor. Delegate when
+
+    predicted_peer_ms + one_rtt  <  predicted_local_cpu_ms
+
+and drop the distance bound entirely. That also removes the arbitrariness of
+`DELEGATE_MIN_CPU_SPEEDUP`, which exists to give the comparison a margin the
+constant cannot express.
+
+Two things a change here must keep, both currently load-bearing:
+
+- **Ordering is what makes a wide bound safe.** `candidates` arrives sorted
+  pool-first, then reachability, then latency, so the first survivor is the
+  nearest qualifying peer and a distant one can only ever be a fallback. This is
+  what stops a repeat of the 2026-08-03 revert (`cbbed678`), where a request went
+  to another country while a peer 5 ms away was idle. Pinned by
+  `a_nearer_peer_still_wins_over_a_distant_one`.
+- **A relayed peer stays excluded**, and an unmeasured latency is not a bound.
+
+Until then the constant is provisional and calibrated to the fleet it runs on,
+which is the same thing 200 was — it just ran on a different fleet.

@@ -1386,6 +1386,50 @@ fn a_distant_peer_is_never_handed_the_model() {
     );
 }
 
+/// The bound must admit the fleet this actually runs on. Until 2026-08-31 it
+/// was 200 ms, chosen to mean "LAN or metro" — and on a swarm whose only GPU
+/// peer sits at ~600 ms that made the whole feature unreachable, which is the
+/// same way the original 50 ms value failed, one order of magnitude out.
+///
+/// Measured on that peer: a whole-model generation (the delegation shape) ran
+/// at 21-25 tok/s where this node's own processor fallback does 9-10, so
+/// delegating across ~600 ms was ~2.3x better than keeping the request. The
+/// asserted latency here is that real peer's.
+#[test]
+fn a_peer_a_continent_away_is_still_worth_delegating_to() {
+    let mut wan = willing_peer(0xBB, LAYERS);
+    wan.latency_ms = 600;
+    let cands = vec![local_full_coverage(), wan];
+    assert_eq!(
+        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0)
+            .map(|c| c.node_id.clone()),
+        Some(NodeId([0xBB; 32])),
+        "a 600 ms GPU peer measured 2.3x faster than the local processor fallback \
+         and must not be excluded by the distance bound"
+    );
+}
+
+/// Widening the bound must not change WHICH peer wins when several qualify.
+/// `candidates` arrives sorted nearest-first, so a distant peer can only ever
+/// be a fallback — that ordering is what makes raising the ceiling safe, and
+/// it is the property the 2026-08-03 revert (`cbbed678`) existed to protect.
+#[test]
+fn a_nearer_peer_still_wins_over_a_distant_one() {
+    // NOT 0xAA — that is `local_id()`, and the local node is never its own
+    // delegate, which is what the first cut of this test tripped over.
+    let mut near = willing_peer(0xCC, LAYERS);
+    near.latency_ms = 5;
+    let mut far = willing_peer(0xBB, LAYERS);
+    far.latency_ms = 900;
+    let cands = vec![local_full_coverage(), near, far];
+    assert_eq!(
+        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 0.0)
+            .map(|c| c.node_id.clone()),
+        Some(NodeId([0xCC; 32])),
+        "the nearest qualifying peer must still win; a wider bound only adds fallbacks"
+    );
+}
+
 /// A relayed peer is reachable but not suitable: relaying a whole generation is
 /// not what that path is sized for, and an unmeasured latency is not a bound.
 #[test]
