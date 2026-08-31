@@ -1486,6 +1486,82 @@ mod bpe_merge_equivalence {
         );
     }
 
+    /// The same equivalence, against a REAL vocabulary rather than the
+    /// synthetic fixture — 32k real pieces and 61k real merges, on text shaped
+    /// like something a user would actually send.
+    ///
+    /// The synthetic fixture proves the algorithm; this proves it on the thing
+    /// that ships. When the heap replaced the scan, the real-vocabulary
+    /// evidence was that token *counts* matched at five prompt sizes — strong,
+    /// but counts are not ids, and this is the component that feeds the model.
+    ///
+    /// Gated on `SWARM_TOKENIZER_HEADER`, in the same style as
+    /// `local_embedder_load_from_real_model`; no vocabulary is committed.
+    /// Point it at a GGUF header whose model declares `tokenizer_model =
+    /// "llama"` AND ships merges (TinyLlama, Llama-2, Mistral, Vicuna) — that
+    /// is the combination that selects the branch with no pre-tokenizer, and
+    /// `examples/tokenizer_scaling` prints those two fields for any header.
+    ///
+    /// Run with:
+    /// ```sh
+    /// SWARM_TOKENIZER_HEADER=~/.local/share/swarmllm/models/tinyllama-1.1b-.../gguf_header.bin \
+    ///     cargo test -- --ignored bpe_merges_match_the_full_scan_on_a_real_vocabulary
+    /// ```
+    #[test]
+    #[ignore]
+    fn bpe_merges_match_the_full_scan_on_a_real_vocabulary() {
+        let header = match std::env::var("SWARM_TOKENIZER_HEADER") {
+            Ok(h) => std::path::PathBuf::from(h),
+            Err(_) => panic!("set SWARM_TOKENIZER_HEADER to a model's gguf_header.bin"),
+        };
+        let meta = crate::inference::split::GgufTokenizerMeta::from_gguf_file(&header)
+            .expect("read gguf header");
+        assert!(
+            !meta.merges.is_empty() && meta.tokenizer_model == "llama",
+            "this header selects the SPM encoder, not the branch under test — \
+             pick a model with tokenizer_model=\"llama\" AND merges (got {:?} / {} merges)",
+            meta.tokenizer_model,
+            meta.merges.len()
+        );
+        let tok = meta.build_tokenizer().expect("build tokenizer");
+        let bpe = as_bpe(&tok);
+
+        // Shaped like real traffic, not like a scaling harness: prose, code,
+        // punctuation, non-Latin scripts and long runs of one character all
+        // drive different merge cascades.
+        let samples = [
+            "The quick brown fox jumps over the lazy dog.",
+            "fn main() { let xs: Vec<u32> = (0..10).map(|i| i * 2).collect(); }",
+            "Отправь это сообщение — 你好，世界! \u{1F600} café naïve",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "   leading and    irregular\twhitespace\n\nand blank lines   ",
+            "SELECT * FROM users WHERE id = 42 AND name LIKE '%o''brien%';",
+        ];
+        let long_prose = samples.join(" ").repeat(40);
+        assert!(
+            long_prose.len() > 8000,
+            "sample must exercise a real cascade"
+        );
+
+        for text in samples
+            .iter()
+            .copied()
+            .chain(std::iter::once(long_prose.as_str()))
+        {
+            // Exactly what `encode` hands the merger on this branch.
+            let normalized = format!("\u{2581}{}", text.replace(' ', "\u{2581}"));
+            let fast = bpe.bpe_encode_word(&normalized);
+            let reference = reference_encode_word(bpe, &normalized);
+            assert_eq!(
+                fast,
+                reference,
+                "heap and scan disagree on {} chars of real vocabulary",
+                normalized.chars().count()
+            );
+            assert!(!fast.is_empty());
+        }
+    }
+
     /// The regression guard. A SentencePiece-style vocabulary has no
     /// pre-tokenizer, so `encode` hands the WHOLE prompt to `bpe_encode_word`
     /// as one word — the scan above is O(len²) there, and 60k characters took
