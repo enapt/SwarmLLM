@@ -21,6 +21,21 @@ fn main() {
     let tok = meta.build_tokenizer().expect("build tokenizer");
     println!("tokenizer built in {:?}", t0.elapsed());
 
+    if std::env::var("SWARM_TOK_TEMPLATE").is_ok() {
+        match &meta.chat_template {
+            Some(t) => {
+                println!(
+                    "template_len={} has_tools={} has_tool_call_tag={}",
+                    t.len(),
+                    t.contains("tools"),
+                    t.contains("tool_call")
+                );
+                println!("--- template ---\n{t}");
+            }
+            None => println!("NO CHAT TEMPLATE IN HEADER"),
+        }
+        return;
+    }
     if let Ok(text) = std::env::var("SWARM_TOK_TEXT") {
         let ids = tok.encode(&text);
         println!("TEXT {text:?}");

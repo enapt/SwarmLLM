@@ -1670,12 +1670,38 @@ impl PipelineScheduler {
 
             match best {
                 Some((candidate, range)) => {
+                    // **Cap the span at what this node can actually hold.**
+                    // Taking `range.1` outright asks a node for every layer it
+                    // HAS, which is a different question from how many it can
+                    // fit in memory at once — and for a model that fits nobody,
+                    // one node declaring the whole range means one node being
+                    // handed the whole model.
+                    //
+                    // Measured 2026-08-31 on the live swarm: a 6 GB card was
+                    // assigned all 48 layers of an 8,571 MB model as a single
+                    // segment and failed at segment 0, roughly one request in
+                    // four. `parallax_assign` has honoured this cap since it
+                    // was introduced; the greedy fallback beneath it never did,
+                    // and the fallback runs precisely when the model is awkward
+                    // enough for parallax to give up — so the guard was absent
+                    // exactly where it was needed. Same shape as the prefill
+                    // budget in `.claude/rules/architecture.md`: enforced on the
+                    // sophisticated path, missing from the crude one beneath it.
+                    //
+                    // `None` means UNKNOWN and must never exclude — an
+                    // unreadable capability is not evidence a node is small
+                    // (see [`max_hostable_layers`]). At least one layer always
+                    // moves, or the loop cannot terminate.
+                    let layer_end = match candidate.max_hostable_layers {
+                        Some(cap) => range.1.min(current_layer.saturating_add(cap.max(1))),
+                        None => range.1,
+                    };
                     segments.push(PipelineSegment {
                         node_id: candidate.node_id.clone(),
                         shard_id: candidate.shard_id.clone(),
-                        layer_range: (current_layer, range.1),
+                        layer_range: (current_layer, layer_end),
                     });
-                    current_layer = range.1;
+                    current_layer = layer_end;
                 }
                 None => {
                     // Name the model and say what is missing. "No node available

@@ -243,6 +243,85 @@ fn merge_contiguous_segments_same_node() {
     assert_eq!(merged[0].layer_range, (0, 4));
 }
 
+/// Minimal candidate for the greedy tests — everything neutral so the field
+/// under test is the only thing that varies.
+fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
+    NodeCandidate {
+        node_id: NodeId([byte; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        },
+        available_ranges: ranges,
+        reach: super::ReachTier::DirectMeasured,
+        latency_ms: 10,
+        load: 0.0,
+        trust_score: 1.0,
+        can_be_first: true,
+        can_be_last: true,
+        region_score: 1.0,
+        est_tokens_per_sec: 0.0,
+        observed_latency_ms_per_layer: None,
+        observed_delegated_ms_per_layer: None,
+        expected_attempts: 1.0,
+        is_pool_member: false,
+        gpu_vram_available_mb: None,
+        max_hostable_layers: None,
+        observed_prefill_ms_per_layer_byte: None,
+        has_gpu: false,
+    }
+}
+
+/// **The greedy fallback used to hand a node every layer it HELD, which is a
+/// different question from how many it can fit in memory at once.** Measured on
+/// the live swarm 2026-08-31: a 6 GB card was assigned all 48 layers of an
+/// 8,571 MB model as one segment and failed at segment 0, about one request in
+/// four. `parallax_assign` has always honoured the cap; the fallback beneath it
+/// never did — and the fallback runs precisely when the model is awkward enough
+/// for parallax to give up, so the guard was missing exactly where it mattered.
+#[test]
+fn greedy_never_hands_a_node_more_layers_than_it_can_hold() {
+    let state = make_shared_state();
+    let scheduler = PipelineScheduler::new(state);
+
+    // One node declares every layer of a 48-layer model but can hold 12.
+    let mut big = simple_candidate(1, vec![(0, 48)]);
+    big.max_hostable_layers = Some(12);
+    // A second node can take the rest, so a correct assignment exists.
+    let mut rest = simple_candidate(2, vec![(0, 48)]);
+    rest.max_hostable_layers = Some(48);
+
+    let segments = scheduler
+        .greedy_assign(48, &[big, rest], false)
+        .expect("a valid assignment exists");
+
+    let first = &segments[0];
+    assert!(
+        first.layer_range.1 - first.layer_range.0 <= 12,
+        "the capped node was handed {} layers, cap is 12",
+        first.layer_range.1 - first.layer_range.0
+    );
+    assert_eq!(
+        segments.last().unwrap().layer_range.1,
+        48,
+        "the whole model must still be covered"
+    );
+}
+
+/// `None` means UNKNOWN and must never exclude — an unreadable capability is
+/// not evidence that a node is small, which is the distinction
+/// [`max_hostable_layers`] exists to preserve.
+#[test]
+fn an_unknown_capacity_still_takes_the_whole_range() {
+    let state = make_shared_state();
+    let scheduler = PipelineScheduler::new(state);
+    let mut only = simple_candidate(1, vec![(0, 48)]);
+    only.max_hostable_layers = None;
+    let segments = scheduler.greedy_assign(48, &[only], false).unwrap();
+    assert_eq!(segments.len(), 1, "unknown capacity must not fragment");
+    assert_eq!(segments[0].layer_range, (0, 48));
+}
+
 #[test]
 fn greedy_assign_multi_range_candidate() {
     // Test that a candidate with multiple non-contiguous ranges can
