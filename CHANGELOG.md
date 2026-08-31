@@ -2,6 +2,43 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.141-alpha] — 2026-08-31
+
+### Fixed
+
+- **A machine is no longer handed a model it cannot fit.** When a model is
+  spread across the network, the fallback planner asked each machine for every
+  part it holds — a different question from how much it can keep in memory at
+  once. For a model too big for any single participant, one machine claiming the
+  whole range meant one machine being given the whole model, and the request
+  failed immediately: measured on the live network at roughly one request in
+  four, on a model correctly shown as ready. The main planner had always
+  respected this; the fallback beneath it never did, and the fallback is what
+  runs when the model is awkward enough for the main planner to give up. A
+  machine's memory now shapes the plan where it can, and is set aside rather
+  than refusing the request when no plan fits within it.
+
+- **A model that wraps its tool call in a list is no longer ignored.** An
+  agentic client asked a distributed model to write a file and run it; the model
+  produced two correct tool calls and neither ran, because they came back as
+  ordinary message text with a normal stop reason — nothing executed and nothing
+  reported an error. The cause was ours: we ask models to answer with
+  `{"tool_calls": [...]}` and this one answered with exactly that inside a
+  one-element list, which the parser did not accept. A bare list of calls is
+  accepted too. Ordinary JSON in a reply is still ordinary text.
+
+### Changed
+
+- **Machines now gather neighbouring parts of a model rather than scattered
+  ones.** Serving a split model passes work from machine to machine, and every
+  change of machine costs a network round trip for every token. Parts were
+  chosen only by how rare they were, which scatters a machine's holdings: one
+  machine held layers 0-8 and 12-47 but not the four between, so the work went
+  out and came back — four round trips per token where two would do, and about
+  1.5 tokens/sec, most of it waiting on the network. Rarity still decides where
+  a machine starts on a model; this decides which way its holding grows, with
+  closing a hole worth most because a hole costs two crossings.
+
 ## [0.3.140-alpha] — 2026-08-31
 
 ### Fixed
