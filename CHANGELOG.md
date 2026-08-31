@@ -2,6 +2,49 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.139-alpha] — 2026-08-31
+
+### Fixed
+
+- **A model the network is asked to host now actually spreads to the machines
+  that offered to help.** A node only trusted a model enough to download part of
+  it if that model happened to appear in HuggingFace's *trending* feed at that
+  moment. Trending says a model is popular this week, not that it is real, and
+  using it as the only proof of legitimacy meant an ordinary model nobody is
+  currently excited about could never be picked up, however much space had been
+  offered.
+
+  Measured on the live network: a 16-shard model seeded across the swarm sat
+  with a single part hosted while a machine with free space, the manifest, and
+  auto-manage switched on ran its check and concluded there was nothing to
+  download. The same gate was quietly holding back every model the network
+  already hosts — none are trending — and went unnoticed only because a machine
+  that already holds part of a model is exempt. That is why machines finish
+  models they have started and never start new ones.
+
+  Trust is now decided by asking the model's origin directly when it is not in
+  the trending feed, using the same download-count and age thresholds. The
+  safety property is unchanged and is the point: another machine still cannot
+  cause your node to download anything by announcing a model — only to ask
+  HuggingFace about it, and your node acts solely on what HuggingFace reports.
+
+- **A model too big for your graphics card can now be handed to a fast machine
+  further away** rather than falling back to your processor. The limit was
+  200ms, set when the intent was "same local network"; on a network this size
+  the nearest machine with a spare card is often further, and the limit made the
+  feature unreachable. Measured: a peer roughly 600ms away served a whole model
+  at 21-25 tokens/sec against 9-10 on the local processor. Raised to 1000ms. A
+  nearer machine still wins whenever one qualifies.
+
+### Changed
+
+- The suggestions list now leads with models the network **cannot** serve but is
+  close to being able to, instead of burying them under models it already serves
+  in full. Suggestions from HuggingFace are also sized properly now, and sparse
+  mixture-of-experts models are no longer estimated ten times too small.
+
+- Refreshed the Discord invite in the README; the previous one had expired.
+
 ## [0.3.138-alpha] — 2026-08-31
 
 ### Fixed
