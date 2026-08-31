@@ -221,12 +221,14 @@ All 20 build phases complete. All subsystems wired — no stubs. **2183 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.140-alpha (2026-08-31).** Local `225e6fe7` (CUDA
+**Released and deployed: v0.3.141-alpha (2026-08-31).** Local `225e6fe7` (CUDA
 asset, GPU serving, installed sha256 == published asset byte for byte, rollback
 `~/.local/bin/swarmllm.0.3.139.bak`) and Proxmox `96842635` (.deb, stayed
 `enabled` + `active`, no `.dpkg-old`) are both on it, node ids and peers kept.
-**.140 carries #424 alone** (the retried-download fix, which had missed .139's
-tag by minutes); **.139 carried #423 and the delegation/wishlist work.**
+.139 carried #423 + the delegation/wishlist work; .140 carried #424 alone;
+**.141 carries the three that came out of serving a model no single node can
+hold** — the greedy capacity cap, the array-wrapped tool call, and #425
+contiguous shard placement.
 
 Release gate, unchanged and followed every time: bump the version FIRST,
 `cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
@@ -241,51 +243,40 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.139/.140-alpha (2026-08-31) — models the network is asked to host now actually spread
+### v0.3.141-alpha (2026-08-31) — a model no single node can hold is now SERVED, and served better
 
-Detail in `memory/round_log_0831_tokenizer_quadratic.md`; gotchas **#423**, **#424**.
+Gotcha **#425**. **Proven live**: `qwen2.5-14b` (8,571 MB, above every node's
+usable budget) answered over a 3-4 segment chain across Belgium + Proxmox +
+Macmini, and a tester reproduced it independently (`segments=3`, a third peer in
+region IT, ~1.5 tok/s).
 
-- **#423 — a model nobody was currently excited about could never be picked up.**
-  Auto-manage refuses anything below `DemandVerified`, and the ONLY promotion
-  path required the repo to be in HuggingFace's **trending** feed — a DISCOVERY
-  signal used as a VERIFICATION one. The gate hid because a node that already
-  holds a shard is EXEMPT, so machines finish models they started and never
-  start new ones. Trust now asks the **ORIGIN** directly with the same
-  thresholds; a node with the fix promoted **7** models on its first tick.
-  **Proven live: a seeded 16-shard model went 1/16 → 16/16 across 6 real
-  holders.** A peer's manifest still cannot make you download anything — only
-  ask HuggingFace, and you act on what HuggingFace reports (#382's rule).
-- **Delegation was unreachable**: `DELEGATE_MAX_LATENCY_MS` 200 → 1000. The old
-  value meant "LAN or metro" and excluded every peer — the only one inside it
-  had no GPU, while a 600 ms GPU peer measured **21-25 tok/s against our own
-  9-10 tok/s CPU fallback**. Safe because candidates arrive sorted nearest-first,
-  so a wider bound only ADDS fallbacks.
-- **The wishlist could not tell a 0.6B from a 120B** — candidates carried
-  `size_mb: 0`, which reads as "fits perfectly" everywhere downstream — and
-  **sparse MoE models were sized 10x too small** (`30B-A3B` picked the ACTIVE
-  count). An unservable model one shard from ready scored **11 against 70**; it
-  now leads the list.
-- **#424 — a retried download truncated away the ranges it had already fetched.**
-  The rewind target was a file length read WITHOUT flushing, and that length is
-  a RACE against tokio's background writer (measured 8192 vs 65536 on one run,
-  equal on the next). Field-reported by a tester as `wrote 0 bytes`.
-
-⚠ **THREE published claims of mine were wrong today, all the same error: reading
-ONE node's log, or ONE moment's peer list, as the state of the SWARM.** Check a
-second vantage point (`swarm_capacity` aggregates; a node you control is a
-different vantage, not a confirmation).
-⚠ **Serving a model no single node can hold is STILL NOT DEMONSTRATED.**
-Assembly works — parallax builds a real 4-to-7-segment chain — but execution
-fails at segment 1. The one clean-ish datum is contaminated: the failing node
-was my own test node (`Could not decrypt forward`). A tester reports the
-matching `parallax: no valid source vertex (starts at layer 0, can_be_first)`.
-
+- **The greedy fallback had ZERO references to `max_hostable_layers`** — it
+  handed a node every layer it HELD, not what it can HOLD, so a 6 GB card was
+  given all 48 layers (~1 request in 4). Parallax always capped; the fallback
+  beneath it never did, and the fallback runs exactly when parallax bails.
+  ⚠ **My first fix was too strict and was caught before shipping**: capping
+  alone REFUSED requests where no bounded route exists. Parallax already routes
+  unbounded rather than refusing; the fallback now matches.
+- **#425 — pipelines bounced between machines.** Shards scored on rarity alone
+  scatter a node's holdings: one peer held layers 0-8 AND 12-47 but not the 4
+  between, costing **4 WAN round trips per token instead of 2**. Added a
+  contiguity term (extend 1.5x, **close a hole 3x**, neutral when holding none).
+  **Researched first and it changed the design** — Petals makes contiguity an
+  INVARIANT combined WITH rarity, not traded against it (arXiv 2209.01188).
+- **A tool call wrapped in a list was ignored** — we ASK for
+  `{"tool_calls":[...]}` and a model answered with exactly that inside a
+  one-element array; correct calls came back as prose and an agentic client ran
+  nothing. Our bug: the chat templates are byte-identical to the coder model's.
+- **`parallax: no valid source vertex` is NOT a bug** — `can_be_first =
+  shard_indices.contains(&0)`, so it means no CONNECTED candidate holds shard 0.
+  It is what exposed the capacity gap above.
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.139/.140** (08-31): **models the network is asked to host now SPREAD.** #423 — trust was granted only to models in HF's *trending* feed (a DISCOVERY signal used as VERIFICATION), and the gate hid because a node already holding a shard is EXEMPT, so machines finish what they start and never start anything. Now asks the ORIGIN directly, same thresholds. **Confirmed by a tester: stuck at 1/16 reachable for 12 min, then 15/16 and `peers_hosting` 1→4 on updating.** Also: delegation bound 200→1000 ms (a 600 ms GPU peer serves 21-25 tok/s vs our 9-10 CPU); the wishlist could not tell a 0.6B from a 120B and sized MoE 10x small; #424 a retried download truncated away good ranges (unflushed length used as a `set_len` target — a RACE), which cost that tester GB of bandwidth. `round_log_0831_tokenizer_quadratic.md`.
 - **v0.3.138** (08-31): two tokenizer faults. **#420** `bpe_encode_word` was naive BPE — fine for a word, and the SentencePiece branch has no pre-tokenizer so it got the WHOLE PROMPT as one "word": 90 KB took **141 s**, daemon CPU **200.25 s → 1.19 s (168x)**, output identical. **#421** every tab and newline went to the model as `<unk>` (chat templates are full of newlines) — found only by checking against HuggingFace `tokenizers`, since the internal tests compare the tokenizer to an older version of ITSELF. **17/17 samples now agree.** ⚠ **The perf bug was the LEAD, not the bug.** `round_log_0831_tokenizer_quadratic.md`.
 - **v0.3.137** (08-31): three faults found by RUNNING the released .136. A peer-held model took 244/210/200/182 s where the LAN holder answers in 0.80 s — it was a candidate every time and lost on ADVERTISED speed, because `record_peer_segment_latency` had only TWO production callers and the speculative path was neither (#418; **proven live 16.87 → 1.36 s**). `/api/admin/stats` took 273 ms, **178 of it KERNEL** — `detect_hardware` enumerated every process TWICE for four numbers (#417, 273 → 6.1 ms). The first-run banner announced a file write the code deliberately does NOT do (#419). ⚠ **FOUR wrong theories killed by measurement before they reached a commit.** `round_log_0830_functional_bench.md`.
 - **v0.3.136** (08-30): **three faults visible ONLY over the network** — clean on every locally-held model, so all three survived release, CI and smoke. Non-English replies REFUSED as lost (#416 — a multi-byte char is several GENERATED tokens but ONE SEND); streamed replies arrived TWICE (#414 — one of five coordinators never sent a terminal finish event); an over-long prompt blamed the network and docked the peer (#415). ⚠ **THREE wrong stories on #416; the second fix was WRITTEN and killed by a paired test — the fix was correct while its justification was wrong.** `round_log_0830_network_path.md`.
