@@ -294,6 +294,42 @@ impl BpeTokenizer {
         fragments
     }
 
+    /// Resolve one merged piece to token ids, falling back to the vocabulary's
+    /// `<0xNN>` byte tokens when the piece itself is not a vocabulary entry.
+    ///
+    /// **A SentencePiece vocabulary does not contain a bare tab or newline.**
+    /// It carries `<0x09>` and `<0x0A>` instead, and `spm_encode` next door has
+    /// always fallen back to them. This path did not — it resolved a miss to
+    /// `<unk>` — so on a GGUF taking the BPE branch (`tokenizer_model =
+    /// "llama"` that also ships merges: TinyLlama, Llama-2, Mistral, Vicuna)
+    /// **every newline in every prompt became `<unk>`**, chat-template newlines
+    /// included. Verified against HuggingFace `tokenizers` on TinyLlama's own
+    /// vocabulary: `"line one\nline two"` gave `[1196, 697, 0, 1220, 1023]`
+    /// where the reference gives `13` — `<0x0A>` — in place of that `0`.
+    ///
+    /// Byte fallback is applied ONLY for SentencePiece-style vocabularies. A
+    /// GPT-2 vocabulary maps every byte through `byte_encoder` into a character
+    /// it does contain, so a miss there is a genuine vocabulary problem and
+    /// `<0xNN>` tokens do not exist to fall back to.
+    fn push_piece_ids(&self, piece: &str, out: &mut Vec<i64>) {
+        if let Some(&id) = self.token_to_id.get(piece) {
+            out.push(id as i64);
+            return;
+        }
+        let unk = self.token_to_id.get("<unk>").copied().unwrap_or(0) as i64;
+        if !self.is_sentencepiece {
+            out.push(unk);
+            return;
+        }
+        for byte in piece.as_bytes() {
+            let byte_tok = format!("<0x{byte:02X}>");
+            match self.token_to_id.get(&byte_tok) {
+                Some(&id) => out.push(id as i64),
+                None => out.push(unk),
+            }
+        }
+    }
+
     /// Apply BPE merges to one pre-token, lowest merge rank first and, among
     /// equal ranks, leftmost first.
     ///
@@ -335,7 +371,9 @@ impl BpeTokenizer {
 
         // Single char: direct lookup
         if chars.len() == 1 {
-            return vec![self.token_to_id.get(&chars[0]).copied().unwrap_or(0) as i64];
+            let mut out = Vec::new();
+            self.push_piece_ids(&chars[0], &mut out);
+            return out;
         }
 
         // Symbols live in a doubly-linked list, so applying a merge is O(1) and
@@ -466,7 +504,7 @@ impl BpeTokenizer {
         while idx >= 0 && (idx as usize) < symbols.len() {
             let symbol = &symbols[idx as usize];
             if symbol.alive {
-                out.push(self.token_to_id.get(&symbol.text).copied().unwrap_or(0) as i64);
+                self.push_piece_ids(&symbol.text, &mut out);
             }
             idx = symbol.next;
         }
@@ -1355,7 +1393,9 @@ mod bpe_merge_equivalence {
             return vec![];
         }
         if chars.len() == 1 {
-            return vec![bpe.token_to_id.get(&chars[0]).copied().unwrap_or(0) as i64];
+            let mut out = Vec::new();
+            bpe.push_piece_ids(&chars[0], &mut out);
+            return out;
         }
         let mut symbols = chars;
         let mut lookup_buf = String::new();
@@ -1384,10 +1424,11 @@ mod bpe_merge_equivalence {
                 break;
             }
         }
-        symbols
-            .iter()
-            .map(|t| bpe.token_to_id.get(t).copied().unwrap_or(0) as i64)
-            .collect()
+        let mut out = Vec::new();
+        for t in &symbols {
+            bpe.push_piece_ids(t, &mut out);
+        }
+        out
     }
 
     /// A vocabulary with cascading merges and deliberately jumbled ranks, so
@@ -1560,6 +1601,62 @@ mod bpe_merge_equivalence {
             );
             assert!(!fast.is_empty());
         }
+    }
+
+    /// A SentencePiece vocabulary has no bare tab or newline — it carries
+    /// `<0x09>` and `<0x0A>`. Resolving a miss to `<unk>` instead meant every
+    /// newline in every prompt became `<unk>` on this branch, chat-template
+    /// newlines included. Checked against HuggingFace `tokenizers` on
+    /// TinyLlama's real vocabulary, where 17 of 17 samples now agree and the
+    /// newline and tab ones did not before.
+    #[test]
+    fn a_character_with_no_vocabulary_entry_falls_back_to_its_byte_token() {
+        let pieces: Vec<String> = ["<unk>", "a", "b", "<0x09>", "<0x0A>", "\u{2581}a"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let tok = SplitTokenizer::from_bpe(&pieces, &[], "default", "llama", false, None);
+        let bpe = as_bpe(&tok);
+        let unk = 0i64;
+        let tab = 3i64;
+        let newline = 4i64;
+
+        assert_eq!(
+            bpe.bpe_encode_word("a\tb"),
+            vec![1, tab, 2],
+            "a tab must resolve to <0x09>, not <unk>"
+        );
+        assert_eq!(
+            bpe.bpe_encode_word("a\nb"),
+            vec![1, newline, 2],
+            "a newline must resolve to <0x0A>, not <unk>"
+        );
+        // The control: a character with neither a piece NOR a byte token still
+        // has to land somewhere, and that somewhere is <unk>.
+        assert_eq!(
+            bpe.bpe_encode_word("a\u{5FC3}b"),
+            vec![1, unk, unk, unk, 2],
+            "no byte token for these bytes, so <unk> per byte"
+        );
+    }
+
+    /// A GPT-2 vocabulary maps every byte through `byte_encoder` into a
+    /// character it contains, and carries no `<0xNN>` tokens to fall back to,
+    /// so the byte fallback must NOT apply there.
+    #[test]
+    fn a_gpt2_vocabulary_does_not_get_byte_fallback() {
+        let pieces: Vec<String> = ["<unk>", "a", "<0x09>"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let tok = SplitTokenizer::from_bpe(&pieces, &[], "gpt-2", "gpt2", false, None);
+        let bpe = as_bpe(&tok);
+        // 'z' maps to a byte_encoder char that is not in this tiny vocabulary.
+        assert_eq!(
+            bpe.bpe_encode_word("z"),
+            vec![0],
+            "gpt2 miss resolves to <unk>"
+        );
     }
 
     /// The regression guard. A SentencePiece-style vocabulary has no

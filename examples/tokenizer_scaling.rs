@@ -21,6 +21,12 @@ fn main() {
     let tok = meta.build_tokenizer().expect("build tokenizer");
     println!("tokenizer built in {:?}", t0.elapsed());
 
+    if let Ok(text) = std::env::var("SWARM_TOK_TEXT") {
+        let ids = tok.encode(&text);
+        println!("TEXT {text:?}");
+        println!("IDS  {ids:?}");
+        return;
+    }
     let unit = "the quick brown fox jumps over the lazy dog. ";
     let mut prev: Option<(usize, f64)> = None;
     for words in [125usize, 250, 500, 1000, 2000] {

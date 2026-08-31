@@ -6,6 +6,29 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Every newline in a prompt was being replaced with "unknown" on some
+  models.** On a model in the TinyLlama / Llama-2 / Mistral / Vicuna family, a
+  tab or a newline was handed to the model as the `<unk>` token instead of the
+  character itself — and since chat templates are themselves full of newlines,
+  essentially every multi-line prompt to those models arrived with its structure
+  replaced by unknown tokens. Code, lists, paragraphs and the template's own
+  role markers were all affected.
+
+  These vocabularies deliberately carry no bare tab or newline; they carry
+  `<0x09>` and `<0x0A>` and expect a fall back to them. The SentencePiece
+  encoder had always done this. The BPE encoder — which is what a model in that
+  family selects — did not, and resolved the miss to `<unk>`.
+
+  Verified against the HuggingFace `tokenizers` reference on TinyLlama's own
+  vocabulary: **17 of 17 samples now agree**, covering prose, code, SQL,
+  non-Latin scripts, emoji, chat-template markup and mixed tabs and newlines.
+  Before the fix the newline and tab cases disagreed — `"line one\nline two"`
+  produced `<unk>` where the reference produces `<0x0A>`.
+
+  Models outside that family map every byte into a character their vocabulary
+  contains and have no byte tokens to fall back to; they are deliberately left
+  alone.
+
 - **A long prompt could take minutes to tokenize before anything else could
   happen.** Sending a long message to a model in the TinyLlama / Llama-2 /
   Mistral / Vicuna family made your node spend **200 seconds of processor time**
