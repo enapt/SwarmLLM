@@ -294,12 +294,33 @@ impl BpeTokenizer {
         fragments
     }
 
-    /// BPE encode a single pre-token word.
-    /// For GPT-2: converts bytes → GPT-2 unicode chars, then applies BPE merges.
-    /// For SentencePiece: uses raw unicode chars directly with ▁ for leading spaces.
+    /// Apply BPE merges to one pre-token, lowest merge rank first and, among
+    /// equal ranks, leftmost first.
+    ///
+    /// That ordering is exactly what the previous implementation produced by
+    /// re-scanning every adjacent pair to apply a single merge, so this is a
+    /// pure speed change; `bpe_merges_match_the_full_scan` pins the two
+    /// against each other over a corpus so it stays one.
+    ///
+    /// **The word handed in is not always short.** A GPT-2-style vocabulary
+    /// reaches here through `pre_tokenize`, so a "word" really is a word and
+    /// the quadratic scan never showed. A SentencePiece-style vocabulary —
+    /// `tokenizer_model == "llama"` that also ships merges, which is what
+    /// TinyLlama and the Llama-2/Mistral GGUF family convert to — has no
+    /// pre-tokenizer step at all: `encode` hands the WHOLE prompt in as one
+    /// word. Re-scanning it per merge is O(len²) on the length of the prompt.
+    ///
+    /// Measured before this change (`examples/tokenizer_scaling`): doubling the
+    /// prompt quadrupled the time four times running, 90 KB of text taking
+    /// **141 s** to tokenize. Because a distributed request tokenizes its
+    /// prompt before it sends it, an over-long prompt to a peer-held TinyLlama
+    /// took **201 s** to come back as the 400 it was always going to be.
     fn bpe_encode_word(&self, word: &str) -> Vec<i64> {
+        use std::cmp::Ordering;
+        use std::collections::BinaryHeap;
+
         let chars: Vec<String> = if self.is_sentencepiece {
-            // SentencePiece: each character is used as-is (▁ already inserted by pre_tokenize)
+            // SentencePiece: each character is used as-is (▁ already inserted above)
             word.chars().map(|c| c.to_string()).collect()
         } else {
             // GPT-2: convert each byte to its GPT-2 unicode character
@@ -317,47 +338,139 @@ impl BpeTokenizer {
             return vec![self.token_to_id.get(&chars[0]).copied().unwrap_or(0) as i64];
         }
 
-        // Apply BPE merges using the standard algorithm:
-        // Repeatedly find the highest-priority (lowest rank) merge pair and apply it.
-        // Uses a reusable lookup buffer to avoid String allocations in the scan loop.
-        let mut symbols = chars;
-        let mut lookup_buf = String::new();
-        loop {
-            // Find the pair with the lowest merge rank (zero-allocation scan)
-            let mut best_rank = usize::MAX;
-            let mut best_idx = usize::MAX;
-            for i in 0..symbols.len() - 1 {
-                lookup_buf.clear();
-                lookup_buf.push_str(&symbols[i]);
-                lookup_buf.push('\0');
-                lookup_buf.push_str(&symbols[i + 1]);
-                if let Some(&rank) = self.merge_ranks.get(&lookup_buf) {
-                    if rank < best_rank {
-                        best_rank = rank;
-                        best_idx = i;
-                    }
-                }
+        // Symbols live in a doubly-linked list, so applying a merge is O(1) and
+        // never shifts the tail. `next < 0` ends the list; a symbol absorbed
+        // into its left neighbour is marked dead and unlinked.
+        struct Symbol {
+            text: String,
+            prev: i32,
+            next: i32,
+            alive: bool,
+        }
+        let n = chars.len();
+        let mut symbols: Vec<Symbol> = chars
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| Symbol {
+                text,
+                prev: if i > 0 { i as i32 - 1 } else { -1 },
+                next: if i + 1 < n { i as i32 + 1 } else { -1 },
+                alive: true,
+            })
+            .collect();
+
+        struct Candidate {
+            rank: usize,
+            left: usize,
+            /// Combined length of the pair **when it was ranked**. The queue is
+            /// not invalidated when a symbol grows, so this is what proves the
+            /// entry still describes the same text. Symbols only ever get
+            /// longer, so a changed pair can never match by coincidence. Same
+            /// guard `spm_encode` carries, for the same reason.
+            size: usize,
+        }
+        impl PartialEq for Candidate {
+            fn eq(&self, other: &Self) -> bool {
+                self.rank == other.rank && self.left == other.left
             }
-
-            if best_idx == usize::MAX {
-                break; // No more merges applicable
+        }
+        impl Eq for Candidate {}
+        impl PartialOrd for Candidate {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
             }
-
-            // Apply the merge: combine symbols[best_idx] and symbols[best_idx+1]
-            let merged = format!("{}{}", symbols[best_idx], symbols[best_idx + 1]);
-            symbols[best_idx] = merged;
-            symbols.remove(best_idx + 1);
-
-            if symbols.len() == 1 {
-                break;
+        }
+        impl Ord for Candidate {
+            // BinaryHeap is a max-heap; invert so the lowest rank pops first,
+            // and among equal ranks the leftmost. Symbol indices are assigned
+            // left to right and a merge keeps the LEFT index, so comparing
+            // indices compares text position — which is how the scan this
+            // replaces broke its ties.
+            fn cmp(&self, other: &Self) -> Ordering {
+                other
+                    .rank
+                    .cmp(&self.rank)
+                    .then_with(|| other.left.cmp(&self.left))
             }
         }
 
-        // Convert BPE tokens to IDs
-        symbols
-            .iter()
-            .map(|t| self.token_to_id.get(t).copied().unwrap_or(0) as i64)
-            .collect()
+        let merge_ranks = &self.merge_ranks;
+        let try_push = |heap: &mut BinaryHeap<Candidate>,
+                        symbols: &[Symbol],
+                        buf: &mut String,
+                        left: usize,
+                        right: usize| {
+            buf.clear();
+            buf.push_str(&symbols[left].text);
+            buf.push('\0');
+            buf.push_str(&symbols[right].text);
+            if let Some(&rank) = merge_ranks.get(buf.as_str()) {
+                heap.push(Candidate {
+                    rank,
+                    left,
+                    size: symbols[left].text.len() + symbols[right].text.len(),
+                });
+            }
+        };
+
+        let mut heap: BinaryHeap<Candidate> = BinaryHeap::new();
+        let mut lookup_buf = String::new();
+        for i in 0..n - 1 {
+            try_push(&mut heap, &symbols, &mut lookup_buf, i, i + 1);
+        }
+
+        while let Some(cand) = heap.pop() {
+            let left = cand.left;
+            if !symbols[left].alive {
+                continue;
+            }
+            // Read the right-hand side from the list rather than from the
+            // entry, so a pair that has since been re-formed is judged on what
+            // is actually adjacent now; the size check below rejects it if the
+            // text has moved on.
+            let right = symbols[left].next;
+            if right < 0 {
+                continue;
+            }
+            let right = right as usize;
+            if !symbols[right].alive
+                || symbols[left].text.len() + symbols[right].text.len() != cand.size
+            {
+                continue;
+            }
+
+            let right_text = std::mem::take(&mut symbols[right].text);
+            symbols[left].text.push_str(&right_text);
+            symbols[right].alive = false;
+            let right_next = symbols[right].next;
+            symbols[left].next = right_next;
+            if right_next >= 0 {
+                symbols[right_next as usize].prev = left as i32;
+            }
+
+            if symbols[left].prev >= 0 {
+                let prev = symbols[left].prev as usize;
+                try_push(&mut heap, &symbols, &mut lookup_buf, prev, left);
+            }
+            if symbols[left].next >= 0 {
+                let next = symbols[left].next as usize;
+                try_push(&mut heap, &symbols, &mut lookup_buf, left, next);
+            }
+        }
+
+        // Convert BPE tokens to IDs, walking the list so they come out in text
+        // order. Symbol 0 is never absorbed — a merge only ever removes a right
+        // neighbour — so the walk always has a live head to start from.
+        let mut out = Vec::new();
+        let mut idx: i32 = 0;
+        while idx >= 0 && (idx as usize) < symbols.len() {
+            let symbol = &symbols[idx as usize];
+            if symbol.alive {
+                out.push(self.token_to_id.get(&symbol.text).copied().unwrap_or(0) as i64);
+            }
+            idx = symbol.next;
+        }
+        out
     }
 
     /// Decode a BPE token string back to UTF-8 bytes.
@@ -1216,5 +1329,182 @@ mod spm_merge_tests {
         assert!(tok.encode("").is_empty());
         assert_eq!(pieces(&toks, &tok.encode("a")), vec!["a"]);
         assert_eq!(pieces(&toks, &tok.encode("bc")), vec!["bc"]);
+    }
+}
+
+/// The heap-driven BPE merge in `bpe_encode_word` replaced a full re-scan of
+/// every adjacent pair per merge. It is meant to be a pure speed change, so
+/// these pin it against the algorithm it replaced rather than against a
+/// hand-written expectation.
+#[cfg(test)]
+mod bpe_merge_equivalence {
+    use super::*;
+
+    /// The implementation `bpe_encode_word` replaced, verbatim in behaviour:
+    /// scan every adjacent pair, apply the single lowest-ranked one, repeat.
+    /// O(len²), which is the whole reason it is now only a test fixture.
+    fn reference_encode_word(bpe: &BpeTokenizer, word: &str) -> Vec<i64> {
+        let chars: Vec<String> = if bpe.is_sentencepiece {
+            word.chars().map(|c| c.to_string()).collect()
+        } else {
+            word.bytes()
+                .map(|b| bpe.byte_encoder[b as usize].to_string())
+                .collect()
+        };
+        if chars.is_empty() {
+            return vec![];
+        }
+        if chars.len() == 1 {
+            return vec![bpe.token_to_id.get(&chars[0]).copied().unwrap_or(0) as i64];
+        }
+        let mut symbols = chars;
+        let mut lookup_buf = String::new();
+        loop {
+            let mut best_rank = usize::MAX;
+            let mut best_idx = usize::MAX;
+            for i in 0..symbols.len() - 1 {
+                lookup_buf.clear();
+                lookup_buf.push_str(&symbols[i]);
+                lookup_buf.push('\0');
+                lookup_buf.push_str(&symbols[i + 1]);
+                if let Some(&rank) = bpe.merge_ranks.get(&lookup_buf) {
+                    if rank < best_rank {
+                        best_rank = rank;
+                        best_idx = i;
+                    }
+                }
+            }
+            if best_idx == usize::MAX {
+                break;
+            }
+            let merged = format!("{}{}", symbols[best_idx], symbols[best_idx + 1]);
+            symbols[best_idx] = merged;
+            symbols.remove(best_idx + 1);
+            if symbols.len() == 1 {
+                break;
+            }
+        }
+        symbols
+            .iter()
+            .map(|t| bpe.token_to_id.get(t).copied().unwrap_or(0) as i64)
+            .collect()
+    }
+
+    /// A vocabulary with cascading merges and deliberately jumbled ranks, so
+    /// ties and out-of-order priorities actually occur. A merge table in rank
+    /// order would let a wrong tie-break pass.
+    fn fixture(model: &str) -> SplitTokenizer {
+        let alphabet: Vec<String> = "abcdefg\u{2581}".chars().map(|c| c.to_string()).collect();
+        let mut pieces: Vec<String> = alphabet.clone();
+        let mut merges: Vec<String> = Vec::new();
+        for a in &alphabet {
+            for b in &alphabet {
+                merges.push(format!("{} {}", a, b));
+                pieces.push(format!("{}{}", a, b));
+            }
+        }
+        // A second generation, so merges have to cascade rather than all
+        // firing against single characters.
+        let two_char: Vec<String> = pieces.iter().skip(alphabet.len()).cloned().collect();
+        for (i, ab) in two_char.iter().enumerate() {
+            let c = &alphabet[i % alphabet.len()];
+            merges.push(format!("{} {}", ab, c));
+            pieces.push(format!("{}{}", ab, c));
+        }
+        // Deterministic shuffle (LCG) so rank order is unrelated to piece
+        // length or alphabet order.
+        let mut seed: u64 = 0x9E3779B97F4A7C15;
+        for i in (1..merges.len()).rev() {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let j = (seed >> 33) as usize % (i + 1);
+            merges.swap(i, j);
+        }
+        SplitTokenizer::from_bpe(&pieces, &merges, "default", model, false, None)
+    }
+
+    fn as_bpe(tok: &SplitTokenizer) -> &BpeTokenizer {
+        match &tok.kind {
+            TokenizerKind::Bpe(b) => b,
+            TokenizerKind::SentencePiece(_) => panic!("fixture must build a BPE tokenizer"),
+        }
+    }
+
+    fn corpus() -> Vec<String> {
+        let mut out = vec![
+            String::new(),
+            "a".to_string(),
+            "ab".to_string(),
+            "abc".to_string(),
+            "gg".to_string(),
+            "\u{2581}abcdefg".to_string(),
+            "abcabcabcabc".to_string(),
+            "\u{2581}the\u{2581}quick\u{2581}brown\u{2581}fox".to_string(),
+        ];
+        // Longer, varied inputs — a short word cannot exercise a cascade deep
+        // enough for a stale queue entry to be reachable at all.
+        let mut seed: u64 = 12345;
+        for len in [17usize, 64, 257, 1024] {
+            let mut s = String::new();
+            for _ in 0..len {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let alphabet = ['a', 'b', 'c', 'd', 'e', 'f', 'g', '\u{2581}'];
+                s.push(alphabet[(seed >> 33) as usize % alphabet.len()]);
+            }
+            out.push(s);
+        }
+        out
+    }
+
+    #[test]
+    fn bpe_merges_match_the_full_scan() {
+        for model in ["llama", "gpt2"] {
+            let tok = fixture(model);
+            let bpe = as_bpe(&tok);
+            for text in corpus() {
+                assert_eq!(
+                    bpe.bpe_encode_word(&text),
+                    reference_encode_word(bpe, &text),
+                    "model={model} diverged from the scan it replaced on {text:?}"
+                );
+            }
+        }
+    }
+
+    /// The control: the comparison above is only meaningful if this corpus
+    /// actually drives merges. A fixture that merged nothing would make every
+    /// assertion trivially true.
+    #[test]
+    fn the_corpus_actually_merges() {
+        let tok = fixture("llama");
+        let bpe = as_bpe(&tok);
+        let long = corpus().pop().expect("corpus is non-empty");
+        assert!(
+            bpe.bpe_encode_word(&long).len() < long.chars().count(),
+            "fixture produced no merges, so the equivalence test proves nothing"
+        );
+    }
+
+    /// The regression guard. A SentencePiece-style vocabulary has no
+    /// pre-tokenizer, so `encode` hands the WHOLE prompt to `bpe_encode_word`
+    /// as one word — the scan above is O(len²) there, and 60k characters took
+    /// about a minute. The bound is deliberately loose: it is three orders of
+    /// magnitude above what the heap costs and still far below the quadratic.
+    #[test]
+    fn a_long_prompt_does_not_cost_quadratic_time() {
+        let tok = fixture("llama");
+        let bpe = as_bpe(&tok);
+        let text = "\u{2581}the\u{2581}quick\u{2581}brown\u{2581}fox\u{2581}".repeat(4000);
+        assert!(text.chars().count() > 60_000);
+        let started = std::time::Instant::now();
+        let ids = bpe.bpe_encode_word(&text);
+        let elapsed = started.elapsed();
+        assert!(!ids.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "tokenizing {} chars took {elapsed:?} — the quadratic scan is back",
+            text.chars().count()
+        );
     }
 }
