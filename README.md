@@ -5,13 +5,13 @@
 [![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://github.com/enapt/SwarmLLM/pkgs/container/swarmllm)
 [![Release](https://img.shields.io/github/v/release/enapt/SwarmLLM?include_prereleases&label=release)](https://github.com/enapt/SwarmLLM/releases)
-[![Discord](https://img.shields.io/badge/discord-join%20chat-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/R3tamKNaj)
+[![Discord](https://img.shields.io/badge/discord-join%20chat-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/nq9be3u828)
 
 A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with other nodes to run 70B+ parameter models on machines that couldn't host them alone — no API tokens, no cloud fees, and encrypted traffic between every peer.
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2164 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2168 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
 > **Recent work (July 2026) — inference across NAT.** Two machines behind ordinary home routers can now run a model together: a sealed application-level relay carries the tensor traffic when no direct path exists, and direct connections are established opportunistically on top. Verified end-to-end by an external tester — a real three-segment pipeline split across two home machines on different continents. Local models also gained working **tool calling** on both API surfaces, streaming included.
 >
@@ -57,7 +57,7 @@ Your browser opens to `localhost:8800`. The setup wizard auto-detects your hardw
 
 **It connects to the live network on its own.** On first run your node auto-joins the public swarm — nothing to configure, no ports to forward. A built-in bootstrap anchor gets you onto the network, UPnP opens your port when your router supports it, AutoNAT v2 tells you your reachability, and a relay fallback keeps you connected even behind CGNAT. Peers and shared models appear on the dashboard within seconds.
 
-> 💬 **New here? [Join the Discord](https://discord.gg/R3tamKNaj).** It's the fastest way to find peers to pool with, share node addresses, and get help — the network grows one member at a time, so come say hi.
+> 💬 **New here? [Join the Discord](https://discord.gg/nq9be3u828).** It's the fastest way to find peers to pool with, share node addresses, and get help — the network grows one member at a time, so come say hi.
 
 | Platform | File | Notes |
 |----------|------|-------|
@@ -522,7 +522,7 @@ Full mdBook site: [https://enapt.github.io/SwarmLLM/](https://enapt.github.io/Sw
 
 ## Contributing & Support
 
-- **Community chat** — [Join the Discord](https://discord.gg/R3tamKNaj) — share node addresses, coordinate the network, get help
+- **Community chat** — [Join the Discord](https://discord.gg/nq9be3u828) — share node addresses, coordinate the network, get help
 - **Bug reports & feature requests** — [GitHub Issues](https://github.com/enapt/SwarmLLM/issues)
 - **Questions & discussion** — [GitHub Discussions](https://github.com/enapt/SwarmLLM/discussions)
 - **Security vulnerabilities** — [SECURITY.md](SECURITY.md) (email `security@enapt.dev`, do not open a public issue)
@@ -537,7 +537,7 @@ cargo run -- run
 
 ## Development Transparency
 
-SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2164 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
+SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2168 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
 
 ## License
 

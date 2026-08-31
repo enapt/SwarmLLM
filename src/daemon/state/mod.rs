@@ -16,7 +16,7 @@ use super::helpers::resolve_api_key;
 
 mod activity;
 mod capacity;
-mod capacity_plan;
+pub(crate) mod capacity_plan;
 mod credits;
 mod events;
 mod hf;

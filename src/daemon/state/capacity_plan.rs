@@ -158,10 +158,22 @@ pub fn compute_capacity_plan(state: &SharedState) -> CapacityPlan {
 }
 
 /// Estimate Q4_K_M GGUF size in MB from a HF repo_id by parsing the
-/// parameter count (e.g. "Qwen3-70B-Instruct" → ~38 GB). Used by the
-/// capacity-plan scenario builder so trending HF models (which we don't
-/// have on-disk size metadata for) can serve as differentiation
-/// candidates across small / medium / large tiers.
+/// parameter count (e.g. "Qwen3-70B-Instruct" → ~38 GB).
+///
+/// **The single answer to "roughly how big is this repo" for a model we do
+/// not have on disk**, and there are two callers that need it: the
+/// capacity-plan scenario builder, and the wishlist's HuggingFace-candidate
+/// branch. The wishlist used to hardcode `size_mb: 0` for every candidate,
+/// which made `fit_factor` a constant 1.0 — so a 0.6B and a 120B scored
+/// identically on fit, `wishlist.why.exceeds_swarm_capacity` could never
+/// fire, and `Unreachable` was unreachable. The estimator was sitting in
+/// the next module the whole time.
+pub(crate) fn estimate_q4_size_mb_from_repo_id_impl(repo_id: &str) -> Option<u64> {
+    estimate_q4_size_mb_from_repo_id(repo_id)
+}
+
+/// Estimate Q4_K_M GGUF size in MB from a HF repo_id by parsing the
+/// parameter count. See [`estimate_q4_size_mb_from_repo_id_impl`].
 ///
 /// Heuristic: Q4_K_M ≈ 0.55 GB per billion parameters (empirical, holds
 /// reasonably from 0.5B through 405B). MoE expert counts (`Nx7B`) are
@@ -208,7 +220,18 @@ fn estimate_q4_size_mb_from_repo_id(repo_id: &str) -> Option<u64> {
                     || chars[i + 1] == '-'
                     || chars[i + 1] == '.'
                     || chars[i + 1] == '_';
-                if next_ok && (0.1..=2000.0).contains(&num) {
+                // `-A3B` is the ACTIVE parameter count of a sparse MoE, not
+                // its size on disk: `Qwen3-Coder-30B-A3B` is 30B of weights
+                // that activate 3B per token, and all 30B have to be stored
+                // and distributed. Because that token comes LAST, the
+                // tail-to-head rule below picked it and under-estimated the
+                // model **~10x** — 1,689 MB against ~16,900. It reads as an
+                // edge case and is not: it is the modern naming convention
+                // for exactly the large models this estimate exists to
+                // surface (Qwen3-30B-A3B, Qwen3-235B-A22B). The older
+                // `8x7B` form was handled above and still is.
+                let is_moe_active_token = start > 0 && chars[start - 1] == 'a';
+                if next_ok && !is_moe_active_token && (0.1..=2000.0).contains(&num) {
                     best_b = Some(num);
                 }
             }
@@ -356,5 +379,43 @@ mod tests {
         let json = serde_json::to_value(&plan).unwrap();
         assert!(json["scenarios"].is_array());
         assert!(json["headline_target"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod estimator_tests {
+    use super::estimate_q4_size_mb_from_repo_id as est;
+
+    /// `-A3B` is the ACTIVE parameter count of a sparse MoE, not the weights
+    /// that have to be stored. It comes last in the name, so the tail-to-head
+    /// rule picked it and under-estimated by ~10x — 1,689 MB for a model of
+    /// ~16,900. That is the modern naming convention for precisely the large
+    /// models this estimate exists to surface, so it was wrong exactly where
+    /// it mattered, and wrong in the optimistic direction: a 235B looked like
+    /// 12 GB and would have been reported as nearly within reach.
+    #[test]
+    fn a_sparse_moe_is_sized_by_its_total_parameters_not_its_active_ones() {
+        let coder = est("Qwen/Qwen3-Coder-30B-A3B-Instruct-GGUF").expect("parseable");
+        assert!(
+            (15_000..=19_000).contains(&coder),
+            "30B-A3B must size on 30B, got {coder} MB"
+        );
+        let big = est("Qwen/Qwen3-235B-A22B").expect("parseable");
+        assert!(big > 100_000, "235B-A22B must size on 235B, got {big} MB");
+    }
+
+    /// The forms that already worked must keep working — this was a targeted
+    /// fix, not a rewrite, and the `8x7B` MoE form is handled by a separate
+    /// branch that the change must not disturb.
+    #[test]
+    fn the_naming_forms_that_already_worked_are_unchanged() {
+        assert_eq!(est("Qwen/Qwen3-32B"), Some(18022));
+        assert_eq!(est("openai/gpt-oss-120b"), Some(67584));
+        assert_eq!(est("meta-llama/Llama-3.1-70B"), Some(39424));
+        // 8 experts x 7B = 56B total.
+        assert_eq!(est("mistralai/Mixtral-8x7B-Instruct-v0.1"), Some(31539));
+        // A version number before the parameter token must not win.
+        assert_eq!(est("Qwen/Qwen2.5-0.5B-Instruct"), Some(281));
+        assert_eq!(est("some-org/mystery-model"), None);
     }
 }

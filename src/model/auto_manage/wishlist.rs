@@ -487,6 +487,35 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
             }
             why_tags.push("wishlist.why.candidate_one_click".to_string());
 
+            // How big is it? A candidate has no manifest, so the only size
+            // signal is the repo name — the same estimate the capacity plan
+            // already reasons with. Without it every candidate was sized 0,
+            // which reads as "fits perfectly" everywhere downstream: a 0.6B
+            // and a 120B scored the same on fit and neither could ever be
+            // flagged as beyond the swarm. `None` stays 0, which keeps the
+            // previous behaviour for a name we cannot parse rather than
+            // inventing a number.
+            let cand_size_mb =
+                crate::daemon::state::capacity_plan::estimate_q4_size_mb_from_repo_id_impl(
+                    &entry.repo_id,
+                )
+                .unwrap_or(0);
+            // Same 1.25x weights-to-VRAM rule the capacity plan uses.
+            let cand_vram_mb = (cand_size_mb as f64 * 1.25) as u64;
+            let mut cand_status = WishlistStatus::Candidate;
+            if cand_vram_mb > 0 {
+                if cand_vram_mb > pool_vram_mb {
+                    why_tags.push("wishlist.why.exceeds_swarm_capacity".to_string());
+                } else if local_vram_mb > 0 && local_vram_mb >= cand_vram_mb {
+                    why_tags.push("wishlist.why.fits_your_memory".to_string());
+                }
+                // Same rule the registry path uses, so a candidate and an
+                // adopted model are judged alike.
+                if cand_vram_mb > pool_vram_mb.saturating_mul(2) {
+                    cand_status = WishlistStatus::Unreachable;
+                }
+            }
+
             let display_name = entry
                 .repo_id
                 .split('/')
@@ -499,13 +528,13 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
                 // without colliding with real model_ids.
                 model_id: format!("hf-candidate:{}", entry.repo_id),
                 display_name,
-                status: WishlistStatus::Candidate,
+                status: cand_status,
                 score: cand_score.clamp(0.0, 100.0).round() as u32,
                 why_tags,
                 swarm_replicas: 0,
                 target_replicas: recommended_replica_target(online_node_count, 0.0),
-                size_mb: 0,
-                vram_required_mb: 0,
+                size_mb: cand_size_mb,
+                vram_required_mb: cand_vram_mb,
                 shards_covered: 0,
                 total_shards: 0,
                 hosted_by_us: false,
@@ -621,6 +650,47 @@ mod tests {
         let no_demand = recommended_replica_target(64, 0.0);
         let high_demand = recommended_replica_target(64, 100.0);
         assert!(high_demand >= no_demand);
+    }
+
+    /// The wishlist's HuggingFace candidates carried `size_mb: 0` — no
+    /// manifest exists for a model nobody hosts yet — and everything
+    /// downstream reads 0 as "fits perfectly": `fit_factor` becomes a
+    /// constant 1.0, `exceeds_swarm_capacity` can never fire and
+    /// `Unreachable` is itself unreachable. So the surface whose entire job
+    /// is "what should this swarm add next" scored a 0.6B and a 120B alike.
+    ///
+    /// The estimate was in the next module the whole time, feeding the
+    /// capacity plan. These are the repo ids actually on this swarm's
+    /// wishlist on 2026-08-31.
+    #[test]
+    fn a_candidate_is_sized_from_its_repo_name() {
+        let est = crate::daemon::state::capacity_plan::estimate_q4_size_mb_from_repo_id_impl;
+
+        let big = est("Qwen/Qwen3-Coder-30B-A3B-Instruct-GGUF").expect("30B is parseable");
+        let small = est("Qwen/Qwen3-0.6B").expect("0.6B is parseable");
+
+        // The capacity plan already values this one at 17,697 MB and names it
+        // the headline target; the wishlist must not disagree with its sibling.
+        assert!(
+            (15_000..=19_000).contains(&big),
+            "30B should size to ~16.9 GB, got {big} MB"
+        );
+        assert!(
+            small < 1_000,
+            "0.6B should size well under 1 GB, got {small} MB"
+        );
+        assert!(
+            big > small * 20,
+            "the whole point is telling these apart: {big} vs {small}"
+        );
+    }
+
+    /// A name with no parameter token must stay 0 rather than be guessed at,
+    /// which is what keeps the previous behaviour for anything unparseable.
+    #[test]
+    fn an_unparseable_candidate_name_is_not_guessed_at() {
+        let est = crate::daemon::state::capacity_plan::estimate_q4_size_mb_from_repo_id_impl;
+        assert_eq!(est("some-org/mystery-model"), None);
     }
 
     #[test]
