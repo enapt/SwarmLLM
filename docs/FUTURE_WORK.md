@@ -11067,3 +11067,88 @@ Two things a change here must keep, both currently load-bearing:
 
 Until then the constant is provisional and calibrated to the fleet it runs on,
 which is the same thing 200 was — it just ran on a different fleet.
+
+## Every node advertises the wrong speed, and the error has opposite signs on CPU and GPU (measured 2026-09-01)
+
+`estimate_tokens_per_sec_7b(bandwidth_gbps, is_gpu)` is
+`bandwidth / 4.4 GB * efficiency`, with efficiency **0.15 for a processor and
+0.30 for a graphics card**. That figure is what a node gossips in
+`NodeCapability.est_tokens_per_sec_7b`, what the parallax cost model prices a
+candidate's compute with (`scheduler/parallax.rs`), what
+`swarm_capacity` totals, and what the dashboard shows.
+
+**Both constants are wrong, and not in the same direction.** Measured on one
+machine (Ryzen 7 5800H + RTX 3070 Laptop, `mem_bandwidth` = 29.9 GB/s, card
+table = 448 GB/s):
+
+| | advertised | measured | error |
+|---|---|---|---|
+| GPU, 7B Q4 (`qwen2.5-coder-7b`, warm, `cpu_placement_reason=None`) | 30.5 tok/s | **20.75** tok/s (371 tokens in 17.88 s) | **1.5x optimistic** |
+| CPU, 7B Q4 (`prefill_bench`, 4 threads, ~912 KV) | 1.02 tok/s | **5.26** tok/s (190.1 ms/token) | **5.2x pessimistic** |
+
+The CPU row is a direct measurement, not a scaled one:
+
+```
+SWARM_BENCH_MODEL=~/.local/share/swarmllm/models/qwen2.5-coder-7b-instruct-q4-k-m \
+RAYON_NUM_THREADS=4 SWARM_BENCH_PROMPT=896 SWARM_BENCH_DECODE=32 SWARM_BENCH_REPS=3 \
+./target/release/examples/prefill_bench
+# BEST decode 5.26 tok/s (190.1 ms/token at ~912 KV); reps 207.4 / 190.1 / 214.2 ms
+```
+
+It was predicted at ~5.2 beforehand by scaling the pinned 2026-08-29 3B baseline
+(10.44 tok/s) by model size, on the grounds that decode is bandwidth-bound so
+tok/s ∝ 1/bytes. The prediction and the measurement agree to within 1%, which is
+worth knowing on its own: **the bandwidth model of CPU decode is sound, and it is
+the efficiency constant that is wrong, not the shape of the formula.**
+
+Against the memory roofline (4.684 GB read per token at a measured 29.9 GB/s =
+6.38 tok/s), 5.26 is **82% of roofline** — the same fraction the 3B baseline
+reaches, and in the same range as the "69% of roofline" figure recorded for CPU
+decode elsewhere. The graphics card reaches **21.7%** of its own (448 GB/s spec
+→ 95.6 tok/s roofline). So the true efficiencies are roughly 0.8 and 0.22, and
+the constants are 0.15 and 0.30.
+
+Both measurements need a release build; an unoptimised one measures its own loop
+(gotcha #427). Note the GPU figure was taken at a much shallower KV depth (~400
+positions against the CPU's ~912), which favours the GPU — so the skew below is
+if anything understated.
+
+**Net effect: the processor-versus-card ranking is skewed by 7.6x in the
+card's favour** (5.2 x 1.47). Which is backwards from the mechanism — at batch 1 a graphics
+card is launch-latency bound and uses a *smaller* fraction of its bandwidth than
+a processor does, which is exactly what the two measurements show (0.22 against
+~0.8 of roofline).
+
+**Where it does and does not matter.** It cancels wherever two figures from this
+same function are compared: `delegation_target`'s processor-versus-processor
+margin (`DELEGATE_MIN_CPU_SPEEDUP`) is unaffected, and so is any ranking within
+one device class. It bites where the classes are mixed — the parallax per-layer
+compute cost across a mixed candidate set — and it is simply wrong on every
+surface a user reads. An Apple M4 Mac mini, measured by its own node at 69.8
+GB/s, advertises **2.38 tok/s** where the same arithmetic that fits our
+measurements gives **~11**. That machine is currently the swarm's largest shard
+holder.
+
+**Second defect, same neighbourhood, cheaper to fix.** Two scheduler sites
+derive the LOCAL node's speed from `gpu_info` directly:
+
+- `scheduler/mod.rs` candidate build (~line 1126)
+- `scheduler/mod.rs` parallax `PeerCapacity` build (~line 1894)
+
+Both are `.map(|g| estimate_tokens_per_sec_7b(gpu_memory_bandwidth_gbps(&g.name), true)).unwrap_or(0.0)`,
+so **a processor-only node reports its own speed as 0** — which both consumers
+read as *unknown* and replace with a generic constant (`UNKNOWN_COMPUTE_MS`;
+the allocator "treats 0 as average"). So the one node whose speed we can
+actually measure is priced with a guess, while every remote peer is priced with
+a real gossiped figure. `vram::node_memory_bandwidth_gbps(gpu_name)` exists
+precisely for this and its doc comment describes this exact missing `None` arm
+being fixed for `/api/admin/stats`; these two sites were not updated. This half
+is a clear fix with no ranking risk and should go first.
+
+**Do not change the constants without deciding what the number MEANS.** Two
+defensible readings: peak sustained decode for that model on an idle machine
+(what these measurements are), or what a requester should expect including
+queueing. They differ by a lot on a busy node, and `est_tokens_per_sec` is
+currently used as if it were the first while being justified as if it were the
+second. Whatever is chosen, the same reading has to hold for both device
+classes, or the ratio goes wrong again.
