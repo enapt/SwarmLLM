@@ -11083,7 +11083,7 @@ table = 448 GB/s):
 
 | | advertised | measured | error |
 |---|---|---|---|
-| GPU, 7B Q4 (`qwen2.5-coder-7b`, warm, `cpu_placement_reason=None`) | 30.5 tok/s | **20.75** tok/s (371 tokens in 17.88 s) | **1.5x optimistic** |
+| GPU, 7B Q4 | 30.5 tok/s | **not established — see below** | unknown |
 | CPU, 7B Q4 (`prefill_bench`, 4 threads, ~912 KV) | 1.02 tok/s | **5.26** tok/s (190.1 ms/token) | **5.2x pessimistic** |
 
 The CPU row is a direct measurement, not a scaled one:
@@ -11104,20 +11104,34 @@ the efficiency constant that is wrong, not the shape of the formula.**
 Against the memory roofline (4.684 GB read per token at a measured 29.9 GB/s =
 6.38 tok/s), 5.26 is **82% of roofline** — the same fraction the 3B baseline
 reaches, and in the same range as the "69% of roofline" figure recorded for CPU
-decode elsewhere. The graphics card reaches **21.7%** of its own (448 GB/s spec
-→ 95.6 tok/s roofline). So the true efficiencies are roughly 0.8 and 0.22, and
-the constants are 0.15 and 0.30.
+decode elsewhere. So the true CPU efficiency is roughly **0.8 against a constant
+of 0.15**.
+
+**The GPU half is NOT measured and must not be quoted until it is.** Three HTTP
+attempts gave 20.75, ~50 and ~27 tok/s on the same model and machine, because
+that path is not a decode measurement: the n-gram speculation cascade drafts
+straight out of the prompt, so a repetitive prompt inflates the rate without
+bound, and the prefix cache removes the prefill from any repeat of the same
+prompt. Differencing two runs at 132 and 332 output tokens gave 50.1 tok/s —
+*faster* at greater KV depth, which is the signature of speculation, not of
+decode.
+
+`prefill_bench` is the harness that answers this (no HTTP, no speculation, no
+prefix cache), and it **refuses to run on CUDA unless the binary was built
+`--features flash-attn`** — it will not report processor timings as graphics
+ones. So the GPU figure needs that build, which compiles the CUTLASS kernels.
+Take it before touching the GPU constant.
 
 Both measurements need a release build; an unoptimised one measures its own loop
-(gotcha #427). Note the GPU figure was taken at a much shallower KV depth (~400
-positions against the CPU's ~912), which favours the GPU — so the skew below is
-if anything understated.
+(gotcha #427).
 
-**Net effect: the processor-versus-card ranking is skewed by 7.6x in the
-card's favour** (5.2 x 1.47). Which is backwards from the mechanism — at batch 1 a graphics
-card is launch-latency bound and uses a *smaller* fraction of its bandwidth than
-a processor does, which is exactly what the two measurements show (0.22 against
-~0.8 of roofline).
+**Net effect: processors are ranked at least 5.2x below what they do**, and the
+card side is unquantified, so the true skew is 5.2x times whatever the graphics
+error turns out to be. There is a mechanism that predicts the card is *also*
+over-stated — at batch 1 a card is launch-latency bound and uses a smaller share
+of its bandwidth than a processor does — but that is a prediction, not a
+measurement, and the first attempt to measure it produced three different
+answers.
 
 **Where it does and does not matter.** It cancels wherever two figures from this
 same function are compared: `delegation_target`'s processor-versus-processor
@@ -11125,8 +11139,8 @@ margin (`DELEGATE_MIN_CPU_SPEEDUP`) is unaffected, and so is any ranking within
 one device class. It bites where the classes are mixed — the parallax per-layer
 compute cost across a mixed candidate set — and it is simply wrong on every
 surface a user reads. An Apple M4 Mac mini, measured by its own node at 69.8
-GB/s, advertises **2.38 tok/s** where the same arithmetic that fits our
-measurements gives **~11**. That machine is currently the swarm's largest shard
+GB/s, advertises **2.38 tok/s** where the CPU efficiency that fits our own
+measured 5.26 gives **~12**. That machine is currently the swarm's largest shard
 holder.
 
 **Second defect, same neighbourhood, cheaper to fix.** Two scheduler sites

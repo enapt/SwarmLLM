@@ -221,14 +221,15 @@ All 20 build phases complete. All subsystems wired — no stubs. **2195 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.141-alpha (2026-08-31).** Local `225e6fe7` (CUDA
+**Released and deployed: v0.3.142-alpha (2026-09-01).** Local `225e6fe7` (CUDA
 asset, GPU serving, installed sha256 == published asset byte for byte, rollback
-`~/.local/bin/swarmllm.0.3.139.bak`) and Proxmox `96842635` (.deb, stayed
+`~/.local/bin/swarmllm.0.3.141.bak`) and Proxmox `96842635` (.deb, stayed
 `enabled` + `active`, no `.dpkg-old`) are both on it, node ids and peers kept.
-.139 carried #423 + the delegation/wishlist work; .140 carried #424 alone;
-**.141 carries the three that came out of serving a model no single node can
-hold** — the greedy capacity cap, the array-wrapped tool call, and #425
-contiguous shard placement.
+**.142 is the privacy round**: the report a non-technical user is invited to
+paste into a bug report no longer contains anyone's IP address (#426), plus
+`swarmllm diagnostics` and a `-- this machine --` section naming the speed every
+peer ranks this node on. .141 carried the three that came out of serving a model
+no single node can hold.
 
 Release gate, unchanged and followed every time: bump the version FIRST,
 `cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
@@ -243,39 +244,43 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.141-alpha (2026-08-31) — a model no single node can hold is now SERVED, and served better
+### v0.3.142-alpha (2026-09-01) — the "safe to share" button no longer shares anyone's IP address
 
-Gotcha **#425**. **Proven live**: `qwen2.5-14b` (8,571 MB, above every node's
-usable budget) answered over a 3-4 segment chain across Belgium + Proxmox +
-Macmini, and a tester reproduced it independently (`segments=3`, a third peer in
-region IT, ~1.5 tok/s).
+Gotchas **#426** and **#427**. Found by asking what a non-programmer can
+actually DO, then walking the path they would take.
 
-- **The greedy fallback had ZERO references to `max_hostable_layers`** — it
-  handed a node every layer it HELD, not what it can HOLD, so a 6 GB card was
-  given all 48 layers (~1 request in 4). Parallax always capped; the fallback
-  beneath it never did, and the fallback runs exactly when parallax bails.
-  ⚠ **My first fix was too strict and was caught before shipping**: capping
-  alone REFUSED requests where no bounded route exists. Parallax already routes
-  unbounded rather than refusing; the fallback now matches.
-- **#425 — pipelines bounced between machines.** Shards scored on rarity alone
-  scatter a node's holdings: one peer held layers 0-8 AND 12-47 but not the 4
-  between, costing **4 WAN round trips per token instead of 2**. Added a
-  contiguity term (extend 1.5x, **close a hole 3x**, neutral when holding none).
-  **Researched first and it changed the design** — Petals makes contiguity an
-  INVARIANT combined WITH rarity, not traded against it (arXiv 2209.01188).
-- **A tool call wrapped in a list was ignored** — we ASK for
-  `{"tool_calls":[...]}` and a model answered with exactly that inside a
-  one-element array; correct calls came back as prose and an agentic client ran
-  nothing. Our bug: the chat templates are byte-identical to the coder model's.
-- **`parallax: no valid source vertex` is NOT a bug** — `can_be_first =
-  shard_indices.contains(&0)`, so it means no CONNECTED candidate holds shard 0.
-  It is what exposed the capacity gap above.
+- **The dashboard's one-click Copy diagnostics copied every peer address the
+  node remembered** — real users' home IPs — under a hint reading "No keys or
+  invite codes are included", which a non-technical reader takes as *safe to
+  post*. A JS comment asserted the daemon had "already redacted" it. Redaction
+  is now ONE pass over the finished report (`?full=1` opts out), keeping kind +
+  port + peer id + `/p2p-circuit` so it still reads; **the tag is salted per
+  report because IPv4 is 2^32**; loopback and our own published anchor exempt.
+- **`swarmllm diagnostics`** — headless machines had no route to the report.
+  Safe by default; `--full` keeps the addresses.
+- **A `-- this machine --` section** naming CPU, GPU, measured bandwidth and the
+  advertised tok/s **every peer's scheduler ranks this node on** — the answer to
+  "why does work never come to me?", previously on no copyable surface.
+- ⚠ **A query-string `bool` accepts ONLY `true`/`false`.** My own documented
+  `?full=1` was refused by the extractor with a bare-text 400 that never reached
+  the error envelope. Found by RUNNING the command, not by reading the diff.
+- ⚠ **#427 a debug build measures its own loop**: 5.3 GB/s at `-O0` against 30.3
+  at `-O`, so a dev test node advertises ~1/6 of its speed for its whole life.
+
+**Open, measured, NOT fixed** (`docs/FUTURE_WORK.md`): every processor node
+advertises **5.2x slower than it is** — measured 5.26 tok/s on a 7B Q4 against
+an advertised 1.02, i.e. 82% of memory roofline against a constant assuming 15%.
+An M4 Mac mini should be advertising ~12 tok/s, not 2.38. **The graphics side is
+NOT measured** — `prefill_bench` rightly refuses CUDA without `--features
+flash-attn`, and the HTTP path is not a decode measurement (speculation drafts
+from the prompt; three attempts gave 20.75, ~50 and ~27 tok/s).
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.141** (08-31): **a model no single node can hold is SERVED** — `qwen2.5-14b` over a 3-4 segment chain, reproduced independently; the greedy fallback had ZERO references to `max_hostable_layers` (⚠ my first fix was too STRICT and was caught pre-ship — parallax routes unbounded rather than refusing, and the fallback now matches); **#425** shards scored on rarity alone scattered holdings, 4 WAN round trips/token instead of 2 → contiguity term, **Petals-informed: an INVARIANT combined WITH rarity, not traded against it** (arXiv 2209.01188); an array-wrapped tool call ignored (**confirmed fixed in the field 09-01**). `parallax: no valid source vertex` is NOT a bug. `round_log_0831_tokenizer_quadratic.md`.
 - **v0.3.139/.140** (08-31): **models the network is asked to host now SPREAD.** #423 — trust was granted only to models in HF's *trending* feed (a DISCOVERY signal used as VERIFICATION), and the gate hid because a node already holding a shard is EXEMPT, so machines finish what they start and never start anything. Now asks the ORIGIN directly, same thresholds. **Confirmed by a tester: stuck at 1/16 reachable for 12 min, then 15/16 and `peers_hosting` 1→4 on updating.** Also: delegation bound 200→1000 ms (a 600 ms GPU peer serves 21-25 tok/s vs our 9-10 CPU); the wishlist could not tell a 0.6B from a 120B and sized MoE 10x small; #424 a retried download truncated away good ranges (unflushed length used as a `set_len` target — a RACE), which cost that tester GB of bandwidth. `round_log_0831_tokenizer_quadratic.md`.
 - **v0.3.138** (08-31): two tokenizer faults. **#420** `bpe_encode_word` was naive BPE — fine for a word, and the SentencePiece branch has no pre-tokenizer so it got the WHOLE PROMPT as one "word": 90 KB took **141 s**, daemon CPU **200.25 s → 1.19 s (168x)**, output identical. **#421** every tab and newline went to the model as `<unk>` (chat templates are full of newlines) — found only by checking against HuggingFace `tokenizers`, since the internal tests compare the tokenizer to an older version of ITSELF. **17/17 samples now agree.** ⚠ **The perf bug was the LEAD, not the bug.** `round_log_0831_tokenizer_quadratic.md`.
 - **v0.3.137** (08-31): three faults found by RUNNING the released .136. A peer-held model took 244/210/200/182 s where the LAN holder answers in 0.80 s — it was a candidate every time and lost on ADVERTISED speed, because `record_peer_segment_latency` had only TWO production callers and the speculative path was neither (#418; **proven live 16.87 → 1.36 s**). `/api/admin/stats` took 273 ms, **178 of it KERNEL** — `detect_hardware` enumerated every process TWICE for four numbers (#417, 273 → 6.1 ms). The first-run banner announced a file write the code deliberately does NOT do (#419). ⚠ **FOUR wrong theories killed by measurement before they reached a commit.** `round_log_0830_functional_bench.md`.
