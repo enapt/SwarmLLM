@@ -2,6 +2,8 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.142-alpha] — 2026-09-01
+
 ### Fixed
 
 - **The report you paste into a bug report no longer contains anyone's IP
