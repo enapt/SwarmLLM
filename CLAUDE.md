@@ -221,7 +221,16 @@ All 20 build phases complete. All subsystems wired — no stubs. **2210 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.144-alpha (2026-09-01).** Local `225e6fe7` (CUDA
+**Released and deployed: v0.3.145-alpha (2026-09-01).** Local `225e6fe7` (CUDA
+asset, installed sha256 == published, rollback
+`~/.local/bin/swarmllm.0.3.144.bak`) and Proxmox `96842635` (.deb, stayed
+`enabled` + `active`, no `.dpkg-old`) are both on it, node ids and peers kept.
+**.145 splits a model across the card and the processor** rather than losing the
+card when it does not fit whole (#431) — **measured 5.0 → 12.25 tok/s, 2.4x**.
+⚠ **On by default now; `SWARMLLM_HYBRID_OFFLOAD=0` disables it. Watch the fleet:
+one card, one model is the whole evidence base.**
+
+**Superseded: v0.3.144-alpha (2026-09-01).** Local `225e6fe7` (CUDA
 asset, GPU serving, installed sha256 == published asset byte for byte, rollback
 `~/.local/bin/swarmllm.0.3.143.bak`) and Proxmox `96842635` (.deb, stayed
 `enabled` + `active`, no `.dpkg-old`) are both on it, node ids and peers kept.
@@ -245,41 +254,40 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.144-alpha (2026-09-01) — no Mac has ever been able to update itself
+### v0.3.145-alpha (2026-09-01) — a model too big for the card no longer loses the card
 
-Gotcha **#430**, reported by a NON-TECHNICAL user whose every visible surface
-said the opposite.
+Gotcha **#431**. Researched, built and **measured on an RTX 3070** in one round.
 
-- `host_has_avx2()` returns `false` on any non-x86 target — meaning *there is no
-  such instruction set here*, not *this processor is old*. That `false` was read
-  as the second, so every Apple Silicon node asked for
-  `swarmllm-macos-aarch64-baseline`, which is not published and never will be.
-- No matching asset → `return Ok(None)` → and **`Ok(None)` is how this module
-  says "you are already up to date"**. Dashboard and CLI both said so. Nine
-  releases, on the swarm's largest shard holder.
-- The one log line said "this processor does not support AVX2", true of no Apple
-  machine ever made.
-- ⚠ **The existing guard asserted the bug as CORRECT** — `if host_has_avx2()
-  { plain } else { baseline }` passes on aarch64 while asserting the fault, and
-  hardcodes a `linux-x86_64` name so it could never see macOS. #413's shape with
-  a twist: not too weak to fire, but pointed at the wrong invariant.
-- Fix: `wants_baseline_asset(is_x86, has_avx2)`, pure and taking both facts, so
-  the interesting case is testable on hardware that is not it.
-- **A node that cannot update now SAYS SO** (activity event + toast naming the
-  version). `Ok(None)` carrying both "current" and "cannot install here" is the
-  `Unauthorized` shape from `rules/completeness.md`.
-- ⚠ **The fix cannot reach an Apple node by updating.** One manual install of
-  `swarmllm-macos-aarch64`, then its own updates work.
-
-**The rule**: a predicate answering `false` for "the question does not apply
-here" is not the same `false` as "the answer is no". Ask which populations answer
-`false` and whether they all deserve the same consequence.
+- Placement was all-or-nothing (`force_cpu_for` is `gpu_layers == 0`), so a model
+  20% too large lost the card ENTIRELY. Three reports; the last had **5151 MB
+  free** while a 14B tripped the machine's thermal limit.
+- **Measured, every figure the same way on one machine**: processor-only
+  **5.0** tok/s, 14/28 layers **7.07**, 20/28 **12.25** — **2.4x, and monotone**,
+  which is the evidence that the mechanism is real rather than lucky.
+- ⚠ **The slow baseline reproduced the bug by accident**: the LIVE node had the
+  3B resident, so the 7B came back `cpu_placement_reason: not_enough_vram` and
+  ran on the processor with 3753 MiB of card in use by the other model.
+  **Checking that field before quoting a GPU number (#422) is what caught that a
+  run labelled "full GPU" was nothing of the kind.**
+- Automatic sizing verified end to end: a 3000 MB budget against a 5232 MB model
+  chose **13 of 28** unprompted and settled at **2613 MB** — inside budget, which
+  is the estimate-vs-reality check (#388) rather than "it answered".
+- **The design was far smaller than the deferral note assumed** — the transition
+  sits BETWEEN layers, so no arch code changed. RoPE already lives in the layer,
+  KV already allocates on the device it is handed, weights already load per
+  tensor. Only the mask needed moving. **Read what the code does before costing
+  work from a months-old list.**
+- ⚠ **Applied by SHADOWING `device`/`cos`/`sin` at each loop head, not by editing
+  ~128 sites** — and the missed-path hazard FIRED: Qwen 3.5 builds its own RoPE
+  outside the loop. **An unused-shadow compiler warning is all that surfaced it.**
+  Hence `arch_supports_hybrid` is an ALLOWLIST.
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.144** (09-01): **no Mac had EVER been able to update itself (#430)**, reported by a NON-TECH user whose every visible surface said otherwise. `host_has_avx2()` returns `false` on non-x86 — meaning *no such instruction set*, not *old processor* — routing every Apple node to a `-baseline` asset that is never published; no asset → `Ok(None)` → **which is how this module says "already up to date"**. Nine releases behind, on the swarm's largest shard holder. ⚠ **The existing guard ASSERTED THE BUG AS CORRECT and was green throughout.** ⚠ **The fix cannot arrive by updating — an Apple node needs ONE manual install.** A node that cannot update now says so.
 - **v0.3.143** (09-01): **every node was lying about how fast it is (#428/#429).** Processor efficiency 0.15 against a measured ~0.82 of roofline (**5.2x low**), and the card's 0.30 was HIGHER than the processor's when it should be LOWER — at batch 1 a card reaches 0.37 of roofline, a processor 0.82. Now **0.75/0.35**, measured via `prefill_bench`, **validated on a SECOND machine** (Ryzen 0.818, i5 0.895). Propagation confirmed within the hour: Proxmox 0.88→4.41, Belgium 1.20→5.89, Belgium GPU 20.45→23.86. Also a CPU-only node reported its OWN speed as 0; the unmeasurable fallback would have gone 1.70→8.52 (**a nominal must move with the efficiency it feeds**). ⚠ **My HTTP-derived GPU number was wrong in DIRECTION and published before retraction — that path is not a decode measurement.** ⚠ **CI caught what two local machines did not, and my FIRST fix was insufficient: widening a margin is not removing a threshold.** `round_log_0901_diagnostics_privacy.md`.
 - **v0.3.142** (09-01): **the "safe to share" button shared everyone's IP address (#426)** — the dashboard's one-click Copy diagnostics, hinted "No keys or invite codes are included", also copied this machine's addresses AND ten peer-cache multiaddrs, i.e. real users' home IPs; a JS comment claimed it was already redacted. ONE pass over the finished report (`?full=1` opts out), keeping kind + port + peer id + `/p2p-circuit`; **tag salted per report because IPv4 is 2^32**; anchor + loopback exempt. Added `swarmllm diagnostics` + the `-- this machine --` section. ⚠ **A query-string `bool` accepts ONLY `true`/`false` — my own documented `?full=1` 400'd.** `round_log_0901_diagnostics_privacy.md`.
 - **v0.3.141** (08-31): **a model no single node can hold is SERVED** — `qwen2.5-14b` over a 3-4 segment chain, reproduced independently; the greedy fallback had ZERO references to `max_hostable_layers` (⚠ my first fix was too STRICT and was caught pre-ship — parallax routes unbounded rather than refusing, and the fallback now matches); **#425** shards scored on rarity alone scattered holdings, 4 WAN round trips/token instead of 2 → contiguity term, **Petals-informed: an INVARIANT combined WITH rarity, not traded against it** (arXiv 2209.01188); an array-wrapped tool call ignored (**confirmed fixed in the field 09-01**). `parallax: no valid source vertex` is NOT a bug. `round_log_0831_tokenizer_quadratic.md`.
