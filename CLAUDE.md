@@ -221,15 +221,16 @@ All 20 build phases complete. All subsystems wired — no stubs. **2202 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.143-alpha (2026-09-01).** Local `225e6fe7` (CUDA
+**Released and deployed: v0.3.144-alpha (2026-09-01).** Local `225e6fe7` (CUDA
 asset, GPU serving, installed sha256 == published asset byte for byte, rollback
-`~/.local/bin/swarmllm.0.3.142.bak`) and Proxmox `96842635` (.deb, stayed
+`~/.local/bin/swarmllm.0.3.143.bak`) and Proxmox `96842635` (.deb, stayed
 `enabled` + `active`, no `.dpkg-old`) are both on it, node ids and peers kept.
-**.143 corrects what every node says about itself**: the processor efficiency
-was 5.2x low and the CPU/GPU ratio was backwards (#428) — visible on deploy, the
-Proxmox node went from advertising **0.80 to 4.41 tok/s** and this laptop from
-30.55 to 35.64, against a measured 35.32. .142 was the privacy round (#426).
-.141 carried the three that came out of serving a model no single node can hold.
+**.144 is the Apple Silicon update fix (#430)** — no Mac has ever been able to
+update itself, and was told it was up to date while nine releases behind.
+⚠ **The fix cannot arrive by updating; an Apple node needs
+`swarmllm-macos-aarch64` installed by hand ONCE.** .143 corrected what every node
+says about its own speed (#428, 5.2x); .142 was the diagnostics privacy round
+(#426); .141 served a model no single node can hold.
 
 Release gate, unchanged and followed every time: bump the version FIRST,
 `cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
@@ -244,38 +245,42 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.143-alpha (2026-09-01) — every node was lying about how fast it is
+### v0.3.144-alpha (2026-09-01) — no Mac has ever been able to update itself
 
-Gotchas **#428** (constants) and **#429** (the test that measures its own host).
+Gotcha **#430**, reported by a NON-TECHNICAL user whose every visible surface
+said the opposite.
 
-- **The processor efficiency was 0.15 where the measured figure is ~0.82 of
-  memory roofline — 5.2x low — and the card's 0.30 was HIGHER than the
-  processor's when it should be lower.** At batch 1 a card reaches 0.37 of
-  roofline against a processor's 0.82: one query row cannot fill it. Now
-  **0.75 / 0.35**, measured through `prefill_bench` at the same model, prompt
-  and KV depth on both sides. **Validated on a second machine** — Ryzen 5800H
-  0.818, i5-10500T 0.895 — so 0.75 is conservative on both.
-- ⚠ **My first GPU number came from HTTP and was wrong in DIRECTION.** That path
-  is not a decode measurement (speculation drafts from the prompt; three
-  attempts gave 20.75 / ~50 / ~27). `prefill_bench` REFUSES CUDA without
-  `--features flash-attn`, and that refusal is the only reason it did not stand.
-- **A processor-only node reported its own speed as 0** to its own planner (two
-  sites derived it from `gpu_info` alone) → `vram::node_tokens_per_sec_7b`.
-- **The unmeasurable-bandwidth fallback** would have gone 1.70 → 8.52 tok/s with
-  the new efficiency, so the most memory-starved node would advertise itself as
-  one of the fastest. **A nominal must move with the efficiency it feeds.**
-- **One `nvidia-smi` spawn instead of two** in the stats endpoint's no-card
-  branch. ⚠ Removing the re-export it orphaned would have broken the CUDA build:
-  its only caller is `cfg`-gated (#264).
-- ⚠ **CI caught what two local machines did not** — the TP tests price the local
-  node, so they test the machine they run on. Fixed properly: the peer fixture
-  is now slow enough that the measurement floor makes the outcome unconditional.
+- `host_has_avx2()` returns `false` on any non-x86 target — meaning *there is no
+  such instruction set here*, not *this processor is old*. That `false` was read
+  as the second, so every Apple Silicon node asked for
+  `swarmllm-macos-aarch64-baseline`, which is not published and never will be.
+- No matching asset → `return Ok(None)` → and **`Ok(None)` is how this module
+  says "you are already up to date"**. Dashboard and CLI both said so. Nine
+  releases, on the swarm's largest shard holder.
+- The one log line said "this processor does not support AVX2", true of no Apple
+  machine ever made.
+- ⚠ **The existing guard asserted the bug as CORRECT** — `if host_has_avx2()
+  { plain } else { baseline }` passes on aarch64 while asserting the fault, and
+  hardcodes a `linux-x86_64` name so it could never see macOS. #413's shape with
+  a twist: not too weak to fire, but pointed at the wrong invariant.
+- Fix: `wants_baseline_asset(is_x86, has_avx2)`, pure and taking both facts, so
+  the interesting case is testable on hardware that is not it.
+- **A node that cannot update now SAYS SO** (activity event + toast naming the
+  version). `Ok(None)` carrying both "current" and "cannot install here" is the
+  `Unauthorized` shape from `rules/completeness.md`.
+- ⚠ **The fix cannot reach an Apple node by updating.** One manual install of
+  `swarmllm-macos-aarch64`, then its own updates work.
+
+**The rule**: a predicate answering `false` for "the question does not apply
+here" is not the same `false` as "the answer is no". Ask which populations answer
+`false` and whether they all deserve the same consequence.
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.143** (09-01): **every node was lying about how fast it is (#428/#429).** Processor efficiency 0.15 against a measured ~0.82 of roofline (**5.2x low**), and the card's 0.30 was HIGHER than the processor's when it should be LOWER — at batch 1 a card reaches 0.37 of roofline, a processor 0.82. Now **0.75/0.35**, measured via `prefill_bench`, **validated on a SECOND machine** (Ryzen 0.818, i5 0.895). Propagation confirmed within the hour: Proxmox 0.88→4.41, Belgium 1.20→5.89, Belgium GPU 20.45→23.86. Also a CPU-only node reported its OWN speed as 0; the unmeasurable fallback would have gone 1.70→8.52 (**a nominal must move with the efficiency it feeds**). ⚠ **My HTTP-derived GPU number was wrong in DIRECTION and published before retraction — that path is not a decode measurement.** ⚠ **CI caught what two local machines did not, and my FIRST fix was insufficient: widening a margin is not removing a threshold.** `round_log_0901_diagnostics_privacy.md`.
 - **v0.3.142** (09-01): **the "safe to share" button shared everyone's IP address (#426)** — the dashboard's one-click Copy diagnostics, hinted "No keys or invite codes are included", also copied this machine's addresses AND ten peer-cache multiaddrs, i.e. real users' home IPs; a JS comment claimed it was already redacted. ONE pass over the finished report (`?full=1` opts out), keeping kind + port + peer id + `/p2p-circuit`; **tag salted per report because IPv4 is 2^32**; anchor + loopback exempt. Added `swarmllm diagnostics` + the `-- this machine --` section. ⚠ **A query-string `bool` accepts ONLY `true`/`false` — my own documented `?full=1` 400'd.** `round_log_0901_diagnostics_privacy.md`.
 - **v0.3.141** (08-31): **a model no single node can hold is SERVED** — `qwen2.5-14b` over a 3-4 segment chain, reproduced independently; the greedy fallback had ZERO references to `max_hostable_layers` (⚠ my first fix was too STRICT and was caught pre-ship — parallax routes unbounded rather than refusing, and the fallback now matches); **#425** shards scored on rarity alone scattered holdings, 4 WAN round trips/token instead of 2 → contiguity term, **Petals-informed: an INVARIANT combined WITH rarity, not traded against it** (arXiv 2209.01188); an array-wrapped tool call ignored (**confirmed fixed in the field 09-01**). `parallax: no valid source vertex` is NOT a bug. `round_log_0831_tokenizer_quadratic.md`.
 - **v0.3.139/.140** (08-31): **models the network is asked to host now SPREAD.** #423 — trust was granted only to models in HF's *trending* feed (a DISCOVERY signal used as VERIFICATION), and the gate hid because a node already holding a shard is EXEMPT, so machines finish what they start and never start anything. Now asks the ORIGIN directly, same thresholds. **Confirmed by a tester: stuck at 1/16 reachable for 12 min, then 15/16 and `peers_hosting` 1→4 on updating.** Also: delegation bound 200→1000 ms (a 600 ms GPU peer serves 21-25 tok/s vs our 9-10 CPU); the wishlist could not tell a 0.6B from a 120B and sized MoE 10x small; #424 a retried download truncated away good ranges (unflushed length used as a `set_len` target — a RACE), which cost that tester GB of bandwidth. `round_log_0831_tokenizer_quadratic.md`.
