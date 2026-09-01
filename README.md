@@ -303,8 +303,11 @@ fits, which is the situation the split exists for:
 
 The split is worth 1.3–1.8× over what shipped before, and the node checks the
 worker's real memory use against its own estimate (2557 MB and 2256 MB, both
-inside the 3000 MB budget). These are one machine's numbers; the fleet is
-confirming them on other cards.
+inside the 3000 MB budget). An external tester confirmed it the same day on an
+RTX 4050 (6 GB) with a 14B model that used to run entirely on the processor:
+the same request went from **4 min 11 s to 13.1 s**, with 10 of the node's 29
+layers on the card, the load average from 11 to 2.4, and the machine usable
+while it ran.
 
 **Cross-node prefix-KV sharing** (measured 2026-04-20): two daemons on loopback, Qwen2.5-Coder-7B Q4, 672-token prompt. When the second node fetches the first's prefix-KV snapshot instead of re-prefilling locally, **iter-1 TTFT drops from 151.7 s → 11.8 s (12.9×)**. See [Performance chapter](https://enapt.github.io/SwarmLLM/operations/performance.html#cross-node-prefix-kv-sharing).
 

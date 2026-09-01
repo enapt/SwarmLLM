@@ -5173,6 +5173,47 @@ more when the network is idle — precisely when generosity costs nothing.
 
 ## Inference engine
 
+### A pipeline whose peer departs with no standby waits the whole segment deadline (seen twice, 2026-09-01)
+
+**Observed independently the same day.** An external tester running a 14B under
+real agentic load had a segment land on a third-party peer that dropped
+mid-request (`connection closed`, then `Dial failed — retrying` cascading across
+peers) and saw **0 tokens for 392 s** before their client gave up. Our own
+streamed 14B request over a 5-segment chain sat **709 s** before
+`Segment failover exhausted: Segment 1 failed with no standby available`. Both
+on the model with the thinnest holder set on the swarm, which is exactly where
+a segment has no standby.
+
+**Why it is slow by design, and where the design stops.** The receipt-ACK
+fast-fail (`network/manager/mod.rs`, RFC 6298 deadline) is deliberately gated
+on `request_has_standby`: abandoning a forward can only buy something if there
+is a second replica to send it to, and without one it converts a slow success
+into a hard 503 — measured on 2026-08-25, a result arrived 1.6 s after we gave
+up (gotcha #386). So with no standby "the compute deadline governs", which for
+a cold prefill segment is `timeout_secs=600`. `handle_connection_closed` keeps
+the peer's registry entry and schedules a re-dial for exactly this case, and
+`close_if_unresponsive` refuses to close a peer serving an active pipeline.
+All correct for a peer that is *slow*. **None of it distinguishes a peer that
+is slow from a peer that is gone.**
+
+**What it would take.** The honest "gone" moment already exists:
+`schedule_redial_retry`'s give-up branch logs *"Giving up re-dialling peer —
+treating it as departed"*. At that point every outstanding forward addressed
+to that peer cannot produce a result over the closed connection, so failing
+them there (`fail_pending_forward`, the same path the ACK sweep uses) is not
+the gamble the standby gate protects against — there is no slow success left
+to discard. With a standby that triggers the failover the pipeline already
+knows how to do; without one it turns a guaranteed 600 s timeout into a prompt
+`SegmentFailoverExhausted`. Keep the gate as it is for the *unacknowledged but
+still connected* case. Pin it with a test that closes the connection to a
+segment's peer with no standby and asserts the request fails before the
+segment deadline, plus the control: a peer that is merely silent but connected
+still gets its full deadline (#386 must not come back).
+
+**Why not chased this round**: found while a release was in flight, the
+reporter framed it as signal rather than a request, and the fix touches the
+network manager's failure path, which #386 shows needs its own measurement.
+
 ### True per-layer GPU/CPU hybrid offload — BUILT AND VALIDATED ON A CARD 2026-09-01
 
 **Status.** Built, unit-tested, and **measured on an RTX 3070** — a
@@ -5244,9 +5285,21 @@ is only what is genuinely not per-layer — the transient activation and
 attention-score buffers.
 
 **Still to do**, in order:
-1. **Watch the fleet.** This changes placement on every graphics node, and the
+1. ~~**Watch the fleet.** This changes placement on every graphics node, and the
    evidence is one card and one model. The reporter's RTX 4050 with
-   `qwen2.5-14b` is the case to confirm next.
+   `qwen2.5-14b` is the case to confirm next.~~ **Confirmed in the field
+   2026-09-01, same day.** The reporter re-ran the identical request on the
+   same RTX 4050 (6 GB) with `qwen2.5-14b`: on .143 it ran entirely on the
+   processor — **4 min 11 s** for a one-token reply, load average 11.1,
+   thermal warning at 86.8 °C, local audio stuttering; on .145 with
+   `gpu_layers = -1` the log read `Hybrid placement: first 10 layers on the
+   graphics card, rest on the processor gpu_layers=10 segment_layers=29` and
+   the same request took **13.1 s**, load 2.4, 77.4 °C — **~19x, and the
+   machine stayed usable**, which was the complaint. Second card, third model
+   (Qwen2 14B, a 29-layer SEGMENT of it), automatic sizing. Note what that
+   figure is: a whole-request time dominated by the cold prefill, not a decode
+   rate — the decode rate on that machine is still unmeasured, and that node
+   serves segments to peers, which is exactly #432's exposure (fixed in .146).
 2. Verify the remaining architectures and extend the allowlist — Qwen35 needs
    its own RoPE tables shadowed, DeepSeek2 needs its MLA projections read.
 3. Prefix-cache snapshots are device-tagged; cross-node reuse of a snapshot from

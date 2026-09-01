@@ -257,6 +257,14 @@ release binary and the real swarm — `examples/stream_bench.py` and
 - **Hybrid placement holds on a second architecture.** 3000 MB budget so neither
   model fits: 7B (Qwen2) full card 27.3 → **13/28 split 6.8** → processor 3.8;
   8B (Llama) 31.7 → **12/32 split 5.2** → 4.0. Both auto counts inside budget.
+  **And confirmed in the field the same day**: the reporter's RTX 4050 + 14B
+  went **4 min 11 s → 13.1 s** for the same request (`gpu_layers=10
+  segment_layers=29`, load 11 → 2.4, 86.8 → 77.4 °C). A whole-request time,
+  not a decode rate — that node serves segments to peers, i.e. #432's exposure.
+- **Open, seen twice today**: a segment landing on a peer that drops
+  mid-request with no standby waits the WHOLE segment deadline before failing
+  — the reporter saw 0 tokens for 392 s, our own 14B stream 709 s to `Segment
+  failover exhausted`. `docs/FUTURE_WORK.md`.
 - **#432 — the first 8B split read 2.9 tok/s, BELOW its processor-only 4.0.**
   Worker at ~100% CPU in decode: one thread. Its calibration line said why —
   `decode_threads=1 … measured=4:5ms 3:2ms 2:2ms 1:1ms`: while the split model

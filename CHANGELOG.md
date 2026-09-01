@@ -54,6 +54,13 @@ All notable changes to SwarmLLM are documented here.
   13/28**, 3.8 on the processor alone; Llama-3.1 8B — 31.7 whole, **5.2 split
   12/32**, 4.0 processor. Both automatic layer counts landed inside the budget.
 
+- 0.3.145's split confirmed in the field on a second card: an external tester
+  re-ran the same 14B request on an RTX 4050 (6 GB) that had previously run it
+  entirely on the processor — **4 min 11 s → 13.1 s** for the same reply, with
+  10 of that node's 29 layers on the card, the load average down from 11 to
+  2.4, the temperature from 86.8 °C to 77.4 °C, and the machine usable while
+  it ran. Automatic sizing, no settings changed.
+
 ## [0.3.145-alpha] — 2026-09-01
 
 ### Added
