@@ -2,6 +2,37 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.145-alpha] — 2026-09-01
+
+### Added
+
+- **A model slightly too big for your graphics card no longer loses the card
+  entirely.** Until now placement was all or nothing: if a model needed a little
+  more graphics memory than was free, the whole thing ran on the processor while
+  the card sat idle beside it. One reporter measured 5.1 GB free while a 14B
+  model pinned several processor cores and pushed the machine past its own
+  thermal limit. Three different machines have now reported it.
+
+  A model can now be split — the first so many layers on the card, the rest on
+  the processor — and the node works out how many fit on its own. Measured on an
+  RTX 3070 with a 7B model, every figure taken the same way on the same machine:
+  **5.0 tokens/sec on the processor alone, 7.07 with half the layers on the
+  card, 12.25 with twenty of twenty-eight.** That last is **2.4x**, and the
+  steady climb as more layers move across is the part worth trusting.
+
+  The slow baseline was not a contrivance: it is the live node, which already
+  had a smaller model resident and so ran the 7B entirely on its processor with
+  nearly 4 GB of the card in use by something else. That is the reported bug,
+  reproduced without trying.
+
+  Setting a layer count by hand (`gpu_layers = 20`) also works now; that value
+  was previously warned about and ignored. `SWARMLLM_HYBRID_OFFLOAD=0` turns the
+  automatic choice off.
+
+  Architectures are enabled one at a time as each is checked — Llama, Qwen2,
+  Gemma, Gemma 2, Phi-3, Mistral, Starcoder2, GLM-4 and Llama 4 today. Anything
+  else loads exactly as it did before.
+
 ## [0.3.144-alpha] — 2026-09-01
 
 ### Fixed

@@ -5175,11 +5175,10 @@ the worker's and the loader's placement lines appear in the log, and VRAM use
 tracked the split (3721 MiB at 14 layers, 4585 at 20). `gpu_layers = N` (a positive value below the segment's layer
 count) is now honoured end to end — config → `effective_gpu_layers` →
 `--gpu-layers` → `split::GPU_LAYER_LIMIT` → `LayerPlacement` → the forward
-loops. Automatic sizing, where admission picks N instead of giving the card up,
-is wired but gated behind **`SWARMLLM_HYBRID_OFFLOAD=1`** until it has been
-measured — it changes placement on every graphics node in the swarm, and CI
-caught an unvalidated change earlier the same day that two machines here had
-passed.
+loops. Automatic sizing — admission choosing N instead of giving the card up — is **on
+by default**, having been exercised end to end: against a 3000 MB budget and a
+5232 MB model it chose 13 of 28 layers unprompted and the worker settled at
+**2613 MB**, inside the budget. `SWARMLLM_HYBRID_OFFLOAD=0` disables it.
 
 **What the design turned out to be**, which is much smaller than the note below
 assumed. The transition sits *between* layers in the forward loop, so **no
@@ -5215,12 +5214,19 @@ is only what is genuinely not per-layer — the transient activation and
 attention-score buffers.
 
 **Still to do**, in order:
-1. Measure on a card. A CUDA build plus a model deliberately over-budget; the
-   reporter's RTX 4050 with `qwen2.5-14b` is the case to reproduce.
-2. Flip `SWARMLLM_HYBRID_OFFLOAD` to default-on once there are numbers.
-3. Verify the remaining architectures and extend the allowlist.
-4. Prefix-cache snapshots are device-tagged; cross-node reuse of a snapshot from
+1. **Watch the fleet.** This changes placement on every graphics node, and the
+   evidence is one card and one model. The reporter's RTX 4050 with
+   `qwen2.5-14b` is the case to confirm next.
+2. Verify the remaining architectures and extend the allowlist — Qwen35 needs
+   its own RoPE tables shadowed, DeepSeek2 needs its MLA projections read.
+3. Prefix-cache snapshots are device-tagged; cross-node reuse of a snapshot from
    a split model is untested.
+4. **A discrepancy worth chasing.** At 20/28 the measured 12.25 tok/s is close
+   to what Amdahl predicts from the two endpoints (~12.9), but at 14/28 the
+   measured 7.07 is well under the predicted ~9.2. Either there is a fixed
+   per-forward cost the model does not capture, or the runs competed with the
+   live node for the card. Not a blocker — every point still beats the
+   processor — but the shape says something is unaccounted for.
 
 ---
 

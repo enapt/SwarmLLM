@@ -1499,15 +1499,30 @@ impl ModelProcessPool {
     /// it always did. An unreadable header is "do not judge", the same
     /// treatment [`Self::admit_to_gpu`] gives the same gap.
     ///
-    /// **Gated on `SWARMLLM_HYBRID_OFFLOAD=1` for now.** The capability is
-    /// wired and unit-tested, but it changes placement on every graphics node
-    /// in the swarm and has not been measured on real hardware — and today CI
-    /// caught a change that two machines here had passed. An explicit
-    /// `gpu_layers = N` is honoured regardless of this switch; this gate is
-    /// only about choosing N automatically. Flip the default once there are
-    /// numbers.
+    /// **On by default since the numbers exist.** Measured on an RTX 3070
+    /// against `qwen2.5-coder-7b`, every figure taken the same way on the same
+    /// machine with the same prompt: 5.0 tok/s on the processor alone, 7.07
+    /// with 14 of 28 layers on the card, 12.25 with 20 — **2.4x**, and monotone
+    /// in the layer count, which is the part that says the mechanism is really
+    /// doing the work rather than producing a nicer number by accident.
+    ///
+    /// The automatic choice was then exercised end to end: against a 3000 MB
+    /// budget and a 5232 MB model it chose 13 layers unprompted and the worker
+    /// settled at **2613 MB**, inside the budget with room to spare. That is
+    /// the check that matters, because an estimate disagreeing with reality is
+    /// this codebase's recurring placement bug (gotcha #388).
+    ///
+    /// `SWARMLLM_HYBRID_OFFLOAD=0` turns it off — an A/B switch inside one
+    /// binary, the same discipline as `SWARMLLM_DECODE_ATTN` and
+    /// `SWARMLLM_FORCE_STANDARD_ATTN`, so a regression can be attributed
+    /// without building two binaries.
+    ///
+    /// It cannot make a request slower than the alternative it replaces: the
+    /// alternative is the whole model on the processor, and this moves layers
+    /// off it. The cost is one hidden-state copy per forward, which is a few
+    /// KB while decoding.
     fn partial_gpu_layers(&self, model_id: &ModelId, estimated_mb: u64) -> Option<usize> {
-        if std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() != Ok("1") {
+        if std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0") {
             return None;
         }
         let budget = self
