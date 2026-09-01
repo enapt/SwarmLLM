@@ -368,6 +368,29 @@ impl UpdateChecker {
                     "No matching binary asset for this platform and build variant — \
                      skipping update rather than installing a different variant"
                 );
+                // Say so where a user will see it. `Ok(None)` is this
+                // function's way of saying "you are already up to date", so
+                // returning it here tells the owner of a node that CANNOT
+                // update that there is nothing to install — which is how an
+                // Apple Silicon Mac sat nine releases behind with auto-update
+                // switched on and no symptom its owner could have noticed. The
+                // log line above existed the whole time and is not a surface a
+                // non-technical user reads.
+                if let Some(shared) = &self.shared {
+                    shared.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "update",
+                            "no_build_for_this_computer",
+                            format!(
+                                "Version {latest_tag} is available, but there is no download \
+                                 for this type of computer. This node will keep running \
+                                 v{current} — it is not broken, but it cannot update itself. \
+                                 Worth reporting."
+                            ),
+                        )
+                        .with_toast("warning", 12000),
+                    );
+                }
                 return Ok(None);
             }
         };
@@ -1328,10 +1351,37 @@ fn host_has_avx2() -> bool {
 /// pre-2013 processor with a modern GPU is vanishingly rare — so such a host
 /// stops updating and says so, rather than being handed something broken.
 fn host_asset_name(default_name: &str) -> String {
-    if host_has_avx2() {
-        return default_name.to_string();
+    if wants_baseline_asset(
+        cfg!(any(target_arch = "x86", target_arch = "x86_64")),
+        host_has_avx2(),
+    ) {
+        return baseline_asset_name(default_name);
     }
-    baseline_asset_name(default_name)
+    default_name.to_string()
+}
+
+/// Should this host be redirected to the `-baseline` asset?
+///
+/// **The AVX2 question is x86-only, and asking it of any other architecture
+/// gets a `false` that means something completely different.**
+/// `host_has_avx2` returns `false` on a non-x86 target because there is no such
+/// instruction set to detect — not because the processor is old. Feeding that
+/// straight into the redirect sent **every Apple Silicon Mac** to
+/// `swarmllm-macos-aarch64-baseline`, which is not published and never will be,
+/// so the caller found no matching asset and returned `Ok(None)`.
+///
+/// `Ok(None)` is how this module says *you are already up to date*. So an M4 Mac
+/// mini had auto-update switched on, was told there was nothing to install, and
+/// sat nine releases behind — while its log gave the reason as "this processor
+/// does not support AVX2", which is not true of any Apple Silicon machine and
+/// would have sent anyone reading it in the wrong direction. Reported by a
+/// non-technical user 2026-09-01, who had no way to see any of that.
+///
+/// Pure and taking both facts as arguments for the reason
+/// [`baseline_asset_name`] is split out: the interesting cases are exactly the
+/// hardware the machine running the tests does not have.
+fn wants_baseline_asset(is_x86: bool, has_avx2: bool) -> bool {
+    is_x86 && !has_avx2
 }
 
 /// The `-baseline` sibling of an asset name.
@@ -1476,6 +1526,44 @@ mod tests {
         assert_eq!(arch, "x86_64");
         // Suppress warnings on other platforms
         let _ = (os, arch);
+    }
+
+    /// The redirect that stopped every Apple Silicon Mac from ever updating.
+    ///
+    /// `host_has_avx2` answers `false` on a non-x86 target because the question
+    /// does not apply there, and that `false` used to be read as "old
+    /// processor, send it to the baseline build". No `-baseline` is published
+    /// for macOS aarch64, so the update was skipped — and skipped is reported
+    /// as *up to date*.
+    #[test]
+    fn only_an_x86_processor_without_avx2_wants_the_baseline_asset() {
+        // Apple Silicon, and any other non-x86 host: the plain asset, always.
+        assert!(!wants_baseline_asset(false, false));
+        // A non-x86 host claiming AVX2 is not a real configuration, but the
+        // answer must not depend on the irrelevant argument.
+        assert!(!wants_baseline_asset(false, true));
+        // The case the redirect exists for: pre-2013 x86 (gotcha #246).
+        assert!(wants_baseline_asset(true, false));
+        // Ordinary x86: the default asset, which is built for x86-64-v3.
+        assert!(!wants_baseline_asset(true, true));
+    }
+
+    /// The whole point is the name that gets requested, so pin that too — a
+    /// predicate can be right while the string it feeds is still wrong.
+    #[test]
+    fn an_apple_silicon_host_asks_for_the_asset_that_is_actually_published() {
+        // What `update_asset_name()` produces on macOS aarch64.
+        let published = "swarmllm-macos-aarch64";
+        let requested = if wants_baseline_asset(false, false) {
+            baseline_asset_name(published)
+        } else {
+            published.to_string()
+        };
+        assert_eq!(
+            requested, published,
+            "an Apple Silicon node is asking for an asset the release does not contain, \
+             so it will report itself up to date for ever"
+        );
     }
 
     /// Pins the bare-binary asset names against
@@ -1888,11 +1976,18 @@ mod cpu_baseline_asset_tests {
     /// cannot run any of them and must be sent to `-baseline`.
     #[test]
     fn the_host_check_picks_the_right_side() {
+        // Was `if host_has_avx2() { plain } else { baseline }`, which asserted
+        // the redirect on ANY host answering `false` — including every non-x86
+        // one, where `false` means "no such instruction set", not "old
+        // processor". On an Apple Silicon machine this test passed while
+        // asserting precisely the behaviour that stopped that machine updating.
+        // A guard can be green and still be pointed at the wrong invariant.
         let picked = host_asset_name("swarmllm-linux-x86_64");
-        if host_has_avx2() {
-            assert_eq!(picked, "swarmllm-linux-x86_64");
-        } else {
+        let x86 = cfg!(any(target_arch = "x86", target_arch = "x86_64"));
+        if x86 && !host_has_avx2() {
             assert_eq!(picked, "swarmllm-linux-x86_64-baseline");
+        } else {
+            assert_eq!(picked, "swarmllm-linux-x86_64");
         }
     }
 

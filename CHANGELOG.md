@@ -2,6 +2,25 @@
 
 All notable changes to SwarmLLM are documented here.
 
+### Fixed
+
+- **Macs with Apple Silicon could never update themselves, and were told they
+  were already up to date.** Auto-update checked whether the processor supports
+  AVX2 — an instruction set that only exists on Intel and AMD chips — and read
+  the "no" it gets on an Apple chip as "this is an old Intel processor", then
+  asked for a build made for old Intel processors. No such build exists for a
+  Mac, so the update was skipped. Skipping is reported the same way as having
+  nothing to install, so the dashboard and `swarmllm update` both said the node
+  was current. One reporter's Mac mini was nine releases behind with updates
+  switched on and no symptom they could have seen. The log's explanation —
+  "this processor does not support AVX2" — was true of no Apple machine ever made.
+
+- **A node that cannot update itself now says so.** When a new version exists but
+  there is no download for that kind of computer, the node raises a notification
+  naming the version and saying plainly that it will keep running the version it
+  has and is worth reporting — instead of silently reporting itself up to date.
+  That silence is what hid the fault above for nine releases.
+
 ## [0.3.143-alpha] — 2026-09-01
 
 ### Fixed
