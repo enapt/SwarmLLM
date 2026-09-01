@@ -1945,6 +1945,67 @@ own comment stated the principle that only the four the Settings panel exposes
 are live-settable, the rest being config-file/CLI where the boot value is
 CORRECT.
 
+## A report built to be handed to a stranger is a publishing surface (2026-09-01)
+
+**`network::redact::redact_addresses`** hides every host in the diagnostics
+report — an IP literal or a DNS name, in a multiaddr or in free prose — and is
+called at the ONE point `api::admin::diagnostics` returns. `?full=1` is the
+deliberate opt-in for an operator debugging their own machine;
+`swarmllm diagnostics --full` and `examples/two_node_test.sh` are the two
+callers that ask for it. `the_diagnostics_report_hides_addresses_unless_full_is_asked_for`
+in `tests/repo_consistency.rs` fails the build if the default changes, and
+checks the two surfaces that hand the report to a person still ask for the safe
+form.
+
+**Why it exists.** `GET /api/admin/diagnostics` has been the documented thing to
+attach to a bug report for many releases; the dashboard has a one-click **Copy
+diagnostics** button whose whole point is that a non-engineer does not have to
+read what it copied; and its hint said *"No keys or invite codes are included"*,
+which reads as *safe to post*. It also copied this machine's own addresses and
+the first ten entries of the peer cache — on a live node, **other people's home
+IP addresses**, verified against the real swarm (gotcha #426). A comment in
+`reference-models.js` asserted the daemon had "already redacted" it, which is
+the #419 shape: a stale assurance reads as verification and stops the next
+person checking.
+
+Four properties a change here must keep.
+
+- **One pass over the finished text, not a rule per section.** Addresses reach
+  the report from at least four places — the listen-address list, the peer
+  cache, relay circuits, and the prose of whatever a failed dial produced — so a
+  per-section rule is the "One invariant, N paths" trap below. A section added
+  later inherits the redaction with no author action, pinned by a test that
+  plants an address in free prose.
+- **Keep the KIND, replace only the host.** Transport, port, peer id and the
+  `/p2p-circuit` structure all survive, so "this node has no public address" and
+  "that hop is relayed" stay legible. Deleting the lines would make `?full=1`
+  the form people paste instead, which is worse than not redacting.
+- **Salt the tag per report.** Two entries for one host share a tag, which is
+  what keeps "ten cache entries, all one machine" readable. **IPv4 is 2^32**, so
+  an unsalted digest is a reversible encoding of the thing being hidden,
+  recovered by enumeration in seconds.
+- **Exempt what identifies nobody.** Loopback and the unspecified address, and
+  the project's own bootstrap anchor — the anchor ships in every binary, so
+  hiding it protects no one and costs the most useful reading in the report. The
+  exemption is derived from `default_bootstrap_peers()`, never restated, so
+  moving the anchor moves the exemption.
+
+**Peer ids and node ids are deliberately NOT redacted.** They are the swarm's
+public identities, they appear throughout the rest of the report, and they are
+not a coordinate anyone can dial. The address is.
+
+**A query flag must have no invalid spelling.** `DiagnosticsQuery::full` is a
+`String`, not a `bool`, because serde deserializes a `bool` from a query string
+only for the literal words `true` and `false` — so `?full=1`, the form this
+project's own README, `docs/DIAGNOSTICS.md` and `two_node_test.sh` all use, was
+refused by the extractor with a bare-text 400 that never reached the JSON error
+envelope (§ "API errors must be readable by the caller"). `query_flag_is_on` is
+the shared predicate.
+
+**The general rule.** Before writing that something is safe to share, enumerate
+what is actually in it — and treat any surface built for a non-technical user to
+hand to a stranger as a publishing surface, not a debug dump.
+
 ## One invariant, N paths — the recurring bug of this codebase
 
 The single most repeated defect here is a **shared invariant implemented per

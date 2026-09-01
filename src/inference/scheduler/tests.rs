@@ -505,6 +505,36 @@ fn prefers_lower_load_node() {
 /// This is the only shape where a tensor-parallel group is worth considering.
 /// When the local node covers every layer it can serve alone, and pulling a
 /// peer in can only add latency and a failure mode.
+/// A peer that is unambiguously slower than any machine these tests could run
+/// on, so local-versus-peer selection is deterministic.
+///
+/// 0.5 tok/s prices a layer at 62.5 ms; the local node's own figure spans about
+/// 2-36 ms across the range of machines and build profiles in play.
+fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
+    crate::types::NodeCapability {
+        node_id: node.clone(),
+        cpu: None,
+        gpu: None,
+        ram_total_mb: 16_384,
+        ram_available_mb: 16_384,
+        disk_available_mb: 100_000,
+        bandwidth_mbps: 100.0,
+        hosted_shards: vec![],
+        max_contribution: crate::types::ContributionLevel::Moderate,
+        uptime_seconds: 3600,
+        version: "0.1.0".into(),
+        region: None,
+        est_tokens_per_sec_7b: 0.5,
+        os: None,
+        observed_latencies: vec![],
+        relay_capable: false,
+        protocol_version: 0,
+        features: 0,
+        relay_reservations: vec![],
+        anchor_mode: false,
+    }
+}
+
 fn setup_tp_split_topology(
     state: &Arc<SharedState>,
     model_id: &str,
@@ -562,7 +592,20 @@ fn setup_tp_split_topology(
             PeerInfo {
                 node_id: node.clone(),
                 addresses: vec![],
-                capability: None,
+                // Pinned rather than left `None`, so which node wins layers
+                // 0-16 does not depend on the host's memory bandwidth.
+                //
+                // The local node is now priced from `mem_bandwidth`, which is a
+                // real measurement of whatever machine the test runs on — and
+                // an unoptimised build measures its own loop rather than the
+                // memory (gotcha #427), so it reads ~5 GB/s here against ~30 in
+                // release. A peer left at `None` falls back to
+                // `UNKNOWN_COMPUTE_MS`, and against that prior the local node
+                // won in a release build and lost in a debug one. These tests
+                // are about TENSOR-PARALLEL GROUPING, not about who wins a
+                // pricing contest, so the peer is given a speed slow enough
+                // that the local node takes the segment on any machine.
+                capability: Some(slow_peer_capability(&node)),
                 last_seen: chrono::Utc::now(),
                 latency_ms: Some(latency),
                 trust_score: 0.9,

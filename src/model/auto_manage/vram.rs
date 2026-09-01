@@ -652,15 +652,77 @@ pub fn gpu_memory_bandwidth_gbps(name: &str) -> f32 {
 /// Estimate tokens/s for a 7B model based on GPU memory bandwidth.
 ///
 /// Formula: tokens/s = memory_bandwidth_GB_s / model_size_GB * efficiency
-/// - GPU efficiency: 0.30 (accounts for compute overhead, KV cache, etc.)
-/// - CPU efficiency: 0.15
+/// The efficiencies are **measured**, not assumed, through
+/// `examples/prefill_bench` — which drives `SplitModel::forward` directly, so
+/// there is no HTTP, no speculation and no prefix cache between the number and
+/// the thing being measured. Same model, prompt and KV depth on both sides
+/// (`qwen2.5-coder-7b-instruct-q4-k-m`, 896-token prompt, ~912 KV, 2026-09-01):
 ///
-/// For a 7B Q4_K_M model (~4.4GB), RTX 3070 (448 GB/s):
-///   448 / 4.4 * 0.30 ≈ 30.5 tokens/s
+/// | | measured | previously advertised |
+/// |---|---|---|
+/// | Ryzen 7 5800H, 29.9 GB/s measured | **5.26 tok/s** | 1.02 |
+/// | RTX 3070 Laptop, 448 GB/s from the table | **35.32 tok/s** | 30.5 |
+///
+/// **The processor constant was 0.15 and is 5.2x wrong.** A processor reaches
+/// ~82% of its memory roofline on decode — corroborated by the pinned 3B
+/// baseline (10.44 tok/s, the same 82%) and by the "69% of roofline" figure
+/// recorded for CPU decode elsewhere — while 0.15 asserts 15%. So every
+/// processor-only node in the swarm advertised about a fifth of what it does,
+/// and an Apple M4 Mac mini (69.8 GB/s measured by its own node) claimed 2.38
+/// tok/s where it should claim ~12.
+///
+/// The graphics constant was 0.30 and is close: 0.347 reproduces the
+/// measurement. Note the direction — the card was *understated* too, not
+/// overstated. An earlier reading of this taken over HTTP said the opposite and
+/// was wrong: that path is not a decode measurement, because the n-gram cascade
+/// drafts out of the prompt and the prefix cache removes the prefill, and three
+/// attempts on one machine gave 20.75, ~50 and ~27 tok/s.
+///
+/// **Confidence differs between the two.** The processor figure has two models
+/// on one machine agreeing, plus a prediction that matched it to 1% before it
+/// was taken. The graphics figure is **one card**; treat its third digit as
+/// unearned. Both are rounded slightly down, since a machine serving the swarm
+/// is not an idle one.
+///
+/// Re-measure with:
+/// ```text
+/// SWARM_BENCH_MODEL=<7B Q4 dir> SWARM_BENCH_PROMPT=896 SWARM_BENCH_DECODE=32 \
+/// SWARM_BENCH_REPS=3 [SWARM_BENCH_DEVICE=cuda] ./target/release/examples/prefill_bench
+/// ```
+/// A release build is required on both sides — an unoptimised one measures its
+/// own loop (gotcha #427) — and the CUDA arm needs `--features flash-attn`,
+/// which the harness enforces rather than silently reporting processor timings.
 pub fn estimate_tokens_per_sec_7b(bandwidth_gbps: f32, is_gpu: bool) -> f32 {
     const MODEL_SIZE_7B_Q4: f32 = 4.4; // ~4.4 GB for 7B Q4_K_M
-    let efficiency = if is_gpu { 0.30 } else { 0.15 };
+                                       // Fraction of the memory roofline decode actually achieves. A card is
+                                       // *less* efficient per byte than a processor at batch 1, because one query
+                                       // row cannot fill it and the per-layer kernel launches dominate — which is
+                                       // the opposite of what the old pair of constants asserted.
+    let efficiency = if is_gpu { 0.35 } else { 0.75 };
     bandwidth_gbps / MODEL_SIZE_7B_Q4 * efficiency
+}
+
+/// What THIS node would manage on a 7B Q4 — the same figure every peer gossips
+/// about itself in `NodeCapability.est_tokens_per_sec_7b`, derived the same way.
+///
+/// `None` means the bandwidth could not be established, which is a different
+/// fact from "slow"; what to do about it stays the caller's policy, exactly as
+/// it is for [`node_memory_bandwidth_gbps`] (the capability gossip substitutes
+/// a nominal figure so a node still advertises something; `/api/admin/stats`
+/// reports unknown rather than state a number it did not derive).
+///
+/// **Why this exists.** Two scheduler sites derived the local node's speed from
+/// `gpu_info` alone — `.map(|g| …gpu_memory_bandwidth_gbps…).unwrap_or(0.0)` —
+/// so a processor-only node reported its OWN speed as zero. Both consumers read
+/// zero as *unknown* and substitute a generic constant (`UNKNOWN_COMPUTE_MS`;
+/// the parallax allocator documents 0 as "treats as average"), so the one node
+/// whose speed we can actually measure was priced with a guess while every
+/// remote peer was priced with a real gossiped figure. That is the same missing
+/// `None` arm [`node_memory_bandwidth_gbps`] was written to close for
+/// `/api/admin/stats`; these two sites were not updated with it.
+pub fn node_tokens_per_sec_7b(gpu_name: Option<&str>) -> Option<f32> {
+    node_memory_bandwidth_gbps(gpu_name)
+        .map(|bw| estimate_tokens_per_sec_7b(bw, gpu_name.is_some()))
 }
 
 /// Compute the optimal shard window for a model given VRAM budget.
@@ -1044,11 +1106,88 @@ mod tests {
         }
     }
 
+    /// The scheduler asked for the local node's speed and got zero on any
+    /// machine without a card, because both sites derived it from `gpu_info`
+    /// alone. Zero is read downstream as *unknown* and replaced with a generic
+    /// constant, so the one node whose speed we can actually measure was the
+    /// only one priced with a guess.
+    #[test]
+    fn a_processor_only_node_states_a_real_speed_rather_than_zero() {
+        let Some(measured) = crate::inference::mem_bandwidth::measured_gbps() else {
+            return; // bandwidth unmeasurable here; the None policy is the caller's
+        };
+        let tps = node_tokens_per_sec_7b(None).expect("measurable bandwidth means a speed");
+        assert!(tps > 0.0, "a processor-only node reported {tps} tok/s");
+        // It must be priced as a processor, not as a card.
+        assert_eq!(tps, estimate_tokens_per_sec_7b(measured, false));
+        assert_ne!(
+            tps,
+            estimate_tokens_per_sec_7b(measured, true),
+            "the two efficiencies must not have collapsed into one"
+        );
+    }
+
+    /// A card is priced from its name, never from host memory bandwidth — the
+    /// name determines the hardware, and the two figures differ by an order of
+    /// magnitude.
+    #[test]
+    fn a_card_is_priced_from_its_name() {
+        const NAME: &str = "NVIDIA GeForce RTX 3070";
+        assert_eq!(
+            node_tokens_per_sec_7b(Some(NAME)),
+            Some(estimate_tokens_per_sec_7b(
+                gpu_memory_bandwidth_gbps(NAME),
+                true
+            ))
+        );
+    }
+
     #[test]
     fn speed_estimation_sanity() {
         // RTX 3070: 448 GB/s, 7B Q4 ≈ 4.4GB
         let tps = estimate_tokens_per_sec_7b(448.0, true);
-        assert!(tps > 20.0 && tps < 50.0, "Expected ~30 t/s, got {tps}");
+        assert!(tps > 20.0 && tps < 50.0, "Expected ~35 t/s, got {tps}");
+    }
+
+    /// The constants are calibrated against `prefill_bench` on one machine, at
+    /// the same model, prompt and KV depth on both sides (2026-09-01). If a
+    /// re-measurement moves either of these, change the constant — do not widen
+    /// the test, or the estimate stops meaning anything.
+    #[test]
+    fn the_efficiencies_reproduce_the_measurements_they_were_taken_from() {
+        // Ryzen 7 5800H, 29.9 GB/s measured, 5.26 tok/s observed.
+        let cpu = estimate_tokens_per_sec_7b(29.9, false);
+        assert!(
+            (4.7..=5.7).contains(&cpu),
+            "processor estimate {cpu} no longer reproduces the measured 5.26 tok/s"
+        );
+        // RTX 3070 Laptop, 448 GB/s table figure, 35.32 tok/s observed.
+        let gpu = estimate_tokens_per_sec_7b(448.0, true);
+        assert!(
+            (32.0..=38.0).contains(&gpu),
+            "card estimate {gpu} no longer reproduces the measured 35.32 tok/s"
+        );
+    }
+
+    /// The defect these constants replaced: a processor was priced at 15% of
+    /// its memory roofline while reaching ~82%, so every processor-only node
+    /// advertised about a fifth of what it does. An Apple M4 Mac mini measures
+    /// 69.8 GB/s and was claiming 2.38 tok/s.
+    #[test]
+    fn a_processor_is_no_longer_priced_at_a_fifth_of_what_it_does() {
+        let m4 = estimate_tokens_per_sec_7b(69.8, false);
+        assert!(
+            m4 > 8.0,
+            "an M4-class machine still advertises only {m4} tok/s"
+        );
+        // The old pair had the ratio backwards: a card is LESS efficient per
+        // byte than a processor at batch 1. Pin the direction, not the values.
+        let per_byte_cpu = estimate_tokens_per_sec_7b(100.0, false);
+        let per_byte_gpu = estimate_tokens_per_sec_7b(100.0, true);
+        assert!(
+            per_byte_cpu > per_byte_gpu,
+            "at equal bandwidth a processor must not be priced below a card"
+        );
     }
 
     #[test]

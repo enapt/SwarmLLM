@@ -2,6 +2,36 @@
 
 All notable changes to SwarmLLM are documented here.
 
+### Fixed
+
+- **Computers without a graphics card were being told they are five times
+  slower than they are.** Every node advertises an estimate of how fast it can
+  generate, and the rest of the network uses that number to decide who gets
+  which part of a shared model. The estimate for a processor assumed it could
+  use 15% of its memory speed. Measured, a processor reaches about 80% — so an
+  ordinary machine claimed a fifth of what it does, and work went to other
+  computers that were not actually faster.
+
+  Measured on a 7B model, same prompt and same conversation length on both
+  sides: a Ryzen 7 5800H does **5.26 tokens/sec** where it was claiming 1.02,
+  and an RTX 3070 does **35.3** where it was claiming 30.5. So graphics cards
+  were understated too, just mildly. An Apple M4 Mac mini, which measures its own
+  memory at 69.8 GB/s, was advertising 2.38 tokens/sec and should be advertising
+  about 12 — and a machine like that is often one of the more capable ones on
+  the network.
+
+  The two figures are now calibrated to reproduce those measurements, and the
+  ratio between them is no longer backwards: at one request at a time a graphics
+  card uses a *smaller* share of its memory bandwidth than a processor does,
+  because a single row of work cannot fill it.
+
+- **A computer with no graphics card reported its own speed as zero** to its own
+  planner. Two places asked the graphics card how fast this machine is and had
+  no answer to fall back on when there wasn't one. Zero is read as "unknown" and
+  replaced with a generic guess, so the one machine whose speed we can actually
+  measure was the only one being guessed at, while every other computer on the
+  network was priced from a real figure it had sent.
+
 ## [0.3.142-alpha] — 2026-09-01
 
 ### Fixed

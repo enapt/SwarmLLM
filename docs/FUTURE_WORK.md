@@ -11068,7 +11068,7 @@ Two things a change here must keep, both currently load-bearing:
 Until then the constant is provisional and calibrated to the fleet it runs on,
 which is the same thing 200 was — it just ran on a different fleet.
 
-## Every node advertises the wrong speed, and the error has opposite signs on CPU and GPU (measured 2026-09-01)
+## Every node advertises the wrong speed (measured 2026-09-01, FIXED 2026-09-01)
 
 `estimate_tokens_per_sec_7b(bandwidth_gbps, is_gpu)` is
 `bandwidth / 4.4 GB * efficiency`, with efficiency **0.15 for a processor and
@@ -11083,7 +11083,7 @@ table = 448 GB/s):
 
 | | advertised | measured | error |
 |---|---|---|---|
-| GPU, 7B Q4 | 30.5 tok/s | **not established — see below** | unknown |
+| GPU, 7B Q4 (`prefill_bench --features flash-attn`, ~912 KV) | 30.5 tok/s | **35.32** tok/s (28.3 ms/token) | 1.16x pessimistic |
 | CPU, 7B Q4 (`prefill_bench`, 4 threads, ~912 KV) | 1.02 tok/s | **5.26** tok/s (190.1 ms/token) | **5.2x pessimistic** |
 
 The CPU row is a direct measurement, not a scaled one:
@@ -11107,31 +11107,38 @@ reaches, and in the same range as the "69% of roofline" figure recorded for CPU
 decode elsewhere. So the true CPU efficiency is roughly **0.8 against a constant
 of 0.15**.
 
-**The GPU half is NOT measured and must not be quoted until it is.** Three HTTP
-attempts gave 20.75, ~50 and ~27 tok/s on the same model and machine, because
-that path is not a decode measurement: the n-gram speculation cascade drafts
-straight out of the prompt, so a repetitive prompt inflates the rate without
-bound, and the prefix cache removes the prefill from any repeat of the same
-prompt. Differencing two runs at 132 and 332 output tokens gave 50.1 tok/s —
-*faster* at greater KV depth, which is the signature of speculation, not of
-decode.
+The graphics figure was taken the same way, through the same harness, at the
+same model, prompt and KV depth — which required a `--features flash-attn`
+release build, because `prefill_bench` **refuses to run on CUDA otherwise**
+rather than report processor timings as graphics ones. With the local kernel
+cache that build took 5m47s.
 
-`prefill_bench` is the harness that answers this (no HTTP, no speculation, no
-prefix cache), and it **refuses to run on CUDA unless the binary was built
-`--features flash-attn`** — it will not report processor timings as graphics
-ones. So the GPU figure needs that build, which compiles the CUTLASS kernels.
-Take it before touching the GPU constant.
+**An earlier attempt to measure it over HTTP was wrong in direction as well as
+magnitude, and was published before being retracted.** Three attempts on the
+same model and machine gave 20.75, ~50 and ~27 tok/s, because that path is not a
+decode measurement: the n-gram cascade drafts straight out of the prompt, so a
+repetitive prompt inflates the rate without bound, and the prefix cache removes
+the prefill from any repeat. Differencing two runs at 132 and 332 output tokens
+gave 50.1 tok/s — *faster* at greater KV depth, which is the signature of
+speculation, not of decode. The harness says 35.32, and the card turns out to
+have been **understated** like the processor, not overstated.
 
 Both measurements need a release build; an unoptimised one measures its own loop
 (gotcha #427).
 
-**Net effect: processors are ranked at least 5.2x below what they do**, and the
-card side is unquantified, so the true skew is 5.2x times whatever the graphics
-error turns out to be. There is a mechanism that predicts the card is *also*
-over-stated — at batch 1 a card is launch-latency bound and uses a smaller share
-of its bandwidth than a processor does — but that is a prediction, not a
-measurement, and the first attempt to measure it produced three different
-answers.
+**Net effect: processors were ranked 4.5x below cards** (5.2 / 1.16) — and the
+mechanism runs the other way from the constants that encoded it. At batch 1 a
+card is launch-latency bound and uses a *smaller* share of its bandwidth than a
+processor does: measured, 0.37 of roofline against 0.82. The old pair asserted
+0.30 against 0.15, i.e. exactly backwards.
+
+**Fixed**: the constants are now 0.35 and 0.75, calibrated to reproduce both
+measurements, with `the_efficiencies_reproduce_the_measurements_they_were_taken_from`
+pinning them and `a_processor_is_no_longer_priced_at_a_fifth_of_what_it_does`
+pinning the direction. **Confidence differs between the two** — the processor
+figure has two models on one machine agreeing plus a prediction that matched to
+1% beforehand; the card figure is one card, so its third digit is unearned. A
+second machine of either class should re-measure.
 
 **Where it does and does not matter.** It cancels wherever two figures from this
 same function are compared: `delegation_target`'s processor-versus-processor
@@ -11143,8 +11150,8 @@ GB/s, advertises **2.38 tok/s** where the CPU efficiency that fits our own
 measured 5.26 gives **~12**. That machine is currently the swarm's largest shard
 holder.
 
-**Second defect, same neighbourhood, cheaper to fix.** Two scheduler sites
-derive the LOCAL node's speed from `gpu_info` directly:
+**Second defect, same neighbourhood — also FIXED 2026-09-01.** Two scheduler
+sites derived the LOCAL node's speed from `gpu_info` directly:
 
 - `scheduler/mod.rs` candidate build (~line 1126)
 - `scheduler/mod.rs` parallax `PeerCapacity` build (~line 1894)
@@ -11156,8 +11163,33 @@ the allocator "treats 0 as average"). So the one node whose speed we can
 actually measure is priced with a guess, while every remote peer is priced with
 a real gossiped figure. `vram::node_memory_bandwidth_gbps(gpu_name)` exists
 precisely for this and its doc comment describes this exact missing `None` arm
-being fixed for `/api/admin/stats`; these two sites were not updated. This half
-is a clear fix with no ranking risk and should go first.
+being fixed for `/api/admin/stats`; these two sites were not updated.
+
+Both now call **`vram::node_tokens_per_sec_7b(gpu_name)`**, the one derivation
+of "what would THIS node manage on a 7B", with `.unwrap_or(0.0)` preserving the
+existing unknown semantics for a machine whose bandwidth genuinely cannot be
+measured. `the_local_nodes_speed_is_not_re_derived_from_the_graphics_card_alone`
+in `tests/repo_consistency.rs` fails the build on a new site, scanning statements
+rather than lines so a chain rustfmt wrapped is still visible (gotcha #413), with
+its own planted-violation self-test beside it.
+
+**A consequence the tests caught, worth watching.** The local node used to be
+priced with the same `UNKNOWN_COMPUTE_MS` prior as an unmeasured peer, so
+local-versus-unknown was decided purely on network cost and the local node always
+won. Now the local node is measured and most peers still are not, so a machine
+that measures *badly* can lose a segment to a peer we know nothing about — the
+prior (25 ms/layer) beats a genuinely slow measurement. That is defensible: real
+evidence about ourselves beats no evidence about them, and the prior is
+deliberately non-zero for exactly this comparison. But it is a behaviour change,
+it surfaced as two scheduler tests flipping, and it is the shape to check first
+if work starts leaving a node that should keep it.
+
+It also made those tests **host- and profile-dependent**: an unoptimised build
+measures ~5 GB/s where release measures ~30 (gotcha #427), which straddles the
+prior. `setup_tp_split_topology` now pins the peer side rather than leaving
+`capability: None`, so which node wins does not depend on the machine CI happens
+to run on. A new scheduler test that turns on local-versus-peer selection must
+do the same.
 
 **Do not change the constants without deciding what the number MEANS.** Two
 defensible readings: peak sustained decode for that model on an idle machine

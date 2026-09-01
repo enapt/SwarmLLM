@@ -2576,6 +2576,60 @@ fn nothing_leaves_this_node_with_a_prompt_in_it_unless_sharing_is_on() {
     );
 }
 
+/// The scheduler must not re-derive the local node's speed from `gpu_info`.
+///
+/// Two sites did — `.map(|g| …gpu_memory_bandwidth_gbps…).unwrap_or(0.0)` — so
+/// a processor-only node reported its OWN speed as zero. Both consumers read
+/// zero as *unknown* and substitute a generic constant (`UNKNOWN_COMPUTE_MS`;
+/// the parallax allocator documents 0 as "treats as average"), so the one node
+/// whose speed we can actually measure was the only one priced with a guess,
+/// while every remote peer got a real gossiped figure.
+///
+/// `vram::node_tokens_per_sec_7b` is the shared derivation. The card lookup is
+/// still legitimate elsewhere in this file (pricing a *peer's* advertised
+/// card), so the check is for the specific composition that skips the
+/// processor arm.
+#[test]
+fn the_local_nodes_speed_is_not_re_derived_from_the_graphics_card_alone() {
+    let src = std::fs::read_to_string("src/inference/scheduler/mod.rs").expect("read scheduler");
+    // Statement-joined so a chain rustfmt wrapped is still visible (gotcha #413).
+    for (line, stmt) in statements(&src) {
+        let flat: String = stmt.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            !(flat.contains("gpu_info") && flat.contains("estimate_tokens_per_sec_7b")),
+            "src/inference/scheduler/mod.rs:{line} derives the local node's speed from \
+             gpu_info, so a processor-only node reports 0 and is priced as unknown. \
+             Use vram::node_tokens_per_sec_7b, which asks the processor when there is \
+             no card."
+        );
+    }
+    assert!(
+        src.contains("node_tokens_per_sec_7b"),
+        "the scheduler no longer asks for the local node's speed at all — if that is \
+         deliberate, retire this guard"
+    );
+}
+
+/// Both halves of the guard above must actually work.
+#[test]
+fn the_local_speed_guard_catches_the_shape_it_is_written_for() {
+    let planted = "        let local_tps = self
+            .shared_state
+            .gpu_info
+                               .as_ref()
+            .map(|g| estimate_tokens_per_sec_7b(bw(&g.name), true))
+                               .unwrap_or(0.0);
+";
+    let hit = statements(planted).into_iter().any(|(_, stmt)| {
+        let flat: String = stmt.chars().filter(|c| !c.is_whitespace()).collect();
+        flat.contains("gpu_info") && flat.contains("estimate_tokens_per_sec_7b")
+    });
+    assert!(
+        hit,
+        "the scanner cannot see the wrapped chain it exists to catch"
+    );
+}
+
 /// The diagnostics report is written to be pasted somewhere public — the
 /// dashboard has a one-click "Copy diagnostics" button and `swarmllm
 /// diagnostics` prints the same thing — and the person doing the pasting is

@@ -1124,16 +1124,15 @@ impl PipelineScheduler {
 
             // Look up speed estimation from capability gossip
             let est_tokens_per_sec = if &node_id == local_node_id {
-                // Local: compute directly from our GPU info
-                self.shared_state
-                    .gpu_info
-                    .as_ref()
-                    .map(|g| {
-                        let bw =
-                            crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
-                        crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(bw, true)
-                    })
-                    .unwrap_or(0.0)
+                // Derived the same way every peer derives its own, so this
+                // compares like with like — and so a processor-only node states
+                // a real figure instead of the zero its consumers read as
+                // "unknown". 0.0 is still the answer when the machine's
+                // bandwidth genuinely could not be measured.
+                crate::model::auto_manage::vram::node_tokens_per_sec_7b(
+                    self.shared_state.gpu_info.as_ref().map(|g| g.name.as_str()),
+                )
+                .unwrap_or(0.0)
             } else {
                 self.shared_state
                     .peer_registry
@@ -1891,15 +1890,13 @@ impl PipelineScheduler {
         // Local node. If we have on-disk shards for this model, treat our
         // capacity as the union of their layer ranges; otherwise assume no
         // local capacity (Phase C won't recommend putting layers here).
-        let local_tps = self
-            .shared_state
-            .gpu_info
-            .as_ref()
-            .map(|g| {
-                let bw = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
-                crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(bw, true)
-            })
-            .unwrap_or(0.0);
+        // Same derivation every peer uses for itself; without it a
+        // processor-only node offered the allocator a zero, which it documents
+        // as "unknown" and replaces with an average.
+        let local_tps = crate::model::auto_manage::vram::node_tokens_per_sec_7b(
+            self.shared_state.gpu_info.as_ref().map(|g| g.name.as_str()),
+        )
+        .unwrap_or(0.0);
         let local_layer_capacity = manifest_layer_capacity_for_local(&manifest, &self.shared_state);
         peers.push(parallax_allocator::PeerCapacity {
             node_id: local_node_id.clone(),

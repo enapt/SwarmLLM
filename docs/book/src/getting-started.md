@@ -50,5 +50,6 @@ This guide walks you through installation, downloading your first model, and cha
 ./swarmllm chat                 # Interactive CLI chat
 ./swarmllm bench                # Benchmark inference performance
 ./swarmllm peers                # List connected peers
+./swarmllm diagnostics          # A node report for a bug report — safe to post publicly
 ./swarmllm version              # Show version number
 ```
