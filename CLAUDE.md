@@ -65,7 +65,7 @@ swarmllm/
 │   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
 │   │   ├── scheduler/    (mod, parallax, parallax_allocator, tests)
 │   │   ├── pipeline/     (mod, distributed, dsd, local, prompt, remote_generate, speculative, tensor_parallel, vision)
-│   │   ├── split/        (mod, model, loader, executor, kv_cache, entry, gguf_meta, shard_reader, rope, prefix_cache, tests/)
+│   │   ├── split/        (mod, model, loader, executor, kv_cache, kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, tests/)
 │   │   │   └── tests/    (mod, common, core, gqa, gemma2, moe_mla, llama4_glm4)
 │   │   ├── chat_template/ (mod, parser, eval, fallbacks, tests, fixtures/llama3_official.jinja)
 │   │   └── layers/       (mod, qwen35)
@@ -233,14 +233,11 @@ one-layer card-only segment served first) calibrated on its own tokens —
 `4:223ms 3:192ms 2:227ms 1:349ms → 4` — and decoded 4.9-5.2 tok/s where .145
 gave 2.9.
 
-**Superseded: v0.3.145-alpha (2026-09-01)** — whole fleet on it by evening,
-node ids kept. **.145 splits a model across the card and the processor** rather
-than losing the card when it does not fit whole (#431). ⚠ **On by default;
-`SWARMLLM_HYBRID_OFFLOAD=0` disables it.** .144 was the Apple Silicon update fix
-(#430 — ⚠ an Apple node needs `swarmllm-macos-aarch64` installed by hand ONCE;
-the fix cannot arrive by updating); .143 corrected what every node says about
-its own speed (#428, 5.2x); .142 the diagnostics privacy round (#426); .141
-served a model no single node can hold.
+Prior line: .145 hybrid placement (#431, on by default, `SWARMLLM_HYBRID_OFFLOAD=0`
+disables), .144 Apple Silicon update fix (#430 — ⚠ an Apple node needs ONE manual
+install of `swarmllm-macos-aarch64`), .143 advertised-speed correction (#428),
+.142 diagnostics privacy (#426), .141 a model no single node can hold — all in
+the one-liners below.
 
 Release gate, unchanged and followed every time: bump the version FIRST,
 `cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
@@ -275,24 +272,20 @@ release binary and the real swarm — `examples/stream_bench.py` and
   failover exhausted`. `docs/FUTURE_WORK.md`.
 - **#432 — the first 8B split read 2.9 tok/s, BELOW its processor-only 4.0.**
   Worker at ~100% CPU in decode: one thread. Its calibration line said why —
-  `decode_threads=1 … measured=4:5ms 3:2ms 2:2ms 1:1ms`: while the split model
-  loaded, the same worker served two ONE-LAYER card-only segments of it for a
-  boomerang request, and the once-per-process calibration settled on them.
-  Proved by removing the cause on the same binary (private mode kept the cold
-  request local → `4:211ms … 1:351ms`, chose 4, 5.2 tok/s). Now keyed by
-  processor depth; depth 0 is never timed. **The Belgian RTX 4050 serving 14B
-  segments while running it hybrid is exactly the exposure.**
+  `measured=4:5ms 3:2ms 2:2ms 1:1ms`: while the split model loaded, the same
+  worker served two ONE-LAYER card-only segments for a boomerang request and the
+  once-per-process calibration settled on them. Proved by removing the cause on
+  the same binary (private mode kept the cold request local → chose 4, 5.2
+  tok/s). Now keyed by processor depth; depth 0 never timed.
 - **#433 — the failure paths over the network were wrong while every success
-  path was right.** A streamed request for a model nobody holds answered `200`
-  + empty `stop` (non-streaming: 503 with a hint) — the streaming branch took
-  the legacy in-process path from before the router could stream. A peer's
-  honest "model not hosted on target" failed a 5-candidate request in 0.8 s —
-  matched nothing, so no retract/retry. Guard written first and seen to fail.
+  path was right**: a streamed request for a model nobody holds answered `200`
+  + empty `stop` (the legacy pre-router streaming path); a peer's honest "model
+  not hosted on target" failed a 5-candidate request with no retry. Guard
+  written first and seen to fail.
 - ⚠ **`SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB` — the README's own example — does
-  not exist**; only 7 hand-coded env overrides do. Caught by verifying the
-  mechanism (no placement lines, budget unchanged), not the number.
-- ⚠ Remote checks ~60 s after a restart 503 "insufficient capacity" for models
-  five peers hold — the registry window (diagnosis rule 3). Wait for ~200 s.
+  not exist** (7 hand-coded env overrides only); caught by verifying the
+  mechanism, not the number. ⚠ Remote checks <~200 s after a restart 503
+  "insufficient capacity" for models five peers hold (diagnosis rule 3).
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
