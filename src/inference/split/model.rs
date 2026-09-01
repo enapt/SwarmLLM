@@ -36,8 +36,17 @@ pub struct SplitModel {
     pub hidden_dim: usize,
     /// Detected model architecture.
     pub arch: ModelArch,
-    /// Device (CPU or CUDA).
+    /// Device (CPU or CUDA). The segment's PRIMARY device: where the
+    /// embedding table, final norm and output head live, and where a forward
+    /// pass starts and ends.
     pub(super) device: Device,
+    /// Per-layer devices, when this segment is split across two of them.
+    ///
+    /// **Empty for the overwhelmingly common case** of a segment that fits on
+    /// one device, so the forward loop can skip all placement work with a
+    /// single `is_empty` check rather than comparing devices per layer on the
+    /// hot path. See `hybrid::LayerPlacement`.
+    pub(super) layer_devices: Vec<Device>,
     /// Vocabulary from GGUF (token ID → string), for decoding generated tokens.
     pub(super) vocabulary: Option<Vec<String>>,
     /// Tokenizer (BPE or sentencepiece/unigram) built from GGUF metadata.

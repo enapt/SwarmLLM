@@ -484,7 +484,9 @@ impl SplitModel {
             .map(|c| c.current_seq_len())
             .unwrap_or(0);
 
-        let mask = if seq_len == 1 {
+        // `mut` because a hybrid segment moves it across the device boundary
+        // with the activation — see the transition at the head of the loop.
+        let mut mask = if seq_len == 1 {
             None
         } else if kv_offset > 0 {
             // Prefix cache: suffix query attends to (offset + seq_len) key positions
@@ -508,6 +510,31 @@ impl SplitModel {
             if let Some(mask) = skip_mask {
                 if mask.get(abs_layer).copied().unwrap_or(false) {
                     continue;
+                }
+            }
+
+            // Hybrid placement: bring the activation, and the mask that goes
+            // with it, to this layer's device.
+            //
+            // `layer_devices` is EMPTY unless the segment is actually split, so
+            // a model on one device pays a single `get` returning `None` per
+            // layer and nothing else — this is the decode hot path.
+            //
+            // The split is contiguous and card-first, so this fires at most
+            // once per forward: one copy of the hidden state (a few KB while
+            // decoding, a few MB during prefill) and one of the mask. That is
+            // the whole per-token cost of hybrid placement, and it is why the
+            // boundary has to stay contiguous.
+            if let Some(target) = self.layer_devices.get(layer_idx) {
+                if !layer_in.device().same_device(target) {
+                    layer_in = layer_in.to_device(target).map_err(|e| {
+                        SwarmError::Internal(format!("layer {abs_layer} activation to device: {e}"))
+                    })?;
+                    if let Some(m) = mask.as_ref() {
+                        mask = Some(m.to_device(target).map_err(|e| {
+                            SwarmError::Internal(format!("layer {abs_layer} mask to device: {e}"))
+                        })?);
+                    }
                 }
             }
 
@@ -690,6 +717,22 @@ impl SplitModel {
                     captured.insert(abs_layer, layer_in.clone());
                 }
             }
+        }
+
+        // Bring the segment's output back to the primary device.
+        //
+        // The final norm, the output head and the embedding table all live
+        // there, and a caller that serialises this for the next node expects
+        // one known device rather than "wherever the last layer happened to
+        // be". Costs nothing when the segment was never split.
+        //
+        // The KV caches are deliberately NOT moved: each one belongs to its
+        // layer and must stay on that layer's device, which is what makes the
+        // card-resident layers actually fast.
+        if !self.layer_devices.is_empty() && !layer_in.device().same_device(&self.device) {
+            layer_in = layer_in.to_device(&self.device).map_err(|e| {
+                SwarmError::Internal(format!("segment output to primary device: {e}"))
+            })?;
         }
 
         // Write the updated KV-caches and SSM states back to the store.
@@ -1190,7 +1233,9 @@ impl SplitModel {
             }
             return Ok(results);
         }
-        let mask = if seq_len == 1 {
+        // `mut` for the same reason as the single-request path: a split
+        // segment carries the mask across the device boundary with the batch.
+        let mut mask = if seq_len == 1 {
             None
         } else if first_kv_offset > 0 {
             Some(
@@ -1209,6 +1254,26 @@ impl SplitModel {
 
         // Process through layers
         for (layer_idx, layer) in self.layers.iter().enumerate() {
+            // Hybrid placement, same contract as the single-request loop: the
+            // batch and its mask follow the layer. Empty `layer_devices` means
+            // an unsplit segment and this costs one `get` per layer.
+            //
+            // The batched path needs this independently — a segment can be
+            // split across devices whichever loop is running it, and a missing
+            // transition here would fail only under concurrency, which is the
+            // hardest kind of device bug to attribute.
+            if let Some(target) = self.layer_devices.get(layer_idx) {
+                if !batched.device().same_device(target) {
+                    batched = batched.to_device(target).map_err(|e| {
+                        SwarmError::Internal(format!("batch to device at layer {layer_idx}: {e}"))
+                    })?;
+                    if let Some(m) = mask.as_ref() {
+                        mask = Some(m.to_device(target).map_err(|e| {
+                            SwarmError::Internal(format!("batch mask to device: {e}"))
+                        })?);
+                    }
+                }
+            }
             match layer {
                 LayerVariant::Dense(lw) => {
                     let residual = batched.clone();

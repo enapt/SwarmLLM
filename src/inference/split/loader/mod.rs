@@ -38,6 +38,15 @@ pub(super) struct SplitLoadOptions<'a> {
     /// (mmap path). When `None`, loads sequentially (ShardReader path —
     /// `ShardReader` can't be shared across threads).
     pub parallel_data: Option<&'a [u8]>,
+    /// How many of this segment's layers to place on the graphics card, from
+    /// the start of the range. `None` means the old all-or-nothing behaviour:
+    /// whatever `device` is, every layer goes there.
+    ///
+    /// The count is decided by `ModelProcessPool`, never here — graphics memory
+    /// has one owner (`.claude/rules/architecture.md`), and a loader that sized
+    /// its own placement would be the second accountant that #401/#402 were
+    /// about. This obeys a number; it does not choose one.
+    pub gpu_layers: Option<usize>,
 }
 
 /// Element type the token-embedding table is dequantized to.
@@ -255,6 +264,7 @@ impl SplitModel {
                 is_first,
                 is_last,
                 parallel_data: Some(mmap.as_ref()),
+                gpu_layers: crate::inference::split::gpu_layer_limit(),
             },
         )
     }
@@ -275,6 +285,7 @@ impl SplitModel {
             is_first,
             is_last,
             parallel_data,
+            gpu_layers,
         } = opts;
         // Detect architecture prefix from GGUF metadata
         let arch_str = super::gguf_arch_str(&ct);
@@ -622,6 +633,47 @@ impl SplitModel {
             precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
                 .map_err(SwarmError::internal)?
         };
+        // Where each layer of this segment goes.
+        //
+        // `gpu_layers` is a decision made by `ModelProcessPool` and passed in;
+        // nothing here inspects free VRAM. When it is `None`, or the device is
+        // not a card, every layer goes on `device` exactly as before — so a
+        // model that fits, and every processor-only node, takes an unchanged
+        // path.
+        let hybrid_ok = super::hybrid::arch_supports_hybrid(&model_arch);
+        if gpu_layers.is_some() && device.is_cuda() && !hybrid_ok {
+            tracing::warn!(
+                arch = %model_arch,
+                "Hybrid placement was requested but is not verified for this architecture — \
+                 loading the whole segment on the graphics card instead. See \
+                 hybrid::arch_supports_hybrid"
+            );
+        }
+        let placement = match (gpu_layers.filter(|_| hybrid_ok), device.is_cuda()) {
+            (Some(n), true) if n < layer_end.saturating_sub(layer_start) => {
+                tracing::info!(
+                    gpu_layers = n,
+                    segment_layers = layer_end - layer_start,
+                    "Hybrid placement: first {n} layers on the graphics card, rest on the processor"
+                );
+                super::hybrid::LayerPlacement::split(
+                    layer_start,
+                    device.clone(),
+                    n,
+                    cos.clone(),
+                    sin.clone(),
+                )
+                .map_err(SwarmError::internal)?
+            }
+            _ => super::hybrid::LayerPlacement::uniform(
+                layer_start,
+                device.clone(),
+                cos.clone(),
+                sin.clone(),
+            )
+            .map_err(SwarmError::internal)?,
+        };
+
         // Helper: create RmsNorm from GGUF weight tensor.
         // Note: GGUF norm weights for Gemma models already include the +1 offset
         // (added by convert_hf_to_gguf.py's modify_tensors), so we use them as-is.
@@ -777,6 +829,11 @@ impl SplitModel {
             );
 
             for layer_idx in layer_start..layer_end {
+                // Per-layer placement, applied by shadowing so that every
+                // tensor load below picks up the right device with no
+                // per-call-site edit — see `hybrid::LayerPlacement`.
+                let device = placement.device_for(layer_idx);
+                let (cos, sin) = placement.rope_for(layer_idx);
                 let prefix = format!("blk.{layer_idx}");
 
                 // Per-layer detection: MLA vs dense attention
@@ -1068,6 +1125,11 @@ impl SplitModel {
                 .unwrap_or(1) as usize;
 
             for layer_idx in layer_start..layer_end {
+                // Per-layer placement, applied by shadowing so that every
+                // tensor load below picks up the right device with no
+                // per-call-site edit — see `hybrid::LayerPlacement`.
+                let device = placement.device_for(layer_idx);
+                let (cos, sin) = placement.rope_for(layer_idx);
                 let prefix = format!("blk.{layer_idx}");
                 let is_nope = layer_idx % 4 == 3; // NoPE every 4th layer
 
@@ -1296,6 +1358,17 @@ impl SplitModel {
             );
 
             for layer_idx in layer_start..layer_end {
+                // Per-layer placement, applied by shadowing so that every
+                // tensor load below picks up the right device with no
+                // per-call-site edit — see `hybrid::LayerPlacement`.
+                // Qwen 3.5 is not eligible for hybrid placement — it builds
+                // its own `q35_cos`/`q35_sin` outside this loop, which a
+                // per-layer shadow cannot reach, so a split model would leave a
+                // card-resident layer's RoPE on the processor. See
+                // `hybrid::arch_supports_hybrid`. This therefore always
+                // resolves to the one segment device; it is kept so that
+                // enabling the architecture is a change here and nowhere else.
+                let device = placement.device_for(layer_idx);
                 let prefix = format!("blk.{layer_idx}");
 
                 // Detect if this layer is SSM (linear_attention) or full attention
@@ -1880,6 +1953,11 @@ impl SplitModel {
                 // Sequential fallback for ShardReader (gaps between tensors prevent read_to_end).
                 // Same per-layer logic as the parallel path, using ct.tensor(file, ...) directly.
                 for layer_idx in layer_start..layer_end {
+                    // Per-layer placement, applied by shadowing so that every
+                    // tensor load below picks up the right device with no
+                    // per-call-site edit — see `hybrid::LayerPlacement`.
+                    let device = placement.device_for(layer_idx);
+                    let (cos, sin) = placement.rope_for(layer_idx);
                     let prefix = format!("blk.{layer_idx}");
                     let has_fused_qkv = ct
                         .tensor_infos
@@ -2107,6 +2185,14 @@ impl SplitModel {
 
         Ok(Self {
             tok_embeddings,
+            // Where each layer actually went. Empty when the segment is on one
+            // device, which is what the forward loop checks before it does any
+            // per-layer device work at all — an unsplit model pays nothing.
+            layer_devices: if placement.is_hybrid(layers.len()) {
+                placement.devices(layers.len())
+            } else {
+                Vec::new()
+            },
             layers,
             norm,
             output,

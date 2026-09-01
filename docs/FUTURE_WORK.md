@@ -5143,7 +5143,62 @@ more when the network is idle — precisely when generosity costs nothing.
 
 ## Inference engine
 
-### True per-layer GPU/CPU hybrid offload (R146, 2026-07-22)
+### True per-layer GPU/CPU hybrid offload — BUILT 2026-09-01, NOT YET GPU-VALIDATED
+
+**Status.** The mechanism exists and is unit-tested; it has not run on a
+graphics card. `gpu_layers = N` (a positive value below the segment's layer
+count) is now honoured end to end — config → `effective_gpu_layers` →
+`--gpu-layers` → `split::GPU_LAYER_LIMIT` → `LayerPlacement` → the forward
+loops. Automatic sizing, where admission picks N instead of giving the card up,
+is wired but gated behind **`SWARMLLM_HYBRID_OFFLOAD=1`** until it has been
+measured — it changes placement on every graphics node in the swarm, and CI
+caught an unvalidated change earlier the same day that two machines here had
+passed.
+
+**What the design turned out to be**, which is much smaller than the note below
+assumed. The transition sits *between* layers in the forward loop, so **no
+architecture code changes at all**: a layer only ever sees tensors on its own
+device. Three of the four things the old note listed came for free —
+- `cos`/`sin` already live inside `LayerWeights`, so RoPE follows its layer;
+- `KvCache::append` allocates on the device of the tensor it is handed, so KV
+  follows its layer with no change to `kv_cache.rs`;
+- weights already load per tensor via `ct.tensor(file, name, device)`.
+
+Only the causal mask needed handling, and it moves with the activation.
+
+**Applied by shadowing, not by threading.** The loader has ~128 `&device`
+references across four per-architecture loops. Each loop shadows `device`,
+`cos` and `sin` on its first line, so every load inside the body picks up the
+right device with no per-call-site edit. Editing 128 sites is how a path gets
+missed, and a missed path fails at *runtime*, not compile time.
+
+**That hazard is real and was caught during implementation.** Qwen 3.5 builds
+its own `q35_cos`/`q35_sin` outside the loop, which a shadow cannot reach — a
+split model would have left a card-resident layer's RoPE on the processor. A
+compiler warning about an unused shadow is what surfaced it. So
+`hybrid::arch_supports_hybrid` is an **allowlist**: Llama/Qwen2/Gemma/Gemma2/
+Phi3/Mistral/Starcoder2/Glm4/Llama4 are verified; Qwen35, Qwen35Moe, DeepSeek2
+and anything unrecognised load whole-device as before.
+
+**Sizing.** `hybrid::plan_gpu_layers` folds KV *into* the per-layer cost rather
+than holding back a flat reserve, because a layer placed on the card brings its
+KV with it and one on the processor does not. That is the one place we
+deliberately differ from llama.cpp PR #17485's 800 MB lump: the number it stands
+in for is one we already compute (`kv_bytes_per_token`). What remains reserved
+is only what is genuinely not per-layer — the transient activation and
+attention-score buffers.
+
+**Still to do**, in order:
+1. Measure on a card. A CUDA build plus a model deliberately over-budget; the
+   reporter's RTX 4050 with `qwen2.5-14b` is the case to reproduce.
+2. Flip `SWARMLLM_HYBRID_OFFLOAD` to default-on once there are numbers.
+3. Verify the remaining architectures and extend the allowlist.
+4. Prefix-cache snapshots are device-tagged; cross-node reuse of a snapshot from
+   a split model is untested.
+
+---
+
+### Original note (R146, 2026-07-22)
 **Context.** `inference.gpu_layers` now reaches the shard/worker path and is honoured for the two outcomes the split engine can actually express: `0` = CPU only, `-1`/`>0` = GPU. What it still cannot do is llama.cpp-style *partial* offload — "put 8 of these 22 layers on the GPU and the rest on the CPU". A positive value below the worker's layer count logs a warning rather than silently pretending.
 
 **What it would take.** `SplitModel` holds one `Device` for the whole model (`split/loader/mod.rs`, `loader/shards.rs`). Real hybrid placement needs:

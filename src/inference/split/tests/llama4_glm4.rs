@@ -297,6 +297,8 @@ fn test_llama4_moe_layer_forward() {
     }
 
     let mut model = SplitModel {
+        // Single-device test model: empty means "not split".
+        layer_devices: Vec::new(),
         tok_embeddings: None,
         layers,
         norm: None,

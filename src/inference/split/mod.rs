@@ -8,6 +8,7 @@
 mod entry;
 mod executor;
 mod gguf_meta;
+pub(crate) mod hybrid;
 mod kv_budget;
 pub(crate) mod kv_cache;
 mod loader;
@@ -136,6 +137,27 @@ pub static MAX_SEQ_LEN_OVERRIDE: std::sync::atomic::AtomicUsize =
 /// may grow into free memory and is refused — with a 503 that re-routes —
 /// before it would swap.
 pub static CPU_KV_BUDGET_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many of a segment's layers this worker should place on the graphics
+/// card, when the daemon has decided on a partial split.
+///
+/// `0` means no partial limit — place the segment wherever the device says,
+/// which is the all-or-nothing behaviour that predates hybrid offload. It is
+/// not ambiguous with "zero layers on the card", because `gpu_layers = 0` sets
+/// `force_cpu` and the loader never reaches a card at all.
+///
+/// Set once from `--gpu-layers`, the same way [`CPU_KV_BUDGET_BYTES`] is set
+/// from `--kv-budget-bytes`: the daemon decides, the worker obeys. Graphics
+/// memory has one owner and it is not this process.
+pub static GPU_LAYER_LIMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The partial-split limit, or `None` when the segment is not being split.
+pub(crate) fn gpu_layer_limit() -> Option<usize> {
+    match GPU_LAYER_LIMIT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        n => Some(n),
+    }
+}
 
 pub fn cpu_kv_budget_bytes() -> Option<u64> {
     match CPU_KV_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed) {

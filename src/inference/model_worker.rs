@@ -598,12 +598,17 @@ fn set_worker_force_cpu(gpu_layers: i32) {
     if force_cpu {
         tracing::info!("model-worker: gpu_layers = 0 — loading models on CPU");
     } else if gpu_layers > 0 {
-        // Honest about the limitation instead of silently ignoring the number.
-        tracing::warn!(
+        // A positive count is now a real instruction, not something to warn
+        // about and ignore: the first `gpu_layers` layers of this worker's
+        // window go on the card and the rest on the processor. Until hybrid
+        // placement existed this could only be honoured as "all of them",
+        // which is why it used to warn.
+        crate::inference::split::GPU_LAYER_LIMIT
+            .store(gpu_layers as usize, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
             gpu_layers,
-            "model-worker: partial GPU offload is not supported by the split \
-             engine — this worker's whole layer window goes on the GPU. Use \
-             gpu_layers = 0 for CPU-only, or a shard window to bound VRAM."
+            "model-worker: placing the first {gpu_layers} layers of this window on the \
+             graphics card and the rest on the processor"
         );
     }
 }

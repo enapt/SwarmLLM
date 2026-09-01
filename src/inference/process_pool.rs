@@ -1491,6 +1491,52 @@ impl ModelProcessPool {
 
     /// The `--gpu-layers` value a worker for `model_id` should be spawned with.
     /// A model pinned to the CPU by a previous OOM overrides the config.
+    /// How many layers of this model would fit on the card, when the whole
+    /// thing does not.
+    ///
+    /// `None` means do not split — either the geometry could not be read, or
+    /// nothing meaningful fits, in which case the processor takes the model as
+    /// it always did. An unreadable header is "do not judge", the same
+    /// treatment [`Self::admit_to_gpu`] gives the same gap.
+    ///
+    /// **Gated on `SWARMLLM_HYBRID_OFFLOAD=1` for now.** The capability is
+    /// wired and unit-tested, but it changes placement on every graphics node
+    /// in the swarm and has not been measured on real hardware — and today CI
+    /// caught a change that two machines here had passed. An explicit
+    /// `gpu_layers = N` is honoured regardless of this switch; this gate is
+    /// only about choosing N automatically. Flip the default once there are
+    /// numbers.
+    fn partial_gpu_layers(&self, model_id: &ModelId, estimated_mb: u64) -> Option<usize> {
+        if std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() != Ok("1") {
+            return None;
+        }
+        let budget = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let available_mb = budget.saturating_sub(self.vram_committed_mb());
+        // Nothing to split if the model would have fitted anyway.
+        if available_mb >= estimated_mb {
+            return None;
+        }
+        let inputs = self.footprint_inputs(model_id)?;
+        let layers = inputs.segment_layers as usize;
+        if layers == 0 {
+            return None;
+        }
+        // KV geometry per layer, in the units `kv_bytes_per_token` takes.
+        let kv_elems = (inputs.head_count_kv * inputs.head_dim) as usize;
+        let n = crate::inference::split::hybrid::plan_gpu_layers(
+            available_mb.saturating_mul(1024 * 1024),
+            inputs.quantized_weight_bytes,
+            layers,
+            kv_elems,
+            kv_elems,
+            false,
+            inputs.effective_context,
+        );
+        (n > 0).then_some(n)
+    }
+
     fn effective_gpu_layers(&self, model_id: &ModelId) -> i32 {
         match self.cpu_reason(model_id) {
             Some(_) => 0,
@@ -2628,6 +2674,8 @@ impl ModelProcessPool {
         // to the card and die there.
         let mut placed_on_cpu_because = self.cpu_reason(model_id);
         let mut going_to_cpu = placed_on_cpu_because.is_some();
+        // Set when the model does not fit the card whole but part of it does.
+        let mut hybrid_layers: Option<usize> = None;
         // What the card would have to give this model. Read from disk ONCE per
         // spawn: the admission gate weighs it, the CPU-fallback log reports it,
         // and the worker carries it so a later request can ask whether the
@@ -2649,6 +2697,27 @@ impl ModelProcessPool {
                         "Reclaimed graphics memory from idle models; retrying admission"
                     );
                     admitted = self.admit_to_gpu(model_id, estimated);
+                }
+            }
+            // Before giving the card up entirely, ask whether PART of the
+            // model fits. This is the whole point of hybrid placement: a model
+            // 20% too large used to lose the card completely, a ~24x cliff on
+            // this swarm, with graphics memory sitting free and unused beside
+            // it (three reports, most recently 5151 MB free while the model
+            // ran on the processor).
+            if !admitted {
+                if let Some(n) = self.partial_gpu_layers(model_id, estimated) {
+                    tracing::info!(
+                        model = %model_id,
+                        gpu_layers = n,
+                        estimated_mb = estimated,
+                        "Model does not fit the card whole — placing its first {n} layers \
+                         there and the rest on the processor"
+                    );
+                    hybrid_layers = Some(n);
+                    // It IS going to the card, just not all of it, so this is
+                    // not a CPU fallback and must not be reported as one.
+                    admitted = true;
                 }
             }
             if !admitted {
@@ -2817,7 +2886,7 @@ impl ModelProcessPool {
         }
 
         match self
-            .spawn_worker(model_id, placed_on_cpu_because, estimated)
+            .spawn_worker(model_id, placed_on_cpu_because, estimated, hybrid_layers)
             .await
         {
             Ok(handle) => {
@@ -2906,6 +2975,10 @@ impl ModelProcessPool {
         model_id: &ModelId,
         placed_on_cpu_because: Option<CpuReason>,
         gpu_estimate_mb: u64,
+        // A partial split decided by admission: this many of the worker's
+        // layers go on the card, the rest on the processor. `None` is the
+        // all-or-nothing placement `placed_on_cpu_because` describes.
+        gpu_layers_override: Option<usize>,
     ) -> Result<WorkerHandle, SwarmError> {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
 
@@ -3128,9 +3201,14 @@ impl ModelProcessPool {
         // The placement the caller decided — the ONE statement of where this
         // worker is going, used for both the spawn argument and the handle.
         args.push(
-            match placed_on_cpu_because {
-                Some(_) => 0,
-                None => self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed),
+            match (placed_on_cpu_because, gpu_layers_override) {
+                (Some(_), _) => 0,
+                // A partial split: the worker places this many of its layers on
+                // the card and the rest on the processor. Reaches the loader
+                // through `GPU_LAYER_LIMIT`, the same route `--kv-budget-bytes`
+                // takes — the daemon decides, the worker obeys.
+                (None, Some(n)) => n as i32,
+                (None, None) => self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed),
             }
             .to_string(),
         );

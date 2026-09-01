@@ -154,6 +154,8 @@ fn make_test_split_model_impl(
         hidden_dim,
         arch: ModelArch::Llama,
         device,
+        // Single-device test models: empty means "not split".
+        layer_devices: Vec::new(),
         vocabulary: None,
         tokenizer: None,
         eos_tokens: vec![2],
@@ -238,6 +240,8 @@ pub(super) fn make_gqa_test_model(
         hidden_dim,
         arch,
         device,
+        // Single-device test models: empty means "not split".
+        layer_devices: Vec::new(),
         vocabulary: None,
         tokenizer: None,
         eos_tokens: vec![2],
@@ -372,6 +376,8 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         hidden_dim,
         arch: ModelArch::DeepSeek2,
         device,
+        // Single-device test models: empty means "not split".
+        layer_devices: Vec::new(),
         vocabulary: None,
         tokenizer: None,
         eos_tokens: vec![2],
