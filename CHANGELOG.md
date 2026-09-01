@@ -2,6 +2,8 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.144-alpha] — 2026-09-01
+
 ### Fixed
 
 - **Macs with Apple Silicon could never update themselves, and were told they
