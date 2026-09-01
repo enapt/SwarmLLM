@@ -2,6 +2,8 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.143-alpha] — 2026-09-01
+
 ### Fixed
 
 - **Computers without a graphics card were being told they are five times
