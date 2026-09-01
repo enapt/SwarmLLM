@@ -221,15 +221,15 @@ All 20 build phases complete. All subsystems wired — no stubs. **2200 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.142-alpha (2026-09-01).** Local `225e6fe7` (CUDA
+**Released and deployed: v0.3.143-alpha (2026-09-01).** Local `225e6fe7` (CUDA
 asset, GPU serving, installed sha256 == published asset byte for byte, rollback
-`~/.local/bin/swarmllm.0.3.141.bak`) and Proxmox `96842635` (.deb, stayed
+`~/.local/bin/swarmllm.0.3.142.bak`) and Proxmox `96842635` (.deb, stayed
 `enabled` + `active`, no `.dpkg-old`) are both on it, node ids and peers kept.
-**.142 is the privacy round**: the report a non-technical user is invited to
-paste into a bug report no longer contains anyone's IP address (#426), plus
-`swarmllm diagnostics` and a `-- this machine --` section naming the speed every
-peer ranks this node on. .141 carried the three that came out of serving a model
-no single node can hold.
+**.143 corrects what every node says about itself**: the processor efficiency
+was 5.2x low and the CPU/GPU ratio was backwards (#428) — visible on deploy, the
+Proxmox node went from advertising **0.80 to 4.41 tok/s** and this laptop from
+30.55 to 35.64, against a measured 35.32. .142 was the privacy round (#426).
+.141 carried the three that came out of serving a model no single node can hold.
 
 Release gate, unchanged and followed every time: bump the version FIRST,
 `cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
@@ -244,42 +244,39 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.142-alpha (2026-09-01) — the "safe to share" button no longer shares anyone's IP address
+### v0.3.143-alpha (2026-09-01) — every node was lying about how fast it is
 
-Gotchas **#426** and **#427**. Found by asking what a non-programmer can
-actually DO, then walking the path they would take.
+Gotchas **#428** (constants) and **#429** (the test that measures its own host).
 
-- **The dashboard's one-click Copy diagnostics copied every peer address the
-  node remembered** — real users' home IPs — under a hint reading "No keys or
-  invite codes are included", which a non-technical reader takes as *safe to
-  post*. A JS comment asserted the daemon had "already redacted" it. Redaction
-  is now ONE pass over the finished report (`?full=1` opts out), keeping kind +
-  port + peer id + `/p2p-circuit` so it still reads; **the tag is salted per
-  report because IPv4 is 2^32**; loopback and our own published anchor exempt.
-- **`swarmllm diagnostics`** — headless machines had no route to the report.
-  Safe by default; `--full` keeps the addresses.
-- **A `-- this machine --` section** naming CPU, GPU, measured bandwidth and the
-  advertised tok/s **every peer's scheduler ranks this node on** — the answer to
-  "why does work never come to me?", previously on no copyable surface.
-- ⚠ **A query-string `bool` accepts ONLY `true`/`false`.** My own documented
-  `?full=1` was refused by the extractor with a bare-text 400 that never reached
-  the error envelope. Found by RUNNING the command, not by reading the diff.
-- ⚠ **#427 a debug build measures its own loop**: 5.3 GB/s at `-O0` against 30.3
-  at `-O`, so a dev test node advertises ~1/6 of its speed for its whole life.
-
-**Open, measured, NOT fixed** (`docs/FUTURE_WORK.md`): every processor node
-advertises **5.2x slower than it is** — measured 5.26 tok/s on a 7B Q4 against
-an advertised 1.02, i.e. 82% of memory roofline against a constant assuming 15%.
-An M4 Mac mini should be advertising ~12 tok/s, not 2.38. **The graphics side is
-NOT measured** — `prefill_bench` rightly refuses CUDA without `--features
-flash-attn`, and the HTTP path is not a decode measurement (speculation drafts
-from the prompt; three attempts gave 20.75, ~50 and ~27 tok/s).
+- **The processor efficiency was 0.15 where the measured figure is ~0.82 of
+  memory roofline — 5.2x low — and the card's 0.30 was HIGHER than the
+  processor's when it should be lower.** At batch 1 a card reaches 0.37 of
+  roofline against a processor's 0.82: one query row cannot fill it. Now
+  **0.75 / 0.35**, measured through `prefill_bench` at the same model, prompt
+  and KV depth on both sides. **Validated on a second machine** — Ryzen 5800H
+  0.818, i5-10500T 0.895 — so 0.75 is conservative on both.
+- ⚠ **My first GPU number came from HTTP and was wrong in DIRECTION.** That path
+  is not a decode measurement (speculation drafts from the prompt; three
+  attempts gave 20.75 / ~50 / ~27). `prefill_bench` REFUSES CUDA without
+  `--features flash-attn`, and that refusal is the only reason it did not stand.
+- **A processor-only node reported its own speed as 0** to its own planner (two
+  sites derived it from `gpu_info` alone) → `vram::node_tokens_per_sec_7b`.
+- **The unmeasurable-bandwidth fallback** would have gone 1.70 → 8.52 tok/s with
+  the new efficiency, so the most memory-starved node would advertise itself as
+  one of the fastest. **A nominal must move with the efficiency it feeds.**
+- **One `nvidia-smi` spawn instead of two** in the stats endpoint's no-card
+  branch. ⚠ Removing the re-export it orphaned would have broken the CUDA build:
+  its only caller is `cfg`-gated (#264).
+- ⚠ **CI caught what two local machines did not** — the TP tests price the local
+  node, so they test the machine they run on. Fixed properly: the peer fixture
+  is now slow enough that the measurement floor makes the outcome unconditional.
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.142** (09-01): **the "safe to share" button shared everyone's IP address (#426)** — the dashboard's one-click Copy diagnostics, hinted "No keys or invite codes are included", also copied this machine's addresses AND ten peer-cache multiaddrs, i.e. real users' home IPs; a JS comment claimed it was already redacted. ONE pass over the finished report (`?full=1` opts out), keeping kind + port + peer id + `/p2p-circuit`; **tag salted per report because IPv4 is 2^32**; anchor + loopback exempt. Added `swarmllm diagnostics` + the `-- this machine --` section. ⚠ **A query-string `bool` accepts ONLY `true`/`false` — my own documented `?full=1` 400'd.** `round_log_0901_diagnostics_privacy.md`.
 - **v0.3.141** (08-31): **a model no single node can hold is SERVED** — `qwen2.5-14b` over a 3-4 segment chain, reproduced independently; the greedy fallback had ZERO references to `max_hostable_layers` (⚠ my first fix was too STRICT and was caught pre-ship — parallax routes unbounded rather than refusing, and the fallback now matches); **#425** shards scored on rarity alone scattered holdings, 4 WAN round trips/token instead of 2 → contiguity term, **Petals-informed: an INVARIANT combined WITH rarity, not traded against it** (arXiv 2209.01188); an array-wrapped tool call ignored (**confirmed fixed in the field 09-01**). `parallax: no valid source vertex` is NOT a bug. `round_log_0831_tokenizer_quadratic.md`.
 - **v0.3.139/.140** (08-31): **models the network is asked to host now SPREAD.** #423 — trust was granted only to models in HF's *trending* feed (a DISCOVERY signal used as VERIFICATION), and the gate hid because a node already holding a shard is EXEMPT, so machines finish what they start and never start anything. Now asks the ORIGIN directly, same thresholds. **Confirmed by a tester: stuck at 1/16 reachable for 12 min, then 15/16 and `peers_hosting` 1→4 on updating.** Also: delegation bound 200→1000 ms (a 600 ms GPU peer serves 21-25 tok/s vs our 9-10 CPU); the wishlist could not tell a 0.6B from a 120B and sized MoE 10x small; #424 a retried download truncated away good ranges (unflushed length used as a `set_len` target — a RACE), which cost that tester GB of bandwidth. `round_log_0831_tokenizer_quadratic.md`.
 - **v0.3.138** (08-31): two tokenizer faults. **#420** `bpe_encode_word` was naive BPE — fine for a word, and the SentencePiece branch has no pre-tokenizer so it got the WHOLE PROMPT as one "word": 90 KB took **141 s**, daemon CPU **200.25 s → 1.19 s (168x)**, output identical. **#421** every tab and newline went to the model as `<unk>` (chat templates are full of newlines) — found only by checking against HuggingFace `tokenizers`, since the internal tests compare the tokenizer to an older version of ITSELF. **17/17 samples now agree.** ⚠ **The perf bug was the LEAD, not the bug.** `round_log_0831_tokenizer_quadratic.md`.
