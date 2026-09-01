@@ -53,6 +53,22 @@ const BUFFER_BYTES: usize = 256 * 1024 * 1024;
 /// The same reasoning as the `bench` helper in `inference::layers`.
 const PASSES: usize = 3;
 
+/// What to assume when the measurement could not be taken at all.
+///
+/// **Deliberately modest, and not a typical machine's bandwidth.** The only way
+/// [`measured_gbps`] returns `None` is `try_reserve_exact` failing on a 256 MB
+/// buffer, so the node reaching this is memory-starved — which is not a node to
+/// advertise as capable. A caller that wants "something rather than nothing"
+/// wants something *small*.
+///
+/// It was 50.0, chosen when a processor was priced at 15% of its roofline and
+/// so produced 1.70 tok/s. Correcting that efficiency to the measured 0.75
+/// (gotcha #428) would have turned the same 50.0 into **8.52 tok/s**, i.e. the
+/// most constrained node on the network suddenly advertising itself as one of
+/// the faster ones and attracting work it cannot do. The nominal moves with the
+/// efficiency so the fallback keeps meaning what it meant.
+pub const UNMEASURABLE_FALLBACK_GBPS: f32 = 10.0;
+
 /// Sustained read bandwidth in GB/s, measured once and cached.
 ///
 /// `None` when the buffer could not be allocated — a machine short enough of

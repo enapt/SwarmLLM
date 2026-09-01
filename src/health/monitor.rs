@@ -537,11 +537,14 @@ impl HealthMonitor {
                 // 29.9 GB/s against the 50 assumed, i.e. the guess was 67% high
                 // for a perfectly ordinary laptop.
                 //
-                // Falls back to the old assumption when the measurement cannot
-                // be taken, which keeps a memory-starved node advertising
-                // something rather than nothing.
+                // Falls back to a deliberately modest nominal when the
+                // measurement cannot be taken, which keeps a memory-starved node
+                // advertising something rather than nothing — without letting it
+                // advertise itself as capable. See
+                // `mem_bandwidth::UNMEASURABLE_FALLBACK_GBPS` for why the figure
+                // is small and why it had to move when the efficiency did.
                 let gbps = crate::model::auto_manage::vram::node_memory_bandwidth_gbps(None)
-                    .unwrap_or(50.0);
+                    .unwrap_or(crate::inference::mem_bandwidth::UNMEASURABLE_FALLBACK_GBPS);
                 crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(gbps, false)
             });
 

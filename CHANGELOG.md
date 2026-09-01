@@ -25,6 +25,21 @@ All notable changes to SwarmLLM are documented here.
   card uses a *smaller* share of its memory bandwidth than a processor does,
   because a single row of work cannot fill it.
 
+- **A computer that cannot measure its own memory no longer claims to be fast.**
+  When the memory check cannot run — which happens only on a machine too short
+  of memory to spare 256 MB for it — the node falls back to a nominal figure so
+  it advertises something rather than nothing. Correcting the efficiency above
+  would have quietly turned that fallback from 1.7 into 8.5 tokens/sec, so the
+  most constrained machine on the network would have started claiming to be one
+  of the faster ones and attracting work it cannot do. The nominal moves with
+  the efficiency and the fallback keeps meaning what it meant.
+
+- **The dashboard's hardware panel spawned `nvidia-smi` twice per refresh** on a
+  machine that has a graphics card but runs a build without CUDA — once for the
+  name and total, once for the amount in use. One combined query now answers
+  all three, which is also more correct: two separate readings are taken at
+  different instants.
+
 - **A computer with no graphics card reported its own speed as zero** to its own
   planner. Two places asked the graphics card how fast this machine is and had
   no answer to fall back on when there wasn't one. Zero is read as "unknown" and

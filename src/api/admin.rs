@@ -1704,9 +1704,10 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
             )
         }
         None => {
-            let (name, total) = detect_gpu_nvidia_smi();
-            let used = crate::model::auto_manage::vram::query_gpu_vram_used();
-            (name, total, used)
+            // One `nvidia-smi` spawn, not two: this branch used to ask for the
+            // name and total with one call and the usage with another, on an
+            // endpoint the dashboard polls.
+            crate::model::auto_manage::vram::detect_gpu_nvidia_smi_with_used()
         }
     };
 
@@ -1761,6 +1762,13 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
 }
 
 /// Fallback GPU detection via nvidia-smi when llama.cpp gpu_info is unavailable.
+///
+/// The only remaining consumer is `daemon/mod.rs`, and it sits inside
+/// `#[cfg(feature = "candle-cuda")]` — so every default build reports this
+/// re-export as unused and every default build is wrong about it (gotcha #264).
+/// Deleting it on that advice breaks the CUDA build, which nothing local
+/// compiles.
+#[cfg_attr(not(feature = "candle-cuda"), allow(unused_imports))]
 pub(crate) use crate::model::auto_manage::vram::detect_gpu_nvidia_smi;
 
 /// POST /api/admin/rescan-shards — Scan the models directory for new shard files.

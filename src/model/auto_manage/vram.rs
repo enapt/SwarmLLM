@@ -818,10 +818,31 @@ fn detect_vram_nvidia_smi() -> Option<u64> {
 }
 
 /// Detect GPU name and total VRAM via nvidia-smi.
+///
+/// A view over [`detect_gpu_nvidia_smi_with_used`] that drops the live usage,
+/// for the callers that only need to know what card is present.
 pub(crate) fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
+    let (name, total, _used) = detect_gpu_nvidia_smi_with_used();
+    (name, total)
+}
+
+/// Name, total VRAM and live used VRAM from **one** `nvidia-smi` invocation.
+///
+/// Exists because `/api/admin/stats`'s no-card branch asked for the name and
+/// total with one call and the usage with another — two process spawns per
+/// dashboard poll, on a path that #417 had already cut from 273 ms to 6.1 ms by
+/// removing exactly this kind of waste. It is also more correct: two separate
+/// invocations sample at different instants, which is the same reason
+/// [`query_gpu_vram_free_mb`] combines its pair rather than subtracting two
+/// racing readings.
+///
+/// Only reached on a machine that has a card but is running a build without
+/// CUDA, so `gpu_info` is `None` while `nvidia-smi` still answers. On a machine
+/// with no card at all the spawn fails immediately and costs nothing.
+pub(crate) fn detect_gpu_nvidia_smi_with_used() -> (Option<String>, Option<u64>, Option<u64>) {
     let output = std::process::Command::new("nvidia-smi")
         .args([
-            "--query-gpu=name,memory.total",
+            "--query-gpu=name,memory.total,memory.used",
             "--format=csv,noheader,nounits",
         ])
         .output();
@@ -829,16 +850,19 @@ pub(crate) fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
     match output {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
-            let line = text.trim();
-            if let Some((name, vram_str)) = line.split_once(',') {
-                let name = name.trim().to_string();
-                let vram_mb = vram_str.trim().parse::<u64>().ok();
-                (Some(name), vram_mb)
-            } else {
-                (None, None)
+            let mut fields = text.trim().split(',');
+            let name = fields.next().map(|f| f.trim().to_string());
+            let total = fields.next().and_then(|f| f.trim().parse::<u64>().ok());
+            // Missing usage is not a failure of the whole reading: an older
+            // driver that does not report `memory.used` still tells us which
+            // card is present, and the caller treats None as unknown.
+            let used = fields.next().and_then(|f| f.trim().parse::<u64>().ok());
+            match name {
+                Some(n) if !n.is_empty() => (Some(n), total, used),
+                _ => (None, None, None),
             }
         }
-        _ => (None, None),
+        _ => (None, None, None),
     }
 }
 
@@ -1167,6 +1191,27 @@ mod tests {
             (32.0..=38.0).contains(&gpu),
             "card estimate {gpu} no longer reproduces the measured 35.32 tok/s"
         );
+    }
+
+    /// A node that could not measure its own memory must not be advertised as
+    /// capable. The nominal and the efficiency have to move together: raising
+    /// the efficiency to the measured 0.75 while leaving the old 50 GB/s
+    /// nominal would have taken this from 1.70 tok/s to 8.52, so the most
+    /// memory-starved node on the network would suddenly claim to be one of
+    /// the faster ones.
+    #[test]
+    fn a_node_that_cannot_measure_itself_stays_modest() {
+        let fallback = estimate_tokens_per_sec_7b(
+            crate::inference::mem_bandwidth::UNMEASURABLE_FALLBACK_GBPS,
+            false,
+        );
+        assert!(
+            fallback < 2.5,
+            "an unmeasurable node advertises {fallback} tok/s, which is not modest"
+        );
+        // But it must still advertise something: the whole point of the
+        // fallback is that a node with no measurement is not silent.
+        assert!(fallback > 0.5, "the fallback has collapsed to nothing");
     }
 
     /// The defect these constants replaced: a processor was priced at 15% of
