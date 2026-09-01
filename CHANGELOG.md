@@ -2,6 +2,43 @@
 
 All notable changes to SwarmLLM are documented here.
 
+### Fixed
+
+- **The report you paste into a bug report no longer contains anyone's IP
+  address.** The dashboard's **Copy diagnostics** button, and the endpoint
+  behind it, are meant to be shared — the button exists so that someone who is
+  not an engineer can hand a maintainer everything needed to help. Its own hint
+  said "No keys or invite codes are included", which reads as *safe to post*.
+  It also copied every network address the node knew: this machine's own, and up
+  to ten remembered peer addresses, which on a live network are other people's
+  home IP addresses.
+
+  Addresses are now replaced with a placeholder naming only what kind of address
+  it was — `<public-ip-a3f1>`, `<private-ip-…>`, `<host-…>`. Everything a
+  maintainer reads the report for survives: the transport, the port, the node
+  identity, and whether a connection is going through a relay. Two entries for
+  the same machine keep the same tag, so "ten remembered addresses, all one
+  machine" is still visible; the tag is scrambled differently in every report
+  and means nothing outside the one it came from. SwarmLLM's own public
+  bootstrap server is left readable, because it ships inside every copy of the
+  program and hiding it would only make the report harder to read.
+
+  Pass `--full` (or `?full=1`) to keep the addresses when you are debugging your
+  own machine.
+
+### Added
+
+- **`swarmllm diagnostics`** — the same report, from a terminal, on a machine
+  with no dashboard open. It prints what a maintainer needs and says plainly
+  that the output is safe to post. `--full` keeps the network addresses in.
+
+- **Diagnostics now say how fast this machine says it is.** A new *this machine*
+  section reports the processor, the graphics card if one is in use, the memory
+  bandwidth measured on the machine, and the speed the node advertises to the
+  rest of the network. That last figure is what every other node's scheduler
+  ranks this one on, so it is the answer to "why does work never come to my
+  machine?" — and until now it appeared nowhere anyone could copy.
+
 ## [0.3.141-alpha] — 2026-08-31
 
 ### Fixed

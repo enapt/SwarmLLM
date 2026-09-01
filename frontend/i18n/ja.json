@@ -880,7 +880,7 @@
   "reference.cold_start_title": "利用できるモデルがまだありません",
   "reference.copied": "診断情報をコピーしました",
   "reference.copy_diagnostics": "診断情報をコピー",
-  "reference.copy_diagnostics_hint": "このノードの概要（バージョン、接続、モデル、最近のイベント）をコピーし、不具合報告に貼り付けられます。キーや招待コードは含まれません。",
+  "reference.copy_diagnostics_hint": "このノードの概要（バージョン、接続、モデル、最近のイベント）をコピーし、不具合報告に貼り付けられます。共有しても安全です。キーや招待コードは含まれず、ネットワークアドレスはプレースホルダーに置き換えられます。",
   "reference.copy_failed": "コピーできませんでした: {error}",
   "reference.copy_manual": "以下をコピーして報告に貼り付けてください:",
   "reference.failed": "開始できませんでした: {error}",

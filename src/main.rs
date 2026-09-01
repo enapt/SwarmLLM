@@ -97,6 +97,14 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Print a report about this node for a bug report. Safe to paste in public:
+    /// no keys, no file paths, and network addresses replaced with placeholders.
+    Diagnostics {
+        /// Include network addresses verbatim — yours and your peers'. Only for
+        /// debugging your own machine; do not post the output publicly.
+        #[arg(long)]
+        full: bool,
+    },
     /// Download a shared reference / test model (smoke, standard, or stress).
     /// Run with no tier to see what's available. Needs a running daemon to fetch.
     GetModel {
@@ -398,6 +406,11 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
             cli::peers::query_peers(port, &data_dir, json).await
+        }
+        Commands::Diagnostics { full } => {
+            let port = resolve_client_port(cli.port);
+            let data_dir = resolve_data_dir(&cli.data_dir);
+            cli::diagnostics::print_diagnostics(port, &data_dir, full).await
         }
         Commands::GetModel { tier, all } => {
             let port = resolve_client_port(cli.port);

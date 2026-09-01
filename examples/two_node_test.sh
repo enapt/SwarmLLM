@@ -72,8 +72,11 @@ SK=$(cat "$S/api_key" 2>/dev/null || true)
 
 # Any direct (non-relayed) address the server publishes. Loopback is filtered
 # out of that list on purpose, so take the LAN one — same machine either way.
+# `?full=1` because this needs the literal address to dial. The endpoint
+# redacts addresses by default — its main consumer is a "copy this into a bug
+# report" button, and that output is meant to be safe to post in public.
 SERVER_ADDRS=$(curl -s -m 8 -H "Authorization: Bearer $SK" \
-  "http://localhost:$SERVER_PORT/api/admin/diagnostics" \
+  "http://localhost:$SERVER_PORT/api/admin/diagnostics?full=1" \
   | grep -oE "/ip4/[0-9.]+/tcp/[0-9]+/p2p/[A-Za-z0-9]+" | grep -v "p2p-circuit")
 # 10.255.255.254 is WSL2's NAT gateway — reachable, and the documented source of
 # the connection churn that loses sends between two nodes on one host. Prefer a

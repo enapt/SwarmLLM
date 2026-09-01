@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Chưa có mô hình nào",
   "reference.copied": "Đã sao chép chẩn đoán",
   "reference.copy_diagnostics": "Sao chép chẩn đoán",
-  "reference.copy_diagnostics_hint": "Sao chép bản tóm tắt ngắn về nút này — phiên bản, kết nối, mô hình và sự kiện gần đây — để dán vào báo cáo lỗi. Không kèm khóa hay mã mời.",
+  "reference.copy_diagnostics_hint": "Sao chép bản tóm tắt ngắn về nút này — phiên bản, kết nối, mô hình và sự kiện gần đây — để dán vào báo cáo lỗi. An toàn để chia sẻ: không có khóa, không có mã mời, và địa chỉ mạng được thay bằng ký tự đại diện.",
   "reference.copy_failed": "Không sao chép được: {error}",
   "reference.copy_manual": "Hãy sao chép nội dung này và dán vào báo cáo của bạn:",
   "reference.failed": "Không bắt đầu được: {error}",

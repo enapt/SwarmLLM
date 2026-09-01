@@ -880,7 +880,7 @@
   "reference.cold_start_title": "아직 사용할 모델이 없습니다",
   "reference.copied": "진단 정보를 복사했습니다",
   "reference.copy_diagnostics": "진단 정보 복사",
-  "reference.copy_diagnostics_hint": "이 노드의 간단한 요약(버전, 연결, 모델, 최근 이벤트)을 복사해 버그 신고에 붙여넣을 수 있습니다. 키나 초대 코드는 포함되지 않습니다.",
+  "reference.copy_diagnostics_hint": "이 노드의 간단한 요약(버전, 연결, 모델, 최근 이벤트)을 복사해 버그 신고에 붙여넣을 수 있습니다. 공유해도 안전합니다. 키나 초대 코드는 포함되지 않으며, 네트워크 주소는 자리 표시자로 대체됩니다.",
   "reference.copy_failed": "복사하지 못했습니다: {error}",
   "reference.copy_manual": "아래 내용을 복사해 신고에 붙여넣으세요:",
   "reference.failed": "시작하지 못했습니다: {error}",

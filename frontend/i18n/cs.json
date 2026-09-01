@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Zatím nejsou dostupné žádné modely",
   "reference.copied": "Diagnostika zkopírována",
   "reference.copy_diagnostics": "Kopírovat diagnostiku",
-  "reference.copy_diagnostics_hint": "Zkopíruje stručný souhrn tohoto uzlu — verzi, spojení, modely a poslední události — k vložení do hlášení chyby. Neobsahuje klíče ani zvací kódy.",
+  "reference.copy_diagnostics_hint": "Zkopíruje stručný souhrn tohoto uzlu — verzi, spojení, modely a poslední události — k vložení do hlášení chyby. Bezpečné ke sdílení: žádné klíče, žádné zvací kódy a síťové adresy jsou nahrazeny zástupnými symboly.",
   "reference.copy_failed": "Nepodařilo se zkopírovat: {error}",
   "reference.copy_manual": "Zkopírujte to a vložte do svého hlášení:",
   "reference.failed": "Nepodařilo se zahájit: {error}",

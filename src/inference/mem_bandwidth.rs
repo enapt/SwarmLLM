@@ -17,6 +17,16 @@
 //! This measures it instead: stream a buffer larger than any last-level cache
 //! and see how long it takes.
 //!
+//! **A debug build measures its own loop, not the machine.** The read is a
+//! scalar `wrapping_add` with bounds checks until the optimiser gets to it, so
+//! an unoptimised build is nowhere near memory-bound: the identical loop
+//! measured **5.3 GB/s at `-O0` against 30.3 GB/s at `-O`** on the same
+//! machine, in the same conditions (2026-09-01). Releases are optimised, so no
+//! user sees this — but a `cargo run` test node advertises about a sixth of its
+//! real speed for its whole life, and that figure is what every peer's
+//! scheduler ranks it on. Read `advertised speed` in `swarmllm diagnostics`
+//! before concluding a development node is being ignored unfairly.
+//!
 //! **Deliberately not a peak number.** It reads with the same thread count the
 //! decode pool uses, because a single-threaded figure understates a multi-channel
 //! machine badly and a thread-per-core figure overstates what a decode actually

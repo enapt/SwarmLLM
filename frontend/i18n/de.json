@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Noch keine Modelle verfügbar",
   "reference.copied": "Diagnose kopiert",
   "reference.copy_diagnostics": "Diagnose kopieren",
-  "reference.copy_diagnostics_hint": "Kopiert eine kurze Übersicht dieses Knotens — Version, Verbindungen, Modelle und letzte Ereignisse — zum Einfügen in einen Fehlerbericht. Schlüssel und Einladungscodes sind nicht enthalten.",
+  "reference.copy_diagnostics_hint": "Kopiert eine kurze Übersicht dieses Knotens — Version, Verbindungen, Modelle und letzte Ereignisse — zum Einfügen in einen Fehlerbericht. Sicher zu teilen: keine Schlüssel, keine Einladungscodes, und Netzwerkadressen werden durch Platzhalter ersetzt.",
   "reference.copy_failed": "Kopieren nicht möglich: {error}",
   "reference.copy_manual": "Kopiere dies und füge es in deinen Bericht ein:",
   "reference.failed": "Start nicht möglich: {error}",

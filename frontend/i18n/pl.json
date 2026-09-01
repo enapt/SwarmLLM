@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Brak dostępnych modeli",
   "reference.copied": "Skopiowano diagnostykę",
   "reference.copy_diagnostics": "Kopiuj diagnostykę",
-  "reference.copy_diagnostics_hint": "Kopiuje krótkie podsumowanie tego węzła — wersję, połączenia, modele i ostatnie zdarzenia — do wklejenia w zgłoszeniu błędu. Nie zawiera kluczy ani kodów zaproszeń.",
+  "reference.copy_diagnostics_hint": "Kopiuje krótkie podsumowanie tego węzła — wersję, połączenia, modele i ostatnie zdarzenia — do wklejenia w zgłoszeniu błędu. Bezpieczne do udostępnienia: bez kluczy, bez kodów zaproszeń, a adresy sieciowe są zastępowane symbolami zastępczymi.",
   "reference.copy_failed": "Nie udało się skopiować: {error}",
   "reference.copy_manual": "Skopiuj to i wklej do swojego zgłoszenia:",
   "reference.failed": "Nie udało się rozpocząć: {error}",

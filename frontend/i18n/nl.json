@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Nog geen modellen beschikbaar",
   "reference.copied": "Diagnose gekopieerd",
   "reference.copy_diagnostics": "Diagnose kopiëren",
-  "reference.copy_diagnostics_hint": "Kopieert een korte samenvatting van dit knooppunt — versie, verbindingen, modellen en recente gebeurtenissen — om in een foutmelding te plakken. Sleutels en uitnodigingscodes worden niet meegenomen.",
+  "reference.copy_diagnostics_hint": "Kopieert een korte samenvatting van dit knooppunt — versie, verbindingen, modellen en recente gebeurtenissen — om in een foutmelding te plakken. Veilig om te delen: geen sleutels, geen uitnodigingscodes, en netwerkadressen worden vervangen door plaatsaanduidingen.",
   "reference.copy_failed": "Kopiëren mislukt: {error}",
   "reference.copy_manual": "Kopieer dit en plak het in je melding:",
   "reference.failed": "Starten mislukt: {error}",

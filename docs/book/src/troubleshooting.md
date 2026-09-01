@@ -33,11 +33,13 @@ decode out of the total there.
 ### No log file to hand?
 
 ```bash
-curl -s -H "Authorization: Bearer $(cat ~/.local/share/swarmllm/api_key)" \
-  localhost:8800/api/admin/diagnostics
+swarmllm diagnostics
 ```
 
-This is the single most useful thing to attach to a bug report. It includes
+This is the single most useful thing to attach to a bug report, and it is safe
+to post in public: no API key, no invite code, no file paths, and every network
+address — yours and your peers' — replaced by a placeholder naming only its kind.
+Add `--full` if you are debugging your own machine and need the addresses back. It includes
 whether your machine is reachable from the internet, the last 50 requests with
 their routes, **per-peer serving performance** (ping, ms per layer, latency,
 region — slowest first), what your node has served for others, and recent

@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Ainda não há modelos disponíveis",
   "reference.copied": "Diagnóstico copiado",
   "reference.copy_diagnostics": "Copiar diagnóstico",
-  "reference.copy_diagnostics_hint": "Copia um breve resumo deste nó — versão, ligações, modelos e eventos recentes — para colar num relatório de erro. Não inclui chaves nem códigos de convite.",
+  "reference.copy_diagnostics_hint": "Copia um breve resumo deste nó — versão, ligações, modelos e eventos recentes — para colar num relatório de erro. Seguro para partilhar: sem chaves, sem códigos de convite, e os endereços de rede são substituídos por marcadores.",
   "reference.copy_failed": "Não foi possível copiar: {error}",
   "reference.copy_manual": "Copia isto e cola no teu relatório:",
   "reference.failed": "Não foi possível iniciar: {error}",

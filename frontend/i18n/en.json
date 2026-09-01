@@ -880,7 +880,7 @@
   "reference.cold_start_title": "No models available yet",
   "reference.copied": "Diagnostics copied",
   "reference.copy_diagnostics": "Copy diagnostics",
-  "reference.copy_diagnostics_hint": "Copies a short summary of this node — version, connections, models and recent events — for pasting into a bug report. No keys or invite codes are included.",
+  "reference.copy_diagnostics_hint": "Copies a short summary of this node — version, connections, models and recent events — for pasting into a bug report. Safe to share: no keys, no invite codes, and network addresses are replaced with placeholders.",
   "reference.copy_failed": "Could not copy: {error}",
   "reference.copy_manual": "Copy this and paste it into your report:",
   "reference.failed": "Could not start: {error}",

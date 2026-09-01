@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Belum ada model tersedia",
   "reference.copied": "Diagnostik disalin",
   "reference.copy_diagnostics": "Salin diagnostik",
-  "reference.copy_diagnostics_hint": "Menyalin ringkasan singkat node ini — versi, koneksi, model, dan kejadian terbaru — untuk ditempel ke laporan bug. Tidak menyertakan kunci atau kode undangan.",
+  "reference.copy_diagnostics_hint": "Menyalin ringkasan singkat node ini — versi, koneksi, model, dan kejadian terbaru — untuk ditempel ke laporan bug. Aman dibagikan: tanpa kunci, tanpa kode undangan, dan alamat jaringan diganti dengan placeholder.",
   "reference.copy_failed": "Tidak bisa menyalin: {error}",
   "reference.copy_manual": "Salin ini dan tempel ke laporan Anda:",
   "reference.failed": "Tidak bisa memulai: {error}",

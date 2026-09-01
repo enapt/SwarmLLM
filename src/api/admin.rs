@@ -252,7 +252,62 @@ pub async fn performance(State(state): State<AppState>) -> impl axum::response::
     }))
 }
 
-pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+/// Query for [`diagnostics`]. `full=1` opts in to the unredacted report.
+#[derive(Deserialize)]
+pub struct DiagnosticsQuery {
+    /// Include network addresses verbatim — this machine's, and every peer
+    /// address it remembers.
+    ///
+    /// Deliberately a string rather than a `bool`. Serde accepts only the
+    /// exact words `true` and `false` for a `bool` in a query string, so
+    /// `?full=1` — the form this project's own docs, README and
+    /// `two_node_test.sh` all use, and the one anyone types by habit — was
+    /// rejected by the extractor with a bare-text 400 that never reached the
+    /// error envelope. A flag with no invalid spelling cannot fail that way.
+    #[serde(default)]
+    full: Option<String>,
+}
+
+impl DiagnosticsQuery {
+    fn wants_full(&self) -> bool {
+        query_flag_is_on(self.full.as_deref())
+    }
+}
+
+/// Is a query flag switched on? `?full`, `?full=1`, `?full=true`, `?full=yes`
+/// and `?full=on` all mean yes; absent, empty-with-an-explicit-`no`, `0` and
+/// `false` mean no.
+///
+/// A bare `?full` with no value arrives as `Some("")` and counts as on,
+/// matching how every other CLI and web form treats a valueless flag.
+fn query_flag_is_on(value: Option<&str>) -> bool {
+    match value {
+        None => false,
+        Some(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "1" | "true" | "yes" | "on"
+        ),
+    }
+}
+
+/// GET /api/admin/diagnostics — the plain-text report a user pastes into a bug
+/// report, redacted so that pasting it is safe.
+///
+/// **The default hides addresses because this endpoint's job is sharing.** The
+/// dashboard's "Copy diagnostics" button is its main consumer, aimed squarely
+/// at someone who is not going to read the text first, and the report carries
+/// this node's own addresses plus up to ten remembered peer multiaddrs — on a
+/// live node, other people's home IP addresses. `?full=1` is the deliberate
+/// opt-in for an operator debugging their own machine, and is what
+/// `swarmllm diagnostics --full` and `examples/two_node_test.sh` ask for.
+///
+/// The redaction runs over the finished text (see
+/// [`crate::network::redact::redact_addresses`]) rather than per section, so a
+/// section added below inherits it with no author action.
+pub async fn diagnostics(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DiagnosticsQuery>,
+) -> impl axum::response::IntoResponse {
     use std::fmt::Write as _;
     let ss = &state.shared_state;
     let mut out = String::new();
@@ -312,6 +367,62 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
             .load(std::sync::atomic::Ordering::Relaxed),
         ss.config.model.shard_size_mb
     );
+
+    // What this machine IS. "Nobody ever routes work to my node" and "my node
+    // is slow" are both answered by the last line here — the speed this node
+    // advertises is what every peer's scheduler ranks it on — and until now it
+    // appeared on no surface anyone could paste. The CPU and the measured
+    // bandwidth it is derived from sit beside it so the figure can be argued
+    // with rather than just read.
+    {
+        let _ = writeln!(out, "\n-- this machine --");
+        match crate::health::monitor::local_cpu_info() {
+            Some(cpu) => {
+                let _ = writeln!(out, "  cpu: {} ({} threads)", cpu.name, cpu.cores);
+            }
+            None => {
+                let _ = writeln!(out, "  cpu: (could not be read)");
+            }
+        }
+        match &ss.gpu_info {
+            Some(g) => {
+                let _ = writeln!(
+                    out,
+                    "  gpu: {} ({} MB total, {} MB free, backend {})",
+                    g.name, g.vram_total_mb, g.vram_free_mb, g.backend
+                );
+            }
+            None => {
+                let _ = writeln!(out, "  gpu: none in use");
+            }
+        }
+        let is_gpu = ss.gpu_info.is_some();
+        match crate::model::auto_manage::vram::node_memory_bandwidth_gbps(
+            ss.gpu_info.as_ref().map(|g| g.name.as_str()),
+        ) {
+            Some(bw) => {
+                let _ = writeln!(
+                    out,
+                    "  memory bandwidth: {bw:.1} GB/s ({})",
+                    if is_gpu {
+                        "from the card's spec"
+                    } else {
+                        "measured on this machine"
+                    }
+                );
+                let _ = writeln!(
+                    out,
+                    "  advertised speed: {:.2} tok/s on a 7B Q4 — what other nodes rank this one on",
+                    crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(bw, is_gpu)
+                );
+            }
+            // Unknown is a different fact from slow and must not be printed as
+            // one — the same distinction `/api/admin/stats` draws.
+            None => {
+                let _ = writeln!(out, "  memory bandwidth: could not be measured");
+            }
+        }
+    }
 
     // How this node is reachable. An anchor advertising only private
     // addresses looks healthy from every other angle, so this belongs next to
@@ -644,12 +755,18 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
         }
     }
 
+    let body = if query.wants_full() {
+        out
+    } else {
+        crate::network::redact::redact_addresses(&out)
+    };
+
     (
         [(
             axum::http::header::CONTENT_TYPE,
             "text/plain; charset=utf-8",
         )],
-        out,
+        body,
     )
 }
 
@@ -2309,4 +2426,39 @@ fn truncate_preview(s: &str) -> String {
     }
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The spelling that shipped in the docs must be the one the code accepts.
+    ///
+    /// This started as `full: bool`, which serde will deserialize from a query
+    /// string only for the literal words `true` and `false` — so `?full=1`,
+    /// which the README, `docs/DIAGNOSTICS.md` and `examples/two_node_test.sh`
+    /// all use, was refused by the extractor before the handler ever ran, with
+    /// a bare-text 400 that never reached the JSON error envelope. Caught by
+    /// running the command, not by reading it.
+    #[test]
+    fn the_full_flag_accepts_the_spellings_people_actually_type() {
+        for on in ["1", "true", "TRUE", "yes", "on", "", " 1 "] {
+            assert!(query_flag_is_on(Some(on)), "{on:?} should switch it on");
+        }
+        for off in ["0", "false", "no", "off", "nonsense"] {
+            assert!(!query_flag_is_on(Some(off)), "{off:?} should leave it off");
+        }
+        assert!(!query_flag_is_on(None), "absent means off");
+    }
+
+    /// The default has to be the redacted report: this endpoint's output is
+    /// copied by a dashboard button whose hint promises it is safe to share.
+    #[test]
+    fn a_diagnostics_request_with_no_query_gets_the_redacted_report() {
+        assert!(!DiagnosticsQuery { full: None }.wants_full());
+        assert!(DiagnosticsQuery {
+            full: Some("1".into())
+        }
+        .wants_full());
+    }
 }

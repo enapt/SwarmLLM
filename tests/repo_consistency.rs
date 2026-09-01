@@ -2576,6 +2576,54 @@ fn nothing_leaves_this_node_with_a_prompt_in_it_unless_sharing_is_on() {
     );
 }
 
+/// The diagnostics report is written to be pasted somewhere public — the
+/// dashboard has a one-click "Copy diagnostics" button and `swarmllm
+/// diagnostics` prints the same thing — and the person doing the pasting is
+/// explicitly not expected to read it first. It carries this machine's
+/// addresses and up to ten remembered peer multiaddrs, which on a live node
+/// are other people's home IP addresses.
+///
+/// The redaction is one call at the end of one handler. Nothing else in the
+/// system would notice if it went away, and the button's own hint tells the
+/// user the output is safe to share.
+#[test]
+fn the_diagnostics_report_hides_addresses_unless_full_is_asked_for() {
+    let src = std::fs::read_to_string("src/api/admin.rs").expect("read admin.rs");
+    let body = fn_body(&src, "pub async fn diagnostics(")
+        .expect("the diagnostics handler was renamed — re-point this guard");
+    // Whitespace-stripped so the assertion is not pinned to whatever rustfmt
+    // produced on the day it was written (gotcha #413).
+    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+
+    assert!(
+        flat.contains("redact::redact_addresses(&out)"),
+        "GET /api/admin/diagnostics no longer redacts network addresses. Its \
+         output is copied by a dashboard button whose hint promises the text is \
+         safe to share, and it contains every peer address this node remembers."
+    );
+    assert!(
+        flat.contains("query.wants_full()"),
+        "the unredacted report must stay behind an explicit `?full=1`, not \
+         become the default"
+    );
+
+    // The other half: the two surfaces that hand the report to a person must
+    // ask for the safe form. `?full=1` belongs to an operator debugging their
+    // own machine.
+    let cli = std::fs::read_to_string("src/cli/diagnostics.rs").expect("read cli/diagnostics.rs");
+    let cli_flat: String = cli.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        cli_flat.contains(r#"iffull{"?full=1"}else{""}"#),
+        "`swarmllm diagnostics` must default to the redacted report"
+    );
+    let js = std::fs::read_to_string("frontend/js/components/reference-models.js")
+        .expect("read reference-models.js");
+    assert!(
+        !js.contains("diagnostics?full"),
+        "the dashboard's copy button must not request the unredacted report"
+    );
+}
+
 /// A function's whole body, from its signature to the closing brace in column
 /// zero. `None` if the signature is not present.
 ///

@@ -880,7 +880,7 @@
   "reference.cold_start_title": "暂无可用模型",
   "reference.copied": "诊断信息已复制",
   "reference.copy_diagnostics": "复制诊断信息",
-  "reference.copy_diagnostics_hint": "复制该节点的简要摘要——版本、连接、模型和近期事件——以便粘贴到错误报告中。不包含密钥或邀请码。",
+  "reference.copy_diagnostics_hint": "复制该节点的简要摘要——版本、连接、模型和近期事件——以便粘贴到错误报告中。可以安全分享：不含密钥或邀请码，网络地址也会替换为占位符。",
   "reference.copy_failed": "无法复制：{error}",
   "reference.copy_manual": "复制以下内容并粘贴到你的报告中：",
   "reference.failed": "无法开始：{error}",

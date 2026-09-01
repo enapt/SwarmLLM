@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Inga modeller tillgängliga än",
   "reference.copied": "Diagnostik kopierad",
   "reference.copy_diagnostics": "Kopiera diagnostik",
-  "reference.copy_diagnostics_hint": "Kopierar en kort sammanfattning av den här noden — version, anslutningar, modeller och senaste händelser — att klistra in i en felrapport. Nycklar och inbjudningskoder ingår inte.",
+  "reference.copy_diagnostics_hint": "Kopierar en kort sammanfattning av den här noden — version, anslutningar, modeller och senaste händelser — att klistra in i en felrapport. Tryggt att dela: inga nycklar, inga inbjudningskoder, och nätverksadresser ersätts med platshållare.",
   "reference.copy_failed": "Kunde inte kopiera: {error}",
   "reference.copy_manual": "Kopiera detta och klistra in i din rapport:",
   "reference.failed": "Kunde inte starta: {error}",

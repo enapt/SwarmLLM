@@ -11,7 +11,7 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2183 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2195 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
 > **Recent work (July 2026) — inference across NAT.** Two machines behind ordinary home routers can now run a model together: a sealed application-level relay carries the tensor traffic when no direct path exists, and direct connections are established opportunistically on top. Verified end-to-end by an external tester — a real three-segment pipeline split across two home machines on different continents. Local models also gained working **tool calling** on both API surfaces, streaming included.
 >
@@ -209,7 +209,7 @@ Private mode is one-way: your data stays private, but your nodes still serve the
 - **Fault tolerance** — JoinSet-based supervisor with restart-on-crash for all 12 subsystems; hot-standby failover; shard replication; atomic shard writes.
 - **Every answer says where it came from** — chat shows "1.25s · 33.8 tok/s · via 2 peers", and every API response carries the route in headers (`x-swarm-route`, `x-swarm-nodes`, plus standard [`Server-Timing`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Server-Timing) durations your browser's devtools renders natively). "Why was that slow" is the first question anyone asks, and it is now answerable without server access.
 - **Observability** — Prometheus `/metrics` with time-to-first-token and time-per-output-token named to the [OpenTelemetry GenAI conventions](https://github.com/open-telemetry/semantic-conventions-genai), so collectors and community Grafana dashboards work without a translation layer. Readiness probe `/health/ready`, structured tracing with request-ID correlation, and one greppable summary line per request carrying the whole route and where the time went.
-- **Self-service diagnostics** — `GET /api/admin/diagnostics` reports whether your machine is reachable from the internet, whether it has managed direct connections, recent requests with per-segment timings, per-peer serving performance (ping, ms/layer, latency, region — slowest first), what your node has served for others, and the most recent failures including *which machine served each one*. That last detail is what separates "my node has a problem" from "one peer has a problem", and it is the single most useful thing to include in a bug report.
+- **Self-service diagnostics** — `GET /api/admin/diagnostics` reports whether your machine is reachable from the internet, whether it has managed direct connections, recent requests with per-segment timings, per-peer serving performance (ping, ms/layer, latency, region — slowest first), what your node has served for others, and the most recent failures including *which machine served each one*. That last detail is what separates "my node has a problem" from "one peer has a problem", and it is the single most useful thing to include in a bug report. Run `swarmllm diagnostics` for the same report from a shell — addresses are replaced with placeholders naming only their kind, so the output is safe to post publicly. `--full` (or `?full=1`) keeps them, for debugging your own machine.
 - **Config hot-reload** — change parameters without restarting via SIGHUP or `/api/admin/config/reload`.
 - **Auto-updater** — checks GitHub releases, downloads & replaces binary with restart prompt.
 - **SDKs** — Python (`pip install swarmllm-client`), JS/TS (zero-dep), LangChain, LlamaIndex.
@@ -462,7 +462,7 @@ Full list: [Configuration Reference](https://enapt.github.io/SwarmLLM/configurat
 | GET | `/api/admin/models` | Model list with shard status |
 | GET | `/api/admin/peers` | Connected peers with latency / trust |
 | GET | `/api/admin/credits` | Internal credit accounting (dormant — gates nothing) |
-| GET | `/api/admin/diagnostics` | Plain-text health report for a shell or a bug report |
+| GET | `/api/admin/diagnostics` | Plain-text health report for a shell or a bug report. Addresses redacted unless `?full=1` |
 | GET | `/api/admin/performance` | Routes, per-segment timings, per-peer performance, hourly trend (JSON) |
 | GET | `/api/admin/ws` | WebSocket for live updates |
 | GET | `/api/pool/state` | Pool membership, stats, private-mode status |
@@ -537,7 +537,7 @@ cargo run -- run
 
 ## Development Transparency
 
-SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2183 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
+SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2195 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
 
 ## License
 

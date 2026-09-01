@@ -106,7 +106,7 @@ pub(crate) enum InboundCheck {
 /// Cached because the answer cannot change while the process runs, and the
 /// capability it feeds is rebuilt every thirty seconds — `sysinfo` refreshing a
 /// CPU list on each of those would be pure waste.
-fn local_cpu_info() -> Option<crate::types::CpuInfo> {
+pub(crate) fn local_cpu_info() -> Option<crate::types::CpuInfo> {
     static CPU: std::sync::OnceLock<Option<crate::types::CpuInfo>> = std::sync::OnceLock::new();
     CPU.get_or_init(|| {
         let sys = sysinfo::System::new_with_specifics(

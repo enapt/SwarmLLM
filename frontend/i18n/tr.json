@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Henüz kullanılabilir model yok",
   "reference.copied": "Tanılama kopyalandı",
   "reference.copy_diagnostics": "Tanılamayı kopyala",
-  "reference.copy_diagnostics_hint": "Bu düğümün kısa bir özetini — sürüm, bağlantılar, modeller ve son olaylar — hata bildirimine yapıştırmak üzere kopyalar. Anahtarlar ve davet kodları dahil edilmez.",
+  "reference.copy_diagnostics_hint": "Bu düğümün kısa bir özetini — sürüm, bağlantılar, modeller ve son olaylar — hata bildirimine yapıştırmak üzere kopyalar. Paylaşmak güvenlidir: anahtar yok, davet kodu yok ve ağ adresleri yer tutucularla değiştirilir.",
   "reference.copy_failed": "Kopyalanamadı: {error}",
   "reference.copy_manual": "Bunu kopyalayıp bildiriminize yapıştırın:",
   "reference.failed": "Başlatılamadı: {error}",

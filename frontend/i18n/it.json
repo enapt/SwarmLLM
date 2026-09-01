@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Nessun modello ancora disponibile",
   "reference.copied": "Diagnostica copiata",
   "reference.copy_diagnostics": "Copia diagnostica",
-  "reference.copy_diagnostics_hint": "Copia un breve riepilogo di questo nodo — versione, connessioni, modelli ed eventi recenti — da incollare in una segnalazione. Non include chiavi né codici di invito.",
+  "reference.copy_diagnostics_hint": "Copia un breve riepilogo di questo nodo — versione, connessioni, modelli ed eventi recenti — da incollare in una segnalazione. Sicuro da condividere: nessuna chiave, nessun codice di invito e gli indirizzi di rete sono sostituiti da segnaposto.",
   "reference.copy_failed": "Copia non riuscita: {error}",
   "reference.copy_manual": "Copia questo e incollalo nella tua segnalazione:",
   "reference.failed": "Avvio non riuscito: {error}",

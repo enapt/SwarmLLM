@@ -6,6 +6,7 @@
 
 pub mod bench;
 pub mod chat;
+pub mod diagnostics;
 pub mod get_model;
 pub mod peers;
 pub mod pool;

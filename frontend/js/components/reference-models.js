@@ -161,10 +161,17 @@
     /**
      * Copy a pasteable node summary.
      *
-     * Served as plain text by the daemon, already redacted — no key, no invite
-     * code, no file paths. Falls back to a selectable textarea because
-     * navigator.clipboard is unavailable over plain HTTP on a LAN address,
-     * which is exactly how most people reach this dashboard.
+     * Served as plain text by the daemon, redacted there — no key, no invite
+     * code, no file paths, and every network address replaced by a placeholder
+     * naming only its kind. That last part is why the endpoint is called
+     * without `?full=1`: the report carries this machine's addresses and up to
+     * ten remembered peer multiaddrs, which on a live node are other people's
+     * home IP addresses, and the person clicking this button is not expected
+     * to read the text before pasting it somewhere public.
+     *
+     * Falls back to a selectable textarea because navigator.clipboard is
+     * unavailable over plain HTTP on a LAN address, which is exactly how most
+     * people reach this dashboard.
      */
     copyDiagnostics: function () {
       return App

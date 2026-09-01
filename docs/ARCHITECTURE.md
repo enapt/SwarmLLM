@@ -1915,7 +1915,10 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `POST    /api/admin/models/{id}/add` — Trigger model acquisition
 - `GET     /api/admin/models/{id}/status` — Model acquisition progress
 - `GET     /api/admin/peers` — Connected peers with latency/trust
-- `GET     /api/admin/diagnostics` — Plain-text support dump. Sections: reachable
+- `GET     /api/admin/diagnostics` — Plain-text support dump, **address-redacted unless `?full=1`** (it is written to be pasted into a bug report; `swarmllm diagnostics` is the CLI wrapper). Sections: **this machine** (CPU, GPU,
+  measured memory bandwidth, and the advertised 7B tok/s every peer's
+  scheduler ranks this node on — the answer to "why does nobody route work
+  to me?", which appeared on no pasteable surface before), reachable
   addresses, peers, **recent inference failures** (last 20: model, elapsed, and
   *which peer served each* — the field that separates "this node is broken" from
   "one peer is broken", plus a repeated-peer note), **NAT traversal**
@@ -2186,7 +2189,7 @@ no trace is registered.
 |---|---|
 | `DIAG: request complete` log line | The whole route and timing set on one greppable line |
 | Response headers | `x-swarm-route`, `x-swarm-segments`, `x-swarm-peers`, `x-swarm-nodes`, `x-swarm-regions` + W3C `Server-Timing`, attached by `api::attach_route_headers` |
-| `GET /api/admin/diagnostics` | Plain text for a shell: recent requests, per-peer performance, served-for-others, failures |
+| `GET /api/admin/diagnostics` | Plain text for a shell: recent requests, per-peer performance, served-for-others, failures. Addresses redacted unless `?full=1` |
 | `GET /api/admin/performance` | Same as JSON, plus the hourly trend |
 | `/metrics` | OTel-named TTFT/TPOT histograms + `requests_by_route{route,outcome}` + serving-side counters |
 | Dashboard | Chat route line; Models → Performance panel |

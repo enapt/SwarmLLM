@@ -880,7 +880,7 @@
   "reference.cold_start_title": "Aucun modèle disponible pour l'instant",
   "reference.copied": "Diagnostic copié",
   "reference.copy_diagnostics": "Copier le diagnostic",
-  "reference.copy_diagnostics_hint": "Copie un bref résumé de ce nœud — version, connexions, modèles et événements récents — à coller dans un rapport de bogue. Aucune clé ni code d'invitation n'est inclus.",
+  "reference.copy_diagnostics_hint": "Copie un bref résumé de ce nœud — version, connexions, modèles et événements récents — à coller dans un rapport de bogue. Sans risque à partager : aucune clé, aucun code d'invitation, et les adresses réseau sont remplacées par des espaces réservés.",
   "reference.copy_failed": "Copie impossible : {error}",
   "reference.copy_manual": "Copiez ceci et collez-le dans votre rapport :",
   "reference.failed": "Démarrage impossible : {error}",

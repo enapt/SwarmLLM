@@ -257,6 +257,15 @@ last 50 completed requests, the failure ring, per-peer serving performance
 (round-trip time, ms/layer, EWMA latency, sample count, region) and what this
 node has served for others. One command instead of a log excerpt:
 
+**`-- this machine --`** — CPU, GPU, measured memory bandwidth, and the
+`advertised speed` derived from it. That last figure is what every other node's
+scheduler ranks this one on, so it is the first thing to read when someone asks
+why work is never routed to their machine, or why their fast box loses to a
+slower one. A GPU node takes its bandwidth from the card's spec table; a
+processor-only node reports what `inference::mem_bandwidth` actually measured.
+"Could not be measured" is a distinct answer from a low number and is printed
+as one.
+
 **`in_flight: N traces, M pipelines`** — both should be `0` on an idle node.
 Non-zero with no traffic means bookkeeping has been left behind, and the trace
 count is the one that bites: it is the oracle behind `model_is_in_use`, so a
@@ -265,9 +274,26 @@ node serving nobody. There is no sweep behind the RAII cleanup, so this number
 is the only way to see it.
 
 ```bash
-curl -s -H "Authorization: Bearer $(cat ~/.local/share/swarmllm/api_key)" \
-  localhost:8800/api/admin/diagnostics
+swarmllm diagnostics          # safe to paste in public
+swarmllm diagnostics --full   # keeps network addresses, for your own machine
 ```
+
+Or straight from the endpoint, which the command is a wrapper over:
+
+```bash
+curl -s -H "Authorization: Bearer $(cat ~/.local/share/swarmllm/api_key)" \
+  'localhost:8800/api/admin/diagnostics?full=1'
+```
+
+**Without `?full=1` every network address is replaced** by a placeholder naming
+its kind — `<public-ip-a3f1>`, `<private-ip-…>`, `<host-…>` — while transport,
+port, peer id and `/p2p-circuit` structure survive, so the report still answers
+"is this node public?" and "is that hop relayed?". Two occurrences of one host
+share a tag, so "ten cache entries, all the same machine" is still visible; the
+tag is salted per report and means nothing across two of them. The project's own
+bootstrap anchor is exempt, since it ships in every binary. The default is
+redacted because the dashboard's **Copy diagnostics** button is this endpoint's
+main consumer and its output gets pasted into public channels.
 
 Per-request routing is also on **every response**, so a failing client can be
 diagnosed without server access at all:

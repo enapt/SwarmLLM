@@ -21,6 +21,13 @@ serving performance, what this node has served for others, and recent failures
 including which peer served each one. See
 [Troubleshooting](../troubleshooting.md) for how to read it.
 
+Network addresses are redacted unless `?full=1` is passed — replaced by a
+placeholder naming their kind, with transport, port, peer id and `/p2p-circuit`
+structure left intact. The default is the safe one because this endpoint exists
+to be shared: the dashboard's **Copy diagnostics** button and `swarmllm
+diagnostics` both use it, and the report otherwise carries this machine's
+addresses plus every remembered peer address.
+
 ### GET /api/admin/performance
 The JSON sibling of `diagnostics`, used by the dashboard's Performance view.
 
