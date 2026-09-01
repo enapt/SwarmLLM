@@ -9,6 +9,18 @@
 //! segment pipeline, no TP, no vision, no LoRA, no pipeline sealing). The
 //! handler here only has to invoke the worker and shuttle tokens.
 
+/// What a serving node answers when asked to run a model it does not hold.
+///
+/// One string, named, because the coordinator has to RECOGNISE it: the refusal
+/// is the only thing it will ever hear about the request, and it means the
+/// holder record that chose this peer is stale. `remote_error_means_missing_shard`
+/// matches on it so the claim is retracted, the peer is blacklisted for this
+/// request, and the request is retried on another holder — the same handling
+/// a mid-pipeline missing-shard error gets. Before it was named, the literal
+/// matched nothing on the coordinator and one honest "not me" failed a request
+/// four other peers could have served (gotcha #433).
+pub(crate) const REMOTE_GENERATE_NOT_HOSTED: &str = "model not hosted on target";
+
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -168,7 +180,7 @@ pub(super) async fn handle_remote_generate_request(
             request_id,
             token_id: 0,
             finish_reason: Some(NetworkFinishReason::Error(
-                "model not hosted on target".into(),
+                REMOTE_GENERATE_NOT_HOSTED.into(),
             )),
             text: String::new(),
             usage: None,

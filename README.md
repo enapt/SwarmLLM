@@ -11,9 +11,11 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2210 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2211 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
-> **Recent work (July 2026) — inference across NAT.** Two machines behind ordinary home routers can now run a model together: a sealed application-level relay carries the tensor traffic when no direct path exists, and direct connections are established opportunistically on top. Verified end-to-end by an external tester — a real three-segment pipeline split across two home machines on different continents. Local models also gained working **tool calling** on both API surfaces, streaming included.
+> **Recent work (September 2026) — a model that does not quite fit your graphics card no longer loses the card.** Placement used to be all or nothing: a model needing a little more graphics memory than was free ran *entirely* on the processor while the card sat idle beside it. Since v0.3.145 the node splits it — the first layers on the card, the rest on the processor, the count chosen automatically — measured on an RTX 3070 at **1.8× the processor-only speed** for a 7B that no longer fits, against 7–8× when it does (see [Benchmarks](#benchmarks)). The same month: **a model no single node can hold is served** by chaining peers (a 14B across three machines on two continents), every node advertises a *measured* speed instead of a constant that was 5× low, the diagnostics report is safe to paste in public, and Apple Silicon nodes can update themselves again.
+>
+> **Earlier (July 2026) — inference across NAT.** Two machines behind ordinary home routers can run a model together: a sealed application-level relay carries the tensor traffic when no direct path exists, and direct connections are established opportunistically on top. Verified end-to-end by an external tester. Local models also gained working **tool calling** on both API surfaces, streaming included.
 >
 > **Benchmarks:** prompt processing is up to **3× faster** and replying inside a long conversation up to **5.5× faster** as of v0.3.81 (measured 2026-08-07, see [Benchmarks](#benchmarks)). Cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (measured 2026-04-20). Windows release binaries reach Linux parity on single-node and split inference (validated 2026-04-23).
 
@@ -173,7 +175,8 @@ Private mode is one-way: your data stays private, but your nodes still serve the
 
 ### Inference
 
-- **Distributed pipelines** — layers sharded across nodes; automatic pipeline assembly, crash recovery, auto-reconnect; Candle-based direct tensor computation; E2E encrypted hop-by-hop.
+- **Distributed pipelines** — layers sharded across nodes; automatic pipeline assembly, crash recovery, auto-reconnect; Candle-based direct tensor computation; E2E encrypted hop-by-hop. A model **no single node can hold** is served by chaining the peers that hold its pieces.
+- **A card that is a little too small still helps** — a model that does not fit whole is split between the graphics card and the processor (the first layers on the card, the rest on the processor, the count sized automatically from what is free). Before v0.3.145 such a model lost the card entirely. `gpu_layers = N` sets the count by hand; `SWARMLLM_HYBRID_OFFLOAD=0` turns the automatic split off.
 - **Default-on speedups** — remote-generate fast path, cross-request prefix cache, cross-node prefix-KV sharing, continuous batching, Sarathi chunked prefill, batched fusion, Parallax scheduler. Numbers + tuning knobs in [Performance & Inference Speedups](https://enapt.github.io/SwarmLLM/operations/performance.html).
 - **Flag-gated speedups** — distributed speculative decoding, SWIFT self-speculative, DSD multi-segment speculation, Q8_0 activation compression (~3.76× wire).
 - **Tensor parallelism** — automatic TP splitting for LAN peers (RTT ≤ 10 ms), ring-allreduce for 4+ ranks; complements pipeline parallelism for WAN.
@@ -207,7 +210,7 @@ Private mode is one-way: your data stays private, but your nodes still serve the
 - **Auto-shard management** — VRAM-aware acquisition from HuggingFace and peers with popularity/rarity scoring; smart pruning auto-removes over-replicated shards.
 - **Web UI** — chat, model browser, shard visualization, first-run wizard, network map, leaderboard, compare page; mobile-responsive; 21 languages; light/dark/system theme.
 - **Fault tolerance** — JoinSet-based supervisor with restart-on-crash for all 12 subsystems; hot-standby failover; shard replication; atomic shard writes.
-- **Every answer says where it came from** — chat shows "1.25s · 33.8 tok/s · via 2 peers", and every API response carries the route in headers (`x-swarm-route`, `x-swarm-nodes`, plus standard [`Server-Timing`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Server-Timing) durations your browser's devtools renders natively). "Why was that slow" is the first question anyone asks, and it is now answerable without server access.
+- **Every answer says where it came from** — chat shows "1.25s · 33.8 tok/s · via 2 peers", and every non-streaming API response carries the route in headers (`x-swarm-route`, `x-swarm-nodes`, `x-swarm-regions`, plus standard [`Server-Timing`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Server-Timing) durations, per segment, that your browser's devtools renders natively). A streamed reply sends its headers before the route is chosen, so look it up afterwards in `/api/admin/performance`. "Why was that slow" is the first question anyone asks, and it is now answerable without server access.
 - **Observability** — Prometheus `/metrics` with time-to-first-token and time-per-output-token named to the [OpenTelemetry GenAI conventions](https://github.com/open-telemetry/semantic-conventions-genai), so collectors and community Grafana dashboards work without a translation layer. Readiness probe `/health/ready`, structured tracing with request-ID correlation, and one greppable summary line per request carrying the whole route and where the time went.
 - **Self-service diagnostics** — `GET /api/admin/diagnostics` reports whether your machine is reachable from the internet, whether it has managed direct connections, recent requests with per-segment timings, per-peer serving performance (ping, ms/layer, latency, region — slowest first), what your node has served for others, and the most recent failures including *which machine served each one*. That last detail is what separates "my node has a problem" from "one peer has a problem", and it is the single most useful thing to include in a bug report. Run `swarmllm diagnostics` for the same report from a shell — addresses are replaced with placeholders naming only their kind, so the output is safe to post publicly. `--full` (or `?full=1`) keeps them, for debugging your own machine.
 - **Config hot-reload** — change parameters without restarting via SIGHUP or `/api/admin/config/reload`.
@@ -287,6 +290,21 @@ around it are unchanged. Both are true; the table is the one you feel.
 > VRAM, so on an 8 GB card a 3.8B model at Q4 does not fit and silently runs on
 > the CPU — 3.4 tok/s instead of 34.5 in the table above. Raise it to `moderate`
 > or `maximum` in Settings if the machine is yours to use.
+
+**When a model does not fit the card whole** (v0.3.145, measured 2026-09-01 on
+the same RTX 3070, streaming `/v1/chat/completions`, 128 tokens, median of 3
+after a warm-up). The card's budget was capped at 3000 MB so that neither model
+fits, which is the situation the split exists for:
+
+| Model | Fits whole on the card | Split (auto-sized) | Processor only (before v0.3.145) |
+|---|---|---|---|
+| Qwen2.5-Coder 7B Q4_K_M (28 layers) | 27.3 tok/s | **6.8 tok/s** — 13 layers on the card | 3.8 tok/s |
+| Llama-3.1 8B Q4_K_M (32 layers) | 31.7 tok/s | **5.2 tok/s** — 12 layers on the card | 4.0 tok/s |
+
+The split is worth 1.3–1.8× over what shipped before, and the node checks the
+worker's real memory use against its own estimate (2557 MB and 2256 MB, both
+inside the 3000 MB budget). These are one machine's numbers; the fleet is
+confirming them on other cards.
 
 **Cross-node prefix-KV sharing** (measured 2026-04-20): two daemons on loopback, Qwen2.5-Coder-7B Q4, 672-token prompt. When the second node fetches the first's prefix-KV snapshot instead of re-prefilling locally, **iter-1 TTFT drops from 151.7 s → 11.8 s (12.9×)**. See [Performance chapter](https://enapt.github.io/SwarmLLM/operations/performance.html#cross-node-prefix-kv-sharing).
 
@@ -394,28 +412,38 @@ Full feature-flag matrix in [CONTRIBUTING.md](CONTRIBUTING.md).
 swarmllm <COMMAND>
 
 Commands:
-  run         Start the daemon (default if omitted)
-  status      Show node status (queries running daemon)
-  chat        Interactive terminal chat
-  bench       Run inference benchmarks
-  peers       List connected peers with latency and trust scores
-  pool        Device pool management
-  test-split  Test split inference locally (single-node diagnostic)
-  update      Check for and download updates
-  version     Print version information
+  run           Start the daemon (default if omitted)
+  status        Show node status (queries running daemon)
+  chat          Interactive terminal chat
+  bench         Run inference benchmarks against a running daemon
+  peers         List connected peers with latency and trust scores
+  diagnostics   Print a report about this node for a bug report (addresses redacted; --full keeps them)
+  get-model     Download a shared reference / test model (smoke, standard, or stress)
+  remove-model  Remove a model from this machine and tell the network it has gone
+  privacy       Make prompt privacy possible for a model by fetching the pieces it needs
+  pool          Device pool management
+  test-split    Test split inference locally (single-node diagnostic)
+  update        Check for and download updates
+  version       Print version information
 ```
 
 Run `swarmllm --help` for the full flag list.
 
 ## Configuration
 
-Config lives at `~/.local/share/swarmllm/config.toml` (Linux), `~/Library/Application Support/swarmllm/config.toml` (macOS), or `%APPDATA%\swarmllm\config.toml` (Windows). Every value can be overridden with a `SWARMLLM_`-prefixed environment variable:
+Config lives at `~/.local/share/swarmllm/config.toml` (Linux), `~/Library/Application Support/swarmllm/config.toml` (macOS), or `%APPDATA%\swarmllm\config.toml` (Windows). Most settings are changed from the dashboard's Settings panel or the config file. A handful — the ones a headless or Docker deployment needs before the file exists — can also be set as environment variables:
 
 ```bash
 SWARMLLM_NODE_LISTEN_PORT=9000
-SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB=6000
+SWARMLLM_NODE_DATA_DIR=/data
 SWARMLLM_LOGGING_LEVEL=debug
+SWARMLLM_INFERENCE_GPU_LAYERS=0          # 0 = processor only
+SWARMLLM_INFERENCE_MODEL_PATH=/models/x.gguf
+SWARMLLM_API_KEY=...
+SWARMLLM_NETWORK_BOOTSTRAP_PEERS=/dns4/.../p2p/...   # comma-separated
 ```
+
+Those seven are the complete list — other keys (such as `resources.max_gpu_vram_mb`) are read from the config file only.
 
 Provider API keys are also loaded from a `.env` file in the data directory:
 
@@ -537,7 +565,7 @@ cargo run -- run
 
 ## Development Transparency
 
-SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2210 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
+SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2211 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
 
 ## License
 

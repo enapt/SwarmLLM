@@ -2,6 +2,58 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.146-alpha] — 2026-09-01
+
+### Fixed
+
+- **A model split between the card and the processor could run its processor
+  half on a single core — for the life of the worker.** Found benchmarking
+  0.3.145 on a second model: an 8B split 12/32 measured 2.9 tokens/sec, *below*
+  the 4.0 it manages on the processor alone. The node calibrates how many
+  threads a reply should use from its first few tokens, once per worker. While
+  the split model was still loading, the same worker served two one-layer,
+  card-only slices of it for another machine's request; those take 1-5 ms, the
+  calibration concluded one thread was best, and the full model then decoded
+  its twenty processor layers single-threaded. With the cold request kept local
+  the same model measured 5.2-5.6 tokens/sec. The calibration is now kept
+  separately for each number of processor-side layers a forward pass actually
+  runs, and a pass with none is never timed. Any graphics node that serves
+  slices to peers while loading a split model could have hit this.
+
+- **A streamed request that could not be served pretended the model had
+  chosen to say nothing.** Asking for a model no node holds answered, with
+  `stream: true`, a `200`, an empty reply and `finish_reason: "stop"`; the same
+  request without streaming answered 503 with "Not enough peers have the shards
+  needed for this model". The streaming form took a path from before the router
+  could stream, which mapped every failure to `stop`. Both forms now go through
+  the router and report the same failure, and a stream whose pipeline dies
+  mid-way reports that as an error rather than a stop. The Anthropic surface
+  was already correct.
+
+- **One peer honestly saying "I don't have that model" failed the whole
+  request** when four other peers held it. The fast path's refusal was not
+  recognised as the stale-holder signal it is, so nothing was retried. It now
+  retracts the stale claim, skips that peer, and tries another — the same
+  handling a missing shard mid-pipeline has had since July.
+
+### Changed
+
+- The README no longer claims every setting can be set as an environment
+  variable. Seven can (`SWARMLLM_NODE_LISTEN_PORT`, `SWARMLLM_NODE_DATA_DIR`,
+  `SWARMLLM_LOGGING_LEVEL`, `SWARMLLM_INFERENCE_MODEL_PATH`,
+  `SWARMLLM_INFERENCE_GPU_LAYERS`, `SWARMLLM_API_KEY`,
+  `SWARMLLM_NETWORK_BOOTSTRAP_PEERS`); the example it gave,
+  `SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB`, was silently ignored. The full list is
+  in the [configuration reference](https://enapt.github.io/SwarmLLM/configuration/cli-env.html).
+
+### Measured
+
+- Hybrid placement on the live release node, RTX 3070, streaming decode, median
+  of three, with the card's budget capped at 3000 MB so neither model fits
+  whole: Qwen2.5-Coder 7B — 27.3 tokens/sec on the card whole, **6.8 split
+  13/28**, 3.8 on the processor alone; Llama-3.1 8B — 31.7 whole, **5.2 split
+  12/32**, 4.0 processor. Both automatic layer counts landed inside the budget.
+
 ## [0.3.145-alpha] — 2026-09-01
 
 ### Added

@@ -1165,7 +1165,10 @@ records the hash as origin-verified, so no peer's claim can displace it.
 
 Every harness below runs against an ISOLATED node or no daemon at all. None of
 them touch a running node; several used to, and that is where most of the traps
-in this section came from.
+in this section came from. **The two Python harnesses are the deliberate
+exception**: they measure a LIVE node over its own API, because that is what a
+user gets, and they change nothing on it — they are how #432 and #433 were found
+on the released binary when a tester's own node ruled out test nodes.
 
 **Before quoting a GPU number, check WHICH DEVICE the model is actually on.**
 `GET /api/admin/models` reports `cpu_placement_reason` per model, read from the
@@ -1192,6 +1195,8 @@ spread widens with it. See gotcha #422.
 | `examples/tokenizer_scaling.rs` | `SplitTokenizer::encode` against prompt length | tells an O(n) tokenizer from an O(n²) one — point `SWARM_TOK_HEADER` at a model's `gguf_header.bin`. It prints `tokenizer_model` / `merges` / `scores`, which is what decides WHICH encode path a GGUF takes (#420); a doubling that quadruples the time is the signature |
 | `examples/attn_bench.rs` | attention ops in isolation | ⚠ an isolated call is not a forward pass (#255/#266) |
 | `examples/sysinfo_probe.rs` | what it costs to describe this machine — `System::new_all()`+`refresh_all()` against a targeted refresh, and that both report the SAME facts | the admin `stats` endpoint spent 182 ms of its 273 ms here (#417). Prints a value comparison first: a cheaper call that answers `Unknown` for the CPU name is a regression, not a win |
+| `examples/stream_bench.py MODEL [--reps N --max-tokens N --port P]` | what a user gets from a running node: streaming TTFT, decode tok/s (`(n-1)/(t_last-t_first)`, a client-side window — #312), whole-request tok/s, the card's memory before/after | reads the API key from the data dir. Compare arms WITHIN one session only (decode spreads ~9-19% on this box); verify the mechanism per arm — placement log lines, `vram_after_load_mb`, `cpu_placement_reason` — not just the number. Found #432 |
+| `examples/remote_checks.py [MODEL...]` | remote inference through the real swarm: route headers (`x-swarm-nodes`, `Server-Timing` per segment), one finish per stream (#414), multi-byte replies whole (#416) | non-streaming for the headers, streaming for the finish/duplication checks. ⚠ Run at steady state — ~60 s after a restart everything peer-held 503s "insufficient capacity" (rule 3). **Check the FAILURE paths too** (a model nobody holds, streaming): that is where #433 was |
 | `examples/smoke_test.sh [binary] [port]` | 9 end-to-end checks on an isolated node | run it on the DOWNLOADED release artifact, not a local build (#268) |
 | `examples/release_shapes.sh [binary] [port]` | 7 pre-release shape checks — cold start, long cold prompt, `prompt_tokens` agreeing cold and warm (#400), greedy determinism WITH a live control, tool-heavy | also on the DOWNLOADED artifact, BEFORE tagging. Local verification used to be a strict subset of CI's |
 | `examples/swap_patience.sh` | what the GPU swap floor costs, in CONVERSATION | two models that each fit the card but not together, alternating multi-turn so a warm prefix is worth something. Arms switched by `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS`, never by rebuilding. Measured 2026-08-28: floor 60 s → 299 s, floor 0 → 82 s, floor 5 s → 89 s (#403) |

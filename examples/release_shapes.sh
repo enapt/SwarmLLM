@@ -32,8 +32,22 @@ cleanup() { [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null; rm -f "$D/models"; rm 
 trap cleanup EXIT
 [ -d "$MODELS_DIR" ] && ln -s "$MODELS_DIR" "$D/models"
 # auto-manage OFF: this throwaway node shares the real models directory and
-# would otherwise prune the shards of the node you actually run.
-printf '[auto_manage]\nenabled = false\nprune_enabled = false\n' > "$D/config.toml"
+# would otherwise prune the shards of the node you actually run. And off the
+# public swarm: every shape here is local, and a throwaway node on the real
+# network is a second identity advertising the live node's shards for as long
+# as it runs (see smoke_test.sh for why the private gossip id, not the absent
+# bootstrap, is what isolates it).
+cat > "$D/config.toml" <<'TOML'
+[auto_manage]
+enabled = false
+prune_enabled = false
+
+[network]
+bootstrap_peers = []
+disable_default_bootstrap = true
+enable_mdns = false
+gossip_network_id = "swarmllm-shapes"
+TOML
 
 echo "shapes: $("$BIN" --version) on port $PORT"
 SWARMLLM_NODE_DATA_DIR="$D" "$BIN" run -p "$PORT" > "$D/node.log" 2>&1 &

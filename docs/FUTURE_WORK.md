@@ -2129,6 +2129,36 @@ level because each binary uses a different subset — `api_test` needs both
 helpers, `test_metrics_health` only `spawn_test_server`. Both binaries pass
 (30 + 30 tests); macOS CI will confirm the path import there._
 
+### Generic `SWARMLLM_<SECTION>_<KEY>` environment overrides (found 2026-09-01)
+
+**Context.** The README said "every value can be overridden with a
+`SWARMLLM_`-prefixed environment variable" and gave
+`SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB=6000` as its example. Only seven variables
+are honoured, each hand-coded in `config/mod.rs` (`NODE_LISTEN_PORT`,
+`NODE_DATA_DIR`, `LOGGING_LEVEL`, `INFERENCE_MODEL_PATH`, `INFERENCE_GPU_LAYERS`,
+`API_KEY`, `NETWORK_BOOTSTRAP_PEERS`); the README's own example was silently
+ignored — found while benchmarking, when a 3000 MB budget set that way had no
+effect and the model loaded whole. The README now states the seven; the book's
+`configuration/cli-env.md` already did.
+
+**What it would take.** After the TOML is loaded, walk `std::env::vars()` for
+the prefix, split the remainder on the FIRST known section name
+(`node`, `resources`, `network`, `inference`, `pool`, `auto_manage`, `updates`,
+`api`, `logging`, `providers` — keys carry underscores, so the split must be
+by section name, not by underscore), parse the value as bool / integer / float /
+string, and merge it into the config through `toml::Value` before
+deserialising. Keep the seven hand-coded ones after it, because two carry
+semantics a generic overlay cannot (`API_KEY` treats empty as unset;
+`BOOTSTRAP_PEERS` is a list with three accepted separators). **Warn on an
+unrecognised `SWARMLLM_*` variable** the way `warn_unknown_keys_in` does for
+TOML — a silently ignored override is the defect being fixed. Never persist an
+env-sourced value through `to_minimal_toml` (§ "Config defaults must stay
+live"). Docker deployments are the audience; `.env.example` is the surface to
+update with it.
+
+**Why deferred.** Not needed by any reported case, and the honest README is the
+fix for the claim. ~60 lines plus tests when a headless deployment asks for it.
+
 ### Configuration-reference doc additions — **CLOSED R147** (2026-07-22)
 
 _The gap was larger than the 4 streaming knobs originally flagged: a
@@ -5221,12 +5251,26 @@ attention-score buffers.
    its own RoPE tables shadowed, DeepSeek2 needs its MLA projections read.
 3. Prefix-cache snapshots are device-tagged; cross-node reuse of a snapshot from
    a split model is untested.
-4. **A discrepancy worth chasing.** At 20/28 the measured 12.25 tok/s is close
+4. ~~**A discrepancy worth chasing.** At 20/28 the measured 12.25 tok/s is close
    to what Amdahl predicts from the two endpoints (~12.9), but at 14/28 the
-   measured 7.07 is well under the predicted ~9.2. Either there is a fixed
-   per-forward cost the model does not capture, or the runs competed with the
-   live node for the card. Not a blocker — every point still beats the
-   processor — but the shape says something is unaccounted for.
+   measured 7.07 is well under the predicted ~9.2.~~ **One cause found and
+   fixed 2026-09-01 (gotcha #432)**: the worker's decode-thread calibration
+   could be settled by forwards that ran no processor layers — a one-layer
+   card-only segment served for a peer while the hybrid model loaded — and it
+   then chose ONE thread for the whole worker's life. Measured on the live
+   node: the 8B at 12/32 did 2.9 tok/s with the poisoned calibration and 5.2
+   with its own tokens deciding (`4:211ms 3:194ms 2:221ms 1:351ms`). The
+   calibration is now keyed by processor depth. Whether the 14/28 point of the
+   original run had the same cause is not knowable after the fact; the shape
+   fits.
+
+**Measured again on the LIVE node, 2026-09-01, two models** (streaming decode
+tok/s, median of 3, 3000 MB budget so neither fits whole; see
+`memory/perf_baseline_0901_hybrid.md`): qwen2.5-coder-7b — full card 27.3,
+**13/28 split 6.8**, processor only 3.8; llama-3.1-8b — full card 31.7, **12/32
+split 5.2**, processor only 4.0. Both automatic counts landed inside the
+budget (2557 / 2256 MB). So 1.3-1.8x over what shipped, on a second
+architecture (Llama) as well as Qwen2.
 
 ---
 

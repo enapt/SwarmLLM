@@ -43,6 +43,20 @@ cat > "$D/config.toml" <<'TOML'
 [auto_manage]
 enabled = false
 prune_enabled = false
+
+# Off the public swarm entirely. Every check here is against models this
+# machine holds, so peers add nothing — and a throwaway node that joins the
+# real network advertises the live node's shards under a second identity for
+# the minutes it exists, which is a "weird test node" to everyone else (a
+# tester was running their own on 2026-09-01). No bootstrap and no mDNS is not
+# isolation on a machine with a live node (loopback discovery is
+# unconditional); the private gossip id is what keeps the two apart. Same
+# recipe as soak_test.sh and two_node_test.sh.
+[network]
+bootstrap_peers = []
+disable_default_bootstrap = true
+enable_mdns = false
+gossip_network_id = "swarmllm-smoke"
 TOML
 
 echo "smoke: $("$BIN" --version) on port $PORT"

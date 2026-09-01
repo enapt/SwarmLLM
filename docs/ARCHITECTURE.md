@@ -2117,7 +2117,12 @@ and `forward_batch` so every entry point inherits it. Prompt processing scales
 to 1.83x past decode's optimum; decode is bandwidth-bound and gets 2.0x worse at
 the same setting. One pool for both made `contribution` perverse — donating more
 of the machine slowed replies down. Only decode is capped, only downward, and
-not at all at the default contribution.
+not at all at the default contribution. The width is calibrated from a worker's
+first real tokens, **per processor depth** — a forward that runs no layers on
+the processor is never timed, and a hybrid split's forwards do not share a
+verdict with the one-layer card-only segments the same worker may serve for a
+peer (gotcha #432: that sharing settled a worker on one thread for its whole
+life).
 
 ### Stage profiler
 

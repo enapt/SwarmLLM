@@ -89,7 +89,7 @@ booted with.
 | `session_timeout_seconds` | integer | `600` | Chat session memory lifetime (10 min) |
 | `max_concurrent_requests` | integer | `10` | Max parallel requests |
 | `model_path` | path | none | Path to a GGUF model file |
-| `gpu_layers` | integer | `-1` | Device placement. `-1` = auto (use the GPU when available), `0` = CPU only, `>0` = GPU. The split engine places a worker's whole layer window on one device, so partial offload is not supported — a positive value behaves as `-1` and logs a warning. Use shard windows to bound VRAM |
+| `gpu_layers` | integer | `-1` | Device placement. `-1` = auto: the whole model on the card when it fits, and when it does not, as many of its first layers as do with the rest on the processor (since v0.3.145; `SWARMLLM_HYBRID_OFFLOAD=0` turns the split off and falls back to processor-only). `0` = processor only. `>0` = put that many layers on the card and the rest on the processor. Architectures verified for the split: Llama, Llama 4, Qwen2, Gemma, Gemma 2, Phi-3, Mistral, Starcoder2, GLM-4; others load on one device as before |
 | `kv_cache_ttl_secs` | integer | `600` | KV-cache lifetime |
 | `max_batch_size` | integer | `8` | How many requests run through the model together, amortising the weight reads that dominate a decode step. Measured on an RTX 3070 with llama-3.2-3b using per-request rates: no cost at any concurrency, about 3% at eight concurrent requests and about 16% at twelve — the gain grows with load. Neutral on a processor (6-core i5-10500T, llama-3.2-1b). Set to `1` to disable |
 | `batch_timeout_ms` | integer | `50` | Ms to wait for additional requests before dispatching a partial batch. `0` = dispatch immediately (purely opportunistic batching) |

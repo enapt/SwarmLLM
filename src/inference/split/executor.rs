@@ -305,7 +305,8 @@ impl SplitModel {
         // Query positions, i.e. which phase this is. Dim 1 is `seq_len` for
         // both token ids [1, seq] and pre-embedded hidden states [1, seq, d].
         let seq_len = input.dim(1).unwrap_or(1);
-        crate::inference::cpu_pools::in_phase_pool(seq_len, || {
+        let cpu_layers = self.cpu_layer_count();
+        crate::inference::cpu_pools::in_phase_pool(seq_len, cpu_layers, || {
             self.forward_inner_body(
                 input,
                 index_pos,
@@ -1044,7 +1045,8 @@ impl SplitModel {
             .map(|i| i.input.dim(1).unwrap_or(1))
             .max()
             .unwrap_or(1);
-        crate::inference::cpu_pools::in_phase_pool(seq_len, || {
+        let cpu_layers = self.cpu_layer_count();
+        crate::inference::cpu_pools::in_phase_pool(seq_len, cpu_layers, || {
             self.forward_batch_body(items, kv_cache_store)
         })
     }

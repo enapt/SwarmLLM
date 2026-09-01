@@ -579,20 +579,6 @@ pub async fn chat_completions(
         }
     }
 
-    // Build prompt for non-split paths (distributed inference + direct executor).
-    // Uses loaded_model_info first; falls back to GGUF header on disk for
-    // distributed-only nodes that have no local model but do have the probe.
-    let prompt = {
-        let (tmpl, bos, eos) = super::resolve_chat_template(&state, &req.model).await;
-        chat_template::build_prompt(
-            &internal_messages,
-            tmpl.as_deref(),
-            &bos,
-            &eos,
-            Some(req.model.as_str()),
-        )
-    };
-
     // Distributed inference: network covers all layers across multiple nodes.
     let peers_have_shards = all_shards_available(&state, &req.model)
         || state.shared_state.config.inference.shard_range.is_some();
@@ -611,23 +597,31 @@ pub async fn chat_completions(
         }
     }
 
-    if req.stream {
-        // Streaming: use direct executor path for real token-by-token SSE.
-        // Echo `req.model` (the requested id), not the manifest display name —
-        // consistent with the split fast path and `router_inference` above.
-        Ok(stream_response(
-            state,
-            request_id,
-            created,
-            req.model.clone(),
-            prompt,
-            params,
-        )
-        .await
-        .into_response())
-    } else if let Some(router_tx) = &state.router_tx {
-        // Non-streaming: route through InferenceRouter for priority queueing.
-        //
+    // Nothing here or in the swarm covers this model. The router is where that
+    // is REFUSED — `InsufficientCapacity`, a 503 with a hint — and it owns the
+    // in-process executor as well as the distributed pipeline, streaming or
+    // not, so both forms of the request go through it and get the same answer.
+    //
+    // Until 2026-09-01 the streaming form skipped the router for the legacy
+    // in-process `stream_response`, which has no model loaded on any node that
+    // reaches this point and which reported its failure as the model choosing
+    // to stop: a 200, an empty assistant delta, `finish_reason: "stop"`,
+    // `[DONE]`. The identical non-streaming request answered 503 "Not enough
+    // peers have the shards needed for this model" (gotcha #433). Whether a
+    // client heard the reason depended on whether it asked to stream.
+    if let Some(router_tx) = &state.router_tx {
+        if req.stream {
+            return dispatch_inference(
+                &state,
+                router_tx.clone(),
+                &req,
+                internal_messages.clone(),
+                request_id,
+                created,
+                cancel_token.clone(),
+            )
+            .await;
+        }
         // Give the request a cancel flag even when the caller supplied none, so
         // that a client going away actually stops the work instead of leaving
         // the model held for the full generation.
@@ -647,7 +641,37 @@ pub async fn chat_completions(
         )
         .await;
         disconnect_guard.disarm();
-        result
+        return result;
+    }
+
+    // No router at all — a test harness or a build without one. The in-process
+    // executor's own stream is all that is left, and it now reports a failure
+    // as one rather than as a stop.
+    if req.stream {
+        // Uses loaded_model_info first; falls back to GGUF header on disk for
+        // distributed-only nodes that have no local model but do have the probe.
+        let prompt = {
+            let (tmpl, bos, eos) = super::resolve_chat_template(&state, &req.model).await;
+            chat_template::build_prompt(
+                &internal_messages,
+                tmpl.as_deref(),
+                &bos,
+                &eos,
+                Some(req.model.as_str()),
+            )
+        };
+        // Echo `req.model` (the requested id), not the manifest display name —
+        // consistent with the split fast path and `router_inference` above.
+        Ok(stream_response(
+            state,
+            request_id,
+            created,
+            req.model.clone(),
+            prompt,
+            params,
+        )
+        .await
+        .into_response())
     } else {
         Err(crate::error::ApiError(
             crate::error::SwarmError::ServiceUnavailable(

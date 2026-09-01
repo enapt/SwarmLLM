@@ -809,17 +809,25 @@ async fn router_inference_stream(
                     }
                 }
                 Err(_) => {
-                    tracing::debug!("DIAG: SSE result_rx channel dropped — pipeline task died without sending result");
+                    // The pipeline task died without reporting. That is a fault
+                    // of this node, and it is reported as one — not as the
+                    // model choosing to stop, which is what this arm used to
+                    // send (gotcha #433).
+                    let died = crate::error::SwarmError::Internal(
+                        "the inference pipeline stopped without reporting a result".into(),
+                    );
+                    tracing::warn!(
+                        "DIAG: SSE result_rx channel dropped — pipeline task died without sending result"
+                    );
                     if sse_tx
-                        .send(StreamEvent::Delta {
-                            content: None,
-                            role: None,
-                            finish_reason: Some("stop".into()),
+                        .send(StreamEvent::Error {
+                            message: died.to_string(),
+                            error_type: crate::error::classify_error(&died).2,
                         })
                         .await
                         .is_err()
                     {
-                        tracing::debug!("DIAG: SSE channel-drop finish send also failed");
+                        tracing::debug!("DIAG: SSE channel-drop error send also failed");
                     }
                 }
             }
@@ -1213,28 +1221,41 @@ pub(super) async fn stream_response(
             send_result.is_ok()
         });
 
-        // Send finish reason. OpenAI spec restricts finish_reason to
-        // stop|length|tool_calls|content_filter|function_call. Map an
-        // execution error to "stop" — the error is already logged here and
-        // the caller has separate paths to surface it (HTTP 500 before the
-        // SSE opens, or an `error` SSE event for in-stream failures).
-        let finish = match result {
-            Ok(r) => r.finish_reason.as_str().to_string(),
+        // A failure is reported as one. This arm used to map every execution
+        // error to `finish_reason: "stop"`, with a comment asserting that the
+        // caller surfaced the error some other way — nothing did, and a
+        // streamed request for a model no node held answered `200`, an empty
+        // delta and `stop` where its non-streaming sibling answered 503 with a
+        // hint (gotcha #433). `finish_reason` carries only what the OpenAI spec
+        // defines, so an error is an `error` frame and no finish at all.
+        match result {
+            Ok(r) => {
+                let finish = r.finish_reason.as_str().to_string();
+                if tx
+                    .send(StreamEvent::Delta {
+                        content: None,
+                        role: None,
+                        finish_reason: Some(finish.clone()),
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(token_count, finish_reason = %finish, "DIAG: local stream finish send failed");
+                }
+            }
             Err(ref e) => {
                 crate::log_failure!(e, error = %e, "DIAG: local stream generate_stream error");
-                "stop".to_string()
+                if tx
+                    .send(StreamEvent::Error {
+                        message: e.to_string(),
+                        error_type: crate::error::classify_error(e).2,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(token_count, "DIAG: local stream error send failed");
+                }
             }
-        };
-        if tx
-            .send(StreamEvent::Delta {
-                content: None,
-                role: None,
-                finish_reason: Some(finish.clone()),
-            })
-            .await
-            .is_err()
-        {
-            tracing::debug!(token_count, finish_reason = %finish, "DIAG: local stream finish send failed");
         }
         if tx.send(StreamEvent::Done).await.is_err() {
             tracing::debug!("DIAG: local stream Done send failed — client disconnected");

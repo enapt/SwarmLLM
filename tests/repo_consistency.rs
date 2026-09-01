@@ -2041,6 +2041,42 @@ fn a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling() {
     );
 }
 
+/// A stream that fails must say so — never end with the model "choosing" to
+/// stop.
+///
+/// Measured on the released v0.3.145 (gotcha #433): a streamed request for a
+/// model no node held answered `200`, an empty assistant delta,
+/// `finish_reason: "stop"`, `[DONE]`. The identical request without `stream`
+/// answered 503 with a hint naming the cause. The legacy in-process stream
+/// mapped every execution error to `"stop"` with a comment explaining that the
+/// caller would surface the error some other way — which nothing did. And the
+/// router stream's channel-dropped arm did the same for a pipeline that died.
+///
+/// The shape this catches: an `Err` arm that, within a few lines, produces the
+/// literal `"stop"`. A failure has `StreamEvent::Error` for exactly this.
+#[test]
+fn a_stream_that_fails_never_pretends_the_model_chose_to_stop() {
+    let root = repo_root();
+    let rel = "src/api/openai/streaming.rs";
+    let src = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+    let lines: Vec<&str> = src.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let is_err_arm = trimmed.starts_with("Err(") && trimmed.contains("=>");
+        if !is_err_arm {
+            continue;
+        }
+        let window = lines[i..lines.len().min(i + 10)].join("\n");
+        assert!(
+            !window.contains("\"stop\""),
+            "{rel}:{} — an Err arm ends the stream with finish_reason \"stop\":\n{window}\n\
+             send StreamEvent::Error (typed via crate::error::classify_error) instead, so a \
+             streaming client hears the same failure its non-streaming sibling would",
+            i + 1
+        );
+    }
+}
+
 /// Every hint key the backend can emit must have a translation entry.
 ///
 /// The hints are the advice a user acts on when something goes wrong, and until

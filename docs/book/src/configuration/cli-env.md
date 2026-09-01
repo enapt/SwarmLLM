@@ -70,15 +70,20 @@ swarmllm pool join A3F7K2M9
 
 ## Environment Variables
 
-Every config option can be set via `SWARMLLM_` prefix:
+A small, fixed set of options — the ones a headless or Docker deployment needs
+before a config file exists — can be set with a `SWARMLLM_` environment
+variable. **This table is the complete list**; any other `SWARMLLM_*` variable
+is ignored. Everything else is set in `config.toml` or from the dashboard.
 
-| Config Path | Environment Variable |
-|---|---|
-| `node.listen_port` | `SWARMLLM_NODE_LISTEN_PORT` |
-| `node.data_dir` | `SWARMLLM_NODE_DATA_DIR` |
-| `logging.level` | `SWARMLLM_LOGGING_LEVEL` |
-| `inference.model_path` | `SWARMLLM_INFERENCE_MODEL_PATH` |
-| `inference.gpu_layers` | `SWARMLLM_INFERENCE_GPU_LAYERS` |
+| Config Path | Environment Variable | Notes |
+|---|---|---|
+| `node.listen_port` | `SWARMLLM_NODE_LISTEN_PORT` | |
+| `node.data_dir` | `SWARMLLM_NODE_DATA_DIR` | |
+| `logging.level` | `SWARMLLM_LOGGING_LEVEL` | `trace` / `debug` / `info` / `warn` / `error` |
+| `inference.model_path` | `SWARMLLM_INFERENCE_MODEL_PATH` | |
+| `inference.gpu_layers` | `SWARMLLM_INFERENCE_GPU_LAYERS` | `0` = processor only |
+| `api.api_key` | `SWARMLLM_API_KEY` | a deterministic key for Docker; empty means unset |
+| `network.bootstrap_peers` | `SWARMLLM_NETWORK_BOOTSTRAP_PEERS` | multiaddrs separated by commas, spaces or newlines |
 
 Example:
 ```bash

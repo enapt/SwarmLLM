@@ -167,7 +167,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- **Counts** (re-measured 2026-09-01): **2210 lib** + 12 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 49 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
+- **Counts** (re-measured 2026-09-01): **2211 lib** + 12 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 50 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
 - **Benches and harnesses — see `docs/DIAGNOSTICS.md` § Benchmarks for the full list and the traps.** The ones reached for most: `examples/prefill_bench.rs` (drives `SplitModel::forward` directly, no daemon — `SWARM_BENCH_MODEL`, `SWARM_BENCH_PROMPT`, `SWARM_BENCH_DECODE`, `SWARM_BENCH_REPS`, `SWARM_BENCH_DEVICE=cuda`, and `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` which prices a K-token forward against a 1-token one at the same history depth — the number that decides whether speculation pays; pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown), `examples/qmatmul_bench.rs` (asserts the tiled kernel is bit-identical to upstream), `examples/smoke_test.sh [binary] [port]` (9 checks on an isolated node — run it on the DOWNLOADED release artifact; it now reports checks that COULD NOT RUN separately and never says "all checks passed" over them, and fails fast if the node it started dies — before 2026-08-25 it skipped the three inference checks silently and still claimed success, so "smoke 8/8" had been passing here without ever exercising inference), `examples/soak_test.sh` (`HOURS=` must be a WHOLE number; data dir is per-`PORT`, so two soaks no longer kill each other), `examples/tokenizer_scaling.rs` (`SWARM_TOK_HEADER` at a model's `gguf_header.bin` — times `encode` against prompt length and prints `tokenizer_model`/`merges`/`scores`, which is what decides WHICH encode path a GGUF takes; a doubling that quadruples the time is the signature. `SWARM_TOK_TEXT` prints the ids for one string, which is how our output gets compared against HuggingFace `tokenizers`. Found #420 and #421).
 - **Measurement discipline** (paid for repeatedly): min-of-N on an IDLE box — the same unchanged code measured 0.42 ms and 0.97 ms across runs here, and a benchmark taken while a build runs is worthless. **min-of-N is for benchmarks, not for live measurement** (#367). A/B inside ONE binary via an env switch (`SWARMLLM_DECODE_CALIBRATE=0`, `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`, `SWARMLLM_FLASH_OFFSET_CAUSAL=0`, `SWARMLLM_GQA_DECODE_FLASH=1`, `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1`), never across two builds. **Verify the mechanism fired**, not just that the outcome improved. Pinned reference models: `docs/REFERENCE_MODELS.md`.
 - Unit tests: in-module `#[cfg(test)]` blocks
@@ -217,29 +217,22 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2210 lib (dev,claude-subscription) — re-measured 2026-09-01, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 49 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
+All 20 build phases complete. All subsystems wired — no stubs. **2211 lib (dev,claude-subscription) — re-measured 2026-09-01, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 50 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the six advisories documented in `SECURITY.md`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.145-alpha (2026-09-01).** Local `225e6fe7` (CUDA
-asset, installed sha256 == published, rollback
-`~/.local/bin/swarmllm.0.3.144.bak`) and Proxmox `96842635` (.deb, stayed
-`enabled` + `active`, no `.dpkg-old`) are both on it, node ids and peers kept.
-**.145 splits a model across the card and the processor** rather than losing the
-card when it does not fit whole (#431) — **measured 5.0 → 12.25 tok/s, 2.4x**.
-⚠ **On by default now; `SWARMLLM_HYBRID_OFFLOAD=0` disables it. Watch the fleet:
-one card, one model is the whole evidence base.**
+**In release: v0.3.146-alpha (2026-09-01)** — the fixes found by benchmarking
+.145 on the live node (#432, #433). Once the gate below passes it is deployed
+to local `225e6fe7` and Proxmox `96842635` like every release before it.
 
-**Superseded: v0.3.144-alpha (2026-09-01).** Local `225e6fe7` (CUDA
-asset, GPU serving, installed sha256 == published asset byte for byte, rollback
-`~/.local/bin/swarmllm.0.3.143.bak`) and Proxmox `96842635` (.deb, stayed
-`enabled` + `active`, no `.dpkg-old`) are both on it, node ids and peers kept.
-**.144 is the Apple Silicon update fix (#430)** — no Mac has ever been able to
-update itself, and was told it was up to date while nine releases behind.
-⚠ **The fix cannot arrive by updating; an Apple node needs
-`swarmllm-macos-aarch64` installed by hand ONCE.** .143 corrected what every node
-says about its own speed (#428, 5.2x); .142 was the diagnostics privacy round
-(#426); .141 served a model no single node can hold.
+**Superseded: v0.3.145-alpha (2026-09-01)** — whole fleet on it by evening,
+node ids kept. **.145 splits a model across the card and the processor** rather
+than losing the card when it does not fit whole (#431). ⚠ **On by default;
+`SWARMLLM_HYBRID_OFFLOAD=0` disables it.** .144 was the Apple Silicon update fix
+(#430 — ⚠ an Apple node needs `swarmllm-macos-aarch64` installed by hand ONCE;
+the fix cannot arrive by updating); .143 corrected what every node says about
+its own speed (#428, 5.2x); .142 the diagnostics privacy round (#426); .141
+served a model no single node can hold.
 
 Release gate, unchanged and followed every time: bump the version FIRST,
 `cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
@@ -254,38 +247,43 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.145-alpha (2026-09-01) — a model too big for the card no longer loses the card
+### v0.3.146-alpha (2026-09-01) — what benchmarking .145 on the live node found
 
-Gotcha **#431**. Researched, built and **measured on an RTX 3070** in one round.
+No test nodes (a tester was running theirs), so everything ran on the live
+release binary and the real swarm — `examples/stream_bench.py` and
+`examples/remote_checks.py` are the harnesses. Numbers in
+`memory/perf_baseline_0901_hybrid.md`.
 
-- Placement was all-or-nothing (`force_cpu_for` is `gpu_layers == 0`), so a model
-  20% too large lost the card ENTIRELY. Three reports; the last had **5151 MB
-  free** while a 14B tripped the machine's thermal limit.
-- **Measured, every figure the same way on one machine**: processor-only
-  **5.0** tok/s, 14/28 layers **7.07**, 20/28 **12.25** — **2.4x, and monotone**,
-  which is the evidence that the mechanism is real rather than lucky.
-- ⚠ **The slow baseline reproduced the bug by accident**: the LIVE node had the
-  3B resident, so the 7B came back `cpu_placement_reason: not_enough_vram` and
-  ran on the processor with 3753 MiB of card in use by the other model.
-  **Checking that field before quoting a GPU number (#422) is what caught that a
-  run labelled "full GPU" was nothing of the kind.**
-- Automatic sizing verified end to end: a 3000 MB budget against a 5232 MB model
-  chose **13 of 28** unprompted and settled at **2613 MB** — inside budget, which
-  is the estimate-vs-reality check (#388) rather than "it answered".
-- **The design was far smaller than the deferral note assumed** — the transition
-  sits BETWEEN layers, so no arch code changed. RoPE already lives in the layer,
-  KV already allocates on the device it is handed, weights already load per
-  tensor. Only the mask needed moving. **Read what the code does before costing
-  work from a months-old list.**
-- ⚠ **Applied by SHADOWING `device`/`cos`/`sin` at each loop head, not by editing
-  ~128 sites** — and the missed-path hazard FIRED: Qwen 3.5 builds its own RoPE
-  outside the loop. **An unused-shadow compiler warning is all that surfaced it.**
-  Hence `arch_supports_hybrid` is an ALLOWLIST.
+- **Hybrid placement holds on a second architecture.** 3000 MB budget so neither
+  model fits: 7B (Qwen2) full card 27.3 → **13/28 split 6.8** → processor 3.8;
+  8B (Llama) 31.7 → **12/32 split 5.2** → 4.0. Both auto counts inside budget.
+- **#432 — the first 8B split read 2.9 tok/s, BELOW its processor-only 4.0.**
+  Worker at ~100% CPU in decode: one thread. Its calibration line said why —
+  `decode_threads=1 … measured=4:5ms 3:2ms 2:2ms 1:1ms`: while the split model
+  loaded, the same worker served two ONE-LAYER card-only segments of it for a
+  boomerang request, and the once-per-process calibration settled on them.
+  Proved by removing the cause on the same binary (private mode kept the cold
+  request local → `4:211ms … 1:351ms`, chose 4, 5.2 tok/s). Now keyed by
+  processor depth; depth 0 is never timed. **The Belgian RTX 4050 serving 14B
+  segments while running it hybrid is exactly the exposure.**
+- **#433 — the failure paths over the network were wrong while every success
+  path was right.** A streamed request for a model nobody holds answered `200`
+  + empty `stop` (non-streaming: 503 with a hint) — the streaming branch took
+  the legacy in-process path from before the router could stream. A peer's
+  honest "model not hosted on target" failed a 5-candidate request in 0.8 s —
+  matched nothing, so no retract/retry. Guard written first and seen to fail.
+- ⚠ **`SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB` — the README's own example — does
+  not exist**; only 7 hand-coded env overrides do. Caught by verifying the
+  mechanism (no placement lines, budget unchanged), not the number.
+- ⚠ Remote checks ~60 s after a restart 503 "insufficient capacity" for models
+  five peers hold — the registry window (diagnosis rule 3). Wait for ~200 s.
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
+
+- **v0.3.145** (09-01): **a model 20% too big for the card no longer loses it (#431)** — `force_cpu_for` was `gpu_layers == 0`, all or nothing; three reports, the last with 5151 MB free while a 14B tripped a thermal limit. Split between layers (contiguous, card-first), sized with KV folded into the per-layer cost; **measured 5.0 → 7.07 (14/28) → 12.25 (20/28), 2.4x and monotone**; a 3000 MB budget chose 13/28 unprompted and settled at 2613 MB. ⚠ **The slow baseline reproduced the bug by accident — check `cpu_placement_reason` before quoting a GPU number (#422).** ⚠ **Applied by SHADOWING `device`/`cos`/`sin` at each loop head, not by editing ~128 sites — and the missed-path hazard FIRED (Qwen 3.5's own RoPE); an unused-shadow warning is all that surfaced it → `arch_supports_hybrid` is an ALLOWLIST.** The design was far smaller than the deferral note assumed: read the code before costing work from a months-old list.
 
 - **v0.3.144** (09-01): **no Mac had EVER been able to update itself (#430)**, reported by a NON-TECH user whose every visible surface said otherwise. `host_has_avx2()` returns `false` on non-x86 — meaning *no such instruction set*, not *old processor* — routing every Apple node to a `-baseline` asset that is never published; no asset → `Ok(None)` → **which is how this module says "already up to date"**. Nine releases behind, on the swarm's largest shard holder. ⚠ **The existing guard ASSERTED THE BUG AS CORRECT and was green throughout.** ⚠ **The fix cannot arrive by updating — an Apple node needs ONE manual install.** A node that cannot update now says so.
 - **v0.3.143** (09-01): **every node was lying about how fast it is (#428/#429).** Processor efficiency 0.15 against a measured ~0.82 of roofline (**5.2x low**), and the card's 0.30 was HIGHER than the processor's when it should be LOWER — at batch 1 a card reaches 0.37 of roofline, a processor 0.82. Now **0.75/0.35**, measured via `prefill_bench`, **validated on a SECOND machine** (Ryzen 0.818, i5 0.895). Propagation confirmed within the hour: Proxmox 0.88→4.41, Belgium 1.20→5.89, Belgium GPU 20.45→23.86. Also a CPU-only node reported its OWN speed as 0; the unmeasurable fallback would have gone 1.70→8.52 (**a nominal must move with the efficiency it feeds**). ⚠ **My HTTP-derived GPU number was wrong in DIRECTION and published before retraction — that path is not a decode measurement.** ⚠ **CI caught what two local machines did not, and my FIRST fix was insufficient: widening a margin is not removing a threshold.** `round_log_0901_diagnostics_privacy.md`.

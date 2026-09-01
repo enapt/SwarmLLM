@@ -2363,7 +2363,7 @@ pub(crate) async fn dispatch_network_messages(
     }
 }
 pub(crate) mod layer_forward;
-mod remote_generate;
+pub(crate) mod remote_generate;
 mod vision;
 
 #[cfg(test)]

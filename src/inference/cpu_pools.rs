@@ -134,9 +134,12 @@
 //!
 //! # What it costs, and why a benchmark overstates it
 //!
-//! The measurement is paid in the user's own first tokens, ONCE per worker
-//! process. A bench pays that inside a single short run; a real worker pays it
-//! once and then serves for hours. Measured on the i5 (tinyllama, same binary,
+//! The measurement is paid in the user's own first tokens, once per worker
+//! process **per processor depth** — a forward that runs no layers on the
+//! processor is never timed, and one that runs a different number of them gets
+//! its own measurement (see [`Calibrations`] for the live case that made this
+//! necessary). A bench pays that inside a single short run; a real worker pays
+//! it once and then serves for hours. Measured on the i5 (tinyllama, same binary,
 //! calibration on vs off):
 //!
 //! | decode tokens | on | off |
@@ -494,10 +497,65 @@ fn pool_for(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
         .clone()
 }
 
-/// The calibrator, or `None` when there is nothing to choose between.
-fn calibration() -> Option<&'static Calibration> {
-    static CALIB: OnceLock<Option<Calibration>> = OnceLock::new();
-    CALIB
+/// One calibration per processor DEPTH — the number of layers a forward runs
+/// on the processor — and none at all for a depth of zero.
+///
+/// **Why per depth, and why zero is excluded.** A worker process serves every
+/// forward its model is asked for, and those are not all the same shape: the
+/// same worker that will run a 32-layer model split across the card and the
+/// processor can, while that model is still loading, serve a one-layer segment
+/// of it entirely on the card for a peer's pipeline. Measured on the live
+/// node 2026-09-01: two such segments answered a boomerang request while the
+/// hybrid 8B loaded behind them, their tokens cost 1-5 ms, and the process-wide
+/// calibration settled on ONE thread from them (`4:5ms 3:2ms 2:2ms 1:1ms`).
+/// The full model then decoded its 20 processor layers single-threaded for
+/// the life of the worker — 2.9 tok/s, below what the same model manages on
+/// the processor alone, with the card doing a third of the work. Re-run with
+/// the cold request kept local so the first tokens were the real ones, the
+/// calibration read `4:211ms 3:194ms 2:221ms 1:351ms`, chose 4, and the same
+/// model did 5.2-5.6 tok/s (gotcha #432).
+///
+/// A forward with no processor layers has nothing for this to decide — the
+/// processor only launches kernels — so it is never timed. And a forward of
+/// one depth says nothing about another: the optimum is set by memory
+/// bandwidth per layer, but a shallow forward is dominated by fixed
+/// per-forward costs and reads narrower than it should. Each depth therefore
+/// earns its own verdict from its own tokens. The map is bounded by the
+/// model's layer count.
+struct Calibrations {
+    candidates: Vec<usize>,
+    by_depth: Mutex<HashMap<usize, Arc<Calibration>>>,
+}
+
+impl Calibrations {
+    fn new(candidates: Vec<usize>) -> Self {
+        Self {
+            candidates,
+            by_depth: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The calibration for forwards that run `cpu_layers` layers on the
+    /// processor, or `None` when there is nothing to calibrate.
+    fn for_depth(&self, cpu_layers: usize) -> Option<Arc<Calibration>> {
+        if cpu_layers == 0 {
+            return None;
+        }
+        let mut map = self.by_depth.lock().ok()?;
+        Some(
+            map.entry(cpu_layers)
+                .or_insert_with(|| Arc::new(Calibration::new(self.candidates.clone())))
+                .clone(),
+        )
+    }
+}
+
+/// The calibrator for this processor depth, or `None` when there is nothing
+/// to choose between (an explicit width, calibration switched off, one core,
+/// or no processor layers at all).
+fn calibration_for(cpu_layers: usize) -> Option<Arc<Calibration>> {
+    static CALIBS: OnceLock<Option<Calibrations>> = OnceLock::new();
+    CALIBS
         .get_or_init(|| {
             // An explicit width (or an explicit 0) is a decision already made.
             if env_decode_threads().is_some() || !env_calibration_enabled() {
@@ -508,9 +566,10 @@ fn calibration() -> Option<&'static Calibration> {
             if candidates.len() < 2 {
                 return None;
             }
-            Some(Calibration::new(candidates))
+            Some(Calibrations::new(candidates))
         })
-        .as_ref()
+        .as_ref()?
+        .for_depth(cpu_layers)
 }
 
 /// `SWARMLLM_DECODE_CALIBRATE=0` pins the previous behaviour, for A/B inside
@@ -578,11 +637,22 @@ fn decode_pool() -> Option<&'static rayon::ThreadPool> {
 ///
 /// Prefill returns `f()` directly, so it keeps the global pool and pays
 /// nothing.
-pub(crate) fn in_phase_pool<R: Send>(seq_len: usize, f: impl FnOnce() -> R + Send) -> R {
-    if seq_len > DECODE_SHAPED_MAX_TOKENS {
+///
+/// `cpu_layers` is how many of the forward's layers run on the processor. It is
+/// what the decode pool is FOR — the quantized matmuls of those layers — so a
+/// forward with none (a segment placed entirely on the card) runs on the
+/// global pool and is never timed: it has nothing to calibrate and its tokens
+/// would mislead the calibration for a forward that does. See
+/// [`Calibrations`] for the case that made this a parameter.
+pub(crate) fn in_phase_pool<R: Send>(
+    seq_len: usize,
+    cpu_layers: usize,
+    f: impl FnOnce() -> R + Send,
+) -> R {
+    if seq_len > DECODE_SHAPED_MAX_TOKENS || cpu_layers == 0 {
         return f();
     }
-    let Some(calib) = calibration() else {
+    let Some(calib) = calibration_for(cpu_layers) else {
         // Pinned width, or nothing to choose between: the original path.
         return match decode_pool() {
             Some(pool) => pool.install(f),
@@ -996,5 +1066,53 @@ mod tests {
         assert!(decode_threads(0, 0) >= 1);
         assert_eq!(decode_threads(1, 1), 1);
         assert!(decode_threads(8, 0) >= 1);
+    }
+
+    /// The live-node case of 2026-09-01 (gotcha #432), replayed. One worker
+    /// served two one-layer card-only segments of an 8B while the full hybrid
+    /// model loaded behind them; their 1-5 ms tokens settled the process-wide
+    /// calibration on ONE thread, and the 32-layer model that finished loading
+    /// seconds later decoded its 20 processor layers single-threaded for the
+    /// life of the worker — 2.9 tok/s against the 5.2-5.6 it does when its own
+    /// tokens decide. A forward with no processor layers must not be timed at
+    /// all, and one processor depth must never settle another's verdict.
+    #[test]
+    fn a_card_only_forward_is_not_timed_and_cannot_decide_a_deeper_ones_width() {
+        let set = Calibrations::new(vec![4, 3, 2, 1]);
+        assert!(
+            set.for_depth(0).is_none(),
+            "a forward with no processor layers has nothing to calibrate"
+        );
+        let shallow = set
+            .for_depth(1)
+            .expect("a one-layer processor forward is calibrated");
+        let deep = set
+            .for_depth(20)
+            .expect("a twenty-layer processor forward is calibrated");
+        assert!(
+            !Arc::ptr_eq(&shallow, &deep),
+            "two processor depths share one verdict — the poisoning is still possible"
+        );
+        assert!(
+            Arc::ptr_eq(&shallow, &set.for_depth(1).unwrap()),
+            "the same depth must keep accumulating into the same calibration"
+        );
+        // Settle the shallow one on 1 thread the way the card-only segments did
+        // (`4:5ms 3:2ms 2:2ms 1:1ms` in the live log).
+        for _ in 0..SAMPLES_PER_CANDIDATE {
+            for (idx, ms) in [5u64, 2, 2, 1].iter().enumerate() {
+                shallow.record(idx, ms * 1_000_000);
+            }
+        }
+        assert_eq!(
+            shallow.chosen.load(Ordering::Relaxed),
+            1,
+            "the shallow forward's own tokens should still settle it"
+        );
+        assert_eq!(
+            deep.chosen.load(Ordering::Relaxed),
+            0,
+            "the deep model's width was decided by another shape's tokens"
+        );
     }
 }

@@ -98,6 +98,27 @@ pub struct SplitModel {
 }
 
 impl SplitModel {
+    /// How many of this segment's layers run on the processor.
+    ///
+    /// This is the number the decode-thread calibration is keyed on
+    /// (`cpu_pools::in_phase_pool`): zero for a segment entirely on the card,
+    /// the whole segment on a processor-only node, and the processor's share
+    /// of a hybrid split. It has to describe THIS forward, not the worker —
+    /// one worker serves both a full hybrid model and one-layer card-only
+    /// segments of it, and timing the second as though it were the first is
+    /// gotcha #432.
+    pub(super) fn cpu_layer_count(&self) -> usize {
+        if self.layer_devices.is_empty() {
+            if self.device.is_cpu() {
+                self.layers.len()
+            } else {
+                0
+            }
+        } else {
+            self.layer_devices.iter().filter(|d| d.is_cpu()).count()
+        }
+    }
+
     /// The model's context window in tokens.
     ///
     /// Exposed so a caller that holds the WHOLE prompt can check it before

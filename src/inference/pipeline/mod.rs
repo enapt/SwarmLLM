@@ -216,6 +216,17 @@ pub(crate) fn remote_error_means_missing_shard(msg: &str) -> bool {
     msg.contains("is in a missing region")
         || msg.contains("missing shard region")
         || msg.contains("Shard not found")
+        // The remote-generate fast path's own refusal: the peer checked
+        // `can_serve_layer_range` for the WHOLE model and said no. That is the
+        // same fact — our holder record for it is stale — arriving one hop
+        // earlier, before any bytes were asked for. Until 2026-09-01 it matched
+        // nothing here, so the claim stayed, nothing was retried, and a
+        // request for a model four other peers held failed on the strength of
+        // one peer's honest "not me" (gotcha #433, measured live: a 14B with
+        // five candidates answered `Inference error: model not hosted on
+        // target` in 0.8 s while the non-streaming sibling a minute earlier
+        // had been served by a two-node chain).
+        || msg.contains(crate::daemon::dispatch::remote_generate::REMOTE_GENERATE_NOT_HOSTED)
         // What a peer ACTUALLY sends. `sanitize_peer_facing_error` replaces
         // every shard-related error with this before it leaves the serving
         // node, so the wordings above — which are what the local code produces
@@ -1145,6 +1156,15 @@ mod tests {
             "ShardReader: position is in a missing shard region"
         ));
         assert!(remote_error_means_missing_shard("Shard not found: model/2"));
+        // The fast path's own refusal, as the coordinator receives it — flattened
+        // to text and re-wrapped, so the classifier sees a prefix in front of it.
+        assert!(
+            remote_error_means_missing_shard(&format!(
+                "Inference error: {}",
+                crate::daemon::dispatch::remote_generate::REMOTE_GENERATE_NOT_HOSTED
+            )),
+            "a peer saying it does not host the model is a stale holder claim (gotcha #433)"
+        );
     }
 
     #[test]

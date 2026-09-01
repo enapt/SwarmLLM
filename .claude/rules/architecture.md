@@ -1074,6 +1074,21 @@ silently break at the wire if duplicated:
   `SWARMLLM_DECODE_THREADS` overrides, and `=0` restores the single-pool
   behaviour for A/B measurement inside one binary — the same discipline as
   `SWARMLLM_FORCE_STANDARD_ATTN`.
+  **The calibration is keyed by the forward's PROCESSOR DEPTH, and a forward
+  with no processor layers is never timed** (2026-09-01, gotcha #432).
+  `in_phase_pool` takes `cpu_layers` — `SplitModel::cpu_layer_count()`, zero for
+  a segment entirely on the card, the whole segment on a processor-only node,
+  the processor's share of a hybrid split — and `cpu_pools::Calibrations` keeps
+  one calibration per depth. Why: one worker serves every forward its model is
+  asked for, and while the 8B was loading as a 12/32 hybrid split the SAME
+  process served two one-layer card-only segments of it for a boomerang
+  request. Their 1-5 ms tokens settled the process-wide calibration on ONE
+  thread (`4:5ms 3:2ms 2:2ms 1:1ms`), and the full model then decoded its 20
+  processor layers single-threaded for the worker's life: 2.9 tok/s, below the
+  4.0 the model does on the processor alone. Re-run with the cold request kept
+  local it read `4:211ms 3:194ms 2:221ms 1:351ms`, chose 4, and did 5.2-5.6.
+  Any GPU holder that serves segments for peers can hit this. A new caller
+  passes the depth of THIS forward, never a property of the worker.
 - **`inference::layers::new_kv_cache`** (2026-08-07) — the only way to construct
   a KV cache. **Never call `KvCache::new(2, max_seq_len)`**, which is what every
   site did and which reads as obviously correct — the parameter is even called
@@ -2459,6 +2474,35 @@ helpers — ending the stream is the coordinator's job, since only it knows why
 generation stopped.
 
 Ask of any "did this happen?" flag what its consumer does when it stays false.
+
+## A stream that fails must say so (2026-09-01)
+
+`finish_reason` carries only what the OpenAI spec defines — `stop`, `length`,
+`tool_calls` — and none of them means "something went wrong". A failure on the
+OpenAI streaming surface is `StreamEvent::Error`, typed through
+`classify_error`, and no finish delta at all; the Anthropic sibling is
+`AnthropicSseEvent::Error`. `a_stream_that_fails_never_pretends_the_model_chose_to_stop`
+in `tests/repo_consistency.rs` fails the build on an `Err` arm that produces the
+literal `"stop"` within a few lines.
+
+**Why**: measured on the released v0.3.145 (gotcha #433), a streamed request for
+a model no node held answered `200`, an empty assistant delta, `finish_reason:
+"stop"`, `[DONE]` — while the identical request without `stream` answered 503
+with the hint naming the cause. The streaming branch of the no-coverage case in
+`api/openai/mod.rs` went to the legacy in-process `stream_response` (from before
+the router could stream), whose error arm mapped every failure to `"stop"` with
+a comment asserting the caller surfaced errors another way. Nothing did.
+
+Two rules follow. **Two branches that differ only by `stream` must reach the
+same decision-maker** — the router owns the in-process executor AND the
+distributed pipeline, streaming or not, so both forms of a request go through
+it and are refused by it identically; a fork on a presentation flag is a fork in
+policy. And **a peer's "I do not hold it" is a stale claim at whichever hop it
+arrives**: `dispatch::remote_generate::REMOTE_GENERATE_NOT_HOSTED` is the fast
+path's refusal, named so `remote_error_means_missing_shard` can match it and
+retract, blacklist and retry — the same handling a mid-pipeline missing-shard
+error has had since July. Unmatched, one honest refusal failed a request four
+other peers could have served.
 
 ## Two counters both called "tokens" — write down which event each one counts
 
