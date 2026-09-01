@@ -5169,6 +5169,42 @@ single largest measured multiplier in the system.
 It is also single-node work needing no protocol change, no additive feature bit
 and no mixed-version story, which is unusual for anything this large here.
 
+**Third instance reported 2026-09-01**, on v0.3.143, by the tester with the
+RTX 4050 laptop: `qwen2.5-14b-instruct-q4-k-m`, `estimated_vram_mb=9347` against
+`vram_budget_mb=4990`, `configured_gpu_layers=-1` → `gpu_layers = 0` in all three
+observed cases, with **5151 MB of the card free and unused**. Felt effect: several
+processor cores pinned above 300%, the machine past its own thermal threshold
+(`temp_c=85.75` against 85.0) and local audio stuttering. So the deferral clause
+above — "a concrete workload that needs a model slightly too big for available
+VRAM and where CPU-only is too slow to be acceptable" — is now satisfied three
+times over, by three different machines.
+
+**Prior art worth reading before designing this**, from that report (diagnosis
+rule 0):
+
+- llama.cpp **PR #17485** (`common/common.cpp`) — reserve ~800 MB for KV and
+  compute buffers, divide the remainder by an estimated per-layer size via
+  `ggml_backend_dev_memory`. An a-priori formula; simple, backend-agnostic.
+  Reported 26/27 layers offloaded on a 4 GB RX 6500 XT, 2.5-3.1x.
+- llama.cpp **#16653 / discussion #18049** — real trial allocations rather than a
+  formula: reduce context first, then move tensors VRAM→RAM until it fits,
+  implemented at the ggml graph level. **This is the closer match for us**, because
+  a daemon choosing placement live has the same problem an a-priori estimate
+  keeps getting wrong — our own `estimate_gpu_footprint_mb` versus
+  `estimate_vram_from_shard_dir` disagreement (gotcha #388) is exactly that shape.
+
+⚠ **Whatever computes `mb_per_layer` must take the real GQA `n_kv_heads`, not the
+query head count** — flagged in the same report, and a 4x error either way. This
+codebase has already been bitten by head-grouping confusion once
+(`grouping_query_heads_matches_expanding_kv_heads` exists because getting it
+backwards computes plausible logits rather than failing), so it is the kind of
+mistake that survives review.
+
+**One thing the report assumed that is not true**, worth stating so nobody scopes
+this as plumbing: there is no existing partial-offload mechanism to re-point at
+segments. `-1` means all-or-nothing, `SplitModel` holds one `Device`, and the
+per-layer path in "What it would take" above has to be built.
+
 A completeness critic on the 2026-08-24 research round named this as the obvious
 idea nobody proposed, and it was right: seven concepts were designed and reviewed
 that round and every one asked "what makes decode faster" rather than "what makes
