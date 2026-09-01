@@ -11068,7 +11068,7 @@ Two things a change here must keep, both currently load-bearing:
 Until then the constant is provisional and calibrated to the fleet it runs on,
 which is the same thing 200 was — it just ran on a different fleet.
 
-## Every node advertises the wrong speed (measured 2026-09-01, FIXED 2026-09-01)
+## Every node advertises the wrong speed (measured 2026-09-01, FIXED and SHIPPED in v0.3.143-alpha)
 
 `estimate_tokens_per_sec_7b(bandwidth_gbps, is_gpu)` is
 `bandwidth / 4.4 GB * efficiency`, with efficiency **0.15 for a processor and
@@ -11173,6 +11173,16 @@ in `tests/repo_consistency.rs` fails the build on a new site, scanning statement
 rather than lines so a chain rustfmt wrapped is still visible (gotcha #413), with
 its own planted-violation self-test beside it.
 
+**Confirmed propagating in the field within an hour of release.** Three peers
+self-updated to v0.3.143 and their advertised figures moved as predicted:
+Proxmox 0.88 → 4.41 tok/s, Belgium 1.20 → 5.89, the Belgian RTX 4050 20.45 →
+23.86, and this laptop 30.55 → 35.64 against its measured 35.32.
+
+⚠ **During any rollout the tok/s figure is only comparable within a version.** A
+CPU node still on .142 advertises ~5x low and is ranked below an updated one of
+equal hardware. Self-resolving, but do not read it as a hardware difference while
+the fleet is mixed.
+
 **Validated on a second machine, 2026-09-01** — the discipline #367 exists for.
 `prefill_bench` cross-built for Debian 12 (zigbuild, glibc 2.36) and run on the
 Proxmox node against the same 3B model, staged in `/tmp` so its daemon never
@@ -11209,6 +11219,17 @@ prior. `setup_tp_split_topology` now pins the peer side rather than leaving
 `capability: None`, so which node wins does not depend on the machine CI happens
 to run on. A new scheduler test that turns on local-versus-peer selection must
 do the same.
+
+**Open question this promoted, worth a decision now.** `mem_bandwidth::measured_gbps`
+is a `OnceLock`: measured once, at whatever moment the health monitor first asks,
+min-of-3 over 256 MB. A node that boots while the machine is busy carries a low
+figure for its entire run — and since this change that figure decides how much
+work the swarm offers it, not merely what the dashboard shows. Observed benignly:
+the Proxmox node read 23.5 GB/s one boot and 25.9 the next, ~10% apart. Options
+if it matters: re-measure periodically and keep the maximum (bandwidth is a
+hardware ceiling, so the best observation is the least contaminated one — the
+same argument min-of-N already makes within a single measurement), or measure
+lazily on an idle tick rather than at startup. Not yet a demonstrated defect.
 
 **Do not change the constants without deciding what the number MEANS.** Two
 defensible readings: peak sustained decode for that model on an idle machine
