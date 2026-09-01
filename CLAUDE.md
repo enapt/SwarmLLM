@@ -221,9 +221,17 @@ All 20 build phases complete. All subsystems wired — no stubs. **2211 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**In release: v0.3.146-alpha (2026-09-01)** — the fixes found by benchmarking
-.145 on the live node (#432, #433). Once the gate below passes it is deployed
-to local `225e6fe7` and Proxmox `96842635` like every release before it.
+**Released and deployed: v0.3.146-alpha (2026-09-01).** Local `225e6fe7`
+(CUDA asset, installed sha256 `83ef5924…` == published, rollback
+`~/.local/bin/swarmllm.0.3.145-alpha.bak`) and Proxmox `96842635` (.deb,
+stayed `enabled` + `active`, no `.dpkg-old`) are both on it, node ids kept.
+Gate: CI + Cache warm green, 25 assets, `latest`, smoke 9/9, shapes 7/7 on the
+DOWNLOADED artifact. **Both fixes confirmed in the field on the deployed
+binary**: the streamed no-coverage request now carries an `error` frame, and
+the 8B hybrid loaded on the exact poisoning path (cold request out to a peer,
+one-layer card-only segment served first) calibrated on its own tokens —
+`4:223ms 3:192ms 2:227ms 1:349ms → 4` — and decoded 4.9-5.2 tok/s where .145
+gave 2.9.
 
 **Superseded: v0.3.145-alpha (2026-09-01)** — whole fleet on it by evening,
 node ids kept. **.145 splits a model across the card and the processor** rather
