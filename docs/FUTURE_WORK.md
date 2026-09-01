@@ -11173,6 +11173,25 @@ in `tests/repo_consistency.rs` fails the build on a new site, scanning statement
 rather than lines so a chain rustfmt wrapped is still visible (gotcha #413), with
 its own planted-violation self-test beside it.
 
+**Validated on a second machine, 2026-09-01** — the discipline #367 exists for.
+`prefill_bench` cross-built for Debian 12 (zigbuild, glibc 2.36) and run on the
+Proxmox node against the same 3B model, staged in `/tmp` so its daemon never
+registered it and the swarm never saw a new holder:
+
+| machine | bandwidth | measured | roofline | fraction |
+|---|---|---|---|---|
+| Ryzen 7 5800H, Zen 3, 8 cores | 29.9 GB/s | 10.44 tok/s | 12.76 | **0.818** |
+| i5-10500T, Comet Lake, 6 cores | 23.5 GB/s | 8.97 tok/s | 10.03 | **0.895** |
+
+Different microarchitecture, core count and memory generation, and the fraction
+holds — the smaller machine sits *higher*, which is what the mechanism predicts,
+since fewer cores means more thoroughly bandwidth-bound. **0.75 is conservative
+on both**, which is the right side to err on for a number that attracts work.
+
+The second machine's bandwidth was read straight out of `swarmllm diagnostics`'s
+new `-- this machine --` section, which is an incidental confirmation that
+v0.3.142's own feature does the job it was added for.
+
 **A consequence the tests caught, worth watching.** The local node used to be
 priced with the same `UNKNOWN_COMPUTE_MS` prior as an unmeasured peer, so
 local-versus-unknown was decided purely on network cost and the local node always

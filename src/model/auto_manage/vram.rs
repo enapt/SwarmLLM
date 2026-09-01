@@ -678,11 +678,27 @@ pub fn gpu_memory_bandwidth_gbps(name: &str) -> f32 {
 /// drafts out of the prompt and the prefix cache removes the prefill, and three
 /// attempts on one machine gave 20.75, ~50 and ~27 tok/s.
 ///
-/// **Confidence differs between the two.** The processor figure has two models
-/// on one machine agreeing, plus a prediction that matched it to 1% before it
-/// was taken. The graphics figure is **one card**; treat its third digit as
-/// unearned. Both are rounded slightly down, since a machine serving the swarm
-/// is not an idle one.
+/// **Validated on a second machine** (2026-09-01), because a figure measured on
+/// one box is not measured. Same model, prompt and KV depth, cross-built and run
+/// on the Proxmox node — a different microarchitecture, core count and memory
+/// generation:
+///
+/// | machine | bandwidth | measured | roofline | fraction |
+/// |---|---|---|---|---|
+/// | Ryzen 7 5800H, Zen 3, 8 cores | 29.9 GB/s | 10.44 tok/s | 12.76 | **0.818** |
+/// | i5-10500T, Comet Lake, 6 cores | 23.5 GB/s | 8.97 tok/s | 10.03 | **0.895** |
+///
+/// (a 3B Q4_K_M, 2.344 GB/token — the model differs from the 7B above, which is
+/// the point: the fraction of roofline is the machine's property, not the
+/// model's.) The smaller machine sits *higher*, which is what the mechanism
+/// predicts — fewer cores means more thoroughly bandwidth-bound, so closer to
+/// the ceiling. **0.75 is therefore conservative on both**, deliberately: this
+/// figure attracts work, so erring low costs a little routing and erring high
+/// costs a request.
+///
+/// **Confidence still differs between the two constants.** The processor figure
+/// now has two machines and three model/size combinations behind it. The
+/// graphics figure is **one card**; treat its third digit as unearned.
 ///
 /// Re-measure with:
 /// ```text
