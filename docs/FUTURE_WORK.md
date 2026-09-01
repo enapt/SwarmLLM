@@ -5143,10 +5143,36 @@ more when the network is idle — precisely when generosity costs nothing.
 
 ## Inference engine
 
-### True per-layer GPU/CPU hybrid offload — BUILT 2026-09-01, NOT YET GPU-VALIDATED
+### True per-layer GPU/CPU hybrid offload — BUILT AND VALIDATED ON A CARD 2026-09-01
 
-**Status.** The mechanism exists and is unit-tested; it has not run on a
-graphics card. `gpu_layers = N` (a positive value below the segment's layer
+**Status.** Built, unit-tested, and **measured on an RTX 3070** — a
+`qwen2.5-coder-7b-instruct-q4-k-m` split across the card and the processor
+answers correctly, and gets faster as more layers move to the card:
+
+| placement | tok/s |
+|---|---|
+| CPU only (what ships today) | **5.0** |
+| hybrid, 14 of 28 layers | **7.07** |
+| hybrid, 20 of 28 layers | **12.25** |
+
+All three measured the same way — same machine, same model, same prompt, same
+HTTP path — because mixing measurement methods is how the graphics number got
+published wrong earlier the same day. **2.4x at 20/28 over the processor-only
+placement that ships today**, and monotone in the layer count, which is what the
+mechanism predicts and is the evidence that it is really doing what it claims
+rather than producing plausible numbers by accident.
+
+⚠ **The comparison case is the reported bug itself.** The "CPU only" row is not
+a contrivance: it is the *live production node*, which had the 3B resident and
+therefore answered `cpu_placement_reason: not_enough_vram` for the 7B and ran it
+entirely on the processor with **3753 MiB of the card in use by the other
+model**. Checking that field before quoting the number is gotcha #422, and doing
+it is what caught that a run labelled "full GPU" was nothing of the kind — the
+first draft of this table had it as the fast baseline.
+
+**Verified the mechanism fired, not just the outcome** (diagnosis rule 4): both
+the worker's and the loader's placement lines appear in the log, and VRAM use
+tracked the split (3721 MiB at 14 layers, 4585 at 20). `gpu_layers = N` (a positive value below the segment's layer
 count) is now honoured end to end — config → `effective_gpu_layers` →
 `--gpu-layers` → `split::GPU_LAYER_LIMIT` → `LayerPlacement` → the forward
 loops. Automatic sizing, where admission picks N instead of giving the card up,
