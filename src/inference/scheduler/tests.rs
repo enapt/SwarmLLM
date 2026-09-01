@@ -505,11 +505,55 @@ fn prefers_lower_load_node() {
 /// This is the only shape where a tensor-parallel group is worth considering.
 /// When the local node covers every layer it can serve alone, and pulling a
 /// peer in can only add latency and a failure mode.
-/// A peer that is unambiguously slower than any machine these tests could run
-/// on, so local-versus-peer selection is deterministic.
+/// `detect_tp_groups` only forms a group for a segment assigned to US, so these
+/// tests silently depend on the local node winning layers 0-16.
 ///
-/// 0.5 tok/s prices a layer at 62.5 ms; the local node's own figure spans about
-/// 2-36 ms across the range of machines and build profiles in play.
+/// Asserted explicitly because when that premise broke on CI the failure read
+/// `left: 0, right: 1` — true, and useless. It said nothing about the local node
+/// having been outbid, which is what had actually happened.
+fn assert_local_holds_the_first_segment(
+    assignment: &crate::inference::scheduler::PipelineAssignment,
+    local_id: &NodeId,
+) {
+    let first = assignment
+        .segments
+        .first()
+        .expect("pipeline assembled no segments at all");
+    assert_eq!(
+        &first.node_id, local_id,
+        "layers {:?} went to {} rather than the local node, so no tensor-parallel \
+         group can form — the peer fixture is no longer slow enough to lose, or \
+         local pricing has moved (gotcha #429)",
+        first.layer_range, first.node_id
+    );
+}
+
+/// A peer slow enough that **no machine can lose to it**, so local-versus-peer
+/// selection in these tests is deterministic.
+///
+/// The local node is priced from `mem_bandwidth`, i.e. from whatever hardware
+/// the test runs on, and the comparison is
+/// `local_ms_per_layer = 1000 / (bw/4.4*0.75) / 32 = 187.5 / bw`. So a peer at
+/// `t` tok/s costs `1000/t/32` ms per layer and the local node only loses below
+/// `bw = 187.5 * t * 32 / 1000` GB/s.
+///
+/// **0.5 tok/s put that break-even at 3.0 GB/s and CI fell under it** — a shared
+/// runner, under build load, on an unoptimised build that measures its own loop
+/// rather than the memory (gotcha #427). It passed on both machines here and
+/// failed on GitHub, which is the whole failure mode gotcha #429 describes: a
+/// test that prices the local node is testing the machine it runs on, and
+/// picking a *closer* threshold only moves where it breaks.
+///
+/// 0.01 tok/s puts the break-even at **0.06 GB/s**, and that is not merely a
+/// distant threshold — it is unreachable. `measured_gbps` refuses to report
+/// anything below **1.0 GB/s**, returning `None` for an implausible reading, and
+/// `None` prices the local node at the `UNKNOWN_COMPUTE_MS` prior of 25 ms per
+/// layer. So both arms are covered: a measurement that lands gives at worst
+/// 187.5 ms per layer, and one that does not gives 25, against the peer's 3125.
+/// The local node cannot lose, on any machine, in any build profile.
+///
+/// These tests are about tensor-parallel GROUPING; the pricing contest is
+/// scenery, and it should be scenery that cannot fall over.
 fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
     crate::types::NodeCapability {
         node_id: node.clone(),
@@ -524,7 +568,7 @@ fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
         uptime_seconds: 3600,
         version: "0.1.0".into(),
         region: None,
-        est_tokens_per_sec_7b: 0.5,
+        est_tokens_per_sec_7b: 0.01,
         os: None,
         observed_latencies: vec![],
         relay_capable: false,
@@ -697,6 +741,7 @@ fn detects_tp_group_for_lan_peers_when_enabled() {
         .assemble_pipeline(&ModelId("tp-lan-model".into()), &local_id)
         .unwrap();
 
+    assert_local_holds_the_first_segment(&assignment, &local_id);
     assert_eq!(assignment.tp_groups.len(), 1);
     assert_eq!(assignment.tp_groups[0].nodes.len(), 2);
     assert!(assignment.tp_groups[0].nodes.contains(&local_id));
@@ -757,6 +802,7 @@ fn tp_group_from_low_latency_only() {
         .assemble_pipeline(&ModelId("latency-tp-model".into()), &local_id)
         .unwrap();
 
+    assert_local_holds_the_first_segment(&assignment, &local_id);
     assert_eq!(assignment.tp_groups.len(), 1);
     assert_eq!(assignment.tp_groups[0].nodes.len(), 2);
 }
