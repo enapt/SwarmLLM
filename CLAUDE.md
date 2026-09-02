@@ -252,6 +252,35 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
+### v0.3.148-alpha (2026-09-02, tagged from `073bb362`; deploy state in memory) — OpenClaw, hygiene, and what an agent asks of a node
+
+- **OpenClaw**: `/v1/models` reports `context_length` beside `max_model_len`
+  (`ModelInfo::new`, both-or-neither); README has a "Use it with OpenClaw"
+  section; **`integrations/openclaw/` is a provider plugin** built on OpenClaw's
+  own self-hosted helper (5 vitest tests, path-filtered CI), verified live with
+  OpenClaw 2026.8.2. Publishing to ClawHub needs the user's credentials.
+- **Measured**: an OpenClaw first turn is **14,633 prompt tokens + an 8192
+  reply reservation** (8192 default refuses; `max_seq_len_override = 32768`,
+  config file only); KV is 344 KB/token (f32 + f16 mirror) → **5 GB at 14.6k on
+  a 3B, filling an 8 GB card**; a 30-tool streamed request decoded at **1.3
+  tok/s vs ~8 plain and delivered nothing** (tool-call buffering) — open.
+- **#437**: idle unload read `last_request_at`, which nothing writes; a stale
+  persisted value outranked a 215 s-old worker → unloaded 5 s after answering.
+  Now the worker's own `last_used`, residency a hard bound.
+- **Hygiene**: 10 stale Dependabot PRs closed, config grouped + majors ignored
+  + `candle-*` excluded, `delete_branch_on_merge` on; **Rust 1.90 minimum**, 26
+  direct deps refreshed, `core2` gone (4 audit ignores); `llama-cpp-2` held at
+  0.1.138 (Vulkan CI needs `spirv-headers`).
+- **Research, collated in `docs/FUTURE_WORK.md`**: rolling shard load (decode
+  PCIe-bound unless paired with wide speculation; prefill pays; Prima.cpp ring
+  for multi-node), weight splitting, ways around the per-token reload, fewer
+  ROUND TRIPS (DSD), and **truncated fast-path replies DIAGNOSED (#438)**: one
+  lost per-token send strands the tail; the requester ACKs a message its
+  dispatcher dropped. Fix ladder recorded, not yet built.
+⚠ Benchmark with representative text: a repeated-filler prompt read 76 s where
+real text of the same length took 22 s. ⚠ A CMake failure in a Dependabot job
+was misread as the MSRV; read the error. `round_log_0902_openclaw.md`.
+
 ### v0.3.147-alpha (2026-09-02) — the failover paths, from one trace
 
 Reading the 709 s 14B failure (`c9b81e27`) line by line found THREE defects —

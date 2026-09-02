@@ -10056,6 +10056,173 @@ every agent turn is refused as too long. The additive manifest field above is
 the fix; until then the README tells OpenClaw users to set `contextWindow`
 explicitly for such models.
 
+## Replies truncated on the remote-generate fast path: one lost token strands the rest (diagnosed 2026-09-02)
+
+**What the logs say.** `node.log.prev` holds ten `remote-generate: gave up on
+tokens that never arrived` events, all on 2026-08-20 between 08:34 and 09:34,
+all from ONE peer (`bf7b3263`, region BE, a WAN link) serving
+`llama-3.2-1b-instruct-q8-0` on the fast path (`route=distributed segments=1`).
+Their shape is the diagnosis: `emitted=3 missing=57 buffered=17`,
+`emitted=18 missing=32 buffered=16`, `emitted=2 missing=58 buffered=49` — a
+few tokens released, then a HOLE, then a dozen or more LATER tokens sitting in
+the reassembly buffer behind it until the 15 s `STRAGGLER_TIMEOUT` gave up.
+The done token had arrived (the peer "reported more tokens than were
+delivered"). No `OutboundFailure`, connection close or dial event on our side
+at any of the ten timestamps. The 08-30 "5 of 38" in MEMORY.md is the same
+fault seen from a throwaway node whose log is gone.
+
+**Why one hole is fatal.** Each content token is its own fire-and-forget
+`request_response` send (`tensors.rs::handle_send_streaming_token`, tracked
+with `delivery_uuid=None`); `StreamReassembler` releases only the consecutive
+run (correct — order matters); and nothing on either side can ask for, or
+offer, a resend. So a single send that dies — on the SERVING side, whose log
+we do not have — costs the whole tail. Three ways a send dies silently, all
+present in the tree (mapped 2026-09-02):
+1. **Requester dispatcher backpressure ACKs a dropped message**
+   (`requests.rs:133-171`): `outbound_tx.try_send` (cap 1024) fails `Full`,
+   the token is dropped with a WARN — and `SwarmResponse::Ack` is sent
+   regardless, so the sender's delivery bookkeeping records success. Did NOT
+   fire on this node in the surviving logs (0 `Dispatcher backpressured …
+   request message` lines; the four on 08-07 are gossipsub at shutdown), but it
+   is a verified defect and "under load" is exactly its trigger.
+2. **libp2p at capacity drops an INBOUND stream with only a warning**
+   (vendored `handler.rs`: "Dropping inbound stream because we are at
+   capacity", `max_concurrent_streams` = 100 per connection, a slot held up to
+   the 600 s request timeout). 0 occurrences here; unknown on the peer.
+3. **A serving-side OutboundFailure on a content token is invisible**
+   (`events.rs:228-339` closes the requester only when `delivery_uuid` is
+   `Some`, which content tokens never are) and libp2p can drop a send with NO
+   failure event ("stale ConnectionIds or handler starvation", documented at
+   `network/manager/mod.rs:73`). The only backstop is a 600 s bookkeeping sweep
+   that tells nobody.
+
+**Fix ladder, in order of size.**
+- *Small, additive*: a `ResendTokens { request_id, from_token_id }` message
+  behind a new feature bit; the serving node keeps the reply's tokens for the
+  request's life (it already resends the terminal token 3×) and the requester
+  asks for the hole after a short gap instead of waiting 15 s for nothing. One
+  extra RTT closes a hole; old peers keep today's behaviour.
+- *Small, correctness*: never ACK a message the dispatcher dropped (send
+  `ResponseOmission`/an error instead), and give content tokens delivery
+  tracking so a serving-side `OutboundFailure` triggers a resend. Also print
+  the PEER on the give-up line — ten events and the peer had to be read off an
+  adjacent DIAG line.
+- *Structural, the real fix*: carry a reply's tokens on ONE ordered
+  `libp2p-stream` per request (the R139 `pipeline_stream.rs` machinery, today
+  used only for tensor forwards), which gives ordering and backpressure from
+  the transport, makes `StreamReassembler` unnecessary, and removes the
+  per-frame ACK path of item 1 entirely. Additive: new protocol id + feature
+  bit, RR fast path kept for older peers. This is what Petals does (one
+  session stream per pipeline stage) and what QUIC streams are for.
+- *Diagnosis aid*: a network-level test that drops one `StreamingToken` and
+  asserts the reply still completes — the only tests today construct tokens in
+  memory and never touch the network.
+
+**Petals' answer to the wider class, for reference**: dual caches — servers
+keep KV, the client keeps the inputs it sent each stage — so a failed server
+is replaced by replaying O(t) inputs to another; measured 11.4 → 10.6 steps/s
+at 1 % server failure, 3.38 at 2 %. Our per-segment standby failover is the
+same idea; the fast path has no equivalent, which is why a hole is terminal.
+
+## Rolling shard load — stream layers through the card (assessed 2026-09-02)
+
+The idea: a node that can hold 4 of a model's 16 shards loads them, runs
+them, unloads, loads the next 4 — so one card could run, or contribute more
+of, a model it cannot hold. Assessed against the physics before building
+anything; the verdict splits by phase.
+
+**Decode: no.** Every token runs every layer, so a rolling load streams the
+whole model through the card per token, and that stream is PCIe-bound. For a
+14B at Q4 (~8 GB): resident VRAM ~448 GB/s → ~50 tok/s; CPU from RAM (~30 GB/s
+measured here) → ~3.5 tok/s; rolling over PCIe 4.0 x16 at a practical 12-20
+GB/s → ~1.5-2.5 tok/s; from NVMe on a page-cache miss, well under 1. It lands
+below the CPU and below the hybrid split (#431), whose whole point is that the
+resident layers run at GDDR speed. This is why AirLLM exists and is not used
+interactively. (Also the reason `delegation_target` and peer chaining are the
+swarm's answer to "no single node can hold it".)
+
+**Prefill: yes, and it attacks the day's measured pain.** Prompt processing is
+compute-bound: a layer's weights are streamed once and applied to every prompt
+token, so at 14.6k tokens (an OpenClaw first turn) the ~0.5 s of streaming is
+amortised over hundreds of GFLOP the card does far faster than the processor.
+Rough estimate for the 14B on the RTX 3070: 40-60 s streamed through the card
+against 140-280 s on the processor, 3-5x. Two conditions: prefill must run
+**layer-major** (the whole prompt through layer i, then i+1), not in the current
+128-token Sarathi chunks, or the weights are re-streamed per chunk; and the KV
+cache for every layer must fit beside the working set, which on an 8 GB card
+means the f16-KV item above comes FIRST (5 GB of KV at 14.6k tokens today).
+Activations at that length are ~290 MB per f32 tensor on a 5120-wide model —
+fine.
+
+**Also pays**: batched serving of several peers' requests, and wide
+speculative verify — anything that reuses streamed weights many times per
+load (FlexGen's insight).
+
+**Swarm constraints if built**: shards on LOCAL disk and warm in the page
+cache (fetching per use from peers is slower than the processor); a rolling
+node is the slowest hop of any pipeline for decode and the scheduler must
+never prefer it to a resident peer; PCIe traffic competes with the hybrid
+split's own decode.
+
+**Refined the same day: with WIDE speculation the decode verdict flips.** The
+pass cost is fixed whether it verifies one draft token or twenty, and the card
+has compute to spare, so a rolling load that verifies 8-20 draft tokens per
+pass lands at ~3-6 tok/s for a model 2-3x the card — against ~2 tok/s for the
+hybrid split alone. That is SpecExec's published regime (NeurIPS 2024: 50B+
+models on a consumer card with RAM offloading, 4-6 tok/s at 4-bit, up to 20
+tokens per target pass). The processor gains from speculation too, but it
+saturates on compute at ~8 tokens per pass; the card does not. Two hard
+requirements: the model must fit in system RAM (NVMe is the bottom rung, 3-7
+s/token) and the draft must be good, since a miss still costs a full pass.
+
+**Recommended shape**: keep what fits resident (the hybrid split), stream the
+remainder through a double-buffered VRAM window each pass (Prima.cpp's
+prefetch discipline), and make every pass verify a wide draft — plus
+layer-major streamed prefill for the same non-resident layers. The worker
+already places layers per device and the verify path already takes K tokens;
+the new pieces are the per-pass copy into a reusable window and a scheduler
+that sizes the window and the draft width together. Weeks, not days.
+
+**In the swarm, several rolling nodes share the load** — Prima.cpp's piped-ring
+exactly: each node takes a layer window sized to its memory, rolls within it if
+the window exceeds VRAM, and prefetches its next window while the others
+compute. For a 20 GB model: one 8 GB card rolling ≈ 1.1 tok/s plain; two on a
+LAN, each streaming ~4 GB per pass, ≈ 2 tok/s; three on a LAN, fully resident,
+≈ 15-20 tok/s — the case chaining already serves, which is why rolling load is
+the bridge for "not enough peers yet" and more peers retire it. Scheduler
+change needed: a node advertises RESIDENT layers and STREAMABLE layers as two
+tiers, and window sizing prices the second at PCIe speed rather than GDDR.
+
+**Ways around the per-token reload, ranked** (the cost is fixed per pass, so
+shrink what a pass reads or make a pass yield more tokens):
+1. *The resident layers ARE the draft.* Early-exit drafting on the layers that
+   fit, one streamed full pass to verify — LayerSkip (Meta 2024, ≤2.2x
+   trained); already in the tree as SWIFT (flag-gated, "off until
+   validated"). No second model, card never idle. Realistic 4-6 tok/s.
+2. *Read fewer bytes per pass.* Activation sparsity on Llama-family models
+   (TEAL/CATS: 40-50 % of FFN reads dropped, 1.5-1.8x); MoE experts (95 %);
+   tree-shaped drafts (Sequoia/SpecExec: 10-20 candidates per pass) stack.
+3. *A pass that yields several tokens.* Multi-token heads (EAGLE-3, MTP in
+   DeepSeek-V3 / Qwen3-Next: 3-6 accepted per pass, trained); diffusion LMs
+   (a 32-token block in 8 denoising steps = 4 tokens per weight read — few
+   GGUFs in 2026, a watch item).
+4. *One pass serves many requests.* A rolling node as a BATCH server for a
+   popular big model: ten peers' requests per pass = ten tokens per weight
+   read (FlexGen's regime). Nothing for a lone user; strong for the swarm.
+5. *Shrink until it fits.* IQ2/IQ3 quantization halves the bytes; ShortGPT-
+   style layer pruning drops ~25 % of layers at small cost. Per-model, today.
+Not a way around it: unified memory / driver paging (WSL2's "shared GPU
+memory", watched crawling 2026-09-02) and wire compression of Q4 weights.
+**Build order for the standalone user**: 1 + 2 (SWIFT drafts, tree verify)
+over a double-buffered streamed pass, plus layer-major streamed prefill. The
+same drafter feeds DSD in the swarm, so a chain verifies a wide draft per
+round trip. It reuses the
+per-layer device placement #431 built (`hybrid.rs`), and the loader already
+knows how to put a layer on either device; the new work is the layer-major
+prefill order and the per-layer H2D copy + drop. Measure with
+`examples/prefill_bench.rs` at 14k tokens before and after; the number that
+matters is the FORWARD, not the copy (#266).
+
 ## `llama-cpp-2` is held at 0.1.138 until CI installs SPIRV-Headers (2026-09-02)
 
 The 2026-09-02 dependency refresh moved `llama-cpp-2` 0.1.138 → 0.1.155 and
