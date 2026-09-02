@@ -10407,6 +10407,24 @@ host-backed memory — every decode step then read it over PCIe.
 prefill (evict cached prompts first, refuse second, at token 0). Options 1
 (f16 stored KV) and 4 remain open and still halve the pressure.
 
+**Measured on the RELEASED v0.3.149 CUDA build (the full `cuda` feature:
+llama.cpp CUDA + candle + flash-attn), same card, same arms**: the first
+long prompt STILL decoded at 1.95 tok/s, and the next two were refused
+mid-prefill by the per-chunk guard (fixed the same night: the guard now
+evicts cached prompts before refusing). The on-card A/B that showed 23
+tok/s used a candle-only local build. The difference is the budget: it is
+`kv_headroom_bytes(weights, free VRAM at LOAD)` = 4491 MB here, taken when
+7541 MB were free — but with both CUDA contexts, the model and ONE cached
+prompt resident the card idles at 7827 of 8192 MB, so the real room for
+live KV is ~2 GB, not 4.5, and an admitted prompt's cache still lands in
+host-backed memory. **Next**: reconcile the budget with the card at
+admission time — `cudaMemGetInfo` (cudarc `mem_get_info`) is microseconds —
+so `admit_prompt` / `plan_snapshot` use `min(budget room, free now − a
+margin)`; and find why the store's `allocated_bytes` read ~1 GB more than
+this request's own cache during prefill (`in_use_mb=4898` with a 2184 MB
+cache + an 1804 MB snapshot). Both are what stands between an 8 GB card and
+a warm agent turn.
+
 Found by running OpenClaw against the live node (RTX 3070, 8 GB) with
 `max_seq_len_override = 32768` so its 14,633-token first turn was accepted at
 all. What happened, with the node's own numbers:

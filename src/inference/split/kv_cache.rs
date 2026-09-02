@@ -448,6 +448,22 @@ pub struct KvCacheStore {
     /// `KvOccupancy::external_bytes` so the per-chunk head-room guard charges
     /// it too.
     external_reserved: std::sync::atomic::AtomicU64,
+    /// How to give some of that external memory back: evicts at least the
+    /// asked-for bytes of cached prompts if it can, updates
+    /// `external_reserved`, and returns what it freed. Installed by the
+    /// worker, which owns the prefix cache. `None` means nothing can be
+    /// evicted from here, and the guard refuses as it always did.
+    external_evictor: std::sync::Mutex<Option<ExternalEvictor>>,
+}
+
+/// Frees at least the asked-for bytes of externally held device memory if it
+/// can, keeps `external_reserved` current, and returns what it freed.
+pub type ExternalEvictor = Box<dyn Fn(u64) -> u64 + Send + Sync>;
+
+/// Why a growth claim was refused: what the device held when it was asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClaimRefused {
+    pub(crate) in_use_bytes: u64,
 }
 
 pub(crate) struct KvCacheEntry {
@@ -644,7 +660,65 @@ impl KvCacheStore {
             caches: dashmap::DashMap::new(),
             ttl,
             external_reserved: std::sync::atomic::AtomicU64::new(0),
+            external_evictor: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Install the way to shrink the external reservation on demand — the
+    /// worker hands in a closure over its prefix cache (gotcha #440).
+    pub fn set_external_evictor(&self, f: ExternalEvictor) {
+        if let Ok(mut slot) = self.external_evictor.lock() {
+            *slot = Some(f);
+        }
+    }
+
+    /// May a forward reserve `positions` more KV positions on this device?
+    ///
+    /// Live caches plus the prefix cache's snapshots plus the claim, against
+    /// the budget. When over, **cached prompts are evicted before the request
+    /// is refused** — the same order as whole-prompt admission, and the
+    /// half that was missing when the snapshot charge first shipped: a
+    /// prompt admitted at token 0 was then refused at its next growth quantum
+    /// because the guard could see the cached prompts and not shrink them,
+    /// where the release before had served it (slowly). A refusal names what
+    /// the device held so the message can say so.
+    pub(crate) fn claim_room(
+        &self,
+        budget_bytes: u64,
+        kv_bytes_per_token: u64,
+        positions: usize,
+    ) -> Result<(), ClaimRefused> {
+        use super::kv_budget::claim_exceeds_headroom;
+        let claim = kv_bytes_per_token.saturating_mul(positions as u64);
+        let in_use = |occ: &KvOccupancy| occ.allocated_bytes.saturating_add(occ.external_bytes);
+        let occ = self.occupancy();
+        if !claim_exceeds_headroom(budget_bytes, in_use(&occ), kv_bytes_per_token, positions) {
+            return Ok(());
+        }
+        let excess = in_use(&occ).saturating_add(claim) - budget_bytes;
+        if occ.external_bytes > 0 {
+            let freed = match self.external_evictor.lock() {
+                Ok(slot) => slot.as_ref().map(|f| f(excess)).unwrap_or(0),
+                Err(_) => 0,
+            };
+            if freed > 0 {
+                let occ = self.occupancy();
+                if !claim_exceeds_headroom(
+                    budget_bytes,
+                    in_use(&occ),
+                    kv_bytes_per_token,
+                    positions,
+                ) {
+                    return Ok(());
+                }
+                return Err(ClaimRefused {
+                    in_use_bytes: in_use(&occ),
+                });
+            }
+        }
+        Err(ClaimRefused {
+            in_use_bytes: in_use(&occ),
+        })
     }
 
     /// Record how many device bytes the prefix cache currently holds, so the
@@ -881,6 +955,55 @@ mod tests {
         assert_eq!(occ.external_bytes, 12_345);
         store.set_external_reserved(0);
         assert_eq!(store.occupancy().external_bytes, 0);
+    }
+
+    /// The per-chunk guard shrinks cached prompts before it refuses, and
+    /// refuses only when even that leaves the claim over the budget.
+    #[test]
+    fn the_growth_guard_evicts_cached_prompts_before_refusing() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(60)));
+        append(&store, 4, 4096);
+        let live = store.occupancy().allocated_bytes;
+        // 1000 bytes of cached prompts, of which an evictor can give back at
+        // most 600.
+        store.set_external_reserved(1000);
+        let held = Arc::new(AtomicU64::new(1000));
+        let evictor_calls = Arc::new(AtomicU64::new(0));
+        {
+            let ks = Arc::downgrade(&store);
+            let held = held.clone();
+            let calls = evictor_calls.clone();
+            store.set_external_evictor(Box::new(move |needed| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                let can = held.load(Ordering::Relaxed).saturating_sub(400);
+                let freed = needed.min(can);
+                let now = held.load(Ordering::Relaxed) - freed;
+                held.store(now, Ordering::Relaxed);
+                if let Some(ks) = ks.upgrade() {
+                    ks.set_external_reserved(now);
+                }
+                freed
+            }));
+        }
+        // Budget covers live + cached + a claim of 10 at 1 byte: fits, no eviction.
+        assert!(store.claim_room(live + 1000 + 10, 1, 10).is_ok());
+        assert_eq!(evictor_calls.load(Ordering::Relaxed), 0);
+        // 300 over: the evictor gives back 300 and the claim is admitted.
+        assert!(store.claim_room(live + 1000 + 10 - 300, 1, 10).is_ok());
+        assert_eq!(store.occupancy().external_bytes, 700);
+        // Now 800 over what remains: only 300 more can go; refused, naming
+        // what the device still holds after the eviction.
+        let refused = store
+            .claim_room(live + 700 + 10 - 800, 1, 10)
+            .expect_err("cannot fit even with every evictable byte gone");
+        assert_eq!(store.occupancy().external_bytes, 400);
+        assert_eq!(refused.in_use_bytes, live + 400);
+        // With no evictor installed a store refuses as it always did.
+        let bare = KvCacheStore::new(std::time::Duration::from_secs(60));
+        bare.set_external_reserved(1000);
+        assert!(bare.claim_room(500, 1, 10).is_err());
     }
 
     /// An empty store reports nothing rather than dividing by zero.

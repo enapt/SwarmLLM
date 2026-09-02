@@ -406,15 +406,12 @@ impl SplitModel {
             );
             if claiming > 0 {
                 // Live caches PLUS the prefix cache's snapshots: the same
-                // device memory, and charged nowhere until gotcha #440.
-                let occ = kv_cache_store.occupancy();
-                let in_use = occ.allocated_bytes.saturating_add(occ.external_bytes);
-                if super::kv_budget::claim_exceeds_headroom(
-                    budget,
-                    in_use,
-                    self.kv_bytes_per_token,
-                    claiming,
-                ) {
+                // device memory, and charged nowhere until gotcha #440 —
+                // and evictable, which `claim_room` does before refusing.
+                if let Err(refused) =
+                    kv_cache_store.claim_room(budget, self.kv_bytes_per_token, claiming)
+                {
+                    let in_use = refused.in_use_bytes;
                     tracing::warn!(
                         request_id,
                         total_seq,

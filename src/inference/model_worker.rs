@@ -247,6 +247,21 @@ pub async fn run_worker(
         prefix_cfg.max_prompt_tokens,
         prefix_cfg.max_bytes,
     ));
+    // The per-chunk head-room guard can shrink the prefix cache when a
+    // request's own KV needs the room (gotcha #440). Weak on both sides:
+    // the store must not keep itself alive through its own closure.
+    {
+        let pc = Arc::downgrade(&prefix_cache);
+        let ks = Arc::downgrade(&kv_store);
+        kv_store.set_external_evictor(Box::new(move |needed: u64| {
+            let (Some(pc), Some(ks)) = (pc.upgrade(), ks.upgrade()) else {
+                return 0;
+            };
+            let freed = pc.release(needed as usize) as u64;
+            ks.set_external_reserved(pc.bytes_total() as u64);
+            freed
+        }));
+    }
     tracing::info!(
         enabled = prefix_cfg.enabled,
         max_entries = prefix_cfg.max_entries,

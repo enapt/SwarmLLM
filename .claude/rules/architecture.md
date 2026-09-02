@@ -830,6 +830,16 @@ silently break at the wire if duplicated:
   first, then the snapshot is cut to what fits (a partial prefix still saves
   its length next turn — `lookup` narrows), then skipped.
   `SWARMLLM_KV_PREFIX_CHARGE=0` disables all of it for A/B.
+  **The per-chunk guard goes through `KvCacheStore::claim_room`**, which
+  evicts through `set_external_evictor` (installed by the worker over its
+  prefix cache, `Weak` on both sides) BEFORE refusing. Shipping the charge
+  without the eviction (v0.3.149) refused admitted prompts mid-prefill
+  where the release before had served them slowly. **A guard that can see a
+  reclaimable tenant must be able to reclaim it, or it is stricter than the
+  guard it replaced.** Still open: the budget is a load-time prediction
+  (`kv_headroom_bytes` at load) and over-promises ~2 GB on an 8 GB card once
+  both CUDA contexts and a snapshot are resident — reconcile with the card
+  (`cudaMemGetInfo`) at admission.
 - **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
   admission check against it. The loader records `kv_headroom_bytes` on the
   model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward

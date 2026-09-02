@@ -2,6 +2,19 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A long prompt that was admitted is no longer refused partway through
+  its own prompt.** v0.3.149 taught the memory guard to count cached prompts
+  but not to shrink them: a prompt admitted at token zero could then be
+  refused at its next growth step with "not enough free memory" while a
+  reconstructible cached prompt sat beside it — measured on the released
+  build, the second and third long prompts in a row were refused where
+  v0.3.148 had served them slowly. The guard now evicts cached prompts
+  first, as admission does, and refuses only when that is not enough.
+
 ## [0.3.149-alpha] — 2026-09-02
 
 ### Changed
