@@ -1,0 +1,67 @@
+{
+  "id": "swarmllm",
+  "name": "SwarmLLM",
+  "description": "Use models served by a SwarmLLM node \u2014 a peer-to-peer inference network on your own machine \u2014 as an OpenClaw model provider.",
+  "version": "0.1.0",
+  "activation": {
+    "onStartup": true,
+    "providers": [
+      "swarmllm"
+    ],
+    "capabilities": [
+      "provider"
+    ]
+  },
+  "providers": [
+    "swarmllm"
+  ],
+  "modelCatalog": {
+    "discovery": {
+      "swarmllm": "refreshable"
+    }
+  },
+  "providerRequest": {
+    "providers": {
+      "swarmllm": {
+        "family": "swarmllm",
+        "openAICompletions": {
+          "supportsStreamingUsage": true
+        }
+      }
+    }
+  },
+  "modelPricing": {
+    "providers": {
+      "swarmllm": {
+        "external": false
+      }
+    }
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "swarmllm",
+        "envVars": [
+          "SWARMLLM_API_KEY"
+        ]
+      }
+    ]
+  },
+  "providerAuthChoices": [
+    {
+      "provider": "swarmllm",
+      "method": "custom",
+      "choiceId": "swarmllm",
+      "choiceLabel": "SwarmLLM",
+      "choiceHint": "Free models from a peer-to-peer swarm on your own machine",
+      "groupId": "swarmllm",
+      "groupLabel": "SwarmLLM",
+      "groupHint": "Peer-to-peer inference network"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

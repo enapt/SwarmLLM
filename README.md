@@ -98,9 +98,14 @@ SDKs — and what it gets is:
   machine ever sees your prompt or the reply.
 
 > **Agents send big prompts.** An agent framework's system prompt alone can
-> exceed SwarmLLM's shipped 8192-token context, so raise it before pointing
-> an agent at a node — `max_seq_len_override = 32768` under `[inference]` in
-> `config.toml`. And for a tool-heavy agent loop, pick the largest model the
+> exceed SwarmLLM's shipped 8192-token context — a fresh OpenClaw workspace
+> sends 14,633 tokens on its first turn and reserves room for the reply on top
+> — so raise it before pointing an agent at a node:
+> `max_seq_len_override = 32768` under `[inference]` in `config.toml`. Know
+> that a prompt that long costs real memory — 5 GB of KV cache for a 3B model
+> at 14.6k tokens, which fills an 8 GB card and slows decoding to a crawl —
+> so an agent is happiest on a card with room to spare, or on a peer that has
+> it. And for a tool-heavy agent loop, pick the largest model the
 > swarm offers you: small models call tools less reliably, and serving models
 > your machine cannot hold alone is what the swarm is for.
 
@@ -137,7 +142,7 @@ claude --model "qwen2.5-coder-7b"
 
 Tools: `chat`, `models`, `compare` (multi-model side-by-side), `research` (fan-out), `batch_prompts`, `delegate`, `node_info`.
 
-**As an [OpenClaw](https://github.com/openclaw/openclaw) model provider** — OpenClaw talks to any OpenAI-compatible server. Export your key as `SWARMLLM_API_KEY` (the daemon reads the same variable), then add SwarmLLM to `~/.openclaw/openclaw.json`:
+**As an [OpenClaw](https://github.com/openclaw/openclaw) model provider** — the [SwarmLLM provider plugin](integrations/openclaw/) adds SwarmLLM to OpenClaw's setup wizard and discovers every model the node can serve (`openclaw models list --provider swarmllm`). Without the plugin, OpenClaw still talks to any OpenAI-compatible server: export your key as `SWARMLLM_API_KEY` (the daemon reads the same variable), then add SwarmLLM to `~/.openclaw/openclaw.json`:
 
 ```json5
 {

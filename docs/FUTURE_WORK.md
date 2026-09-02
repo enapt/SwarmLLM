@@ -10088,7 +10088,93 @@ NOT taken and need a person:
   `examples/qmatmul_bench` for bit-identity. Do it when upstream carries
   something we need, not because a number went up.
 
-## OpenClaw provider plugin (researched 2026-09-02, not built)
+## An agent-sized prompt fills an 8 GB card with KV cache, and decode crawls (measured 2026-09-02)
+
+Found by running OpenClaw against the live node (RTX 3070, 8 GB) with
+`max_seq_len_override = 32768` so its 14,633-token first turn was accepted at
+all. What happened, with the node's own numbers:
+
+- **A plain 14,959-token prompt of real text (this repo's ARCHITECTURE.md)
+  answered in 22 s cold, 64 tokens generated** (`total_ms=22107`) — the node
+  is NOT slow at this length on its own. (A first measurement with a
+  synthetic prompt of one sentence repeated 900 times took 76 s; that prompt
+  is unrepresentative and the figure is withdrawn — repeated text is its own
+  pathology, possibly in the n-gram draft index, and was not chased.)
+- **The card filled as the prompt was read**: 7,175 MiB thirty seconds in,
+  7,943 of 8,192 MiB by the end. `kv_bytes_per_token` prices this model at
+  28 layers × 2,048 elements × (4 B f32 + 2 B f16 mirror) = **344 KB per
+  token, so 5.0 GB of KV at 14.6k tokens**, beside ~2 GB of weights.
+  llama.cpp's f16 cache is 115 KB/token — one third — for the same model.
+  The card at its limit is a real hazard on its own, but it did not make the
+  plain request slow.
+- **The OpenClaw turn itself is the outlier**: the same model, a 14,633-token
+  prompt, produced 372 tokens in 393 s on the first run and was still going
+  at 100% GPU utilisation ten minutes into a second — against 22 s for the
+  plain request above. What differs in OpenClaw's request: `stream: true`,
+  some thirty tool definitions (so the tool prompt is injected and every
+  streamed token goes through the tool-call parser), `max_tokens: 8192`, and
+  the model itself, which does not follow OpenClaw's instructions and rambles
+  to the reply cap instead of answering "pong". **Isolated by A/B on the same node at the same context** (real-text
+  14,965-token prompt, 32 output tokens): plain non-streaming **18.7 s**,
+  streaming without tools **15.7 s** (`ttft_ms=14673 decode_ms=3932
+  tpot_ms=126.8`, i.e. ~8 tok/s decode), streaming WITH 32 tool definitions and
+  `max_tokens: 8192` — **no chunk at all in 26 minutes**, at which point it
+  was stopped. Two mechanisms, both real: with `tools` present the streaming
+  path BUFFERS the reply until it can tell a tool call from prose, so nothing
+  reaches the client until the model stops — and this model does not stop, it
+  rambles to the cap; and the node-side decode rate with tools was **1.2-1.35
+  tok/s** — the A/B arm had produced 2,153 tokens in 1,592 s when it was
+  stopped; the two OpenClaw runs 732 in 600 s and 372 in 393 s — against
+  ~8 tok/s without them. The second number is the one to
+  chase: something on the tools path costs ~7x per token at this context —
+  the per-token re-parse of the accumulated text by `tool_parse`, or the
+  n-gram draft index over 30 near-identical JSON schemas, are the two
+  candidates, and neither was measured. Verify the mechanism before fixing
+  either.
+- **The prefix cache works as designed**: a second request with the same
+  14.4k-token system prompt and a new user message answered in **11 s** — the
+  warm path OpenClaw's "stable prompt above the cache boundary" relies on —
+  when the worker survives between turns, which #437 (fixed the same day)
+  had been preventing.
+
+**What it means for agent users.** The README's advice to raise the context is
+necessary (8192 refuses every agent turn). On an 8 GB card the KV cache for
+an agent-sized prompt then fills the card beside the weights, and the runtime
+head-room guard (`claim_exceeds_headroom`) did not refuse it — the claim fit
+the budget computed from free VRAM at load — so the card ran at its limit
+rather than 503ing to a peer. That is worth fixing on its own. But the
+minutes-long OpenClaw turns have a second cause specific to the request shape
+(above), and a 3B model is also simply the wrong tool for a 30-tool agent
+loop, which OpenClaw's own docs say plainly.
+
+**Options, roughly in order of leverage:**
+
+1. **An f16 KV cache as the stored representation, at least on CUDA.** The
+   f32 cache is kept deliberately (`LayerKv`: rounding once at write, the flash
+   kernel reads bitwise-identical numbers, arXiv 2604.15409 on f16 KV
+   divergence under long context + GQA). But 3x the memory at precisely the
+   context lengths agents need is a cost that paper did not weigh. A config
+   switch (`inference.kv_cache_dtype = "f16"`) with the f32 default would let a
+   user trade a small, measurable divergence for a usable agent — and the
+   divergence should be MEASURED here with the split-model tests, not assumed
+   either way.
+2. **Drop the f32 copy when a mirror exists and the standard path is never
+   taken** — but `cuda_decode_prefers_standard` sends every CUDA decode to the
+   f32 path, so today both copies are read. That routing decision is what makes
+   the f32 copy load-bearing.
+3. **Charge the head-room guard for the WHOLE prompt before prefill starts**
+   rather than per chunk: a request that will certainly not fit should be
+   refused (or routed to a bigger peer) at token 0, not at token 12,000.
+4. **The hybrid split (#431) could place KV on the processor** for the layers
+   it moves — today it moves weights only.
+
+Until one of these lands, the honest advice for OpenClaw on an 8 GB card is a
+smaller context override (16384 accepts the first turn with a 1k reply
+reservation and halves the KV) or a peer with more memory serving the model —
+which the swarm exists to make possible, and which `delegation_target` will
+choose when a suitable peer advertises the room.
+
+## OpenClaw provider plugin (researched and BUILT 2026-09-02 — `integrations/openclaw/`; publishing to ClawHub/npm is the open step)
 
 **Why**: OpenClaw (github.com/openclaw/openclaw, ~388k stars, TypeScript) is a
 personal AI agent whose users want a free model backend, and one of its
@@ -10113,7 +10199,20 @@ the bundled `extensions/sglang` plugin is 25 lines — one call to
 `openclaw plugins init swarmllm --name "SwarmLLM" --type provider` scaffolds the
 package with ClawHub metadata, a validate script and an OIDC publish workflow.
 
-**Plan**:
+**Status 2026-09-02**: built in-tree at `integrations/openclaw/` (the
+scaffold's `src/`→`dist/` layout, 5 vitest tests, typecheck clean) and verified
+against the live node with OpenClaw 2026.8.2: `plugins install` →
+`onboard --auth-choice swarmllm` → `models list --provider swarmllm` lists all
+nine models the node serves → `agent exec` reaches the node. Two facts the run
+established: a fresh workspace's first turn is **14,633 prompt tokens plus the
+8192-token reply reservation**, so the override must be ≥ ~23k (32768 is the
+documented value); and OpenClaw's non-secret markers are a fixed list
+(`ollama-local`, `custom-local`, …), not a suffix pattern. Publishing needs
+the user's ClawHub/npm credentials (`npm exec clawhub -- package publish .`);
+ClawHub's OIDC workflow publishes from a repo root, so trusted publishing would
+need the plugin in its own repository (`git subtree split`).
+
+**Original plan** (kept for the reasoning):
 
 1. Scaffold in a sibling repo (`enapt/openclaw-swarmllm`), TypeScript, pure-JS
    dependency tree (OpenClaw installs plugins with `--ignore-scripts`).

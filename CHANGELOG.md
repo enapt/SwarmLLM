@@ -6,6 +6,14 @@ All notable changes to SwarmLLM are documented here.
 
 ### Added
 
+- **An OpenClaw provider plugin** (`integrations/openclaw/`). It puts
+  SwarmLLM in OpenClaw's setup wizard, discovers every model a node can serve
+  with its real context window, and is built on the same SDK helper as
+  OpenClaw's bundled vLLM and SGLang providers, so it inherits their
+  onboarding and non-interactive setup flags. Verified end to end against a
+  live node with OpenClaw 2026.8.2. Publishing to ClawHub is the next step;
+  until then it installs from a local build (see its README).
+
 - **SwarmLLM can be an [OpenClaw](https://github.com/openclaw/openclaw)
   model provider.** `GET /v1/models` now reports each model's context under
   `context_length` as well as `max_model_len` — the name OpenClaw's model

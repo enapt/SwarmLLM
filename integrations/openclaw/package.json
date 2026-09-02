@@ -1,0 +1,74 @@
+{
+  "name": "openclaw-plugin-swarmllm",
+  "version": "0.1.0",
+  "description": "OpenClaw model provider plugin for SwarmLLM — free models from a peer-to-peer inference network on your own machine",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/enapt/SwarmLLM.git",
+    "directory": "integrations/openclaw"
+  },
+  "homepage": "https://github.com/enapt/SwarmLLM/tree/main/integrations/openclaw#readme",
+  "bugs": "https://github.com/enapt/SwarmLLM/issues",
+  "keywords": ["openclaw", "openclaw-plugin", "swarmllm", "llm", "local-models", "p2p"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run --config ./vitest.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "validate": "npm run build && clawhub package validate . --out .clawhub-validation"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "openclaw": ">=2026.8.2"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "clawhub": "latest",
+    "openclaw": "2026.8.2",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "providers": ["swarmllm"],
+    "compat": {
+      "pluginApi": ">=2026.8.2"
+    },
+    "build": {
+      "openclawVersion": "2026.8.2"
+    },
+    "install": {
+      "clawhubSpec": "clawhub:openclaw-plugin-swarmllm",
+      "npmSpec": "npm:openclaw-plugin-swarmllm",
+      "defaultChoice": "clawhub",
+      "minHostVersion": ">=2026.8.2"
+    },
+    "release": {
+      "publishToClawHub": true
+    }
+  },
+  "pluginInspector": {
+    "version": 1,
+    "plugin": {
+      "id": "swarmllm",
+      "priority": "high",
+      "seams": ["plugin-runtime"],
+      "sourceRoot": ".",
+      "expect": {
+        "registrations": ["registerProvider"]
+      }
+    }
+  }
+}
