@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.147-alpha] — 2026-09-02
 
 ### Fixed
 
@@ -29,7 +29,10 @@ All notable changes to SwarmLLM are documented here.
   for 392 seconds while the log showed the disconnect and the failed
   reconnects. Once a reconnect attempt to a disconnected machine fails, its
   part of the work is now failed immediately: the request moves to a backup at
-  once, or reports the failure honestly instead of hanging.
+  once, or reports the failure honestly instead of hanging. Verified end to
+  end on two isolated nodes: a machine serving the middle of a model was
+  killed mid-request, and the request failed cleanly 10 seconds later instead
+  of after several minutes.
 
 ## [0.3.146-alpha] — 2026-09-01
 
