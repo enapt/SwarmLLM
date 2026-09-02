@@ -251,46 +251,41 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.146-alpha (2026-09-01) — what benchmarking .145 on the live node found
+### v0.3.147-alpha (2026-09-02) — the failover paths, from one trace
 
-No test nodes (a tester was running theirs), so everything ran on the live
-release binary and the real swarm — `examples/stream_bench.py` and
-`examples/remote_checks.py` are the harnesses. Numbers in
-`memory/perf_baseline_0901_hybrid.md`.
+Reading the 709 s 14B failure (`c9b81e27`) line by line found THREE defects —
+two of them not the one the FUTURE_WORK entry described, whose proposed fix
+(the redial give-up branch, ~8 min in) would barely have beaten the deadline
+it meant to replace. All three fixed, each with a toggle-off-goes-red test:
 
-- **Hybrid placement holds on a second architecture.** 3000 MB budget so neither
-  model fits: 7B (Qwen2) full card 27.3 → **13/28 split 6.8** → processor 3.8;
-  8B (Llama) 31.7 → **12/32 split 5.2** → 4.0. Both auto counts inside budget.
-  **And confirmed in the field the same day**: the reporter's RTX 4050 + 14B
-  went **4 min 11 s → 13.1 s** for the same request (`gpu_layers=10
-  segment_layers=29`, load 11 → 2.4, 86.8 → 77.4 °C). A whole-request time,
-  not a decode rate — that node serves segments to peers, i.e. #432's exposure.
-- **Open, seen twice today**: a segment landing on a peer that drops
-  mid-request with no standby waits the WHOLE segment deadline before failing
-  — the reporter saw 0 tokens for 392 s, our own 14B stream 709 s to `Segment
-  failover exhausted`. `docs/FUTURE_WORK.md`.
-- **#432 — the first 8B split read 2.9 tok/s, BELOW its processor-only 4.0.**
-  Worker at ~100% CPU in decode: one thread. Its calibration line said why —
-  `measured=4:5ms 3:2ms 2:2ms 1:1ms`: while the split model loaded, the same
-  worker served two ONE-LAYER card-only segments for a boomerang request and the
-  once-per-process calibration settled on them. Proved by removing the cause on
-  the same binary (private mode kept the cold request local → chose 4, 5.2
-  tok/s). Now keyed by processor depth; depth 0 never timed.
-- **#433 — the failure paths over the network were wrong while every success
-  path was right**: a streamed request for a model nobody holds answered `200`
-  + empty `stop` (the legacy pre-router streaming path); a peer's honest "model
-  not hosted on target" failed a 5-candidate request with no retry. Guard
-  written first and seen to fail.
-- ⚠ **`SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB` — the README's own example — does
-  not exist** (7 hand-coded env overrides only); caught by verifying the
-  mechanism, not the number. ⚠ Remote checks <~200 s after a restart 503
-  "insufficient capacity" for models five peers hold (diagnosis rule 3).
+- **#434** — a decode step to a remote segment 0 carries `PromptBytes`, and the
+  budget fallback asked the UNITS, not the KIND: every such step was budgeted
+  as a prefill (240 s for 16 layers; standby idle throughout). Kind decides
+  first; decode uses the measured basis regardless of units.
+- **#435** — a standby's ERROR result was taken as the segment's output: empty
+  activations flowed downstream as `Tensor bytes too short`, blamed on the
+  wrong segment. Failover now LOOPS over standbys (tried nodes excluded);
+  exhaustion names the segment and the last standby's reason. The RTX 4050
+  tester's unexplained one-off on .146 was this, seen from outside.
+- **#436** — an ACKed forward leaves `pending_tensor_outbound`, so a peer that
+  then DEPARTS was bounded only by the compute deadline (0 tokens for 392 s in
+  the field). Close + first failed re-dial now fails every waiter PINNED to
+  the node (`fail_layer_results_awaiting`); no standby gate — not #386's
+  gamble, the serving side aborts on close. **Verified END TO END pre-tag**
+  (`examples/departed_peer_test.sh`): server killed mid-segment → DIAG fires →
+  clean 503 in 10.4 s where .146 waits minutes.
+
+⚠ An edit and the guard that checks it must be strictly SEQUENTIAL tool calls —
+running them in parallel let a stale README count reach CI. ⚠ The first decode
+sample to a cold peer is DROPPED by design; a test must record twice.
+`round_log_0902_failover_paths.md`.
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.146** (09-01): benchmarking .145 on the LIVE node — hybrid holds on a 2nd arch (7B 13/28 **6.8** vs 3.8 CPU; 8B 12/32 **5.2** vs 4.0); **#432** a worker's decode-thread calibration settled by one-layer card-only segments it served for a peer (2.9 tok/s, ONE thread for life → keyed by processor depth, depth 0 never timed; confirmed in the field on the deployed binary); **#433** a streamed no-coverage request answered `200`+empty `stop`, and a peer's honest "not hosted" failed a 5-candidate request (both field-confirmed fixed). ⚠ The README's own `SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB` never existed. `round_log_0901_diagnostics_privacy.md`, `perf_baseline_0901_hybrid.md`.
 - **v0.3.145** (09-01): **a model 20% too big for the card no longer loses it (#431)** — `force_cpu_for` was `gpu_layers == 0`, all or nothing; three reports, the last with 5151 MB free while a 14B tripped a thermal limit. Split between layers (contiguous, card-first), sized with KV folded into the per-layer cost; **measured 5.0 → 7.07 (14/28) → 12.25 (20/28), 2.4x and monotone**; a 3000 MB budget chose 13/28 unprompted and settled at 2613 MB. ⚠ **The slow baseline reproduced the bug by accident — check `cpu_placement_reason` before quoting a GPU number (#422).** ⚠ **Applied by SHADOWING `device`/`cos`/`sin` at each loop head, not by editing ~128 sites — and the missed-path hazard FIRED (Qwen 3.5's own RoPE); an unused-shadow warning is all that surfaced it → `arch_supports_hybrid` is an ALLOWLIST.** The design was far smaller than the deferral note assumed: read the code before costing work from a months-old list.
 
 - **v0.3.144** (09-01): **no Mac had EVER been able to update itself (#430)**, reported by a NON-TECH user whose every visible surface said otherwise. `host_has_avx2()` returns `false` on non-x86 — meaning *no such instruction set*, not *old processor* — routing every Apple node to a `-baseline` asset that is never published; no asset → `Ok(None)` → **which is how this module says "already up to date"**. Nine releases behind, on the swarm's largest shard holder. ⚠ **The existing guard ASSERTED THE BUG AS CORRECT and was green throughout.** ⚠ **The fix cannot arrive by updating — an Apple node needs ONE manual install.** A node that cannot update now says so.
