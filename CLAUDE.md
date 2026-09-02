@@ -221,23 +221,22 @@ All 20 build phases complete. All subsystems wired — no stubs. **2217 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.146-alpha (2026-09-01).** Local `225e6fe7`
-(CUDA asset, installed sha256 `83ef5924…` == published, rollback
-`~/.local/bin/swarmllm.0.3.145-alpha.bak`) and Proxmox `96842635` (.deb,
-stayed `enabled` + `active`, no `.dpkg-old`) are both on it, node ids kept.
-Gate: CI + Cache warm green, 25 assets, `latest`, smoke 9/9, shapes 7/7 on the
-DOWNLOADED artifact. **Both fixes confirmed in the field on the deployed
-binary**: the streamed no-coverage request now carries an `error` frame, and
-the 8B hybrid loaded on the exact poisoning path (cold request out to a peer,
-one-layer card-only segment served first) calibrated on its own tokens —
-`4:223ms 3:192ms 2:227ms 1:349ms → 4` — and decoded 4.9-5.2 tok/s where .145
-gave 2.9.
+**Released and deployed: v0.3.147-alpha (2026-09-02).** Local `225e6fe7`
+(CUDA asset, installed sha256 `bb1a57c2…` == published, rollback
+`~/.local/bin/swarmllm.0.3.146-alpha.bak`) and Proxmox `96842635` (.deb,
+stayed `enabled` + `active`, no `.dpkg-old`) both on it, node ids kept, zero
+ERROR lines post-restart, first inference OK. Gate: CI + Cache warm green,
+25 assets, `latest`, smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact.
+Content: the three failover fixes (#434 decode-step deadlines, #435 standby
+errors, #436 departed peers) — #436 additionally verified END TO END pre-tag
+on two isolated nodes: server killed mid-segment, clean 503 in 10.4 s where
+.146 waits minutes.
 
-Prior line: .145 hybrid placement (#431, on by default, `SWARMLLM_HYBRID_OFFLOAD=0`
-disables), .144 Apple Silicon update fix (#430 — ⚠ an Apple node needs ONE manual
-install of `swarmllm-macos-aarch64`), .143 advertised-speed correction (#428),
-.142 diagnostics privacy (#426), .141 a model no single node can hold — all in
-the one-liners below.
+Prior line: .146 (#432 calibration by processor depth + #433 streamed-failure
+honesty — BOTH field-confirmed by the RTX 4050 tester, whose "new one-off"
+`Tensor bytes too short` is #435), .145 hybrid placement (#431), .144 Apple
+Silicon update fix (#430), .143 advertised-speed correction (#428) — details
+in the one-liners below.
 
 Release gate, unchanged and followed every time: bump the version FIRST,
 `cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
