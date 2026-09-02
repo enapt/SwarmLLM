@@ -10056,6 +10056,108 @@ every agent turn is refused as too long. The additive manifest field above is
 the fix; until then the README tells OpenClaw users to set `contextWindow`
 explicitly for such models.
 
+## Speeding up inference BETWEEN nodes — ranked, with the physics (research sprint 2026-09-02)
+
+An ideation worker surveyed the literature and checked each idea against the
+tree; its load-bearing code claims were verified by hand (`build_spec_verify_
+forward` sets `spec_logits_requested: true` at `pipeline/mod.rs:292`; a
+request without `session_id` keeps mid-chain KV only for the request's own TTL,
+`distributed.rs:505-524`; `ack_rtt` is private to the NetworkManager,
+`mod.rs:350`, while routing reads a ping written at `requests.rs:475`). Full
+report in the session artifact "Holes and Round Trips"; the substance:
+
+**Three premises corrected first.** (1) "One RTT per token per hop" is no
+longer true: `inference.pipeline_chaining` is ON by default since v0.3.109, so a
+chained decode costs one trip out + one back plus the short peer-to-peer hops.
+(2) Chaining is SILENTLY OFF for any request with `frequency_penalty` or
+`presence_penalty` ≠ 0, any peer without the feature bit, and any assembly with
+a local segment — `plan_chain` stops at the local node, so **boomerang never
+chains**. (3) Bandwidth is ~3 % of decode cost but DOMINATES prefill (below).
+
+Canonical case: 14B, 3 segments of 16 layers on peers A/B/D, coordinator C
+holds nothing, C↔A and D↔C 80 ms, peers clustered 20 ms or spread 80 ms, ~20 ms
+compute per segment per token:
+
+| decode topology | clustered | spread |
+|---|---|---|
+| coordinator relay (what the brief assumed) | 300 ms → 3.3 tok/s | 3.3 |
+| chained (today's default) | 160 ms → 6.3 | 220 ms → 4.5 |
+| ring, tail samples, C out of the loop | 90 ms → 11.1 | 180 ms → 5.6 |
+
+**Ranked:**
+1. **Prefix-keyed remote KV across turns — ~50× TTFT on turn 2+ of an agent
+   loop.** Mid-chain segments DO retain KV, but only under `session_id`, which
+   stateless OpenAI/Anthropic clients (OpenClaw, Claude Code) never send; the
+   prefix cache is keyed by token block hashes (`prefix_cache.rs::compute_block_
+   hashes`) that a mid-chain segment, seeing only hidden states, can never
+   compute. So every turn re-ships and re-prefills the whole 14,633-token prompt
+   through every segment: 14.6k × 5120 × 1.0625 B ≈ **79 MB per hop, ~51 s of
+   wire at 25 Mbps, ×20 tool calls**. Fix: the coordinator computes the block-
+   hash chain it already computes for segment 0, ships it as an opaque prefix id
+   in the forward, each segment stores KV under it and answers "held to position
+   k"; turn 2+ ships only the delta (~1 s). A lying coordinator corrupts only
+   its own request. Mooncake (2407.00079) / DistServe (2401.09670) are the
+   datacentre siblings. **Largest number, smallest research risk.**
+2. **Move accept/reject to the tail — the blocker under all distributed
+   speculation.** The verify round returns γ+1 FULL-VOCABULARY f32 logit
+   vectors: 152,064 × 4 B × 5 = **3.04 MB per round, ~970 ms on a 25 Mbps
+   uplink** — speculation is net ~6× NEGATIVE as shipped (`FUTURE_WORK` already
+   notes the miss-round half, ~513 KB per 128k-vocab miss). The tail already
+   owns the sampler for ordinary decode; let it run `sampled_accept_reject` and
+   return the accepted count + bonus token (~8 bytes); KV rollback rides the
+   next round's `truncate_kv_to` as `pending_truncate` already does. Fix this
+   BEFORE measuring anything speculative. DSD's published 2.5× was measured on
+   100 Gbps InfiniBand, not a WAN, and `speculative_distributed` has no failover.
+3. **Ring decode / tail-owned sampler — 1.24-1.76× on decode, up to 2× for a
+   distant client.** Generalise the `remote_generate` fast path (N=1 today) to N
+   segments: the tail samples, applies stops, sends the token to the HEAD, and
+   streams to the coordinator, which leaves the per-token loop. Repetition
+   penalties get BETTER (the tail accumulates `generated_ids`, so they stop
+   disabling chaining). Boomerang is structurally excluded (the client IS in the
+   ring). Failover = Petals' replay of retained inputs. Risk: N² reachability
+   (a ring hop through a relay may be worse than the coordinator path — gate on
+   measured peer-to-peer RTT, fall back to chaining); the tail's token stream
+   should double as the liveness heartbeat.
+4. **Prefill microbatching across segments — ~2.2× TTFT, exact, zero quality
+   risk.** `streaming_chunked_send` chunks the WIRE but `try_assemble_chunked_
+   forward` reassembles the whole prompt before dispatch, so segment 1 waits
+   for all of segment 0. Let a chunk LEAVE before the next is computed
+   (GPipe: bubbles negligible at ≥4× the partition count → ~12 chunks of ~1,200
+   tokens for 3 segments). Sarathi-Serve (OSDI'24) is the evidence: 2.6-5.6×.
+   `prefill_chunk_tokens` and `prefill_pacer.rs` already exist worker-side.
+5. **Feed `AckRttEstimator.srtt` into routing and gossip peer↔peer RTT — tens
+   of lines that decide a 2× swing.** The estimator is the best latency signal
+   in the system (it sees queueing on a loaded peer; a ping does not — #386)
+   and routing cannot see it; and with chaining on, the cost that matters is
+   RTT(A↔B), which NO node knows. `docs/plans/direct_peer_chaining.md` §3.7
+   already specifies the additive `rtt_ms` gossip field.
+
+**Also worth doing**: wide/tree speculation across hops once #2 lands —
+SpecPipe (2504.04104) 4.2-5.5× time-between-tokens on an 8-stage pipeline with
+explicit inter-node stages, no draft training; SpecExec up to 20 tokens per
+target pass; on agentic traffic SuffixDecoding (2411.04975) reaches 5.3× and
+this project measured 8.83 tokens/round locally on copy-heavy replies, while
+the only real-WAN measurement (2602.16760) got 1.2-1.3 accepted per step with
+an untrained lookahead draft — so the draft must live at the TAIL (zero extra
+network; it already holds the sequence) and be suffix/n-gram-based for agent
+traffic. Estimated 3.3× on the chained case for agentic acceptance, none for
+prose. Pipelined/asynchronous speculation (PipeInfer 2407.11798, up to 2.15×,
+tolerant of low acceptance) stacks on top but is the riskiest item here —
+every rollback path yields a plausible WRONG ANSWER rather than an error.
+Q4 activations for PREFILL only (not decode) would halve the 79 MB hop.
+
+**Explicitly not recommended**: 4-bit or delta-coded activations for decode
+(5.4 KB/hop/token is 3 % of the cost; no paper delta-codes token-to-token
+hidden states); tensor parallelism over WAN (fibre floor × barriers ≈ 9 s per
+token); ring attention (needs Gbps of upload); early exit as a chain-shortener
+(untrained models need ~73 % of layers to match baseline; LayerSkip needs
+per-model training); MTP heads (trained in from scratch); QUIC 0-RTT (worth
+120-240 ms once, not per token); cross-user batching as a LATENCY fix.
+
+**The one thing**: prefix-keyed remote KV. It is the only item that changes
+what the swarm can do rather than how fast; the machinery is ~80 % present
+and the reason it does not fire is one missing key.
+
 ## Replies truncated on the remote-generate fast path: one lost token strands the rest (diagnosed 2026-09-02)
 
 **What the logs say.** `node.log.prev` holds ten `remote-generate: gave up on
