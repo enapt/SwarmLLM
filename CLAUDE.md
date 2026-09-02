@@ -222,18 +222,21 @@ All 20 build phases complete. All subsystems wired — no stubs. **2220 lib (dev
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.147-alpha (2026-09-02).** Local `225e6fe7`
-(CUDA asset, installed sha256 `bb1a57c2…` == published, rollback
-`~/.local/bin/swarmllm.0.3.146-alpha.bak`) and Proxmox `96842635` (.deb,
-stayed `enabled` + `active`, no `.dpkg-old`) both on it, node ids kept, zero
-ERROR lines post-restart, first inference OK. Gate: CI + Cache warm green,
-25 assets, `latest`, smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact.
-Content: the three failover fixes (#434 decode-step deadlines, #435 standby
-errors, #436 departed peers) — #436 additionally verified END TO END pre-tag
-on two isolated nodes: server killed mid-segment, clean 503 in 10.4 s where
-.146 waits minutes.
+**Released and deployed: v0.3.148-alpha (2026-09-02, tag on `073bb362`).** Local
+`225e6fe7` (CUDA asset, installed sha256 `a2dc27ce…` == published, ready in 2 s,
+0 ERROR lines, first inference OK, rollback `~/.local/bin/swarmllm.0.3.147-alpha.bak`)
+and Proxmox `96842635` (.deb `0.3.148-alpha-1` over `0.3.147-alpha-1`, stayed
+`enabled` + `active`, no `.dpkg-old`, 0 ERROR lines) both on it, node ids kept.
+Gate: CI + Cache warm green (the cache warm was a ~100 min cold rebuild after
+the dependency refresh), 25 assets, `latest`, sha256 on CUDA + deb, `ggml_cuda_init`
+= 1, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact**. Content: OpenClaw
+(`context_length`, provider plugin, README section), #437, Rust 1.90 + 26 deps,
+Dependabot hygiene. ⚠ The `.sha256` assets hash the RAW binary, not the tarball —
+a gate script that hashes the tarball goes red on a correct release. ⚠ `gh` needs
+`GH_REPO` (or a checkout cwd) when run from a scratch directory.
 
-Prior line: .146 (#432 calibration by processor depth + #433 streamed-failure
+Prior line: .147 (#434-#436 failover fixes, `round_log_0902_failover_paths.md`),
+.146 (#432 calibration by processor depth + #433 streamed-failure
 honesty — BOTH field-confirmed by the RTX 4050 tester, whose "new one-off"
 `Tensor bytes too short` is #435), .145 hybrid placement (#431), .144 Apple
 Silicon update fix (#430), .143 advertised-speed correction (#428) — details
@@ -252,7 +255,7 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.148-alpha (2026-09-02, tagged from `073bb362`; deploy state in memory) — OpenClaw, hygiene, and what an agent asks of a node
+### v0.3.148-alpha (2026-09-02) — OpenClaw, hygiene, and what an agent asks of a node
 
 - **OpenClaw**: `/v1/models` reports `context_length` beside `max_model_len`
   (`ModelInfo::new`, both-or-neither); README has a "Use it with OpenClaw"
