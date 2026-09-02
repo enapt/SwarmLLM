@@ -10065,7 +10065,8 @@ bumps into one weekly PR and proposes no majors. Three items were deliberately
 NOT taken and need a person:
 
 - **`rand` 0.8 → 0.9.** Direct dependency (`Cargo.toml`), and 0.9.x is already
-  in the lock transitively, so the tree carries both. 0.9 renamed the core
+  in the lock transitively — and since the 2026-09-02 `cargo update`, 0.10.x
+  too, via `quinn-proto` under `libp2p-quic` — so the tree carries THREE copies. 0.9 renamed the core
   traits and functions (`thread_rng` → `rng`, `gen` → `random`, `Rng::gen_range`
   semantics, `distributions` → `distr`); the Dependabot branch failed clippy,
   tests and the feature-compile checks. A real migration, then one crate in the

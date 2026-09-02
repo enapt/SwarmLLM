@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/enapt/SwarmLLM/actions/workflows/ci.yml/badge.svg)](https://github.com/enapt/SwarmLLM/actions/workflows/ci.yml)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
-[![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://github.com/enapt/SwarmLLM/pkgs/container/swarmllm)
 [![Release](https://img.shields.io/github/v/release/enapt/SwarmLLM?include_prereleases&label=release)](https://github.com/enapt/SwarmLLM/releases)
 [![Discord](https://img.shields.io/badge/discord-join%20chat-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/nq9be3u828)
@@ -28,6 +28,7 @@ For long-form documentation see the [SwarmLLM book](https://enapt.github.io/Swar
 
 - [Quick Start](#quick-start)
 - [Use it as an API](#use-it-as-an-api)
+- [Use it with OpenClaw](#use-it-with-openclaw)
 - [What it does](#what-it-does)
 - [Networking & Privacy](#networking--privacy)
 - [Capabilities](#capabilities)
@@ -98,14 +99,10 @@ SDKs — and what it gets is:
   machine ever sees your prompt or the reply.
 
 > **Agents send big prompts.** An agent framework's system prompt alone can
-> exceed SwarmLLM's shipped 8192-token context — a fresh OpenClaw workspace
-> sends 14,633 tokens on its first turn and reserves room for the reply on top
-> — so raise it before pointing an agent at a node:
-> `max_seq_len_override = 32768` under `[inference]` in `config.toml`. Know
-> that a prompt that long costs real memory — 5 GB of KV cache for a 3B model
-> at 14.6k tokens, which fills an 8 GB card and slows decoding to a crawl —
-> so an agent is happiest on a card with room to spare, or on a peer that has
-> it. And for a tool-heavy agent loop, pick the largest model the
+> exceed SwarmLLM's shipped 8192-token context, so raise it before pointing an
+> agent at a node: `max_seq_len_override = 32768` under `[inference]` in
+> `config.toml`. The [OpenClaw section](#use-it-with-openclaw) below has the
+> full setup and what to expect from a small graphics card. And for a tool-heavy agent loop, pick the largest model the
 > swarm offers you: small models call tools less reliably, and serving models
 > your machine cannot hold alone is what the swarm is for.
 
@@ -142,7 +139,51 @@ claude --model "qwen2.5-coder-7b"
 
 Tools: `chat`, `models`, `compare` (multi-model side-by-side), `research` (fan-out), `batch_prompts`, `delegate`, `node_info`.
 
-**As an [OpenClaw](https://github.com/openclaw/openclaw) model provider** — the [SwarmLLM provider plugin](integrations/openclaw/) adds SwarmLLM to OpenClaw's setup wizard and discovers every model the node can serve (`openclaw models list --provider swarmllm`). Without the plugin, OpenClaw still talks to any OpenAI-compatible server: export your key as `SWARMLLM_API_KEY` (the daemon reads the same variable), then add SwarmLLM to `~/.openclaw/openclaw.json`:
+## Use it with OpenClaw
+
+[OpenClaw](https://github.com/openclaw/openclaw) is a personal AI agent that
+runs on your own machine and talks to you over the messaging apps you already
+use. It needs a model behind it, and a SwarmLLM node gives it one for free —
+local, or split across a swarm for the models your machine cannot hold alone.
+
+**1. Give the node room for an agent's prompt.** OpenClaw's first turn is
+about 14,600 tokens before you have said a word, plus room reserved for the
+reply; the shipped 8192-token context refuses it. In SwarmLLM's `config.toml`:
+
+```toml
+[inference]
+max_seq_len_override = 32768
+```
+
+Restart the node. This is a config-file setting, not a dashboard control.
+
+**2. Export the access key.** OpenClaw's "local marker" keys send no
+`Authorization` header at all, and every `/v1` route on a node requires one.
+The daemon reads the same variable as its own key override, so one export
+serves both sides:
+
+```bash
+export SWARMLLM_API_KEY="$(cat ~/.local/share/swarmllm/api_key)"   # Linux
+# macOS: ~/Library/Application Support/swarmllm/api_key
+```
+
+**3. Install the provider plugin** — it puts SwarmLLM in OpenClaw's setup
+wizard and discovers every model the node can serve, with each model's real
+context window:
+
+```bash
+openclaw plugins install clawhub:openclaw-plugin-swarmllm
+openclaw onboard        # pick "SwarmLLM"; or non-interactively:
+openclaw onboard --non-interactive --accept-risk --skip-health --mode local \
+  --auth-choice swarmllm --custom-base-url "http://127.0.0.1:8800/v1" \
+  --custom-api-key "$SWARMLLM_API_KEY" --custom-model-id "meta-llama-3.1-8b-instruct-q4-k-m"
+openclaw models list --provider swarmllm
+```
+
+The plugin lives in [`integrations/openclaw/`](integrations/openclaw/) with
+its own README (install from a checkout, manual config, troubleshooting).
+Without the plugin, OpenClaw still talks to any OpenAI-compatible server —
+add SwarmLLM to `~/.openclaw/openclaw.json` by hand:
 
 ```json5
 {
@@ -163,7 +204,12 @@ Tools: `chat`, `models`, `compare` (multi-model side-by-side), `research` (fan-o
 }
 ```
 
-OpenClaw needs a **real key** — its "local marker" keys send no `Authorization` header, and every `/v1` route requires one — and the raised context window from the note above (its own system prompt is larger than 8192 tokens). Model ids are whatever `GET /v1/models` lists, referenced as `swarmllm/<id>`; each entry carries `context_length`, so OpenClaw's model discovery picks up the real limit instead of assuming 128k.
+**What to expect.** Verified end to end with OpenClaw 2026.8.2 against a live
+node. Pick the largest model the swarm offers you: small models call tools
+unreliably and ramble past an agent-sized prompt, and a 14.6k-token prompt
+costs real memory — 5 GB of KV cache for a 3B model, which fills an 8 GB card
+and makes replies crawl. An agent is happiest on a card with room to spare, or
+on a peer in the swarm that has it, which is what the swarm is for.
 
 ## What it does
 
@@ -448,7 +494,7 @@ cp .env.example .env && docker compose up -d
 ### From source
 
 ```bash
-# Requires Rust 1.89+
+# Requires Rust 1.90+
 git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
 
 cargo build --release                             # CPU (candle)

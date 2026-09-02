@@ -16,6 +16,14 @@ All notable changes to SwarmLLM are documented here.
   it has been loaded. Found while running an agent framework against a live
   node, where each reload also threw away the cached system prompt.
 
+### Changed
+
+- **Building from source now needs Rust 1.90** (was 1.89): the storage
+  engine's latest release requires it. Release binaries are unaffected. Taken
+  together with a routine dependency refresh (26 direct dependencies, minor
+  and patch versions only) that also drops the yanked `core2` crate from the
+  tree, closing one of the accepted `cargo audit` advisories.
+
 ### Added
 
 - **An OpenClaw provider plugin** (`integrations/openclaw/`). It puts

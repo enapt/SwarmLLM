@@ -45,7 +45,7 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
-  # `cargo audit` against the RustSec advisory DB. The five `--ignore`
+  # `cargo audit` against the RustSec advisory DB. The four `--ignore`
   # advisories below are documented in SECURITY.md § "Known accepted
   # advisories" with the rationale for each. Re-evaluate whenever the
   # transitive dep tree moves (most are blocked on a libp2p bump that
@@ -68,7 +68,6 @@ jobs:
           cargo audit \
             --ignore RUSTSEC-2026-0118 \
             --ignore RUSTSEC-2026-0119 \
-            --ignore RUSTSEC-2026-0105 \
             --ignore RUSTSEC-2024-0436 \
             --ignore RUSTSEC-2026-0097
 
