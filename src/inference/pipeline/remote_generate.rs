@@ -101,6 +101,13 @@ impl StreamReassembler {
         if tok.token_id > 0 {
             self.sequenced = true;
         }
+        // A token already emitted arriving again — a resend that raced the
+        // original, or the original arriving after a resend filled its slot.
+        // Without this guard it would sit in `pending` for ever, counted as
+        // buffered and never drained.
+        if self.sequenced && tok.token_id < self.next_seq {
+            return Vec::new();
+        }
         let slot = if self.sequenced {
             tok.token_id
         } else {
@@ -191,6 +198,100 @@ impl StreamReassembler {
     pub(super) fn buffered(&self) -> usize {
         self.pending.len()
     }
+
+    /// Is the next token to emit one the peer has (or says it has) sent, but
+    /// that has not arrived? True when later tokens are buffered behind it,
+    /// or when the done token promised more than has been emitted. Only ever
+    /// true for a sequenced peer — an unsequenced one has no holes, only
+    /// arrival order.
+    pub(super) fn has_hole(&self) -> bool {
+        self.sequenced && (!self.pending.is_empty() || self.missing() > 0)
+    }
+
+    /// The range `[from, to)` to ask the peer to resend: from the next token
+    /// to emit up to the first token already buffered, or to the total the
+    /// done token announced. `None` when there is nothing to ask for.
+    pub(super) fn resend_range(&self) -> Option<(u32, u32)> {
+        if !self.has_hole() {
+            return None;
+        }
+        let from = self.next_seq;
+        let to = self
+            .pending
+            .keys()
+            .next()
+            .copied()
+            .or(self.expected_total)?;
+        (to > from).then_some((from, to))
+    }
+}
+
+/// Asks for a resend per reply before the requester falls back to waiting the
+/// old deadlines out. Each ask costs one round trip; four cover a hole that
+/// is itself lossy without letting a dead peer hold the request for long.
+const MAX_RESEND_ASKS: u32 = 4;
+
+/// Whether, and how often, to ask the serving peer to fill a hole.
+///
+/// Pure so the policy can be pinned without a network: it decides only
+/// "may I ask again", given what the peer advertised. `SWARMLLM_RESEND_TOKENS=0`
+/// answers no unconditionally — the A/B switch that shows the truncation
+/// coming back inside one binary.
+pub(super) struct ResendPolicy {
+    supported: bool,
+    asks: u32,
+}
+
+impl ResendPolicy {
+    pub(super) fn new(peer_supports_resend: bool) -> Self {
+        Self {
+            supported: peer_supports_resend && !resend_disabled_by_env(),
+            asks: 0,
+        }
+    }
+
+    /// May an ask be made now? True while the peer supports it and the
+    /// budget is not spent.
+    pub(super) fn can_ask(&self) -> bool {
+        self.supported && self.asks < MAX_RESEND_ASKS
+    }
+
+    /// Spend one ask. Returns false, spending nothing, when none is allowed.
+    pub(super) fn ask(&mut self) -> bool {
+        if !self.can_ask() {
+            return false;
+        }
+        self.asks += 1;
+        true
+    }
+
+    pub(super) fn asks(&self) -> u32 {
+        self.asks
+    }
+}
+
+/// `SWARMLLM_RESEND_TOKENS=0` disables asking for resends on this node, so a
+/// lost token truncates the reply the way it did before — the control arm
+/// for `examples/dropped_token_test.sh`. Read once.
+fn resend_disabled_by_env() -> bool {
+    use std::sync::OnceLock;
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| {
+        std::env::var("SWARMLLM_RESEND_TOKENS")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    })
+}
+
+/// How long to wait on a hole before asking for a resend: a few round trips
+/// to the peer, so ordinary reordering settles on its own, bounded so a lost
+/// token costs seconds rather than the 15 s straggler wait.
+const HOLE_WAIT_MIN: Duration = Duration::from_secs(1);
+const HOLE_WAIT_MAX: Duration = Duration::from_secs(5);
+
+pub(super) fn hole_wait(peer_latency_ms: Option<u32>) -> Duration {
+    Duration::from_millis(u64::from(peer_latency_ms.unwrap_or(0)) * 4)
+        .clamp(HOLE_WAIT_MIN, HOLE_WAIT_MAX)
 }
 
 /// Preconditions for the fast path. All checks are local and cheap.
@@ -392,8 +493,62 @@ impl PipelineExecutor {
 
         // Reassembly of an unordered stream — see `StreamReassembler`.
         let mut stream = StreamReassembler::new();
+        // A hole in that stream can be FILLED if the peer keeps what it sent
+        // (`features::RESEND_TOKENS`); before that existed one lost token
+        // cost the whole tail of the reply (gotcha #438).
+        let mut resend = ResendPolicy::new(
+            self.shared_state
+                .peer_advertises_feature(&segment.node_id, crate::types::features::RESEND_TOKENS),
+        );
+        let hole_wait = hole_wait(
+            self.shared_state
+                .peer_registry
+                .get(&segment.node_id)
+                .and_then(|p| p.latency_ms),
+        );
+        // When the current hole opened. An ask is made once it has stood for
+        // `hole_wait`, whether or not later tokens keep arriving behind it —
+        // measured with a token dropped on purpose, waiting for silence meant
+        // the ask came only after the whole rest of the reply had streamed
+        // in, ten seconds after the loss.
+        let mut hole_since: Option<std::time::Instant> = None;
 
         loop {
+            if stream.has_hole() {
+                let since = *hole_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= hole_wait && resend.can_ask() {
+                    if let Some((from, to)) = stream.resend_range() {
+                        resend.ask();
+                        hole_since = Some(std::time::Instant::now());
+                        tracing::info!(
+                            %request_id,
+                            peer = %segment.node_id,
+                            from,
+                            to,
+                            ask = resend.asks(),
+                            emitted = stream.emitted(),
+                            buffered = stream.buffered(),
+                            "DIAG: remote-generate: tokens missing — asking the peer to resend"
+                        );
+                        let _ = self
+                            .network_tx
+                            .send(NetworkCommand::SendDirectMessage {
+                                target_peer_bytes: target_peer_bytes.clone(),
+                                message: crate::types::SwarmMessage::ResendTokens(
+                                    swarmllm_types::ResendTokens {
+                                        request_id,
+                                        from_token_id: from,
+                                        to_token_id: to,
+                                    },
+                                ),
+                                delivery_request_id: None,
+                            })
+                            .await;
+                    }
+                }
+            } else {
+                hole_since = None;
+            }
             // Honor external cancel — same pattern as execute_distributed
             // line 174. Without this, a cancelled request keeps draining
             // tokens until INTER_TOKEN_TIMEOUT (60s) per gap.
@@ -419,7 +574,9 @@ impl PipelineExecutor {
                 finish_reason = "stop".to_string();
                 break;
             }
-            let timeout_dur = if stream.done_seen() {
+            let timeout_dur = if stream.has_hole() && resend.can_ask() {
+                hole_wait
+            } else if stream.done_seen() {
                 STRAGGLER_TIMEOUT
             } else if first {
                 first_token_budget
@@ -427,6 +584,14 @@ impl PipelineExecutor {
                 INTER_TOKEN_TIMEOUT
             };
             let maybe = tokio::time::timeout(timeout_dur, stream_rx.recv()).await;
+            // A wait on a hole ran out in silence: go round and ask (the check
+            // at the top of the loop does it, since the hole has now stood
+            // for at least `hole_wait`), rather than treating a lost send as
+            // the end of the reply. Bounded by the policy; a peer that never
+            // answers still reaches the deadlines below.
+            if maybe.is_err() && resend.can_ask() && stream.resend_range().is_some() {
+                continue;
+            }
             let tok = match maybe {
                 Ok(Some(t)) => t,
                 Ok(None) => {
@@ -477,9 +642,11 @@ impl PipelineExecutor {
                     if stream.done_seen() && stream.emitted() > 0 {
                         tracing::warn!(
                             %request_id,
+                            peer = %segment.node_id,
                             emitted = stream.emitted(),
                             missing = stream.missing(),
                             buffered = stream.buffered(),
+                            resend_asks = resend.asks(),
                             "remote-generate: gave up on tokens that never arrived — returning what did"
                         );
                         break;
@@ -688,6 +855,7 @@ impl PipelineExecutor {
         if stream_was_truncated {
             tracing::warn!(
                 %request_id,
+                peer = %segment.node_id,
                 claimed = claimed_by_peer,
                 delivered,
                 generated = completion_tokens,
@@ -887,7 +1055,10 @@ mod first_token_budget_tests {
 
 #[cfg(test)]
 mod stream_reassembly_tests {
-    use super::StreamReassembler;
+    use super::{
+        hole_wait, ResendPolicy, StreamReassembler, HOLE_WAIT_MAX, HOLE_WAIT_MIN, MAX_RESEND_ASKS,
+    };
+    use std::time::Duration;
     use swarmllm_types::StreamingToken;
 
     fn content(id: u32, text: &str) -> StreamingToken {
@@ -956,6 +1127,94 @@ mod stream_reassembly_tests {
         assert!(s.truncated(), "two of four tokens arrived — that is a loss");
         assert_eq!(s.missing(), 2);
         assert_eq!(s.sent_by_peer(), 4);
+    }
+
+    // ── Filling a hole (gotcha #438) ──
+
+    /// The shape of the measured failure: a token early in the reply is lost,
+    /// later ones arrive and wait behind it. The reassembler must say so and
+    /// name exactly the range to ask for.
+    #[test]
+    fn a_hole_names_the_range_to_ask_for() {
+        let mut s = StreamReassembler::new();
+        s.push_content(content(0, "a"));
+        s.push_content(content(1, "b"));
+        assert!(!s.has_hole(), "nothing missing yet");
+        assert_eq!(s.resend_range(), None);
+        // 2 is lost; 3 and 4 land.
+        s.push_content(content(3, "d"));
+        s.push_content(content(4, "e"));
+        assert!(s.has_hole());
+        assert_eq!(s.resend_range(), Some((2, 3)));
+        // The done token widens what is known to be missing.
+        s.mark_done(7);
+        assert_eq!(
+            s.resend_range(),
+            Some((2, 3)),
+            "ask for the hole, not the tail"
+        );
+        // The resend arrives: the run drains through the buffered tokens.
+        let released = s.push_content(content(2, "c"));
+        assert_eq!(released.len(), 3);
+        assert_eq!(s.emitted(), 5);
+        // 5 and 6 were promised and are still missing — a hole with nothing
+        // buffered behind it is bounded by the total instead.
+        assert!(s.has_hole());
+        assert_eq!(s.resend_range(), Some((5, 7)));
+    }
+
+    /// A resend that races the original — or an original arriving after its
+    /// resend — must not be buffered for ever as a phantom hole.
+    #[test]
+    fn a_duplicate_of_an_emitted_token_is_ignored() {
+        let mut s = StreamReassembler::new();
+        s.push_content(content(0, "a"));
+        s.push_content(content(1, "b"));
+        assert!(s.push_content(content(1, "b")).is_empty());
+        assert!(s.push_content(content(0, "a")).is_empty());
+        assert_eq!(s.buffered(), 0);
+        assert!(!s.has_hole());
+        assert_eq!(s.emitted(), 2);
+    }
+
+    /// An unsequenced peer has arrival order and nothing else: no holes, no
+    /// asks, exactly the behaviour it always had.
+    #[test]
+    fn an_unsequenced_peer_never_has_a_hole() {
+        let mut s = StreamReassembler::new();
+        s.push_content(content(0, "a"));
+        s.push_content(content(0, "b"));
+        s.mark_done(0);
+        assert!(!s.has_hole());
+        assert_eq!(s.resend_range(), None);
+    }
+
+    /// The policy is what bounds the wait: a peer that never answers an ask
+    /// runs the budget out and the old deadlines take over.
+    #[test]
+    fn asks_are_budgeted_and_need_the_peers_support() {
+        let mut p = ResendPolicy::new(true);
+        for _ in 0..MAX_RESEND_ASKS {
+            assert!(p.can_ask());
+            assert!(p.ask());
+        }
+        assert!(!p.can_ask());
+        assert!(!p.ask(), "an exhausted budget spends nothing");
+        assert_eq!(p.asks(), MAX_RESEND_ASKS);
+
+        let mut old_peer = ResendPolicy::new(false);
+        assert!(!old_peer.can_ask());
+        assert!(!old_peer.ask());
+        assert_eq!(old_peer.asks(), 0);
+    }
+
+    /// A few round trips, never less than a second, never more than five.
+    #[test]
+    fn the_hole_wait_scales_with_the_peer_and_stays_bounded() {
+        assert_eq!(hole_wait(None), HOLE_WAIT_MIN);
+        assert_eq!(hole_wait(Some(0)), HOLE_WAIT_MIN);
+        assert_eq!(hole_wait(Some(300)), Duration::from_millis(1200));
+        assert_eq!(hole_wait(Some(10_000)), HOLE_WAIT_MAX);
     }
 
     /// A peer too old to sequence sends zeros throughout and cannot tell us

@@ -32,6 +32,7 @@ impl NetworkManager {
             SwarmMessage::RemoteGenerateRequest(_)
                 | SwarmMessage::StreamingToken(_)
                 | SwarmMessage::CancelInference(_)
+                | SwarmMessage::ResendTokens(_)
         )
     }
 
@@ -41,6 +42,7 @@ impl NetworkManager {
             SwarmMessage::RemoteGenerateRequest(r) => r.request_id,
             SwarmMessage::StreamingToken(t) => t.request_id,
             SwarmMessage::CancelInference(c) => c.request_id,
+            SwarmMessage::ResendTokens(r) => r.request_id,
             _ => uuid::Uuid::new_v4(),
         }
     }
@@ -289,10 +291,8 @@ impl NetworkManager {
                 .behaviour_mut()
                 .request_response
                 .send_request(&relay_peer_id, req);
-            self.pending_rr_observability.insert(
-                req_id,
-                ("relayed".to_string(), std::time::Instant::now(), None),
-            );
+            self.pending_rr_observability
+                .insert(req_id, super::PendingRrSend::new("relayed"));
             tracing::debug!(
                 %relay_peer_id,
                 target = %target_node,
@@ -382,14 +382,8 @@ impl NetworkManager {
                 .behaviour_mut()
                 .request_response
                 .send_request(&relay_peer_id, req);
-            self.pending_rr_observability.insert(
-                req_id,
-                (
-                    "relayed_tensor".to_string(),
-                    std::time::Instant::now(),
-                    None,
-                ),
-            );
+            self.pending_rr_observability
+                .insert(req_id, super::PendingRrSend::new("relayed_tensor"));
             tracing::debug!(
                 %relay_peer_id,
                 target = %target_node,
@@ -492,10 +486,8 @@ impl NetworkManager {
             .behaviour_mut()
             .request_response
             .send_request(&target_peer_id, req);
-        self.pending_rr_observability.insert(
-            req_id,
-            ("relay_forward".to_string(), std::time::Instant::now(), None),
-        );
+        self.pending_rr_observability
+            .insert(req_id, super::PendingRrSend::new("relay_forward"));
     }
 
     /// Handle an inbound `RelayedTensor` (NETWORKING_PLAN tensor relay). Either
@@ -606,14 +598,8 @@ impl NetworkManager {
             .behaviour_mut()
             .request_response
             .send_request(&target_peer_id, req);
-        self.pending_rr_observability.insert(
-            req_id,
-            (
-                "relay_tensor_forward".to_string(),
-                std::time::Instant::now(),
-                None,
-            ),
-        );
+        self.pending_rr_observability
+            .insert(req_id, super::PendingRrSend::new("relay_tensor_forward"));
     }
 
     /// Register a relayed message's `origin` as a known peer reachable via
@@ -645,6 +631,7 @@ impl NetworkManager {
                     latency_ms: None,
                     trust_score: 0.5,
                     peer_id_bytes: Some(peer_bytes),
+                    ack_srtt_ms: None,
                     active_request_count: 0,
                     first_seen: now_ts,
                     verified_transaction_count: 0,

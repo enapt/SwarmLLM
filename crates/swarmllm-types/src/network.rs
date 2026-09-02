@@ -145,6 +145,11 @@ pub enum SwarmMessage {
     // variant simply never receives one — the sender gates on the peer's
     // advertised capability before wrapping.
     RelayedEnvelope(RelayedEnvelope),
+
+    // A coordinator asking the node serving a remote-generate reply to send
+    // a range of its content tokens again (gotcha #438). Additive: gated on
+    // `features::RESEND_TOKENS`, so an older node is never sent one.
+    ResendTokens(ResendTokens),
 }
 
 /// NETWORKING_PLAN Phase 1 — application-level inference relay envelope.
@@ -182,6 +187,25 @@ pub struct RelayedEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CancelInference {
     pub request_id: uuid::Uuid,
+}
+
+/// Ask the node serving a remote-generate reply to send some of its content
+/// tokens again. Sent by the coordinator when the reply's token sequence has a
+/// hole — tokens numbered past `from_token_id` have arrived and the ones from
+/// `from_token_id` up to (not including) `to_token_id` have not.
+///
+/// Gated on `features::RESEND_TOKENS`: a serving node that advertises it keeps
+/// the reply's tokens for a while after sending them (see the daemon's retained
+/// replies), so filling a hole costs one round trip instead of the reply's
+/// tail. The serving node re-sends the terminal token too when the reply has
+/// finished, since that is the frame the requester is waiting on.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResendTokens {
+    pub request_id: uuid::Uuid,
+    /// First content token wanted (inclusive), as numbered by the sender.
+    pub from_token_id: u32,
+    /// One past the last content token wanted. Bounded by the serving node.
+    pub to_token_id: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

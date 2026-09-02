@@ -283,6 +283,7 @@ impl NetworkManager {
             latency_ms: prev_latency_ms,
             trust_score,
             peer_id_bytes: Some(peer_id.to_bytes()),
+            ack_srtt_ms: None,
             active_request_count: prev_active_requests,
             first_seen,
             verified_transaction_count: vtc,

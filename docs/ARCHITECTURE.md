@@ -342,7 +342,8 @@ without ever being able to read them.
   dropped as unattributed.
 - **Feature-gated + prefer-direct.** `NodeCapability` advertises
   `protocol_version: u16` and a `features: u64` bitset
-  (`features::{RELAY, TENSOR_RELAY}`); a node only attempts a relayed send when
+  (`features::{RELAY, TENSOR_RELAY, PIPELINE_CHAIN, PIPELINE_CHAIN_V2,
+  FORWARD_ACK, RESEND_TOKENS}`); a node only attempts a relayed send when
   the *recipient* advertises the matching bit, so the protocol evolves additively
   with no flag-day. The relay is chosen only when there is no usable direct
   connection (`has_direct_connection` false — the circuit-only case); a real

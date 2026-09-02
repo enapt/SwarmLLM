@@ -151,6 +151,7 @@ fn assemble_multi_node_pipeline() {
             latency_ms: Some(10),
             trust_score: 0.8,
             peer_id_bytes: None,
+            ack_srtt_ms: None,
             active_request_count: 0,
             first_seen: 0,
             verified_transaction_count: 0,
@@ -168,6 +169,7 @@ fn assemble_multi_node_pipeline() {
             latency_ms: Some(15),
             trust_score: 0.9,
             peer_id_bytes: None,
+            ack_srtt_ms: None,
             active_request_count: 0,
             first_seen: 0,
             verified_transaction_count: 0,
@@ -184,6 +186,83 @@ fn assemble_multi_node_pipeline() {
     assert_eq!(assignment.segments.len(), 2);
     assert_eq!(assignment.segments[0].layer_range, (0, 16));
     assert_eq!(assignment.segments[1].layer_range, (16, 32));
+}
+
+/// Routing prices a peer by what forwarding to it has actually cost when it
+/// has that figure, and by the health ping only until then. The ping is
+/// taken idle; the acknowledgement latency is taken on real work and sees a
+/// loaded peer's queueing (gotcha #386). Two holders of the same shard: the
+/// one whose ping looks worse but whose forwards come back faster wins —
+/// and without the measured figure the ping decides, as before.
+#[test]
+fn a_measured_ack_latency_outranks_the_health_ping_when_choosing_a_holder() {
+    fn holder(latency_ms: u32, ack_srtt_ms: Option<u32>, id: u8) -> (NodeId, PeerInfo) {
+        let node = NodeId([id; 32]);
+        (
+            node.clone(),
+            PeerInfo {
+                node_id: node,
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(latency_ms),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                ack_srtt_ms,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+            },
+        )
+    }
+    fn chosen(slow_ping_ack: Option<u32>) -> NodeId {
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let shard = ShardId {
+            model_id: ModelId("test-model".into()),
+            index: 0,
+        };
+        let manifest = make_manifest(
+            "test-model",
+            32,
+            vec![ShardInfo {
+                index: 0,
+                layer_range: (0, 32),
+                size_bytes: 2_000_000_000,
+                hash: [0u8; 32],
+                tensors: vec![],
+            }],
+        );
+        state.model_registry.register_manifest(manifest);
+        // Slow ping (400 ms) but, when given one, a fast measured ACK (20 ms).
+        let (slow_ping, slow_info) = holder(400, slow_ping_ack, 2);
+        // Fast ping (50 ms), never forwarded to, so no measured figure.
+        let (fast_ping, fast_info) = holder(50, None, 3);
+        for (node, info) in [
+            (slow_ping.clone(), slow_info),
+            (fast_ping.clone(), fast_info),
+        ] {
+            state
+                .model_registry
+                .record_shard_holder(shard.clone(), node.clone());
+            state.peer_registry.insert(node.clone(), info);
+            state.connected_node_ids.insert(node);
+        }
+        let scheduler = PipelineScheduler::new(state);
+        let assignment = scheduler
+            .assemble_pipeline(&ModelId("test-model".into()), &local_id)
+            .unwrap();
+        assert_eq!(assignment.segments.len(), 1);
+        assignment.segments[0].node_id.clone()
+    }
+    assert_eq!(
+        chosen(Some(20)),
+        NodeId([2u8; 32]),
+        "the measured 20 ms must beat a 50 ms ping"
+    );
+    // Control: with no measured figure the ping decides, and the 50 ms peer wins.
+    assert_eq!(chosen(None), NodeId([3u8; 32]));
 }
 
 #[test]
@@ -464,6 +543,7 @@ fn prefers_lower_load_node() {
             latency_ms: Some(20),
             trust_score: 0.8,
             peer_id_bytes: None,
+            ack_srtt_ms: None,
             active_request_count: 10, // high load
             first_seen: 0,
             verified_transaction_count: 0,
@@ -481,6 +561,7 @@ fn prefers_lower_load_node() {
             latency_ms: Some(20),
             trust_score: 0.8,
             peer_id_bytes: None,
+            ack_srtt_ms: None,
             active_request_count: 1, // low load
             first_seen: 0,
             verified_transaction_count: 0,
@@ -654,6 +735,7 @@ fn setup_tp_split_topology(
                 latency_ms: Some(latency),
                 trust_score: 0.9,
                 peer_id_bytes: None,
+                ack_srtt_ms: None,
                 active_request_count: 0,
                 first_seen: 0,
                 verified_transaction_count: 0,
@@ -708,6 +790,7 @@ fn no_tp_group_when_local_node_covers_every_layer() {
             latency_ms: Some(1),
             trust_score: 0.9,
             peer_id_bytes: None,
+            ack_srtt_ms: None,
             active_request_count: 0,
             first_seen: 0,
             verified_transaction_count: 0,
@@ -890,6 +973,7 @@ fn encrypted_pipeline_forces_local_first_and_last() {
             latency_ms: Some(10),
             trust_score: 0.8,
             peer_id_bytes: None,
+            ack_srtt_ms: None,
             active_request_count: 0,
             first_seen: 0,
             verified_transaction_count: 0,
@@ -970,6 +1054,7 @@ fn encrypted_pipeline_fails_without_first_shard() {
             latency_ms: Some(10),
             trust_score: 0.8,
             peer_id_bytes: None,
+            ack_srtt_ms: None,
             active_request_count: 0,
             first_seen: 0,
             verified_transaction_count: 0,
@@ -1043,6 +1128,7 @@ fn parallax_flag_picks_low_latency_peer_end_to_end() {
             latency_ms: Some(200),
             trust_score: 0.8,
             peer_id_bytes: None,
+            ack_srtt_ms: None,
             active_request_count: 0,
             first_seen: 0,
             verified_transaction_count: 0,
@@ -1060,6 +1146,7 @@ fn parallax_flag_picks_low_latency_peer_end_to_end() {
             latency_ms: Some(10),
             trust_score: 0.8,
             peer_id_bytes: None,
+            ack_srtt_ms: None,
             active_request_count: 0,
             first_seen: 0,
             verified_transaction_count: 0,

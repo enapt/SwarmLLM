@@ -876,6 +876,34 @@ silently break at the wire if duplicated:
   if these arrive backwards. R139's chunked activation forwards already answer it
   (slot table indexed by `chunk_idx` plus a filled count); this path did not.
 
+- **A hole in a peer-served reply is FILLED, not waited out** (2026-09-02,
+  gotcha #438). `daemon::state::retained_replies::RetainedReplies` keeps each
+  fast-path reply this node streams — every content token as it is queued,
+  the terminal token when the decode ends — and `SwarmMessage::ResendTokens`
+  is answered from it, ONLY to the peer the reply was for. The requester's
+  `StreamReassembler` reports `has_hole` / `resend_range`, and the fast-path
+  loop asks after `hole_wait` (4×RTT, clamped 1-5 s), at most
+  `MAX_RESEND_ASKS` times, gated on the peer advertising
+  `features::RESEND_TOKENS`. Three things a change must keep: **a resend goes
+  only to the requester** (model output is the requester's and nobody else's);
+  **a duplicate of an emitted token is dropped by the reassembler**, or a
+  resend racing its original sits in `pending` for ever as a phantom hole;
+  and **the old deadlines still bound everything** — an exhausted ask budget
+  falls through to `STRAGGLER_TIMEOUT` / `INTER_TOKEN_TIMEOUT`, so a peer that
+  never answers cannot hold a request longer than before.
+  **An acknowledgement must come from the code that accepted the message.**
+  `requests.rs` used to send `SwarmResponse::Ack` for a `StreamingToken` its
+  own dispatcher had just dropped on backpressure — a drop reported as a
+  delivery. It now answers `SwarmResponse::Dropped` to a peer advertising the
+  bit (an older peer could not decode it and gets the ACK it always got), and
+  the serving side re-sends that token once from the retained reply, after
+  `STREAM_TOKEN_RESEND_DELAY_MS`; the re-send carries no `stream_token` key
+  in `PendingRrSend`, so it cannot loop, and anything further is the
+  requester's `ResendTokens` to ask for. `SWARMLLM_FAULT_DROP_STREAM_TOKEN=<n>`
+  drops content token `n` of every reply once — the only way to lose a token
+  on demand — and `SWARMLLM_RESEND_TOKENS=0` disables asking, so
+  `examples/dropped_token_test.sh` shows both the fix and the truncation it
+  replaces inside one binary.
 - **`api::mcp::dispatch::spawn_model_call_task`** (2026-08-10) — the single place
   that decides whether a fan-out model call actually **answered**, as opposed to
   merely not erroring. Every real model call in `compare` / `research` /
@@ -1308,6 +1336,19 @@ silently break at the wire if duplicated:
   to send a build string is about identifying the INSTALL, whereas a processor model
   identifies the hardware doing the work, which is what a peer needs to judge.
 
+- **`PeerInfo::ack_srtt_ms` is what routing prices a peer by** (2026-09-02).
+  Written by the network manager on every acknowledged tensor forward from
+  `AckRttEstimator::srtt_ms` (the RFC 6298 `srtt` the ACK deadline is built
+  from), capped at `ACK_SRTT_ROUTING_CAP_MS` (10 s) because the estimator
+  DOUBLES on a miss up to the deadline maximum — the right deadline for a
+  silent peer and the wrong latency for a route, which would take ~30 good
+  samples to decay. Read by `get_peer_metrics` ahead of `latency_ms`, the
+  health ping, which stays the fallback for a peer never forwarded to. The
+  ping is taken idle and cannot see the queueing a loaded event loop adds to
+  every forward (#386); routing prices the forward. **Local, never gossiped**
+  — it describes OUR path (the #341 rule). Pinned by
+  `a_measured_ack_latency_outranks_the_health_ping_when_choosing_a_holder`
+  with a control that the ping still decides without it.
 - **`inference::scheduler::delegation_target`** (2026-08-18) — the single decision
   to hand a WHOLE model to a peer rather than run it on this node's CPU. Fires only
   when `ModelProcessPool::is_cpu_bound_for_lack_of_vram` says we have a working GPU

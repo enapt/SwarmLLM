@@ -143,6 +143,7 @@ impl NetworkManager {
                         }
                         // Forward all other messages to dispatcher with authenticated sender
                         tracing::debug!(%peer, "Handling protocol message request");
+                        let is_stream_token = matches!(&*msg, SwarmMessage::StreamingToken(_));
                         if let Err(e) = self.dispatch_authenticated(Some(&peer), *msg) {
                             self.shared_state
                                 .metrics
@@ -150,6 +151,28 @@ impl NetworkManager {
                                 .network_out
                                 .record_dropped();
                             tracing::warn!(error = %e, "Dispatcher backpressured, dropping request message");
+                            // An acknowledgement must come from the code that
+                            // accepted the message, and nothing did. A peer
+                            // that can act on the truth is told it (gotcha
+                            // #438); an older one could not decode the reply
+                            // and gets the ACK it always got.
+                            if is_stream_token
+                                && self.peer_advertises(
+                                    &peer,
+                                    swarmllm_types::node::features::RESEND_TOKENS,
+                                )
+                            {
+                                if self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .request_response
+                                    .send_response(channel, SwarmResponse::Dropped)
+                                    .is_err()
+                                {
+                                    tracing::debug!(%peer, "Failed to send Dropped (channel closed)");
+                                }
+                                return;
+                            }
                         } else {
                             self.shared_state
                                 .metrics
@@ -1120,6 +1143,11 @@ impl NetworkManager {
             }
             SwarmResponse::Ack => {
                 tracing::debug!(%peer, "Received ACK");
+            }
+            SwarmResponse::Dropped => {
+                // The re-send, when there is one, was scheduled where the
+                // pending-send entry was still in hand (`events.rs`).
+                tracing::debug!(%peer, "Received Dropped — the peer could not take the message");
             }
             SwarmResponse::PrefixKvData(resp) => {
                 // Item 8 Phase 2: route to the caller's oneshot via the

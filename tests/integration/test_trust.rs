@@ -20,6 +20,7 @@ fn make_peer(node_id: NodeId) -> PeerInfo {
         latency_ms: Some(50),
         trust_score: DEFAULT_TRUST,
         peer_id_bytes: None,
+        ack_srtt_ms: None,
         active_request_count: 0,
         first_seen: 0,
         verified_transaction_count: 0,

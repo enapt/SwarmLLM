@@ -30,6 +30,13 @@ use super::NetworkManager;
 /// can issue `listen_on` for a relay circuit.
 const RELAY_RETRY_MIN_SECS: u64 = 20;
 
+/// Ceiling on the acknowledgement latency handed to routing, in ms. The
+/// estimator doubles on every miss up to the ACK-deadline maximum, which is
+/// the right deadline for a silent peer and the wrong latency for a route: a
+/// peer at 90 s would take ~30 good samples to read as reachable again.
+/// Ten seconds already loses every comparison against a healthy peer.
+const ACK_SRTT_ROUTING_CAP_MS: f64 = 10_000.0;
+
 impl NetworkManager {
     pub(super) async fn handle_swarm_event(&mut self, event: SwarmEvent<SwarmBehaviourEvent>) {
         tracing::debug!(event_type = %swarm_event_name(&event), "DIAG: processing swarm event");
@@ -177,6 +184,7 @@ impl NetworkManager {
                         SwarmResponse::Message(_) => "message",
                         SwarmResponse::ShardData(_) => "shard",
                         SwarmResponse::Ack => "ack",
+                        SwarmResponse::Dropped => "dropped",
                         SwarmResponse::TensorPayload(_) => "tensor",
                         SwarmResponse::PrefixKvData(_) => "prefix_kv_data",
                     };
@@ -201,10 +209,24 @@ impl NetworkManager {
                         // the per-peer deadline, so a peer whose loop is busy
                         // widens its own window instead of being declared dead
                         // on a ping-derived guess (gotcha #386).
-                        self.ack_rtt
-                            .entry(peer)
-                            .or_default()
-                            .observe(sent_at.elapsed().as_secs_f64() * 1000.0);
+                        let est = self.ack_rtt.entry(peer).or_default();
+                        est.observe(sent_at.elapsed().as_secs_f64() * 1000.0);
+                        // Hand the smoothed figure to routing. The health ping
+                        // it otherwise reads cannot see queueing on a busy peer;
+                        // this was measured on the forward that just completed.
+                        // Bounded so a timed-out estimator (which doubles on a
+                        // miss) reads as "slow", not as a number that never
+                        // decays back.
+                        let srtt = est
+                            .srtt_ms()
+                            .map(|ms| ms.min(ACK_SRTT_ROUTING_CAP_MS) as u32);
+                        if let Some(node_id) = self.peer_to_node.get(&peer).map(|r| r.clone()) {
+                            if let Some(mut info) =
+                                self.shared_state.peer_registry.get_mut(&node_id)
+                            {
+                                info.ack_srtt_ms = srtt;
+                            }
+                        }
                         // The onward forward was received; its failure is no
                         // longer ours to report to the coordinator.
                         self.hop_reply_to.remove(&uuid);
@@ -219,7 +241,20 @@ impl NetworkManager {
                     // the peer DID acknowledge and is working. From here the proper
                     // FIRST_TOKEN_TIMEOUT (120s) governs. streaming_token_txs is left
                     // intact so tokens keep flowing.
-                    self.pending_rr_observability.remove(&request_id);
+                    let pending = self.pending_rr_observability.remove(&request_id);
+                    // The peer took the message off the wire and could not
+                    // keep it. For a fast-path token that is a hole in the
+                    // requester's reply; fill it from what was retained.
+                    if matches!(response, SwarmResponse::Dropped) {
+                        if let Some((rid, tid)) = pending.as_ref().and_then(|p| p.stream_token) {
+                            self.resend_dropped_stream_token(
+                                peer,
+                                rid,
+                                tid,
+                                "the requester's dispatcher dropped it",
+                            );
+                        }
+                    }
                     self.handle_response(peer, request_id, response).await;
                 }
             },
@@ -309,9 +344,15 @@ impl NetworkManager {
                         "Tensor result fallback OutboundFailure — upstream will timeout"
                     );
                 }
-                if let Some((label, _, delivery_uuid)) =
-                    self.pending_rr_observability.remove(&request_id)
-                {
+                if let Some(pending) = self.pending_rr_observability.remove(&request_id) {
+                    let label = pending.label;
+                    let delivery_uuid = pending.delivery;
+                    // A content token of a reply this node is serving never
+                    // reached the wire. The requester cannot know; re-send it
+                    // once from the retained reply (gotcha #438).
+                    if let Some((rid, tid)) = pending.stream_token {
+                        self.resend_dropped_stream_token(peer, rid, tid, "OutboundFailure");
+                    }
                     // A caller blocked on this failure needs to hear about it
                     // every time; a fire-and-forget notification failing the
                     // same way every 30s does not. Suppression is keyed on

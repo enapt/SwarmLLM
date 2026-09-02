@@ -2284,6 +2284,66 @@ pub(crate) async fn dispatch_network_messages(
                                             "Dropping HealthPing/Pong with missing node_id"
                                         );
                                     }
+                                    // A coordinator asking for tokens of a reply this node
+                                    // streamed that never reached it (gotcha #438). Answered
+                                    // only to the peer the reply was for, from what was
+                                    // retained; see `state::retained_replies`.
+                                    SwarmMessage::ResendTokens(ask) => {
+                                        let Some(ref sender) = authenticated_sender else {
+                                            tracing::debug!("Dropping unauthenticated ResendTokens");
+                                            continue;
+                                        };
+                                        let Some(asker_bytes) = shared_state
+                                            .peer_id_map
+                                            .get(sender)
+                                            .map(|r| r.value().clone())
+                                        else {
+                                            tracing::debug!(sender = %sender, "ResendTokens from a peer with no known peer id — dropping");
+                                            continue;
+                                        };
+                                        use crate::daemon::state::retained_replies::ResendOutcome;
+                                        match shared_state.retained_replies.resend(
+                                            ask.request_id,
+                                            ask.from_token_id,
+                                            ask.to_token_id,
+                                            &asker_bytes,
+                                        ) {
+                                            ResendOutcome::Send { tokens, terminal } => {
+                                                tracing::info!(
+                                                    request_id = %ask.request_id,
+                                                    sender = %sender,
+                                                    from = ask.from_token_id,
+                                                    to = ask.to_token_id,
+                                                    resending = tokens.len(),
+                                                    with_terminal = terminal.is_some(),
+                                                    "DIAG: resending tokens the coordinator never received"
+                                                );
+                                                let ntx = network_tx.clone();
+                                                tokio::spawn(async move {
+                                                    for token in tokens.into_iter().chain(terminal) {
+                                                        if ntx
+                                                            .send(NetworkCommand::SendStreamingToken {
+                                                                target_peer_bytes: asker_bytes.clone(),
+                                                                token,
+                                                            })
+                                                            .await
+                                                            .is_err()
+                                                        {
+                                                            break;
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                            refused => {
+                                                tracing::info!(
+                                                    request_id = %ask.request_id,
+                                                    sender = %sender,
+                                                    ?refused,
+                                                    "ResendTokens refused"
+                                                );
+                                            }
+                                        }
+                                    }
                                     // Cross-node inference cancellation. Originator broadcasts
                                     // this when the local request flips its cancel flag (or the
                                     // SSE client hangs up); receiver aborts the matching

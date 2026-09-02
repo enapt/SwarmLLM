@@ -209,6 +209,14 @@ pub(super) async fn handle_remote_generate_request(
         return;
     }
 
+    // Keep what this reply sends, so the coordinator can ask for a token that
+    // never arrived (gotcha #438). Retained for every requester, whether or
+    // not it advertises `RESEND_TOKENS` — an older one never asks, and the
+    // cost is a few KB per reply for `RETAINED_REPLY_TTL`.
+    shared_state
+        .retained_replies
+        .start(request_id, sender_bytes.clone());
+
     // Channel from the worker (via ModelProcessPool::generate) → the network
     // forwarding task below. Must be bounded to apply back-pressure if the
     // network can't keep up.
@@ -267,6 +275,7 @@ pub(super) async fn handle_remote_generate_request(
     // treats an all-zero stream as unsequenced and behaves exactly as before.
     let stream_seq = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let forward_seq = stream_seq.clone();
+    let retain_state = shared_state.clone();
     let forward_task = tokio::spawn(async move {
         while let Some(evt) = token_rx.recv().await {
             // Skip events that carry a `finish_reason` — those are the
@@ -288,6 +297,9 @@ pub(super) async fn handle_remote_generate_request(
                 matched_stop_sequence: None,
                 logprob: None,
             };
+            // Remembered BEFORE it is queued, so an ask that races the send
+            // still finds it.
+            retain_state.retained_replies.push(request_id, &token);
             if forward_net_tx
                 .send(NetworkCommand::SendStreamingToken {
                     target_peer_bytes: forward_sender.clone(),
@@ -392,6 +404,9 @@ pub(super) async fn handle_remote_generate_request(
         final_token.finish_reason,
         Some(NetworkFinishReason::Error(_))
     );
+    shared_state
+        .retained_replies
+        .finish(request_id, &final_token);
     let terminal_copy = final_token.clone();
     let terminal_target = sender_bytes.clone();
     if let Err(e) = network_tx

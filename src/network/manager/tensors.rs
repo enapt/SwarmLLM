@@ -24,6 +24,27 @@ use crate::types::{NetworkCommand, SwarmMessage};
 
 use super::NetworkManager;
 
+/// Pause before re-sending a streaming token whose first copy is known to
+/// have failed. Long enough that a momentarily full dispatcher on the other
+/// side has drained; short against the requester's own hole wait, so the
+/// re-send lands before it asks.
+const STREAM_TOKEN_RESEND_DELAY_MS: u64 = 250;
+
+/// `SWARMLLM_FAULT_DROP_STREAM_TOKEN=<n>`: this node silently does not send
+/// content token `n` of every fast-path reply it serves, once per reply. The
+/// network-level test for the resend path (`examples/dropped_token_test.sh`)
+/// — the only way to lose a token on demand without a lossy network. Unset
+/// in production; read once.
+fn fault_drop_stream_token() -> Option<u32> {
+    use std::sync::OnceLock;
+    static N: OnceLock<Option<u32>> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("SWARMLLM_FAULT_DROP_STREAM_TOKEN")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+    })
+}
+
 impl NetworkManager {
     /// Send a tensor forward to a specific peer via the unified binary tensor protocol.
     /// Uses WIRE_TAG_TENSOR (0x01) framing. Encrypts activations when an encryption
@@ -737,6 +758,36 @@ impl NetworkManager {
             return;
         };
 
+        // The network-level drop test (`examples/dropped_token_test.sh`):
+        // lose ONE content token per reply on purpose, and let its re-send
+        // through. Inert unless the variable is set.
+        if let Some(n) = fault_drop_stream_token() {
+            if token.finish_reason.is_none()
+                && token.token_id == n
+                && self.faulted_stream_tokens.insert(token.request_id)
+            {
+                tracing::warn!(
+                    request_id = %token.request_id,
+                    token_id = n,
+                    "FAULT INJECTION: not sending this streaming token (SWARMLLM_FAULT_DROP_STREAM_TOKEN)"
+                );
+                return;
+            }
+        }
+        // A content token is re-sendable from the retained reply — once from
+        // this side. A token that IS that re-send is tracked without the key,
+        // so it cannot loop; anything further is the requester's to ask for.
+        let stream_key = if token.finish_reason.is_none() {
+            let key = (token.request_id, token.token_id);
+            if self.resent_stream_tokens.remove(&key) {
+                None
+            } else {
+                Some(key)
+            }
+        } else {
+            None
+        };
+
         let msg = SwarmMessage::StreamingToken(token);
         let connected = self.swarm.is_connected(&peer_id);
         // NETWORKING_PLAN Phase 1 — prefer the app-level relay when the
@@ -764,12 +815,79 @@ impl NetworkManager {
             .send_request(&peer_id, req);
         self.pending_rr_observability.insert(
             req_id,
-            (
-                "streaming_token".to_string(),
-                std::time::Instant::now(),
-                None,
-            ),
+            super::PendingRrSend::new("streaming_token").with_stream_token(stream_key),
         );
+    }
+
+    /// Re-send content token `token_id` of the fast-path reply `request_id`
+    /// to `peer`, from what this node retained, after a short pause. Called
+    /// when the send is known to have failed: the requester answered
+    /// `Dropped`, or libp2p reported an `OutboundFailure`. One retry per
+    /// token from this side — see `resent_stream_tokens`.
+    pub(super) fn resend_dropped_stream_token(
+        &mut self,
+        peer: libp2p::PeerId,
+        request_id: uuid::Uuid,
+        token_id: u32,
+        why: &str,
+    ) {
+        use crate::daemon::state::retained_replies::ResendOutcome;
+        let key = (request_id, token_id);
+        if self.resent_stream_tokens.contains(&key) {
+            return;
+        }
+        let target = peer.to_bytes();
+        let token = match self.shared_state.retained_replies.resend(
+            request_id,
+            token_id,
+            token_id.saturating_add(1),
+            &target,
+        ) {
+            ResendOutcome::Send { mut tokens, .. } if !tokens.is_empty() => tokens.remove(0),
+            other => {
+                tracing::debug!(
+                    %request_id,
+                    token_id,
+                    why,
+                    ?other,
+                    "streaming token lost and not re-sendable"
+                );
+                return;
+            }
+        };
+        self.resent_stream_tokens.insert(key);
+        tracing::info!(
+            %request_id,
+            token_id,
+            %peer,
+            why,
+            "DIAG: re-sending a streaming token the requester did not get"
+        );
+        let cmd_tx = self.internal_cmd_tx.clone();
+        tokio::spawn(async move {
+            // Not back to back: whatever dropped the first copy is likely
+            // still true in the same instant (same reasoning as the
+            // terminal-token repeats).
+            tokio::time::sleep(std::time::Duration::from_millis(
+                STREAM_TOKEN_RESEND_DELAY_MS,
+            ))
+            .await;
+            let _ = cmd_tx
+                .send(NetworkCommand::SendStreamingToken {
+                    target_peer_bytes: target,
+                    token,
+                })
+                .await;
+        });
+    }
+
+    /// Does the peer behind this connection advertise `feature`? Unknown
+    /// counts as no.
+    pub(super) fn peer_advertises(&self, peer: &libp2p::PeerId, feature: u64) -> bool {
+        let Some(node_id) = self.peer_to_node.get(peer).map(|r| r.clone()) else {
+            return false;
+        };
+        self.shared_state.peer_advertises_feature(&node_id, feature)
     }
 
     /// Send an arbitrary SwarmMessage to a specific peer via request_response.
@@ -832,11 +950,8 @@ impl NetworkManager {
         let deadline = self.ack_deadline_secs(&peer_id);
         self.pending_rr_observability.insert(
             req_id,
-            (
-                label.to_string(),
-                std::time::Instant::now(),
-                delivery_request_id.map(|u| (u, deadline)),
-            ),
+            super::PendingRrSend::new(label)
+                .with_delivery(delivery_request_id.map(|u| (u, deadline))),
         );
     }
 
@@ -931,6 +1046,12 @@ impl AckRttEstimator {
         self.srtt_ms = (current * 2.0).min(super::RR_ACK_TIMEOUT_MAX_SECS as f64 * 1000.0);
         self.rttvar_ms = 0.0;
         self.samples = self.samples.max(1);
+    }
+
+    /// The smoothed round trip itself, in ms, or `None` before any sample.
+    /// What routing reads (`PeerInfo::ack_srtt_ms`).
+    pub(super) fn srtt_ms(&self) -> Option<f64> {
+        (self.samples > 0).then_some(self.srtt_ms)
     }
 
     /// The deadline this peer has earned, in whole seconds, or `None` while no

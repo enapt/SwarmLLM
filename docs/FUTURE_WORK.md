@@ -10126,7 +10126,10 @@ compute per segment per token:
    tokens for 3 segments). Sarathi-Serve (OSDI'24) is the evidence: 2.6-5.6×.
    `prefill_chunk_tokens` and `prefill_pacer.rs` already exist worker-side.
 5. **Feed `AckRttEstimator.srtt` into routing and gossip peer↔peer RTT — tens
-   of lines that decide a 2× swing.** The estimator is the best latency signal
+   of lines that decide a 2× swing.** *(First half BUILT 2026-09-02:
+   `PeerInfo::ack_srtt_ms`, written on every acknowledged forward, read by
+   `get_peer_metrics` ahead of the ping. The peer↔peer RTT gossip for chained
+   hops is still open.)* The estimator is the best latency signal
    in the system (it sees queueing on a loaded peer; a ping does not — #386)
    and routing cannot see it; and with chaining on, the cost that matters is
    RTT(A↔B), which NO node knows. `docs/plans/direct_peer_chaining.md` §3.7
@@ -10158,7 +10161,19 @@ per-model training); MTP heads (trained in from scratch); QUIC 0-RTT (worth
 what the swarm can do rather than how fast; the machinery is ~80 % present
 and the reason it does not fire is one missing key.
 
-## Replies truncated on the remote-generate fast path: one lost token strands the rest (diagnosed 2026-09-02)
+## Replies truncated on the remote-generate fast path: one lost token strands the rest (diagnosed 2026-09-02; rungs 1-2 BUILT 2026-09-02)
+
+**Status**: the first two rungs of the ladder below shipped the same day —
+`ResendTokens` behind `features::RESEND_TOKENS` (the serving node retains a
+reply's tokens, `daemon/state/retained_replies.rs`; the requester asks for a
+hole after an RTT-scaled wait, up to four times, `pipeline/remote_generate.rs`),
+`SwarmResponse::Dropped` in place of an ACK for a token the dispatcher dropped
+(to a peer advertising the bit), a one-shot sender-side re-send on `Dropped`
+or `OutboundFailure`, and the peer named on the give-up line. Verified with a
+token dropped on purpose (`examples/dropped_token_test.sh`, fault injector
+`SWARMLLM_FAULT_DROP_STREAM_TOKEN`). The structural rung — one ordered stream
+per reply — remains open below; the resend path makes it a latency
+improvement rather than a correctness fix.
 
 **What the logs say.** `node.log.prev` holds ten `remote-generate: gave up on
 tokens that never arrived` events, all on 2026-08-20 between 08:34 and 09:34,

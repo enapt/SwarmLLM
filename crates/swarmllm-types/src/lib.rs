@@ -40,7 +40,7 @@ pub use network::{
     AuthenticatedMessage, CancelInference, DownloadState, EphemeralKeyExchange, HfSourceGossip,
     ModelDemandGossip, NetworkCommand, PoolModelAvailability, PrefixBlockEntry,
     PrefixCacheAnnounce, PruneEvent, RebalanceEvent, RegionShardSummary, RelayedEnvelope,
-    ShardAnnounce, ShardDownloadProgress, ShardRequest, ShardResponse, SwarmMessage,
+    ResendTokens, ShardAnnounce, ShardDownloadProgress, ShardRequest, ShardResponse, SwarmMessage,
     WishlistAnnouncement, WishlistAnnouncementEntry,
 };
 pub use node::{

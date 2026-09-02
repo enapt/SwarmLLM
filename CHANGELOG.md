@@ -4,8 +4,33 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Routing now prices a peer by what forwarding to it has actually cost.**
+  A node keeps a smoothed measurement of how long each peer takes to
+  acknowledge a forward — the figure that sizes its deadlines — and the
+  scheduler now reads it, falling back to the health ping only for a peer it
+  has never sent work to. The ping is taken while a peer is idle and cannot
+  see the queueing a busy one adds to every forward; the acknowledgement
+  latency is taken on the work itself. A peer whose forwards keep coming
+  back late is chosen less; one that stops acknowledging reads as slow, not
+  as absent.
+
 ### Fixed
 
+- **A reply from another node no longer loses its tail when one token goes
+  missing on the way.** Each token of a reply served by a peer travels as its
+  own message, and the network keeps them in order but does not promise to
+  deliver every one — so a single lost token used to strand everything after
+  it: the reader waited 15 seconds for a token that was never coming and then
+  returned a reply cut off at the hole (ten such replies from one node in an
+  hour, all on the same distant peer). The serving node now keeps what it has
+  sent for a short while, and a node that sees a hole asks for exactly the
+  missing tokens instead of waiting. A node that drops an incoming token
+  because it is overloaded also says so now, rather than acknowledging it as
+  delivered, and the sender re-sends it at once. Older nodes keep the previous
+  behaviour in both directions. Verified end to end with one token dropped on
+  purpose (`examples/dropped_token_test.sh`).
 - **A rejected speculative draft no longer copies the whole KV cache.** The
   rollback after a rejected draft used to copy the kept part of the cache out
   and back in, twice per layer plus the half-precision mirror, allocating

@@ -240,6 +240,14 @@ pub enum SwarmResponse {
     Message(Box<SwarmMessage>),
     ShardData(ShardResponse),
     Ack,
+    /// The message reached this node and was NOT accepted: the dispatcher
+    /// could not take it (backpressure). Sent instead of `Ack` for a
+    /// `StreamingToken` from a peer advertising `features::RESEND_TOKENS`,
+    /// which re-sends the token from its retained reply. Before this existed
+    /// a dropped token was acknowledged as delivered (gotcha #438) — an
+    /// acknowledgement must come from the code that actually accepted the
+    /// message. Never sent to an older peer, which could not decode it.
+    Dropped,
     /// Binary tensor response data (already encoded).
     TensorPayload(Vec<u8>),
     /// Item 8 Phase 2: cross-node KV-block fetch response. `None` means
@@ -759,11 +767,13 @@ impl serde::Serialize for SwarmResponse {
             Message { data: &'a SwarmMessage },
             ShardData { data: &'a ShardResponse },
             Ack,
+            Dropped,
         }
         match self {
             SwarmResponse::Message(m) => Inner::Message { data: m }.serialize(serializer),
             SwarmResponse::ShardData(s) => Inner::ShardData { data: s }.serialize(serializer),
             SwarmResponse::Ack => Inner::Ack.serialize(serializer),
+            SwarmResponse::Dropped => Inner::Dropped.serialize(serializer),
             SwarmResponse::TensorPayload(_) | SwarmResponse::PrefixKvData(_) => Err(
                 serde::ser::Error::custom("binary response variants should not be JSON-serialized"),
             ),
@@ -780,11 +790,13 @@ impl<'de> serde::Deserialize<'de> for SwarmResponse {
             Message { data: SwarmMessage },
             ShardData { data: ShardResponse },
             Ack,
+            Dropped,
         }
         match Inner::deserialize(deserializer)? {
             Inner::Message { data } => Ok(SwarmResponse::Message(Box::new(data))),
             Inner::ShardData { data } => Ok(SwarmResponse::ShardData(data)),
             Inner::Ack => Ok(SwarmResponse::Ack),
+            Inner::Dropped => Ok(SwarmResponse::Dropped),
         }
     }
 }

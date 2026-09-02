@@ -172,7 +172,43 @@ const MAX_FOREIGN_PEERS: usize = 1024;
 /// One tracked outbound rr send: a label for logging, when it went out, and —
 /// when a streaming caller is blocked on it — that caller's request id together
 /// with the ACK deadline sized for the peer it was sent to.
-type PendingRrSend = (String, std::time::Instant, Option<(uuid::Uuid, u64)>);
+/// One outbound request_response send this node is still waiting to hear
+/// about. See the `pending_rr_observability` field for the three uses.
+pub(super) struct PendingRrSend {
+    /// What kind of send, for logging.
+    label: String,
+    sent_at: std::time::Instant,
+    /// `Some((request uuid, ack deadline secs))` for a streaming caller whose
+    /// `streaming_token_txs[uuid]` is closed if no ACK arrives in time.
+    delivery: Option<(uuid::Uuid, u64)>,
+    /// `Some((request_id, token_id))` for a content token of a fast-path reply
+    /// this node is serving, so a `SwarmResponse::Dropped` or an
+    /// `OutboundFailure` can re-send it from the retained reply (gotcha
+    /// #438). `None` for everything else, and for a token that IS a re-send —
+    /// one retry from this side; the requester asks for anything further.
+    stream_token: Option<(uuid::Uuid, u32)>,
+}
+
+impl PendingRrSend {
+    pub(super) fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            sent_at: std::time::Instant::now(),
+            delivery: None,
+            stream_token: None,
+        }
+    }
+
+    pub(super) fn with_delivery(mut self, delivery: Option<(uuid::Uuid, u64)>) -> Self {
+        self.delivery = delivery;
+        self
+    }
+
+    pub(super) fn with_stream_token(mut self, key: Option<(uuid::Uuid, u32)>) -> Self {
+        self.stream_token = key;
+        self
+    }
+}
 
 /// Consecutive request/response failures to one peer before the connection is
 /// closed as unusable.
@@ -376,6 +412,14 @@ pub struct NetworkManager {
     ///    time by `NetworkManager::ack_deadline_secs`, because the ACK is a
     ///    round trip and a fixed one declares a distant peer dead.
     pending_rr_observability: HashMap<OutboundRequestId, PendingRrSend>,
+    /// Fast-path content tokens this node has already re-sent once after a
+    /// `Dropped` response or an `OutboundFailure` (gotcha #438). A re-send
+    /// is tracked without a `stream_token` key, so a second failure is left
+    /// to the requester's `ResendTokens`. Bounded by periodic clearing.
+    resent_stream_tokens: std::collections::HashSet<(uuid::Uuid, u32)>,
+    /// Replies on which `SWARMLLM_FAULT_DROP_STREAM_TOKEN` has already fired,
+    /// so the fault drops one send per reply and lets the re-send through.
+    faulted_stream_tokens: std::collections::HashSet<uuid::Uuid>,
     /// Suppression state for repeated identical rr failures, keyed by
     /// (peer, message label).
     ///
@@ -705,6 +749,8 @@ impl NetworkManager {
             hop_reply_to: HashMap::new(),
             pending_tensor_result_outbound: HashMap::new(),
             pending_rr_observability: HashMap::new(),
+            resent_stream_tokens: std::collections::HashSet::new(),
+            faulted_stream_tokens: std::collections::HashSet::new(),
             peer_failure_log_suppression: HashMap::new(),
             connection_addrs: HashMap::new(),
             peer_direct_conns: HashMap::new(),
@@ -1375,21 +1421,30 @@ impl NetworkManager {
                     // only) keep the existing long sweep window.
                     let now = std::time::Instant::now();
                     let mut closed_streaming: Vec<(uuid::Uuid, u64)> = Vec::new();
-                    self.pending_rr_observability
-                        .retain(|_id, (_label, inserted, delivery_uuid)| {
-                            let age = now.duration_since(*inserted).as_secs();
-                            match delivery_uuid {
-                                Some((uuid, deadline)) => {
-                                    if age >= *deadline {
-                                        closed_streaming.push((*uuid, *deadline));
-                                        false
-                                    } else {
-                                        true
-                                    }
+                    self.pending_rr_observability.retain(|_id, pending| {
+                        let age = now.duration_since(pending.sent_at).as_secs();
+                        match pending.delivery {
+                            Some((uuid, deadline)) => {
+                                if age >= deadline {
+                                    closed_streaming.push((uuid, deadline));
+                                    false
+                                } else {
+                                    true
                                 }
-                                None => age < MAX_TENSOR_FORWARD_SECS,
                             }
-                        });
+                            None => age < MAX_TENSOR_FORWARD_SECS,
+                        }
+                    });
+                    // The re-send bookkeeping is a set of keys that only ever
+                    // grows between sweeps; a reply's keys are useless once it
+                    // is over, and the retained replies they refer to expire
+                    // on their own.
+                    if self.resent_stream_tokens.len() > 4096 {
+                        self.resent_stream_tokens.clear();
+                    }
+                    if self.faulted_stream_tokens.len() > 4096 {
+                        self.faulted_stream_tokens.clear();
+                    }
                     for (uuid, deadline) in closed_streaming {
                         if self.shared_state.streaming_token_txs.remove(&uuid).is_some() {
                             tracing::warn!(

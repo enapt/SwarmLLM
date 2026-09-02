@@ -57,9 +57,22 @@ pub mod features {
     /// 300 s, twice in one request). Older coordinators still work: they accept
     /// an ACK response and a result arriving as a request.
     pub const FORWARD_ACK: u64 = 1 << 4;
+    /// The node keeps the tokens of a reply it streams on the remote-generate
+    /// fast path for a short while after sending them, and answers a
+    /// `SwarmMessage::ResendTokens` naming a range by sending those tokens
+    /// again. Each token of such a reply is its own fire-and-forget
+    /// `request_response` send, so one lost send used to strand every token
+    /// after it (gotcha #438); a requester that sees a hole in the sequence
+    /// asks this peer to fill it instead of waiting out a deadline for
+    /// nothing. A requester only asks a peer advertising this bit, and only
+    /// answers a dropped inbound token with `SwarmResponse::Dropped` to a
+    /// peer advertising it; an older peer keeps today's behaviour in both
+    /// directions.
+    pub const RESEND_TOKENS: u64 = 1 << 5;
 
     /// The full feature set THIS build implements. Advertised by every node.
-    pub const ALL: u64 = RELAY | TENSOR_RELAY | PIPELINE_CHAIN | PIPELINE_CHAIN_V2 | FORWARD_ACK;
+    pub const ALL: u64 =
+        RELAY | TENSOR_RELAY | PIPELINE_CHAIN | PIPELINE_CHAIN_V2 | FORWARD_ACK | RESEND_TOKENS;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {
@@ -247,6 +260,13 @@ pub struct PeerInfo {
     /// Raw libp2p PeerId bytes for directed request_response messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_id_bytes: Option<Vec<u8>>,
+    /// Smoothed send-to-acknowledgement latency of tensor forwards to this
+    /// peer, in ms — the RFC 6298 `srtt` the ACK deadline is built from.
+    /// Measured on real work, so it sees queueing on a loaded peer that a
+    /// ping cannot (gotcha #386). Routing prefers it to `latency_ms` when
+    /// present. Local only, never gossiped: it describes OUR path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_srtt_ms: Option<u32>,
     /// Active inference request count reported by this peer's last health ping/pong.
     #[serde(default)]
     pub active_request_count: u32,

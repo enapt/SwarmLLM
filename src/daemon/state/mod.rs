@@ -27,6 +27,7 @@ mod perf_history;
 mod relay;
 mod removed_shards;
 mod repair;
+pub(crate) mod retained_replies;
 mod tp_allreduce;
 
 pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};
@@ -372,6 +373,12 @@ pub struct SharedState {
     /// Distributed streaming token routing (request_id → sink).
     /// Consumer: dispatch handler + health monitor cleanup. Producer: pipeline.rs.
     pub streaming_token_txs: DashMap<uuid::Uuid, StreamingTokenSink>,
+    /// Serving-side memory of the fast-path replies this node has streamed,
+    /// so a requester can ask for tokens that never arrived (gotcha #438).
+    /// Written by `dispatch::remote_generate` as it sends; read by the
+    /// `ResendTokens` handler and by the network manager's re-send on a
+    /// `SwarmResponse::Dropped`; swept on the health tick.
+    pub(crate) retained_replies: retained_replies::RetainedReplies,
     /// Coordinator-side waiters for remote segment results, keyed by
     /// `request_id`. The value records WHICH node the waiter expects to hear
     /// from — see `PendingLayerResult::awaiting`. Resolve through
@@ -979,6 +986,7 @@ impl SharedState {
             },
             model_loaded: std::sync::atomic::AtomicBool::new(false),
             streaming_token_txs: DashMap::new(),
+            retained_replies: retained_replies::RetainedReplies::default(),
             is_ready: AtomicBool::new(false),
             config_watch_tx,
             detected_region: RwLock::new(None),
@@ -1930,6 +1938,17 @@ impl SharedState {
     /// waiting on a node that is never going to answer — so a chain must never
     /// be routed through one. Unknown counts as no, which costs a round trip
     /// and always works.
+    /// Does `node_id` advertise every bit of `feature`? Unknown counts as no —
+    /// the additive-protocol rule: a peer is never sent something it has not
+    /// said it understands.
+    pub fn peer_advertises_feature(&self, node_id: &crate::types::NodeId, feature: u64) -> bool {
+        self.peer_registry
+            .get(node_id)
+            .and_then(|p| p.capability.as_ref().map(|c| c.features))
+            .map(|f| swarmllm_types::node::features::supports(f, feature))
+            .unwrap_or(false)
+    }
+
     pub fn peer_supports_pipeline_chain(&self, node_id: &crate::types::NodeId) -> bool {
         self.peer_registry
             .get(node_id)
@@ -2993,6 +3012,7 @@ mod shard_peer_scope_tests {
                 latency_ms: Some(latency_ms),
                 trust_score: 0.5,
                 peer_id_bytes: Some(vec![1, 2, 3]),
+                ack_srtt_ms: None,
                 active_request_count: 0,
                 first_seen: 0,
                 verified_transaction_count: 0,
@@ -3279,6 +3299,7 @@ mod connected_peer_resolution_tests {
                 latency_ms: Some(50),
                 trust_score: 0.5,
                 peer_id_bytes: Some(peer_bytes()),
+                ack_srtt_ms: None,
                 active_request_count: 0,
                 first_seen: 0,
                 verified_transaction_count: 0,

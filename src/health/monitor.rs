@@ -257,6 +257,18 @@ impl HealthMonitor {
                             "Swept stale chunk assemblies"
                         );
                     }
+                    // Replies kept for `ResendTokens` (gotcha #438) — bounded by
+                    // count at insert, and by age here.
+                    let swept = self.shared_state.retained_replies.sweep(
+                        crate::daemon::state::retained_replies::RETAINED_REPLY_TTL,
+                    );
+                    if swept > 0 {
+                        tracing::debug!(
+                            target: "swarmllm::health::monitor",
+                            swept,
+                            "Swept retained fast-path replies"
+                        );
+                    }
                     // NETWORKING_PLAN Phase 1 — bound the learned relay-route
                     // table + relay-forward rate counters so they can't grow
                     // unbounded under peer churn.
