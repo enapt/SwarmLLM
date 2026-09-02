@@ -10056,6 +10056,45 @@ every agent turn is refused as too long. The additive manifest field above is
 the fix; until then the README tells OpenClaw users to set `contextWindow`
 explicitly for such models.
 
+## A CPU-only node that holds a whole model never asks the swarm's GPUs (reported 2026-09-02)
+
+Dated field report from a tester's CPU-only node: the moment it finished
+acquiring the last shard of a 14B model (16/16), every request for that
+model ran entirely locally on its processor — no `Pipeline segment` line, no
+scheduler candidates — where the same request the day before had been a
+five-candidate evaluation and a three-segment pipeline across two GPU nodes
+that were live on the same pool. Through an agent front end that meant
+every message sat unanswered for minutes with the processor pinned, and the
+tester moved the agent off SwarmLLM to keep it usable.
+
+Why: `scheduler::delegation_target` hands a whole model to a faster peer
+ONLY when `ModelProcessPool::is_cpu_bound_for_lack_of_vram` says this node
+has a working card the model does not fit. A node with **no card at all** is
+never CPU-bound "for lack of VRAM", so it never delegates — full local
+coverage is the end of the search. The same gap the "capacity mechanism
+used as a speed mechanism" entry above describes, from the other side: here
+the swarm IS the speed mechanism and the node refuses it.
+
+**Half done the same night** (v0.3.150, gotcha #442): the precondition is now
+`ModelProcessPool::serves_on_cpu` — no card, told to use the processor, a
+build without CUDA, or a card the model does not fit — with the peer-side
+gates unchanged (whole coverage, direct + measured reach, trust, GPU room
+with margin or ≥2× our processor speed). A small model on a processor-only
+node now goes to a GPU peer that holds it.
+
+**Still open, and it is the tester's actual case**: a 14B no single peer's
+card can hold. Delegation is whole-model-or-nothing, so the request still
+runs locally on the processor, while the day before — with one shard
+missing — the scheduler built a three-segment pipeline across two GPU
+nodes that answered in seconds. The fix is in the scheduler: when local
+coverage is complete AND `serves_on_cpu`, price the all-local assignment at
+the node's measured processor speed and let the Parallax search compete
+against it, rather than short-circuiting on coverage. That is the shape
+`cbbed678` (2026-08-03) got wrong by pricing local layers at a constant
+10,000 and picking a node in another country; the honest inputs it lacked
+now exist (#428/#429 advertised speeds, `ack_srtt_ms`). Measure on the live
+swarm with a processor-only node holding a whole 14B before shipping.
+
 ## Speeding up inference BETWEEN nodes — ranked, with the physics (research sprint 2026-09-02)
 
 An ideation worker surveyed the literature and checked each idea against the

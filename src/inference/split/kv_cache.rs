@@ -454,6 +454,25 @@ pub struct KvCacheStore {
     /// worker, which owns the prefix cache. `None` means nothing can be
     /// evicted from here, and the guard refuses as it always did.
     external_evictor: std::sync::Mutex<Option<ExternalEvictor>>,
+    /// Answers "has the client of this request gone away?" from inside a
+    /// forward pass, so a prompt pass can stop between layers instead of
+    /// running to the end for nobody (gotcha #441). Installed by the worker
+    /// over its cancelled-request set; `None` means never cancelled here.
+    cancel_oracle: std::sync::Mutex<Option<CancelOracle>>,
+}
+
+/// Given a request id, is that request cancelled?
+pub type CancelOracle = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// The message a forward returns when the request behind it was cancelled
+/// partway through. Matched by `forward_was_cancelled` on the worker, which
+/// is the one place allowed to look at it.
+pub(crate) const CANCELLED_MID_FORWARD: &str =
+    "cancelled by the client before the forward pass finished";
+
+/// Did this forward stop because its request was cancelled?
+pub(crate) fn forward_was_cancelled(e: &crate::error::SwarmError) -> bool {
+    matches!(e, crate::error::SwarmError::Inference(m) if m == CANCELLED_MID_FORWARD)
 }
 
 /// Frees at least the asked-for bytes of externally held device memory if it
@@ -661,6 +680,23 @@ impl KvCacheStore {
             ttl,
             external_reserved: std::sync::atomic::AtomicU64::new(0),
             external_evictor: std::sync::Mutex::new(None),
+            cancel_oracle: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Install the cancellation oracle a forward pass consults between layers.
+    pub fn set_cancel_oracle(&self, f: CancelOracle) {
+        if let Ok(mut slot) = self.cancel_oracle.lock() {
+            *slot = Some(f);
+        }
+    }
+
+    /// Has the request been cancelled? Cheap: one lock and one map probe, so
+    /// a forward can afford it once per layer.
+    pub fn request_cancelled(&self, request_id: &str) -> bool {
+        match self.cancel_oracle.lock() {
+            Ok(slot) => slot.as_ref().is_some_and(|f| f(request_id)),
+            Err(_) => false,
         }
     }
 

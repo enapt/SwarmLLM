@@ -326,6 +326,18 @@ pub async fn run_worker(
     // and fulfils the oneshot inline (short-circuiting the main loop).
     let pending_fetches: PrefixFetchWaiterMap = Arc::new(DashMap::new());
     let cancelled: CancelledSet = Arc::new(DashMap::new());
+    // A forward pass asks between layers whether its request was cancelled
+    // (gotcha #441): the daemon's cancel reaches the reader task, which
+    // writes `cancelled`, and this is how that reaches a prompt pass already
+    // running. The set is shared, not cloned, so a cancel is seen at once.
+    {
+        let cancelled = cancelled.clone();
+        kv_store.set_cancel_oracle(Box::new(move |request_id: &str| {
+            uuid::Uuid::parse_str(request_id)
+                .map(|id| cancelled.contains_key(&id))
+                .unwrap_or(false)
+        }));
+    }
 
     // Temperature reporting. Polled in the worker because this is the process
     // actually doing the arithmetic, so it is the one whose heat is worth
@@ -2468,10 +2480,39 @@ async fn handle_generate(
     let force_attn = force_standard_attn || swift_active;
 
     // Prefill — block_in_place for CPU-bound inference
-    let logits = tokio::task::block_in_place(|| {
+    let prefill = tokio::task::block_in_place(|| {
         let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
         model.forward(&input, index_pos_start, kv_store, &req_id_str)
-    })?;
+    });
+    let logits = match prefill {
+        Ok(l) => l,
+        Err(e) if crate::inference::split::kv_cache::forward_was_cancelled(&e) => {
+            // The client left during the prompt pass. Not an error: the
+            // reply was never wanted. Clean up as a finished request does.
+            cancelled.remove(&request_id);
+            tracing::info!(
+                %request_id,
+                prompt_tokens = prompt_ids.len(),
+                "model-worker: prompt pass abandoned — request cancelled by daemon"
+            );
+            kv_store.clear_request(model.kv_model_key(), &req_id_str);
+            send_worker(
+                writer,
+                &WorkerMsg::GenerateDone {
+                    request_id,
+                    prompt_tokens: prompt_ids.len(),
+                    completion_tokens: 0,
+                    finish_reason: "cancelled".to_string(),
+                    matched_stop_sequence: None,
+                },
+                &[],
+            )
+            .await
+            .map_err(|e| SwarmError::Internal(format!("send GenerateDone: {e}")))?;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
 
     // After prefill the KV cache holds exactly `prompt_tokens` positions.
     // Snapshot it into the prefix cache so future prompts sharing this
@@ -3435,6 +3476,11 @@ async fn step_decode_pool(
                     });
                     match forward_result {
                         Ok(l) => logits_per_step[i] = Some(l),
+                        Err(e) if crate::inference::split::kv_cache::forward_was_cancelled(&e) => {
+                            // The cancel landed mid-chunk; the drain step
+                            // collects the slot like any other cancelled one.
+                            tracing::debug!(request_id = %step.request_id, "BatchGenerate prefill chunk abandoned — request cancelled");
+                        }
                         Err(e) => {
                             let request_id = step.request_id;
                             tracing::warn!(%request_id, error = %e, "DIAG: BatchGenerate prefill chunk forward failed — slot errored");

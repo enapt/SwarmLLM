@@ -1728,6 +1728,38 @@ fn only_a_directly_measured_peer_qualifies() {
     }
 }
 
+/// A node with no card at all runs the model on its processor, and a peer
+/// that would run it several times faster is worth handing it to — with the
+/// same wide margin the speed branch has always demanded, so a nose ahead is
+/// not enough (gotcha #442: a processor-only node holding every shard ran
+/// the model itself with GPU peers idle beside it).
+#[test]
+fn a_node_with_no_card_hands_the_model_to_a_much_faster_processor_peer() {
+    let mut faster = willing_peer(0xBB, LAYERS);
+    faster.gpu_vram_available_mb = None; // a processor peer, no card advertised
+    faster.est_tokens_per_sec = 12.0;
+    let cands = vec![local_full_coverage(), faster];
+    assert_eq!(
+        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 4.0)
+            .map(|c| c.node_id.clone()),
+        Some(NodeId([0xBB; 32])),
+        "three times our processor speed is worth the hand-off"
+    );
+    let mut barely = willing_peer(0xBB, LAYERS);
+    barely.gpu_vram_available_mb = None;
+    barely.est_tokens_per_sec = 6.0;
+    let cands = vec![local_full_coverage(), barely];
+    assert!(
+        super::delegation_target(&cands, &local_id(), LAYERS, true, MODEL_MB, 4.0).is_none(),
+        "1.5x is inside the margin a self-reported figure gets"
+    );
+    // And a node that would NOT run it on its processor never delegates.
+    let mut faster = willing_peer(0xBB, LAYERS);
+    faster.est_tokens_per_sec = 12.0;
+    let cands = vec![local_full_coverage(), faster];
+    assert!(super::delegation_target(&cands, &local_id(), LAYERS, false, MODEL_MB, 4.0).is_none());
+}
+
 /// Delegation is whole-model or nothing. A peer holding part of the model is a
 /// candidate for the routing search, not for this — a split pays a round trip
 /// per token and measured slower every time it was tried.

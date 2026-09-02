@@ -505,6 +505,17 @@ impl SplitModel {
         // Run through our layers
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let abs_layer = self.layer_start + layer_idx;
+            // A client that has gone away must not keep a processor pegged
+            // for the rest of a prompt pass it will never read (gotcha #441):
+            // a 14k-token prompt on a CPU node is minutes of work in ONE
+            // forward, and the per-token cancel check lives in the decode
+            // loop, after it. One map probe per layer is nothing beside a
+            // layer.
+            if layer_idx > 0 && kv_cache_store.request_cancelled(request_id) {
+                return Err(SwarmError::Inference(
+                    super::kv_cache::CANCELLED_MID_FORWARD.to_string(),
+                ));
+            }
             let lora_param = lora_adapter.map(|a| (a, abs_layer));
 
             // SWIFT skip: identity pass-through, no attention, no MLP, no KV write.

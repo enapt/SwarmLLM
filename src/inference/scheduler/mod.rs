@@ -270,12 +270,14 @@ const DELEGATE_VRAM_MARGIN: f64 = 1.2;
 /// Conditions, all required:
 ///
 /// - **The local route is genuinely degraded** — we have a working GPU and
-///   this model does not fit it, so serving here means the CPU fallback. An
-///   unreadable estimate, no configured budget, a node told to use its CPU and
-///   a node with no usable GPU are all NOT degraded; see
-///   `ModelProcessPool::is_cpu_bound_for_lack_of_vram`, which owns that
-///   distinction. Declining to serve over a file we could not read would be
-///   worse than the problem being solved.
+///   this model does not fit it, OR no usable card at all — either way the
+///   request would run on this node's processor. An unreadable estimate or no
+///   configured budget on a node WITH a card is NOT degraded; see
+///   `ModelProcessPool::serves_on_cpu`, which owns that distinction (a
+///   processor-only node was excluded until 2026-09-02, gotcha #442, and ran
+///   a freshly completed model itself with GPU peers idle). Declining to serve
+///   over a file we could not read would be worse than the problem being
+///   solved.
 /// - **The peer covers every layer.** This is a delegation, not a split. A
 ///   split pays a network round trip per token and measured slower than a
 ///   single remote segment every time it was tried (see `docs/FUTURE_WORK.md`).
@@ -304,14 +306,14 @@ fn delegation_target<'a>(
     candidates: &'a [NodeCandidate],
     local_node_id: &NodeId,
     num_layers: u32,
-    local_is_cpu_bound_for_lack_of_vram: bool,
+    local_serves_on_cpu: bool,
     model_vram_mb: u64,
     local_cpu_tokens_per_sec: f32,
 ) -> Option<&'a NodeCandidate> {
-    // Only a node with a working GPU that this model does not fit is degraded.
-    // `ModelProcessPool::is_cpu_bound_for_lack_of_vram` owns that distinction —
-    // a node told to use its CPU, or without a usable GPU, is working normally.
-    if !local_is_cpu_bound_for_lack_of_vram {
+    // Only a request that would run on this node's PROCESSOR is worth handing
+    // away: a card the model does not fit, or no usable card at all.
+    // `ModelProcessPool::serves_on_cpu` owns that distinction (gotcha #442).
+    if !local_serves_on_cpu {
         return None;
     }
     // Without a size for the model we cannot judge whether a peer has room,
@@ -675,7 +677,13 @@ impl PipelineScheduler {
             //
             // This is exactly equivalent, because the flag being false is the
             // first thing `delegation_target` tests.
-            let local_is_degraded = pool.is_cpu_bound_for_lack_of_vram(model_id);
+            //
+            // "Would this request run on our processor" — a node with no card
+            // at all included, since 2026-09-02 (gotcha #442). It used to ask
+            // only whether a card we HAVE was too small, so a processor-only
+            // node holding every shard ran the model itself with GPU peers
+            // idle beside it.
+            let local_is_degraded = pool.serves_on_cpu(model_id);
             let delegate_to = if local_is_degraded {
                 delegation_target(
                     &candidates,

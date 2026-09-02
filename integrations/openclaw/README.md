@@ -159,6 +159,18 @@ your machine could not hold alone is what the swarm is for.
 - **Every model shows a 128000 context window.** The node predates
   v0.3.148, whose `/v1/models` reports `context_length`; upgrade it, or set
   `contextWindow` by hand in a `models:` block.
+- **`context_length` reads 8192 for every model.** That figure is the NODE's
+  configured context, not the model's: it reports whatever
+  `max_seq_len_override` in the node's `config.toml` allows (8192 until you
+  set it, as in step 2 above) and changes only after the node restarts. The
+  model's native window does not matter until the node is allowed to use it.
+- **`openclaw models list --provider swarmllm` says "No models found" although
+  `curl` to `/v1/models` with the same key works.** One gateway showed this for
+  the bundled `ollama` provider too, so it is the gateway's shared discovery
+  path rather than this plugin. Declare the models by hand for now:
+  `models.providers.swarmllm` with a `models:` array (`id` and `contextWindow`
+  per model, as `/v1/models` reports them) and `agents.defaults.model.primary`
+  set to `swarmllm/<id>`. Requests then reach the node normally.
 - **Embeddings.** A node does not serve `/v1/embeddings`; point OpenClaw's
   memory search at another embedding provider.
 

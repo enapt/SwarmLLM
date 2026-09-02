@@ -1992,6 +1992,38 @@ impl ModelProcessPool {
     ///
     /// What is left is the case reported on 2026-08-17: a working GPU that this
     /// particular model does not fit in.
+    /// Would a request for `model_id` run on this node's PROCESSOR? True for
+    /// a node with no usable card at all, one told to use its processor, a
+    /// build without CUDA, and a card the model does not fit.
+    ///
+    /// The precondition for whole-model delegation (`scheduler::delegation_
+    /// target`) since 2026-09-02. It used to be `is_cpu_bound_for_lack_of_vram`
+    /// alone — "only a node with a working card the model does not fit is
+    /// degraded" — which read a node with NO card as working normally. A
+    /// tester's processor-only node that had just acquired every shard of a
+    /// model then ran it locally at processor speed with two GPU nodes idle on
+    /// the same pool, every request sitting for minutes (gotcha #442). Whether
+    /// the node is "degraded" is not the question; where the request would
+    /// run is, and a peer that would run it several times faster is worth
+    /// asking either way. The peer-side gates (whole coverage, direct
+    /// reachability, trust, room or a wide speed margin) are unchanged.
+    pub fn serves_on_cpu(&self, model_id: &ModelId) -> bool {
+        if !cfg!(feature = "candle-cuda") {
+            return true;
+        }
+        if !self.gpu_detected.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        if self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            return true;
+        }
+        #[cfg(feature = "candle-cuda")]
+        if !crate::daemon::gpu_support::local_gpu_is_supported() {
+            return true;
+        }
+        self.is_cpu_bound_for_lack_of_vram(model_id)
+    }
+
     pub fn is_cpu_bound_for_lack_of_vram(&self, model_id: &ModelId) -> bool {
         if self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed) == 0 {
             return false;
@@ -5244,5 +5276,25 @@ mod admission_tests {
     fn estimating_a_missing_model_is_zero() {
         let p = pool();
         assert_eq!(p.estimate_gpu_footprint_mb(&ModelId("nope".into())), 0);
+    }
+    /// Where a request would RUN is the delegation precondition, not whether
+    /// a card we have is too small (gotcha #442). No card, or a node told to
+    /// use its processor, both answer "on the processor".
+    #[test]
+    fn a_node_with_no_card_serves_on_its_processor() {
+        let pool =
+            ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-serves-on-cpu-test"));
+        let model = ModelId("m".into());
+        pool.set_gpu_detected(false);
+        assert!(pool.serves_on_cpu(&model), "no card detected");
+        pool.set_gpu_detected(true);
+        pool.gpu_layers
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(pool.serves_on_cpu(&model), "told to use the processor");
+        pool.gpu_layers
+            .store(-1, std::sync::atomic::Ordering::Relaxed);
+        // A build without CUDA runs everything on the processor; with CUDA, a
+        // card that is present and not known to be too small is not degraded.
+        assert_eq!(pool.serves_on_cpu(&model), !cfg!(feature = "candle-cuda"));
     }
 }

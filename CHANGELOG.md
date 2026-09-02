@@ -6,6 +6,25 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A client that gives up during a long prompt no longer leaves the
+  processor working on it.** A worker checked for cancellation only between
+  generated tokens; a prompt is one forward pass before the first token, and
+  on a processor-only node a 14,000-token prompt is minutes of it. A tester
+  found their worker still at full load on five cores eleven minutes after
+  the node had logged "cancelling", and had to kill it by hand. The pass now
+  checks between layers and stops, on both the batched and the sequential
+  paths, freeing the request's cache.
+- **A node with no graphics card now hands a whole model to a much faster
+  peer.** Whole-model delegation fired only for a node whose own card was too
+  small; a node with no card at all was treated as "working normally" and
+  ran every request itself. A tester's processor-only node that had just
+  finished acquiring every shard of a model ran it locally with two GPU nodes
+  idle on the same pool. The same peer-side gates apply — the peer must hold
+  every layer, be directly reachable and trusted, and advertise room on a
+  card or at least twice this node's processor speed — and prompt privacy
+  keeps the embedding and sampling here. A model too large for any single
+  peer's card still runs locally; comparing that against a pipeline across
+  several GPU nodes is the next piece of work.
 - **A long prompt that was admitted is no longer refused partway through
   its own prompt.** v0.3.149 taught the memory guard to count cached prompts
   but not to shrink them: a prompt admitted at token zero could then be

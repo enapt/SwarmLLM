@@ -1359,6 +1359,31 @@ silently break at the wire if duplicated:
   — it describes OUR path (the #341 rule). Pinned by
   `a_measured_ack_latency_outranks_the_health_ping_when_choosing_a_holder`
   with a control that the ping still decides without it.
+- **A prompt pass asks between layers whether its request was cancelled**
+  (2026-09-02, gotcha #441). `KvCacheStore::set_cancel_oracle` is installed by
+  the worker over its `cancelled` set; `forward_inner_impl` probes it once per
+  layer and returns `CANCELLED_MID_FORWARD`; `forward_was_cancelled` on the
+  worker is the ONE place that looks at that message (the sequential path
+  answers a normal `GenerateDone{finish_reason:"cancelled"}` and clears the
+  KV; the batch path lets the drain step collect the slot). Why: the cancel
+  check lived only in the decode loop, and the prompt is one forward before
+  the first token — minutes on a processor-only node with an agent-sized
+  prompt, which a tester found still pegging five cores eleven minutes after
+  "cancelling" was logged. A cancel check belongs at the granularity of the
+  WORK; a new long-running loop inside a forward inherits this probe only if
+  it runs per layer, so anything longer than a layer (a chunked prefill at
+  another level) must probe on its own.
+- **`ModelProcessPool::serves_on_cpu` is the whole-model delegation
+  precondition** (2026-09-02, gotcha #442) — "would this request run on our
+  processor": no usable card, told to use the processor, a build without
+  CUDA, or a card the model does not fit. It replaced
+  `is_cpu_bound_for_lack_of_vram` alone, whose doc read a node with NO card
+  as "working normally" — so a processor-only node holding every shard ran
+  the model itself with GPU peers idle on the same pool. Peer-side gates in
+  `delegation_target` are unchanged. **Still open**: a model no single peer's
+  card holds is not delegated and runs locally on the processor — the
+  scheduler does not price local-CPU against a GPU pipeline once local
+  coverage is complete (`docs/FUTURE_WORK.md`).
 - **`inference::scheduler::delegation_target`** (2026-08-18) — the single decision
   to hand a WHOLE model to a peer rather than run it on this node's CPU. Fires only
   when `ModelProcessPool::is_cpu_bound_for_lack_of_vram` says we have a working GPU
