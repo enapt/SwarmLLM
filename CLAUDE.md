@@ -220,6 +220,13 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2220 lib (dev,claude-subscription) — re-measured 2026-09-02, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 50 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the five advisories documented in `SECURITY.md` (`core2`/RUSTSEC-2026-0105 left the tree with the 2026-09-02 dependency update).
 
+**Next up (user-directed 2026-09-02)**: the inference work over more OpenClaw work —
+prefix-keyed remote KV across turns, the truncated-reply fix ladder (#438),
+accept/reject at the tail, KV-cache size on small cards and the tools+streaming
+crawl; then ring decode, prefill microbatching, `srtt` into routing. Ordered list
+with pointers in `memory/MEMORY.md` § NEXT UP; entries in `docs/FUTURE_WORK.md`.
+OpenClaw is parked at basic support (plugin built + verified; publishing deferred).
+
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
 **Released and deployed: v0.3.148-alpha (2026-09-02, tag on `073bb362`).** Local
@@ -261,7 +268,7 @@ commit correctly shows no run and the tag restores `main`'s cache. Cache warm
   (`ModelInfo::new`, both-or-neither); README has a "Use it with OpenClaw"
   section; **`integrations/openclaw/` is a provider plugin** built on OpenClaw's
   own self-hosted helper (5 vitest tests, path-filtered CI), verified live with
-  OpenClaw 2026.8.2. Publishing to ClawHub needs the user's credentials.
+  OpenClaw 2026.8.2. Publishing to ClawHub is DEFERRED (basic support is enough for now).
 - **Measured**: an OpenClaw first turn is **14,633 prompt tokens + an 8192
   reply reservation** (8192 default refuses; `max_seq_len_override = 32768`,
   config file only); KV is 344 KB/token (f32 + f16 mirror) → **5 GB at 14.6k on

@@ -10463,7 +10463,7 @@ reservation and halves the KV) or a peer with more memory serving the model —
 which the swarm exists to make possible, and which `delegation_target` will
 choose when a suitable peer advertises the room.
 
-## OpenClaw provider plugin (researched and BUILT 2026-09-02 — `integrations/openclaw/`; publishing to ClawHub/npm is the open step)
+## OpenClaw provider plugin (BUILT 2026-09-02, shipped in v0.3.148; PARKED — publishing to ClawHub/npm deferred, the inference items below come first)
 
 **Why**: OpenClaw (github.com/openclaw/openclaw, ~388k stars, TypeScript) is a
 personal AI agent whose users want a free model backend, and one of its

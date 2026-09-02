@@ -797,6 +797,18 @@ silently break at the wire if duplicated:
   targets idle models, so the common path returns without sleeping at all, and a
   test pins that so no unload pays for a race that is not happening.
 
+- **`model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER
+  BOUND on "idle since", and the worker's own `last_used` is the signal that
+  moves** (2026-09-02, gotcha #437). The idle unload used to trust
+  `model_trust.last_request_at`, which NOTHING in the current code writes; a
+  two-day-old persisted value outranked a worker loaded 215 s earlier and the
+  model was unloaded five seconds after answering, so every request after that
+  paid a cold reload and lost the worker's prefix cache. `ModelProcessPool::
+  model_idle_secs` (seconds since `register_response`, the one place every
+  execution path passes) is now a fourth input, and residency clamps the answer.
+  A new "how long has X been idle" judgement must be bounded by "how long has
+  X existed", and must read a signal the COMMON path actually writes — grep for
+  the writer before trusting a doc comment that names one.
 - **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
   admission check against it. The loader records `kv_headroom_bytes` on the
   model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward
