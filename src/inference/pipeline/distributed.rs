@@ -1495,7 +1495,90 @@ impl PipelineExecutor {
         ))
     }
 
-    /// Attempt failover to a standby node for a failed segment.
+    /// Tell a node we are abandoning to stop working on this segment.
+    ///
+    /// Without this it never finds out. It computes the whole forward to
+    /// completion and every other request that arrives meanwhile queues
+    /// behind work whose result nobody will read. Measured on two machines:
+    /// a ~2000-token prefill left a CPU node saturated for several minutes
+    /// after the coordinator had already given up, and an unrelated short
+    /// request sent during that window failed for no reason of its own —
+    /// then succeeded in 42s once the node went idle.
+    ///
+    /// Sent BEFORE the standby search, and regardless of its outcome,
+    /// because the case that hurt had NO standby: the request was already
+    /// lost, and the only thing still worth doing was freeing the peer.
+    ///
+    /// Best-effort by design. `CancelInference` is relay-eligible, so a
+    /// NAT'd peer is reachable, but a peer that never receives it is no
+    /// worse off than before. A peer that has already finished treats it as
+    /// a no-op ("no in-flight decode for request").
+    ///
+    /// NOTE: today only the remote-generate path registers an abort handle,
+    /// so a peer serving a *segment* will log that no-op rather than
+    /// actually stopping. Sending it is still the correct half to ship
+    /// first — it costs one small message, it is what the peer-side change
+    /// will need in place, and it already stops us treating a written-off
+    /// node as idle. See `docs/FUTURE_WORK.md` for the peer-side half.
+    async fn cancel_segment_on(
+        &self,
+        node_id: &crate::types::NodeId,
+        request_id: uuid::Uuid,
+        segment_idx: usize,
+    ) {
+        let Some(target_peer_bytes) = self.shared_state.resolve_peer_id_bytes(node_id) else {
+            return;
+        };
+        let _ = self
+            .network_tx
+            .send(NetworkCommand::SendDirectMessage {
+                target_peer_bytes,
+                message: crate::types::SwarmMessage::CancelInference(
+                    swarmllm_types::CancelInference { request_id },
+                ),
+                delivery_request_id: None,
+            })
+            .await;
+        // info!, not debug!. The receiving side logs this at debug when it
+        // finds nothing to abort (the normal case today, and normal for
+        // hedge losers), so at default verbosity there is otherwise NO
+        // record anywhere that the cancel was sent — which made the send
+        // unverifiable in exactly the situation an operator cares about.
+        tracing::info!(
+            request_id = %request_id,
+            abandoned_node = %node_id,
+            segment = segment_idx,
+            "DIAG: asked the abandoned node to stop working on this segment"
+        );
+    }
+
+    /// Hand a failed segment to a standby — and, if that standby fails too,
+    /// to the next one, until one answers or none is left.
+    ///
+    /// **A standby's error is a failure of that standby, not the segment's
+    /// output.** Until 2026-09-02 this returned whatever the first standby
+    /// sent back, and the segment loop took it as the segment's result. A
+    /// standby that REFUSES the segment — out of memory, a shard it does not
+    /// hold — answers with an error `LayerResult` whose activations are
+    /// empty, and those empty bytes were forwarded to the next segment, whose
+    /// worker failed them as `Internal error: Tensor bytes too short`: an
+    /// internal error, blamed on a segment that was fine. Measured on the
+    /// live swarm 2026-09-01 (gotcha #435): segment 0's standby answered
+    /// "needs about 10362 MB of memory" in 1.1 s, segment 1 was then sent 0
+    /// bytes, and the request failed as "Segment 1 failed with no standby
+    /// available". An external tester reported the same `Tensor bytes too
+    /// short` on the same model the same day, once, gone on retry — which is
+    /// what a failover that happens to land on a refusing standby looks like
+    /// from outside.
+    ///
+    /// Three things this keeps. Every node the segment has already been
+    /// tried on — the failed holder and each standby that failed in turn — is
+    /// excluded from the search, so two failing standbys cannot hand the
+    /// segment back and forth until the request's deadline. A refusal that
+    /// describes the REQUEST (`every_holder_would_refuse`) is returned as the
+    /// caller's own error at once, exactly as the primary path does, because
+    /// every standby would reproduce it. And a standby that says it does not
+    /// hold the shard loses its claim, as a primary holder would.
     async fn failover_segment(
         &mut self,
         failed_idx: usize,
@@ -1505,204 +1588,39 @@ impl PipelineExecutor {
         activations: &[u8],
         _is_last: bool,
     ) -> Result<LayerResult, SwarmError> {
-        let failed_segment = &self.assignment.segments[failed_idx];
+        let failed_segment = self.assignment.segments[failed_idx].clone();
+        // Everyone this segment has been tried on for this request.
+        let mut tried: Vec<crate::types::NodeId> = vec![failed_segment.node_id.clone()];
+        // The node abandoned on the previous round — the failed holder first,
+        // then each standby that failed in turn.
+        let mut abandoned = failed_segment.node_id.clone();
+        let mut last_failure: Option<String> = None;
 
-        // Tell the node we are abandoning to stop.
-        //
-        // Without this it never finds out. It computes the whole forward to
-        // completion and every other request that arrives meanwhile queues
-        // behind work whose result nobody will read. Measured on two machines:
-        // a ~2000-token prefill left a CPU node saturated for several minutes
-        // after the coordinator had already given up, and an unrelated short
-        // request sent during that window failed for no reason of its own —
-        // then succeeded in 42s once the node went idle.
-        //
-        // Sent BEFORE the standby search, and regardless of its outcome,
-        // because the case that hurt had NO standby: the request was already
-        // lost, and the only thing still worth doing was freeing the peer.
-        //
-        // Best-effort by design. `CancelInference` is relay-eligible, so a
-        // NAT'd peer is reachable, but a peer that never receives it is no
-        // worse off than before. A peer that has already finished treats it as
-        // a no-op ("no in-flight decode for request").
-        //
-        // NOTE: today only the remote-generate path registers an abort handle,
-        // so a peer serving a *segment* will log that no-op rather than
-        // actually stopping. Sending it is still the correct half to ship
-        // first — it costs one small message, it is what the peer-side change
-        // will need in place, and it already stops us treating a written-off
-        // node as idle. See `docs/FUTURE_WORK.md` for the peer-side half.
-        if let Some(target_peer_bytes) = self
-            .shared_state
-            .resolve_peer_id_bytes(&failed_segment.node_id)
-        {
-            let _ = self
-                .network_tx
-                .send(NetworkCommand::SendDirectMessage {
-                    target_peer_bytes,
-                    message: crate::types::SwarmMessage::CancelInference(
-                        swarmllm_types::CancelInference { request_id },
-                    ),
-                    delivery_request_id: None,
-                })
+        loop {
+            self.cancel_segment_on(&abandoned, request_id, failed_idx)
                 .await;
-            // info!, not debug!. The receiving side logs this at debug when it
-            // finds nothing to abort (the normal case today, and normal for
-            // hedge losers), so at default verbosity there is otherwise NO
-            // record anywhere that the cancel was sent — which made the send
-            // unverifiable in exactly the situation an operator cares about.
-            tracing::info!(
-                request_id = %request_id,
-                abandoned_node = %failed_segment.node_id,
-                segment = failed_idx,
-                "DIAG: asked the abandoned node to stop working on this segment"
-            );
-        }
 
-        // Find a standby for this segment's layer range
-        let standby = self
-            .assignment
-            .standbys
-            .iter()
-            .find(|s| {
-                s.layer_range.0 <= failed_segment.layer_range.0
-                    && s.layer_range.1 >= failed_segment.layer_range.1
-                    && s.node_id != failed_segment.node_id
-            })
-            .cloned();
+            // Find a standby covering this segment's layer range that has not
+            // already failed it.
+            let standby = self
+                .assignment
+                .standbys
+                .iter()
+                .find(|s| {
+                    s.layer_range.0 <= failed_segment.layer_range.0
+                        && s.layer_range.1 >= failed_segment.layer_range.1
+                        && !tried.contains(&s.node_id)
+                })
+                .cloned();
 
-        match standby {
-            Some(backup) => {
-                tracing::warn!(
-                    request_id = %request_id,
-                    failed_node = %failed_segment.node_id,
-                    backup_node = %backup.node_id,
-                    failed_layer_range = ?failed_segment.layer_range,
-                    backup_layer_range = ?backup.layer_range,
-                    segment = failed_idx,
-                    total_segments = self.assignment.segments.len(),
-                    total_standbys = self.assignment.standbys.len(),
-                    "DIAG: failing over to standby node"
-                );
-
-                // Register a response channel BEFORE sending the request.
-                // SEC: a RAII guard removes the entry on every error path
-                // (including a panic between insert and wait). Without it a
-                // failed `wait_for_result` would leak one slot per double
-                // timeout — at MAX_PENDING_LAYER_RESULTS the pipeline starts
-                // rejecting all new requests with ServiceUnavailable.
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                self.shared_state.pending_layer_results.insert(
-                    request_id,
-                    crate::daemon::state::PendingLayerResult {
-                        tx,
-                        // Pin to the standby. The forward we just gave up on is
-                        // still outstanding to the failed node; when it is
-                        // reaped, its synthetic error carries this same
-                        // `request_id` and would otherwise resolve THIS waiter,
-                        // discarding the standby's real result.
-                        awaiting: Some(backup.node_id.clone()),
-                        chain_members: Vec::new(),
-                    },
-                );
-                let mut pending_guard = super::PendingLayerResultGuard::new(
-                    &self.shared_state.pending_layer_results,
-                    request_id,
-                );
-
-                // Send to backup node via directed tensor protocol
-                let forward = LayerForward {
-                    request_id,
-                    sequence_num,
-                    index_pos: index_pos as u32,
-                    activations: activations.to_vec(),
-                    format: TensorFormat::FP32,
-                    model_id: backup.shard_id.model_id.clone(),
-                    layer_range: backup.layer_range,
-                    tp_meta: None,
-                    vision_embeddings: None,
-                    chain: Vec::new(),
-                    sender_peer_bytes: None,
-                    // Unchained failover: the standby answers its sender, which is
-                    // us. Naming ourselves would put a 0x07 trailer on a frame an
-                    // older standby does not expect.
-                    requester_node_id: None,
-                    pre_embedded: false,
-                    generated_ids: Vec::new(),
-                    adapter_id: None,
-                    draft_tokens: Vec::new(),
-                    spec_logits_requested: false,
-                    truncate_kv_to: None,
-                    chunk_meta: None,
-                    sampling: None,
-                };
-
-                let target_peer_bytes =
-                    match self.shared_state.resolve_peer_id_bytes(&backup.node_id) {
-                        Some(b) => b,
-                        None => {
-                            return Err(SwarmError::Network(format!(
-                                "No peer_id_bytes for backup node {}",
-                                backup.node_id
-                            )));
-                        }
-                    };
-                if self
-                    .network_tx
-                    .send(NetworkCommand::SendTensor {
-                        target_peer_bytes,
-                        forward,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return Err(SwarmError::Network(
-                        "Failed to send to standby node".to_string(),
-                    ));
-                }
-
-                // Wait for standby response via the oneshot channel
-                let failed_segment = &self.assignment.segments[failed_idx];
-                let num_layers = failed_segment.layer_range.1 - failed_segment.layer_range.0;
-                let budget = super::local::SegmentBudget::for_forward(
-                    &self.shared_state,
-                    &backup.node_id,
-                    &backup.shard_id.model_id,
-                    super::work_kind_for(sequence_num),
-                    num_layers,
-                    activations.len(),
-                    if failed_idx == 0 {
-                        super::local::ActivationUnits::PromptBytes
-                    } else {
-                        super::local::ActivationUnits::HiddenStates
-                    },
-                );
-                let result = Self::wait_for_result(
-                    rx,
-                    request_id,
-                    failed_idx,
-                    &backup.node_id,
-                    num_layers,
-                    activations.len(),
-                    budget,
-                )
-                .await?;
-                // dispatcher already removed the entry on deliver
-                pending_guard.disarm();
-
-                // Update the assignment so subsequent tokens use the standby
-                // directly, avoiding repeated failover + 30s timeout per token.
-                self.assignment.segments[failed_idx].node_id = backup.node_id;
-                self.assignment.segments[failed_idx].layer_range = backup.layer_range;
-
-                Ok(result)
-            }
-            None => {
+            let Some(backup) = standby else {
                 tracing::error!(
                     request_id = %request_id,
                     failed_segment = failed_idx,
                     failed_node = %failed_segment.node_id,
                     failed_layer_range = ?failed_segment.layer_range,
+                    tried = ?tried.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+                    last_failure = ?last_failure,
                     total_standbys = self.assignment.standbys.len(),
                     standby_nodes = ?self.assignment.standbys.iter().map(|s| format!("{}[{:?}]", s.node_id, s.layer_range)).collect::<Vec<_>>(),
                     "DIAG: NO standby available for failed segment — pipeline will fail"
@@ -1712,10 +1630,216 @@ impl PipelineExecutor {
                 // this node — there was simply nobody free to take the
                 // segment over. See the variant's doc for why neither
                 // `ModelIncompleteInSwarm` nor `ServiceUnavailable` fits.
-                Err(SwarmError::SegmentFailoverExhausted(format!(
-                    "Segment {failed_idx} failed with no standby available"
-                )))
+                //
+                // The last standby's own words are carried along so the caller
+                // is told WHY the last machine that was tried could not serve
+                // it, rather than only that it could not.
+                return Err(SwarmError::SegmentFailoverExhausted(exhausted_message(
+                    failed_idx,
+                    last_failure.as_deref(),
+                )));
+            };
+
+            tracing::warn!(
+                request_id = %request_id,
+                failed_node = %abandoned,
+                backup_node = %backup.node_id,
+                failed_layer_range = ?failed_segment.layer_range,
+                backup_layer_range = ?backup.layer_range,
+                segment = failed_idx,
+                attempt = tried.len(),
+                total_segments = self.assignment.segments.len(),
+                total_standbys = self.assignment.standbys.len(),
+                "DIAG: failing over to standby node"
+            );
+
+            // Register a response channel BEFORE sending the request.
+            // SEC: a RAII guard removes the entry on every error path
+            // (including a panic between insert and wait). Without it a
+            // failed `wait_for_result` would leak one slot per double
+            // timeout — at MAX_PENDING_LAYER_RESULTS the pipeline starts
+            // rejecting all new requests with ServiceUnavailable.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.shared_state.pending_layer_results.insert(
+                request_id,
+                crate::daemon::state::PendingLayerResult {
+                    tx,
+                    // Pin to the standby. The forward we just gave up on is
+                    // still outstanding to the failed node; when it is
+                    // reaped, its synthetic error carries this same
+                    // `request_id` and would otherwise resolve THIS waiter,
+                    // discarding the standby's real result.
+                    awaiting: Some(backup.node_id.clone()),
+                    chain_members: Vec::new(),
+                },
+            );
+            let mut pending_guard = super::PendingLayerResultGuard::new(
+                &self.shared_state.pending_layer_results,
+                request_id,
+            );
+
+            // Send to backup node via directed tensor protocol
+            let forward = LayerForward {
+                request_id,
+                sequence_num,
+                index_pos: index_pos as u32,
+                activations: activations.to_vec(),
+                format: TensorFormat::FP32,
+                model_id: backup.shard_id.model_id.clone(),
+                layer_range: backup.layer_range,
+                tp_meta: None,
+                vision_embeddings: None,
+                chain: Vec::new(),
+                sender_peer_bytes: None,
+                // Unchained failover: the standby answers its sender, which is
+                // us. Naming ourselves would put a 0x07 trailer on a frame an
+                // older standby does not expect.
+                requester_node_id: None,
+                pre_embedded: false,
+                generated_ids: Vec::new(),
+                adapter_id: None,
+                draft_tokens: Vec::new(),
+                spec_logits_requested: false,
+                truncate_kv_to: None,
+                chunk_meta: None,
+                sampling: None,
+            };
+
+            let target_peer_bytes = match self.shared_state.resolve_peer_id_bytes(&backup.node_id) {
+                Some(b) => b,
+                None => {
+                    return Err(SwarmError::Network(format!(
+                        "No peer_id_bytes for backup node {}",
+                        backup.node_id
+                    )));
+                }
+            };
+            if self
+                .network_tx
+                .send(NetworkCommand::SendTensor {
+                    target_peer_bytes,
+                    forward,
+                })
+                .await
+                .is_err()
+            {
+                return Err(SwarmError::Network(
+                    "Failed to send to standby node".to_string(),
+                ));
             }
+
+            // Wait for standby response via the oneshot channel
+            let num_layers = failed_segment.layer_range.1 - failed_segment.layer_range.0;
+            let budget = super::local::SegmentBudget::for_forward(
+                &self.shared_state,
+                &backup.node_id,
+                &backup.shard_id.model_id,
+                super::work_kind_for(sequence_num),
+                num_layers,
+                activations.len(),
+                if failed_idx == 0 {
+                    super::local::ActivationUnits::PromptBytes
+                } else {
+                    super::local::ActivationUnits::HiddenStates
+                },
+            );
+            let result = Self::wait_for_result(
+                rx,
+                request_id,
+                failed_idx,
+                &backup.node_id,
+                num_layers,
+                activations.len(),
+                budget,
+            )
+            .await;
+
+            let result = match result {
+                Ok(result) => {
+                    // dispatcher already removed the entry on deliver
+                    pending_guard.disarm();
+                    result
+                }
+                Err(e) => {
+                    // The guard removes the waiter as it goes out of scope.
+                    tracing::warn!(
+                        request_id = %request_id,
+                        segment = failed_idx,
+                        standby = %backup.node_id,
+                        error = %e,
+                        "Standby did not answer — trying the next standby"
+                    );
+                    last_failure = Some(e.to_string());
+                    tried.push(backup.node_id.clone());
+                    abandoned = backup.node_id;
+                    continue;
+                }
+            };
+
+            if let Some(NetworkFinishReason::Error(ref err_msg)) = result.finish_reason {
+                if let Some(err) = super::every_holder_would_refuse(err_msg) {
+                    tracing::info!(
+                        request_id = %request_id,
+                        segment = failed_idx,
+                        standby = %backup.node_id,
+                        error = %err_msg,
+                        "Standby refused the request itself — not trying another"
+                    );
+                    return Err(err);
+                }
+                if super::remote_error_means_missing_shard(err_msg) {
+                    self.shared_state.retract_shard_holder_claims_for_range(
+                        &backup.shard_id.model_id,
+                        &backup.node_id,
+                        backup.layer_range,
+                        "standby reported the shard data as missing",
+                    );
+                    self.shared_state
+                        .blacklist_holder_for_request(request_id, &backup.node_id);
+                }
+                tracing::warn!(
+                    request_id = %request_id,
+                    segment = failed_idx,
+                    standby = %backup.node_id,
+                    error = %err_msg,
+                    "Standby returned an error — trying the next standby"
+                );
+                last_failure = Some(err_msg.clone());
+                tried.push(backup.node_id.clone());
+                abandoned = backup.node_id;
+                continue;
+            }
+
+            // Update the assignment so subsequent tokens use the standby
+            // directly, avoiding repeated failover + 30s timeout per token.
+            self.assignment.segments[failed_idx].node_id = backup.node_id;
+            self.assignment.segments[failed_idx].layer_range = backup.layer_range;
+
+            return Ok(result);
+        }
+    }
+}
+
+/// How many characters of a standby's own failure message the exhaustion
+/// error carries. A worker's refusal names sizes and context lengths and can
+/// run to several hundred characters; the caller needs the reason, not the
+/// arithmetic.
+const EXHAUSTED_REASON_MAX_CHARS: usize = 200;
+
+/// The message a request fails with when every standby for `segment` has been
+/// tried, carrying the last standby's stated reason where there is one.
+pub(super) fn exhausted_message(segment: usize, last_failure: Option<&str>) -> String {
+    let base = format!("Segment {segment} failed with no standby available");
+    match last_failure.map(str::trim).filter(|s| !s.is_empty()) {
+        None => base,
+        Some(reason) => {
+            let shown: String = reason.chars().take(EXHAUSTED_REASON_MAX_CHARS).collect();
+            let ellipsis = if shown.len() < reason.len() {
+                "…"
+            } else {
+                ""
+            };
+            format!("{base} (last standby: {shown}{ellipsis})")
         }
     }
 }

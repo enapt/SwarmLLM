@@ -100,6 +100,16 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
   cannot buy a failover and can only turn a slow success into a 503: measured, a reply
   arrived 1.6 s after we gave up and was discarded. Absence of the pipeline entry counts
   as "yes", so paths this check cannot see (a chain hop) keep the old behaviour.
+  **The standby gate is for a peer that is CONNECTED but silent.** A peer whose
+  connection closed AND whose re-dial failed is a different fact: no result can
+  arrive over a connection that does not exist, and the serving side abandons
+  inbound forwards on the close, so there is no slow success left to protect.
+  That case bypasses the gate deliberately — `schedule_redial_retry` →
+  `fail_forwards_awaiting_departed_peer` → `SharedState::
+  fail_layer_results_awaiting`, which fails only waiters PINNED to the departed
+  node via `resolve_pending_layer_result` (2026-09-02, gotcha #436). A new
+  fast-fail must decide which of the two facts it has: silence gets the gate,
+  proven departure does not.
 
 - **A KV-budget refusal MUST release what the request already took** (2026-08-25) —
   `executor.rs` calls `kv_cache_store.clear_request` before returning the
@@ -211,13 +221,26 @@ is the single answer to "is this forward doing a prefill?", for the deadline
 carries the resolved verdict (`is_prefill()`) so the log cannot contradict the
 budget it is describing.
 
-**`ActivationUnits::PromptBytes` means prefill, unconditionally.** Segment 0 of a
-non-pre-embedded pipeline is handed the prompt itself; every later hop carries
-hidden states. A forward carrying the prompt performs the whole prefill by
-construction, however short the prompt — so the size test does not apply to it.
-Only `HiddenStates` may be classified by size, because
-`PREFILL_ACTIVATION_THRESHOLD_BYTES` (100_000) is a **hidden-state** scale: one
-token of hidden state is thousands of bytes, one token of prompt is a few.
+**The work KIND decides first (2026-09-02, gotcha #434).** `work_kind_for
+(sequence_num)` is authoritative — 0 is the prompt pass, everything later is a
+single-token decode step — and a decode step is a decode step whatever it
+carries. Segment 0 of a DECODE step is handed the sampled token as
+`PromptBytes` (that is the unit the first segment takes), and while the units
+alone decided, every decode step of a remote first segment was budgeted as a
+PREFILL: 240 s for 16 layers, measured live against a silent peer with a
+standby idle throughout, where the decode budget is 32 s. The decode
+coefficient is per-layer and never reads the byte count, so a decode-kind
+forward also uses the MEASURED basis regardless of units. The spec-verify
+sites pass `WorkKind::Decode` with `PromptBytes` and rely on exactly this.
+
+**Within the prompt pass, `ActivationUnits::PromptBytes` means prefill,
+unconditionally.** Segment 0 of a non-pre-embedded pipeline is handed the
+prompt itself; every later hop carries hidden states. A forward carrying the
+prompt performs the whole prefill by construction, however short the prompt —
+so the size test does not apply to it. Only `HiddenStates` may be classified
+by size, because `PREFILL_ACTIVATION_THRESHOLD_BYTES` (100_000) is a
+**hidden-state** scale: one token of hidden state is thousands of bytes, one
+token of prompt is a few.
 
 **Why it is a rule.** The units were already explicit, and already honoured on
 the *measured* path — `for_forward` refuses to predict from the peer-speed
@@ -2425,6 +2448,16 @@ a comment on one of them explaining exactly why it mattered.
   return sites and checking each one is the mistake being fixed. The one path
   that does not go through it — `speculative.rs`'s prefill, which awaits
   `wait_for_result` directly — carries its own call and says so.
+- **`failover_segment` LOOPS over standbys, and a standby's error is a failure
+  of that standby, not the segment's output** (2026-09-02, gotcha #435). It
+  used to return whatever the first standby sent; a refusal (out of memory, a
+  missing shard) is an error `LayerResult` with EMPTY activations, and those
+  were forwarded to the next segment, which failed them as `Tensor bytes too
+  short` — an internal error blamed on a segment that was fine, seen live and
+  independently reported by a tester the same day. Every node already tried is
+  excluded from the standby search; exhaustion carries the last standby's
+  stated reason (`exhausted_message`). Every consumer of a `LayerResult` must
+  check `finish_reason` before using the payload.
 - **`every_holder_would_refuse`** — asked BEFORE failing over. Deliberately
   narrow: only `Validation`, because that describes the REQUEST and every holder
   reproduces it identically. A missing shard or a dead worker says nothing about

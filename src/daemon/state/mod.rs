@@ -1292,6 +1292,44 @@ impl SharedState {
         }
     }
 
+    /// Fail every waiter pinned to `node` with a synthetic error result, and
+    /// return the request ids that were resolved.
+    ///
+    /// For the one case where failing a forward the pipeline is still waiting
+    /// on is honest rather than a gamble: the node it was sent to has GONE —
+    /// its connection closed and a re-dial has failed — so its result has no
+    /// connection to arrive on, and the serving side abandons an inbound
+    /// forward the moment it sees its coordinator's connection close, so the
+    /// work is not being done anywhere either. Each waiter is resolved through
+    /// `resolve_pending_layer_result` with the departed node as the sender, so
+    /// a request that has already failed over to a standby is untouched — its
+    /// waiter is pinned to the standby and refuses this attribution.
+    ///
+    /// Waiters that are not pinned (`awaiting: None`) are left alone: they
+    /// accept a result from anyone, so nothing ties them to this node. A
+    /// waiter whose CHAIN includes the node fails too — a chained run cannot
+    /// complete without every hop.
+    pub fn fail_layer_results_awaiting(
+        &self,
+        node: &crate::types::NodeId,
+        reason: &str,
+    ) -> Vec<uuid::Uuid> {
+        let ids: Vec<uuid::Uuid> = self
+            .pending_layer_results
+            .iter()
+            .filter(|e| e.value().awaiting.is_some() && e.value().accepts(Some(node)))
+            .map(|e| *e.key())
+            .collect();
+        ids.into_iter()
+            .filter(|id| {
+                self.resolve_pending_layer_result(
+                    Some(node),
+                    crate::types::LayerResult::error(*id, reason),
+                )
+            })
+            .collect()
+    }
+
     /// Record that an inbound segment forward is in flight and can be aborted.
     ///
     /// Call this immediately after `tokio::spawn`, passing the same `finished`
@@ -3375,6 +3413,98 @@ mod pending_layer_result_tests {
             None,
         );
         state
+    }
+
+    /// A departed node's forwards are failed — and nobody else's. The waiter
+    /// pinned to another node and the unpinned waiter (which accepts a result
+    /// from anyone, so nothing ties it to the departed node) both survive.
+    #[tokio::test]
+    async fn failing_a_departed_nodes_forwards_touches_only_waiters_pinned_to_it() {
+        let state = test_state();
+        let gone = NodeId([0xAA; 32]);
+        let healthy = NodeId([0xBB; 32]);
+        let (rid_gone, rid_healthy, rid_unpinned) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+
+        let (tx1, mut rx_gone) = tokio::sync::oneshot::channel();
+        state.pending_layer_results.insert(
+            rid_gone,
+            PendingLayerResult {
+                tx: tx1,
+                awaiting: Some(gone.clone()),
+                chain_members: Vec::new(),
+            },
+        );
+        let (tx2, mut rx_healthy) = tokio::sync::oneshot::channel();
+        state.pending_layer_results.insert(
+            rid_healthy,
+            PendingLayerResult {
+                tx: tx2,
+                awaiting: Some(healthy.clone()),
+                chain_members: Vec::new(),
+            },
+        );
+        let (tx3, mut rx_unpinned) = tokio::sync::oneshot::channel();
+        state.pending_layer_results.insert(
+            rid_unpinned,
+            PendingLayerResult {
+                tx: tx3,
+                awaiting: None,
+                chain_members: Vec::new(),
+            },
+        );
+
+        let failed = state.fail_layer_results_awaiting(&gone, "peer departed");
+        assert_eq!(
+            failed,
+            vec![rid_gone],
+            "exactly the departed node's forward"
+        );
+
+        let result = rx_gone.try_recv().expect("the pinned waiter was resolved");
+        assert!(matches!(
+            result.finish_reason,
+            Some(crate::types::NetworkFinishReason::Error(ref m)) if m.contains("departed")
+        ));
+        assert!(
+            rx_healthy.try_recv().is_err(),
+            "another node's waiter survives"
+        );
+        assert!(
+            rx_unpinned.try_recv().is_err(),
+            "an unpinned waiter survives"
+        );
+        assert!(state.pending_layer_results.contains_key(&rid_healthy));
+        assert!(state.pending_layer_results.contains_key(&rid_unpinned));
+    }
+
+    /// A chained run cannot complete without every hop, so a waiter whose
+    /// chain includes the departed node fails with it even though `awaiting`
+    /// pins the tail.
+    #[tokio::test]
+    async fn a_chained_waiter_fails_when_a_mid_chain_hop_departs() {
+        let state = test_state();
+        let head = NodeId([0x01; 32]);
+        let hop = NodeId([0x02; 32]);
+        let tail = NodeId([0x03; 32]);
+        let rid = uuid::Uuid::new_v4();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        state.pending_layer_results.insert(
+            rid,
+            PendingLayerResult {
+                tx,
+                awaiting: Some(tail.clone()),
+                chain_members: vec![head, hop.clone(), tail],
+            },
+        );
+        assert_eq!(
+            state.fail_layer_results_awaiting(&hop, "peer departed"),
+            vec![rid]
+        );
+        assert!(rx.try_recv().is_ok());
     }
 
     /// The live failure of 2026-08-01, in miniature.

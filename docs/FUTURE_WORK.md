@@ -5173,7 +5173,33 @@ more when the network is idle — precisely when generosity costs nothing.
 
 ## Inference engine
 
-### A pipeline whose peer departs with no standby waits the whole segment deadline (seen twice, 2026-09-01)
+### A pipeline whose peer departs with no standby waits the whole segment deadline (seen twice 2026-09-01 — FIXED 2026-09-02, differently than sketched below)
+
+**FIXED 2026-09-02**, and the trigger is better than the give-up branch this
+entry proposed: the redial schedule's give-up point is ~8 minutes in
+(2-5 s jitter + 5+15+45+120+300 s), which barely beats the 600 s deadline it
+was meant to replace. The honest "gone" moment is earlier: the connection
+CLOSED and the **first** re-dial failed — at that point no result can arrive
+(no connection to arrive on, and the serving side abandons an inbound forward
+when it sees its coordinator's connection close, so the work is not being done
+anywhere). `schedule_redial_retry` → `fail_forwards_awaiting_departed_peer` →
+`SharedState::fail_layer_results_awaiting`, which fails only waiters PINNED to
+the departed node through `resolve_pending_layer_result`, so a request that
+already failed over is untouched. No standby gate, deliberately — see the
+method's doc for why this is not #386's gamble. A peer that is connected again
+by the time the dial failure lands keeps its full deadline. Gotcha #436.
+Residual: a CHAIN HOP's onward forwards are not covered (`hop_reply_to` does
+not record the onward peer); the ACK-deadline path covers those until ACK.
+
+The same day's trace also yielded two sibling fixes: a decode step of a remote
+segment 0 was budgeted as a PREFILL (15 s/layer — 240 s for 16 layers) because
+the units said `PromptBytes` and the fallback never asked the work KIND
+(gotcha #434); and a standby that answered failover with an ERROR had its
+empty activations forwarded to the next segment as though computed — surfacing
+as `Tensor bytes too short` blamed on the wrong segment (gotcha #435,
+independently reported by an external tester the same day). Original entry
+kept below for the measurements.
+
 
 **Observed independently the same day.** An external tester running a 14B under
 real agentic load had a segment land on a third-party peer that dropped

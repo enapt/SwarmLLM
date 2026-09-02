@@ -110,6 +110,8 @@ impl NetworkManager {
         // the budget resets here rather than expiring — a peer that flaps gets a
         // fresh set of attempts each time it comes back.
         self.redial_attempts.remove(&peer_id);
+        // And it is no longer departed, so its forwards are no longer doomed.
+        self.departed_peer_nodes.remove(&peer_id);
         // A fresh connection starts with a clean slate — the count is about one
         // connection's silence, not the peer's history.
         self.rr_failures.remove(&peer_id);
@@ -418,6 +420,15 @@ impl NetworkManager {
             // on the same shard → synchronous deadlock that freezes the event loop.
             let node_id_opt = node_id_for_cleanup;
             if let Some(node_id) = node_id_opt {
+                // Remember who this peer WAS. If the re-dial scheduled below
+                // fails, `fail_forwards_awaiting_departed_peer` needs the node
+                // id to name the waiters this departure has orphaned, and the
+                // registry entry it would otherwise read is removed a few
+                // lines down (kept only for an active-pipeline peer).
+                if self.departed_peer_nodes.len() >= MAX_REDIAL_TRACKED_PEERS {
+                    self.departed_peer_nodes.clear();
+                }
+                self.departed_peer_nodes.insert(peer_id, node_id.clone());
                 // Addresses to re-dial this peer on. MUST be read before the
                 // `peer_registry` removal below, which is the only place that
                 // still knows where this peer listens.
@@ -782,6 +793,63 @@ impl NetworkManager {
         let _ = self.swarm.disconnect_peer_id(peer);
     }
 
+    /// A peer whose connection has closed AND whose re-dial has just failed
+    /// cannot deliver a result — there is no connection for one to arrive on.
+    /// Fail every forward still waiting on it now, so the pipeline fails over
+    /// in seconds (or, with no standby, reports the failure at once) instead
+    /// of waiting out the segment's compute deadline — 600 s for a cold
+    /// prefill.
+    ///
+    /// **This is not the gamble the receipt-ACK fast-fail's standby gate
+    /// protects against** (gotcha #386). That gate exists because a CONNECTED
+    /// peer that has not acknowledged may still be computing, and abandoning
+    /// it with nowhere to fail over to converts a slow success into a hard
+    /// 503 — measured, a result arrived 1.6 s after we gave up on it. Here
+    /// there is no slow success left to discard: the connection is gone, the
+    /// peer could not be reached again, and the serving side abandons an
+    /// inbound forward the moment it sees its coordinator's connection close
+    /// (`handle_connection_closed`, "abandoning inbound segment forward"), so
+    /// the work is not being done anywhere either. That is why this needs no
+    /// standby gate.
+    ///
+    /// Seen twice on 2026-09-01 (gotcha #436): an external tester's 14B
+    /// request lost a segment's peer mid-request (`connection closed`, then
+    /// `Dial failed — retrying` cascading) and streamed 0 tokens for 392 s
+    /// before their client gave up; our own 14B stream waited a 240 s decode
+    /// deadline on a peer that had stopped answering. The close and the
+    /// failed dial were both in the log while the pipeline waited.
+    ///
+    /// A peer that is connected again by the time its dial failure is
+    /// reported — it dialled US while our dial was in flight — keeps every
+    /// deadline: its result can still arrive.
+    fn fail_forwards_awaiting_departed_peer(&mut self, peer_id: &libp2p::PeerId) {
+        if self.swarm.is_connected(peer_id) {
+            return;
+        }
+        let Some(node_id) = self
+            .departed_peer_nodes
+            .get(peer_id)
+            .cloned()
+            .or_else(|| self.peer_to_node.get(peer_id).map(|r| r.clone()))
+        else {
+            return;
+        };
+        let failed = self.shared_state.fail_layer_results_awaiting(
+            &node_id,
+            "Peer departed: its connection closed and it could not be reached again",
+        );
+        if failed.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            %peer_id,
+            node = %node_id,
+            failed = failed.len(),
+            request_ids = ?failed.iter().take(5).map(|u| u.to_string()).collect::<Vec<_>>(),
+            "DIAG: peer departed with forwards outstanding — failed them so the pipeline can fail over"
+        );
+    }
+
     /// Re-enqueue a re-dial after a dial failure, on a bounded backoff.
     ///
     /// Only peers with a `redial_attempts` entry are retried — that entry is
@@ -790,6 +858,16 @@ impl NetworkManager {
     /// DHT dial targets are therefore untouched, which is what keeps this from
     /// becoming a dial storm.
     pub(super) fn schedule_redial_retry(&mut self, peer_id: libp2p::PeerId) {
+        if !self.redial_attempts.contains_key(&peer_id) {
+            return;
+        }
+        // This dial failure is the second half of the departure proof (the
+        // close was the first): the peer is gone AND cannot be reached, so any
+        // forward still waiting on it is failed NOW rather than at its compute
+        // deadline. Runs on every failed attempt, not only the last — the
+        // waiters exist on the first failure or not at all, and later
+        // attempts find nothing left to fail.
+        self.fail_forwards_awaiting_departed_peer(&peer_id);
         let Some((addrs, attempts)) = self.redial_attempts.get_mut(&peer_id) else {
             return;
         };
@@ -800,6 +878,7 @@ impl NetworkManager {
                 "Giving up re-dialling peer — treating it as departed"
             );
             self.redial_attempts.remove(&peer_id);
+            self.departed_peer_nodes.remove(&peer_id);
             return;
         };
         *attempts += 1;

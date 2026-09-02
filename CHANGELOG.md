@@ -2,6 +2,35 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A request whose first machine went silent mid-reply waited minutes with a
+  backup sitting idle.** Each single-token step sent to the machine holding a
+  model's first layers was given the deadline for re-reading the whole prompt —
+  240 seconds for a 16-layer piece — because of what that step happens to carry
+  on the wire. Such steps now get the per-token deadline (32 seconds there),
+  sized from the machine's measured speed where one exists, so a silent machine
+  is given up on and the backup takes over in seconds.
+
+- **A backup machine's refusal was mistaken for its answer.** When the machine
+  taking over a failed segment refused it — not enough memory, or missing
+  data — its refusal was passed down the pipeline as if it were computed
+  output, and the request failed with a confusing internal error (`Tensor
+  bytes too short`) blamed on a machine that was fine. A refusal now moves the
+  work to the next backup; when none is left, the error names the segment that
+  actually failed and why the last backup could not take it. (Also the likely
+  explanation for the one-off `Tensor bytes too short` a tester reported on
+  0.3.146.)
+
+- **A machine that disconnected mid-request and could not be reached again
+  kept the request waiting for its full deadline** — one report saw 0 tokens
+  for 392 seconds while the log showed the disconnect and the failed
+  reconnects. Once a reconnect attempt to a disconnected machine fails, its
+  part of the work is now failed immediately: the request moves to a backup at
+  once, or reports the failure honestly instead of hanging.
+
 ## [0.3.146-alpha] — 2026-09-01
 
 ### Fixed

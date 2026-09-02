@@ -1133,6 +1133,192 @@ mod tests {
         assert!(result.is_err()); // NoModelLoaded
     }
 
+    /// What a simulated peer answers a forward with.
+    enum PeerReply {
+        Error(&'static str),
+        Activations(Vec<u8>),
+        Token(u32),
+    }
+
+    /// Play every peer in an assignment: answer each `SendTensor` the executor
+    /// emits, as the node it was addressed to, and record who was sent what.
+    /// Ends when the executor (and so the channel's sender) is dropped.
+    fn spawn_peers(
+        state: Arc<SharedState>,
+        mut rx: mpsc::Receiver<NetworkCommand>,
+        peers: std::collections::HashMap<Vec<u8>, NodeId>,
+        reply: impl Fn(&NodeId) -> PeerReply + Send + 'static,
+    ) -> tokio::task::JoinHandle<Vec<(NodeId, Vec<u8>)>> {
+        tokio::spawn(async move {
+            let mut sent = Vec::new();
+            while let Some(cmd) = rx.recv().await {
+                let NetworkCommand::SendTensor {
+                    target_peer_bytes,
+                    forward,
+                } = cmd
+                else {
+                    continue;
+                };
+                let node = peers[&target_peer_bytes].clone();
+                sent.push((node.clone(), forward.activations.clone()));
+                let base = LayerResult::error(forward.request_id, "");
+                let result = match reply(&node) {
+                    PeerReply::Error(m) => LayerResult::error(forward.request_id, m),
+                    PeerReply::Activations(a) => LayerResult {
+                        activations: a,
+                        finish_reason: None,
+                        ..base
+                    },
+                    PeerReply::Token(t) => LayerResult {
+                        token_ids: vec![t],
+                        finish_reason: None,
+                        ..base
+                    },
+                };
+                assert!(
+                    state.resolve_pending_layer_result(Some(&node), result),
+                    "the executor registers its waiter before it sends"
+                );
+            }
+            sent
+        })
+    }
+
+    fn remote_segment(node: &NodeId, range: (u32, u32)) -> PipelineSegment {
+        PipelineSegment {
+            node_id: node.clone(),
+            shard_id: ShardId {
+                model_id: ModelId("test".into()),
+                index: range.0,
+            },
+            layer_range: range,
+        }
+    }
+
+    /// The live failure of 2026-09-01 (gotcha #435), in miniature: the first
+    /// segment's holder fails, its only standby REFUSES the segment, and the
+    /// refusal's empty activations used to be forwarded to segment 1 as though
+    /// the standby had computed them — which failed there as `Tensor bytes
+    /// too short` and reported segment 1 as the one with no standby. A
+    /// standby's error is a failure of that standby.
+    #[tokio::test]
+    async fn a_standby_that_refuses_is_a_failure_not_the_segments_output() {
+        let state = make_test_state();
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        let request = make_test_request(&state);
+        let request_id = request.id;
+        let (a, b, d) = (NodeId([0xA1; 32]), NodeId([0xB2; 32]), NodeId([0xD4; 32]));
+        let mut peers = std::collections::HashMap::new();
+        for (node, byte) in [(&a, 0xA1u8), (&b, 0xB2), (&d, 0xD4)] {
+            state.peer_id_map.insert(node.clone(), vec![byte]);
+            peers.insert(vec![byte], node.clone());
+        }
+        let assignment = PipelineAssignment {
+            request_id,
+            segments: vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))],
+            standbys: vec![remote_segment(&b, (0, 16))],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        let (a2, b2) = (a.clone(), b.clone());
+        let peers = spawn_peers(state, rx, peers, move |node| {
+            if *node == a2 || *node == b2 {
+                PeerReply::Error(
+                    "Worker: Service unavailable: needs about 10362 MB of memory: 8566 MB of weights",
+                )
+            } else {
+                PeerReply::Token(7)
+            }
+        });
+
+        let result = executor
+            .forward_through_segments(request_id, 0, 0, b"hello".to_vec(), None, false, &[])
+            .await;
+        drop(executor);
+        let sent = peers.await.unwrap();
+
+        let err = result.expect_err("nobody computed segment 0");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, SwarmError::SegmentFailoverExhausted(_)),
+            "wrong class: {msg}"
+        );
+        assert!(
+            msg.contains("Segment 0") && msg.contains("10362 MB"),
+            "the failure names the segment that failed and why the last standby refused it: {msg}"
+        );
+        let asked: Vec<&NodeId> = sent.iter().map(|(n, _)| n).collect();
+        assert_eq!(asked, vec![&a, &b], "holder, then its standby, then nobody");
+        assert!(
+            !sent.iter().any(|(n, _)| *n == d),
+            "segment 1 must never be sent the refusal's empty activations"
+        );
+    }
+
+    /// With more than one standby, a refusal moves the segment on to the next
+    /// one, and the loop resumes with what THAT standby computed; the segment
+    /// is re-pointed at it for the rest of the request.
+    #[tokio::test]
+    async fn a_second_standby_is_tried_when_the_first_fails() {
+        let state = make_test_state();
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        let request = make_test_request(&state);
+        let request_id = request.id;
+        let (a, b, c, d) = (
+            NodeId([0xA1; 32]),
+            NodeId([0xB2; 32]),
+            NodeId([0xC3; 32]),
+            NodeId([0xD4; 32]),
+        );
+        let mut peers = std::collections::HashMap::new();
+        for (node, byte) in [(&a, 0xA1u8), (&b, 0xB2), (&c, 0xC3), (&d, 0xD4)] {
+            state.peer_id_map.insert(node.clone(), vec![byte]);
+            peers.insert(vec![byte], node.clone());
+        }
+        let assignment = PipelineAssignment {
+            request_id,
+            segments: vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))],
+            standbys: vec![remote_segment(&b, (0, 16)), remote_segment(&c, (0, 16))],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        let (a2, b2, c2) = (a.clone(), b.clone(), c.clone());
+        let computed = vec![0x5Au8; 64];
+        let computed2 = computed.clone();
+        let peers = spawn_peers(state, rx, peers, move |node| {
+            if *node == a2 || *node == b2 {
+                PeerReply::Error("Worker: Service unavailable: out of memory")
+            } else if *node == c2 {
+                PeerReply::Activations(computed2.clone())
+            } else {
+                PeerReply::Token(7)
+            }
+        });
+
+        let result = executor
+            .forward_through_segments(request_id, 0, 0, b"hello".to_vec(), None, false, &[])
+            .await;
+        let now_serving = executor.assignment.segments[0].node_id.clone();
+        drop(executor);
+        let sent = peers.await.unwrap();
+
+        let out = result.expect("the second standby answered");
+        assert_eq!(out.token_ids, vec![7]);
+        let asked: Vec<&NodeId> = sent.iter().map(|(n, _)| n).collect();
+        assert_eq!(asked, vec![&a, &b, &c, &d]);
+        let to_d = &sent.iter().find(|(n, _)| *n == d).unwrap().1;
+        assert_eq!(
+            to_d, &computed,
+            "segment 1 receives what the standby that answered computed"
+        );
+        assert_eq!(
+            now_serving, c,
+            "the segment is re-pointed at the standby that answered"
+        );
+    }
+
     /// R137 (closes R136 test-coverage deferral, partial): the wire-format
     /// helpers `pack_verify_tokens_to_le_bytes`, `build_spec_verify_forward`,
     /// and `build_kv_truncate_forward` are pure and unit-testable. Full

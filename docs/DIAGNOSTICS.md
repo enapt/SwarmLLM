@@ -391,7 +391,8 @@ histograms. Adding a field means adding it there once, not at each surface.
 - **Outbound failure** → `DIAG: OutboundFailure` → `Tensor forward OutboundFailure — notifying pipeline` (manager/events.rs)
 - **Inbound failure** → `DIAG: InboundFailure — response send may have failed` (manager/events.rs)
 - **Decryption fail** → `DIAG: decrypt FAILED — possible AAD mismatch` (manager/tensors.rs)
-- **No standby** → `DIAG: NO standby available for failed segment` (pipeline/distributed.rs)
+- **No standby** → `DIAG: NO standby available for failed segment` (pipeline/distributed.rs) — carries `tried` (every node the segment was attempted on) and `last_failure` since 2026-09-02
+- **Departed peer** → `DIAG: peer departed with forwards outstanding — failed them so the pipeline can fail over` (network/manager/connections.rs) — fires when a peer's connection closed AND its re-dial failed while forwards were still pinned to it; the pipeline then fails over immediately instead of waiting the segment deadline
 - **Client disconnect** → `DIAG: result_tx receiver dropped` (router/mod.rs)
 - **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch/mod.rs)
 - **No pending channel** → `DIAG: No pending channel for LayerResult — timed out, duplicate, or hedge loser` (daemon/dispatch/mod.rs)

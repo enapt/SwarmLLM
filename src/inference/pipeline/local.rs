@@ -91,13 +91,21 @@ impl SegmentBudget {
         activation_bytes: usize,
         units: ActivationUnits,
     ) -> Self {
-        let measured = match units {
-            ActivationUnits::HiddenStates => {
-                state.predict_segment_ms(node_id, kind, num_layers, activation_bytes)
-            }
-            // The coefficient is not in these units; a prediction from it would
-            // be meaningless rather than merely imprecise.
-            ActivationUnits::PromptBytes => None,
+        let measured = match (kind, units) {
+            // The prefill coefficient is ms per layer per HIDDEN-STATE byte; a
+            // prediction from it over raw prompt bytes would be meaningless
+            // rather than merely imprecise.
+            (WorkKind::Prefill, ActivationUnits::PromptBytes) => None,
+            // The decode coefficient is ms per layer and never reads the byte
+            // count, so what a decode step happens to carry — one token id to
+            // segment 0, hidden states to every later segment — cannot
+            // corrupt it. Until 2026-09-02 this arm fell into the one above
+            // whenever the units were `PromptBytes`, and the fallback beneath
+            // it then asked the units rather than the kind: every decode step
+            // of a remote first segment was budgeted as a PREFILL, 15 s a
+            // layer, however fast the peer had been measured answering the
+            // identical step a moment earlier (gotcha #434).
+            _ => state.predict_segment_ms(node_id, kind, num_layers, activation_bytes),
         };
 
         let (base, basis) = match measured {
@@ -106,7 +114,12 @@ impl SegmentBudget {
                 "measured",
             ),
             None => (
-                PipelineExecutor::compute_segment_timeout(num_layers, activation_bytes, units),
+                PipelineExecutor::compute_segment_timeout(
+                    kind,
+                    num_layers,
+                    activation_bytes,
+                    units,
+                ),
                 "default",
             ),
         };
@@ -150,7 +163,7 @@ impl SegmentBudget {
                 .clamp(Duration::from_secs(SEGMENT_TIMEOUT_MIN_SECS), ceiling)
                 .min(transport_ceiling),
             basis,
-            prefill: PipelineExecutor::forward_is_prefill(activation_bytes, units),
+            prefill: PipelineExecutor::forward_is_prefill(kind, activation_bytes, units),
         }
     }
 
@@ -336,14 +349,16 @@ impl PipelineExecutor {
     /// Prefill (the whole prompt at once) is much slower than decode (a single
     /// token), so the two get different per-layer rates. Which one this forward
     /// is doing is decided by [`PipelineExecutor::forward_is_prefill`] — by the
-    /// activation UNITS, not by the byte count; read that before assuming a
-    /// large payload means prefill or a small one means decode.
+    /// work KIND first and then the activation UNITS, never by the byte count;
+    /// read that before assuming a large payload means prefill or a small one
+    /// means decode.
     pub(super) fn compute_segment_timeout(
+        kind: WorkKind,
         num_layers: u32,
         activation_bytes: usize,
         units: ActivationUnits,
     ) -> Duration {
-        let per_layer_secs: u64 = if Self::forward_is_prefill(activation_bytes, units) {
+        let per_layer_secs: u64 = if Self::forward_is_prefill(kind, activation_bytes, units) {
             PREFILL_SECS_PER_LAYER
         } else {
             DECODE_SECS_PER_LAYER
@@ -356,15 +371,28 @@ impl PipelineExecutor {
     /// Is this forward doing a prefill? The single answer, for the deadline and
     /// for the DIAG that reports it.
     ///
-    /// **The units decide it, not the size.** A `PromptBytes` payload is the
-    /// prompt itself — that is what the unit means — so the forward carrying it
-    /// performs the whole prefill by construction, however short the prompt.
-    /// Only `HiddenStates` can be classified by size, because
-    /// `PREFILL_ACTIVATION_THRESHOLD_BYTES` is a hidden-state scale: one token
-    /// of hidden state is thousands of bytes, whereas one token of prompt is a
-    /// few. Comparing prompt bytes against it asks a question in the wrong
-    /// units and answers "decode" for anything under ~100 KB of text — roughly
-    /// 25k tokens, i.e. essentially every real prompt.
+    /// **The kind decides first.** `WorkKind` comes from the sequence number
+    /// (`work_kind_for`): 0 is the prompt pass, everything after it is a
+    /// single-token decode step — and a decode step is a decode step whatever
+    /// it carries. Segment 0 of a decode step is handed the sampled token as
+    /// `PromptBytes`, because that is the unit the first segment takes, and
+    /// asking the units alone answered "prefill" for it: every decode step of
+    /// a remote first segment was budgeted at 15 s a layer. Measured on the
+    /// live swarm 2026-09-01 (gotcha #434): a 16-layer segment 0 that had just
+    /// answered in 4.9 s took a decode step and went silent, and the pipeline
+    /// waited 240 s for it — with a standby idle the whole time — where the
+    /// decode budget is 32 s and its measured speed would have allowed ~30.
+    ///
+    /// **Within the prompt pass, the units decide, not the size.** A
+    /// `PromptBytes` payload is the prompt itself — that is what the unit
+    /// means — so the forward carrying it performs the whole prefill by
+    /// construction, however short the prompt. Only `HiddenStates` can be
+    /// classified by size, because `PREFILL_ACTIVATION_THRESHOLD_BYTES` is a
+    /// hidden-state scale: one token of hidden state is thousands of bytes,
+    /// whereas one token of prompt is a few. Comparing prompt bytes against it
+    /// asks a question in the wrong units and answers "decode" for anything
+    /// under ~100 KB of text — roughly 25k tokens, i.e. essentially every real
+    /// prompt.
     ///
     /// Measured on the live swarm 2026-08-29: a 4728-token prompt reached
     /// segment 0 as `activation_bytes=24045`, was budgeted `2s/layer`, and its
@@ -373,10 +401,15 @@ impl PipelineExecutor {
     /// request plus a needless failover — not a failure, which is why it went
     /// unnoticed. The peer-agnostic constants stay peer-agnostic; this only
     /// stops the fallback asking the wrong question.
-    fn forward_is_prefill(activation_bytes: usize, units: ActivationUnits) -> bool {
-        match units {
-            ActivationUnits::PromptBytes => true,
-            ActivationUnits::HiddenStates => activation_bytes > PREFILL_ACTIVATION_THRESHOLD_BYTES,
+    fn forward_is_prefill(kind: WorkKind, activation_bytes: usize, units: ActivationUnits) -> bool {
+        match kind {
+            WorkKind::Decode => false,
+            WorkKind::Prefill | WorkKind::Delegated => match units {
+                ActivationUnits::PromptBytes => true,
+                ActivationUnits::HiddenStates => {
+                    activation_bytes > PREFILL_ACTIVATION_THRESHOLD_BYTES
+                }
+            },
         }
     }
 
@@ -648,6 +681,101 @@ mod segment_budget_tests {
             "default",
             "raw-prompt units must fall back rather than mis-apply the coefficient"
         );
+    }
+
+    /// A decode step of a remote FIRST segment carries the sampled token as
+    /// `PromptBytes` — that is the unit segment 0 takes — and was budgeted as
+    /// a prefill for it: 15 s a layer instead of 2. Measured on the live swarm
+    /// 2026-09-01 (gotcha #434): a 16-layer segment 0 took a decode step, went
+    /// silent, and the pipeline waited 240 s with a standby idle throughout.
+    #[test]
+    fn a_decode_step_to_the_first_segment_is_budgeted_as_a_decode() {
+        let state = test_state();
+        let node = NodeId([11u8; 32]);
+        let model = ModelId("m".into());
+        // A prefill sample marks the peer warm (so the cold-load allowance does
+        // not blur the number) while leaving its decode speed unmeasured, which
+        // is what sends the budget to the peer-agnostic fallback.
+        state.record_peer_segment_latency(&node, &model, WorkKind::Prefill, 4_900, 16, 146);
+        // The exact shape observed live: one packed token id, 16 layers.
+        let (token_bytes, layers) = (8usize, 16u32);
+        let mk = |kind| {
+            SegmentBudget::for_forward(
+                &state,
+                &node,
+                &model,
+                kind,
+                layers,
+                token_bytes,
+                ActivationUnits::PromptBytes,
+            )
+        };
+
+        let decode = mk(WorkKind::Decode);
+        assert!(
+            !decode.is_prefill(),
+            "a decode step is a decode step whatever it carries"
+        );
+        assert_eq!(decode.basis(), "default");
+        assert_eq!(
+            decode.duration(),
+            Duration::from_secs(layers as u64 * DECODE_SECS_PER_LAYER),
+            "16 layers at the decode rate — before the fix this was 240 s"
+        );
+
+        // Control: the prompt pass to the same segment, carrying the same
+        // units, is still the prefill. The kind is what changed the answer.
+        let prefill = mk(WorkKind::Prefill);
+        assert!(prefill.is_prefill());
+        assert!(prefill.duration() > decode.duration());
+    }
+
+    /// The decode coefficient is ms per layer and never reads the byte count,
+    /// so a decode step to segment 0 can be sized from what this peer has
+    /// actually been measured doing — the same "measured" basis every later
+    /// segment already gets. Before the fix the `PromptBytes` units sent it to
+    /// the fallback unconditionally, and the measurement was never consulted.
+    #[test]
+    fn a_decode_step_to_the_first_segment_uses_the_measured_decode_speed() {
+        let state = test_state();
+        let node = NodeId([12u8; 32]);
+        let model = ModelId("m".into());
+        // 16 layers in 600 ms, as a decode step: ~37 ms a layer. Recorded
+        // twice because the FIRST sample finds the peer cold and is dropped —
+        // a cold decode sample is a load time wearing a compute figure's
+        // clothes (`PeerSpeed::observe`) — while marking the peer warm, so
+        // the second is the one that counts. Exactly production's order.
+        state.record_peer_segment_latency(&node, &model, WorkKind::Decode, 600, 16, 8);
+        state.record_peer_segment_latency(&node, &model, WorkKind::Decode, 600, 16, 8);
+
+        let decode = SegmentBudget::for_forward(
+            &state,
+            &node,
+            &model,
+            WorkKind::Decode,
+            16,
+            8,
+            ActivationUnits::PromptBytes,
+        );
+        assert_eq!(
+            decode.basis(),
+            "measured",
+            "a measured decode speed applies to the first segment as it does to the rest"
+        );
+        assert!(!decode.is_prefill());
+
+        // Control: the prompt pass in the same units still refuses to predict
+        // from a coefficient that is not in those units.
+        let prefill = SegmentBudget::for_forward(
+            &state,
+            &node,
+            &model,
+            WorkKind::Prefill,
+            16,
+            146,
+            ActivationUnits::PromptBytes,
+        );
+        assert_eq!(prefill.basis(), "default");
     }
 
     /// The transport reaps an outstanding forward at `RR_REQUEST_TIMEOUT_SECS`

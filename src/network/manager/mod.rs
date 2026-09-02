@@ -430,6 +430,13 @@ pub struct NetworkManager {
     /// retry to peers we actually know rather than every failed dial target.
     /// Cleared when a connection to the peer is established.
     redial_attempts: HashMap<libp2p::PeerId, (Vec<Multiaddr>, u32)>,
+    /// The node id each registered peer had when its last connection closed,
+    /// kept until the peer is reached again. A failed re-dial needs to say
+    /// WHICH node's forwards it has just proved undeliverable, and by then the
+    /// registry entry — the usual answer — is gone unless the peer was serving
+    /// an active pipeline. Bounded alongside `redial_attempts`; entries clear
+    /// on reconnect and when the retry budget is spent.
+    departed_peer_nodes: HashMap<libp2p::PeerId, crate::types::NodeId>,
     /// Peers that completed libp2p Identify but advertise no `/swarmllm/…`
     /// protocol — i.e. foreign libp2p nodes, not ours. Recorded so the
     /// unregistered-peer re-dial path and PEX both skip them; without it,
@@ -706,6 +713,7 @@ impl NetworkManager {
             shutdown_rx,
             pending_redial: Vec::new(),
             redial_attempts: HashMap::new(),
+            departed_peer_nodes: HashMap::new(),
             foreign_peers: std::collections::HashSet::new(),
             rr_failures: HashMap::new(),
             dht_query_rx,
