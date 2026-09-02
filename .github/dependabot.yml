@@ -4,18 +4,45 @@ updates:
   # opens PRs that bump those SHAs while keeping the trailing tag comment
   # in sync. Without this config a compromised third-party action that
   # mutates its tag could ship malicious code into release builds.
+  #
+  # One grouped PR per week rather than one per action: in May 2026 five
+  # single-action PRs filled this ecosystem's limit and sat untriaged for
+  # four months, during which Dependabot could not open anything new.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
   # SEC: also surface cargo dep updates so we get yanked-version /
   # unmaintained-crate alerts that `cargo audit` doesn't catch. Auto-merge
   # is intentionally NOT enabled — a malicious semver-compatible bump
   # (typosquat / takeover) is the precise supply-chain vector to defend
   # against, so all PRs require human review before merge.
+  #
+  # Patch and minor bumps arrive as ONE weekly PR. Major bumps are not
+  # proposed at all: a semver-major (rand 0.8→0.9, reqwest 0.12→0.13) is a
+  # code migration, not a version edit — the rand PR failed to compile —
+  # and it is tracked in docs/FUTURE_WORK.md and done by hand. Security
+  # fixes still reach us through `cargo audit` in CI regardless.
+  #
+  # candle-* is excluded outright: candle-core is a vendored, patched copy
+  # (`[patch.crates-io]` in Cargo.toml) pinned to one version, and the
+  # sibling crates require exactly that version, so a Dependabot bump of
+  # candle-nn resolves an UNPATCHED candle-core and breaks the GPU build.
+  # Bumping candle means re-porting the vendored patch — a deliberate task.
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "candle-*"

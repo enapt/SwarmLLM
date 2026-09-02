@@ -10056,6 +10056,38 @@ every agent turn is refused as too long. The additive manifest field above is
 the fix; until then the README tells OpenClaw users to set `contextWindow`
 explicitly for such models.
 
+## Major-version dependency migrations Dependabot may not do (2026-09-02)
+
+Ten Dependabot PRs from May 2026 sat untriaged until they filled both
+ecosystems' `open-pull-requests-limit` and Dependabot went silent. The safe
+bumps were applied on main by hand and the config now groups minor/patch
+bumps into one weekly PR and proposes no majors. Three items were deliberately
+NOT taken and need a person:
+
+- **`rand` 0.8 → 0.9.** Direct dependency (`Cargo.toml`), and 0.9.x is already
+  in the lock transitively, so the tree carries both. 0.9 renamed the core
+  traits and functions (`thread_rng` → `rng`, `gen` → `random`, `Rng::gen_range`
+  semantics, `distributions` → `distr`); the Dependabot branch failed clippy,
+  tests and the feature-compile checks. A real migration, then one crate in the
+  tree instead of two.
+- **`reqwest` 0.12 → 0.13.** Direct dependency, used for HuggingFace downloads,
+  cloud-provider proxying and the update checker — including the
+  inactivity-timeout (`read_timeout`) discipline in
+  `.claude/rules/architecture.md` § Timeouts. Read the 0.13 changelog for the
+  TLS-backend and timeout changes before touching it, then re-run the download
+  and proxy paths against real endpoints, not just the unit tests.
+- **`candle-*` 0.10.1 → anything.** `candle-core` is vendored and patched
+  (`vendor/candle/candle-core`, `[patch.crates-io]`), and `candle-nn` /
+  `candle-transformers` require exactly the same version, so a bump of any
+  sibling resolves an UNPATCHED candle-core and reintroduces the
+  `cudarc/dynamic-linking` hard-code the patch removes (the GPU checks on the
+  Dependabot branch failed for this reason). Bumping candle means re-applying
+  every `SwarmLLM patch:` block in `vendor/candle` onto the new version — the
+  k_quants tiled/row-blocked kernels, `QTensor::gather_rows`, the
+  `dequantize_f16` host fallback (gotcha #288) — and re-running
+  `examples/qmatmul_bench` for bit-identity. Do it when upstream carries
+  something we need, not because a number went up.
+
 ## OpenClaw provider plugin (researched 2026-09-02, not built)
 
 **Why**: OpenClaw (github.com/openclaw/openclaw, ~388k stars, TypeScript) is a

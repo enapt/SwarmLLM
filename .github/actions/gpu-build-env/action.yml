@@ -213,7 +213,7 @@ runs:
         "visual_studio_integration"]'
   - name: Install Vulkan SDK
     if: inputs.vulkan == 'true'
-    uses: jakoch/install-vulkan-sdk-action@85a045da72257cc52d4b11e0d4125ab8a7b768e4
+    uses: jakoch/install-vulkan-sdk-action@3c53c378c9bfbb2ea122a1cc164a837d4004c871 # v1.5.2
     with:
       vulkan_version: ${{ inputs.vulkan-sdk-version }}
       install_runtime: true
