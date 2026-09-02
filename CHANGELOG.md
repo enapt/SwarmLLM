@@ -4,6 +4,18 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A model in constant use was unloaded as "idle" minutes after loading,
+  and every request after that paid a cold reload.** The idle check trusted a
+  last-request timestamp that nothing in the current code writes, so a
+  two-day-old value left behind by an older build outranked a worker loaded
+  four minutes earlier; the node logged `idle_secs=150432` five seconds after
+  answering. The check now reads the worker's own last-use time, which every
+  request path updates, and a model can never be judged idle for longer than
+  it has been loaded. Found while running an agent framework against a live
+  node, where each reload also threw away the cached system prompt.
+
 ### Added
 
 - **An OpenClaw provider plugin** (`integrations/openclaw/`). It puts

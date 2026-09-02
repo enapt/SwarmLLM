@@ -4269,6 +4269,20 @@ impl ModelProcessPool {
             .collect()
     }
 
+    /// Seconds since each resident worker last had a request registered
+    /// against it — `WorkerHandle::last_used`, stamped in `register_response`,
+    /// which every execution path passes through (local, distributed,
+    /// peer-served). This is the fact the idle unload must read: the
+    /// `model_trust.last_request_at` it used to rely on has NO writer in the
+    /// current code, so for a model in constant local use the only evidence
+    /// of use was the worker being busy at the instant of the check.
+    pub fn model_idle_secs(&self) -> Vec<(ModelId, u64)> {
+        self.workers
+            .iter()
+            .map(|e| (e.key().clone(), e.value().idle_secs()))
+            .collect()
+    }
+
     /// Restart a model's worker with a new shard window.
     /// Kills the current worker → OS/CUDA frees VRAM → next inference request
     /// triggers `get_or_spawn` which reads the new window.

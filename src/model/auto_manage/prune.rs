@@ -63,28 +63,44 @@ fn idle_hard_unload_secs(idle_unload_secs: u64) -> i64 {
 /// How long a loaded model can be considered idle.
 ///
 /// `since_local` is our own outbound request history, `since_served` is work
-/// done for peers, `residency_secs` is how long the worker has existed.
+/// done for peers, `since_worker` is the worker's own record of its last
+/// request (`WorkerHandle::last_used`, stamped on every execution path), and
+/// `residency_secs` is how long the worker has existed.
 ///
-/// **A model with no request history is not idle for ever.** It cannot have
-/// been idle longer than it has been loaded, so residency is the bound when
-/// nothing else is known. That is a fact rather than a worst-case guess, and
-/// getting it wrong evicted a model seven seconds after it loaded, killing the
-/// request that had just loaded it: `last_request_at` is written only by the
-/// distributed executor, so a locally-served model never records one and fell
-/// through to "assume maximally idle" (reported 2026-07-31).
+/// **A model cannot have been idle longer than it has been loaded**, so
+/// residency is a hard upper bound on the answer, whatever the histories say.
+/// It was only the fallback for "no history at all" until 2026-09-02, and the
+/// gap was measured on the live node: `model_trust.last_request_at` has no
+/// writer in the current code, so the value it carries is whatever an older
+/// build persisted — here, 150,432 s — and that stale figure outranked a worker
+/// loaded 215 s earlier. The model was unloaded five seconds after finishing a
+/// request, and every request after that paid a cold reload and lost the
+/// worker's prefix cache with it (gotcha #437).
+///
+/// `since_worker` is the signal that actually moves: the two histories are
+/// written by the distributed executor and by peer-served work, and the local
+/// split path — the common one — writes neither. Getting this wrong the first
+/// time evicted a model seven seconds after it loaded, killing the request
+/// that had just loaded it (reported 2026-07-31).
 ///
 /// Returns `None` only when nothing at all is known — no history and no
 /// residency — which callers must treat as "do not judge", not as idle.
 fn effective_idle_secs(
     since_local: Option<i64>,
     since_served: Option<i64>,
+    since_worker: Option<u64>,
     residency_secs: Option<u64>,
 ) -> Option<i64> {
-    let observed = match (since_local, since_served) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
-    observed.or_else(|| residency_secs.map(|s| s.min(i64::MAX as u64) as i64))
+    let clamp = |s: u64| s.min(i64::MAX as u64) as i64;
+    let observed = [since_local, since_served, since_worker.map(clamp)]
+        .into_iter()
+        .flatten()
+        .min();
+    let bound = residency_secs.map(clamp);
+    match (observed, bound) {
+        (Some(o), Some(b)) => Some(o.min(b)),
+        (o, b) => o.or(b),
+    }
 }
 
 /// R134.7: penalty applied when a model has a recent swarm request.
@@ -1136,6 +1152,8 @@ impl AutoShardManager {
         let local_id = self.shared_state.identity.node_id().clone();
         let residency: std::collections::HashMap<ModelId, u64> =
             pool.model_residency_secs().into_iter().collect();
+        let worker_idle: std::collections::HashMap<ModelId, u64> =
+            pool.model_idle_secs().into_iter().collect();
         // Pool shard pins snapshot (same source the pressure-prune uses).
         let shard_pins = super::manager::read_shard_pins_blocking(&self.shared_state).await;
 
@@ -1225,8 +1243,12 @@ impl AutoShardManager {
                 .serving_models
                 .get(&model_id)
                 .map(|s| s.last_served_at.elapsed().as_secs().min(i64::MAX as u64) as i64);
-            let since_any =
-                effective_idle_secs(since_local, since_served, residency.get(&model_id).copied());
+            let since_any = effective_idle_secs(
+                since_local,
+                since_served,
+                worker_idle.get(&model_id).copied(),
+                residency.get(&model_id).copied(),
+            );
             let idle = since_any.is_none_or(|s| s >= idle_unload_secs as i64);
             if !idle {
                 continue;
@@ -1234,9 +1256,9 @@ impl AutoShardManager {
             // Past a much longer idle period, keep the VRAM rather than the
             // model. The demand check below keeps a wanted model warm while this
             // node is momentarily quiet, which is right — but it measures what
-            // the REGION wants in the abstract, not whether anyone is asking US:
-            // `last_request_at` is only set by our own outbound requests, never
-            // by serving a peer. So a model nobody ever asks us for stays
+            // the REGION wants in the abstract, not whether anyone is asking US
+            // (nothing in the current code writes `last_request_at` at all; the
+            // worker's own `last_used` is what says so). So a model nobody ever asks us for stays
             // resident indefinitely whenever regional demand sits above the
             // threshold, and on a small card that starves the owner's own work.
             // Reported externally 2026-07-27: two models resident 2h16 past their
@@ -1441,7 +1463,7 @@ mod tests {
     /// unloaded mid-generation. Residency bounds it — 7 seconds, not for ever.
     #[test]
     fn a_freshly_loaded_model_is_not_idle() {
-        let idle = effective_idle_secs(None, None, Some(7)).expect("residency bounds it");
+        let idle = effective_idle_secs(None, None, None, Some(7)).expect("residency bounds it");
         assert_eq!(idle, 7);
         assert!(idle < 300, "must not trip a 300s idle threshold");
     }
@@ -1450,14 +1472,14 @@ mod tests {
     /// unknown as idle. Pinning that it now yields a number.
     #[test]
     fn no_request_history_still_produces_an_answer() {
-        assert!(effective_idle_secs(None, None, Some(0)).is_some());
+        assert!(effective_idle_secs(None, None, None, Some(0)).is_some());
     }
 
     /// A genuinely old model is still collectable — the fix must not pin
     /// everything in memory for ever.
     #[test]
     fn a_long_resident_unused_model_is_still_idle() {
-        let idle = effective_idle_secs(None, None, Some(4000)).unwrap();
+        let idle = effective_idle_secs(None, None, None, Some(4000)).unwrap();
         assert!(idle >= 300, "an actually-idle model must still unload");
     }
 
@@ -1465,16 +1487,62 @@ mod tests {
     /// requested a second ago is busy, not idle.
     #[test]
     fn recent_use_beats_long_residency() {
-        assert_eq!(effective_idle_secs(Some(1), None, Some(9999)), Some(1));
-        assert_eq!(effective_idle_secs(None, Some(2), Some(9999)), Some(2));
+        assert_eq!(
+            effective_idle_secs(Some(1), None, None, Some(9999)),
+            Some(1)
+        );
+        assert_eq!(
+            effective_idle_secs(None, Some(2), None, Some(9999)),
+            Some(2)
+        );
         // Most recent activity of either kind wins.
-        assert_eq!(effective_idle_secs(Some(90), Some(3), Some(9999)), Some(3));
+        assert_eq!(
+            effective_idle_secs(Some(90), Some(3), None, Some(9999)),
+            Some(3)
+        );
+    }
+
+    /// Measured on the live node 2026-09-02 (gotcha #437): a persisted
+    /// `last_request_at` from an older build read 150,432 s while the worker
+    /// had existed for 215 s. The stale history outranked residency and the
+    /// model was unloaded five seconds after answering. Residency is a bound,
+    /// not a fallback.
+    #[test]
+    fn a_stale_history_cannot_outrank_how_long_the_worker_has_existed() {
+        assert_eq!(
+            effective_idle_secs(Some(150_432), None, None, Some(215)),
+            Some(215)
+        );
+        assert_eq!(
+            effective_idle_secs(None, Some(150_432), None, Some(215)),
+            Some(215)
+        );
+    }
+
+    /// The worker stamps `last_used` on every path, including the local split
+    /// path that writes no history at all — so a model answering every few
+    /// seconds is busy however old (or absent) its histories are.
+    #[test]
+    fn the_workers_own_last_use_is_the_signal_that_moves() {
+        assert_eq!(
+            effective_idle_secs(Some(150_432), None, Some(5), Some(215)),
+            Some(5)
+        );
+        assert_eq!(
+            effective_idle_secs(None, None, Some(5), Some(4000)),
+            Some(5)
+        );
+        // And it cannot pin a model that really is idle.
+        assert_eq!(
+            effective_idle_secs(None, None, Some(3600), Some(4000)),
+            Some(3600)
+        );
     }
 
     /// Nothing known at all must stay "do not judge" rather than becoming 0.
     #[test]
     fn total_absence_of_information_is_unknown() {
-        assert_eq!(effective_idle_secs(None, None, None), None);
+        assert_eq!(effective_idle_secs(None, None, None, None), None);
     }
     use crate::daemon::state::{ServingGuard, ServingState};
 
