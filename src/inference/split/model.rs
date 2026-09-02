@@ -204,6 +204,13 @@ impl SplitModel {
     }
 
     /// Return the KV cache model key (used for cache cleanup).
+    /// The runtime KV budget and the per-position cost it is measured in:
+    /// `(budget_bytes, bytes_per_token)`. `None` budget means unknown, and an
+    /// unknown budget admits everything (never a zero one).
+    pub(crate) fn kv_budget(&self) -> (Option<u64>, u64) {
+        (self.kv_budget_bytes, self.kv_bytes_per_token)
+    }
+
     pub fn kv_model_key(&self) -> &str {
         &self.kv_model_key
     }

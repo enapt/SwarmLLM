@@ -359,7 +359,20 @@ impl PrefixCache {
         request_id: &str,
         kv_store: &KvCacheStore,
         prompt_tokens: &[u32],
+        max_positions: usize,
     ) -> Vec<PrefixBlockEntry> {
+        // `max_positions` is the room beside the live cache, from
+        // `kv_budget::plan_snapshot` — a snapshot that does not fit is worse
+        // than none (gotcha #440). `usize::MAX` means no device bound.
+        if max_positions == 0 {
+            tracing::info!(
+                model_key,
+                request_id,
+                prompt_tokens = prompt_tokens.len(),
+                "DIAG: prefix-cache: not snapshotting — no room on the device beside the live cache"
+            );
+            return Vec::new();
+        }
         // Each bail-out below says why. They were silent, and that made a
         // cross-node prefix-KV measurement undiagnosable: the producing node
         // simply never announced any blocks, with nothing in the log to say
@@ -409,8 +422,9 @@ impl PrefixCache {
         let dim = first_kv.k_cache().dim();
         let max_seq_len = first_kv.k_cache().max_seq_len();
         let available = first_kv.current_seq_len();
-        // Bound insertion points by what the KV actually holds.
-        let available = available.min(prompt_tokens.len());
+        // Bound insertion points by what the KV actually holds, and by the
+        // room on the device.
+        let available = available.min(prompt_tokens.len()).min(max_positions);
         if available < self.min_tokens {
             tracing::debug!(
                 model_key,
@@ -661,6 +675,79 @@ impl PrefixCache {
             .ok()
             .and_then(|i| i.per_model.get(model_key).map(|v| v.len()))
             .unwrap_or(0)
+    }
+
+    /// Bytes of KV held across every model — what this cache costs the device
+    /// right now, charged against the KV budget by `admit_prompt`.
+    pub fn bytes_total(&self) -> usize {
+        self.inner
+            .read()
+            .ok()
+            .map(|i| {
+                i.per_model
+                    .values()
+                    .flatten()
+                    .map(|e| e.snapshot.bytes())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Evict least-recently-hit entries, across every model, until at least
+    /// `needed` bytes are freed or nothing is left. Returns the bytes freed.
+    ///
+    /// Called when a request's own KV would not fit beside the cache (gotcha
+    /// #440). A cached prompt is reconstructible; the request in hand is not,
+    /// and a cache that pushes live memory onto the host costs far more than
+    /// the prefill it saves. Oldest first, so an entry the current request
+    /// just hit — whose `last_hit` the lookup bumped — goes last.
+    pub fn release(&self, needed: usize) -> usize {
+        let Ok(mut inner) = self.inner.write() else {
+            return 0;
+        };
+        let mut freed = 0usize;
+        while freed < needed {
+            let oldest = inner
+                .per_model
+                .iter()
+                .flat_map(|(key, bucket)| {
+                    bucket
+                        .iter()
+                        .enumerate()
+                        .map(move |(i, e)| (e.last_hit.load(Ordering::Relaxed), key.clone(), i))
+                })
+                .min_by_key(|(hit, _, _)| *hit);
+            let Some((_, key, idx)) = oldest else {
+                break;
+            };
+            let bytes = {
+                let bucket = inner
+                    .per_model
+                    .get_mut(&key)
+                    .expect("key came from the map");
+                let removed = bucket.remove(idx);
+                if bucket.is_empty() {
+                    inner.per_model.remove(&key);
+                }
+                removed.snapshot.bytes()
+            };
+            freed = freed.saturating_add(bytes);
+        }
+        if freed > 0 {
+            tracing::info!(
+                freed_mb = freed / (1024 * 1024),
+                needed_mb = needed / (1024 * 1024),
+                remaining_mb = inner
+                    .per_model
+                    .values()
+                    .flatten()
+                    .map(|e| e.snapshot.bytes())
+                    .sum::<usize>()
+                    / (1024 * 1024),
+                "DIAG: prefix-cache released cached prompts so a request's KV fits on the device"
+            );
+        }
+        freed
     }
 
     /// Bytes of KV currently held for a model. The figure the byte budget
@@ -1066,6 +1153,41 @@ mod tests {
         }
     }
 
+    /// Cached prompts are the one thing eviction can recover for a request
+    /// that would not otherwise fit on the device (gotcha #440): oldest hit
+    /// first, stop once enough is freed, and report what went.
+    #[test]
+    fn release_evicts_the_least_recently_hit_prompts_until_enough_is_freed() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        // Three entries of 10 tokens, inserted a, b, c; then b is hit, so the
+        // LRU order becomes a, c, b.
+        for (req, base) in [("req-a", 100u32), ("req-b", 200), ("req-c", 300)] {
+            make_fake_kv(&kv_store, "m", req, 2, 10);
+            let tokens: Vec<u32> = (base..base + 10).collect();
+            pc.insert_from_kv("m", req, &kv_store, &tokens, usize::MAX);
+        }
+        let b: Vec<u32> = (200..210).collect();
+        assert!(pc.lookup("m", &b).is_some());
+        let per_entry = pc.bytes_total() / 3;
+        assert!(per_entry > 0);
+
+        // Ask for a little more than one entry: two must go, a then c.
+        let freed = pc.release(per_entry + 1);
+        assert_eq!(freed, 2 * per_entry);
+        assert_eq!(pc.bytes_total(), per_entry);
+        let a: Vec<u32> = (100..110).collect();
+        let c: Vec<u32> = (300..310).collect();
+        assert!(pc.lookup("m", &a).is_none(), "a was the oldest");
+        assert!(pc.lookup("m", &c).is_none(), "c was next");
+        assert!(pc.lookup("m", &b).is_some(), "b was hit last and survives");
+
+        // Asking for more than everything frees everything and stops.
+        assert_eq!(pc.release(usize::MAX), per_entry);
+        assert_eq!(pc.bytes_total(), 0);
+        assert_eq!(pc.release(1), 0);
+    }
+
     #[test]
     fn lookup_miss_when_disabled() {
         let pc = PrefixCache::new(false, 8, 32, 8, 8192, 0);
@@ -1085,7 +1207,7 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
 
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
         assert_eq!(pc.entry_count("m"), 1);
 
         // New request with same tokens + 5 more: should hit at 10.
@@ -1104,7 +1226,7 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
 
         let tokens_a: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a);
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a, usize::MAX);
         assert_eq!(pc.entry_count("m"), 1);
 
         let mut tokens_b: Vec<u32> = (1..=6).collect();
@@ -1128,7 +1250,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
-        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
         assert_eq!(pc.entry_count("m"), 1);
         // The announce manifest still covers every block boundary.
         assert_eq!(manifest.len(), 3);
@@ -1142,7 +1264,7 @@ mod tests {
 
         // req-a's KV is zeros (make_fake_kv); insert it.
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
-        let m1 = pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        let m1 = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
 
         // req-b holds DIFFERENT KV content (ones) for the same tokens. If the
         // second insert re-snapshots, the cached tensors become ones; if it
@@ -1158,7 +1280,7 @@ mod tests {
                 *slot = Some(kv);
             }
         }
-        let m2 = pc.insert_from_kv("m", "req-b", &kv_store, &tokens);
+        let m2 = pc.insert_from_kv("m", "req-b", &kv_store, &tokens, usize::MAX);
 
         assert_eq!(pc.entry_count("m"), 1);
         // The skip must still report the full manifest, or the caller stops
@@ -1181,9 +1303,21 @@ mod tests {
         let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
-        pc.insert_from_kv("m", "req-a", &kv_store, &(1..=8).collect::<Vec<_>>());
+        pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &(1..=8).collect::<Vec<_>>(),
+            usize::MAX,
+        );
         make_fake_kv(&kv_store, "m", "req-b", 2, 12);
-        pc.insert_from_kv("m", "req-b", &kv_store, &(1..=12).collect::<Vec<_>>());
+        pc.insert_from_kv(
+            "m",
+            "req-b",
+            &kv_store,
+            &(1..=12).collect::<Vec<_>>(),
+            usize::MAX,
+        );
 
         assert_eq!(pc.entry_count("m"), 1);
         let snap = pc.lookup("m", &(1..=14).collect::<Vec<_>>()).expect("hit");
@@ -1198,7 +1332,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
 
         let snap = pc.lookup("m", &tokens).expect("hit");
         assert_eq!(snap.token_count, 9);
@@ -1210,7 +1344,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens_a: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a);
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a, usize::MAX);
 
         let tokens_b: Vec<u32> = vec![99, 98, 97, 96, 95, 94, 93, 92];
         assert!(pc.lookup("m", &tokens_b).is_none());
@@ -1222,7 +1356,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
         // lookup requires at least one token left to forward, so query with a
         // longer prompt that still has `tokens` as its strict prefix.
         let lookup_tokens: Vec<u32> = (1..=12).collect();
@@ -1283,7 +1417,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
-        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
         assert_eq!(manifest.len(), 3);
         // token_count grows by block_size (4) each entry.
         assert_eq!(manifest[0].token_count, 4);
@@ -1302,8 +1436,8 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-b", 2, 8);
         let a: Vec<u32> = vec![1, 2, 3, 4, 50, 51, 52, 53];
         let b: Vec<u32> = vec![1, 2, 3, 4, 60, 61, 62, 63];
-        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &a);
-        let _ = pc.insert_from_kv("m", "req-b", &kv_store, &b);
+        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &a, usize::MAX);
+        let _ = pc.insert_from_kv("m", "req-b", &kv_store, &b, usize::MAX);
         let manifest = pc.enumerate_manifest("m");
         // Block 0 (shared) appears once, plus block 1 from each prompt = 3.
         assert_eq!(manifest.len(), 3);
@@ -1320,7 +1454,13 @@ mod tests {
         let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
-        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &(1..=8).collect::<Vec<_>>());
+        let _ = pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &(1..=8).collect::<Vec<_>>(),
+            usize::MAX,
+        );
         // block_tokens=0 → enumerate_manifest is empty even though the
         // entry exists (it was inserted via the always-store-tail rule).
         assert!(pc.enumerate_manifest("m").is_empty());
@@ -1458,7 +1598,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
-        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
         assert_eq!(manifest.len(), 3);
         // Request the middle block. Serving side should produce bytes
         // whose header `tokens` equal tokens[..8].
@@ -1546,7 +1686,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
         let tokens: Vec<u32> = (1..=8).collect();
-        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
         // Hash derived from a different prompt should miss.
         let other = compute_block_hashes(&[99, 99, 99, 99, 99, 99, 99, 99], 4);
         assert!(pc
@@ -1583,7 +1723,7 @@ mod tests {
         for (i, req) in ["r1", "r2", "r3"].iter().enumerate() {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, usize::MAX);
         }
 
         assert_eq!(pc.entry_count("m"), 2);
@@ -1601,7 +1741,13 @@ mod tests {
         make_fake_kv(&kv_store, "m", "probe", 2, 10);
         let one = {
             let pc = PrefixCache::new(true, 64, 0, 4, 8192, 0);
-            pc.insert_from_kv("m", "probe", &kv_store, &(0u32..10).collect::<Vec<_>>());
+            pc.insert_from_kv(
+                "m",
+                "probe",
+                &kv_store,
+                &(0u32..10).collect::<Vec<_>>(),
+                usize::MAX,
+            );
             pc.bytes_held("m")
         };
         assert!(one > 0, "a snapshot must weigh something");
@@ -1610,7 +1756,7 @@ mod tests {
         for (i, req) in ["r1", "r2", "r3", "r4", "r5"].iter().enumerate() {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, usize::MAX);
         }
         assert!(
             pc.entry_count("m") < 5,
@@ -1632,7 +1778,13 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         let pc = PrefixCache::new(true, 64, 0, 4, 8192, 1);
         make_fake_kv(&kv_store, "m", "r1", 2, 10);
-        pc.insert_from_kv("m", "r1", &kv_store, &(0u32..10).collect::<Vec<_>>());
+        pc.insert_from_kv(
+            "m",
+            "r1",
+            &kv_store,
+            &(0u32..10).collect::<Vec<_>>(),
+            usize::MAX,
+        );
         assert_eq!(pc.entry_count("m"), 1);
     }
 
@@ -1645,7 +1797,7 @@ mod tests {
         for (i, req) in ["r1", "r2", "r3", "r4"].iter().enumerate() {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, usize::MAX);
         }
         assert_eq!(pc.entry_count("m"), 4);
     }

@@ -2178,6 +2178,155 @@ fn ngram_spec_round(
     Ok((produced, committed))
 }
 
+/// KV positions reserved for the reply when a prompt is admitted and when its
+/// snapshot is sized: one growth quantum, the least a decode needs to claim.
+const REPLY_RESERVE_POSITIONS: usize = crate::inference::layers::KV_CACHE_GROWTH_TOKENS;
+
+/// `SWARMLLM_KV_PREFIX_CHARGE=0` turns off the whole-prompt admission below,
+/// so the two arms can be compared inside ONE binary. Read once.
+fn prefix_cache_charged() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("SWARMLLM_KV_PREFIX_CHARGE")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    })
+}
+
+/// How many positions of a finished prompt to snapshot into the prefix cache
+/// so the copy fits BESIDE the request's live cache (gotcha #440). Evicts
+/// older cached prompts first. `usize::MAX` when the budget is unknown or
+/// charging is switched off.
+fn snapshot_positions_that_fit(
+    model: &SplitModel,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    prompt_tokens: usize,
+) -> usize {
+    if !prefix_cache_charged() {
+        return usize::MAX;
+    }
+    let (Some(budget), per_token) = model.kv_budget() else {
+        return usize::MAX;
+    };
+    if per_token == 0 {
+        return usize::MAX;
+    }
+    // The live figure carries one growth quantum of reserve for the reply
+    // about to be decoded: a snapshot sized to the last byte left this
+    // request unable to claim its next quantum mid-reply (measured: the
+    // reply cut at token 32, the quantum boundary after a 7649-token prompt).
+    let live = kv_store
+        .occupancy()
+        .allocated_bytes
+        .saturating_add(per_token.saturating_mul(REPLY_RESERVE_POSITIONS as u64));
+    let cached = prefix_cache.bytes_total() as u64;
+    let plan = crate::inference::split::kv_budget::plan_snapshot(
+        budget,
+        live,
+        cached,
+        per_token,
+        prompt_tokens,
+    );
+    if plan.evict_bytes > 0 {
+        prefix_cache.release(plan.evict_bytes as usize);
+    }
+    if plan.positions < prompt_tokens {
+        tracing::info!(
+            prompt_tokens,
+            keeping = plan.positions,
+            live_mb = live / (1024 * 1024),
+            cached_mb = cached / (1024 * 1024),
+            budget_mb = budget / (1024 * 1024),
+            "DIAG: prefix-cache snapshot cut to the room beside the live cache"
+        );
+    }
+    plan.positions
+}
+
+/// Make sure the whole prompt's KV can live on the device BEFORE prefill
+/// starts — evicting cached prompts first, refusing second (gotcha #440).
+///
+/// Called after the prefix-cache lookup and before hydration, at both entry
+/// points (sequential and batched), because hydration is itself an
+/// allocation of the matched prefix. The prefix cache's snapshots are the
+/// same device memory as the live caches and were charged nowhere; on an
+/// 8 GB card the second long prompt's cache landed in host-backed memory
+/// and decoded at 3-5 tok/s where an empty card did 19-33. A refusal here
+/// is a 503 the coordinator can route elsewhere, at token 0, with nothing
+/// half-built.
+fn ensure_room_for_prompt(
+    model: &SplitModel,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    request_id: &str,
+    prompt_tokens: usize,
+) -> Result<(), SwarmError> {
+    if !prefix_cache_charged() {
+        return Ok(());
+    }
+    let (Some(budget), per_token) = model.kv_budget() else {
+        return Ok(());
+    };
+    if per_token == 0 {
+        return Ok(());
+    }
+    // The prompt plus one growth quantum for the reply, so an admitted
+    // request can at least begin decoding without meeting the per-chunk
+    // guard at its first quantum boundary. A very long reply may still meet
+    // it later, which is the lazy charge that guard exists for.
+    let positions =
+        crate::inference::layers::kv_cache_reservation(prompt_tokens) + REPLY_RESERVE_POSITIONS;
+    let live = kv_store.occupancy().allocated_bytes;
+    let cached = prefix_cache.bytes_total() as u64;
+    let mb = |b: u64| b / (1024 * 1024);
+    use crate::inference::split::kv_budget::{admit_prompt, PromptAdmission};
+    let verdict = admit_prompt(budget, live, cached, per_token, positions);
+    let short_by = match verdict {
+        PromptAdmission::Fits => return Ok(()),
+        PromptAdmission::EvictBytes(needed) => {
+            let freed = prefix_cache.release(needed as usize) as u64;
+            // Charging is on here (checked above), so keep the guard's figure current.
+            kv_store.set_external_reserved(prefix_cache.bytes_total() as u64);
+            tracing::info!(
+                request_id,
+                prompt_tokens,
+                positions,
+                live_mb = mb(live),
+                cached_mb = mb(cached),
+                budget_mb = mb(budget),
+                needed_mb = mb(needed),
+                freed_mb = mb(freed),
+                "DIAG: KV admission — evicted cached prompts so this prompt's cache fits on the device"
+            );
+            if freed >= needed {
+                return Ok(());
+            }
+            needed - freed
+        }
+        PromptAdmission::Refuse { short_by } => short_by,
+    };
+    tracing::warn!(
+        request_id,
+        prompt_tokens,
+        positions,
+        live_mb = mb(live),
+        cached_mb = mb(cached),
+        budget_mb = mb(budget),
+        short_by_mb = mb(short_by),
+        "DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device"
+    );
+    Err(SwarmError::ServiceUnavailable(format!(
+        "Not enough free memory on this node for a {prompt_tokens}-token prompt ({} MB of KV \
+         cache in use, budget {} MB, short by {} MB). Shorter conversations still work; free \
+         memory on this node (close other programs, or raise its memory budget) to raise this.",
+        mb(live),
+        mb(budget),
+        mb(short_by),
+    )))
+}
+
 /// Handle a Generate IPC message — run a full tokenize+decode loop.
 #[allow(clippy::too_many_arguments)]
 async fn handle_generate(
@@ -2244,6 +2393,7 @@ async fn handle_generate(
     // forward the suffix. Try local first (free); on miss, probe cross-node
     // (Item 8 Phase 2b).
     let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
+    ensure_room_for_prompt(model, kv_store, prefix_cache, &req_id_str, prompt_ids.len())?;
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
             .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)
@@ -2312,8 +2462,13 @@ async fn handle_generate(
     // Snapshot it into the prefix cache so future prompts sharing this
     // prefix skip the prefill work. insert_from_kv is a no-op when the
     // prompt is shorter than the configured floor or the cache is off.
+    let keep = snapshot_positions_that_fit(model, kv_store, prefix_cache, prompt_ids.len());
     let manifest =
-        prefix_cache.insert_from_kv(&model_key_string, &req_id_str, kv_store, &prompt_ids);
+        prefix_cache.insert_from_kv(&model_key_string, &req_id_str, kv_store, &prompt_ids, keep);
+    // The snapshot just taken is device memory the head-room guard must see.
+    if prefix_cache_charged() {
+        kv_store.set_external_reserved(prefix_cache.bytes_total() as u64);
+    }
     if !manifest.is_empty() {
         let _ = send_worker(
             writer,
@@ -3036,6 +3191,8 @@ async fn try_register_generate_slot(
     // Prefix-cache lookup + per-request KV hydration if we hit. Cheap clone of
     // K/V tensors — no compute.
     let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
+    ensure_room_for_prompt(model, kv_store, prefix_cache, &req_id_str, prompt_ids.len())
+        .map_err(SlotAdmitError::Fatal)?;
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
             .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)
@@ -3364,12 +3521,22 @@ async fn step_decode_pool(
                                 continue;
                             }
                         };
+                    let keep = snapshot_positions_that_fit(
+                        model,
+                        kv_store,
+                        prefix_cache,
+                        slot.prompt_ids.len(),
+                    );
                     let manifest = prefix_cache.insert_from_kv(
                         &slot.model_key,
                         &slot.req_id_str,
                         kv_store,
                         &slot.prompt_ids,
+                        keep,
                     );
+                    if prefix_cache_charged() {
+                        kv_store.set_external_reserved(prefix_cache.bytes_total() as u64);
+                    }
                     if !manifest.is_empty() {
                         pending_announces.push((slot.model_id.clone(), manifest));
                     }

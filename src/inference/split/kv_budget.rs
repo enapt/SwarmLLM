@@ -155,9 +155,214 @@ pub(crate) fn claim_exceeds_headroom(
     in_use_bytes.saturating_add(claim) > budget_bytes
 }
 
+/// What to do about a prompt BEFORE its prefill starts (gotcha #440).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptAdmission {
+    /// Live cache plus cached prompts plus this prompt fit the budget.
+    Fits,
+    /// It fits once this many bytes of cached prompts are evicted.
+    EvictBytes(u64),
+    /// It does not fit even with every cached prompt gone; refuse now,
+    /// short by this many bytes.
+    Refuse { short_by: u64 },
+}
+
+/// Decide once, for the whole prompt, whether its KV can live on the device.
+///
+/// **Why a whole-prompt decision exists beside the per-chunk guard.** The
+/// per-chunk guard (`claim_exceeds_headroom`) sees only what the KV store
+/// holds. The prefix cache's snapshots are the same device memory — up to
+/// the cache's byte cap, and one entry may exceed it by design — and were
+/// charged nowhere, while the budget was sized from free memory at LOAD,
+/// before any snapshot existed. Measured on an 8 GB card (gotcha #439/#440):
+/// the second 6.4k-token request found ~300 MB free, its 2.6 GB cache was
+/// allocated anyway — WSL2 hands out host-backed memory rather than failing —
+/// and every decode step then read the cache over PCIe: 3-5 tok/s where an
+/// empty card did 19-33. Nothing refused, nothing logged.
+///
+/// The cached prompts are a cache: reconstructible, and worth less than the
+/// request in hand. So the order is fit → evict cached prompts → refuse,
+/// and the refusal comes at token 0 rather than at chunk N with a partial
+/// cache already built (the ratchet of gotcha #387, one level up).
+pub(crate) fn admit_prompt(
+    budget_bytes: u64,
+    live_bytes: u64,
+    cached_prompt_bytes: u64,
+    kv_bytes_per_token: u64,
+    positions: usize,
+) -> PromptAdmission {
+    let claim = kv_bytes_per_token.saturating_mul(positions as u64);
+    let total = live_bytes
+        .saturating_add(cached_prompt_bytes)
+        .saturating_add(claim);
+    if total <= budget_bytes {
+        return PromptAdmission::Fits;
+    }
+    let excess = total - budget_bytes;
+    if excess <= cached_prompt_bytes {
+        PromptAdmission::EvictBytes(excess)
+    } else {
+        PromptAdmission::Refuse {
+            short_by: excess - cached_prompt_bytes,
+        }
+    }
+}
+
+/// How much of a finished prompt to keep as a prefix-cache snapshot, so that
+/// the snapshot fits BESIDE the request's own live cache (gotcha #440).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SnapshotPlan {
+    /// Bytes of older cached prompts to evict first.
+    pub(crate) evict_bytes: u64,
+    /// Positions to snapshot after that; 0 means do not snapshot.
+    pub(crate) positions: usize,
+}
+
+/// A snapshot is a COPY of the request's cache, so on a device where the live
+/// cache alone takes a third of the budget the whole-prompt snapshot cannot
+/// fit beside it — measured: admission evicted the previous snapshot, the
+/// request started warm, and the snapshot taken after its prefill put the
+/// card over the top again, so the next growth quantum was refused
+/// mid-reply and the tokens before it decoded at 3-6 tok/s. Older cached
+/// prompts go first; then the snapshot is cut to what fits, because a
+/// partial prefix still saves its length of prefill on the next turn
+/// (`lookup` narrows a longer entry to the shared length).
+pub(crate) fn plan_snapshot(
+    budget_bytes: u64,
+    live_bytes: u64,
+    cached_prompt_bytes: u64,
+    kv_bytes_per_token: u64,
+    prompt_positions: usize,
+) -> SnapshotPlan {
+    if kv_bytes_per_token == 0 {
+        return SnapshotPlan {
+            evict_bytes: 0,
+            positions: prompt_positions,
+        };
+    }
+    let needed = kv_bytes_per_token.saturating_mul(prompt_positions as u64);
+    let room = budget_bytes.saturating_sub(live_bytes.saturating_add(cached_prompt_bytes));
+    if room >= needed {
+        return SnapshotPlan {
+            evict_bytes: 0,
+            positions: prompt_positions,
+        };
+    }
+    let evict_bytes = (needed - room).min(cached_prompt_bytes);
+    let room_after = room.saturating_add(evict_bytes);
+    SnapshotPlan {
+        evict_bytes,
+        positions: (room_after / kv_bytes_per_token).min(prompt_positions as u64) as usize,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The snapshot is cut to the room beside the live cache, after older
+    /// cached prompts have been offered up — and is skipped outright when the
+    /// live cache leaves nothing.
+    #[test]
+    fn a_snapshot_is_cut_to_what_fits_beside_the_live_cache() {
+        // 1000-byte budget, 10 bytes a token, a 40-token prompt (400 bytes).
+        assert_eq!(
+            plan_snapshot(1000, 400, 0, 10, 40),
+            SnapshotPlan {
+                evict_bytes: 0,
+                positions: 40
+            }
+        );
+        // Live 400 + cached 500: room 100 → evict all 500 cached, room 600 → whole prompt.
+        assert_eq!(
+            plan_snapshot(1000, 400, 500, 10, 40),
+            SnapshotPlan {
+                evict_bytes: 300,
+                positions: 40
+            }
+        );
+        // Live 800, cached 100: room 100, evict 100 → room 200 → 20 positions.
+        assert_eq!(
+            plan_snapshot(1000, 800, 100, 10, 40),
+            SnapshotPlan {
+                evict_bytes: 100,
+                positions: 20
+            }
+        );
+        // Live cache already at the budget: nothing to snapshot.
+        assert_eq!(
+            plan_snapshot(1000, 1000, 0, 10, 40),
+            SnapshotPlan {
+                evict_bytes: 0,
+                positions: 0
+            }
+        );
+        // Unknown per-token cost: no judgement, snapshot everything.
+        assert_eq!(
+            plan_snapshot(1000, 1000, 0, 0, 40),
+            SnapshotPlan {
+                evict_bytes: 0,
+                positions: 40
+            }
+        );
+    }
+
+    /// The measured case: a 6.4k-token prompt whose live cache is 2.6 GB of a
+    /// 4.5 GB budget cannot keep a full copy of itself; it keeps what fits.
+    #[test]
+    fn the_long_prompts_own_snapshot_is_cut_rather_than_overfilling_the_card() {
+        let mb = 1024 * 1024u64;
+        let per_token = 344 * 1024u64;
+        let live = per_token * 7680;
+        let plan = plan_snapshot(4523 * mb, live, 0, per_token, 7649);
+        assert_eq!(plan.evict_bytes, 0);
+        assert!(plan.positions > 0 && plan.positions < 7649, "{plan:?}");
+        assert!(live + per_token * plan.positions as u64 <= 4523 * mb);
+    }
+
+    /// The three outcomes, and the boundary between them: cached prompts are
+    /// the ONLY thing eviction can recover, so a shortfall past them is a
+    /// refusal however large the cache is.
+    #[test]
+    fn a_prompt_is_admitted_evicts_cached_prompts_or_is_refused_at_token_zero() {
+        // 1000-byte budget, 10 bytes a token.
+        assert_eq!(admit_prompt(1000, 0, 0, 10, 100), PromptAdmission::Fits);
+        assert_eq!(admit_prompt(1000, 500, 0, 10, 50), PromptAdmission::Fits);
+        // Live 500 + cached 300 + claim 300 = 1100: 100 over, cache can cover it.
+        assert_eq!(
+            admit_prompt(1000, 500, 300, 10, 30),
+            PromptAdmission::EvictBytes(100)
+        );
+        // Live 500 + cached 300 + claim 600 = 1400: 400 over, cache covers 300.
+        assert_eq!(
+            admit_prompt(1000, 500, 300, 10, 60),
+            PromptAdmission::Refuse { short_by: 100 }
+        );
+        // Exactly at the budget fits; one byte past it evicts one byte.
+        assert_eq!(admit_prompt(1000, 700, 100, 10, 20), PromptAdmission::Fits);
+        assert_eq!(
+            admit_prompt(999, 700, 100, 10, 20),
+            PromptAdmission::EvictBytes(1)
+        );
+    }
+
+    /// The measured case: a 3.1 GB model on an 8 GB card, one 6.4k-token
+    /// prompt's snapshot already cached, the same prompt again. Before this
+    /// existed the answer was "fits" and the cache spilled to host memory.
+    #[test]
+    fn the_second_long_prompt_evicts_the_first_ones_snapshot_rather_than_spilling() {
+        let mb = 1024 * 1024u64;
+        let budget = 4523 * mb;
+        let per_token = 344 * 1024u64;
+        // The first prompt's snapshot: 7680 positions (6.4k tokens rounded
+        // up to the growth quantum) at 344 KB each, ~2.6 GB.
+        let cached = per_token * 7680;
+        assert!(cached < budget && 2 * cached > budget);
+        assert_eq!(
+            admit_prompt(budget, 0, cached, per_token, 7680),
+            PromptAdmission::EvictBytes(2 * cached - budget)
+        );
+    }
 
     /// MLA caches decompressed K/V at full head count with asymmetric widths,
     /// so it is far more expensive per token than GQA at the same head_dim.

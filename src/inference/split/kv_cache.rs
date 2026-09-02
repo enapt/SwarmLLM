@@ -1,9 +1,190 @@
 // ── Per-request KV-cache store ──
 
 use candle_core::{DType, Tensor};
-use candle_nn::kv_cache::KvCache;
 
 use super::SsmState;
+
+/// One sequence-major cache buffer — candle's `Cache`, re-implemented here so
+/// that dropping positions off the END is a bookkeeping change.
+///
+/// **Why not candle's.** `candle_nn::kv_cache::Cache` keeps `current_seq_len`
+/// private and exposes only `reset()` and `append()`, so the only way to keep
+/// the first `n` positions was to copy them out, reset, and append the copy:
+/// two full copies of the retained prefix per layer, for K and for V, with the
+/// f16 mirror rebuilt on top — every time a speculative draft was rejected.
+/// That is O(context) work on a path that runs once per generated token. At
+/// 6.4k positions of llama-3.2-3b it is ~2.2 GB read and ~2.2 GB written per
+/// miss and, worse, two 2.2 GB temporaries allocated on a card already holding
+/// the cache — measured live as the decode rate collapsing from 33 to 3-5
+/// tok/s on a prompt full of tool schemas, which draft on almost every token
+/// and miss on almost every draft (gotcha #439).
+///
+/// The buffer beyond `current_seq_len` is never read: every reader goes
+/// through `current_data`, and `append` writes at `current_seq_len`. So a
+/// truncation only has to move the length; the stale positions are overwritten
+/// by the next append before anything can see them.
+///
+/// Growth semantics are candle's, unchanged: the first append allocates
+/// `max_seq_len` positions, and each time the cache outgrows its buffer it is
+/// extended by `grow_by` with a concatenation. [`KvOccupancy`] and the KV
+/// budget reason about that quantum and must keep seeing the same numbers.
+#[derive(Debug, Clone)]
+pub(crate) struct SeqCache {
+    /// `None` until the first append, when the batch/head shape is known.
+    all_data: Option<Tensor>,
+    dim: usize,
+    current_seq_len: usize,
+    grow_by: usize,
+    max_seq_len: usize,
+}
+
+impl SeqCache {
+    pub(crate) fn new(dim: usize, max_seq_len: usize) -> Self {
+        Self {
+            all_data: None,
+            dim,
+            current_seq_len: 0,
+            grow_by: max_seq_len,
+            max_seq_len,
+        }
+    }
+
+    pub(crate) fn dim(&self) -> usize {
+        self.dim
+    }
+
+    pub(crate) fn current_seq_len(&self) -> usize {
+        self.current_seq_len
+    }
+
+    pub(crate) fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+
+    pub(crate) fn all_data(&self) -> &Option<Tensor> {
+        &self.all_data
+    }
+
+    /// The positions written so far, as a view over the buffer.
+    pub(crate) fn current_data(&self) -> candle_core::Result<Option<Tensor>> {
+        match self.all_data.as_ref() {
+            None => Ok(None),
+            Some(d) => Ok(Some(d.narrow(self.dim, 0, self.current_seq_len)?)),
+        }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.current_seq_len = 0;
+        self.all_data = None;
+    }
+
+    /// Keep the first `len` positions and forget the rest. O(1): no copy, no
+    /// allocation, the buffer is untouched. A `len` at or past the current
+    /// length is a no-op.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.current_seq_len = self.current_seq_len.min(len);
+    }
+
+    pub(crate) fn append(&mut self, src: &Tensor) -> candle_core::Result<()> {
+        let seq_len = src.dim(self.dim)?;
+        if self.all_data.is_none() {
+            let mut shape = src.dims().to_vec();
+            shape[self.dim] = self.max_seq_len;
+            self.all_data = Some(Tensor::zeros(shape, src.dtype(), src.device())?);
+        }
+        let ad = self
+            .all_data
+            .as_mut()
+            .expect("all_data was just initialised");
+        while self.current_seq_len + seq_len > self.max_seq_len {
+            let mut shape = src.dims().to_vec();
+            shape[self.dim] = self.grow_by;
+            let next_ad = Tensor::zeros(shape, src.dtype(), src.device())?;
+            *ad = Tensor::cat(&[&*ad, &next_ad], self.dim)?;
+            self.max_seq_len += self.grow_by;
+        }
+        ad.slice_set(src, self.dim, self.current_seq_len)?;
+        self.current_seq_len += seq_len;
+        Ok(())
+    }
+}
+
+/// A K cache and a V cache that move together — candle's `KvCache` over
+/// [`SeqCache`], same method names so the call sites did not change.
+#[derive(Debug, Clone)]
+pub(crate) struct KvPair {
+    k: SeqCache,
+    v: SeqCache,
+}
+
+impl KvPair {
+    pub(crate) fn new(dim: usize, max_seq_len: usize) -> Self {
+        Self {
+            k: SeqCache::new(dim, max_seq_len),
+            v: SeqCache::new(dim, max_seq_len),
+        }
+    }
+
+    pub(crate) fn k_cache(&self) -> &SeqCache {
+        &self.k
+    }
+
+    pub(crate) fn v_cache(&self) -> &SeqCache {
+        &self.v
+    }
+
+    pub(crate) fn k(&self) -> candle_core::Result<Option<Tensor>> {
+        self.k.current_data()
+    }
+
+    pub(crate) fn v(&self) -> candle_core::Result<Option<Tensor>> {
+        self.v.current_data()
+    }
+
+    /// Append new positions and return the full (K, V) written so far. An
+    /// empty cache answers with zero-length tensors rather than `None`, as
+    /// candle's does, so attention code never has to special-case it.
+    pub(crate) fn append(
+        &mut self,
+        k: &Tensor,
+        v: &Tensor,
+    ) -> candle_core::Result<(Tensor, Tensor)> {
+        self.k.append(k)?;
+        self.v.append(v)?;
+        let out_k = match self.k.current_data()? {
+            Some(t) => t,
+            None => {
+                let mut shape = k.dims().to_vec();
+                shape[self.k.dim] = 0;
+                Tensor::zeros(shape, k.dtype(), k.device())?
+            }
+        };
+        let out_v = match self.v.current_data()? {
+            Some(t) => t,
+            None => {
+                let mut shape = v.dims().to_vec();
+                shape[self.v.dim] = 0;
+                Tensor::zeros(shape, v.dtype(), v.device())?
+            }
+        };
+        Ok((out_k, out_v))
+    }
+
+    pub(crate) fn current_seq_len(&self) -> usize {
+        self.k.current_seq_len()
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.k.reset();
+        self.v.reset();
+    }
+
+    /// Keep the first `len` positions of both. See [`SeqCache::truncate`].
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.k.truncate(len);
+        self.v.truncate(len);
+    }
+}
 
 /// One layer's KV cache: the f32 BHSD cache every path reads, plus an optional
 /// f16 BSHD mirror kept for the CUDA flash-attention kernel.
@@ -31,14 +212,14 @@ use super::SsmState;
 /// that mutates the cache therefore goes through `append` / `reset` here, which
 /// are inherent methods and so take priority over the `Deref` to `KvCache` —
 /// existing call sites cannot reach the inner cache's versions by accident.
-/// `KvCacheStore::truncate_to` gets correct behaviour for free from that, since
-/// it truncates by `reset()` + `append()` of the kept prefix.
+/// `truncate` is the third such method: it moves both lengths together, in
+/// place, and is what `KvCacheStore::truncate_to` calls on a rejected draft.
 pub(crate) struct LayerKv {
     /// f32 BHSD, sequence on dim 2. The source of truth.
-    main: KvCache,
+    main: KvPair,
     /// f16 BSHD, sequence on dim 1. `None` on CPU and until the first append,
     /// which is where the device becomes known.
-    shadow: Option<KvCache>,
+    shadow: Option<KvPair>,
     /// Reservation to build the mirror with, mirroring `main`'s growth quantum.
     growth: usize,
     /// False when `main`'s sequence axis is not dim 2, which the mirror's
@@ -59,7 +240,7 @@ impl LayerKv {
     /// layout simply gets no mirror and the original conversion path.
     pub(crate) fn with_dim(dim: usize, growth: usize) -> Self {
         Self {
-            main: KvCache::new(dim, growth),
+            main: KvPair::new(dim, growth),
             shadow: None,
             growth,
             mirrorable: dim == 2,
@@ -89,7 +270,7 @@ impl LayerKv {
 
     /// Append new positions, updating the mirror in the same call.
     ///
-    /// Returns the full f32 BHSD (K, V) exactly as `KvCache::append` does, so
+    /// Returns the full f32 BHSD (K, V) exactly as `KvPair::append` does, so
     /// callers are unchanged.
     pub(crate) fn append(
         &mut self,
@@ -98,7 +279,7 @@ impl LayerKv {
     ) -> candle_core::Result<(Tensor, Tensor)> {
         let out = self.main.append(k, v)?;
         if self.shadow.is_none() && self.mirrorable && Self::wants_shadow(k) {
-            self.shadow = Some(KvCache::new(1, self.growth));
+            self.shadow = Some(KvPair::new(1, self.growth));
         }
         if let Some(shadow) = self.shadow.as_mut() {
             // Convert only what is being added — this is the point of the mirror.
@@ -120,6 +301,18 @@ impl LayerKv {
         self.main.reset();
         if let Some(shadow) = self.shadow.as_mut() {
             shadow.reset();
+        }
+    }
+
+    /// Keep the first `len` positions of both representations, in place.
+    ///
+    /// This is what a rejected speculative draft costs now: two length fields
+    /// move. It used to be a snapshot, a reset and a re-append of the kept
+    /// prefix — see [`SeqCache`] for what that cost and where it was measured.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.main.truncate(len);
+        if let Some(shadow) = self.shadow.as_mut() {
+            shadow.truncate(len);
         }
     }
 
@@ -147,7 +340,7 @@ impl LayerKv {
     #[cfg(test)]
     pub(crate) fn force_shadow_for_test(&mut self) {
         if self.mirrorable {
-            self.shadow = Some(KvCache::new(1, self.growth));
+            self.shadow = Some(KvPair::new(1, self.growth));
         }
     }
 
@@ -169,7 +362,7 @@ impl LayerKv {
 
     /// Every underlying cache holding memory — the f32 pair, plus the f16
     /// mirror's pair when it exists. For accounting only.
-    pub(crate) fn all_caches(&self) -> Vec<&candle_nn::kv_cache::Cache> {
+    pub(crate) fn all_caches(&self) -> Vec<&SeqCache> {
         let mut out = vec![self.main.k_cache(), self.main.v_cache()];
         if let Some(shadow) = self.shadow.as_ref() {
             out.push(shadow.k_cache());
@@ -222,14 +415,14 @@ fn mirror_disabled() -> bool {
 }
 
 impl std::ops::Deref for LayerKv {
-    type Target = KvCache;
-    fn deref(&self) -> &KvCache {
+    type Target = KvPair;
+    fn deref(&self) -> &KvPair {
         &self.main
     }
 }
 
 impl std::ops::DerefMut for LayerKv {
-    fn deref_mut(&mut self) -> &mut KvCache {
+    fn deref_mut(&mut self) -> &mut KvPair {
         &mut self.main
     }
 }
@@ -249,11 +442,17 @@ pub struct KvCacheStore {
     caches: dashmap::DashMap<String, KvCacheEntry>,
     /// TTL for abandoned cache entries.
     ttl: std::time::Duration,
+    /// Device bytes held by something OTHER than live request caches that the
+    /// KV budget must still see — the prefix cache's snapshots. Set by the
+    /// worker whenever that cache changes (gotcha #440); read into
+    /// `KvOccupancy::external_bytes` so the per-chunk head-room guard charges
+    /// it too.
+    external_reserved: std::sync::atomic::AtomicU64,
 }
 
 pub(crate) struct KvCacheEntry {
     /// Per-layer KV cache. Index corresponds to layer index within the model segment.
-    /// Each `KvCache` holds a buffer sized in `KV_CACHE_GROWTH_TOKENS` quanta
+    /// Each `KvPair` holds a buffer sized in `KV_CACHE_GROWTH_TOKENS` quanta
     /// and appends into it in place, concatenating only when a conversation
     /// outgrows the current quantum.
     pub(crate) layers: Vec<Option<LayerKv>>,
@@ -284,6 +483,9 @@ pub struct KvOccupancy {
     pub used_bytes: u64,
     /// Sequence positions written across every entry and layer.
     pub tokens: usize,
+    /// Bytes held on the same device by the prefix cache's snapshots — not
+    /// live requests, but not free either. Charged by the head-room guard.
+    pub external_bytes: u64,
 }
 
 impl KvOccupancy {
@@ -340,20 +542,46 @@ impl KvCacheEntry {
 
     /// Truncate every layer's KV cache to exactly `target_len` sequence
     /// positions. No-op for layers whose current length is already ≤ target.
-    /// Used by speculative decoding after partial acceptance — the remote
-    /// forward wrote γ new KV entries, but only k ≤ γ are accepted, so the
-    /// coordinator asks us to discard the trailing γ-k stale slots before
-    /// the next round.
+    /// Used by speculative decoding after partial acceptance — the forward
+    /// wrote γ new KV entries, but only k ≤ γ are accepted, so the trailing
+    /// γ-k stale slots are discarded before the next round.
     ///
-    /// Implementation: candle's `KvCache` exposes only `reset()` (to zero)
-    /// and `append()` (to grow). To preserve the first `target_len`
-    /// positions we snapshot them via narrow+contiguous, reset the cache,
-    /// and re-append the snapshot. Cost is O(target_len * hidden) per layer
-    /// per truncation.
+    /// In place, via [`LayerKv::truncate`]: two length fields per layer move
+    /// and nothing is copied or allocated. `SWARMLLM_KV_TRUNCATE=copy` restores
+    /// the previous snapshot-reset-append implementation so the two can be
+    /// compared inside ONE binary (the same discipline as
+    /// `SWARMLLM_FORCE_STANDARD_ATTN`); it is not a fallback and has no other
+    /// use.
     pub(crate) fn truncate_to(
         &mut self,
         target_len: usize,
     ) -> Result<(), crate::error::SwarmError> {
+        self.truncate_to_with(truncate_mode(), target_len)
+    }
+
+    pub(crate) fn truncate_to_with(
+        &mut self,
+        mode: TruncateMode,
+        target_len: usize,
+    ) -> Result<(), crate::error::SwarmError> {
+        match mode {
+            TruncateMode::InPlace => {
+                for kv in self.layers.iter_mut().flatten() {
+                    kv.truncate(target_len);
+                }
+                Ok(())
+            }
+            TruncateMode::Copy => self.truncate_by_copy(target_len),
+        }
+    }
+
+    /// The implementation this replaced, kept ONLY for A/B measurement.
+    ///
+    /// Snapshot the kept prefix (one copy), reset, re-append it (a second copy,
+    /// plus the f16 mirror rebuilt by `LayerKv::append`). O(target_len ×
+    /// hidden) per layer per truncation, and two prefix-sized temporaries on
+    /// the cache's device.
+    fn truncate_by_copy(&mut self, target_len: usize) -> Result<(), crate::error::SwarmError> {
         use crate::error::SwarmError;
         for cache_opt in self.layers.iter_mut() {
             let Some(kv) = cache_opt else { continue };
@@ -361,7 +589,6 @@ impl KvCacheEntry {
                 continue;
             }
             let dim = kv.k_cache().dim();
-            // Snapshot the prefix we want to keep.
             let (k_snap, v_snap) = {
                 let k = kv
                     .k()
@@ -371,8 +598,6 @@ impl KvCacheEntry {
                     .map_err(|e| SwarmError::Internal(format!("kv v snapshot: {e}")))?;
                 let k = k.ok_or_else(|| SwarmError::Internal("kv cache: k empty".into()))?;
                 let v = v.ok_or_else(|| SwarmError::Internal("kv cache: v empty".into()))?;
-                // Narrow to [0..target_len] on the sequence dim, then force a copy
-                // so the subsequent reset+append doesn't alias the same buffer.
                 let k_trunc = k
                     .narrow(dim, 0, target_len)
                     .and_then(|t| t.contiguous())
@@ -384,13 +609,32 @@ impl KvCacheEntry {
                 (k_trunc, v_trunc)
             };
             kv.reset();
-            // Re-append the snapshot. append() writes at current_seq_len (=0
-            // after reset) and advances by target_len — exactly what we want.
             kv.append(&k_snap, &v_snap)
                 .map_err(|e| SwarmError::Internal(format!("kv truncate re-append: {e}")))?;
         }
         Ok(())
     }
+}
+
+/// How a KV cache is shortened on a rejected speculative draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TruncateMode {
+    /// Move the length; the buffer is untouched. The production path.
+    InPlace,
+    /// Snapshot, reset and re-append the kept prefix — the implementation this
+    /// replaced, reachable only via `SWARMLLM_KV_TRUNCATE=copy` for A/B.
+    Copy,
+}
+
+/// `SWARMLLM_KV_TRUNCATE=copy` selects the old copying truncation, so the two
+/// can be compared inside ONE binary. Read once.
+pub(crate) fn truncate_mode() -> TruncateMode {
+    use std::sync::OnceLock;
+    static MODE: OnceLock<TruncateMode> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("SWARMLLM_KV_TRUNCATE") {
+        Ok(v) if v.eq_ignore_ascii_case("copy") => TruncateMode::Copy,
+        _ => TruncateMode::InPlace,
+    })
 }
 
 impl KvCacheStore {
@@ -399,7 +643,15 @@ impl KvCacheStore {
         Self {
             caches: dashmap::DashMap::new(),
             ttl,
+            external_reserved: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Record how many device bytes the prefix cache currently holds, so the
+    /// head-room guard charges them. Call after every insert or release.
+    pub fn set_external_reserved(&self, bytes: u64) {
+        self.external_reserved
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Build a composite lookup key from model key and request ID for the KV-cache DashMap.
@@ -527,6 +779,9 @@ impl KvCacheStore {
             out.used_bytes += used;
             out.tokens += tokens;
         }
+        out.external_bytes = self
+            .external_reserved
+            .load(std::sync::atomic::Ordering::Relaxed);
         out
     }
 }
@@ -607,6 +862,25 @@ mod tests {
             2 * KV_CACHE_GROWTH_TOKENS as u64 * per_pos
         );
         assert!(occ.utilisation() > 0.5);
+    }
+
+    /// The prefix cache's snapshots are device memory the head-room guard
+    /// must charge (gotcha #440); they arrive through `set_external_reserved`
+    /// and are reported beside the live figure, never folded into it.
+    #[test]
+    fn externally_reserved_bytes_are_reported_beside_the_live_ones() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        append(&store, 4, 4096);
+        let live = store.occupancy().allocated_bytes;
+        store.set_external_reserved(12_345);
+        let occ = store.occupancy();
+        assert_eq!(
+            occ.allocated_bytes, live,
+            "live bytes must not absorb the external figure"
+        );
+        assert_eq!(occ.external_bytes, 12_345);
+        store.set_external_reserved(0);
+        assert_eq!(store.occupancy().external_bytes, 0);
     }
 
     /// An empty store reports nothing rather than dividing by zero.
@@ -745,6 +1019,167 @@ mod tests {
             "mirror kept a different number of positions than the f32 cache"
         );
         assert!(slot.flash_operands().is_some());
+    }
+
+    /// Distinct values per position, so a truncation that kept the wrong
+    /// positions — or read back stale ones — is visible in the numbers.
+    fn filled(dev: &candle_core::Device, positions: usize) -> LayerKv {
+        let mut kv = LayerKv::new(64);
+        kv.force_shadow_for_test();
+        let k = t(dev, 1, 2, positions, 4);
+        let v = (t(dev, 1, 2, positions, 4) + 1000.0).unwrap();
+        kv.append(&k, &v).unwrap();
+        kv
+    }
+
+    fn flat(x: &Tensor) -> Vec<f32> {
+        x.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    /// The in-place truncation must answer exactly what the copying one did:
+    /// the same kept prefix, and the next append landing right after it.
+    /// Compared against the old implementation rather than against a
+    /// hand-computed expectation, so the equivalence is between the two
+    /// things that actually changed places.
+    #[test]
+    fn an_in_place_truncation_keeps_the_prefix_bitwise_and_the_next_append_continues_from_it() {
+        let dev = candle_core::Device::Cpu;
+        let mut by_copy = KvCacheEntry {
+            layers: vec![Some(filled(&dev, 8))],
+            ssm_states: vec![None],
+            last_accessed: std::time::Instant::now(),
+        };
+        let mut in_place = KvCacheEntry {
+            layers: vec![Some(filled(&dev, 8))],
+            ssm_states: vec![None],
+            last_accessed: std::time::Instant::now(),
+        };
+        let original_k = flat(&in_place.layers[0].as_ref().unwrap().k().unwrap().unwrap());
+
+        by_copy.truncate_to_with(TruncateMode::Copy, 5).unwrap();
+        in_place.truncate_to_with(TruncateMode::InPlace, 5).unwrap();
+
+        for (label, e) in [("copy", &by_copy), ("in place", &in_place)] {
+            let kv = e.layers[0].as_ref().unwrap();
+            assert_eq!(kv.current_seq_len(), 5, "{label}");
+            assert_eq!(kv.shadow_len_for_test(), Some(5), "{label}: mirror");
+            // BHSD with h=2, d=4: the kept prefix is the first 5 positions of
+            // each head, i.e. NOT a contiguous prefix of the flattened buffer.
+            let k = kv.k().unwrap().unwrap();
+            assert_eq!(k.dims(), &[1, 2, 5, 4], "{label}");
+            let want: Vec<f32> = (0..2)
+                .flat_map(|h| (0..5 * 4).map(move |i| (h * 8 * 4 + i) as f32))
+                .collect();
+            assert_eq!(flat(&k), want, "{label}: kept the wrong positions");
+        }
+        assert_ne!(
+            flat(&in_place.layers[0].as_ref().unwrap().k().unwrap().unwrap()),
+            original_k,
+            "the control: truncation must have changed what k() returns"
+        );
+
+        // The next append continues from position 5 on both, and the two
+        // caches read back identically afterwards — including the mirror the
+        // flash kernel would be handed.
+        let more_k = (t(&dev, 1, 2, 2, 4) + 5000.0).unwrap();
+        let more_v = (t(&dev, 1, 2, 2, 4) + 6000.0).unwrap();
+        for e in [&mut by_copy, &mut in_place] {
+            e.layers[0]
+                .as_mut()
+                .unwrap()
+                .append(&more_k, &more_v)
+                .unwrap();
+        }
+        let a = by_copy.layers[0].as_ref().unwrap();
+        let b = in_place.layers[0].as_ref().unwrap();
+        assert_eq!(a.current_seq_len(), 7);
+        assert_eq!(b.current_seq_len(), 7);
+        assert_eq!(
+            flat(&a.k().unwrap().unwrap()),
+            flat(&b.k().unwrap().unwrap())
+        );
+        assert_eq!(
+            flat(&a.v().unwrap().unwrap()),
+            flat(&b.v().unwrap().unwrap())
+        );
+        let (ak, av) = a.flash_operands().unwrap();
+        let (bk, bv) = b.flash_operands().unwrap();
+        assert_eq!(
+            flat(&ak.to_dtype(DType::F32).unwrap()),
+            flat(&bk.to_dtype(DType::F32).unwrap())
+        );
+        assert_eq!(
+            flat(&av.to_dtype(DType::F32).unwrap()),
+            flat(&bv.to_dtype(DType::F32).unwrap())
+        );
+        // And the appended positions are where they should be.
+        let tail = b.k().unwrap().unwrap().narrow(2, 5, 2).unwrap();
+        assert_eq!(flat(&tail), flat(&more_k));
+    }
+
+    /// The whole point: a rejected draft must not copy or reallocate the
+    /// cache. Pinned on the buffer's identity, with the copying mode as the
+    /// control proving the check can see a reallocation when one happens.
+    #[test]
+    fn an_in_place_truncation_allocates_nothing() {
+        let dev = candle_core::Device::Cpu;
+        let buffer_id = |e: &KvCacheEntry| {
+            let kv = e.layers[0].as_ref().unwrap();
+            let k = kv.k_cache().all_data().as_ref().unwrap().id();
+            let v = kv.v_cache().all_data().as_ref().unwrap().id();
+            (k, v)
+        };
+        let mut e = KvCacheEntry {
+            layers: vec![Some(filled(&dev, 8))],
+            ssm_states: vec![None],
+            last_accessed: std::time::Instant::now(),
+        };
+        let before = buffer_id(&e);
+        e.truncate_to_with(TruncateMode::InPlace, 3).unwrap();
+        assert_eq!(
+            buffer_id(&e),
+            before,
+            "in-place truncation replaced the buffer"
+        );
+
+        let mut control = KvCacheEntry {
+            layers: vec![Some(filled(&dev, 8))],
+            ssm_states: vec![None],
+            last_accessed: std::time::Instant::now(),
+        };
+        let before = buffer_id(&control);
+        control.truncate_to_with(TruncateMode::Copy, 3).unwrap();
+        assert_ne!(
+            buffer_id(&control),
+            before,
+            "control: the copying mode reallocates, and the check must see it"
+        );
+    }
+
+    /// A truncation past the end is a no-op, and to zero is a length-only
+    /// reset that a later append recovers from.
+    #[test]
+    fn truncation_bounds_are_no_ops_or_empties_not_errors() {
+        let dev = candle_core::Device::Cpu;
+        let mut kv = filled(&dev, 4);
+        kv.truncate(10);
+        assert_eq!(kv.current_seq_len(), 4);
+        kv.truncate(0);
+        assert_eq!(kv.current_seq_len(), 0);
+        assert_eq!(kv.shadow_len_for_test(), Some(0));
+        let k = t(&dev, 1, 2, 2, 4);
+        kv.append(&k, &k).unwrap();
+        assert_eq!(kv.current_seq_len(), 2);
+        assert_eq!(flat(&kv.k().unwrap().unwrap()), flat(&k));
+    }
+
+    #[test]
+    fn the_production_truncation_is_the_in_place_one() {
+        // The env switch exists for measurement; unset, the fast path is the
+        // one that runs.
+        if std::env::var("SWARMLLM_KV_TRUNCATE").is_err() {
+            assert_eq!(truncate_mode(), TruncateMode::InPlace);
+        }
     }
 
     #[test]

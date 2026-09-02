@@ -2,6 +2,38 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A rejected speculative draft no longer copies the whole KV cache.** The
+  rollback after a rejected draft used to copy the kept part of the cache out
+  and back in, twice per layer plus the half-precision mirror, allocating
+  cache-sized temporaries each time — once per generated token on prompts
+  that draft and miss constantly, such as ones full of tool schemas. It is
+  now a bookkeeping change: nothing copied, nothing allocated. Measured on
+  the card under memory pressure this alone did NOT change the decode rate
+  (the entry below is what does); it removes waste and it is what makes
+  that fix's accounting exact.
+- **A long prompt no longer pushes its own cache off the graphics card and
+  crawls.** On an 8 GB card a 3B model answered a plain prompt at 33 tokens
+  a second and a 6,400-token prompt at 3 to 5 — the "1.3 tok/s with tools"
+  seen with an agent framework the day before. The cached copy of the
+  previous prompt (up to 2 GB, kept to make the next turn fast) was never
+  counted against the memory budget, so the next long prompt's own cache
+  was allocated with a few hundred MB free and landed in host memory,
+  where every generated token had to read it back over the PCIe bus. Now a
+  prompt's whole cache is sized before any work starts: cached prompts are
+  evicted first, and only if that is not enough is the request refused
+  with a 503 another node can serve, at token zero rather than partway
+  through. The copy kept after a prompt is likewise cut to what fits
+  beside the live cache — a partial prefix still saves its length of
+  prompt processing on the next turn — rather than taken whole and
+  pushing the reply it belongs to off the card. Measured on that card with
+  it equally full in both arms: the long-prompt replies went from 6.9, 4.9
+  and 4.5 tokens a second to 23.3, 23.7 and 8.1, and plain replies right
+  after them from 10 and 6 to 36 and 35.
+
 ## [0.3.148-alpha] — 2026-09-02
 
 ### Fixed

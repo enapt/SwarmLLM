@@ -9,7 +9,7 @@ mod entry;
 mod executor;
 mod gguf_meta;
 pub(crate) mod hybrid;
-mod kv_budget;
+pub(crate) mod kv_budget;
 pub(crate) mod kv_cache;
 mod loader;
 mod model;

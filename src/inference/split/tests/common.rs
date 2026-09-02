@@ -6,9 +6,9 @@
 use super::super::model::SplitModel;
 use super::super::rope::precompute_freqs_cis;
 use super::super::*;
+use crate::inference::split::kv_cache::LayerKv;
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Tensor};
-use candle_nn::kv_cache::KvCache;
 use candle_transformers::quantized_nn::RmsNorm;
 
 /// Build a randomly-initialised QMatMul of shape (out_d, in_d) on `device`.
@@ -34,8 +34,8 @@ pub(super) fn make_rms_norm_dim(dim: usize, device: &Device) -> RmsNorm {
     make_rms_norm(&w)
 }
 
-/// Append a single position to a KvCache. Helper for the truncate tests.
-pub(super) fn append_pos(cache: &mut KvCache, key: f32, val: f32) {
+/// Append a single position to a layer's cache. Helper for the truncate tests.
+pub(super) fn append_pos(cache: &mut LayerKv, key: f32, val: f32) {
     let k = Tensor::from_vec(vec![key, key], &[1, 1, 1, 2], &Device::Cpu).unwrap();
     let v = Tensor::from_vec(vec![val, val], &[1, 1, 1, 2], &Device::Cpu).unwrap();
     cache.append(&k, &v).unwrap();

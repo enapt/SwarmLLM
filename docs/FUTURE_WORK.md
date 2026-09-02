@@ -10377,7 +10377,20 @@ NOT taken and need a person:
   `examples/qmatmul_bench` for bit-identity. Do it when upstream carries
   something we need, not because a number went up.
 
-## An agent-sized prompt fills an 8 GB card with KV cache, and decode crawls (measured 2026-09-02)
+## An agent-sized prompt fills an 8 GB card with KV cache, and decode crawls (measured 2026-09-02; the crawl's cause FOUND and FIXED the same day — gotcha #440)
+
+**Status**: the "1.2-1.35 tok/s with tools" below was NOT the tools path.
+Pasting the same schemas into the system prompt with no `tools` field
+reproduced it; n-gram speculation on/off made no difference on an empty
+card; and the in-place KV rollback (#439) made no difference under
+pressure. The cause is option 3 below, one level up: the prefix cache's
+snapshot of the previous prompt (up to 2 GB, one entry may exceed the cap)
+was never charged against the KV budget, so the next long prompt's live
+cache was allocated with ~300 MB of VRAM free and landed in WSL2's
+host-backed memory — every decode step then read it over PCIe.
+`kv_budget::admit_prompt` now decides once for the whole prompt before
+prefill (evict cached prompts first, refuse second, at token 0). Options 1
+(f16 stored KV) and 4 remain open and still halve the pressure.
 
 Found by running OpenClaw against the live node (RTX 3070, 8 GB) with
 `max_seq_len_override = 32768` so its 14,633-token first turn was accepted at

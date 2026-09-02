@@ -809,6 +809,27 @@ silently break at the wire if duplicated:
   A new "how long has X been idle" judgement must be bounded by "how long has
   X existed", and must read a signal the COMMON path actually writes — grep for
   the writer before trusting a doc comment that names one.
+- **`inference::split::kv_budget::admit_prompt` + `PrefixCache::release`**
+  (2026-09-02, gotcha #440) — ONE decision for a whole prompt, before prefill,
+  charging live caches PLUS the prefix cache's snapshots (the same device
+  memory, previously charged nowhere): fit → evict cached prompts, oldest hit
+  first → refuse with a 503 at token 0. Wired at both worker entry points
+  (`ensure_room_for_prompt`, after the lookup and before hydration — hydration
+  is itself an allocation of the matched prefix). The per-chunk guard below now
+  charges `KvOccupancy::external_bytes`, set by the worker after every
+  snapshot insert or release. **A budget must see every tenant of the memory
+  it bounds**: on an 8 GB card the second 6.4k-token prompt found ~300 MB free,
+  was admitted against a KV-store-only figure, and its cache landed in WSL2's
+  host-backed memory — 3-5 tok/s where the empty card did 19-33, with nothing
+  refused and nothing logged. A cache of reconstructible data ranks below the
+  request in hand. **The snapshot taken AFTER a prefill is sized the same
+  way** (`plan_snapshot` → `insert_from_kv(.., max_positions)`): it is a full
+  copy of the request's own cache, and taken whole it put the card straight
+  back over the top — every reply cut at the next growth quantum, measured
+  after the admission half alone had shipped to the card. Older prompts go
+  first, then the snapshot is cut to what fits (a partial prefix still saves
+  its length next turn — `lookup` narrows), then skipped.
+  `SWARMLLM_KV_PREFIX_CHARGE=0` disables all of it for A/B.
 - **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
   admission check against it. The loader records `kv_headroom_bytes` on the
   model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward
@@ -1167,6 +1188,27 @@ silently break at the wire if duplicated:
   503 that reroutes to a peer.
   Worth 1.41x on GQA decode at ~2064 KV; the win is long-context only (~1.04x at
   256), which is what an O(history) cost predicts.
+- **`inference::split::kv_cache::SeqCache` / `KvPair` + `LayerKv::truncate`**
+  (2026-09-02, gotcha #439) — the KV cache buffer is this project's own, not
+  candle's, for ONE reason: candle's `Cache` keeps its length private, so the
+  only way to keep the first `n` positions was snapshot + `reset()` +
+  `append()` — two full copies of the retained prefix per layer (K and V, then
+  the f16 mirror rebuilt), and two prefix-sized TEMPORARIES on the device —
+  every time a speculative draft was rejected, i.e. once per generated token
+  on a prompt that drafts and misses. Found while chasing 33 → 2.8-4.7 tok/s
+  on a prompt of 32 tool schemas with the card at 7.9 of 8 GB — and measured
+  NOT to be that crawl's cause (one binary, both modes, same pressure: no
+  change; the cause is live KV spilling to host memory because the prefix
+  cache's snapshots are not charged, gotcha #439/#440). It is still waste
+  removed, and exact rollback accounting. `truncate` now moves
+  two length fields. Growth semantics are candle's, unchanged, because
+  `KvOccupancy` and the KV budget reason about that quantum. **Never
+  re-introduce a copy on the rollback path**, and never reach the inner
+  cache's `reset`/`append` from a call site — `LayerKv`'s inherent methods
+  keep the mirror in step. `SWARMLLM_KV_TRUNCATE=copy` restores the old path
+  for A/B inside one binary. Two tests pin it: bitwise equality with the copy
+  path after truncate + append, and buffer identity (no reallocation) with the
+  copy mode as the control that the check can see one.
 - **`inference::attn_softmax::scaled_masked_softmax`** (2026-08-07) — the single
   expression of attention's tail: scale, optional Gemma-2 logit soft-cap,
   additive mask, softmax. Do NOT re-express those as separate candle ops in a
