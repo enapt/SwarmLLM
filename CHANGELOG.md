@@ -2,6 +2,21 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **SwarmLLM can be an [OpenClaw](https://github.com/openclaw/openclaw)
+  model provider.** `GET /v1/models` now reports each model's context under
+  `context_length` as well as `max_model_len` — the name OpenClaw's model
+  discovery reads. Without it OpenClaw assumed a 128,000-token window and
+  sent prompts a node had to refuse. The README and the book gain a
+  ready-to-paste OpenClaw config, and the "Use it as an API" section now
+  speaks to people who run an agent, coding assistant or chat UI and want a
+  free backend for it — including the one setting an agent needs (a context
+  window above the 8192-token default, since an agent's system prompt alone
+  is larger).
+
 ## [0.3.147-alpha] — 2026-09-02
 
 ### Fixed

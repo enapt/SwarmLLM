@@ -1794,9 +1794,12 @@ the sidecar holds.
 - `POST   /v1/embeddings` — Text embeddings
 - `GET    /v1/models` — List available models. Each entry carries `max_model_len`
   (the effective context this node will serve for that model — prompt plus reply,
-  after the shipped 4096 default and any `inference.max_seq_len_override`), which
-  is the field vLLM added for the same purpose. Omitted when the model's declared
-  context is unreadable, since a wrong figure is worse than an absent one.
+  after the shipped 8192 default and any `inference.max_seq_len_override`), which
+  is the field vLLM added for the same purpose, and the identical figure as
+  `context_length`, the name OpenClaw's self-hosted model discovery reads (with
+  it absent OpenClaw assumes 128,000 — 2026-09-02). `ModelInfo::new` sets both
+  from one value. Omitted when the model's declared context is unreadable, since
+  a wrong figure is worse than an absent one.
 - `GET    /v1/providers` — List configured cloud providers and their available models
 - `GET    /v1/status` — SwarmLLM node status
 

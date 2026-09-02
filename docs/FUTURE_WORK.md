@@ -10048,6 +10048,64 @@ quiet patch:
   tolerating `null` indefinitely — this reduces how often it happens, it does not
   eliminate it.
 
+**2026-09-02 — this got more pressing.** OpenClaw's self-hosted model discovery
+reads the context from `/v1/models` (`context_length`, now emitted beside
+`max_model_len` — see `ModelInfo::new`) and, finding neither, assumes
+**128,000** — so every network-only model looks like a 128k model to it and
+every agent turn is refused as too long. The additive manifest field above is
+the fix; until then the README tells OpenClaw users to set `contextWindow`
+explicitly for such models.
+
+## OpenClaw provider plugin (researched 2026-09-02, not built)
+
+**Why**: OpenClaw (github.com/openclaw/openclaw, ~388k stars, TypeScript) is a
+personal AI agent whose users want a free model backend, and one of its
+maintainers has starred this repo. The config-only path (README § Use it as an
+API) already works, verified against a live node with an OpenClaw-shaped
+request: content parts, tools, `tool_choice`, `parallel_tool_calls`,
+`reasoning_effort`, `stream_options.include_usage` all came back as a proper
+streamed `tool_calls` delta with usage and `finish_reason: "tool_calls"`.
+
+**What a plugin adds over the config**: an entry in `openclaw onboard`'s
+provider picker, non-interactive setup flags, live model discovery from
+`/v1/models`, `openclaw models list --provider swarmllm`, and a listing on
+ClawHub where OpenClaw users look for providers.
+
+**How small it is** (verified in OpenClaw's source, npm `openclaw` 2026.8.2):
+the bundled `extensions/sglang` plugin is 25 lines — one call to
+`defineSelfHostedOpenAICompatibleProvider` from
+`openclaw/plugin-sdk/provider-model-shared` with `id`, `label`, `hint`,
+`groupHint`, `defaultBaseUrl` (`http://127.0.0.1:8800/v1`), `apiKeyEnvVar`
+(`SWARMLLM_API_KEY` — also the daemon's own override name) and
+`modelPlaceholder`. `extensions/vllm` is the same helper plus a stream wrapper.
+`openclaw plugins init swarmllm --name "SwarmLLM" --type provider` scaffolds the
+package with ClawHub metadata, a validate script and an OIDC publish workflow.
+
+**Plan**:
+
+1. Scaffold in a sibling repo (`enapt/openclaw-swarmllm`), TypeScript, pure-JS
+   dependency tree (OpenClaw installs plugins with `--ignore-scripts`).
+2. Use the self-hosted helper; add `buildUnknownModelHint` pointing at the
+   README section, and a health probe against `/health/ready` so a stopped
+   node gives a plain message rather than a discovery timeout.
+3. Tests: the provider-discovery contract test shape the bundled plugins use
+   (`provider-discovery.contract.test.ts`), plus a fixture of our real
+   `/v1/models` body asserting `context_length` lands in `contextWindow`.
+4. Publish: `clawhub package publish enapt/swarmllm`; users install with
+   `openclaw plugins install clawhub:enapt/swarmllm`. Docs route
+   `/providers/swarmllm` is what the helper advertises — ship a README section
+   at that path in the plugin repo.
+5. Then raise bundling upstream. Their CONTRIBUTING steers new features to
+   third-party plugins, but ~60 providers are bundled and two use exactly this
+   helper; a published, tested plugin is the strongest form of that ask.
+
+**What stays on our side first**: the 8192 default context (an agent's system
+prompt alone is larger — decide whether to raise the default now that admission
+is decoupled from it, 2026-08-18), `context_length` for network-only models
+(entry above), and embeddings (`/v1/embeddings` is 501, so OpenClaw's memory
+search needs another provider — a local embedder exists in
+`inference::local_embedder` but is not wired to the endpoint).
+
 ## `peer never acknowledged` answers 500 after ~93 s (observed 2026-08-12) — FIXED 2026-08-16
 
 **Both instances fixed.** The silent-peer pair (`peer never acknowledged` +

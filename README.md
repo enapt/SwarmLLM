@@ -11,7 +11,7 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2217 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2218 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
 > **Recent work (September 2026) — a model that does not quite fit your graphics card no longer loses the card.** Placement used to be all or nothing: a model needing a little more graphics memory than was free ran *entirely* on the processor while the card sat idle beside it. Since v0.3.145 the node splits it — the first layers on the card, the rest on the processor, the count chosen automatically — measured on an RTX 3070 at **1.8× the processor-only speed** for a 7B that no longer fits, against 7–8× when it does (see [Benchmarks](#benchmarks)). The same month: **a model no single node can hold is served** by chaining peers (a 14B across three machines on two continents), every node advertises a *measured* speed instead of a constant that was 5× low, the diagnostics report is safe to paste in public, Apple Silicon nodes can update themselves again — and a machine that vanishes or refuses mid-request now costs the request seconds, not minutes (v0.3.147).
 >
@@ -82,6 +82,28 @@ See the [Getting Started Guide](https://enapt.github.io/SwarmLLM/getting-started
 
 ## Use it as an API
 
+**Already running an AI agent, coding assistant or chat UI?** Point it at
+SwarmLLM the way you would point it at Ollama or vLLM. Anything that speaks
+the OpenAI or Anthropic API works — [OpenClaw](https://github.com/openclaw/openclaw),
+Claude Code, Open WebUI, Continue, LibreChat, the `openai` and `anthropic`
+SDKs — and what it gets is:
+
+- **No per-token bill.** Every model in the swarm is free to use; the only
+  cost is the hardware you already own.
+- **Models bigger than your machine.** A 14B or 70B that will not fit your
+  card runs anyway, split across peers, behind the same endpoint.
+- **Your cloud keys in one place.** Add OpenAI, Anthropic, DeepSeek or any of
+  12 providers once, and route to them by model name when you want to.
+- **Traffic sealed between peers**, and an optional mode where no remote
+  machine ever sees your prompt or the reply.
+
+> **Agents send big prompts.** An agent framework's system prompt alone can
+> exceed SwarmLLM's shipped 8192-token context, so raise it before pointing
+> an agent at a node — `max_seq_len_override = 32768` under `[inference]` in
+> `config.toml`. And for a tool-heavy agent loop, pick the largest model the
+> swarm offers you: small models call tools less reliably, and serving models
+> your machine cannot hold alone is what the swarm is for.
+
 Your access key is written to `api_key` in SwarmLLM's data directory, and is
 shown under Settings → Access Token in the dashboard.
 
@@ -114,6 +136,29 @@ claude --model "qwen2.5-coder-7b"
 ```
 
 Tools: `chat`, `models`, `compare` (multi-model side-by-side), `research` (fan-out), `batch_prompts`, `delegate`, `node_info`.
+
+**As an [OpenClaw](https://github.com/openclaw/openclaw) model provider** — OpenClaw talks to any OpenAI-compatible server. Export your key as `SWARMLLM_API_KEY` (the daemon reads the same variable), then add SwarmLLM to `~/.openclaw/openclaw.json`:
+
+```json5
+{
+  models: {
+    providers: {
+      swarmllm: {
+        baseUrl: "http://127.0.0.1:8800/v1",
+        apiKey: "${SWARMLLM_API_KEY}",
+        api: "openai-completions",
+        timeoutSeconds: 300,
+        models: [{ id: "meta-llama-3.1-8b-instruct-q4-k-m", name: "SwarmLLM Llama 3.1 8B",
+                   contextWindow: 32768, maxTokens: 4096,
+                   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+      },
+    },
+  },
+  agents: { defaults: { model: { primary: "swarmllm/meta-llama-3.1-8b-instruct-q4-k-m" } } },
+}
+```
+
+OpenClaw needs a **real key** — its "local marker" keys send no `Authorization` header, and every `/v1` route requires one — and the raised context window from the note above (its own system prompt is larger than 8192 tokens). Model ids are whatever `GET /v1/models` lists, referenced as `swarmllm/<id>`; each entry carries `context_length`, so OpenClaw's model discovery picks up the real limit instead of assuming 128k.
 
 ## What it does
 
@@ -568,7 +613,7 @@ cargo run -- run
 
 ## Development Transparency
 
-SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2217 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
+SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2218 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
 
 ## License
 

@@ -585,6 +585,39 @@ pub struct ModelInfo {
     /// the mismatch surfaced as a request with "no room for any prompt at all".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_model_len: Option<usize>,
+    /// The same figure under the name OpenClaw's self-hosted model discovery
+    /// reads. Its discovery looks for `context_length`, `context_window` or
+    /// `context_size` and, finding none, assumes **128,000** — so a client that
+    /// was told nothing sent prompts sized for 128k to a node serving 8192 and
+    /// was refused every time (researched 2026-09-02; `max_model_len` is only
+    /// consulted by its generic live-catalog path, not the self-hosted one).
+    /// Always equal to `max_model_len`, which `ModelInfo::new` guarantees;
+    /// never set one without the other.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<usize>,
+}
+
+impl ModelInfo {
+    /// Build an entry whose two context fields cannot disagree.
+    ///
+    /// `effective_context` is the longest conversation this node will serve,
+    /// or `None` when the model's declared context cannot be read — in which
+    /// case BOTH fields are omitted rather than guessed.
+    pub fn new(
+        id: String,
+        created: i64,
+        owned_by: String,
+        effective_context: Option<usize>,
+    ) -> Self {
+        Self {
+            id,
+            object: "model",
+            created,
+            owned_by,
+            max_model_len: effective_context,
+            context_length: effective_context,
+        }
+    }
 }
 
 // ---- Embeddings request/response ----

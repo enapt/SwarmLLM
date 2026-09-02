@@ -790,14 +790,13 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         // `owned_by` must describe shard possession, not which model happened
         // to be loaded last. See `api::count_shard_availability`.
         let owned_by = owned_by_for(&state, &model_id);
-        let max_model_len = max_model_len_for(&state, &model_id);
-        data.push(ModelInfo {
-            id: model_id,
-            object: "model",
+        let effective_context = max_model_len_for(&state, &model_id);
+        data.push(ModelInfo::new(
+            model_id,
             created,
             owned_by,
-            max_model_len,
-        });
+            effective_context,
+        ));
     }
 
     // Include models from the registry if all layers are covered network-wide
@@ -809,14 +808,13 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         if all_shards_available(&state, &id) {
             seen.insert(id.clone());
             let owned_by = owned_by_for(&state, &id);
-            let max_model_len = max_model_len_for(&state, &id);
-            data.push(ModelInfo {
+            let effective_context = max_model_len_for(&state, &id);
+            data.push(ModelInfo::new(
                 id,
-                object: "model",
-                created: manifest.publish_date.timestamp(),
+                manifest.publish_date.timestamp(),
                 owned_by,
-                max_model_len,
-            });
+                effective_context,
+            ));
         }
     }
 
@@ -962,6 +960,22 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OpenClaw's self-hosted discovery reads `context_length`; vLLM-style
+    /// clients read `max_model_len`. Both must carry the one effective figure,
+    /// and an unknown context must omit both rather than guess.
+    #[test]
+    fn a_model_entry_advertises_its_context_under_both_names_or_neither() {
+        let known = serde_json::to_value(ModelInfo::new("m".into(), 0, "local".into(), Some(8192)))
+            .unwrap();
+        assert_eq!(known["max_model_len"], 8192);
+        assert_eq!(known["context_length"], 8192);
+
+        let unknown =
+            serde_json::to_value(ModelInfo::new("m".into(), 0, "network".into(), None)).unwrap();
+        assert!(unknown.get("max_model_len").is_none());
+        assert!(unknown.get("context_length").is_none());
+    }
 
     /// **The case that matters.** A relay-circuit address carries two peer ids
     /// — the relay's, then ours — and both forms are present on a real node at

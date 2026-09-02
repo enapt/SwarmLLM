@@ -138,13 +138,24 @@ curl http://localhost:8800/v1/models \
   "object": "list",
   "data": [
     {
-      "id": "qwen2.5-coder-7b",
+      "id": "qwen2.5-coder-7b-instruct-q4-k-m",
       "object": "model",
-      "owned_by": "swarmllm"
+      "created": 1756000000,
+      "owned_by": "local",
+      "max_model_len": 8192,
+      "context_length": 8192
     }
   ]
 }
 ```
+
+`owned_by` says where the model's parts sit: `local`, `hybrid` (some parts
+here, some on peers) or `network`. `max_model_len` and `context_length` are
+the same number — the longest conversation this node will serve, after the
+shipped 8192-token default and any `inference.max_seq_len_override`. The
+first is the name vLLM clients read, the second the name OpenClaw's model
+discovery reads. Both are omitted when the model's declared context cannot be
+read (a model no part of which is on this machine), rather than guessed.
 
 ## GET /v1/status
 
@@ -235,9 +246,52 @@ curl -N http://localhost:8800/v1/chat/completions \
   -d '{"model":"qwen2.5-coder-7b","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
 ```
 
+### OpenClaw
+
+[OpenClaw](https://github.com/openclaw/openclaw) accepts any OpenAI-compatible
+server as a model provider. Export your key as `SWARMLLM_API_KEY` (the daemon
+reads the same variable) and add a `swarmllm` provider to `~/.openclaw/openclaw.json`:
+
+```json5
+{
+  models: {
+    providers: {
+      swarmllm: {
+        baseUrl: "http://127.0.0.1:8800/v1",
+        apiKey: "${SWARMLLM_API_KEY}",
+        api: "openai-completions",
+        timeoutSeconds: 300,
+        models: [{ id: "meta-llama-3.1-8b-instruct-q4-k-m", name: "SwarmLLM Llama 3.1 8B",
+                   contextWindow: 32768, maxTokens: 4096,
+                   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+      },
+    },
+  },
+  agents: { defaults: { model: { primary: "swarmllm/meta-llama-3.1-8b-instruct-q4-k-m" } } },
+}
+```
+
+Two requirements, both on the SwarmLLM side:
+
+- **A real key.** OpenClaw accepts a non-secret marker such as `"ollama-local"`
+  for loopback servers, but a marker sends no `Authorization` header at all,
+  and every `/v1` route here requires one.
+- **A context window above the 8192-token default.** OpenClaw's system prompt
+  alone is larger than that, and its context guard refuses a model below
+  4k tokens and warns below 8k. Set `max_seq_len_override = 32768` under
+  `[inference]` in `config.toml` (config file only — it is not a dashboard
+  setting or an environment variable).
+
+Model ids are whatever `GET /v1/models` lists, referenced as
+`swarmllm/<id>`. Each entry carries `context_length`, which is the field
+OpenClaw's self-hosted discovery reads; with it absent OpenClaw assumes
+128,000 and sends prompts the node has to refuse. Embeddings are not served
+here (see below), so point OpenClaw's memory search at another embedding
+provider.
+
 ## POST /v1/embeddings
 
-Returns `503 Service Unavailable`. Text embeddings are not supported via the subprocess inference path. Use a dedicated embedding provider or the OpenAI embeddings API directly.
+Returns `501 Not Implemented`. Text embeddings are not supported via the subprocess inference path. Use a dedicated embedding provider or the OpenAI embeddings API directly.
 
 ## GET /v1/providers
 
