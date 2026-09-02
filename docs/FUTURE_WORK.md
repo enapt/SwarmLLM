@@ -10056,6 +10056,25 @@ every agent turn is refused as too long. The additive manifest field above is
 the fix; until then the README tells OpenClaw users to set `contextWindow`
 explicitly for such models.
 
+## `llama-cpp-2` is held at 0.1.138 until CI installs SPIRV-Headers (2026-09-02)
+
+The 2026-09-02 dependency refresh moved `llama-cpp-2` 0.1.138 → 0.1.155 and
+the `windows-gpu-no-flash` feature check (`--features llama-vulkan,candle-cuda`)
+failed in CI — on Dependabot's branch first, misread as the MSRV, then on main
+(`3740a4a9`): the newer bundled llama.cpp's Vulkan backend does
+`find_package(SPIRV-Headers)` (`ggml/src/ggml-vulkan/CMakeLists.txt:14`) and
+the job installs only `libvulkan-dev glslang-tools glslc`. The crate is
+feature-gated, so no release binary changed; it was pinned back to 0.1.138 to
+ship v0.3.148.
+
+**To lift the pin**: add `spirv-headers` (Ubuntu package; provides
+`SPIRV-HeadersConfig.cmake`) — and, if the next error asks for it,
+`spirv-tools` — to that apt line in `.github/workflows/ci.yml`, bump
+`llama-cpp-2` again, and let CI prove it on a branch before it touches main.
+It cannot be verified here: this machine has no Vulkan build environment.
+Until then Dependabot's weekly cargo group will propose the bump and fail
+the same job; that is the signal to do this, not a reason to ignore the crate.
+
 ## Major-version dependency migrations Dependabot may not do (2026-09-02)
 
 Ten Dependabot PRs from May 2026 sat untriaged until they filled both
