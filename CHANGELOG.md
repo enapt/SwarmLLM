@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.149-alpha] — 2026-09-02
 
 ### Changed
 
