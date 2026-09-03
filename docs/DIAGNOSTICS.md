@@ -169,6 +169,42 @@ model-worker: Model loaded ... device=Cuda(...)
   running.** For a resident worker, ask `placed_on_cpu_because` /
   `cpu_placement_reason` (#401).
 
+## "Why did my machine run this itself instead of using the swarm?"
+
+A node that holds every layer of a model decides, on every pipeline assembly,
+whether to run it alone. Since v0.3.152 the whole decision is at `info`:
+
+```
+Local node has full layer coverage — single local segment (no remote peers)
+        (the card runs it, or there is no peer to ask — the fast path)
+Not handing this model to peer: <reason>  peer= latency_ms= free_vram_mb= peer_tokens_per_sec= local_cpu_tokens_per_sec=
+        (one line per peer that did not qualify for a whole-model hand-off)
+This model does not fit our GPU, so a nearby peer runs the whole of it ...
+        (whole-model delegation fired)
+DIAG: pipeline candidate  node= est_tokens_per_sec= has_gpu= cost_prefill_ms= cost_compute_ms= ...
+        (every holder priced over the whole model — the LOCAL line's
+         est_tokens_per_sec and has_gpu describe the device the request
+         would USE: on a node whose card is too small they are the
+         processor's figures, gotcha #444)
+This node holds the whole model but would run it on its processor; a pipeline across
+  peers' cards is priced faster, so the request goes there
+        local_processor_cost_ms= pipeline_cost_ms= segments= prompt_tokens=
+This node holds the whole model and runs it on its processor: <reason>
+        local_processor_cost_ms= pipeline_cost_ms=
+        (reasons: "no pipeline across peers is priced faster", or the
+         faster-looking chain includes a peer whose speed is unknown)
+```
+
+The two `_cost_ms` figures are in the router's own milliseconds — decode
+priced over `ASSUMED_FORWARD_PASSES` tokens plus the prompt — and are
+comparable to each other, not to a wall clock. Under prompt privacy the
+chosen pipeline is a boomerang, `local(0,1)` … `local(N−1,N)`, with the
+peers' cards in between.
+
+**Not the explanation**: a `DIAG: parallax routing selected chain segments=1`
+line beside a local-only result is the search AGREEING with the fast path,
+not failing to run.
+
 ## "Why is this node talking to a stranger?"
 
 ```
@@ -580,6 +616,10 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 | Level | What | Where |
 |-------|------|-------|
 | INFO  | `DIAG: KV-cache store cleanup — expired entries removed` — `removed`, `remaining` | split/kv_cache.rs |
+| INFO  | `DIAG: KV admission — evicted cached prompts so this prompt's cache fits on the device` — `budget_mb` (as the card can honour it NOW), `load_time_budget_mb`, `live_mb`, `cached_mb`, `freed_mb` | model_worker.rs |
+| WARN  | `DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device` — the 503 that re-routes; `short_by_mb` is against the reconciled budget | model_worker.rs |
+| DEBUG | `DIAG: KV budget reconciled with the card — less room than the load-time figure` — `load_time_budget_mb`, `budget_now_mb`, `live_mb`, `cached_mb`; fires whenever the card has less room than the loader predicted (another tenant, a snapshot, the llama.cpp context). `budget_mb` in the two lines above is this figure. | split/model.rs |
+| WARN  | `DIAG: refusing to grow the KV cache past this worker's budget` — the per-chunk guard, at a growth-quantum boundary, after evicting cached prompts | split/executor.rs |
 
 ## Split Model Forward Pass Diagnostics
 

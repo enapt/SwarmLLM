@@ -396,7 +396,7 @@ impl SplitModel {
         // and THIS server cannot serve it right now. That is a 503, which is
         // what lets a coordinator route it to a peer that can — the reason a
         // swarm can refuse where vLLM has to preempt and recompute.
-        if let Some(budget) = self.kv_budget_bytes {
+        if let Some(load_time_budget) = self.kv_budget_bytes {
             // Positions this forward newly reserves — zero for almost every
             // decode step, and a whole prompt's worth on a prefill.
             let claiming = super::kv_budget::positions_claimed(
@@ -405,6 +405,15 @@ impl SplitModel {
                 crate::inference::layers::KV_CACHE_GROWTH_TOKENS,
             );
             if claiming > 0 {
+                // The budget as the card can honour it at this moment — the
+                // load-time figure capped by what the device actually has
+                // left (`kv_budget_now`). Asked only here, at a growth
+                // boundary, so the device query stays off the per-token path.
+                let occ = kv_cache_store.occupancy();
+                let budget = self
+                    .kv_budget_now(occ.allocated_bytes, occ.external_bytes)
+                    .0
+                    .unwrap_or(load_time_budget);
                 // Live caches PLUS the prefix cache's snapshots: the same
                 // device memory, and charged nowhere until gotcha #440 —
                 // and evictable, which `claim_room` does before refusing.

@@ -2,6 +2,34 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A machine with no graphics card that holds a whole model too big for any
+  one card now uses the swarm's cards for it.** A tester's processor-only node
+  finished downloading the last part of a 14B model and from then on ran every
+  request itself, for minutes, while two GPU machines on the same pool that
+  had been serving it together the day before sat idle. Holding every part
+  ended the search for a better route; and when the search did run, the node
+  was priced at the speed of a card it was not going to use, and prompt
+  privacy left it no legal way to hand the middle of the model to more than
+  one peer. All three are fixed: the node is priced by the device the request
+  will actually run on, the routing search competes with the local route, and
+  under prompt privacy the embedding and sampling stay home while several
+  peers' cards take the middle. A short prompt with only distant cards on
+  offer still runs locally, and a peer whose speed is unknown never displaces
+  a route the node can price.
+- **The graphics-memory budget for conversation history is now checked against
+  the card as it stands, not as it looked when the model loaded.** The budget
+  was taken from free memory at load time and could not see anything that
+  arrived afterwards — a second model's worker, the full CUDA build's own
+  context, a cached prompt — so on an 8 GB card it promised about 4.5 GB of
+  room where roughly 2 GB was free, and a long prompt admitted on that promise
+  ran from host memory at 2 tokens a second instead of being refused and sent
+  to a peer. Every decision that takes graphics memory now asks the card how
+  much it has left (a microsecond driver call) and honours the smaller figure.
+
 ## [0.3.151-alpha] — 2026-09-03
 
 ### Fixed

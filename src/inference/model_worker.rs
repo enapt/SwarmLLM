@@ -2234,7 +2234,12 @@ fn snapshot_positions_that_fit(
     if !prefix_cache_charged() {
         return usize::MAX;
     }
-    let (Some(budget), per_token) = model.kv_budget() else {
+    let allocated = kv_store.occupancy().allocated_bytes;
+    let cached = prefix_cache.bytes_total() as u64;
+    // Against the card as it stands, not the budget predicted at load: a
+    // snapshot is a device allocation the size of the prompt, taken on a card
+    // that may hold tenants the load-time figure never saw.
+    let (Some(budget), per_token) = model.kv_budget_now(allocated, cached) else {
         return usize::MAX;
     };
     if per_token == 0 {
@@ -2244,11 +2249,7 @@ fn snapshot_positions_that_fit(
     // about to be decoded: a snapshot sized to the last byte left this
     // request unable to claim its next quantum mid-reply (measured: the
     // reply cut at token 32, the quantum boundary after a 7649-token prompt).
-    let live = kv_store
-        .occupancy()
-        .allocated_bytes
-        .saturating_add(per_token.saturating_mul(REPLY_RESERVE_POSITIONS as u64));
-    let cached = prefix_cache.bytes_total() as u64;
+    let live = allocated.saturating_add(per_token.saturating_mul(REPLY_RESERVE_POSITIONS as u64));
     let plan = crate::inference::split::kv_budget::plan_snapshot(
         budget,
         live,
@@ -2293,20 +2294,41 @@ fn ensure_room_for_prompt(
     if !prefix_cache_charged() {
         return Ok(());
     }
-    let (Some(budget), per_token) = model.kv_budget() else {
+    let occupancy = kv_store.occupancy();
+    let live = occupancy.allocated_bytes;
+    let cached = prefix_cache.bytes_total() as u64;
+    // Nothing of THIS request is in the store yet, so anything live belongs to
+    // an earlier one — a request still decoding, or one whose cache outlived
+    // its reply. The store's figure was seen to wander by ~1 GB across
+    // identical sequential prompts (2856 → 4200 MB, 2026-09-02) and this is
+    // the line that says whose bytes those are.
+    if live > 0 {
+        tracing::debug!(
+            request_id,
+            store_entries = occupancy.entries,
+            live_mb = live / (1024 * 1024),
+            live_tokens = occupancy.tokens,
+            "DIAG: KV admission — the store already holds caches from earlier requests"
+        );
+    }
+    // The budget as the card can honour it NOW, not as predicted at load. The
+    // load-time figure cannot see a tenant that arrived after it — another
+    // model's worker, the full build's second CUDA context — and on the
+    // released v0.3.149 it admitted a prompt into ~300 MB of real room, which
+    // WSL2 served from host memory at 1.95 tok/s rather than refusing.
+    let (Some(budget), per_token) = model.kv_budget_now(live, cached) else {
         return Ok(());
     };
     if per_token == 0 {
         return Ok(());
     }
+    let load_time_budget = model.kv_budget().0.unwrap_or(budget);
     // The prompt plus one growth quantum for the reply, so an admitted
     // request can at least begin decoding without meeting the per-chunk
     // guard at its first quantum boundary. A very long reply may still meet
     // it later, which is the lazy charge that guard exists for.
     let positions =
         crate::inference::layers::kv_cache_reservation(prompt_tokens) + REPLY_RESERVE_POSITIONS;
-    let live = kv_store.occupancy().allocated_bytes;
-    let cached = prefix_cache.bytes_total() as u64;
     let mb = |b: u64| b / (1024 * 1024);
     use crate::inference::split::kv_budget::{admit_prompt, PromptAdmission};
     let verdict = admit_prompt(budget, live, cached, per_token, positions);
@@ -2323,6 +2345,7 @@ fn ensure_room_for_prompt(
                 live_mb = mb(live),
                 cached_mb = mb(cached),
                 budget_mb = mb(budget),
+                load_time_budget_mb = mb(load_time_budget),
                 needed_mb = mb(needed),
                 freed_mb = mb(freed),
                 "DIAG: KV admission — evicted cached prompts so this prompt's cache fits on the device"
@@ -2341,6 +2364,7 @@ fn ensure_room_for_prompt(
         live_mb = mb(live),
         cached_mb = mb(cached),
         budget_mb = mb(budget),
+        load_time_budget_mb = mb(load_time_budget),
         short_by_mb = mb(short_by),
         "DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device"
     );

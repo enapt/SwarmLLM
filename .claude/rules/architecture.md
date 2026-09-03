@@ -836,10 +836,23 @@ silently break at the wire if duplicated:
   without the eviction (v0.3.149) refused admitted prompts mid-prefill
   where the release before had served them slowly. **A guard that can see a
   reclaimable tenant must be able to reclaim it, or it is stricter than the
-  guard it replaced.** Still open: the budget is a load-time prediction
-  (`kv_headroom_bytes` at load) and over-promises ~2 GB on an 8 GB card once
-  both CUDA contexts and a snapshot are resident — reconcile with the card
-  (`cudaMemGetInfo`) at admission.
+  guard it replaced.**
+  **The budget is reconciled with the CARD at every decision that takes
+  device memory** (2026-09-03): `SplitModel::kv_budget_now(live, cached)` =
+  `min(load-time budget, live + cached + free_now − margin)`, `free_now` from
+  cudarc's `mem_get_info` (microseconds), margin 5% of the card with a
+  256 MB floor (`kv_budget::budget_reconciled_with_device`). Asked by
+  `ensure_room_for_prompt`, `snapshot_positions_that_fit` and the per-chunk
+  guard — never on the per-token path. **The load-time budget is a
+  prediction; the card is the fact**: `kv_headroom_bytes` was taken from free
+  memory at load and could not see a tenant that arrived later (a second
+  worker, the full build's llama.cpp context, a snapshot), so on the released
+  v0.3.149 it said 4491 MB of room where the card had ~2 GB, and the admitted
+  prompt's cache spilled to host memory at 1.95 tok/s. The reconciled form is
+  invariant under evicting a cached prompt (bytes move from `cached` to
+  `free_now`), which is what keeps `admit_prompt`'s evict-then-fit arithmetic
+  valid against it. A device that cannot say (the processor) leaves the
+  load-time figure alone; `None` still means unknown, never zero.
 - **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
   admission check against it. The loader records `kv_headroom_bytes` on the
   model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward
@@ -1393,10 +1406,42 @@ silently break at the wire if duplicated:
   `is_cpu_bound_for_lack_of_vram` alone, whose doc read a node with NO card
   as "working normally" — so a processor-only node holding every shard ran
   the model itself with GPU peers idle on the same pool. Peer-side gates in
-  `delegation_target` are unchanged. **Still open**: a model no single peer's
-  card holds is not delegated and runs locally on the processor — the
-  scheduler does not price local-CPU against a GPU pipeline once local
-  coverage is complete (`docs/FUTURE_WORK.md`).
+  `delegation_target` are unchanged. The case it could not reach — a model no
+  single peer's card holds — is the priced comparison below.
+- **A node holding every layer that would run the model on its processor lets
+  the priced search compete with its fast path** (2026-09-03, gotcha #444).
+  `assemble_pipeline_for` answers `serves_on_cpu` ONCE (a lazy `OnceCell`,
+  since it prices the model against the graphics budget and reads the header
+  for a model with no worker) and threads it into `gather_candidates`, which
+  prices the LOCAL candidate by the device the request would USE: processor
+  speed from measured bandwidth, the processor prefill prior, and — on a node
+  that has a card — no `observed_latency_ms_per_layer`, because that figure
+  is per node and was measured on whatever the card served for someone else.
+  When no whole-model peer qualifies (`delegation_target` → `None`),
+  `pipeline_may_beat_local` skips the fast path and `route_shortest_path`
+  runs; `pipeline_may_replace_processor_route` then keeps the request home
+  for an all-local chain or one whose remote segments include a peer priced
+  at `UNKNOWN_COMPUTE_MS` — **a route this node can price is never given up
+  for one it cannot**. Greedy never makes this call (nothing to compare), and
+  a parallax error falls back to the fast path, not greedy. The decision line
+  logs `local_processor_cost_ms` and `pipeline_cost_ms` (`parallax::
+  chain_cost_ms`) so the choice can be checked from a log.
+  **Why this is not `cbbed678` again**: that pass priced local layers at a
+  constant 10,000 — a penalty, not a price — so the search could not see the
+  LAN split that was best and sent a request abroad. Here the local figure is
+  the same measured one every peer advertises about itself, and every remote
+  hop is still charged per token, so a short prompt with only distant cards
+  stays home (pinned by `a_short_prompt_stays_on_the_processor_when_the_
+  cards_are_far_away`, whose near-peer arm proves the route exists).
+  **Under prompt privacy the router adds split points 1 and N−1 when the
+  local node holds the whole model.** Privacy is auto-on for a node holding
+  both ends, so the tester's shape is a boomerang across SEVERAL peers —
+  local(0,1), card, card, local(N−1,N) — and `route_shortest_path` only cut
+  ranges at shard boundaries, of which a node holding everything has none in
+  the interior. Added only for that topology, so every other encrypted route
+  is exactly what it was. Test it from `assemble_pipeline_for`, not from the
+  router: the first cut passed the router's tests and stayed local end to
+  end for exactly this reason.
 - **`inference::scheduler::delegation_target`** (2026-08-18) — the single decision
   to hand a WHOLE model to a peer rather than run it on this node's CPU. Fires only
   when `ModelProcessPool::is_cpu_bound_for_lack_of_vram` says we have a working GPU

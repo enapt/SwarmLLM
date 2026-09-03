@@ -10090,7 +10090,25 @@ gates unchanged (whole coverage, direct + measured reach, trust, GPU room
 with margin or ≥2× our processor speed). A small model on a processor-only
 node now goes to a GPU peer that holds it.
 
-**Still open, and it is the tester's actual case**: a 14B no single peer's
+**BUILT 2026-09-03 (gotcha #444) — the tester's actual case**: a 14B no
+single peer's card can hold. The scheduler now prices the local candidate at
+the device the request would USE (`serves_on_cpu` → processor speed, processor
+prefill prior, card-measured observations dropped) and, when no whole-model
+peer qualifies, lets the Parallax search compete with the fast path. A chain
+wins only if it is genuinely remote and every remote segment is priced from a
+measurement (advertised or observed) — an `UNKNOWN_COMPUTE_MS` peer never
+displaces a route this node can price. Third defect found on the way: prompt
+privacy is auto-on for a node holding both ends, and the router only split
+ranges at shard boundaries, so a node holding EVERYTHING had no interior split
+point and the boomerang across several peers was unrepresentable; the router
+adds layers 1 and N−1 as split points for exactly that topology. Unit-tested
+with the tester's shape (two GPU halves, 14k prompt → local(0,1) + card +
+card + local(N−1,N); privacy off → the two cards; 900 ms away + short prompt →
+stays home). **Not yet observed on the live swarm** — the decision line
+`This node holds the whole model but would run it on its processor; a pipeline
+across peers' cards is priced faster` is what to look for on the tester's node.
+
+The original note, for the reasoning: a 14B no single peer's
 card can hold. Delegation is whole-model-or-nothing, so the request still
 runs locally on the processor, while the day before — with one shard
 missing — the scheduler built a three-segment pipeline across two GPU
@@ -10471,6 +10489,19 @@ margin)`; and find why the store's `allocated_bytes` read ~1 GB more than
 this request's own cache during prefill (`in_use_mb=4898` with a 2184 MB
 cache + an 1804 MB snapshot). Both are what stands between an 8 GB card and
 a warm agent turn.
+
+**First half BUILT 2026-09-03**: `SplitModel::kv_budget_now` reconciles the
+load-time budget with the card at every decision that takes device memory —
+whole-prompt admission, snapshot sizing, the per-chunk growth guard — as
+`min(budget, live + cached + free_now − margin)` via cudarc's `mem_get_info`
+(microseconds; `kv_budget::budget_reconciled_with_device`). The form is
+invariant under evicting a cached prompt, so `admit_prompt`'s evict-then-fit
+arithmetic holds against it unchanged. Margin: 5% of the card, floor 256 MB.
+Replaying the .149 numbers: the second 6.4k prompt is now REFUSED at token 0
+(25 MB short of the margin with every cached prompt gone) where the load-time
+budget evicted 689 MB and spilled a 2.6 GB cache into host memory. The
+`allocated_bytes` wander (~1 GB) is still unexplained and still matters less:
+the card's own figure now bounds every decision.
 
 Found by running OpenClaw against the live node (RTX 3070, 8 GB) with
 `max_seq_len_override = 32768` so its 14,633-token first turn was accepted at

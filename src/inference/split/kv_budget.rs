@@ -114,6 +114,74 @@ pub(crate) fn kv_headroom_bytes(weight_bytes: u64, free_vram_bytes: u64) -> u64 
     (free_vram_bytes / 100 * VRAM_HEADROOM_PCT).saturating_sub(weight_bytes)
 }
 
+/// What the card keeps free beyond the KV cache when the budget is reconciled
+/// with it: the forward in flight's activations and library workspaces, and
+/// allocator fragmentation. A fraction of the CARD with a floor, because those
+/// costs do not shrink as the card fills — the same reason [`VRAM_HEADROOM_PCT`]
+/// is a share of free memory at load rather than of whatever the model left.
+pub(crate) const DEVICE_FREE_MARGIN_PCT: u64 = 5;
+/// See [`DEVICE_FREE_MARGIN_PCT`]; the floor on small cards.
+pub(crate) const DEVICE_FREE_MARGIN_MIN_BYTES: u64 = 256 << 20;
+
+/// Bytes the card must keep free beside the KV cache, for a card of `total_bytes`.
+pub(crate) fn device_free_margin_bytes(total_bytes: u64) -> u64 {
+    (total_bytes / 100 * DEVICE_FREE_MARGIN_PCT).max(DEVICE_FREE_MARGIN_MIN_BYTES)
+}
+
+/// The KV budget as the card can honour it NOW.
+///
+/// **The load-time budget is a prediction; the card is the fact.**
+/// [`kv_headroom_bytes`] is taken once, from free memory at load, and it
+/// cannot see a tenant that arrives afterwards — a second worker loading
+/// another model on the same card, the llama.cpp context of the full CUDA
+/// build, a prefix-cache snapshot the size of a prompt. Measured on the
+/// released v0.3.149 (gotcha #440, third half): a budget of 4491 MB taken
+/// when 7541 MB were free, on a card idling at 7827 of 8192 MB once the model,
+/// two CUDA contexts and one cached prompt were resident. The real room for
+/// live KV was ~2 GB, the budget said 4.5, and the admitted prompt's cache
+/// landed in host-backed memory at 1.95 tok/s — WSL2 hands out shared memory
+/// rather than failing, so the accounting is the only guard there is.
+///
+/// The reconciled figure is the smaller of the budget and `live + cached +
+/// free_now − margin`: everything the KV cache already holds on the device,
+/// plus what the device has left, less the margin the forward needs. Stated
+/// that way it is **invariant under evicting a cached prompt** — releasing
+/// `x` bytes moves `x` from `cached` to `free_now` and the sum is unchanged —
+/// which is what lets [`admit_prompt`]'s evict-then-fit arithmetic hold
+/// against it exactly as it does against the load-time budget.
+///
+/// Never larger than the budget: the card having room does not license the
+/// cache to take more than the loader set aside for it.
+pub(crate) fn budget_reconciled_with_device(
+    budget_bytes: u64,
+    live_bytes: u64,
+    cached_bytes: u64,
+    free_now_bytes: u64,
+    total_bytes: u64,
+) -> u64 {
+    let ours_plus_free = live_bytes
+        .saturating_add(cached_bytes)
+        .saturating_add(free_now_bytes);
+    budget_bytes.min(ours_plus_free.saturating_sub(device_free_margin_bytes(total_bytes)))
+}
+
+/// `(free, total)` bytes on the CUDA device `device` lives on, or `None` for
+/// any other device or when the driver cannot say. A driver call taking
+/// microseconds; `cudaMemGetInfo` under cudarc's name.
+pub(crate) fn device_free_and_total_bytes(device: &candle_core::Device) -> Option<(u64, u64)> {
+    #[cfg(feature = "candle-cuda")]
+    if let candle_core::Device::Cuda(dev) = device {
+        return dev
+            .cuda_stream()
+            .context()
+            .mem_get_info()
+            .ok()
+            .map(|(free, total)| (free as u64, total as u64));
+    }
+    let _ = device;
+    None
+}
+
 /// Sequence positions this forward will NEWLY reserve, or 0 if it fits inside
 /// what the cache already has.
 ///
@@ -520,5 +588,92 @@ mod tests {
             fits_mirrored < fits_plain,
             "a mirrored cache must exhaust the budget sooner ({fits_mirrored} vs {fits_plain})"
         );
+    }
+    /// The card, not the load-time figure, has the last word when the card has
+    /// less room — and the budget still caps the cache when the card has more.
+    #[test]
+    fn the_card_caps_the_budget_when_other_tenants_have_taken_the_room() {
+        let mb = 1024 * 1024u64;
+        let card = 8192 * mb;
+        let budget = 4491 * mb;
+        // Plenty free: the loader's budget binds.
+        assert_eq!(
+            budget_reconciled_with_device(budget, 0, 0, 7000 * mb, card),
+            budget
+        );
+        // Another tenant took most of the card: the room left, less the
+        // margin, is what the cache may take — well under the budget.
+        let reconciled = budget_reconciled_with_device(budget, 0, 0, 1500 * mb, card);
+        assert_eq!(reconciled, 1500 * mb - device_free_margin_bytes(card));
+        assert!(reconciled < budget);
+        // Less free than the margin: nothing, never a wrap-around.
+        assert_eq!(
+            budget_reconciled_with_device(budget, 0, 0, 100 * mb, card),
+            0
+        );
+    }
+
+    /// Releasing a cached prompt moves bytes from `cached` to `free` and
+    /// leaves the reconciled budget where it was — the property that lets
+    /// `admit_prompt`'s evict-then-fit arithmetic hold against it.
+    #[test]
+    fn evicting_cached_prompts_does_not_move_the_reconciled_budget() {
+        let mb = 1024 * 1024u64;
+        let card = 8192 * mb;
+        let before = budget_reconciled_with_device(4491 * mb, 1000 * mb, 500 * mb, 300 * mb, card);
+        let after = budget_reconciled_with_device(4491 * mb, 1000 * mb, 0, 800 * mb, card);
+        assert_eq!(before, after);
+    }
+
+    /// The v0.3.149 case (gotcha #440, third half): a 4491 MB budget taken
+    /// when 7541 MB were free, a 2.6 GB cached prompt, and 365 MB left on the
+    /// card. The load-time budget admitted the next 6.4k-token prompt after
+    /// evicting 689 MB of cache — into ~1 GB of real room for a 2.6 GB cache,
+    /// which WSL2 served from host memory at 1.95 tok/s. Reconciled with the
+    /// card the same prompt is refused at token 0 (the card is 25 MB short of
+    /// its margin even with every cached prompt gone), and a prompt that does
+    /// fit after eviction is still admitted.
+    #[test]
+    fn the_second_long_prompt_is_refused_where_the_load_time_budget_spilled_it() {
+        let mb = 1024 * 1024u64;
+        let card = 8192 * mb;
+        let per_token = 344 * 1024u64;
+        let budget = 4491 * mb;
+        let cached = 2600 * mb;
+        let positions = 7680usize;
+        assert!(per_token * positions as u64 > 2500 * mb);
+        // Load-time budget: evicts and admits.
+        assert!(matches!(
+            admit_prompt(budget, 0, cached, per_token, positions),
+            PromptAdmission::EvictBytes(_)
+        ));
+        // The card as it stood: refuse before prefill.
+        let now = budget_reconciled_with_device(budget, 0, cached, 365 * mb, card);
+        assert!(now < budget);
+        assert!(matches!(
+            admit_prompt(now, 0, cached, per_token, positions),
+            PromptAdmission::Refuse { .. }
+        ));
+        // A prompt that fits once the cache is gone is still admitted.
+        assert!(matches!(
+            admit_prompt(now, 0, cached, per_token, 6000),
+            PromptAdmission::EvictBytes(_)
+        ));
+    }
+
+    /// The margin is a share of the card with a floor: small cards keep at
+    /// least the floor, large cards scale.
+    #[test]
+    fn the_device_margin_has_a_floor_and_scales_with_the_card() {
+        let gib = 1024 * 1024 * 1024u64;
+        assert_eq!(
+            device_free_margin_bytes(2 * gib),
+            DEVICE_FREE_MARGIN_MIN_BYTES
+        );
+        assert_eq!(
+            device_free_margin_bytes(24 * gib),
+            24 * gib / 100 * DEVICE_FREE_MARGIN_PCT
+        );
+        assert!(device_free_margin_bytes(24 * gib) > DEVICE_FREE_MARGIN_MIN_BYTES);
     }
 }
