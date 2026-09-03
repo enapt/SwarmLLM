@@ -202,29 +202,37 @@ impl NetworkManager {
                     // a peer that answers even one request never accumulates.
                     self.rr_failures.remove(&peer);
                     // Clean up tensor outbound tracking (response received = not a failure)
-                    if let Some((uuid, sent_at, _, _, _)) =
+                    if let Some((uuid, sent_at, _, _, activation_bytes)) =
                         self.pending_tensor_outbound.remove(&request_id)
                     {
                         // How long this peer actually took to acknowledge. Feeds
                         // the per-peer deadline, so a peer whose loop is busy
                         // widens its own window instead of being declared dead
                         // on a ping-derived guess (gotcha #386).
-                        let est = self.ack_rtt.entry(peer).or_default();
-                        est.observe(sent_at.elapsed().as_secs_f64() * 1000.0);
-                        // Hand the smoothed figure to routing. The health ping
-                        // it otherwise reads cannot see queueing on a busy peer;
-                        // this was measured on the forward that just completed.
-                        // Bounded so a timed-out estimator (which doubles on a
-                        // miss) reads as "slow", not as a number that never
-                        // decays back.
-                        let srtt = est
-                            .srtt_ms()
-                            .map(|ms| ms.min(ACK_SRTT_ROUTING_CAP_MS) as u32);
-                        if let Some(node_id) = self.peer_to_node.get(&peer).map(|r| r.clone()) {
-                            if let Some(mut info) =
-                                self.shared_state.peer_registry.get_mut(&node_id)
-                            {
-                                info.ack_srtt_ms = srtt;
+                        //
+                        // Only for a forward small enough that the time was the
+                        // peer's, not the payload's: a prompt pass of tens of
+                        // megabytes acknowledges when it has ARRIVED, and that
+                        // sample would price the peer as slow for every decode
+                        // step after it (`tensors::ACK_OBSERVE_MAX_BYTES`).
+                        if activation_bytes <= super::tensors::ACK_OBSERVE_MAX_BYTES {
+                            let est = self.ack_rtt.entry(peer).or_default();
+                            est.observe(sent_at.elapsed().as_secs_f64() * 1000.0);
+                            // Hand the smoothed figure to routing. The health ping
+                            // it otherwise reads cannot see queueing on a busy peer;
+                            // this was measured on the forward that just completed.
+                            // Bounded so a timed-out estimator (which doubles on a
+                            // miss) reads as "slow", not as a number that never
+                            // decays back.
+                            let srtt = est
+                                .srtt_ms()
+                                .map(|ms| ms.min(ACK_SRTT_ROUTING_CAP_MS) as u32);
+                            if let Some(node_id) = self.peer_to_node.get(&peer).map(|r| r.clone()) {
+                                if let Some(mut info) =
+                                    self.shared_state.peer_registry.get_mut(&node_id)
+                                {
+                                    info.ack_srtt_ms = srtt;
+                                }
                             }
                         }
                         // The onward forward was received; its failure is no

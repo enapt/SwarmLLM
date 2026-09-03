@@ -138,6 +138,29 @@ Inference and the OpenAI/Anthropic APIs are unaffected — they accept the key a
 a Bearer token from any address. Full detail in
 [Tailscale / WAN](operations/tailscale-wan.md).
 
+## A worker keeps working after the client gave up
+
+Symptoms: a client timed out or was closed, the log says the request was
+cancelled, and `top` still shows a `swarmllm model-worker` process at full CPU
+minutes later — on a processor-only machine, sometimes long enough to trip a
+thermal warning.
+
+Since v0.3.152 a cancel reaches every place a request can wait, so this should
+stop within one prompt chunk (about 128 tokens' worth of work, seconds on a
+processor). To see what the node is computing and stop a worker without
+`kill -9`:
+
+```bash
+./swarmllm status                     # "Workers:" lists each model worker, its pid,
+                                      # card or processor, and requests in flight
+./swarmllm unload <model-id>          # retire that worker; the files stay, it
+                                      # loads again on the next request
+```
+
+If a worker stays busy longer than a chunk after the client has gone, the cancel
+did not reach it — `docs/DIAGNOSTICS.md` § "The client left — did the work
+stop?" lists the log lines to check, in order.
+
 ## Slow First Request
 
 If the first inference request to a model takes noticeably longer than subsequent ones, this is expected. SwarmLLM uses **on-demand model loading** — models whose shards are on disk but not loaded into VRAM are loaded when first requested. If VRAM is full, an LRU eviction occurs first. Subsequent requests to the same model will be fast.

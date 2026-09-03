@@ -52,6 +52,14 @@ All notable changes to SwarmLLM are documented here.
   `prompt_tokens=0` on most streamed requests (the response itself was always
   right). The reader now waits for the counts before recording the trace, on
   both API surfaces.
+- **A large prompt forwarded to a distant machine is no longer abandoned before
+  it can have arrived.** The receipt deadline for a forward was derived from
+  round-trip time alone, so a 20 MB prompt pass to a peer 600 ms away got the
+  same ten-second floor as a two-kilobyte decode step — an acknowledgement is
+  sent when the whole message has arrived, so the transfer was still in flight
+  when the coordinator gave up (measured on the live swarm, 2026-09-03). The
+  deadline now adds the time the payload takes at a slow home uplink, and
+  large forwards no longer feed the per-peer latency figure that routing reads.
 - **The graphics-memory budget for conversation history is now checked against
   the card as it stands, not as it looked when the model loaded.** The budget
   was taken from free memory at load time and could not see anything that

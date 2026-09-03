@@ -10176,6 +10176,47 @@ against it, rather than short-circuiting on coverage. That is the shape
 now exist (#428/#429 advertised speeds, `ack_srtt_ms`). Measure on the live
 swarm with a processor-only node holding a whole 14B before shipping.
 
+## A multi-megabyte forward over ONE QUIC stream can kill the connection (measured 2026-09-03, gotcha #446)
+
+**What was seen.** On the live pair — Proxmox (processor) coordinating,
+the WSL card holding gemma shards 0-1 — an 8,111-token prompt produced a
+19.9 MB hidden-state forward for the card's segment. 152 ms into the send the
+sender saw `OutboundFailure: IO error on outbound stream: connection lost`;
+the receiver logged the cause: quinn `TransportError INTERNAL_ERROR "too many
+gaps in stream buffer"`. That is quinn-proto's `Assembler::insert` giving up
+when a single stream holds more than `MAX_CHUNKS = 1024` discontiguous
+fragments after defragmentation — a burst of thousands of packets on one
+stream with loss or reordering inside it (WSL2's virtual NIC does both). The
+connection was re-dialled two seconds later and was fine; the SAME transfer
+would fail again. Failover then went to a peer 625 ms away and met the
+RTT-only receipt deadline, which is fixed (`ack_deadline_with_payload`).
+
+**Why it matters.** This is exactly the tester's shape at agent-sized prompts:
+a 14k-token prompt through a 14B is ~79 MB per hop, and every hop is one
+request-response message on whichever connection the layer picks. On a link
+with any loss, a forward that size over QUIC fails by construction.
+
+**Mitigations, in order of preference:**
+1. **Chunk large forwards on the wire.** `inference.streaming_chunked_send`
+   (R139) already splits a forward into 256 KiB requests with AAD-bound chunk
+   metadata and reassembles by request id — each chunk is its own stream, so
+   no stream can accumulate 1024 gaps. It is default-off and, crucially, has
+   **no feature bit**: an older receiver does not understand the `chunk_meta`
+   trailer. Give it a `features::CHUNKED_FORWARD` bit, send chunked only to
+   peers advertising it, and switch the default on above a size floor of a
+   few MB (the failure needs a multi-MB burst; decode forwards must stay
+   single-frame). Measure the LAN cost first — the config comment argues
+   chunking is pure overhead there, but a failed connection costs more.
+2. **Rank TCP above QUIC for large payloads** in the vendored
+   request-response `connection_rank`: TCP has no equivalent failure mode.
+   Needs the rank to see the request size, which it does not today.
+3. Upstream: quinn's limit is deliberate (memory bound against pathological
+   peers); a larger receive window does not remove it.
+
+Until one lands, a prompt-pass forward above a few MB to a QUIC-connected
+peer is a coin flip on lossy links, and the failover it triggers is to a
+worse peer.
+
 ## Speeding up inference BETWEEN nodes — ranked, with the physics (research sprint 2026-09-02)
 
 An ideation worker surveyed the literature and checked each idea against the

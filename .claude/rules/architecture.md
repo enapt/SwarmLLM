@@ -110,6 +110,15 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
   node via `resolve_pending_layer_result` (2026-09-02, gotcha #436). A new
   fast-fail must decide which of the two facts it has: silence gets the gate,
   proven departure does not.
+  **The deadline includes the payload** (2026-09-03, gotcha #446):
+  `tensors::ack_deadline_with_payload(base, activation_bytes)` adds
+  `bytes / ACK_ASSUMED_TRANSFER_BYTES_PER_SEC` (1 MiB/s, rounded down so a
+  decode step adds nothing), capped at the protocol timeout. An
+  acknowledgement is sent when the WHOLE message has arrived; the RTT-only
+  deadline gave a 20 MB prompt pass to a peer 625 ms away the same 10 s floor
+  as a 2 KB decode step and failed it in flight. **And the estimator only sees
+  small forwards** (`ACK_OBSERVE_MAX_BYTES`, 256 KiB): a transfer-dominated
+  sample measures the payload, not the peer, and routing reads the estimator.
 
 - **A KV-budget refusal MUST release what the request already took** (2026-08-25) —
   `executor.rs` calls `kv_cache_store.clear_request` before returning the

@@ -916,7 +916,11 @@ impl NetworkManager {
             .unwrap_or(true)
     }
 
-    fn forward_ack_deadline_secs(&self, peer: &libp2p::PeerId) -> Option<u64> {
+    fn forward_ack_deadline_secs(
+        &self,
+        peer: &libp2p::PeerId,
+        activation_bytes: usize,
+    ) -> Option<u64> {
         let node_id = self.peer_to_node.get(peer).map(|r| r.clone())?;
         let (features, rtt) = {
             let p = self.shared_state.peer_registry.get(&node_id)?;
@@ -934,10 +938,16 @@ impl NetworkManager {
         // What this peer's acknowledgements have ACTUALLY cost, when we have
         // measured any. The ping-derived figure is the fallback for a peer we
         // have not yet forwarded to.
-        if let Some(observed) = self.ack_rtt.get(peer).and_then(|e| e.deadline_secs()) {
-            return Some(observed);
-        }
-        Some(tensors::ack_deadline_from_rtt(rtt))
+        // Plus the time the payload itself takes to arrive: an acknowledgement
+        // is sent on receipt of the WHOLE message, and a prompt pass is tens
+        // of megabytes where a decode step is a few KB (see
+        // `tensors::ack_deadline_with_payload`).
+        let base = self
+            .ack_rtt
+            .get(peer)
+            .and_then(|e| e.deadline_secs())
+            .unwrap_or_else(|| tensors::ack_deadline_from_rtt(rtt));
+        Some(tensors::ack_deadline_with_payload(base, activation_bytes))
     }
 
     fn fail_tensor_forward(
@@ -1494,7 +1504,7 @@ impl NetworkManager {
                         let mut unacked: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId, u64)> = Vec::new();
                         for (req_id, (uuid, sent_at, target_peer, num_layers, activation_bytes)) in &self.pending_tensor_outbound {
                             let age = now.duration_since(*sent_at);
-                            let _ = (num_layers, activation_bytes);
+                            let _ = num_layers;
                             // This sweep is a BACKSTOP for sends libp2p dropped
                             // silently — not a second, competing deadline. It
                             // must therefore never fire before the pipeline's
@@ -1541,7 +1551,7 @@ impl NetworkManager {
                             if age.as_secs() > timeout_secs {
                                 stale.push((*req_id, *uuid, *target_peer));
                             } else if let Some(deadline_secs) =
-                                self.forward_ack_deadline_secs(target_peer)
+                                self.forward_ack_deadline_secs(target_peer, *activation_bytes)
                             {
                                 // A peer that acknowledges receipt has not: the
                                 // path is dead, whatever the compute deadline

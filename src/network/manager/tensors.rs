@@ -1077,6 +1077,42 @@ pub(super) fn ack_deadline_from_rtt(rtt_ms: u32) -> u64 {
     scaled.clamp(super::RR_ACK_TIMEOUT_SECS, super::RR_ACK_TIMEOUT_MAX_SECS)
 }
 
+/// Bytes per second a forward is assumed to be delivered at when its PAYLOAD
+/// is what takes the time — 1 MiB/s, 8 Mbit/s, slower than nearly any home
+/// uplink, so the allowance errs generous.
+///
+/// The receipt-ACK deadline was a function of round-trip time alone, and an
+/// acknowledgement is sent when the WHOLE message has arrived. A 20 MB
+/// prompt-pass forward to a peer 625 ms away therefore had the same ten-second
+/// floor as a 2 KB decode step — measured live 2026-09-03, the standby for an
+/// 8,111-token gemma prefill was abandoned at that deadline with the transfer
+/// still in flight, and the request failed. At agent-sized prompts a hop is
+/// tens of megabytes (14k tokens × 5120 × f16 ≈ 79 MB on a 14B), so without
+/// this term every WAN prefill forward of that size is failed by construction.
+pub(super) const ACK_ASSUMED_TRANSFER_BYTES_PER_SEC: u64 = 1 << 20;
+
+/// Forwards larger than this do not feed the acknowledgement-latency
+/// estimator. The estimator prices the PEER — how long its event loop takes to
+/// acknowledge — and routing reads it (`PeerInfo::ack_srtt_ms`, capped at
+/// 10 s). A prompt-pass forward's acknowledgement is dominated by moving the
+/// payload, which says nothing about the peer and would price it as slow for
+/// every decode step that follows. Decode forwards are a few KB; this is well
+/// above them and well below any prompt pass worth the name.
+pub(super) const ACK_OBSERVE_MAX_BYTES: usize = 256 * 1024;
+
+/// The receipt-ACK deadline for a forward carrying `activation_bytes`: the
+/// round-trip-derived `base_secs` plus the time the payload itself takes at
+/// [`ACK_ASSUMED_TRANSFER_BYTES_PER_SEC`], never past the request-response
+/// protocol's own timeout (at which libp2p reports a failure anyway).
+pub(super) fn ack_deadline_with_payload(base_secs: u64, activation_bytes: usize) -> u64 {
+    // Whole seconds, rounded DOWN: a payload under a mebibyte — every decode
+    // step — adds nothing, and the deadline for those stays what it was.
+    let transfer = activation_bytes as u64 / ACK_ASSUMED_TRANSFER_BYTES_PER_SEC;
+    base_secs
+        .saturating_add(transfer)
+        .min(super::MAX_TENSOR_FORWARD_SECS)
+}
+
 /// Resolve the `pending_layer_results` waiter for `request_id` with a
 /// `LayerResult::error(reason)`. Used from within `tokio::spawn` closures that
 /// don't have `&mut self` access (where the
@@ -1268,5 +1304,39 @@ mod ack_backoff_tests {
             Some(super::super::RR_ACK_TIMEOUT_SECS),
             "a peer that is answering promptly again must return to the floor"
         );
+    }
+}
+
+#[cfg(test)]
+mod payload_deadline_tests {
+    use super::*;
+
+    /// A decode step adds nothing to the deadline; a prompt pass adds the time
+    /// its bytes take at the assumed slow uplink — the 20 MB gemma prefill that
+    /// was abandoned at the 10 s floor gets 30 s.
+    #[test]
+    fn a_large_forward_earns_the_time_its_bytes_take() {
+        let floor = super::super::RR_ACK_TIMEOUT_SECS;
+        assert_eq!(ack_deadline_with_payload(floor, 0), floor);
+        assert_eq!(
+            ack_deadline_with_payload(floor, 5_000),
+            floor,
+            "a decode step"
+        );
+        assert_eq!(
+            ack_deadline_with_payload(floor, 19_855_748),
+            floor + 18,
+            "the measured 8,111-token gemma prefill"
+        );
+        // 79 MB — a 14k-token prompt through a 14B — gets well over a minute.
+        assert!(ack_deadline_with_payload(floor, 79 << 20) >= floor + 79);
+    }
+
+    /// Never past the protocol's own timeout, which fires regardless.
+    #[test]
+    fn the_payload_allowance_stops_at_the_protocol_timeout() {
+        let cap = super::super::MAX_TENSOR_FORWARD_SECS;
+        assert_eq!(ack_deadline_with_payload(90, usize::MAX), cap);
+        assert_eq!(ack_deadline_with_payload(cap, 1), cap);
     }
 }
