@@ -468,7 +468,17 @@ swarm. Today it is one model and the cost is bounded; the manifest half was the
 urgent part because it silently corrupted metadata rather than wasting a
 transfer.
 
-### Manual shard download ignores private mode when picking a peer (2026-08-21)
+### Manual shard download ignores private mode when picking a peer (2026-08-21) — FIXED 2026-08-23
+
+_**Fixed in `401447ab`** ("private mode now scopes where a shard is downloaded
+from, not just inference"): `download_shard` selects through
+`SharedState::select_best_allowed_peer`, which drops the local node and
+anything outside the pool when private mode is on, and falls through to the
+HuggingFace path when nobody allowed holds the shard. This entry was left
+open by mistake; found on the 2026-09-03 sweep of this file._
+
+**Original note preserved below.**
+
 
 `api/admin_models/shards.rs::download_shard` ("Download this part" in the
 dashboard) builds its holder list from `shard_holders` and hands it to
@@ -5296,6 +5306,15 @@ by default**, having been exercised end to end: against a 3000 MB budget and a
 5232 MB model it chose 13 of 28 layers unprompted and the worker settled at
 **2613 MB**, inside the budget. `SWARMLLM_HYBRID_OFFLOAD=0` disables it.
 
+**The split is now VISIBLE (2026-09-03 evening, unreleased).** It was decided in
+`get_or_spawn`, sent as `--gpu-layers`, logged once at spawn, and then existed
+nowhere a person could read — the models page said `fits_on_gpu: true` for a
+model running 13 of its 28 layers on the card. `WorkerHandle::gpu_layers_on_card`
+records `(on the card, in total)`; `WorkerSummary` carries it into `/v1/status`
+and `swarmllm status` ("graphics card (13 of 28 layers; the rest on the
+processor)"); the models API reports `gpu_layers_on_card` + `num_layers`; and
+the dashboard's placement section shows the split with why it matters.
+
 **What the design turned out to be**, which is much smaller than the note below
 assumed. The transition sits *between* layers in the forward loop, so **no
 architecture code changes at all**: a layer only ever sees tensors on its own
@@ -6434,13 +6453,36 @@ fires on healthy traffic would be worse than none, since this runs on every
 completion.
 
 The removed text is the diagnostic: a leaked marker points at the chat template,
-a stop matching at position 0 points at the prompt. **Still open**: counting it
-as a distinct trace/Prometheus outcome, and whether to fail the request outright
-so retry-capable clients re-route. Failing it is the invasive one — an empty
+a stop matching at position 0 points at the prompt. **The counter is DONE
+(2026-09-03, unreleased)**: `swarmllm_empty_replies_total` on `/metrics`,
+incremented beside the warning (`inference::EMPTY_REPLIES_TOTAL`), so the rate
+is a graph rather than a grep. **Still open**: whether to fail the request
+outright so retry-capable clients re-route. Failing it is the invasive one — an empty
 reply can be legitimate (a model answering an empty prompt), so that needs the
 counter first to show how often it happens in practice.
 
-## Peer-gossiped versions could shorten the update-detection window
+## Peer-gossiped versions could shorten the update-detection window — BUILT 2026-09-03 (unreleased)
+
+**Built as specified below**, with every guard the note asked for.
+`update::PeerVersionWatch` (held on `state.events.peer_versions`) records the
+newer version each peer advertises; the capability-gossip handler feeds it
+through `EventBus::note_peer_version`. A version counts only when it is newer
+than ours AND plausibly adjacent (same major and minor, at most 25 patch
+releases ahead — this project ships several a week), and only when
+`MIN_CORROBORATING_PEERS = 2` DISTINCT peers advertise it; one version nudges
+once; a peer that later advertises something older withdraws its vote; the
+map is capped at 4096 peers. The nudge is a `tokio::sync::Notify`
+(`state.events.update_nudge`) the checker's inter-check wait selects on: it
+brings the next GitHub check forward, no closer than ten minutes to the last
+one and after a random delay of up to 90 s so a swarm noticing one release
+does not poll GitHub in the same second. **It names nothing and fetches
+nothing** — `check_for_update` runs exactly as it does on the hourly poll, and
+GitHub's signed release plus the SHA256 check remain the only things that
+decide what is installed. Pinned by `two_peers_agreeing_on_a_newer_version_
+nudge_once`, `an_older_or_implausible_version_never_nudges` (includes `9.9.9`
+from two peers) and `a_peer_that_downgrades_withdraws_its_vote`.
+
+**Original note preserved below.**
 
 **Status**: not built. Requested during the v0.3.44 update-lifecycle work
 ("nodes report their version, so this could trigger or let other nodes to update
@@ -10229,6 +10271,33 @@ auto-manage OFF holding gemma whole, WSL holding shards 0-1; both prompts.
 The processor-route comparison itself (#444) is therefore **still unmeasured
 on the live pair**: in this topology the hand-off gate fires first.
 
+**Two of the three BUILT 2026-09-03 evening (unreleased):**
+
+- **The capacity bound now charges the prompt's KV cache.**
+  `scheduler::max_hostable_layers` takes `prompt_kv_bytes_per_layer` — positions
+  × `kv_bytes_per_position_per_layer`, from the model's `gguf_meta` geometry
+  when this node holds its header, mirror included for a GQA model on a card
+  (the 295 KB/position figure above) — and charges it on top of the weights
+  for a cold peer and ALONE for a warm one, which used to be uncapped: the
+  #447 card was warm. Unknown prompt or geometry → 0 → weights only, as
+  before. Pinned by `a_long_prompt_shrinks_the_layers_a_peer_may_take`,
+  `a_warm_peer_is_still_bounded_by_the_prompts_kv`,
+  `a_prompt_position_is_priced_like_the_worker_charges_it`.
+- **The segment path has whole-prompt admission.** `model_worker::handle_forward`
+  calls `ensure_room_for_prompt` for a `sequence_num == 0` forward (the prompt
+  pass — gotcha #434's work kind), over the input's sequence axis whichever
+  form it took (`[1, tokens]` or `[1, positions, hidden]`), before any layer
+  runs; tensor-parallel phases and speculative verify rounds are left alone.
+  A refusal is the same `ServiceUnavailable` the `Generate` path raises, at
+  token 0, which the coordinator fails over from. Not exercisable without a
+  model in the unit tests; the admission arithmetic itself is
+  `kv_budget::admit_prompt`, already pinned.
+
+**Still open: the gate itself.** `delegation_target` still runs before the
+priced search and still decides yes/no. Making it a filter wants the live pair
+(`measure_444.sh`) to confirm the search's verdict before it ships — the
+comparison it exists to make has not yet been observed on real machines.
+
 ## A multi-megabyte forward over ONE QUIC stream can kill the connection (measured 2026-09-03, gotcha #446)
 
 **What was seen.** On the live pair — Proxmox (processor) coordinating,
@@ -12247,6 +12316,16 @@ if it matters: re-measure periodically and keep the maximum (bandwidth is a
 hardware ceiling, so the best observation is the least contaminated one — the
 same argument min-of-N already makes within a single measurement), or measure
 lazily on an idle tick rather than at startup. Not yet a demonstrated defect.
+
+**Taken, 2026-09-03 evening (unreleased): re-measure and keep the maximum.**
+`mem_bandwidth::remeasure_keeping_the_best` measures again and records the
+higher figure (`best_of`: an unmeasurable pass is no information, never zero);
+the health monitor calls it on a blocking thread at ten minutes and then
+hourly, only when no inference is in flight on the node (a measurement under a
+decode measures the decode) and never on a node with a card (priced by name).
+A node that booted busy now recovers its real figure within the hour; a node
+busy at re-measure time keeps the figure it earned idle. The reading of the
+number is unchanged: peak sustained decode on an idle machine.
 
 **Do not change the constants without deciding what the number MEANS.** Two
 defensible readings: peak sustained decode for that model on an idle machine

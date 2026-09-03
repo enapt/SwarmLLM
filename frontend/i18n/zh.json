@@ -761,6 +761,8 @@
   "perf.ttft_label": "首个 token {value}",
   "placement.configured": "你已将此节点设置为仅使用处理器。",
   "placement.gpu_too_old": "这张显卡比此版本支持的更旧，因此改用处理器。",
+  "placement.hybrid": "{total} 层中有 {on} 层在显卡上",
+  "placement.hybrid_detail": "其余部分在处理器上运行，因此这个模型比完全在显卡上的模型慢。释放显存可以把更多部分移到显卡上。",
   "placement.not_enough_vram": "它需要的显存超过了启动时的可用量。显存释放后会重新使用显卡。",
   "placement.on_cpu": "正在处理器上运行",
   "placement.section": "运行位置",

@@ -761,6 +761,8 @@
   "perf.ttft_label": "erstes Token {value}",
   "placement.configured": "Sie haben diesen Knoten so eingestellt, dass nur der Prozessor verwendet wird.",
   "placement.gpu_too_old": "Diese Grafikkarte ist älter als von dieser Version unterstützt, daher wird der Prozessor verwendet.",
+  "placement.hybrid": "{on} von {total} Schichten auf der Grafikkarte",
+  "placement.hybrid_detail": "Der Rest läuft auf dem Prozessor – deshalb ist dieses Modell langsamer als eines, das ganz auf der Karte liegt. Gib Grafikspeicher frei, um mehr davon dorthin zu verschieben.",
   "placement.not_enough_vram": "Es braucht mehr Grafikspeicher, als beim Start frei war. Sobald wieder Speicher frei ist, wird die Grafikkarte erneut genutzt.",
   "placement.on_cpu": "Läuft auf dem Prozessor",
   "placement.section": "Wo es läuft",

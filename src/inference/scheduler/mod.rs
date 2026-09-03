@@ -120,20 +120,34 @@ fn max_hostable_layers(
     capability: Option<&swarmllm_types::NodeCapability>,
     bytes_per_layer: u64,
     already_warm: bool,
+    // What THIS prompt's KV cache costs per layer on that peer — positions ×
+    // bytes per position per layer, including the f16 mirror where its card
+    // keeps one. 0 when the prompt length or the model's geometry is unknown.
+    prompt_kv_bytes_per_layer: u64,
 ) -> Option<u32> {
-    // A peer that is already serving this model has already paid for it. The
-    // advertised figure is free memory RIGHT NOW (`health/monitor` queries the
-    // card on every broadcast), so it EXCLUDES the weights of anything resident
-    // — meaning the one node that certainly can hold the model reports the
-    // least room for it, and capping it would route around the best-placed
-    // machine in the swarm.
+    // A peer that is already serving this model has already paid for its
+    // WEIGHTS. The advertised figure is free memory RIGHT NOW (`health/monitor`
+    // queries the card on every broadcast), so it EXCLUDES the weights of
+    // anything resident — meaning the one node that certainly can hold the
+    // model reports the least room for it, and charging it for the weights
+    // would route around the best-placed machine in the swarm.
     //
     // This is gotcha #329 from the other side: "is it loaded?" and "would it
     // fit?" are different questions, and free memory only answers the second.
-    if already_warm {
-        return None;
-    }
-    if bytes_per_layer == 0 {
+    //
+    // It has NOT paid for this prompt's KV cache, which is why the prompt term
+    // applies to a warm peer too. The capacity bound used to be weights-only:
+    // a warm 6 GB card 500 ms away was handed 24 layers of an 8,111-token
+    // prompt — ~2.4 GB of KV it did not have — and its worker died in
+    // attention with `CUDA_ERROR_OUT_OF_MEMORY` 22 s in, with no standby
+    // (gotcha #447).
+    let per_layer = if already_warm {
+        prompt_kv_bytes_per_layer
+    } else {
+        bytes_per_layer.saturating_add(prompt_kv_bytes_per_layer)
+    };
+    if per_layer == 0 || (!already_warm && bytes_per_layer == 0) {
+        // Nothing known to charge: unknown never excludes (see the doc comment).
         return None;
     }
     let cap = capability?;
@@ -149,7 +163,30 @@ fn max_hostable_layers(
         return None;
     }
     let usable_bytes = (free_mb as f64 * 1_048_576.0 / DELEGATE_VRAM_MARGIN) as u64;
-    Some((usable_bytes / bytes_per_layer) as u32)
+    Some((usable_bytes / per_layer) as u32)
+}
+
+/// KV-cache bytes ONE prompt position costs across ONE layer of `meta`'s model
+/// on a peer with (`on_gpu`) or without a graphics card.
+///
+/// The same arithmetic the worker charges at admission
+/// (`kv_budget::kv_bytes_per_token` over `standard_kv_elems`), so the
+/// coordinator's bound and the peer's refusal agree about the shape. A CUDA
+/// worker keeps an f16 mirror of a GQA model's cache for the flash kernel
+/// (`layers::model_wants_kv_mirror`), which is the same elements again at half
+/// the width — 295 KB per position over Gemma-2's 24 middle layers, mirror
+/// included, which is the figure the #447 worker ran out of memory against.
+/// DeepSeek-style MLA caches wider decompressed heads and is priced LOW here;
+/// the peer's own admission remains the backstop.
+fn kv_bytes_per_position_per_layer(
+    meta: &crate::inference::split::GgufTensorMeta,
+    on_gpu: bool,
+) -> u64 {
+    let (k, v) =
+        crate::inference::split::kv_budget::standard_kv_elems(meta.head_count_kv, meta.head_dim);
+    let mirrored = on_gpu
+        && crate::inference::layers::model_wants_kv_mirror(meta.head_count, meta.head_count_kv);
+    crate::inference::split::kv_budget::kv_bytes_per_token(1, k, v, mirrored)
 }
 
 /// How far away a peer may be and still be handed a whole model, in ms.
@@ -1188,6 +1225,18 @@ impl PipelineScheduler {
         // on-disk quantized figure, which is what the peer's loader charges
         // against its budget too.
         let bytes_per_layer = manifest.total_size_bytes / manifest.num_layers.max(1) as u64;
+        // What THIS prompt's KV cache costs per layer, on a card and on a
+        // processor, from the model's geometry when this node holds its
+        // header (`gguf_meta` is filled for every model with a local header).
+        // Unknown → 0 → the bound charges weights only, as it always did.
+        let (prompt_kv_per_layer_gpu, prompt_kv_per_layer_cpu) =
+            match (prompt_tokens, self.shared_state.gguf_meta.get(&manifest.id)) {
+                (Some(tokens), Some(meta)) => (
+                    kv_bytes_per_position_per_layer(&meta, true).saturating_mul(u64::from(tokens)),
+                    kv_bytes_per_position_per_layer(&meta, false).saturating_mul(u64::from(tokens)),
+                ),
+                _ => (0, 0),
+            };
 
         // Build set of pool member NodeIds for preferred routing.
         // Pool devices are trusted, free (no credit cost), and usually low latency.
@@ -1443,10 +1492,19 @@ impl PipelineScheduler {
                     &manifest.id,
                     std::time::Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
                 );
-                self.shared_state
-                    .peer_registry
-                    .get(&node_id)
-                    .and_then(|p| max_hostable_layers(p.capability.as_ref(), bytes_per_layer, warm))
+                let prompt_kv_per_layer = if has_gpu {
+                    prompt_kv_per_layer_gpu
+                } else {
+                    prompt_kv_per_layer_cpu
+                };
+                self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                    max_hostable_layers(
+                        p.capability.as_ref(),
+                        bytes_per_layer,
+                        warm,
+                        prompt_kv_per_layer,
+                    )
+                })
             };
             let gpu_vram_available_mb = if node_id == *local_node_id {
                 // Never used for the local node — the loader's own admission

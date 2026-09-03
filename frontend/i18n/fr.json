@@ -761,6 +761,8 @@
   "perf.ttft_label": "premier jeton {value}",
   "placement.configured": "Vous avez configuré ce nœud pour n'utiliser que le processeur.",
   "placement.gpu_too_old": "Cette carte graphique est plus ancienne que ce que cette version prend en charge : le processeur est utilisé à la place.",
+  "placement.hybrid": "{on} couches sur {total} sur la carte graphique",
+  "placement.hybrid_detail": "Le reste s'exécute sur le processeur, c'est pourquoi ce modèle est plus lent qu'un modèle entièrement sur la carte. Libérez de la mémoire graphique pour en déplacer davantage.",
   "placement.not_enough_vram": "Il lui faut plus de mémoire graphique qu'il n'y en avait de libre au démarrage. Il réutilisera la carte graphique dès que de la mémoire se libérera.",
   "placement.on_cpu": "S'exécute sur le processeur",
   "placement.section": "Où il s'exécute",

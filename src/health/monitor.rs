@@ -172,6 +172,68 @@ impl HealthMonitor {
     }
 
     /// Compute how many base ticks (30s each) between heavy gossip broadcasts.
+    /// Re-measure this machine's memory bandwidth while it is idle, keeping the
+    /// higher figure.
+    ///
+    /// The first measurement is taken on the first capability broadcast,
+    /// whatever else the machine is doing at that moment, and since gotcha
+    /// #428 it is the speed a processor-only node advertises — i.e. how much
+    /// work the swarm offers it. A node that booted while a build or a browser
+    /// was streaming memory carried a low figure for its whole run (Proxmox
+    /// read 23.5 GB/s one boot and 25.9 the next). Bandwidth is a hardware
+    /// ceiling, so the best observation is the least contaminated one: this
+    /// re-measures at ten minutes and then hourly, only when no inference is
+    /// in flight (a measurement taken under a decode measures the decode), on
+    /// a blocking thread so the 250 ms read does not stall the health loop.
+    /// GPU nodes are priced by their card's name and never measure.
+    async fn maybe_remeasure_memory_bandwidth(&self, nonce: u64) {
+        /// Ticks (30 s each) between re-measurements: hourly.
+        const REMEASURE_EVERY_TICKS: u64 = 120;
+        /// The first re-measurement, once the boot-time noise has settled.
+        const FIRST_REMEASURE_TICK: u64 = 20;
+        if self.shared_state.gpu_info.is_some() {
+            return;
+        }
+        if nonce != FIRST_REMEASURE_TICK && !nonce.is_multiple_of(REMEASURE_EVERY_TICKS) {
+            return;
+        }
+        if self.shared_state.active_inference_load() > 0
+            || !self
+                .shared_state
+                .model_process_pool
+                .models_with_inflight_requests()
+                .is_empty()
+        {
+            tracing::debug!(
+                target: "swarmllm::health::monitor",
+                "memory bandwidth re-measure skipped: inference in flight"
+            );
+            return;
+        }
+        let before = crate::inference::mem_bandwidth::measured_gbps();
+        let after = tokio::task::spawn_blocking(
+            crate::inference::mem_bandwidth::remeasure_keeping_the_best,
+        )
+        .await
+        .ok()
+        .flatten();
+        match (before, after) {
+            (Some(b), Some(a)) if a > b => tracing::info!(
+                target: "swarmllm::health::monitor",
+                before_gbps = format!("{b:.1}"),
+                after_gbps = format!("{a:.1}"),
+                "Memory bandwidth re-measured higher on an idle machine — the advertised \
+                 speed rises with it"
+            ),
+            _ => tracing::debug!(
+                target: "swarmllm::health::monitor",
+                before_gbps = ?before,
+                after_gbps = ?after,
+                "memory bandwidth re-measured; best figure unchanged"
+            ),
+        }
+    }
+
     /// Scales with log(peer_count) to reduce bandwidth at large network sizes.
     ///   ≤10 peers:  every tick   (30s)
     ///   ~100 peers: every 2 ticks (60s)
@@ -228,6 +290,8 @@ impl HealthMonitor {
                     }
 
                     self.maybe_warn_wsl_firewall();
+
+                    self.maybe_remeasure_memory_bandwidth(nonce).await;
 
                     // Cleanup tasks: run every tick (cheap, local-only)
                     self.cleanup_acquisition_progress();

@@ -961,6 +961,8 @@ impl SharedState {
                 activity_tx: broadcast::channel(256).0,
                 activity_history: parking_lot::Mutex::new(VecDeque::new()),
                 ws_tickets: DashMap::new(),
+                peer_versions: parking_lot::Mutex::new(crate::update::PeerVersionWatch::default()),
+                update_nudge: tokio::sync::Notify::new(),
             },
             // Root-level fields (not sub-structed)
             executor,

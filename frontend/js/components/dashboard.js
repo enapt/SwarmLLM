@@ -1281,6 +1281,27 @@
         // tester spent a session on exactly this question (2026-08-10).
         var placementSectionHtml = '';
         var cpuReason = m.cpu_placement_reason;
+        // A HYBRID split: part of the model on the card, the rest on the
+        // processor. Reported by the daemon from the worker it actually spawned
+        // (`gpu_layers_on_card`); until this existed the only trace of the
+        // split was one log line at spawn, and the card showed `fits_on_gpu:
+        // true` for a model running 13 of its 28 layers on the card — so a
+        // user could not tell why it was slower than the number promised.
+        if (!cpuReason && hostedShards > 0 && typeof m.gpu_layers_on_card === 'number' && m.num_layers > 0) {
+          placementSectionHtml =
+            '<div class="mce-section mce-section-placement mce-section-state-amber" title="' + U.escapeHtml(I18n.t('placement.tip')) + '">' +
+              '<div class="mce-section-header">' +
+                '<div class="mce-section-title">' + U.escapeHtml(I18n.t('placement.section')) + '</div>' +
+              '</div>' +
+              '<div class="mce-section-body">' +
+                '<span class="composite-badge cb-fragile">' +
+                  '<span class="mce-section-icon">🖥</span>' +
+                  U.escapeHtml(I18n.t('placement.hybrid', { on: m.gpu_layers_on_card, total: m.num_layers })) +
+                '</span>' +
+                '<div class="mce-section-detail">' + U.escapeHtml(I18n.t('placement.hybrid_detail')) + '</div>' +
+              '</div>' +
+            '</div>';
+        }
         if (cpuReason && hostedShards > 0) {
           // `not_enough_vram` is the recoverable one and reads as amber; the
           // other two are settled facts about this machine until something

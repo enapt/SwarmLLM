@@ -4,7 +4,48 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **A node learns about a new release from its peers.** When two different
+  peers advertise the same newer version of SwarmLLM, the node brings its next
+  update check forward instead of waiting up to an hour for the scheduled
+  poll. The peers' word is never trusted for anything more: the check is the
+  same one the hourly poll makes, GitHub's signed release decides what exists,
+  and the download is still verified by checksum. A single peer's claim, a
+  version that is not plausibly the next few releases, or a peer that later
+  reports something older, all count for nothing; and the brought-forward
+  check waits a random moment first so a whole swarm noticing one release
+  does not ask GitHub in the same second.
+- **The dashboard, `swarmllm status` and the models API now say when a model
+  is split between the graphics card and the processor**, and how many of its
+  layers are on each. A model running 13 of its 28 layers on the card used to
+  show "fits on GPU" and nothing else, so there was no way to tell why it was
+  slower than expected. The placement note also says what to do about it.
+- **`/metrics` counts empty replies.** A reply the model generated and the
+  cleanup then removed entirely is delivered as an ordinary success with empty
+  content, so no other counter moved when it happened; how often it happens on
+  a node was knowable only by reading the log. `swarmllm_empty_replies_total`
+  makes it a graph.
+
 ### Fixed
+
+- **A card that already holds a model is no longer handed more of a long
+  prompt than it has memory for.** The routing search sized a peer by the
+  weights it would need and never by the conversation's cache, so a 6 GB card
+  that was already running the model — and therefore looked unlimited — was
+  given 24 layers of an 8,000-token prompt and ran out of memory 22 seconds in.
+  The prompt's cache is now part of the price, for a card that has to load the
+  model and for one that already has it. And a node asked to run part of a
+  model now checks the whole prompt fits before it starts, so the refusal is an
+  immediate "not here" the requester routes around rather than a crash partway
+  through.
+- **A machine that started while busy no longer advertises a slow processor
+  for its whole run.** The memory-bandwidth measurement that sets a
+  processor-only node's advertised speed was taken once, at whatever moment
+  the node first announced itself; a build or a browser running at that moment
+  made the node look slower to every peer until its next restart. It is now
+  re-measured on an idle machine after ten minutes and then hourly, and the
+  best figure is kept.
 
 - **A node could sit "out of storage budget" for ever while its disk was
   nowhere near the limit you set, and nothing said why.** A tester holding

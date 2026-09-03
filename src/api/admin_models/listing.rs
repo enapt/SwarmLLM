@@ -495,6 +495,17 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 "gpu_budget_mb".to_string(),
                 serde_json::json!(pool.vram_budget_mb()),
             );
+            // A hybrid split, when the resident worker runs one: how many of
+            // the model's layers are on the card. `fits_on_gpu: true` alone
+            // told a user nothing about a model running 13 of 28 layers there
+            // and the rest on the processor — the only trace of the split was
+            // one log line at spawn.
+            let hybrid = pool.hybrid_gpu_layers(&model_id);
+            obj.insert(
+                "gpu_layers_on_card".to_string(),
+                serde_json::json!(hybrid.map(|(n, _)| n)),
+            );
+            obj.insert("num_layers".to_string(), serde_json::json!(m.num_layers));
             obj.insert("acquisition".to_string(), serde_json::json!(acq_state));
             obj.insert(
                 "acquisition_progress".to_string(),

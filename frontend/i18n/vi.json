@@ -761,6 +761,8 @@
   "perf.ttft_label": "token đầu {value}",
   "placement.configured": "Bạn đã đặt nút này chỉ dùng bộ xử lý.",
   "placement.gpu_too_old": "Card đồ họa này cũ hơn mức bản dựng này hỗ trợ, nên bộ xử lý được dùng thay thế.",
+  "placement.hybrid": "{on} trong {total} lớp chạy trên card đồ họa",
+  "placement.hybrid_detail": "Phần còn lại chạy trên bộ xử lý, vì vậy mô hình này chậm hơn mô hình nằm hoàn toàn trên card. Giải phóng bộ nhớ đồ họa để chuyển thêm phần lên đó.",
   "placement.not_enough_vram": "Nó cần nhiều bộ nhớ đồ họa hơn mức còn trống lúc khởi động. Nó sẽ dùng lại card đồ họa ngay khi có bộ nhớ trống.",
   "placement.on_cpu": "Đang chạy trên bộ xử lý",
   "placement.section": "Chạy ở đâu",

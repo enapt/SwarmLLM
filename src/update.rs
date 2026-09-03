@@ -205,6 +205,107 @@ pub(crate) fn should_stage_download(mode: crate::config::UpdateMode, info: &Upda
     mode >= crate::config::UpdateMode::Download && info.self_update_supported
 }
 
+/// Peers advertising a newer version than ours, and whether enough of them
+/// agree for the next GitHub check to be brought forward.
+///
+/// A peer's advertised version is SELF-ATTESTED — nothing proves a node runs
+/// what it claims — so this signal is never load-bearing. It may only bring the
+/// next check forward; it never selects, names or fetches an artifact. GitHub's
+/// signed release stays the only source of what gets installed, and the SHA256
+/// verification the only thing that decides it is genuine. Without that rule,
+/// announcing `9.9.9` would be a one-gossip-message way to make every node in
+/// the swarm hit the update path at once.
+///
+/// Three more guards, each cheap: a single node's claim is worth nothing
+/// ([`MIN_CORROBORATING_PEERS`] distinct peers must agree); a version has to be
+/// plausibly adjacent to ours ([`plausibly_adjacent`] — a jump of several
+/// releases is more likely a lie or a stale field); and one version nudges
+/// once, so a swarm that has moved on does not re-trigger a check every time a
+/// capability update lands.
+#[derive(Debug, Default)]
+pub struct PeerVersionWatch {
+    /// The newer version each peer most recently advertised.
+    seen: std::collections::HashMap<crate::types::NodeId, String>,
+    /// The version the last nudge was issued for.
+    nudged_for: Option<String>,
+}
+
+/// Distinct peers that must advertise the same newer version before it counts.
+pub const MIN_CORROBORATING_PEERS: usize = 2;
+
+/// How many patch releases ahead of ours a peer's version may be and still be
+/// believed. This project ships several patch releases a week and a node can
+/// miss a few, so the window is wide; a different major or minor is a lie or
+/// a stale field until GitHub says otherwise.
+const MAX_PLAUSIBLE_PATCH_JUMP: u64 = 25;
+
+/// Bound on remembered peers, so a flood of fabricated node ids cannot grow
+/// the map. Far above any real swarm size.
+const MAX_PEER_VERSIONS: usize = 4096;
+
+fn version_triple(v: &str) -> (u64, u64, u64) {
+    let mut it = v.trim_start_matches('v').split('.');
+    let mut next = || {
+        it.next()
+            .and_then(|p| p.split('-').next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    (next(), next(), next())
+}
+
+/// Same major and minor as ours, and no more than [`MAX_PLAUSIBLE_PATCH_JUMP`]
+/// patch releases ahead.
+pub(crate) fn plausibly_adjacent(current: &str, candidate: &str) -> bool {
+    let (cm, cn, cp) = version_triple(current);
+    let (lm, ln, lp) = version_triple(candidate);
+    cm == lm && cn == ln && lp <= cp.saturating_add(MAX_PLAUSIBLE_PATCH_JUMP)
+}
+
+impl PeerVersionWatch {
+    /// Record what `peer` advertises. Returns the version to check for when this
+    /// observation is the one that reaches corroboration — `None` otherwise.
+    pub fn observe(
+        &mut self,
+        peer: crate::types::NodeId,
+        advertised: &str,
+        current: &str,
+    ) -> Option<String> {
+        let advertised = advertised.trim_start_matches('v');
+        if !is_newer_version(current, advertised) || !plausibly_adjacent(current, advertised) {
+            // Not ahead of us, or not believably so: forget whatever this peer
+            // said before, so a downgraded or corrected peer stops counting.
+            self.seen.remove(&peer);
+            return None;
+        }
+        if self.seen.len() >= MAX_PEER_VERSIONS && !self.seen.contains_key(&peer) {
+            return None;
+        }
+        self.seen.insert(peer, advertised.to_string());
+        let agreeing = self
+            .seen
+            .values()
+            .filter(|v| v.as_str() == advertised)
+            .count();
+        if agreeing < MIN_CORROBORATING_PEERS || self.nudged_for.as_deref() == Some(advertised) {
+            return None;
+        }
+        self.nudged_for = Some(advertised.to_string());
+        Some(advertised.to_string())
+    }
+}
+
+/// Shortest gap between two checks brought forward by peer gossip. The
+/// periodic poll is hourly; a nudge may pull ONE check inside that hour, not
+/// turn every capability update into a GitHub request.
+const NUDGED_CHECK_MIN_SPACING: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Upper bound of the random delay before a nudged check. The motivating case
+/// is every node seeing the anchor jump at once, which is precisely a
+/// thundering herd against one API; the periodic poll already spreads itself
+/// and a triggered one needs it more, not less.
+const NUDGED_CHECK_MAX_JITTER_SECS: u64 = 90;
+
 impl UpdateChecker {
     pub fn new(
         config: UpdateConfig,
@@ -1072,9 +1173,43 @@ impl UpdateChecker {
                 }
             }
 
-            // Wait for next check interval or shutdown
+            // Wait for the next check interval, a corroborated peer-version
+            // nudge, or shutdown. The nudge only brings the next GitHub check
+            // forward — it names nothing and fetches nothing (see
+            // `PeerVersionWatch`) — jittered so a whole swarm noticing one
+            // release does not poll GitHub in the same second, and no closer
+            // than `NUDGED_CHECK_MIN_SPACING` to the previous check.
+            let checked_at = std::time::Instant::now();
+            let nudge = self.shared.as_ref().map(|s| &s.events.update_nudge);
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {}
+                _ = async {
+                    match nudge {
+                        Some(n) => n.notified().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    let since = checked_at.elapsed();
+                    let wait = NUDGED_CHECK_MIN_SPACING
+                        .saturating_sub(since)
+                        .saturating_add(std::time::Duration::from_secs(
+                            rand::random::<u64>() % (NUDGED_CHECK_MAX_JITTER_SECS + 1),
+                        ));
+                    tracing::info!(
+                        in_secs = wait.as_secs(),
+                        "Peers report a newer version — checking GitHub for it ahead of the \
+                         hourly poll"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                tracing::debug!("Update checker shutting down");
+                                return;
+                            }
+                        }
+                    }
+                }
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         tracing::debug!("Update checker shutting down");
@@ -2044,5 +2179,74 @@ mod pending_restart_tests {
     #[test]
     fn a_newer_running_version_is_not_a_pending_restart() {
         assert!(restart_required_for("0.3.89-alpha", Some("0.3.85-alpha")).is_none());
+    }
+
+    /// The peer signal brings a check forward only when two DISTINCT peers agree
+    /// on a believably newer version — and only once per version.
+    #[test]
+    fn two_peers_agreeing_on_a_newer_version_nudge_once() {
+        use super::PeerVersionWatch;
+        use crate::types::NodeId;
+        let mut w = PeerVersionWatch::default();
+        let a = NodeId([1u8; 32]);
+        let b = NodeId([2u8; 32]);
+        let current = "0.3.152-alpha";
+        // One peer is a claim, not evidence.
+        assert_eq!(w.observe(a.clone(), "0.3.153-alpha", current), None);
+        // The same peer repeating itself is still one peer.
+        assert_eq!(w.observe(a.clone(), "0.3.153-alpha", current), None);
+        // A second, distinct peer corroborates.
+        assert_eq!(
+            w.observe(b.clone(), "0.3.153-alpha", current),
+            Some("0.3.153-alpha".to_string())
+        );
+        // The same version does not nudge again on the next gossip round.
+        assert_eq!(w.observe(a, "0.3.153-alpha", current), None);
+        assert_eq!(w.observe(b, "0.3.153-alpha", current), None);
+    }
+
+    /// Nothing behind or level with us counts, and neither does a jump no real
+    /// release cadence produces — `9.9.9` from two colluding peers must not make
+    /// the swarm hit GitHub.
+    #[test]
+    fn an_older_or_implausible_version_never_nudges() {
+        use super::{plausibly_adjacent, PeerVersionWatch};
+        use crate::types::NodeId;
+        let mut w = PeerVersionWatch::default();
+        let current = "0.3.152-alpha";
+        for (i, v) in [
+            "0.3.152-alpha",
+            "0.3.151-alpha",
+            "9.9.9",
+            "0.4.0-alpha",
+            "1.3.152",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(w.observe(NodeId([i as u8; 32]), v, current), None, "{v}");
+            assert_eq!(
+                w.observe(NodeId([100 + i as u8; 32]), v, current),
+                None,
+                "{v}"
+            );
+        }
+        // A wide-but-real patch jump is still believed (a node can miss a week).
+        assert!(plausibly_adjacent(current, "0.3.170-alpha"));
+        assert!(!plausibly_adjacent(current, "0.3.999-alpha"));
+    }
+
+    /// A peer that corrects itself downward stops counting.
+    #[test]
+    fn a_peer_that_downgrades_withdraws_its_vote() {
+        use super::PeerVersionWatch;
+        use crate::types::NodeId;
+        let mut w = PeerVersionWatch::default();
+        let current = "0.3.152-alpha";
+        let a = NodeId([1u8; 32]);
+        assert_eq!(w.observe(a.clone(), "0.3.153-alpha", current), None);
+        assert_eq!(w.observe(a, "0.3.152-alpha", current), None);
+        // Only one OTHER peer now says 153: not enough.
+        assert_eq!(w.observe(NodeId([2u8; 32]), "0.3.153-alpha", current), None);
     }
 }

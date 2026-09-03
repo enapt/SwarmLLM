@@ -54,6 +54,18 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         requests as f64,
     );
 
+    // Replies the model generated that finalisation removed entirely. Such a
+    // reply reaches the client as an ordinary `200` with empty content, so it
+    // moves no other counter; without this the rate was knowable only from the
+    // log. See `inference::EMPTY_REPLIES_TOTAL`.
+    write_counter(
+        &mut buf,
+        "swarmllm_empty_replies_total",
+        "Replies the model generated that finalisation removed entirely (control tokens or a \
+         stop sequence matching at once) — delivered to the client as an empty success",
+        crate::inference::EMPTY_REPLIES_TOTAL.load(Ordering::Relaxed) as f64,
+    );
+
     // Credits. `/metrics` carried only the balance while the JSON API grew the
     // lifetime figures, so anyone monitoring with Prometheus rather than the
     // dashboard saw a materially poorer picture — reported 2026-07-30 alongside

@@ -761,6 +761,8 @@
   "perf.ttft_label": "ilk token {value}",
   "placement.configured": "Bu düğümü yalnızca işlemciyi kullanacak şekilde ayarladınız.",
   "placement.gpu_too_old": "Bu ekran kartı bu sürümün desteklediğinden eski, bu yüzden işlemci kullanılıyor.",
+  "placement.hybrid": "{total} katmandan {on} tanesi ekran kartında",
+  "placement.hybrid_detail": "Geri kalanı işlemcide çalışır; bu yüzden bu model tamamı ekran kartında olan bir modelden daha yavaştır. Daha fazlasını oraya taşımak için grafik belleği boşaltın.",
   "placement.not_enough_vram": "Başlatıldığında boşta olandan daha fazla ekran belleği gerekiyor. Bellek boşaldığında ekran kartı yeniden kullanılacak.",
   "placement.on_cpu": "İşlemcide çalışıyor",
   "placement.section": "Nerede çalışıyor",

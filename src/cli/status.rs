@@ -160,9 +160,22 @@ fn describe_worker(w: &serde_json::Value) -> String {
         .and_then(|v| v.as_u64())
         .map(|p| format!("pid {p}"))
         .unwrap_or_else(|| "pid unknown".to_string());
-    let device = match (s("device"), w.get("cpu_reason").and_then(|v| v.as_str())) {
-        (_, Some(reason)) => format!("processor ({})", cpu_reason_in_words(reason)),
-        (d, None) => d.to_string(),
+    let split = (
+        w.get("gpu_layers_on_card").and_then(|v| v.as_u64()),
+        w.get("layers_total").and_then(|v| v.as_u64()),
+    );
+    let device = match (
+        s("device"),
+        w.get("cpu_reason").and_then(|v| v.as_str()),
+        split,
+    ) {
+        (_, Some(reason), _) => format!("processor ({})", cpu_reason_in_words(reason)),
+        // A hybrid split: the part on the card is the part worth naming,
+        // because the rest is what makes it slower than "graphics card" reads.
+        (d, None, (Some(on), Some(total))) => {
+            format!("{d} ({on} of {total} layers; the rest on the processor)")
+        }
+        (d, None, _) => d.to_string(),
     };
     let busy = match n("in_flight") {
         0 => "idle".to_string(),
@@ -261,5 +274,29 @@ mod tests {
             let tag = r.as_str();
             assert_ne!(cpu_reason_in_words(tag), tag, "no words for {tag}");
         }
+    }
+
+    /// A hybrid worker says how much of the model is on the card — the split
+    /// used to exist only in one log line at spawn (gotcha #431's follow-up).
+    #[test]
+    fn a_hybrid_worker_names_its_split() {
+        let w = serde_json::json!({
+            "model": "qwen2.5-coder-7b", "pid": 4242, "device": "graphics card",
+            "cpu_reason": null, "in_flight": 0, "idle_secs": 5, "age_secs": 60, "dead": false,
+            "gpu_estimate_mb": 5232, "gpu_layers_on_card": 13, "layers_total": 28
+        });
+        let line = describe_worker(&w);
+        assert!(
+            line.contains("13 of 28 layers"),
+            "the split must be readable from the line: {line}"
+        );
+        assert!(line.contains("rest on the processor"), "{line}");
+        // A worker wholly on the card says nothing about layers.
+        let whole = serde_json::json!({
+            "model": "m", "pid": 1, "device": "graphics card", "cpu_reason": null,
+            "in_flight": 0, "idle_secs": 5, "age_secs": 60, "dead": false, "gpu_estimate_mb": 1,
+            "gpu_layers_on_card": null, "layers_total": null
+        });
+        assert!(!describe_worker(&whole).contains("layers"));
     }
 }

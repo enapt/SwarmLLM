@@ -948,6 +948,7 @@ async fn handle_batch_forward(
     writer: &mut IpcWriter,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
+    prefix_cache: &Arc<PrefixCache>,
     data_dir: &std::path::Path,
     requests: Vec<IpcForward>,
     activation_lens: Vec<u32>,
@@ -1010,6 +1011,7 @@ async fn handle_batch_forward(
             writer,
             models,
             kv_store,
+            prefix_cache,
             data_dir,
             fwd,
             slice,
@@ -1228,6 +1230,7 @@ async fn handle_forward(
     writer: &mut IpcWriter,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
+    prefix_cache: &Arc<PrefixCache>,
     data_dir: &std::path::Path,
     fwd: IpcForward,
     mut activation_bytes: Vec<u8>,
@@ -1502,8 +1505,31 @@ async fn handle_forward(
         None
     };
 
-    // Run forward pass — CPU-bound, use block_in_place
+    // Whole-prompt admission for a SEGMENT's prompt pass (gotcha #447).
+    //
+    // `ensure_room_for_prompt` guarded the `Generate` path only; a segment's
+    // prompt pass was admitted chunk by chunk (`claim_room` at each growth
+    // boundary), so the card filled up until attention's transient
+    // allocation — not the cache — hit the wall: a 6 GB card handed 24 layers
+    // of an 8,111-token prompt died 22 s in with `CUDA_ERROR_OUT_OF_MEMORY`
+    // and no standby. Decided here, before any layer runs, the refusal is a
+    // 503 at token 0 that the coordinator fails over from.
+    //
+    // The prompt pass is `sequence_num == 0` (the work KIND, gotcha #434); a
+    // decode step of the same segment is one position and skips this. The
+    // positions are the input's sequence axis whichever form it arrived in —
+    // `[1, tokens]` for a first segment, `[1, positions, hidden]` for hidden
+    // states. Tensor-parallel phases and speculative verify rounds keep their
+    // own shape and are left alone.
     let tp_meta = fwd.tp_meta.clone();
+    if fwd.sequence_num == 0 && tp_meta.is_none() && !want_spec_output {
+        let positions = input_tensor.dims().get(1).copied().unwrap_or(0);
+        if positions > 0 {
+            ensure_room_for_prompt(model, kv_store, prefix_cache, &req_id_str, positions)?;
+        }
+    }
+
+    // Run forward pass — CPU-bound, use block_in_place
     let compute_result =
         tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
             // Speculative verify: multi-position forward returning per-position
@@ -3975,6 +4001,7 @@ async fn handle_daemon_msg(
                 writer,
                 models,
                 kv_store,
+                prefix_cache,
                 data_dir,
                 fwd,
                 payload,
@@ -3995,6 +4022,7 @@ async fn handle_daemon_msg(
                 writer,
                 models,
                 kv_store,
+                prefix_cache,
                 data_dir,
                 requests,
                 activation_lens,

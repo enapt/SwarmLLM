@@ -145,6 +145,7 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
     // a stop sequence matching at position 0 points at the prompt. Logged at
     // WARN because a user is looking at an empty answer either way.
     if let Some(evidence) = emptied_reply_evidence(had_content, text, &before) {
+        EMPTY_REPLIES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::warn!(
             matched_stop = ?matched,
             generated = %evidence,
@@ -156,6 +157,21 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
 
     matched
 }
+
+/// Replies the model generated and finalisation then removed entirely —
+/// `swarmllm_empty_replies_total` on `/metrics`.
+///
+/// The warning beside it is for a person reading the log; this is for a graph.
+/// An emptied reply reaches the client as `content: ""`, `finish_reason:
+/// "stop"`, HTTP 200 — indistinguishable from a real answer — so nothing in the
+/// response, the request counters or the latency histogram moves when it
+/// happens, and how OFTEN it happens on a node was unknowable except by reading
+/// its log. This is the figure the open question "should an emptied reply fail
+/// the request so a client re-routes?" needs before it can be answered: an
+/// empty reply can be legitimate (an empty prompt), so the rate has to be seen
+/// first. A `static` because `finalize_reply_text` is a free function reached
+/// from all three reply-text sources and has no state to hang a counter on.
+pub static EMPTY_REPLIES_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Longest reply still treated as "a stop sequence ate the answer".
 ///
@@ -609,6 +625,24 @@ mod finalize_reply_text_tests {
     /// caller then returns HTTP 200 with empty content and
     /// `finish_reason: "stop"`, which no client can tell from a real answer —
     /// so this case has to be recognisable in the log.
+    /// The emptied-reply counter moves when a reply is emptied. Delta-based,
+    /// because the counter is process-wide and other tests finalise text in
+    /// parallel; that the counter does NOT move on an ordinary reply is pinned
+    /// through `emptied_reply_evidence`, which is the one condition it keys on.
+    #[test]
+    fn an_emptied_reply_is_counted() {
+        use super::EMPTY_REPLIES_TOTAL;
+        use std::sync::atomic::Ordering;
+        let before = EMPTY_REPLIES_TOTAL.load(Ordering::Relaxed);
+        let mut t = String::from("<|im_end|>");
+        finalize_reply_text(&mut t, &stops());
+        assert!(t.trim().is_empty(), "control: the reply was emptied");
+        assert!(
+            EMPTY_REPLIES_TOTAL.load(Ordering::Relaxed) > before,
+            "an emptied reply must move swarmllm_empty_replies_total"
+        );
+    }
+
     #[test]
     fn a_reply_of_nothing_but_a_marker_finalises_to_empty() {
         let mut t = "<|im_end|>".to_string();

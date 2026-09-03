@@ -2066,13 +2066,13 @@ fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
     let bytes_per_layer = 3_000u64 * 1_048_576 / 32;
     let cap = capability_with_gpu(Some(200));
 
-    let cold = super::max_hostable_layers(Some(&cap), bytes_per_layer, false);
+    let cold = super::max_hostable_layers(Some(&cap), bytes_per_layer, false, 0);
     assert!(
         cold.is_some_and(|k| k < 32),
         "a COLD peer with 200 MB free cannot take a 3 GB model: {cold:?}"
     );
 
-    let warm = super::max_hostable_layers(Some(&cap), bytes_per_layer, true);
+    let warm = super::max_hostable_layers(Some(&cap), bytes_per_layer, true, 0);
     assert_eq!(
         warm, None,
         "a peer already serving this model has already paid for it — the free \
@@ -2080,15 +2080,117 @@ fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
     );
 }
 
+/// The prompt's KV cache is part of what a peer must hold for THIS request, and
+/// the bound used to price weights only (gotcha #447): a warm 6 GB card 500 ms
+/// away was handed 24 layers of an 8,111-token prompt, ~2.4 GB of KV it did not
+/// have, and its worker died in attention. Gemma-2 geometry: 4 KV heads × 256,
+/// f32 plus the f16 mirror = 12 KB per position per layer, 295 KB over 24 layers.
+#[test]
+fn a_long_prompt_shrinks_the_layers_a_peer_may_take() {
+    let bytes_per_layer = 1_600u64 * 1_048_576 / 26; // a 1.6 GB Q4 over 26 layers
+    let cap = capability_with_gpu(Some(3_000));
+    let per_position_per_layer = 2 * 4 * 256 * 6; // K+V, 4 heads × 256, f32 + f16 mirror
+    let short = super::max_hostable_layers(
+        Some(&cap),
+        bytes_per_layer,
+        false,
+        per_position_per_layer * 19,
+    );
+    let long = super::max_hostable_layers(
+        Some(&cap),
+        bytes_per_layer,
+        false,
+        per_position_per_layer * 8_111,
+    );
+    assert!(short.is_some() && long.is_some());
+    assert!(
+        long.unwrap() < short.unwrap(),
+        "an 8k prompt must leave room for fewer layers than a 19-token one: {long:?} vs {short:?}"
+    );
+    // 3000 MB / 1.1 margin ≈ 2727 MB usable; each layer costs ~63 MB of weights
+    // plus ~99.6 MB of KV for 8,111 positions → 16 layers, not 26.
+    assert!(
+        long.unwrap() < 26,
+        "the whole model no longer 'fits': {long:?}"
+    );
+}
+
+/// A WARM peer has paid for its weights but not for this prompt's cache: its
+/// free memory bounds the layers by the KV term alone. Before, warm meant
+/// uncapped, which is exactly the #447 card.
+#[test]
+fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
+    let bytes_per_layer = 1_600u64 * 1_048_576 / 26;
+    let cap = capability_with_gpu(Some(1_000)); // 1 GB free beside the resident weights
+    let per_position_per_layer = 2 * 4 * 256 * 6;
+    // Unknown prompt: warm stays uncapped, as it always was.
+    assert_eq!(
+        super::max_hostable_layers(Some(&cap), bytes_per_layer, true, 0),
+        None
+    );
+    // 8,111 positions × 12 KB ≈ 99.6 MB per layer against ~909 MB usable → 9 layers.
+    let capped = super::max_hostable_layers(
+        Some(&cap),
+        bytes_per_layer,
+        true,
+        per_position_per_layer * 8_111,
+    );
+    assert!(
+        capped.is_some_and(|k| k < 24),
+        "a warm card with 1 GB free cannot take 24 layers of an 8k prompt: {capped:?}"
+    );
+}
+
+/// The coordinator prices a position the way the worker charges it, mirror
+/// included on a card and excluded on a processor.
+#[test]
+fn a_prompt_position_is_priced_like_the_worker_charges_it() {
+    let meta = crate::inference::split::GgufTensorMeta {
+        tensors: Default::default(),
+        tensor_data_offset: 0,
+        model_name: None,
+        head_count: 8,
+        head_count_kv: 4,
+        block_count: 26,
+        embedding_length: 2304,
+        head_dim: 256,
+        rope_dim: 256,
+        rope_freq_base: 10_000.0,
+        rms_norm_eps: 1e-6,
+        expert_count: 0,
+        architecture: "gemma2".into(),
+    };
+    // GQA on a card: f32 + f16 mirror → 6 bytes per element.
+    assert_eq!(
+        super::kv_bytes_per_position_per_layer(&meta, true),
+        2 * 4 * 256 * 6
+    );
+    // On a processor there is no mirror.
+    assert_eq!(
+        super::kv_bytes_per_position_per_layer(&meta, false),
+        2 * 4 * 256 * 4
+    );
+    // An MHA model keeps no mirror even on a card.
+    let mha = crate::inference::split::GgufTensorMeta {
+        head_count: 8,
+        head_count_kv: 8,
+        ..meta
+    };
+    assert_eq!(
+        super::kv_bytes_per_position_per_layer(&mha, true),
+        2 * 8 * 256 * 4
+    );
+}
+
 /// Unknown must still mean unknown: a peer that gossips nothing, or gossips the
 /// zero every node before v0.3.103 sent, is routed to exactly as before.
 #[test]
 fn an_unreadable_memory_figure_never_caps_a_peer() {
-    assert_eq!(super::max_hostable_layers(None, 1024, false), None);
+    assert_eq!(super::max_hostable_layers(None, 1024, false, 0), None);
 
     let zeroed = capability_with_gpu(Some(0));
     assert_eq!(
-        super::max_hostable_layers(Some(&zeroed), 1024, false),
+        super::max_hostable_layers(Some(&zeroed), 1024, false, 0),
         None,
         "zero free VRAM is what a pre-v0.3.103 node always advertised — it is \
          no information, not 'no room' (gotcha #330)"

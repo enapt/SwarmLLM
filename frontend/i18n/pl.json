@@ -761,6 +761,8 @@
   "perf.ttft_label": "pierwszy token {value}",
   "placement.configured": "Ustawiłeś ten węzeł na korzystanie wyłącznie z procesora.",
   "placement.gpu_too_old": "Ta karta graficzna jest starsza niż obsługuje ta wersja, więc używany jest procesor.",
+  "placement.hybrid": "{on} z {total} warstw na karcie graficznej",
+  "placement.hybrid_detail": "Reszta działa na procesorze, dlatego ten model jest wolniejszy od modelu w całości na karcie. Zwolnij pamięć graficzną, aby przenieść tam więcej.",
   "placement.not_enough_vram": "Potrzebuje więcej pamięci karty graficznej niż było wolne przy starcie. Gdy pamięć się zwolni, karta zostanie użyta ponownie.",
   "placement.on_cpu": "Działa na procesorze",
   "placement.section": "Gdzie działa",

@@ -761,6 +761,8 @@
   "perf.ttft_label": "eerste token {value}",
   "placement.configured": "Je hebt deze node ingesteld om alleen de processor te gebruiken.",
   "placement.gpu_too_old": "Deze grafische kaart is ouder dan deze versie ondersteunt, dus de processor wordt gebruikt.",
+  "placement.hybrid": "{on} van {total} lagen op de grafische kaart",
+  "placement.hybrid_detail": "De rest draait op de processor, daarom is dit model trager dan een model dat volledig op de kaart staat. Maak grafisch geheugen vrij om er meer naartoe te verplaatsen.",
   "placement.not_enough_vram": "Het heeft meer grafisch geheugen nodig dan er bij de start vrij was. Zodra er geheugen vrijkomt, wordt de grafische kaart weer gebruikt.",
   "placement.on_cpu": "Draait op de processor",
   "placement.section": "Waar het draait",

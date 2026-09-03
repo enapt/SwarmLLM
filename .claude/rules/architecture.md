@@ -1515,6 +1515,46 @@ silently break at the wire if duplicated:
   is exactly what it was. Test it from `assemble_pipeline_for`, not from the
   router: the first cut passed the router's tests and stayed local end to
   end for exactly this reason.
+- **A peer's capacity for a prompt is weights PLUS that prompt's KV cache**
+  (2026-09-03 evening, gotcha #447 follow-up). `scheduler::max_hostable_layers`
+  takes `prompt_kv_bytes_per_layer` — `kv_bytes_per_position_per_layer(gguf_meta,
+  on_gpu) × prompt_tokens`, the same arithmetic the worker charges at admission,
+  mirror included for a GQA model on a card — on top of the weights for a cold
+  peer and ALONE for a warm one. A warm peer used to be uncapped ("it has already
+  paid for the weights"), which is true and was the whole story until the prompt
+  was 8,000 tokens: the #447 card was warm. Unknown prompt or geometry → 0, and
+  unknown never excludes. **The peer's own admission is the backstop**:
+  `model_worker::handle_forward` now runs `ensure_room_for_prompt` for the prompt
+  pass (`sequence_num == 0`, the work kind of #434) of a SEGMENT too, so an
+  over-committed peer refuses at token 0 with the 503 the coordinator fails over
+  from, instead of dying in attention 22 s in. A new admission check on the
+  `Generate` path has to be asked whether the segment path got it too.
+- **`mem_bandwidth::remeasure_keeping_the_best`** (2026-09-03 evening) — the
+  memory-bandwidth figure a processor-only node advertises may RISE over its
+  run and never fall. It was a `OnceLock` taken on the first capability
+  broadcast, so a node that booted busy carried a low figure for its whole
+  run — and since #428 that figure is what every peer's scheduler ranks it on.
+  Bandwidth is a hardware ceiling, so the best observation is the least
+  contaminated one (the argument `PASSES` already makes within one measurement).
+  The health monitor re-measures on a blocking thread at ten minutes and then
+  hourly, ONLY while no inference is in flight (a measurement under a decode
+  measures the decode), never on a GPU node. `best_of` treats an unmeasurable
+  pass as no information, not zero. A new consumer of the figure reads
+  `measured_gbps()` as before; a new measurement of any hardware ceiling should
+  be shaped the same way.
+- **A peer's advertised version may bring the update check FORWARD and may do
+  nothing else** (2026-09-03 evening). `update::PeerVersionWatch` on
+  `state.events.peer_versions`, fed by the capability-gossip handler through
+  `EventBus::note_peer_version`; `state.events.update_nudge` (a `Notify`, not a
+  third broadcast channel — one listener, no payload) wakes `UpdateChecker::run`,
+  which then runs the SAME `check_for_update` the hourly poll runs, after a
+  random delay of up to 90 s and no closer than ten minutes to the last check.
+  The version is self-attested, so: two DISTINCT peers must agree; the version
+  must be newer AND plausibly adjacent (same major.minor, ≤ 25 patch releases
+  ahead); one version nudges once; a peer that reports something older
+  withdraws its vote; the map is capped. **Never let the gossiped value name,
+  select or fetch an artifact** — announcing `9.9.9` would otherwise be a
+  one-message way to make the whole swarm hit the update path at once.
 - **`inference::scheduler::delegation_target`** (2026-08-18) — the single decision
   to hand a WHOLE model to a peer rather than run it on this node's CPU. Fires only
   when `ModelProcessPool::is_cpu_bound_for_lack_of_vram` says we have a working GPU

@@ -761,6 +761,8 @@
   "perf.ttft_label": "primer token {value}",
   "placement.configured": "Has configurado este nodo para usar solo el procesador.",
   "placement.gpu_too_old": "Esta tarjeta gráfica es más antigua de lo que admite esta versión, así que se usa el procesador.",
+  "placement.hybrid": "{on} de {total} capas en la tarjeta gráfica",
+  "placement.hybrid_detail": "El resto se ejecuta en el procesador, por eso este modelo es más lento que uno que está por completo en la tarjeta. Libera memoria gráfica para mover más partes allí.",
   "placement.not_enough_vram": "Necesita más memoria gráfica de la que había libre al iniciarse. Volverá a usar la tarjeta gráfica cuando se libere memoria.",
   "placement.on_cpu": "Ejecutándose en el procesador",
   "placement.section": "Dónde se ejecuta",

@@ -387,6 +387,15 @@ struct WorkerHandle {
     /// `gguf_header.bin` and scans the model directory, which is fine once per
     /// spawn and not fine once per request.
     gpu_estimate_mb: u64,
+    /// A hybrid split — `(layers on the card, layers in total)` — when admission
+    /// chose one; `None` for a worker wholly on either device.
+    ///
+    /// Recorded because nothing else says it. The split was decided here, sent
+    /// to the worker as `--gpu-layers`, logged once at spawn, and then existed
+    /// nowhere a person could read: the models page showed `fits_on_gpu:
+    /// true` and no placement note for a model running 13 of its 28 layers on
+    /// the card, so a user could not tell why it was slower than expected.
+    gpu_layers_on_card: Option<(usize, usize)>,
 }
 
 /// Pull the `request_id` field out of any `WorkerMsg` variant that carries one.
@@ -1031,6 +1040,11 @@ pub struct WorkerSummary {
     pub dead: bool,
     /// What admission priced the model at, in MB; 0 when unpriced.
     pub gpu_estimate_mb: u64,
+    /// For a hybrid split, how many of `layers_total` run on the card; `None`
+    /// for a worker wholly on either device.
+    pub gpu_layers_on_card: Option<u32>,
+    /// Layers in the model this worker runs, known only for a hybrid split.
+    pub layers_total: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1547,7 +1561,10 @@ impl ModelProcessPool {
     /// alternative is the whole model on the processor, and this moves layers
     /// off it. The cost is one hidden-state copy per forward, which is a few
     /// KB while decoding.
-    fn partial_gpu_layers(&self, model_id: &ModelId, estimated_mb: u64) -> Option<usize> {
+    /// `(layers on the card, layers in total)` for a model that does not fit
+    /// whole but partly does; `None` when it fits, when nothing fits, or when
+    /// hybrid placement is switched off.
+    fn partial_gpu_layers(&self, model_id: &ModelId, estimated_mb: u64) -> Option<(usize, usize)> {
         if std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0") {
             return None;
         }
@@ -1575,7 +1592,7 @@ impl ModelProcessPool {
             false,
             inputs.effective_context,
         );
-        (n > 0).then_some(n)
+        (n > 0).then_some((n, layers))
     }
 
     fn effective_gpu_layers(&self, model_id: &ModelId) -> i32 {
@@ -2747,8 +2764,9 @@ impl ModelProcessPool {
         // to the card and die there.
         let mut placed_on_cpu_because = self.cpu_reason(model_id);
         let mut going_to_cpu = placed_on_cpu_because.is_some();
-        // Set when the model does not fit the card whole but part of it does.
-        let mut hybrid_layers: Option<usize> = None;
+        // Set when the model does not fit the card whole but part of it does:
+        // `(layers on the card, layers in total)`.
+        let mut hybrid_layers: Option<(usize, usize)> = None;
         // What the card would have to give this model. Read from disk ONCE per
         // spawn: the admission gate weighs it, the CPU-fallback log reports it,
         // and the worker carries it so a later request can ask whether the
@@ -2779,15 +2797,16 @@ impl ModelProcessPool {
             // it (three reports, most recently 5151 MB free while the model
             // ran on the processor).
             if !admitted {
-                if let Some(n) = self.partial_gpu_layers(model_id, estimated) {
+                if let Some((n, total)) = self.partial_gpu_layers(model_id, estimated) {
                     tracing::info!(
                         model = %model_id,
                         gpu_layers = n,
+                        total_layers = total,
                         estimated_mb = estimated,
-                        "Model does not fit the card whole — placing its first {n} layers \
-                         there and the rest on the processor"
+                        "Model does not fit the card whole — placing its first {n} of {total} \
+                         layers there and the rest on the processor"
                     );
-                    hybrid_layers = Some(n);
+                    hybrid_layers = Some((n, total));
                     // It IS going to the card, just not all of it, so this is
                     // not a CPU fallback and must not be reported as one.
                     admitted = true;
@@ -3048,10 +3067,11 @@ impl ModelProcessPool {
         model_id: &ModelId,
         placed_on_cpu_because: Option<CpuReason>,
         gpu_estimate_mb: u64,
-        // A partial split decided by admission: this many of the worker's
-        // layers go on the card, the rest on the processor. `None` is the
-        // all-or-nothing placement `placed_on_cpu_because` describes.
-        gpu_layers_override: Option<usize>,
+        // A partial split decided by admission: `(this many of the worker's
+        // layers go on the card, layers in total)`, the rest on the processor.
+        // `None` is the all-or-nothing placement `placed_on_cpu_because`
+        // describes.
+        gpu_layers_override: Option<(usize, usize)>,
     ) -> Result<WorkerHandle, SwarmError> {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
 
@@ -3280,7 +3300,7 @@ impl ModelProcessPool {
                 // the card and the rest on the processor. Reaches the loader
                 // through `GPU_LAYER_LIMIT`, the same route `--kv-budget-bytes`
                 // takes — the daemon decides, the worker obeys.
-                (None, Some(n)) => n as i32,
+                (None, Some((n, _))) => n as i32,
                 (None, None) => self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed),
             }
             .to_string(),
@@ -3395,6 +3415,9 @@ impl ModelProcessPool {
             last_used: AtomicU64::new(0),
             placed_on_cpu_because,
             gpu_estimate_mb,
+            // Only a split is worth recording; a worker wholly on the card
+            // says so through `placed_on_cpu_because: None` alone.
+            gpu_layers_on_card: gpu_layers_override.filter(|_| placed_on_cpu_because.is_none()),
         })
     }
 
@@ -4362,11 +4385,24 @@ impl ModelProcessPool {
                     age_secs: h.spawned_at.elapsed().as_secs(),
                     dead: h.dead.load(Ordering::Acquire),
                     gpu_estimate_mb: h.gpu_estimate_mb,
+                    gpu_layers_on_card: h.gpu_layers_on_card.map(|(n, _)| n as u32),
+                    layers_total: h.gpu_layers_on_card.map(|(_, t)| t as u32),
                 }
             })
             .collect();
         out.sort_by(|a, b| a.model.cmp(&b.model));
         out
+    }
+
+    /// The hybrid split a resident worker runs with — `(layers on the card,
+    /// layers in total)` — or `None` when the model has no worker or its
+    /// worker is wholly on one device. The models page reads this so a model
+    /// running 13 of 28 layers on the card says so, instead of showing
+    /// `fits_on_gpu: true` and nothing else.
+    pub fn hybrid_gpu_layers(&self, model_id: &ModelId) -> Option<(usize, usize)> {
+        self.workers
+            .get(model_id)
+            .and_then(|h| h.gpu_layers_on_card)
     }
 
     /// Models with at least one request in flight *right now*.

@@ -1205,6 +1205,10 @@ pub(crate) async fn dispatch_network_messages(
                                             peer.capability = Some(cap.clone());
                                             peer.last_seen = chrono::Utc::now();
                                         }
+                                        // A newer version on enough peers brings
+                                        // our next update check forward; it never
+                                        // chooses what to install.
+                                        shared_state.events.note_peer_version(&cap.node_id, &cap.version);
                                     }
                                     // Nickname gossip from peers
                                     SwarmMessage::NicknameGossip(gossip) => {

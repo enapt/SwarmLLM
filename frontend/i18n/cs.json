@@ -761,6 +761,8 @@
   "perf.ttft_label": "první token {value}",
   "placement.configured": "Nastavili jste tento uzel tak, aby používal jen procesor.",
   "placement.gpu_too_old": "Tato grafická karta je starší, než tato verze podporuje, takže se používá procesor.",
+  "placement.hybrid": "{on} z {total} vrstev na grafické kartě",
+  "placement.hybrid_detail": "Zbytek běží na procesoru, proto je tento model pomalejší než model celý na kartě. Uvolněte grafickou paměť, aby se tam přesunulo více.",
   "placement.not_enough_vram": "Potřebuje víc grafické paměti, než bylo při startu volné. Jakmile se paměť uvolní, grafická karta se použije znovu.",
   "placement.on_cpu": "Běží na procesoru",
   "placement.section": "Kde běží",

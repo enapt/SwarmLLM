@@ -33,7 +33,7 @@
 //! achieves. What is wanted is a number that ranks machines the way running a
 //! model would.
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::time::Instant;
 
 /// Buffer streamed per pass, in bytes.
@@ -69,14 +69,60 @@ const PASSES: usize = 3;
 /// efficiency so the fallback keeps meaning what it meant.
 pub const UNMEASURABLE_FALLBACK_GBPS: f32 = 10.0;
 
-/// Sustained read bandwidth in GB/s, measured once and cached.
+/// The best measurement so far. Outer `None`: never measured.
+///
+/// A `Mutex` rather than a `OnceLock` because the figure is allowed to IMPROVE:
+/// see [`remeasure_keeping_the_best`].
+static BEST: Mutex<Option<Option<f32>>> = Mutex::new(None);
+
+/// Sustained read bandwidth in GB/s — the best measurement taken so far,
+/// measuring on the first call.
 ///
 /// `None` when the buffer could not be allocated — a machine short enough of
 /// memory for that is not one to be handing extra work to, and the caller falls
 /// back to the previous assumption rather than advertising a wrong figure.
 pub fn measured_gbps() -> Option<f32> {
-    static MEASURED: OnceLock<Option<f32>> = OnceLock::new();
-    *MEASURED.get_or_init(measure)
+    let mut best = BEST.lock().unwrap_or_else(|e| e.into_inner());
+    match *best {
+        Some(v) => v,
+        None => {
+            let v = measure();
+            *best = Some(v);
+            v
+        }
+    }
+}
+
+/// Measure again and keep whichever figure is HIGHER.
+///
+/// Bandwidth is a property of the hardware, so the best observation is the
+/// least contaminated one — the same argument [`PASSES`] already makes within a
+/// single measurement, applied across time. The first measurement is taken on
+/// the health monitor's first tick, whatever else the machine is doing at that
+/// moment; a node that booted while a build or a browser was streaming memory
+/// read low, and since gotcha #428 that figure is what every peer's scheduler
+/// ranks it on for its whole run. Measured on the Proxmox node: 23.5 GB/s one
+/// boot, 25.9 the next, ~10% apart for the same silicon.
+///
+/// The caller decides WHEN — the health monitor asks only while no inference
+/// is in flight, since a measurement taken under a decode is a measurement of
+/// the decode. Returns the figure now on record.
+pub fn remeasure_keeping_the_best() -> Option<f32> {
+    let fresh = measure();
+    let mut best = BEST.lock().unwrap_or_else(|e| e.into_inner());
+    let kept = best_of(best.flatten(), fresh);
+    *best = Some(kept);
+    kept
+}
+
+/// The higher of two measurements, treating "could not measure" as no
+/// information rather than as zero.
+fn best_of(previous: Option<f32>, fresh: Option<f32>) -> Option<f32> {
+    match (previous, fresh) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
 }
 
 fn measure() -> Option<f32> {
@@ -168,5 +214,37 @@ mod tests {
             start.elapsed().as_millis() < 50,
             "second call re-measured; it must come from the cache"
         );
+    }
+
+    /// A later, higher reading replaces a lower one; a later, lower reading
+    /// does not — a node that booted busy recovers, a node that is busy NOW
+    /// does not lose the figure it earned when idle.
+    #[test]
+    fn a_re_measurement_only_ever_raises_the_figure() {
+        assert_eq!(best_of(Some(23.5), Some(25.9)), Some(25.9));
+        assert_eq!(best_of(Some(25.9), Some(23.5)), Some(25.9));
+    }
+
+    /// "Could not measure" is no information, never zero: it neither replaces a
+    /// real figure nor is invented in place of one.
+    #[test]
+    fn an_unmeasurable_pass_leaves_the_record_alone() {
+        assert_eq!(best_of(Some(25.9), None), Some(25.9));
+        assert_eq!(best_of(None, Some(25.9)), Some(25.9));
+        assert_eq!(best_of(None, None), None);
+    }
+
+    /// The re-measure and the cached read agree afterwards: whatever the
+    /// re-measure kept is what the next `measured_gbps` returns.
+    #[test]
+    fn a_re_measurement_is_what_later_reads_return() {
+        let kept = remeasure_keeping_the_best();
+        assert_eq!(measured_gbps(), kept);
+        if let Some(v) = kept {
+            assert!(
+                (1.0..=2000.0).contains(&v),
+                "implausible bandwidth {v} GB/s"
+            );
+        }
     }
 }

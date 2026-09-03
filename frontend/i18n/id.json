@@ -761,6 +761,8 @@
   "perf.ttft_label": "token pertama {value}",
   "placement.configured": "Anda menyetel node ini untuk hanya memakai prosesor.",
   "placement.gpu_too_old": "Kartu grafis ini lebih lama daripada yang didukung versi ini, jadi prosesor yang dipakai.",
+  "placement.hybrid": "{on} dari {total} lapisan di kartu grafis",
+  "placement.hybrid_detail": "Sisanya berjalan di prosesor, karena itu model ini lebih lambat daripada model yang sepenuhnya di kartu. Kosongkan memori grafis untuk memindahkan lebih banyak bagian ke sana.",
   "placement.not_enough_vram": "Model ini butuh memori grafis lebih banyak daripada yang tersedia saat dimulai. Kartu grafis akan dipakai lagi begitu memori tersedia.",
   "placement.on_cpu": "Berjalan di prosesor",
   "placement.section": "Tempat menjalankannya",
