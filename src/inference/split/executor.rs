@@ -224,6 +224,96 @@ impl SplitModel {
         Ok(output)
     }
 
+    /// A prompt pass issued in chunks of `chunk_tokens` positions.
+    ///
+    /// The same forward the one-shot call performs, run once per chunk with
+    /// `index_pos` advancing, so the KV cache fills exactly as it would have
+    /// and the answer is the same tensor — pinned by
+    /// `a_prompt_pass_in_chunks_matches_the_whole_pass`. What changes is what
+    /// happens BETWEEN chunks: the request's cancel flag is read (gotcha #445),
+    /// and the hidden-state intermediates are one chunk wide instead of the
+    /// whole prompt.
+    ///
+    /// Why the segment path needs this when the `Generate` path already chunks:
+    /// the between-layers cancel probe (gotcha #441) has nowhere to fire on a
+    /// segment of ONE layer, and the local ends of a privacy pipeline are
+    /// exactly one layer each — so on a processor an agent-sized prompt ran
+    /// for minutes after its client had gone, uninterruptible. A chunk
+    /// boundary is a place to stop that every segment has.
+    ///
+    /// A segment that is not last returns hidden states, concatenated back to
+    /// `[1, seq, hidden]`; the last segment returns the logits of the final
+    /// position, which is the final chunk's output alone — the same as the
+    /// one-shot call. `chunk_tokens == 0`, or a prompt no longer than one
+    /// chunk, is the one-shot call unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_prompt_in_chunks(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        lora_adapter: Option<&LoraAdapter>,
+        skip_embedding: bool,
+        chunk_tokens: usize,
+    ) -> Result<Tensor, SwarmError> {
+        let seq_len = input.dim(1).map_err(SwarmError::internal)?;
+        if chunk_tokens == 0 || seq_len <= chunk_tokens {
+            let (out, _) = self.forward_inner_impl(
+                input,
+                index_pos,
+                kv_cache_store,
+                request_id,
+                lora_adapter,
+                None,
+                skip_embedding,
+                false,
+                None,
+            )?;
+            return Ok(out);
+        }
+        let last_segment = self.is_last();
+        let mut outputs: Vec<Tensor> = Vec::new();
+        let mut start = 0usize;
+        while start < seq_len {
+            // The whole point of the chunking: a place to notice the client has
+            // gone. The forward itself probes between layers; this probes
+            // between chunks, which a one-layer segment otherwise never reaches.
+            if start > 0 && kv_cache_store.request_cancelled(request_id) {
+                return Err(SwarmError::Inference(
+                    super::kv_cache::CANCELLED_MID_FORWARD.to_string(),
+                ));
+            }
+            let len = chunk_tokens.min(seq_len - start);
+            let part = input
+                .narrow(1, start, len)
+                .and_then(|t| t.contiguous())
+                .map_err(SwarmError::internal)?;
+            let (out, _) = self.forward_inner_impl(
+                &part,
+                index_pos + start,
+                kv_cache_store,
+                request_id,
+                lora_adapter,
+                None,
+                skip_embedding,
+                false,
+                None,
+            )?;
+            if last_segment {
+                // Only the final position's logits are the answer; an earlier
+                // chunk's are the cost of having somewhere to stop.
+                outputs.clear();
+            }
+            outputs.push(out);
+            start += len;
+        }
+        if outputs.len() == 1 {
+            return Ok(outputs.pop().expect("one output"));
+        }
+        Tensor::cat(&outputs, 1).map_err(SwarmError::internal)
+    }
+
     /// Forward pass with optional LoRA adapter applied per-layer.
     ///
     /// When `lora_adapter` is `Some`, the adapter's low-rank deltas are applied

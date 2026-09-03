@@ -478,11 +478,11 @@ model-worker: skipping already-cancelled request                            (DEB
 ```
 
 The request then ends with `Request abandoned by the client before the reply
-was ready` (a 503 nobody receives) and is NOT retried. **What this cannot
-stop**: a segment of ONE layer already computing — the between-layer probe has
-nowhere to fire — so on a processor the local ends of a boomerang finish their
-current layer first. If a worker stays busy longer than that after the lines
-above, the cancel did not reach it: check for `CancelRequest` on the IPC path.
+was ready` (a 503 nobody receives) and is NOT retried. A running prompt pass
+stops at its next chunk boundary (`prefill_chunk_tokens`, 128 positions) or
+layer boundary, whichever comes first; on a processor that is seconds. If a
+worker stays busy longer than that after the lines above, the cancel did not
+reach it: check for `CancelRequest` on the IPC path.
 
 ## Measuring cancellation (what NOT to use)
 

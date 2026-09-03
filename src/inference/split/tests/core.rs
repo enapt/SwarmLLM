@@ -1402,3 +1402,99 @@ fn a_refused_request_gives_back_the_cache_it_had_taken() {
          permanently raises the floor and the node ratchets itself to a halt"
     );
 }
+
+/// A prompt pass issued in chunks fills the KV cache exactly as the one-shot
+/// pass does and returns the same hidden states — the property that lets a
+/// worker stop between chunks when the client has gone (gotcha #445) without
+/// changing any answer. Checked on the output AND on a decode step afterwards,
+/// which reads the cache each pass left behind.
+#[test]
+fn a_prompt_pass_in_chunks_matches_the_whole_pass() {
+    let hidden_dim = 128;
+    let mut model = make_test_split_model(2, hidden_dim);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let seq = 11;
+    let input = Tensor::randn(0f32, 1.0, (1, seq, hidden_dim), &Device::Cpu).unwrap();
+
+    let whole = model.forward(&input, 0, &kv_store, "whole").unwrap();
+    // 4-position chunks over 11 positions: 4, 4, 3 — a ragged tail included.
+    let chunked = model
+        .forward_prompt_in_chunks(&input, 0, &kv_store, "chunked", None, false, 4)
+        .unwrap();
+    assert_eq!(chunked.dims(), whole.dims());
+    assert_tensors_close(
+        &chunked,
+        &whole,
+        1e-3,
+        "a chunked prompt pass must return what the one-shot pass returns",
+    );
+
+    // The caches must agree too: the same next token attends over each.
+    let next = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+    let after_whole = model.forward(&next, seq, &kv_store, "whole").unwrap();
+    let after_chunked = model.forward(&next, seq, &kv_store, "chunked").unwrap();
+    assert_tensors_close(
+        &after_chunked,
+        &after_whole,
+        1e-3,
+        "the KV cache a chunked pass leaves behind must equal the one-shot pass's",
+    );
+
+    // A chunk size of zero, or one no smaller than the prompt, IS the one-shot
+    // call — bitwise, since it takes the same path.
+    for chunk in [0usize, seq, seq + 5] {
+        let same = model
+            .forward_prompt_in_chunks(
+                &input,
+                0,
+                &kv_store,
+                &format!("one-shot-{chunk}"),
+                None,
+                false,
+                chunk,
+            )
+            .unwrap();
+        assert_tensors_close(
+            &same,
+            &whole,
+            1e-6,
+            "chunk={chunk} must be the one-shot call",
+        );
+    }
+}
+
+/// The reason the chunks exist: a request cancelled while its prompt pass is
+/// running stops at the next chunk boundary instead of finishing the prompt.
+/// Control: the same pass with the oracle saying "not cancelled" completes.
+#[test]
+fn a_cancelled_request_stops_at_the_next_chunk_boundary() {
+    let hidden_dim = 128;
+    let mut model = make_test_split_model(1, hidden_dim);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let input = Tensor::randn(0f32, 1.0, (1, 12, hidden_dim), &Device::Cpu).unwrap();
+
+    // ONE layer, deliberately: the per-layer probe fires only between layers,
+    // so on this segment the chunk boundary is the only place a cancel can be
+    // noticed — the case the chunking exists for. The request is cancelled
+    // from the start; nothing looks before the first chunk, so exactly that
+    // chunk's positions reach the cache and the rest never run.
+    kv_store.set_cancel_oracle(Box::new(|req: &str| req == "cancelled"));
+    let err = model
+        .forward_prompt_in_chunks(&input, 0, &kv_store, "cancelled", None, false, 4)
+        .unwrap_err();
+    assert!(
+        crate::inference::split::kv_cache::forward_was_cancelled(&err),
+        "a cancelled request must end with the cancel marker, got {err}"
+    );
+    let occ = kv_store.occupancy();
+    assert_eq!(
+        occ.tokens, 4,
+        "exactly the chunk that was running when the cancel landed is in the cache"
+    );
+
+    // Control: an uncancelled request runs every chunk.
+    let out = model
+        .forward_prompt_in_chunks(&input, 0, &kv_store, "kept", None, false, 4)
+        .unwrap();
+    assert_eq!(out.dims(), &[1, 12, hidden_dim]);
+}

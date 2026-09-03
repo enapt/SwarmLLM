@@ -1403,8 +1403,14 @@ silently break at the wire if duplicated:
   prompt, which a tester found still pegging five cores eleven minutes after
   "cancelling" was logged. A cancel check belongs at the granularity of the
   WORK; a new long-running loop inside a forward inherits this probe only if
-  it runs per layer, so anything longer than a layer (a chunked prefill at
-  another level) must probe on its own.
+  it runs per layer, so anything longer than a layer must probe on its own —
+  which is what `SplitModel::forward_prompt_in_chunks` does for the segment
+  path (2026-09-03, gotcha #445): a prompt longer than `prefill_chunk_tokens`
+  runs in chunks, `index_pos` advancing, and probes between them, because a
+  ONE-layer segment (the boomerang's local ends) has no between-layers at
+  all. Parity with the one-shot pass is pinned on the output and on the
+  cache left behind; a decode step is one position and takes the one-shot
+  path unchanged.
 - **`SharedState::local_fast_path_for` is the single answer to "may this
   request take the local split fast path?"** (2026-09-03, gotcha #443). Both
   API surfaces used to compose it themselves (`has_complete_split_model &&

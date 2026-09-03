@@ -7044,15 +7044,19 @@ sends `CancelRequest`) and beside `wait_for_result` (the caller sends
 `CancelInference`, no failover); both SSE surfaces set the flag on
 `sse_tx.closed()`; the router never retries a cancelled request.
 
+**Also built 2026-09-03**: a ONE-layer segment used to be uninterruptible — the
+between-layer probe has nowhere to fire, and the boomerang's local ends are one
+layer each. `SplitModel::forward_prompt_in_chunks` now runs a segment's prompt
+pass longer than `prefill_chunk_tokens` (128) in chunks, `index_pos`
+advancing, probing the cancel oracle between chunks (parity with the one-shot
+pass pinned on the output and on the cache it leaves). This also caps the
+hidden-state intermediate a 14k × 5120 f32 prompt pass materialised at ~287 MB
+to one chunk's worth. NOT yet measured on a processor: the question to answer
+is whether 128-position chunks cost prefill throughput on the segment path
+(the `Generate` path has run chunked at this size since Phase 2, so the
+expectation is no).
+
 **Still open, in order of value:**
-- **A ONE-layer segment cannot be interrupted** — the between-layer probe has
-  nowhere to fire, and the boomerang's local ends are one layer each. On a
-  processor with an agent-sized prompt that is minutes of uninterruptible work
-  per abandoned attempt (bounded to the current layer now; before, to the
-  whole chain). The fix is worker-side: chunk a long prompt pass in
-  `handle_forward` (`prefill_chunk_tokens` exists on the `Generate` path) so
-  the probe fires per chunk — which also caps the 287 MB hidden-state
-  intermediate a 14k × 5120 f32 prompt pass materialises.
 - **"A new model-worker per abandoned attempt" is unexplained.** The pool keys
   workers per model (`workers: DashMap<ModelId, _>`) and the sites that evict
   one are error paths this scenario does not take. Several `model-worker`

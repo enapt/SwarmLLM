@@ -30,7 +30,9 @@ All notable changes to SwarmLLM are documented here.
   81 minutes over three abandoned attempts, each queued behind the last. Every
   long wait in a request now watches its cancel flag, dropping the wait tells
   the worker or the peer to stop, queued attempts for a cancelled request are
-  skipped, and a cancelled request is never retried.
+  skipped, and a cancelled request is never retried. A running prompt pass
+  now stops within one chunk of the cancel even on a segment of a single
+  layer, because a long prompt is processed in chunks on that path too.
 - **The graphics-memory budget for conversation history is now checked against
   the card as it stands, not as it looked when the model loaded.** The budget
   was taken from free memory at load time and could not see anything that

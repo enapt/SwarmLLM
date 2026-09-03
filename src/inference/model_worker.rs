@@ -1015,6 +1015,10 @@ async fn handle_batch_forward(
             slice,
             shard_window,
             activation_compression,
+            // A batched forward is a decode step — one position per request
+            // (`forward_is_schedulable` refuses a prompt pass) — so there is
+            // nothing to chunk.
+            0,
         )
         .await
         {
@@ -1229,6 +1233,10 @@ async fn handle_forward(
     mut activation_bytes: Vec<u8>,
     shard_window: &Option<Vec<u32>>,
     activation_compression: bool,
+    // Ceiling on the positions a prompt pass runs per forward; a prompt
+    // longer than this is run in chunks so a cancel can land between them
+    // (gotcha #445). 0 disables chunking.
+    prefill_chunk_tokens: usize,
 ) -> Result<(), SwarmError> {
     let request_id = fwd.request_id;
     let model_id = fwd.model_id.clone();
@@ -1573,11 +1581,14 @@ async fn handle_forward(
                     .map_err(|e| format!("Forward TP phase: {e}"))?
             } else if pre_embedded {
                 model
-                    .forward_pre_embedded(
+                    .forward_prompt_in_chunks(
                         &input_tensor,
                         fwd.index_pos as usize,
                         kv_store,
                         &req_id_str,
+                        None,
+                        true,
+                        prefill_chunk_tokens,
                     )
                     .map_err(|e| format!("Forward pre-embedded: {e}"))?
             } else if let Some(ref vis_emb) = vision_tensor {
@@ -1591,13 +1602,19 @@ async fn handle_forward(
                     )
                     .map_err(|e| format!("Forward multimodal: {e}"))?
             } else {
+                // In chunks when the prompt is longer than one, so a cancelled
+                // request stops at the next boundary even on a one-layer
+                // segment; a decode step is one position and takes the
+                // one-shot path unchanged.
                 model
-                    .forward_with_lora(
+                    .forward_prompt_in_chunks(
                         &input_tensor,
                         fwd.index_pos as usize,
                         kv_store,
                         &req_id_str,
                         lora_adapter.as_ref(),
+                        false,
+                        prefill_chunk_tokens,
                     )
                     .map_err(|e| format!("Forward: {e}"))?
             };
@@ -3963,6 +3980,7 @@ async fn handle_daemon_msg(
                 payload,
                 shard_window,
                 activation_compression,
+                options.prefill_chunk_tokens as usize,
             )
             .await
             {
