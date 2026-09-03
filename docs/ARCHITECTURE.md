@@ -70,6 +70,8 @@ Single Rust binary, three simultaneous functions:
 │  │    pending_layer_results, pending_stream_result_    │  │
 │  │    routes, pending_prefix_kv_fetches,               │  │
 │  │    pending_activation_chunks (R139 Tier 4K),        │  │
+│  │    retained_replies (fast-path replies kept for      │  │
+│  │      ResendTokens, gotcha #438, 2026-09-02),         │  │
 │  │    standalone_tokenizers (R136 L1/L3 follow-on),    │  │
 │  │    listen_multiaddrs (R140 pool invite v2),         │  │
 │  │    publicly_reachable + hole_punch_successes /      │  │
@@ -274,6 +276,7 @@ libp2p Swarm
 │   ├── Binary tensor payloads — LayerForward, LayerResult (type-tag 0x01=WIRE_TAG_TENSOR, or 0x02=WIRE_TAG_TENSOR_COMPRESSED for zstd, flag-gated; inner ChaCha20-Poly1305 encryption marked by TENSOR_TAG_ENCRYPTED=0x10)
 │   ├── Binary shard data — ShardResponse payload (type-tag 0x03=WIRE_TAG_SHARD, 32MB chunks as raw bytes, bypasses 4MB JSON limit)
 │   ├── Cross-node prefix-KV snapshots — (type-tag 0x04=WIRE_TAG_PREFIX_KV, Item 8 Phase 2 fetched path)
+│   ├── Resend of a fast-path reply's tokens (2026-09-02, gotcha #438) — `SwarmMessage::ResendTokens{request_id, from, to}` from the requester when its reassembler sees a hole (after `hole_wait` = 4×RTT clamped 1-5 s, up to 4 asks), answered from the serving node's `retained_replies` (bounded 64 replies / 8192 tokens / 32 asks / 120 s) ONLY to the requester's peer; gated on `features::RESEND_TOKENS`. A `StreamingToken` the requester's dispatcher dropped is answered `SwarmResponse::Dropped` (to a peer advertising the bit) instead of `Ack`, and the sender re-sends it once
 │   └── ACK-timeout fast-fail: streaming-tracked sends (`SendDirectMessage` with `delivery_request_id = Some(uuid)`) are mapped to a Uuid via `pending_rr_observability`. The 10s `RR_ACK_TIMEOUT_SECS` sweep closes `streaming_token_txs[uuid]` if no Response/OutboundFailure event fires (libp2p rr can silently drop sends under load); caller sees Err in ~10–20s instead of 120s
 │
 ├── TCP transport (Noise + Yamux, nodelay=true, port+10)

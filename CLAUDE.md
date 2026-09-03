@@ -220,34 +220,42 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2246 lib (dev,claude-subscription) — re-measured 2026-09-03 morning, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 50 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the five advisories documented in `SECURITY.md` (`core2`/RUSTSEC-2026-0105 left the tree with the 2026-09-02 dependency update).
 
-**Next up (user-directed 2026-09-02)**: the inference work over more OpenClaw work —
-prefix-keyed remote KV across turns, the truncated-reply fix ladder (#438),
-accept/reject at the tail, KV-cache size on small cards and the tools+streaming
-crawl; then ring decode, prefill microbatching, `srtt` into routing. Ordered list
-with pointers in `memory/MEMORY.md` § NEXT UP; entries in `docs/FUTURE_WORK.md`.
-OpenClaw is parked at basic support (plugin built + verified; publishing deferred).
+**Next up (after the 09-02/03 round)**: (0) a processor-only node holding every
+shard of a model no single card holds runs it on its CPU instead of the GPU
+pipeline the swarm built the day before — the scheduler must price all-local at
+measured CPU speed against the Parallax search (#442/#443, tester's 14B case);
+(1) reconcile the KV budget with the card at admission (`cudaMemGetInfo`) — it
+is a load-time prediction that over-promises ~2 GB on an 8 GB card (#440) —
+and find the ~1 GB the store's live figure wanders by; (2) prefix-keyed remote
+KV across turns; (3) f16 stored KV on small cards; (4) accept/reject at the
+tail; then the #438 structural rung, peer↔peer RTT gossip, ring decode, prefill
+microbatching. Ordered list with pointers in `memory/MEMORY.md` § NEXT UP;
+entries in `docs/FUTURE_WORK.md`. OpenClaw stays parked at basic support
+(plugin built + verified; ClawHub publishing needs the user's credentials).
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.148-alpha (2026-09-02, tag on `073bb362`).** Local
-`225e6fe7` (CUDA asset, installed sha256 `a2dc27ce…` == published, ready in 2 s,
-0 ERROR lines, first inference OK, rollback `~/.local/bin/swarmllm.0.3.147-alpha.bak`)
-and Proxmox `96842635` (.deb `0.3.148-alpha-1` over `0.3.147-alpha-1`, stayed
-`enabled` + `active`, no `.dpkg-old`, 0 ERROR lines) both on it, node ids kept.
-Gate: CI + Cache warm green (the cache warm was a ~100 min cold rebuild after
-the dependency refresh), 25 assets, `latest`, sha256 on CUDA + deb, `ggml_cuda_init`
-= 1, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact**. Content: OpenClaw
-(`context_length`, provider plugin, README section), #437, Rust 1.90 + 26 deps,
-Dependabot hygiene. ⚠ The `.sha256` assets hash the RAW binary, not the tarball —
-a gate script that hashes the tarball goes red on a correct release. ⚠ `gh` needs
-`GH_REPO` (or a checkout cwd) when run from a scratch directory.
+**Released and deployed: v0.3.151-alpha (2026-09-03, tag on `24a36bd0`).** Local
+`225e6fe7` (CUDA asset, installed sha256 `9cb5d5f0…` == published, ready in 4 s,
+0 ERROR lines, first inference OK, rollback `~/.local/bin/swarmllm.0.3.150-alpha.bak`)
+and Proxmox `96842635` (.deb `0.3.151-alpha-1` over `0.3.150-alpha-1`, stayed
+`enabled` + `active`, 0 errors) both on it, node ids kept. Gate: CI + Cache warm
+green, 25 assets, `latest`, sha256 on CUDA + deb, `ggml_cuda_init` = 1, **smoke
+9/9 + shapes 7/7 on the DOWNLOADED artifact**. Three releases in one round
+(.149 → .150 → .151, the last two correcting the first): see the section below.
+⚠ The `.sha256` assets hash the RAW binary, not the tarball. ⚠ `gh` needs
+`GH_REPO` (or a checkout cwd) from a scratch directory. ⚠ **A version bump
+changes `Cargo.lock`, so Cache warm RUNS on every release commit (~45 min) and
+the gate waits for it**; Release itself took 52-67 min on these three (Windows
+GPU the long pole). ⚠ `verify_release.sh` in the session scratchpad is the
+whole gate + deploy in one script — recreate it from
+`round_log_0902_perf_commits.md` if the scratchpad is gone.
 
-Prior line: .147 (#434-#436 failover fixes, `round_log_0902_failover_paths.md`),
-.146 (#432 calibration by processor depth + #433 streamed-failure
-honesty — BOTH field-confirmed by the RTX 4050 tester, whose "new one-off"
-`Tensor bytes too short` is #435), .145 hybrid placement (#431), .144 Apple
-Silicon update fix (#430), .143 advertised-speed correction (#428) — details
-in the one-liners below.
+Prior line: .148 (OpenClaw plugin + `context_length`, #437, Rust 1.90,
+`round_log_0902_openclaw.md`), .147 (#434-#436 failover fixes,
+`round_log_0902_failover_paths.md`), .146 (#432 + #433, both field-confirmed),
+.145 hybrid placement (#431), .144 Apple Silicon update fix (#430), .143
+advertised-speed correction (#428) — one-liners below.
 
 Release gate, unchanged and followed every time: bump the version FIRST,
 `cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
@@ -262,69 +270,58 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.148-alpha (2026-09-02) — OpenClaw, hygiene, and what an agent asks of a node
+### v0.3.149 → .151-alpha (2026-09-02 evening → 09-03) — the performance batch, and what the card taught twice
 
-- **OpenClaw**: `/v1/models` reports `context_length` beside `max_model_len`
-  (`ModelInfo::new`, both-or-neither); README has a "Use it with OpenClaw"
-  section; **`integrations/openclaw/` is a provider plugin** built on OpenClaw's
-  own self-hosted helper (5 vitest tests, path-filtered CI), verified live with
-  OpenClaw 2026.8.2. Publishing to ClawHub is DEFERRED (basic support is enough for now).
-- **Measured**: an OpenClaw first turn is **14,633 prompt tokens + an 8192
-  reply reservation** (8192 default refuses; `max_seq_len_override = 32768`,
-  config file only); KV is 344 KB/token (f32 + f16 mirror) → **5 GB at 14.6k on
-  a 3B, filling an 8 GB card**; a 30-tool streamed request decoded at **1.3
-  tok/s vs ~8 plain and delivered nothing** (tool-call buffering) — open.
-- **#437**: idle unload read `last_request_at`, which nothing writes; a stale
-  persisted value outranked a 215 s-old worker → unloaded 5 s after answering.
-  Now the worker's own `last_used`, residency a hard bound.
-- **Hygiene**: 10 stale Dependabot PRs closed, config grouped + majors ignored
-  + `candle-*` excluded, `delete_branch_on_merge` on; **Rust 1.90 minimum**, 26
-  direct deps refreshed, `core2` gone (4 audit ignores); `llama-cpp-2` held at
-  0.1.138 (Vulkan CI needs `spirv-headers`).
-- **Research, collated in `docs/FUTURE_WORK.md`**: rolling shard load (decode
-  PCIe-bound unless paired with wide speculation; prefill pays; Prima.cpp ring
-  for multi-node), weight splitting, ways around the per-token reload, fewer
-  ROUND TRIPS (DSD), and **truncated fast-path replies DIAGNOSED (#438)**: one
-  lost per-token send strands the tail; the requester ACKs a message its
-  dispatcher dropped. Fix ladder recorded, not yet built.
-⚠ Benchmark with representative text: a repeated-filler prompt read 76 s where
-real text of the same length took 22 s. ⚠ A CMake failure in a Dependabot job
-was misread as the MSRV; read the error. `round_log_0902_openclaw.md`.
+Full account in `round_log_0902_perf_commits.md`; gotchas #438-#443.
 
-### v0.3.147-alpha (2026-09-02) — the failover paths, from one trace
-
-Reading the 709 s 14B failure (`c9b81e27`) line by line found THREE defects —
-two of them not the one the FUTURE_WORK entry described, whose proposed fix
-(the redial give-up branch, ~8 min in) would barely have beaten the deadline
-it meant to replace. All three fixed, each with a toggle-off-goes-red test:
-
-- **#434** — a decode step to a remote segment 0 carries `PromptBytes`, and the
-  budget fallback asked the UNITS, not the KIND: every such step was budgeted
-  as a prefill (240 s for 16 layers; standby idle throughout). Kind decides
-  first; decode uses the measured basis regardless of units.
-- **#435** — a standby's ERROR result was taken as the segment's output: empty
-  activations flowed downstream as `Tensor bytes too short`, blamed on the
-  wrong segment. Failover now LOOPS over standbys (tried nodes excluded);
-  exhaustion names the segment and the last standby's reason. The RTX 4050
-  tester's unexplained one-off on .146 was this, seen from outside.
-- **#436** — an ACKed forward leaves `pending_tensor_outbound`, so a peer that
-  then DEPARTS was bounded only by the compute deadline (0 tokens for 392 s in
-  the field). Close + first failed re-dial now fails every waiter PINNED to
-  the node (`fail_layer_results_awaiting`); no standby gate — not #386's
-  gamble, the serving side aborts on close. **Verified END TO END pre-tag**
-  (`examples/departed_peer_test.sh`): server killed mid-segment → DIAG fires →
-  clean 503 in 10.4 s where .146 waits minutes.
-
-⚠ An edit and the guard that checks it must be strictly SEQUENTIAL tool calls —
-running them in parallel let a stale README count reach CI. ⚠ The first decode
-sample to a cold peer is DROPPED by design; a test must record twice.
-`round_log_0902_failover_paths.md`.
+- **#438 — a lost token no longer strands a peer-served reply's tail.** Serving
+  node retains what it sent (`daemon/state/retained_replies.rs`, bounded); the
+  requester asks `ResendTokens` for the hole after `hole_wait` (4×RTT, 1-5 s),
+  up to 4 times, gated on `features::RESEND_TOKENS`; a dispatcher drop answers
+  `SwarmResponse::Dropped` instead of a false ACK and the sender re-sends once.
+  `examples/dropped_token_test.sh` drops token 5 on purpose (fix arm 40/40 after
+  one ask; control arm 5/40) — ⚠ its control arm can route to the LIVE node over
+  loopback; it now flags that as INVALID.
+- **#439/#440 — the agent-prompt crawl (1.3-5 tok/s vs 33) was VRAM spill, not
+  the tools path.** The prefix cache's snapshot of the previous prompt was never
+  charged against the KV budget, so the next long prompt's cache was allocated
+  with ~300 MB free and landed in WSL2's host-backed memory. `kv_budget::
+  admit_prompt` decides once per prompt (evict cached prompts → refuse at token
+  0), `plan_snapshot` sizes the snapshot to the room beside the live cache,
+  `KvCacheStore::claim_room` evicts before the per-chunk guard refuses. Measured
+  on the card, both arms equally full: **6.9/4.9/4.5 → 23.3/23.7/8.1 tok/s**;
+  on the deployed release 22.9/13.1/17.2. The O(1) KV rollback (#439, own
+  `SeqCache`/`KvPair`) was the first, wrong story — measured no change, kept as
+  waste removed. ⚠ **A candle-only local CUDA build is NOT the release binary**:
+  its smaller footprint made #440 look complete; the release build still needs
+  the budget reconciled with `cudaMemGetInfo` (open).
+- **`PeerInfo::ack_srtt_ms`** — routing prices a peer by measured ACK latency
+  ahead of the health ping (local, never gossiped, capped 10 s).
+- **From the testers (three reports, .150/.151)**: **#441** cancel during a long
+  prompt now stops the worker (per-layer cancel oracle; confirmed in the field,
+  13-17 s vs 11+ min); **#442** a node with NO card delegates a whole model
+  (`serves_on_cpu`) — and **#443** that was unreachable until
+  `SharedState::local_fast_path_for` stood the API fast path aside (a whole-model
+  holder never reached the scheduler; confirmed on Proxmox post-deploy);
+  delegation rejections now log at `info`. Plugin README: `context_length` is
+  the node's configured context; declare models by hand when a gateway's own
+  discovery returns nothing.
+⚠ **Measure the mechanism on the card BEFORE writing the CHANGELOG line** — two
+"fixed" texts were rewritten after the A/B said no. ⚠ Both arms of a memory-
+pressure A/B must be in the SAME memory state; a restart between arms is a
+confound. ⚠ `pkill -f` / a cmdline-grep kill loop matches the shell whose
+COMMAND TEXT contains the pattern (#283/#385, twice more) — match `/proc/*/exe`.
+⚠ Editing `crates/swarmllm-types` mid-way through a release build fails that
+build. ⚠ The build-time question: warm release 18 min, cold 55; the cold case
+is a lockfile change, nothing in the pipeline to fix.
 
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.148** (09-02): OpenClaw provider plugin BUILT + verified (`integrations/openclaw/`), `context_length` on `/v1/models`, **#437** idle unload trusted a timestamp nothing writes, Rust 1.90 + 26 deps, Dependabot hygiene; measured the agent-prompt reality (14,633 tokens + 8192 reservation; 5 GB KV at 14.6k). `round_log_0902_openclaw.md`.
+- **v0.3.147** (09-02): three failover defects from ONE trace — **#434** a decode step of a remote segment 0 budgeted as a PREFILL (kind decides first), **#435** a standby's ERROR taken as the segment's output (`Tensor bytes too short` blamed on the wrong segment), **#436** a DEPARTED peer now fails its pinned forwards at once (`examples/departed_peer_test.sh`, 503 in 10.4 s). `round_log_0902_failover_paths.md`.
 - **v0.3.146** (09-01): benchmarking .145 on the LIVE node — hybrid holds on a 2nd arch (7B 13/28 **6.8** vs 3.8 CPU; 8B 12/32 **5.2** vs 4.0); **#432** a worker's decode-thread calibration settled by one-layer card-only segments it served for a peer (2.9 tok/s, ONE thread for life → keyed by processor depth, depth 0 never timed; confirmed in the field on the deployed binary); **#433** a streamed no-coverage request answered `200`+empty `stop`, and a peer's honest "not hosted" failed a 5-candidate request (both field-confirmed fixed). ⚠ The README's own `SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB` never existed. `round_log_0901_diagnostics_privacy.md`, `perf_baseline_0901_hybrid.md`.
 - **v0.3.145** (09-01): **a model 20% too big for the card no longer loses it (#431)** — `force_cpu_for` was `gpu_layers == 0`, all or nothing; three reports, the last with 5151 MB free while a 14B tripped a thermal limit. Split between layers (contiguous, card-first), sized with KV folded into the per-layer cost; **measured 5.0 → 7.07 (14/28) → 12.25 (20/28), 2.4x and monotone**; a 3000 MB budget chose 13/28 unprompted and settled at 2613 MB. ⚠ **The slow baseline reproduced the bug by accident — check `cpu_placement_reason` before quoting a GPU number (#422).** ⚠ **Applied by SHADOWING `device`/`cos`/`sin` at each loop head, not by editing ~128 sites — and the missed-path hazard FIRED (Qwen 3.5's own RoPE); an unused-shadow warning is all that surfaced it → `arch_supports_hybrid` is an ALLOWLIST.** The design was far smaller than the deferral note assumed: read the code before costing work from a months-old list.
 
