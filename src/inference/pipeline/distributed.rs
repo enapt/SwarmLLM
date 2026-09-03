@@ -1216,6 +1216,7 @@ impl PipelineExecutor {
                     num_layers,
                     activations.len(),
                     budget,
+                    self.request.cancel.as_ref(),
                 )
                 .await;
 
@@ -1461,6 +1462,23 @@ impl PipelineExecutor {
                     Err(e) => {
                         // Timeout or channel drop — remove stale entry and failover
                         self.shared_state.pending_layer_results.remove(&request_id);
+                        // Not a failure of the peer: the client left. Tell the
+                        // peer to stop and end the request; failing over would
+                        // send the same prompt to another machine for nobody.
+                        if crate::inference::cancel::is_request_abandoned(&e) {
+                            tracing::info!(
+                                request_id = %request_id,
+                                segment = idx,
+                                node = %segment.node_id,
+                                seq = sequence_num,
+                                segment_ms = segment_start.elapsed().as_millis() as u64,
+                                "DIAG: request cancelled while a remote segment was computing — \
+                                 telling the peer to stop, not failing over"
+                            );
+                            self.cancel_segment_on(&segment.node_id, request_id, idx)
+                                .await;
+                            return Err(e);
+                        }
                         tracing::warn!(
                             request_id = %request_id,
                             segment = idx,
@@ -1751,6 +1769,7 @@ impl PipelineExecutor {
                 num_layers,
                 activations.len(),
                 budget,
+                self.request.cancel.as_ref(),
             )
             .await;
 

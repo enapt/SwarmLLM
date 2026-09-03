@@ -20,6 +20,17 @@ All notable changes to SwarmLLM are documented here.
   peers' cards take the middle. A short prompt with only distant cards on
   offer still runs locally, and a peer whose speed is unknown never displaces
   a route the node can price.
+- **A client that gives up during a long prompt now stops the work on this
+  node and on its peers, whichever path the request took.** v0.3.150 taught a
+  worker to check for cancellation between layers, but nothing told it to:
+  the pipeline read the cancel flag only between generated tokens, and the
+  streaming surfaces never set it at all, so a client that left during the
+  prompt pass was noticed only at the first token — minutes later on a
+  processor. A tester's processor-only node kept a worker at full load for
+  81 minutes over three abandoned attempts, each queued behind the last. Every
+  long wait in a request now watches its cancel flag, dropping the wait tells
+  the worker or the peer to stop, queued attempts for a cancelled request are
+  skipped, and a cancelled request is never retried.
 - **The graphics-memory budget for conversation history is now checked against
   the card as it stands, not as it looked when the model loaded.** The budget
   was taken from free memory at load time and could not see anything that

@@ -1372,6 +1372,25 @@ silently break at the wire if duplicated:
   — it describes OUR path (the #341 rule). Pinned by
   `a_measured_ack_latency_outranks_the_health_ping_when_choosing_a_holder`
   with a control that the ping still decides without it.
+- **`inference::cancel::unless_cancelled` — every wait that can run for minutes
+  watches the request's cancel flag** (2026-09-03, gotcha #445). The flag
+  (`InferenceRequest::cancel`) is the ONE cancellation signal: set by
+  `CancelOnDisconnect` (non-streaming), by both SSE surfaces on
+  `sse_tx.closed()` (they used to only drop `token_rx`, which the pipeline
+  notices at its next send — after the prompt pass), and by `/cancel`. Read
+  by `ModelProcessPool::forward_for_request` around the WAIT for the worker's
+  answer (never around the send: a half-written `Forward` frame corrupts the
+  worker's stream), by `PipelineExecutor::wait_for_result` for a remote
+  segment (the caller then sends `CancelInference` and does NOT fail over),
+  and by the per-token loop as before. Dropping the wait is the mechanism —
+  the armed `ResponseGuard` sends `CancelRequest`, the worker skips a queued
+  forward and stops a running one between layers. The router never retries a
+  request whose flag is set; the marker error is `REQUEST_ABANDONED`
+  (`ServiceUnavailable`, penalty-exempt, matched only by `is_request_
+  abandoned`). **A new wait longer than a token goes through this helper**, and
+  a new surface that learns the client left must set the flag — a tester's
+  worker ran 81 CPU-minutes on two one-layer segments after the client had
+  gone because the flag was read in one place and set in one other.
 - **A prompt pass asks between layers whether its request was cancelled**
   (2026-09-02, gotcha #441). `KvCacheStore::set_cancel_oracle` is installed by
   the worker over its `cancelled` set; `forward_inner_impl` probes it once per

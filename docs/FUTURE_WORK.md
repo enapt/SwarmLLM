@@ -7031,6 +7031,38 @@ set out to make work, and the GPU path has no spike at all.
 
 ## An abandoned segment keeps running on the peer, blocking everyone (2026-08-02) — FIXED
 
+**Second half, 2026-09-03 (gotcha #445).** The fix above told a PEER to stop;
+the coordinator's own waits never noticed a cancel. `InferenceRequest::cancel`
+was read at the top of the per-token loop only, and the two streamed surfaces
+never set it (they dropped `token_rx`, seen by the pipeline at its next send —
+after the prompt pass). A tester's processor-only node kept a worker at 400%
+CPU for 81 CPU-minutes over three abandoned 14k-token attempts on a 14B, each
+queued behind the last, holding only the boomerang's one-layer local ends.
+Now `inference::cancel::unless_cancelled` polls the flag (250 ms) beside the
+pool's response wait (`forward_for_request`; dropping the armed `ResponseGuard`
+sends `CancelRequest`) and beside `wait_for_result` (the caller sends
+`CancelInference`, no failover); both SSE surfaces set the flag on
+`sse_tx.closed()`; the router never retries a cancelled request.
+
+**Still open, in order of value:**
+- **A ONE-layer segment cannot be interrupted** — the between-layer probe has
+  nowhere to fire, and the boomerang's local ends are one layer each. On a
+  processor with an agent-sized prompt that is minutes of uninterruptible work
+  per abandoned attempt (bounded to the current layer now; before, to the
+  whole chain). The fix is worker-side: chunk a long prompt pass in
+  `handle_forward` (`prefill_chunk_tokens` exists on the `Generate` path) so
+  the probe fires per chunk — which also caps the 287 MB hidden-state
+  intermediate a 14k × 5120 f32 prompt pass materialises.
+- **"A new model-worker per abandoned attempt" is unexplained.** The pool keys
+  workers per model (`workers: DashMap<ModelId, _>`) and the sites that evict
+  one are error paths this scenario does not take. Several `model-worker`
+  PIDs are normal for several resident models. Ask the reporter for
+  `ps -o pid,ppid,lstart,etime,cmd` of every `model-worker` and the daemon log
+  lines `spawning model worker` / `Worker send failed` around the attempts.
+- **`swarmllm status` shows nothing about workers.** A `workers` block (model,
+  pid, device, busy, age) and an admin endpoint to retire one would have let
+  the reporter act without `kill -9`.
+
 **Status: FIXED 2026-08-03, both halves.** The coordinator sends
 `CancelInference` when it abandons a segment (v0.3.63), and the peer now acts on
 it: `inbound_forward_aborts` registers each spawned forward's abort handle, the

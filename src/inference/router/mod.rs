@@ -1005,8 +1005,12 @@ impl InferenceRouter {
             // a remote segment was actually part of this attempt — otherwise the
             // identical message from our own worker would retry pointlessly.
             let used_remote_segment = trace.snapshot().remote_segments() > 0;
-            if matches!(&output, Err(e) if is_transient_remote_failure(e)
-                || (used_remote_segment && remote_peer_could_not_serve(e)))
+            // Never for a request whose client has gone: a retry would send
+            // the same prompt through a fresh pipeline for nobody, which is
+            // exactly the waste the cancel exists to stop (gotcha #445).
+            if !request.is_cancelled()
+                && matches!(&output, Err(e) if is_transient_remote_failure(e)
+                    || (used_remote_segment && remote_peer_could_not_serve(e)))
             {
                 tracing::warn!(
                     request_id = %request.id,

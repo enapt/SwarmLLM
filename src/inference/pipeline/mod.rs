@@ -420,6 +420,9 @@ pub(super) async fn forward_verify_through_segments(
                 num_layers,
                 activation_bytes.len(),
                 budget,
+                // A verify step is a few tokens' work; the loop that issues it
+                // reads the cancel flag between steps.
+                None,
             )
             .await?;
             pending_guard.disarm();

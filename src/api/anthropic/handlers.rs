@@ -223,6 +223,11 @@ pub(super) async fn anthropic_stream(
     model: String,
     tools_requested: bool,
 ) -> Result<axum::response::Response, ApiError> {
+    // The request's own cancel flag: `/v1/messages` has no cancel-by-token
+    // wire, but the flag is what a long wait inside the pipeline watches, so a
+    // client leaving during the prompt pass stops the work instead of being
+    // noticed at the next token (gotcha #445).
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (result_rx, mut token_rx, traced_id) = crate::api::openai::submit_stream_to_router(
         &router_tx,
         ModelId(model.clone()),
@@ -230,7 +235,7 @@ pub(super) async fn anthropic_stream(
         params,
         None,
         None,
-        None, // anthropic /v1/messages doesn't have a cancel-by-token wire yet
+        Some(cancel.clone()),
     )
     .await?;
     let progress_handle = Some((state.shared_state.clone(), traced_id));
@@ -264,6 +269,7 @@ pub(super) async fn anthropic_stream(
                         token_count = streamed_token_count,
                         "Anthropic SSE client disconnected (connection closed) — cancelling pipeline"
                     );
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
                     client_disconnected = true;
                     break;
                 }
@@ -315,6 +321,7 @@ pub(super) async fn anthropic_stream(
                         token_count = streamed_token_count,
                         "Anthropic SSE consumer gone mid-stream (closed or not reading) — cancelling pipeline"
                     );
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
                     client_disconnected = true;
                     break;
                 }

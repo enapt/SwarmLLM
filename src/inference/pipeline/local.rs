@@ -325,10 +325,13 @@ impl PipelineExecutor {
             // path, which is every COLD-START request.
             sampling: Some(self.request.sampling_params.clone()),
         };
+        // Watched against the request's cancel flag: a client that leaves
+        // during a minutes-long prompt pass on this node's processor ends this
+        // wait, and dropping it tells the worker to stop (gotcha #445).
         let layer_result = self
             .shared_state
             .model_process_pool
-            .forward(layer_forward)
+            .forward_for_request(layer_forward, self.request.cancel.clone())
             .await?;
 
         // Deliberately NOT counted as a forward served. This is our own segment
@@ -414,6 +417,14 @@ impl PipelineExecutor {
     }
 
     /// Wait for a remote segment to return its result via the oneshot channel.
+    ///
+    /// `cancel` is the request's cancel flag when the caller has one: the wait
+    /// ends with `inference::cancel::request_abandoned` the moment it flips,
+    /// instead of running out the segment deadline for an answer nobody will
+    /// read. The caller then owes the peer a `CancelInference`.
+    // Eight primitives that name one wait; a struct would rename them at the
+    // five call sites without saying anything new.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn wait_for_result(
         rx: tokio::sync::oneshot::Receiver<LayerResult>,
         request_id: uuid::Uuid,
@@ -422,6 +433,7 @@ impl PipelineExecutor {
         num_layers: u32,
         activation_bytes: usize,
         budget: SegmentBudget,
+        cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<LayerResult, SwarmError> {
         let timeout = budget.duration();
         let send_time = std::time::Instant::now();
@@ -436,7 +448,12 @@ impl PipelineExecutor {
             is_prefill = budget.is_prefill(),
             "DIAG: waiting for remote segment result"
         );
-        match tokio::time::timeout(timeout, rx).await {
+        let timed = crate::inference::cancel::unless_cancelled(
+            async { Ok(tokio::time::timeout(timeout, rx).await) },
+            cancel,
+        )
+        .await?;
+        match timed {
             Ok(Ok(result)) => {
                 let elapsed = send_time.elapsed();
                 tracing::info!(

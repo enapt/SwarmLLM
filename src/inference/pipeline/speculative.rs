@@ -191,6 +191,7 @@ impl PipelineExecutor {
                 num_layers,
                 prompt_byte_len,
                 budget,
+                self.request.cancel.as_ref(),
             )
             .await?;
             // Result delivered (the dispatcher already removed the entry when
@@ -643,6 +644,9 @@ pub(super) async fn send_verify_batch(
         num_layers,
         verify_tokens.len() * 4,
         budget,
+        // A verify round is a few tokens' work; the loop that issues it reads
+        // the cancel flag between rounds.
+        None,
     )
     .await?;
     // Result delivered (the dispatcher already removed the entry); disarm

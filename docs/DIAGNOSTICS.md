@@ -201,9 +201,9 @@ comparable to each other, not to a wall clock. Under prompt privacy the
 chosen pipeline is a boomerang, `local(0,1)` … `local(N−1,N)`, with the
 peers' cards in between.
 
-**Not the explanation**: a `DIAG: parallax routing selected chain segments=1`
-line beside a local-only result is the search AGREEING with the fast path,
-not failing to run.
+**Not the explanation**: a `DIAG: parallax routing selected chain` line with
+`segments=1` beside a local-only result is the search AGREEING with the fast
+path, not failing to run.
 
 ## "Why is this node talking to a stranger?"
 
@@ -462,6 +462,27 @@ The match also catches that node's `model-worker` child, so kill the daemon, not
 just the first hit. Peer-dependent probes need ~45 s after a restart for the peer
 set to settle — a different failure right after start is usually the swarm, not
 the change.
+
+## "The client left — did the work stop?"
+
+Since v0.3.152 every long wait in a request watches `InferenceRequest::cancel`
+(`inference::cancel`). The lines, in order, for a client that disconnects
+during the prompt pass:
+
+```
+DIAG: SSE client disconnected (connection closed) — cancelling pipeline     (streaming; flag set here)
+DIAG: client disconnected before completion — cancelling request           (non-streaming; flag set here)
+DIAG: request cancelled while a remote segment was computing — telling the peer to stop, not failing over
+model-worker: skipping already-cancelled request                            (DEBUG; a queued forward dropped)
+...cancelled between layers → GenerateDone finish_reason="cancelled"        (a running multi-layer forward)
+```
+
+The request then ends with `Request abandoned by the client before the reply
+was ready` (a 503 nobody receives) and is NOT retried. **What this cannot
+stop**: a segment of ONE layer already computing — the between-layer probe has
+nowhere to fire — so on a processor the local ends of a boomerang finish their
+current layer first. If a worker stays busy longer than that after the lines
+above, the cancel did not reach it: check for `CancelRequest` on the IPC path.
 
 ## Measuring cancellation (what NOT to use)
 

@@ -929,7 +929,7 @@ async fn dispatch_scheduler_group(pool: &Arc<ModelProcessPool>, msgs: Vec<BatchS
     if msgs.len() == 1 {
         let BatchSchedulerMsg::Forward { fwd, resp_tx } =
             msgs.into_iter().next().expect("len == 1 checked above");
-        let result = pool.forward_direct(fwd).await;
+        let result = pool.forward_direct(fwd, None).await;
         let _ = resp_tx.send(result);
         return;
     }
@@ -3382,6 +3382,27 @@ impl ModelProcessPool {
         &self,
         forward: crate::types::LayerForward,
     ) -> Result<crate::types::LayerResult, SwarmError> {
+        self.forward_for_request(forward, None).await
+    }
+
+    /// [`Self::forward`] for a request THIS node coordinates: the wait for the
+    /// worker's answer watches the request's cancel flag and ends — telling the
+    /// worker to stop — the moment it flips (`inference::cancel`).
+    ///
+    /// Only the wait is watched. The send is never interrupted, because a
+    /// `Forward` frame written half-way would corrupt the worker's stream for
+    /// every request after it; and a forward the batch scheduler takes (a
+    /// decode step, one token's work) is not watched either — the per-token
+    /// loop above it already reads the flag between steps.
+    ///
+    /// `None` is a forward with no request of ours behind it — a segment served
+    /// for a remote coordinator, whose cancel arrives over the network as
+    /// `CancelInference` and reaches the worker through `cancel_request`.
+    pub async fn forward_for_request(
+        &self,
+        forward: crate::types::LayerForward,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<crate::types::LayerResult, SwarmError> {
         if self
             .continuous_batching
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -3409,12 +3430,13 @@ impl ModelProcessPool {
                 ));
             }
         }
-        self.forward_direct(forward).await
+        self.forward_direct(forward, cancel).await
     }
 
     async fn forward_direct(
         &self,
         forward: crate::types::LayerForward,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<crate::types::LayerResult, SwarmError> {
         // `None` means the caller had no request context — a segment served
         // for a REMOTE coordinator, whose parameters are not on the wire.
@@ -3515,51 +3537,62 @@ impl ModelProcessPool {
             }
         }
 
-        loop {
-            match resp_rx.recv().await {
-                Some((msg, payload)) => match msg {
-                    WorkerMsg::LayerResult(r) if r.request_id == request_id => {
-                        let (activations, spec_logits) = reconstruct_layer_payload(
-                            r.has_activations,
-                            r.has_spec_logits,
-                            r.spec_logits_dims,
-                            payload,
-                        )?;
+        // The wait — and ONLY the wait — ends early when the request is
+        // cancelled. Returning from `unless_cancelled` with the request
+        // abandoned drops this block with `guard` still armed, and
+        // `ResponseGuard::drop` is what tells the worker: it sends
+        // `CancelRequest`, the worker skips the forward if it has not started
+        // and stops between layers if it has (gotcha #445 — a local segment of
+        // an agent-sized prompt on a processor ran for 81 minutes after the
+        // client had gone, because nothing here was watching).
+        let wait = async {
+            loop {
+                match resp_rx.recv().await {
+                    Some((msg, payload)) => match msg {
+                        WorkerMsg::LayerResult(r) if r.request_id == request_id => {
+                            let (activations, spec_logits) = reconstruct_layer_payload(
+                                r.has_activations,
+                                r.has_spec_logits,
+                                r.spec_logits_dims,
+                                payload,
+                            )?;
+                            guard.disarm();
+                            return Ok(crate::types::LayerResult {
+                                request_id: r.request_id,
+                                token_ids: r.token_ids,
+                                finish_reason: r.finish_reason,
+                                activations,
+                                sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
+                                spec_logits,
+                                matched_stop_sequence: r.matched_stop_sequence,
+                                token_logprobs: r.logprobs.unwrap_or_default(),
+                            });
+                        }
+                        WorkerMsg::Error {
+                            request_id: rid,
+                            message,
+                            fatal,
+                        } if rid == request_id => {
+                            // Worker already reached a terminal state for this id.
+                            guard.disarm();
+                            return Err(self.classify_worker_error(&model_id, message, fatal));
+                        }
+                        _ => continue,
+                    },
+                    None => {
+                        // Reader actor closed the channel — worker died while we were waiting.
+                        // Subprocess lifecycle failure → ServiceUnavailable (per
+                        // .claude/rules/completeness.md); Internal is for code bugs.
+                        self.workers.remove(&model_id);
                         guard.disarm();
-                        return Ok(crate::types::LayerResult {
-                            request_id: r.request_id,
-                            token_ids: r.token_ids,
-                            finish_reason: r.finish_reason,
-                            activations,
-                            sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
-                            spec_logits,
-                            matched_stop_sequence: r.matched_stop_sequence,
-                            token_logprobs: r.logprobs.unwrap_or_default(),
-                        });
+                        return Err(SwarmError::ServiceUnavailable(
+                            "worker closed connection before reply".into(),
+                        ));
                     }
-                    WorkerMsg::Error {
-                        request_id: rid,
-                        message,
-                        fatal,
-                    } if rid == request_id => {
-                        // Worker already reached a terminal state for this id.
-                        guard.disarm();
-                        return Err(self.classify_worker_error(&model_id, message, fatal));
-                    }
-                    _ => continue,
-                },
-                None => {
-                    // Reader actor closed the channel — worker died while we were waiting.
-                    // Subprocess lifecycle failure → ServiceUnavailable (per
-                    // .claude/rules/completeness.md); Internal is for code bugs.
-                    self.workers.remove(&model_id);
-                    guard.disarm();
-                    return Err(SwarmError::ServiceUnavailable(
-                        "worker closed connection before reply".into(),
-                    ));
                 }
             }
-        }
+        };
+        crate::inference::cancel::unless_cancelled(wait, cancel.as_ref()).await
     }
 
     /// Batched forward: send N forwards in a single `DaemonMsg::BatchForward`

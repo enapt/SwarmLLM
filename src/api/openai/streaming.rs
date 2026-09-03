@@ -588,6 +588,14 @@ async fn router_inference_stream(
     created: i64,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<axum::response::Response, ApiError> {
+    // Every streamed request gets a cancel flag, the caller's or one of its
+    // own, because the flag is what a long wait inside the pipeline watches
+    // (`inference::cancel`). Dropping `token_rx` on disconnect, which this path
+    // has always done, reaches the pipeline only when it next has a token to
+    // send — never during the prompt pass, which on a processor can outlast
+    // any client (gotcha #445).
+    let cancel =
+        cancel.unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let (result_rx, mut token_rx, traced_id) = submit_stream_to_router(
         &router_tx,
         ModelId(req.model.clone()),
@@ -595,7 +603,7 @@ async fn router_inference_stream(
         req.to_sampling_params(),
         req.session_id.clone(),
         req.lora_adapter.clone(),
-        cancel,
+        Some(cancel.clone()),
     )
     .await?;
 
@@ -656,6 +664,7 @@ async fn router_inference_stream(
                         elapsed_ms = stream_start.elapsed().as_millis() as u64,
                         "DIAG: SSE client disconnected (connection closed) — cancelling pipeline"
                     );
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
                     client_disconnected = true;
                     break;
                 }
