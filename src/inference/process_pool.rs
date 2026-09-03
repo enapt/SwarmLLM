@@ -1007,6 +1007,32 @@ pub(crate) fn charges_ram(going_to_cpu: bool, gpu_detected: bool, build_has_cuda
     going_to_cpu || !gpu_detected || !build_has_cuda
 }
 
+/// One resident model-worker subprocess as the status surfaces report it.
+///
+/// Read through [`ModelProcessPool::worker_summaries`]; every field is a fact
+/// the pool already keeps, so the report cannot disagree with the decisions
+/// the pool makes from the same numbers.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkerSummary {
+    pub model: String,
+    /// The subprocess id, when the child is still ours to name.
+    pub pid: Option<u32>,
+    /// `"graphics card"` or `"processor"`.
+    pub device: &'static str,
+    /// Why it runs on the processor, when it does (`CpuReason::as_str`).
+    pub cpu_reason: Option<&'static str>,
+    /// Requests this worker is computing right now.
+    pub in_flight: usize,
+    /// Seconds since a request was last registered against it.
+    pub idle_secs: u64,
+    /// Seconds since it was spawned.
+    pub age_secs: u64,
+    /// The reader actor saw its socket close: the process is gone or going.
+    pub dead: bool,
+    /// What admission priced the model at, in MB; 0 when unpriced.
+    pub gpu_estimate_mb: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuReason {
     /// `inference.gpu_layers = 0` — the user asked for CPU.
@@ -4302,6 +4328,45 @@ impl ModelProcessPool {
     /// List all currently loaded model IDs.
     pub fn loaded_model_ids(&self) -> Vec<ModelId> {
         self.workers.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Every worker this node has resident, as `/v1/status` and `swarmllm
+    /// status` show it — sorted by model so two readings line up.
+    ///
+    /// **Why**: a tester found a worker at 400% CPU for 81 minutes on a request
+    /// whose client had long gone, and wrote that "nothing in `swarmllm status`
+    /// or the API surfaced these or offered a way to reap them" — `kill -9` was
+    /// the only tool (gotcha #445). The pool is the one owner of these
+    /// processes, so it is the one place that can say what they are doing:
+    /// `in_flight` is the pool's own response map, which every execution path
+    /// passes through (see `models_with_inflight_requests`). Retiring one is
+    /// `POST /api/admin/models/{id}/unload`, which drains and then stops it.
+    pub fn worker_summaries(&self) -> Vec<WorkerSummary> {
+        let mut out: Vec<WorkerSummary> = self
+            .workers
+            .iter()
+            .map(|e| {
+                let h = e.value();
+                let cpu_reason = h.placed_on_cpu_because.map(|r| r.as_str());
+                WorkerSummary {
+                    model: e.key().0.clone(),
+                    pid: h.child.as_ref().and_then(|c| c.id()),
+                    device: if cpu_reason.is_some() {
+                        "processor"
+                    } else {
+                        "graphics card"
+                    },
+                    cpu_reason,
+                    in_flight: h.responses.len(),
+                    idle_secs: h.idle_secs(),
+                    age_secs: h.spawned_at.elapsed().as_secs(),
+                    dead: h.dead.load(Ordering::Acquire),
+                    gpu_estimate_mb: h.gpu_estimate_mb,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.model.cmp(&b.model));
+        out
     }
 
     /// Models with at least one request in flight *right now*.

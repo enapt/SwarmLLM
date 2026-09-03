@@ -87,6 +87,33 @@ fn print_summary(json: &serde_json::Value) {
         None => println!("Model:     unknown"),
     }
 
+    // What the machine is computing right now. A worker still busy for a
+    // client that has gone used to be visible only in `ps`, and the only way
+    // to stop it was `kill -9` (gotcha #445).
+    let workers: Vec<serde_json::Value> = json
+        .get("workers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if workers.is_empty() {
+        println!("Workers:   none running (a model starts its worker on first use)");
+    } else {
+        println!("Workers:   {} running", workers.len());
+        for w in &workers {
+            println!("             {}", describe_worker(w));
+        }
+        if workers
+            .iter()
+            .any(|w| w.get("in_flight").and_then(|v| v.as_u64()).unwrap_or(0) > 0)
+        {
+            println!(
+                "           (a worker still computing for a client that has gone can be retired \
+                 with POST /api/admin/models/<model>/unload — the daemon stops it and frees \
+                 its memory)"
+            );
+        }
+    }
+
     match n("peers") {
         Some(0) => println!(
             "Peers:     none connected — this node is on its own for now, which is \
@@ -113,4 +140,120 @@ fn print_summary(json: &serde_json::Value) {
     }
 
     println!("\n(run with --json for the raw response)");
+}
+
+/// One worker, one line: what it runs, where, how busy, how long.
+///
+/// A function rather than inline formatting so the wording — the part a
+/// person reads — can be pinned by a test.
+fn describe_worker(w: &serde_json::Value) -> String {
+    let s = |k: &str| w.get(k).and_then(|v| v.as_str()).unwrap_or("?");
+    let n = |k: &str| w.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    let pid = w
+        .get("pid")
+        .and_then(|v| v.as_u64())
+        .map(|p| format!("pid {p}"))
+        .unwrap_or_else(|| "pid unknown".to_string());
+    let device = match (s("device"), w.get("cpu_reason").and_then(|v| v.as_str())) {
+        (_, Some(reason)) => format!("processor ({})", cpu_reason_in_words(reason)),
+        (d, None) => d.to_string(),
+    };
+    let busy = match n("in_flight") {
+        0 => "idle".to_string(),
+        1 => "1 request in flight".to_string(),
+        k => format!("{k} requests in flight"),
+    };
+    let dead = if w.get("dead").and_then(|v| v.as_bool()).unwrap_or(false) {
+        "  (exiting)"
+    } else {
+        ""
+    };
+    format!(
+        "{}  {pid}  {device}  {busy}  idle {}  up {}{dead}",
+        s("model"),
+        human_secs(n("idle_secs")),
+        human_secs(n("age_secs")),
+    )
+}
+
+/// The daemon's stable machine tags (`CpuReason::as_str`) in plain words. An
+/// unknown tag is shown as it is rather than hidden.
+fn cpu_reason_in_words(tag: &str) -> String {
+    match tag {
+        "not_enough_vram" => "not enough graphics memory for it".to_string(),
+        "configured_cpu_only" => "configured to use the processor".to_string(),
+        "gpu_too_old_for_this_build" => "graphics card too old for this build".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn human_secs(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s => format!("{}h {}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The line a person reads for a worker stuck on a request nobody is
+    /// waiting for: the model, the process, where it runs and why, how busy.
+    #[test]
+    fn a_busy_processor_worker_is_described_in_plain_words() {
+        let w = serde_json::json!({
+            "model": "qwen2.5-14b-instruct-q4-k-m",
+            "pid": 2466031,
+            "device": "processor",
+            "cpu_reason": "not_enough_vram",
+            "in_flight": 1,
+            "idle_secs": 0,
+            "age_secs": 1200,
+            "dead": false,
+        });
+        let line = describe_worker(&w);
+        assert!(line.starts_with("qwen2.5-14b-instruct-q4-k-m  pid 2466031  processor (not enough graphics memory for it)  1 request in flight"), "{line}");
+        assert!(line.ends_with("idle 0s  up 20m"), "{line}");
+    }
+
+    /// An idle card worker, and a worker whose process is already going.
+    #[test]
+    fn an_idle_card_worker_and_a_dying_one_read_as_such() {
+        let idle = serde_json::json!({
+            "model": "llama-3.2-3b", "pid": 7, "device": "graphics card",
+            "cpu_reason": null, "in_flight": 0, "idle_secs": 190, "age_secs": 7300, "dead": false,
+        });
+        assert_eq!(
+            describe_worker(&idle),
+            "llama-3.2-3b  pid 7  graphics card  idle  idle 3m  up 2h 1m"
+        );
+        let dying = serde_json::json!({
+            "model": "m", "pid": null, "device": "processor", "cpu_reason": "configured_cpu_only",
+            "in_flight": 2, "idle_secs": 5, "age_secs": 5, "dead": true,
+        });
+        let line = describe_worker(&dying);
+        assert!(
+            line.contains("pid unknown")
+                && line.contains("2 requests in flight")
+                && line.ends_with("(exiting)"),
+            "{line}"
+        );
+    }
+
+    /// Every tag the daemon can emit has words; the mapping is pinned against
+    /// the enum itself so a renamed tag cannot silently fall through.
+    #[test]
+    fn every_processor_reason_has_words() {
+        use swarmllm::inference::process_pool::CpuReason;
+        for r in [
+            CpuReason::Configured,
+            CpuReason::GpuTooOld,
+            CpuReason::NotEnoughVram,
+        ] {
+            let tag = r.as_str();
+            assert_ne!(cpu_reason_in_words(tag), tag, "no words for {tag}");
+        }
+    }
 }

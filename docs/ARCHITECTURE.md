@@ -1805,7 +1805,7 @@ the sidecar holds.
   from one value. Omitted when the model's declared context is unreadable, since
   a wrong figure is worse than an absent one.
 - `GET    /v1/providers` — List configured cloud providers and their available models
-- `GET    /v1/status` — SwarmLLM node status
+- `GET    /v1/status` — SwarmLLM node status. `workers` (2026-09-03): every resident model-worker subprocess — `model`, `pid`, `device` (`graphics card`/`processor`), `cpu_reason`, `in_flight` (requests it is computing now, from the pool's own response map), `idle_secs`, `age_secs`, `dead`, `gpu_estimate_mb`. The answer to "what is my machine computing right now", and how a worker still busy for a client that has gone is found without `ps` (gotcha #445); retire one with `POST /api/admin/models/{id}/unload`. `swarmllm status` renders it.
 
 ### OpenAI Responses API (`/v1/responses`)
 OpenAI-compatible Responses endpoint — the 2026 default API for o-series / gpt-5 / reasoning-era callers:

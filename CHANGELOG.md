@@ -4,6 +4,16 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`swarmllm status` now lists the node's model workers** — which model each
+  one runs, its process id, whether it is on the graphics card or the
+  processor (and why), how many requests it is computing right now, and how
+  long it has been idle and alive. The same list is in `/v1/status` as
+  `workers`. Until now a worker still busy for a client that had gone could
+  only be found with `ps` and only stopped with `kill -9`; the status output
+  names the one that is busy and the request that retires it.
+
 ### Fixed
 
 - **A machine with no graphics card that holds a whole model too big for any

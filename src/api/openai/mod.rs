@@ -954,6 +954,10 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
         "peers": state.shared_state.peer_registry.len(),
         "node_id": state.shared_state.identity.node_id().to_string(),
         "peer_id": peer_id,
+        // What this machine is computing RIGHT NOW: every resident worker,
+        // with the requests it has in flight. A worker still busy for a client
+        // that has gone used to be visible only in `ps` (gotcha #445).
+        "workers": state.shared_state.model_process_pool.worker_summaries(),
     }))
 }
 
