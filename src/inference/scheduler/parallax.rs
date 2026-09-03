@@ -323,6 +323,36 @@ pub(super) fn vertex_cost(
     }
 }
 
+/// What a whole chain is priced at: the sum of its segments' vertex costs, in
+/// the same milliseconds `vertex_cost` speaks. A segment whose node is not
+/// among `candidates` contributes nothing, which cannot happen for a chain the
+/// DP produced from those candidates.
+///
+/// Exists so the caller can put the number it is about to act on in the log
+/// beside the alternative it is giving up — the search itself returns only the
+/// winning segments, and "the pipeline was cheaper" is unverifiable without
+/// both figures.
+pub(super) fn chain_cost_ms(
+    segments: &[PipelineSegment],
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    num_layers: u32,
+    prompt_tokens: Option<u32>,
+) -> f32 {
+    segments
+        .iter()
+        .filter_map(|seg| {
+            candidates
+                .iter()
+                .find(|c| c.node_id == seg.node_id)
+                .map(|c| {
+                    vertex_cost(c, seg.layer_range, local_node_id, num_layers, prompt_tokens)
+                        .total()
+                })
+        })
+        .sum()
+}
+
 /// Route layers [0, num_layers) across candidates using shortest-path DP.
 ///
 /// Returns segments covering [0, num_layers) in order, or the SwarmError from
@@ -371,6 +401,29 @@ pub(super) fn route_shortest_path(
             if b > 0 {
                 split_points.push(b);
             }
+        }
+    }
+    // A local candidate holding the WHOLE model offers the search no boundary
+    // to cut at: its one range starts at 0 and ends at `num_layers`, and under
+    // encryption it is the only legal source and sink, so every other chain
+    // must begin and end on it — at a layer the points above do not contain.
+    // Add the boomerang's own ends, one layer each: exactly the shape
+    // `boomerang_assignment` builds by hand for a single peer, now available
+    // to the priced search across several. Without them a node holding every
+    // shard of a model it would run on its processor could never be routed as
+    // a boomerang over its peers' cards, however much faster they were priced
+    // (gotcha #444). Only when such a candidate exists, so every other
+    // topology's split set — and route — is exactly what it was.
+    if encrypted_pipeline && num_layers >= 3 {
+        let local_holds_whole = candidates.iter().any(|c| {
+            &c.node_id == local_node_id
+                && c.available_ranges
+                    .iter()
+                    .any(|&(a, b)| a == 0 && b >= num_layers)
+        });
+        if local_holds_whole {
+            split_points.push(1);
+            split_points.push(num_layers - 1);
         }
     }
     split_points.sort_unstable();
@@ -1582,5 +1635,74 @@ mod tests {
             segs[0].node_id.0[0], 2,
             "a 25x faster peer must win despite being 6x further away"
         );
+    }
+    /// A chain is priced as the sum of its segments, in the same milliseconds
+    /// `vertex_cost` speaks — so the log can put the pipeline's figure beside
+    /// the local route it displaced.
+    #[test]
+    fn a_chain_costs_the_sum_of_its_segments() {
+        let local = NodeId([0xAA; 32]);
+        let a = cand(1, vec![(0, 16)], 20, 0.0, true, false, 10.0);
+        let b = cand(2, vec![(16, 32)], 30, 0.0, false, true, 10.0);
+        let cands = vec![a.clone(), b.clone()];
+        let segs = vec![
+            PipelineSegment {
+                node_id: a.node_id.clone(),
+                shard_id: a.shard_id.clone(),
+                layer_range: (0, 16),
+            },
+            PipelineSegment {
+                node_id: b.node_id.clone(),
+                shard_id: b.shard_id.clone(),
+                layer_range: (16, 32),
+            },
+        ];
+        let expected = vertex_cost(&a, (0, 16), &local, 32, Some(1000)).total()
+            + vertex_cost(&b, (16, 32), &local, 32, Some(1000)).total();
+        let got = chain_cost_ms(&segs, &cands, &local, 32, Some(1000));
+        assert!((got - expected).abs() < 1e-3, "{got} vs {expected}");
+        assert!(got > 0.0);
+    }
+    /// A node holding EVERY layer of a model it would run on its processor,
+    /// with prompt privacy on: the only private route is a boomerang, and until
+    /// the boomerang's ends were split points the search could not build one
+    /// across two peers each holding half — its ranges had no boundary at layer
+    /// 1 or 31 — so the whole model stayed on the processor however cheap the
+    /// cards were priced (gotcha #444). Control: privacy off routes straight to
+    /// the two cards.
+    #[test]
+    fn an_encrypted_whole_model_holder_is_routed_as_a_boomerang_across_two_cards() {
+        let local = NodeId([1u8; 32]);
+        let mut slow_local = cand(1, vec![(0, 32)], 0, 0.0, true, true, 1.0);
+        slow_local.node_id = local.clone();
+        let mut a = cand(2, vec![(0, 16)], 5, 0.0, true, false, 20.0);
+        a.has_gpu = true;
+        let mut b = cand(3, vec![(16, 32)], 5, 0.0, false, true, 20.0);
+        b.has_gpu = true;
+        let cands = vec![slow_local, a, b];
+
+        let segs = route_shortest_path(32, &cands, &local, true, true, true, Some(14_000))
+            .expect("the boomerang across two cards must be routable");
+        let shape: Vec<(bool, (u32, u32))> = segs
+            .iter()
+            .map(|s| (s.node_id == local, s.layer_range))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (true, (0, 1)),
+                (false, (1, 16)),
+                (false, (16, 31)),
+                (true, (31, 32))
+            ],
+            "{segs:?}"
+        );
+
+        // Control: with privacy off nothing forces the ends home, and the two
+        // cards take a half each.
+        let segs =
+            route_shortest_path(32, &cands, &local, false, false, true, Some(14_000)).unwrap();
+        let nodes: Vec<u8> = segs.iter().map(|s| s.node_id.0[0]).collect();
+        assert_eq!(nodes, vec![2, 3], "{segs:?}");
     }
 }

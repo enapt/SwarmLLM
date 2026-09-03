@@ -2094,3 +2094,289 @@ fn an_unreadable_memory_figure_never_caps_a_peer() {
          no information, not 'no room' (gotcha #330)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A node holding every layer that would run the model on its PROCESSOR lets
+// the priced search compete with its fast path (gotcha #444). In this build
+// `ModelProcessPool::serves_on_cpu` is always true — there is no card — so
+// every assembly below is on the processor side of that question.
+// ---------------------------------------------------------------------------
+
+/// A holder with a card advertising room, at `latency_ms`, stating a speed.
+fn gpu_holder_info(node: &NodeId, latency_ms: u32, tokens_per_sec: f32) -> PeerInfo {
+    let mut cap = capability_with_gpu(Some(24_000));
+    cap.node_id = node.clone();
+    cap.est_tokens_per_sec_7b = tokens_per_sec;
+    PeerInfo {
+        node_id: node.clone(),
+        addresses: vec![],
+        capability: Some(cap),
+        last_seen: chrono::Utc::now(),
+        latency_ms: Some(latency_ms),
+        trust_score: 0.9,
+        peer_id_bytes: None,
+        ack_srtt_ms: None,
+        active_request_count: 0,
+        first_seen: 0,
+        verified_transaction_count: 0,
+        is_lan_peer: false,
+    }
+}
+
+/// The local node holds both halves of a two-shard model; peers B and C hold
+/// one half each, on cards, `peer_latency_ms` away. No single peer holds the
+/// whole model, so the whole-model hand-off cannot fire — only a pipeline can.
+fn processor_holder_beside_two_gpu_halves(
+    peer_latency_ms: u32,
+    peer_tokens_per_sec: f32,
+) -> (Arc<SharedState>, NodeId, NodeId, NodeId) {
+    let state = make_shared_state();
+    let local = state.identity.node_id().clone();
+    let b = NodeId([0xB1; 32]);
+    let c = NodeId([0xC1; 32]);
+    let model = "split-14b";
+    let shards = vec![
+        ShardInfo {
+            index: 0,
+            layer_range: (0, 16),
+            size_bytes: 2_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        },
+        ShardInfo {
+            index: 1,
+            layer_range: (16, 32),
+            size_bytes: 2_000_000_000,
+            hash: [1u8; 32],
+            tensors: vec![],
+        },
+    ];
+    state
+        .model_registry
+        .register_manifest(make_manifest(model, 32, shards));
+    let sid = |i: u32| ShardId {
+        model_id: ModelId(model.into()),
+        index: i,
+    };
+    state
+        .model_registry
+        .record_shard_holder(sid(0), local.clone());
+    state
+        .model_registry
+        .record_shard_holder(sid(1), local.clone());
+    state.model_registry.record_shard_holder(sid(0), b.clone());
+    state.model_registry.record_shard_holder(sid(1), c.clone());
+    for n in [&b, &c] {
+        state.peer_registry.insert(
+            n.clone(),
+            gpu_holder_info(n, peer_latency_ms, peer_tokens_per_sec),
+        );
+        state.connected_node_ids.insert(n.clone());
+    }
+    (state, local, b, c)
+}
+
+/// The tester's case (gotcha #442, second half): a processor-only node that
+/// holds every shard of a model no single card holds, two GPU peers on the LAN
+/// each holding half, and an agent-sized prompt. The day before it held the
+/// last shard, a three-segment pipeline across those cards answered in seconds;
+/// holding it turned every request into minutes on the processor, because full
+/// local coverage ended the search. The priced search must win here.
+///
+/// Holding both ends turns prompt privacy on automatically, so the winning
+/// shape is the boomerang: embedding here, the two cards for the middle,
+/// sampling here. The peers see encrypted hidden states and never the prompt.
+#[test]
+fn a_processor_bound_holder_hands_a_long_prompt_to_a_pipeline_of_faster_cards() {
+    let (state, local, b, c) = processor_holder_beside_two_gpu_halves(5, 20.0);
+    assert!(
+        state.encrypted_pipeline_for(&ModelId("split-14b".into())),
+        "the fixture holds both ends, so privacy must be auto-on"
+    );
+    let scheduler = PipelineScheduler::new(state);
+    let assignment = scheduler
+        .assemble_pipeline_for(
+            &ModelId("split-14b".into()),
+            &local,
+            uuid::Uuid::new_v4(),
+            Some(14_000),
+        )
+        .unwrap();
+    let shape: Vec<(NodeId, (u32, u32))> = assignment
+        .segments
+        .iter()
+        .map(|s| (s.node_id.clone(), s.layer_range))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (local.clone(), (0, 1)),
+            (b, (1, 16)),
+            (c, (16, 31)),
+            (local, (31, 32)),
+        ],
+        "embedding and sampling stay home, the cards take the middle; got {:?}",
+        assignment.segments
+    );
+}
+
+/// The same node with prompt privacy switched off hands the two cards a half
+/// each and keeps nothing.
+#[test]
+fn with_privacy_off_the_processor_bound_holder_hands_the_whole_model_to_the_cards() {
+    let (state, local, b, c) = processor_holder_beside_two_gpu_halves(5, 20.0);
+    state
+        .encrypted_pipeline_models
+        .insert(ModelId("split-14b".into()), false);
+    assert!(!state.encrypted_pipeline_for(&ModelId("split-14b".into())));
+    let scheduler = PipelineScheduler::new(state);
+    let assignment = scheduler
+        .assemble_pipeline_for(
+            &ModelId("split-14b".into()),
+            &local,
+            uuid::Uuid::new_v4(),
+            Some(14_000),
+        )
+        .unwrap();
+    let nodes: Vec<NodeId> = assignment
+        .segments
+        .iter()
+        .map(|s| s.node_id.clone())
+        .collect();
+    assert_eq!(nodes, vec![b, c], "{:?}", assignment.segments);
+}
+
+/// The control, and the guard against the reverted `cbbed678`: distant cards
+/// and a short prompt. Every remote hop is charged per token, so at 900 ms a
+/// pipeline costs far more than any processor's decode — the request stays
+/// here, in the fast path's shape with nobody else involved. The same fixture
+/// with the cards 5 ms away goes to them, so it is the distance that decides,
+/// not the absence of a route.
+#[test]
+fn a_short_prompt_stays_on_the_processor_when_the_cards_are_far_away() {
+    let assemble = |peer_latency_ms: u32| {
+        let (state, local, _b, _c) = processor_holder_beside_two_gpu_halves(peer_latency_ms, 20.0);
+        let scheduler = PipelineScheduler::new(state);
+        let assignment = scheduler
+            .assemble_pipeline_for(
+                &ModelId("split-14b".into()),
+                &local,
+                uuid::Uuid::new_v4(),
+                None,
+            )
+            .unwrap();
+        (local, assignment)
+    };
+    let (local, far) = assemble(900);
+    assert_eq!(far.segments.len(), 1, "{:?}", far.segments);
+    assert_eq!(far.segments[0].node_id, local);
+    assert!(
+        far.standbys.is_empty() && far.tp_groups.is_empty(),
+        "the fast path's shape: nobody else involved"
+    );
+    let (local, near) = assemble(5);
+    assert!(
+        near.segments.iter().any(|s| s.node_id != local),
+        "with the same cards on the LAN the route exists and is taken: {:?}",
+        near.segments
+    );
+}
+
+/// A peer priced at the shared unknown prior is not evidence of a faster
+/// route: a route this node can price is never given up for one it cannot.
+/// Advertised speed counts as knowing; an all-local chain means the search
+/// agrees with the fast path.
+#[test]
+fn an_unpriced_peer_cannot_displace_the_processor_route() {
+    let local = local_full_coverage();
+    let mut peer = willing_peer(0xBB, LAYERS);
+    assert_eq!(
+        peer.est_tokens_per_sec, 0.0,
+        "the fixture must start unpriced"
+    );
+    let remote_chain = vec![PipelineSegment {
+        node_id: peer.node_id.clone(),
+        shard_id: peer.shard_id.clone(),
+        layer_range: (0, LAYERS),
+    }];
+    let cands = vec![local.clone(), peer.clone()];
+    assert!(
+        super::pipeline_may_replace_processor_route(&remote_chain, &cands, &local_id()).is_err(),
+        "an unpriced peer must not take the request"
+    );
+    peer.est_tokens_per_sec = 20.0;
+    let cands = vec![local.clone(), peer];
+    assert!(
+        super::pipeline_may_replace_processor_route(&remote_chain, &cands, &local_id()).is_ok(),
+        "an advertised speed is a price"
+    );
+    let local_chain = vec![PipelineSegment {
+        node_id: local.node_id.clone(),
+        shard_id: local.shard_id.clone(),
+        layer_range: (0, LAYERS),
+    }];
+    assert!(
+        super::pipeline_may_replace_processor_route(&local_chain, &cands, &local_id()).is_err(),
+        "an all-local chain is the fast path by another name"
+    );
+}
+
+/// The local candidate is priced by the device the REQUEST would use, not the
+/// device the node owns: a card this model does not fit contributes neither
+/// its speed nor its prefill prior.
+#[test]
+fn the_local_candidate_is_priced_by_the_device_the_request_would_use() {
+    let identity = Identity::generate();
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::open(temp.path()).unwrap();
+    let executor = Arc::new(Mutex::new(ModelExecutor::new()));
+    let card = crate::inference::executor::GpuInfo {
+        name: "NVIDIA GeForce RTX 3070".into(),
+        vram_total_mb: 8192,
+        vram_free_mb: 7000,
+        backend: "cuda".into(),
+    };
+    let (state, _, _) = SharedState::new(Config::default(), identity, db, executor, Some(card));
+    let local = state.identity.node_id().clone();
+    let mid = ModelId("too-big-for-the-card".into());
+    state.model_registry.register_manifest(make_manifest(
+        &mid.0,
+        32,
+        vec![ShardInfo {
+            index: 0,
+            layer_range: (0, 32),
+            size_bytes: 4_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        }],
+    ));
+    state.model_registry.record_shard_holder(
+        ShardId {
+            model_id: mid.clone(),
+            index: 0,
+        },
+        local.clone(),
+    );
+    let manifest = state.model_registry.get_manifest(&mid).unwrap();
+    let scheduler = PipelineScheduler::new(state);
+    let pick = |cands: Vec<NodeCandidate>| cands.into_iter().find(|c| c.node_id == local).unwrap();
+    let on_card =
+        pick(scheduler.gather_candidates(&manifest, &local, uuid::Uuid::new_v4(), None, &|| false));
+    let on_processor =
+        pick(scheduler.gather_candidates(&manifest, &local, uuid::Uuid::new_v4(), None, &|| true));
+    assert!(
+        on_card.has_gpu,
+        "a request the card runs gets the card's prefill prior"
+    );
+    assert!(
+        !on_processor.has_gpu,
+        "a request the processor runs must not get the card's prefill prior"
+    );
+    assert!(on_card.est_tokens_per_sec > 0.0);
+    assert!(
+        on_processor.est_tokens_per_sec < on_card.est_tokens_per_sec,
+        "the processor figure ({}) must not be the card's ({})",
+        on_processor.est_tokens_per_sec,
+        on_card.est_tokens_per_sec
+    );
+}

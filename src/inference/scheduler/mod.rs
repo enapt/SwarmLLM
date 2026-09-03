@@ -375,6 +375,58 @@ fn delegation_target<'a>(
     None
 }
 
+/// Is this candidate's speed KNOWN — measured by us, or advertised by it — as
+/// opposed to standing at the shared `UNKNOWN_COMPUTE_MS` prior?
+fn priced_from_a_measurement(c: &NodeCandidate) -> bool {
+    c.observed_latency_ms_per_layer.is_some()
+        || c.observed_delegated_ms_per_layer.is_some()
+        || c.est_tokens_per_sec > 0.0
+}
+
+/// May the chain the search produced replace this node's own processor route?
+/// `Err` names why not.
+///
+/// Asked only when the local node holds every layer, would run the model on its
+/// processor (`ModelProcessPool::serves_on_cpu`), no single peer qualified for a
+/// whole-model hand-off, and the priced search has come back cheaper than
+/// running here. Two grounds to run here regardless:
+///
+/// - **The chain is all local.** The search agrees with the fast path, and the
+///   fast path's shape — no standby, no tensor-parallel group — is the right
+///   one for a request nobody else is involved in.
+/// - **A remote segment is priced from nothing.** `UNKNOWN_COMPUTE_MS` is one
+///   shared prior; it does not describe the peer, it stands in for not knowing.
+///   A route this node CAN price would be abandoned for one it cannot, so
+///   "cheaper" is not evidence. Advertised or observed speed both count as
+///   knowing — the same standard `delegation_target` holds a peer to before
+///   handing it a whole model.
+fn pipeline_may_replace_processor_route(
+    chain: &[PipelineSegment],
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+) -> Result<(), &'static str> {
+    let remote: Vec<&PipelineSegment> = chain
+        .iter()
+        .filter(|s| s.node_id != *local_node_id)
+        .collect();
+    if remote.is_empty() {
+        return Err("no pipeline across peers is priced faster than the processor");
+    }
+    let every_remote_priced = remote.iter().all(|seg| {
+        candidates
+            .iter()
+            .find(|c| c.node_id == seg.node_id)
+            .is_some_and(priced_from_a_measurement)
+    });
+    if !every_remote_priced {
+        return Err(
+            "the faster-looking pipeline includes a peer whose speed is unknown, and a route \
+             we can price is not given up for one we cannot",
+        );
+    }
+    Ok(())
+}
+
 /// Build the boomerang: embedding here, the middle layers on `peer`, sampling
 /// back here.
 ///
@@ -602,9 +654,32 @@ impl PipelineScheduler {
             );
         }
 
+        // Where would THIS request run on this node — the card, or the
+        // processor? Asked at most once per assembly, and only if the local
+        // node turns out to hold any of the model: `serves_on_cpu` prices the
+        // model against the graphics budget, which reads its header off disk
+        // for a model with no resident worker, and that cost belongs on the
+        // path that needs the answer rather than on every assembly.
+        //
+        // The answer feeds two things. The local candidate's own speed
+        // (`gather_candidates`), so the search prices this node by the device
+        // the request would actually get — a node whose card is too small for
+        // this model was priced at its card's speed, which is a speed it was
+        // not going to deliver. And the whole-model hand-off below.
+        let local_runs_on_processor = std::cell::OnceCell::new();
+        let local_on_processor = || {
+            *local_runs_on_processor
+                .get_or_init(|| self.shared_state.model_process_pool.serves_on_cpu(model_id))
+        };
+
         // Gather all candidates: nodes that have shards for this model
-        let candidates =
-            self.gather_candidates(&manifest, local_node_id, request_id, prompt_tokens);
+        let candidates = self.gather_candidates(
+            &manifest,
+            local_node_id,
+            request_id,
+            prompt_tokens,
+            &local_on_processor,
+        );
         if candidates.is_empty() {
             // In private mode, give a specific error showing which shards are missing
             if self
@@ -670,6 +745,11 @@ impl PipelineScheduler {
                     .iter()
                     .any(|r| r.0 == 0 && r.1 >= num_layers)
         });
+        // Set below when this node holds every layer but would run the model on
+        // its processor and no single peer could take the whole of it: then the
+        // routing search is allowed to compete with the local fast path, on the
+        // strength of the local candidate now being priced at processor speed.
+        let mut pipeline_may_beat_local = false;
         if local_covers_everything {
             let pool = &self.shared_state.model_process_pool;
             // Ask the cheap question first and only price the model if the
@@ -689,7 +769,7 @@ impl PipelineScheduler {
             // only whether a card we HAVE was too small, so a processor-only
             // node holding every shard ran the model itself with GPU peers
             // idle beside it.
-            let local_is_degraded = pool.serves_on_cpu(model_id);
+            let local_is_degraded = local_on_processor();
             let delegate_to = if local_is_degraded {
                 delegation_target(
                     &candidates,
@@ -768,42 +848,50 @@ impl PipelineScheduler {
                     });
                 }
             }
+            // No single peer could take the whole model — but the request
+            // would still run on this node's processor, and a PIPELINE over
+            // several peers' cards may be faster than that (gotcha #444; the
+            // tester's case in #442: a 14B no one card holds, on a
+            // processor-only node that had just finished acquiring it, where
+            // the day before a three-segment pipeline across two GPU nodes
+            // answered in seconds). Let the search below compete with the
+            // fast path. It can, now, because the local candidate is priced
+            // at the processor's measured speed rather than the card's — the
+            // honest input the reverted `cbbed678` lacked when it priced local
+            // layers at a constant 10,000 and sent a request abroad past a
+            // peer 5 ms away. The search still charges every remote hop per
+            // token, so a short prompt with only distant cards on offer stays
+            // here; a long prompt on a processor does not.
+            //
+            // Only the priced search may make this call: greedy has no cost
+            // to compare, so with parallax routing off the fast path stands.
+            pipeline_may_beat_local = local_is_degraded
+                && self.shared_state.config.inference.parallax_routing
+                && candidates.len() > 1;
         }
 
         // Fast path: if the local node has full layer coverage (0..num_layers),
         // run entirely locally without involving remote peers.  This prevents
         // "Segment N failed with no standby" errors caused by remote peers that
         // hold overlapping shards being pulled into the pipeline unnecessarily.
-        if let Some(local_cand) = candidates.iter().find(|c| {
+        let local_cand = candidates.iter().find(|c| {
             c.node_id == *local_node_id
                 && c.available_ranges
                     .iter()
                     .any(|r| r.0 == 0 && r.1 >= num_layers)
-        }) {
+        });
+        if let Some(local_cand) = local_cand.filter(|_| !pipeline_may_beat_local) {
             tracing::info!(
                 model = %model_id,
                 num_layers,
                 "Local node has full layer coverage — single local segment (no remote peers)"
             );
-            let segment = PipelineSegment {
-                node_id: local_node_id.clone(),
-                shard_id: local_cand.shard_id.clone(),
-                layer_range: (0, num_layers),
-            };
-            // No TP groups here — deliberately. When the local node already
-            // holds every layer, pulling a LAN peer into a tensor-parallel
-            // group can only make the request slower (2 × num_layers AllReduce
-            // round trips replacing compute we were about to do anyway) and
-            // adds a hard dependency on a peer we did not need. A peer that
-            // stalls then fails the whole request with an AllReduce timeout,
-            // even though this node could have answered alone.
-            return Ok(PipelineAssignment {
+            return Ok(Self::local_only_assignment(
                 request_id,
-                segments: vec![segment],
-                standbys: vec![],
-                tp_groups: vec![],
-                supports_speculative: true,
-            });
+                local_node_id,
+                local_cand,
+                num_layers,
+            ));
         }
 
         // Distributed layer assignment: prefer Parallax shortest-path DP when
@@ -868,9 +956,80 @@ impl PipelineScheduler {
                         segments = segs.len(),
                         "DIAG: parallax routing selected chain"
                     );
+                    // The search ran against a local node that holds every
+                    // layer and would run the model on its processor. Its
+                    // answer displaces the fast path only on a chain that is
+                    // genuinely remote AND priced from real figures; the log
+                    // carries both costs so the choice can be checked.
+                    if let (true, Some(local_cand)) = (pipeline_may_beat_local, local_cand) {
+                        let local_ms = parallax::vertex_cost(
+                            local_cand,
+                            (0, num_layers),
+                            local_node_id,
+                            num_layers,
+                            prompt_tokens,
+                        )
+                        .total();
+                        let chain_ms = parallax::chain_cost_ms(
+                            &segs,
+                            &candidates,
+                            local_node_id,
+                            num_layers,
+                            prompt_tokens,
+                        );
+                        match pipeline_may_replace_processor_route(
+                            &segs,
+                            &candidates,
+                            local_node_id,
+                        ) {
+                            Ok(()) => tracing::info!(
+                                model = %model_id,
+                                segments = segs.len(),
+                                local_processor_cost_ms = local_ms,
+                                pipeline_cost_ms = chain_ms,
+                                prompt_tokens = ?prompt_tokens,
+                                "This node holds the whole model but would run it on its \
+                                 processor; a pipeline across peers' cards is priced faster, \
+                                 so the request goes there"
+                            ),
+                            Err(reason) => {
+                                tracing::info!(
+                                    model = %model_id,
+                                    local_processor_cost_ms = local_ms,
+                                    pipeline_cost_ms = chain_ms,
+                                    prompt_tokens = ?prompt_tokens,
+                                    "This node holds the whole model and runs it on its \
+                                     processor: {reason}"
+                                );
+                                return Ok(Self::local_only_assignment(
+                                    request_id,
+                                    local_node_id,
+                                    local_cand,
+                                    num_layers,
+                                ));
+                            }
+                        }
+                    }
                     segs
                 }
                 Err(e) => {
+                    // A local node holding every layer needs no fallback route:
+                    // greedy has no cost to compare against the processor, so
+                    // the fast path it would have taken is the answer.
+                    if let (true, Some(local_cand)) = (pipeline_may_beat_local, local_cand) {
+                        tracing::info!(
+                            model = %model_id,
+                            err = %e,
+                            "DIAG: parallax routing unavailable — this node holds the whole \
+                             model, so it runs here"
+                        );
+                        return Ok(Self::local_only_assignment(
+                            request_id,
+                            local_node_id,
+                            local_cand,
+                            num_layers,
+                        ));
+                    }
                     tracing::info!(
                         model = %model_id,
                         err = %e,
@@ -959,6 +1118,11 @@ impl PipelineScheduler {
         local_node_id: &NodeId,
         request_id: uuid::Uuid,
         prompt_tokens: Option<u32>,
+        // Would a request for this model run on the local node's PROCESSOR?
+        // Consulted only if the local node holds any of the model, hence a
+        // closure: the answer prices the model against the graphics budget,
+        // which reads its header off disk for a model with no worker resident.
+        local_runs_on_processor: &dyn Fn() -> bool,
     ) -> Vec<NodeCandidate> {
         // Private mode: compute allowed node set (None = unrestricted).
         // R134.7: when `allow_cross_pool_inference` is on and the local pool
@@ -1136,17 +1300,29 @@ impl PipelineScheduler {
                 self.compute_region_score(&node_id, local_node_id)
             };
 
+            // The device THIS request would run on here. A node with a card
+            // that this model does not fit runs it on the processor (or a
+            // hybrid split, which is nearer the processor than the card), so
+            // pricing the local candidate at the card's speed described a speed
+            // it was not going to deliver — and made the local route look
+            // unbeatable to the search (gotcha #444). Asked once, lazily, and
+            // only for the local node.
+            let is_local = &node_id == local_node_id;
+            let local_on_processor = is_local && local_runs_on_processor();
+            let local_device_name = if local_on_processor {
+                None
+            } else {
+                self.shared_state.gpu_info.as_ref().map(|g| g.name.as_str())
+            };
             // Look up speed estimation from capability gossip
-            let est_tokens_per_sec = if &node_id == local_node_id {
+            let est_tokens_per_sec = if is_local {
                 // Derived the same way every peer derives its own, so this
                 // compares like with like — and so a processor-only node states
                 // a real figure instead of the zero its consumers read as
                 // "unknown". 0.0 is still the answer when the machine's
                 // bandwidth genuinely could not be measured.
-                crate::model::auto_manage::vram::node_tokens_per_sec_7b(
-                    self.shared_state.gpu_info.as_ref().map(|g| g.name.as_str()),
-                )
-                .unwrap_or(0.0)
+                crate::model::auto_manage::vram::node_tokens_per_sec_7b(local_device_name)
+                    .unwrap_or(0.0)
             } else {
                 self.shared_state
                     .peer_registry
@@ -1166,8 +1342,18 @@ impl PipelineScheduler {
             // width — so the router would happily pile every layer onto a slow
             // local CPU rather than hand work to a faster peer. A local sample
             // carries no network component, which is correct: there isn't one.
+            //
+            // EXCEPT when this node has a card and this request would not use
+            // it: the figure is per node, not per device, so it was measured on
+            // whatever the card served for someone else and says nothing about
+            // the processor about to do this work. A node with no card at all
+            // keeps its samples — all its work is processor work.
             let observed_latency_ms_per_layer =
-                self.shared_state.observed_latency_ms_per_layer(&node_id);
+                if local_on_processor && self.shared_state.gpu_info.is_some() {
+                    None
+                } else {
+                    self.shared_state.observed_latency_ms_per_layer(&node_id)
+                };
             // Deliberately `None` for the local node: there is no such thing as
             // delegating to ourselves, and a local segment pays no network at
             // all, so the whole distinction this figure exists to draw is moot.
@@ -1191,8 +1377,11 @@ impl PipelineScheduler {
                 self.shared_state
                     .observed_prefill_ms_per_layer_byte(&node_id)
             };
-            let has_gpu = if &node_id == local_node_id {
-                self.shared_state.gpu_info.is_some()
+            // Which prefill prior applies — a card reads a prompt ~40x faster
+            // than it writes a reply, a processor ~4.5x. It follows the device
+            // the request would use, not the device the node owns.
+            let has_gpu = if is_local {
+                local_device_name.is_some()
             } else {
                 self.shared_state
                     .peer_registry
@@ -1782,6 +1971,35 @@ impl PipelineScheduler {
     }
 
     /// Merge contiguous segments assigned to the same node into one segment.
+    /// The assignment for a node that runs the whole model itself: one local
+    /// segment and nobody else involved.
+    ///
+    /// No TP groups here — deliberately. When the local node already holds
+    /// every layer, pulling a LAN peer into a tensor-parallel group can only
+    /// make the request slower (2 × num_layers AllReduce round trips replacing
+    /// compute we were about to do anyway) and adds a hard dependency on a peer
+    /// we did not need. A peer that stalls then fails the whole request with an
+    /// AllReduce timeout, even though this node could have answered alone. No
+    /// standby for the same reason: there is no remote segment to fail over.
+    fn local_only_assignment(
+        request_id: uuid::Uuid,
+        local_node_id: &NodeId,
+        local_cand: &NodeCandidate,
+        num_layers: u32,
+    ) -> PipelineAssignment {
+        PipelineAssignment {
+            request_id,
+            segments: vec![PipelineSegment {
+                node_id: local_node_id.clone(),
+                shard_id: local_cand.shard_id.clone(),
+                layer_range: (0, num_layers),
+            }],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: true,
+        }
+    }
+
     fn merge_contiguous(segments: Vec<PipelineSegment>) -> Vec<PipelineSegment> {
         let mut merged: Vec<PipelineSegment> = Vec::new();
         for seg in segments {
