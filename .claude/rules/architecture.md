@@ -1373,6 +1373,19 @@ silently break at the wire if duplicated:
   WORK; a new long-running loop inside a forward inherits this probe only if
   it runs per layer, so anything longer than a layer (a chunked prefill at
   another level) must probe on its own.
+- **`SharedState::local_fast_path_for` is the single answer to "may this
+  request take the local split fast path?"** (2026-09-03, gotcha #443). Both
+  API surfaces used to compose it themselves (`has_complete_split_model &&
+  !should_offer_work_to_the_swarm`), and the fast path skips the router —
+  which is where `delegation_target` lives. On a node whose card is too
+  small the model is not REGISTERED (`scan.rs` refuses over the graphics
+  budget), so the fast path was skipped by accident and delegation looked
+  reachable; on a node with no card the model is always registered, the fast
+  path always won, and the #442 fix shipped in v0.3.150 was unreachable on
+  the very node it was for. The predicate now stands aside when
+  `serves_on_cpu` AND a connected peer exists; the scheduler then delegates
+  or assigns locally. A feature behind a gate is only as reachable as the
+  gate's callers: test it from the API, not from the function.
 - **`ModelProcessPool::serves_on_cpu` is the whole-model delegation
   precondition** (2026-09-02, gotcha #442) — "would this request run on our
   processor": no usable card, told to use the processor, a build without

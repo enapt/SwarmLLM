@@ -10075,6 +10075,14 @@ coverage is the end of the search. The same gap the "capacity mechanism
 used as a speed mechanism" entry above describes, from the other side: here
 the swarm IS the speed mechanism and the node refuses it.
 
+**Correction (2026-09-03, gotcha #443)**: the v0.3.150 half was unreachable
+from the API on the node it was written for — a whole-model holder took the
+local fast path before the scheduler. `SharedState::local_fast_path_for` now
+stands the fast path aside when the request would run on the processor and
+a peer exists. Delegation can therefore fire for a full-coverage peer that is
+at least twice as fast (the Mac mini, for the 14B); the pipeline comparison
+below is still what the GPU-split case needs.
+
 **Half done the same night** (v0.3.150, gotcha #442): the precondition is now
 `ModelProcessPool::serves_on_cpu` — no card, told to use the processor, a
 build without CUDA, or a card the model does not fit — with the peer-side

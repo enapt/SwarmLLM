@@ -604,6 +604,17 @@ pub struct SharedState {
     shutdown_tx: watch::Sender<bool>,
 }
 
+/// The fast-path policy for a model this node holds completely, as a pure
+/// function of the three facts that decide it — see
+/// [`SharedState::local_fast_path_for`] for what each means.
+pub(crate) fn local_fast_path_allowed(
+    shedding_load: bool,
+    would_run_on_processor: bool,
+    has_peers: bool,
+) -> bool {
+    !shedding_load && !(would_run_on_processor && has_peers)
+}
+
 impl SharedState {
     /// Record that a remote machine dialled us and it worked — the single way
     /// [`SharedState::observed_inbound_connection`] is ever set.
@@ -1903,6 +1914,44 @@ impl SharedState {
         let cfg = self.cfg();
         cfg.inference.shed_load_when_busy
             && self.active_inference_load() >= cfg.inference.shed_load_threshold
+    }
+
+    /// May a request for `model_id` take the local split fast path, or must it
+    /// go through the router so the scheduler can consider the swarm?
+    ///
+    /// The single answer for both API surfaces (OpenAI and Anthropic each
+    /// asked it themselves, in the same words, until 2026-09-03). The fast
+    /// path skips the router entirely, and the router is where whole-model
+    /// delegation lives — so a node that holds every shard never asked
+    /// whether a peer would be faster, however slowly it would run the model
+    /// itself. That is why `serves_on_cpu`-gated delegation shipped in
+    /// v0.3.150 was "not observed triggering" on the very node it was written
+    /// for (gotcha #443): the decision was never reached.
+    ///
+    /// Three reasons to stand aside, any one sufficient: this node is shedding
+    /// load; or the request would run on this node's PROCESSOR and there is at
+    /// least one connected peer to ask — the scheduler then decides, and with
+    /// no delegate it assigns the request here anyway, so the only cost is a
+    /// scheduling pass. A node with no peers keeps the fast path: there is
+    /// nobody to ask.
+    pub fn local_fast_path_for(&self, model_id: &crate::types::ModelId) -> bool {
+        if !self.has_complete_split_model(model_id) {
+            return false;
+        }
+        let would_run_on_processor = self.model_process_pool.serves_on_cpu(model_id);
+        let has_peers = !self.connected_node_ids.is_empty();
+        let allowed = local_fast_path_allowed(
+            self.should_offer_work_to_the_swarm(),
+            would_run_on_processor,
+            has_peers,
+        );
+        if !allowed && would_run_on_processor {
+            tracing::debug!(
+                model = %model_id,
+                "local fast path stood aside: this node would run the model on its processor and has peers to ask"
+            );
+        }
+        allowed
     }
 
     /// What we have measured of this peer running a **whole model** for us, per
@@ -3812,5 +3861,26 @@ mod inbound_reachability_persistence_tests {
                 .load(Ordering::Relaxed),
             "the evidence must outlive the process that saw it"
         );
+    }
+}
+
+#[cfg(test)]
+mod local_fast_path_tests {
+    use super::local_fast_path_allowed;
+
+    /// A whole-model holder skips the router only when nothing would be
+    /// gained by asking: not shedding, and either it would run the model on a
+    /// card or it has nobody to ask (gotcha #443).
+    #[test]
+    fn a_processor_bound_node_with_peers_goes_through_the_router() {
+        // Runs on a card, has peers: fast path.
+        assert!(local_fast_path_allowed(false, false, true));
+        // Would run on the processor, but no peers: fast path — nobody to ask.
+        assert!(local_fast_path_allowed(false, true, false));
+        // Would run on the processor, peers exist: the scheduler decides.
+        assert!(!local_fast_path_allowed(false, true, true));
+        // Shedding load overrides everything.
+        assert!(!local_fast_path_allowed(true, false, false));
+        assert!(!local_fast_path_allowed(true, false, true));
     }
 }

@@ -356,13 +356,19 @@ fn delegation_target<'a>(
         } else {
             "no graphics card with room, and not clearly faster than our own processor"
         };
-        tracing::debug!(
+        // `info`, not `debug`: this only runs when the request would run on
+        // this node's processor, once per candidate per assembly, and "why is
+        // my fast machine idle" is the question an operator at the default log
+        // level needs answered — a tester grepping for it found nothing.
+        tracing::info!(
             peer = %c.node_id,
             reach = ?c.reach,
             latency_ms = c.latency_ms,
             trust = c.trust_score,
             free_vram_mb = ?c.gpu_vram_available_mb,
             needed_vram_mb = needed,
+            peer_tokens_per_sec = c.est_tokens_per_sec,
+            local_cpu_tokens_per_sec,
             "Not handing this model to peer: {reason}"
         );
     }

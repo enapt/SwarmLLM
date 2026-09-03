@@ -2,6 +2,20 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A node with no graphics card now actually asks the swarm.** v0.3.150
+  taught whole-model delegation to consider a node with no card, but the
+  decision lives in the scheduler and a node holding every shard of a model
+  never got there: its API took the local fast path first. Both API surfaces
+  now share one rule that stands the fast path aside when the request would
+  run on this node's processor and there is a peer to ask; the scheduler then
+  delegates or keeps the request here, at the cost of one scheduling pass.
+  The reasons a peer was not chosen are now logged at the default level, so
+  "why is my fast machine idle" can be answered from the log.
+
 ## [0.3.150-alpha] — 2026-09-02
 
 ### Fixed
