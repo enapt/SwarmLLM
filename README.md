@@ -519,6 +519,7 @@ Commands:
   diagnostics   Print a report about this node for a bug report (addresses redacted; --full keeps them)
   get-model     Download a shared reference / test model (smoke, standard, or stress)
   remove-model  Remove a model from this machine and tell the network it has gone
+  unload        Stop a model's worker and free its memory (the files stay; `status` lists workers)
   privacy       Make prompt privacy possible for a model by fetching the pieces it needs
   pool          Device pool management
   test-split    Test split inference locally (single-node diagnostic)

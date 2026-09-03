@@ -125,6 +125,15 @@ enum Commands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+    /// Stop a model's worker and free its memory. The downloaded pieces stay,
+    /// and the model loads again on the next request for it.
+    ///
+    /// `swarmllm status` lists the workers; this retires one — for example a
+    /// worker still computing for a client that has gone.
+    Unload {
+        /// Model id to unload, e.g. llama-3.2-3b-instruct-q4-k-m.
+        model: String,
+    },
     /// Make prompt privacy possible for a model by fetching the pieces it needs.
     ///
     /// Prompt privacy keeps prompts and answers on this machine, which requires
@@ -421,6 +430,11 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
             cli::remove_model::remove_model(port, &data_dir, &model, yes).await
+        }
+        Commands::Unload { model } => {
+            let port = resolve_client_port(cli.port);
+            let data_dir = resolve_data_dir(&cli.data_dir);
+            cli::unload_model::unload_model(port, &data_dir, &model).await
         }
         Commands::Privacy { model } => {
             let port = resolve_client_port(cli.port);

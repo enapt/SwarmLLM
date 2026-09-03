@@ -115,8 +115,7 @@ fn print_summary(json: &serde_json::Value) {
         {
             println!(
                 "           (a worker still computing for a client that has gone can be retired \
-                 with POST /api/admin/models/<model>/unload — the daemon stops it and frees \
-                 its memory)"
+                 with `swarmllm unload <model>` — the daemon stops it and frees its memory)"
             );
         }
     }

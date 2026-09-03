@@ -11899,7 +11899,19 @@ gotcha #367 asks of any threshold. Not attempted here: it wants both figures
 measured on a machine where they differ from this one's, and the 12x already
 banked should not wait for it.
 
-## Intermittent token loss on the remote-generate fast path (observed 2026-08-30)
+## Intermittent token loss on the remote-generate fast path (observed 2026-08-30; ADDRESSED by the v0.3.149 resend ladder, gotcha #438)
+
+**Status 2026-09-03**: the send layer now does what the last paragraph of
+"where to look first" asked for. A `StreamingToken` the receiving dispatcher
+drops is answered `SwarmResponse::Dropped` and re-sent once from the serving
+node's retained reply; a hole the requester's `StreamReassembler` still sees is
+asked for with `SwarmMessage::ResendTokens` (up to four asks, 4×RTT apart). The
+live drop harness (`examples/dropped_token_test.sh`) completes 40 of 40 replies
+with a token deliberately dropped, against 5 of 40 without the ladder. The
+trigger was never isolated — the fix makes the trigger irrelevant so long as
+the serving node is alive. What remains is the structural rung (one ordered
+stream per reply), recorded under "Replies truncated on the remote-generate
+fast path". Original note follows.
 
 **Status: observed and reproduced, NOT diagnosed.** Distinct from gotcha #416,
 which was the false-positive half of the same error and is fixed.

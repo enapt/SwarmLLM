@@ -15,6 +15,7 @@ pub mod remove_model;
 pub mod run;
 pub mod split_test;
 pub mod status;
+pub mod unload_model;
 pub mod update;
 
 /// Read the API key from the data dir. Shared helper used by CLI commands

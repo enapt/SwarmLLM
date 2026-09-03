@@ -53,7 +53,7 @@ swarmllm/
 ├── src/
 │   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs
 │   ├── bin/       (launcher.rs — Windows GPU/CPU auto-selecting launcher)
-│   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update, get_model, remove_model, diagnostics (pasteable node report) — R150 `swarmllm get-model` reference-model opt-in)
+│   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update, get_model, remove_model, unload_model (`swarmllm unload` — retire a worker, keep the files), diagnostics (pasteable node report) — R150 `swarmllm get-model` reference-model opt-in)
 │   ├── config/    (mod, providers, credit, network, ops, node, inference)
 │   ├── daemon/    (mod, manifest, shard_loader, gpu_support (CUDA compute-capability floor + pre-Ampere CPU fallback), dispatch/, startup, background, helpers, supervisor)
 │   │   └── state/        (mod, activity, capacity, capacity_plan, credits, events, hf, metrics, models, peer_speed, perf_history, relay, removed_shards, repair, retained_replies (fast-path replies kept for ResendTokens, #438), tp_allreduce)

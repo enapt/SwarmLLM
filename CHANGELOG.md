@@ -12,7 +12,9 @@ All notable changes to SwarmLLM are documented here.
   long it has been idle and alive. The same list is in `/v1/status` as
   `workers`. Until now a worker still busy for a client that had gone could
   only be found with `ps` and only stopped with `kill -9`; the status output
-  names the one that is busy and the request that retires it.
+  names the one that is busy, and a new `swarmllm unload <model>` retires it —
+  the daemon drains the worker, stops it and frees its memory, keeping the
+  downloaded files.
 
 ### Fixed
 
