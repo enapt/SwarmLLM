@@ -321,6 +321,9 @@
       // framing with numbers a non-technical user can act on.
       // Prefers the actual available disk (capped at 200 GB so a 2 TB
       // drive doesn't claim all the space) over a hardcoded default.
+      // The same shares the daemon uses when `max_storage_mb` is unset
+      // (`auto_manage::contribution_disk_share_pct`) — the preview must
+      // promise what the budget then delivers (gotcha #448).
       var contribFactor = { minimal: 0.25, moderate: 0.5, maximum: 0.75 }[contribKey] || 0.5;
       var availDiskMb = App.setup.hwData && App.setup.hwData.available_disk_mb;
       var diskBudgetGb = availDiskMb && availDiskMb > 0

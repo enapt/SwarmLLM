@@ -90,15 +90,23 @@ pub(super) async fn drain(mut tasks: BackgroundTasks) {
 ///
 /// **Measured on the development node 2026-08-04: 5.5 GB across two models**,
 /// including an entire 8-shard model quarantined by the v0.3.44 accept-gate bug
-/// on 28 July and still resident a week later. This matters beyond wasted
-/// space: `dir_size` counts every file under the models directory, so those
-/// bytes count toward `max_disk_mb` — meaning a node prunes LIVE shards to stay
-/// under a budget that dead files are consuming.
+/// on 28 July and still resident a week later. The bytes are not counted as
+/// held — the storage budget prices the registry, not the directory — but
+/// they are real on the disk, and the budget's free-space clamp sees a
+/// fuller disk for as long as they stay.
 ///
 /// A day is long enough that an operator who notices a verification failure can
 /// still look, and short enough that a bad batch does not squeeze out real
 /// shards.
 const QUARANTINE_RETENTION_SECS: u64 = 24 * 60 * 60;
+
+/// The two names a shard is moved aside under: `.quarantine` for a hash
+/// mismatch, `.mismatched` for a size one (`model::shard`). The sweep matched
+/// only the first for five weeks after the second was introduced (2026-07-27),
+/// so a truncated transfer sat on disk for ever — a tester's node carried
+/// ~1 GB of `.mismatched` files from downloads that had failed weeks earlier
+/// (gotcha #448).
+const QUARANTINE_EXTENSIONS: [&str; 2] = ["quarantine", "mismatched"];
 
 /// Delete quarantined shards older than [`QUARANTINE_RETENTION_SECS`].
 ///
@@ -119,7 +127,11 @@ fn sweep_expired_quarantine(models_dir: &std::path::Path) -> (u32, u64) {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("quarantine") {
+            let quarantined = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| QUARANTINE_EXTENSIONS.contains(&e));
+            if !quarantined {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
@@ -1313,7 +1325,31 @@ mod quarantine_sweep_tests {
             .exists());
     }
 
-    /// Only `.quarantine` files. Deleting a live shard, a header or a manifest
+    /// A size-mismatch quarantine (`.mismatched`) is reclaimed on the same
+    /// clock as a hash-mismatch one. It was not: the sweep named one
+    /// extension and the other had been introduced later (gotcha #448).
+    #[test]
+    fn an_expired_size_mismatch_quarantine_is_reclaimed_too() {
+        let root = models_dir_with(&[
+            (
+                "shard_001.bin.mismatched",
+                4096,
+                QUARANTINE_RETENTION_SECS + 60,
+            ),
+            ("shard_012.bin.mismatched", 4096, 60),
+        ]);
+        let (files, bytes) = sweep_expired_quarantine(root.path());
+        assert_eq!(
+            (files, bytes),
+            (1, 4096),
+            "the expired one, not the recent one"
+        );
+        let m = root.path().join("some-model");
+        assert!(!m.join("shard_001.bin.mismatched").exists());
+        assert!(m.join("shard_012.bin.mismatched").exists());
+    }
+
+    /// Only quarantine files. Deleting a live shard, a header or a manifest
     /// here would be far worse than the leak this fixes.
     #[test]
     fn nothing_but_quarantine_files_is_touched() {

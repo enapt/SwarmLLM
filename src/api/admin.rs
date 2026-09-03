@@ -367,6 +367,25 @@ pub async fn diagnostics(
             .load(std::sync::atomic::Ordering::Relaxed),
         ss.config.model.shard_size_mb
     );
+    // The storage arithmetic auto-manage decides by. A tester holding 18 GB
+    // against a 50 GB setting read "no remaining storage budget" every cycle
+    // and, with nothing on any surface saying what the budget WAS, built a
+    // careful theory about phantom manifest reservations. The rule that
+    // actually applied fits on one line (gotcha #448).
+    {
+        let (budget, held_bytes, held_shards) = crate::model::auto_manage::storage_budget_now(ss);
+        const MB: u64 = 1024 * 1024;
+        let _ = writeln!(
+            out,
+            "storage: held {} MB in {} shards, budget {} MB ({}), room {} MB, max_disk_mb {}",
+            held_bytes / MB,
+            held_shards,
+            budget.bytes / MB,
+            budget.limited_by,
+            budget.remaining(held_bytes) / MB,
+            ss.cfg().resources.max_disk_mb
+        );
+    }
 
     // What this machine IS. "Nobody ever routes work to my node" and "my node
     // is slow" are both answered by the last line here — the speed this node
@@ -878,46 +897,22 @@ pub async fn swarm_capacity_plan(State(state): State<AppState>) -> Json<serde_js
 /// Numbers are pre-converted to MB so the frontend doesn't have to handle
 /// byte→MB rounding (avoids `49.99 GB` rendering when user typed `50 GB`).
 pub async fn storage_breakdown(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let config = state.config.clone();
-    let local_node_id = state.shared_state.identity.node_id().clone();
-    let mgr = &state.shared_state.models;
+    let ss = &state.shared_state;
+    let mgr = &ss.models;
 
-    // Bytes currently held on disk by this node.
-    let mut used_bytes: u64 = 0;
-    let mut held_shards: u32 = 0;
-    for entry in state.shared_state.model_registry.models() {
-        for shard in &entry.shards {
-            let sid = crate::types::ShardId {
-                model_id: entry.id.clone(),
-                index: shard.index,
-            };
-            let holders = state.shared_state.model_registry.shard_holders(&sid);
-            if holders.contains(&local_node_id) {
-                used_bytes = used_bytes.saturating_add(shard.size_bytes);
-                held_shards += 1;
-            }
-        }
-    }
+    // Held, and what may be held: the SAME two figures the download pass
+    // refuses against and the prune pass measures pressure by. This handler
+    // used to run its own holder loop and read the budget without the held
+    // term, and reported the contribution level from the boot snapshot next
+    // to a budget computed from the live one (gotcha #448).
+    let (budget, used_bytes, held_shards) = crate::model::auto_manage::storage_budget_now(ss);
 
-    // What auto-manage will try to grow to. Shared with the scheduler
-    // via `model::auto_manage::compute_budget_max_bytes` so the two
-    // can't drift if the ContributionMode scaling changes.
-    let live = state.shared_state.cfg();
-    let auto_target_bytes = crate::model::auto_manage::compute_budget_max_bytes(
-        live.auto_manage.max_storage_mb,
-        live.resources.max_disk_mb,
-        // Live level: `scoring.rs` sizes the real budget the same way, so
-        // reading the boot-time config here would show the user a storage
-        // target the scheduler is no longer working towards.
-        &state.shared_state.contribution(),
-        crate::model::auto_manage::free_disk_bytes_for(&config.node.data_dir),
-    );
+    let live = ss.cfg();
     let total_bytes = live
         .resources
         .max_disk_mb
         .saturating_mul(1024)
         .saturating_mul(1024);
-    let auto_target_capped = auto_target_bytes.min(total_bytes);
     // Free = max(0, total - used). When used > total (rare — happens if
     // user shrinks Max Disk after already having more on disk), we report
     // 0 free and let the UI show a "you're over your budget" hint.
@@ -927,17 +922,23 @@ pub async fn storage_breakdown(State(state): State<AppState>) -> Json<serde_json
         .auto_manage_enabled
         .load(std::sync::atomic::Ordering::Relaxed);
 
+    const MB: u64 = 1024 * 1024;
     Json(serde_json::json!({
         // All values in MB to match the slider units; UI converts to GB
         // for display. Single-source-of-truth: never present "max_disk_mb"
         // and "auto_manage_max_storage_mb" as independent inputs again.
-        "total_mb": total_bytes / (1024 * 1024),
-        "used_mb": used_bytes / (1024 * 1024),
-        "free_mb": free_bytes / (1024 * 1024),
-        "auto_target_mb": auto_target_capped / (1024 * 1024),
+        "total_mb": total_bytes / MB,
+        "used_mb": used_bytes / MB,
+        "free_mb": free_bytes / MB,
+        // The CAP on what auto-manage may hold in total — not headroom on
+        // top of `used_mb`. The dashboard draws the room left as
+        // max(0, auto_target - used).
+        "auto_target_mb": budget.bytes / MB,
+        "auto_remaining_mb": budget.remaining(used_bytes) / MB,
+        "auto_limited_by": budget.limited_by.to_string(),
         "held_shards": held_shards,
         "auto_manage_enabled": auto_enabled,
-        "contribution": match config.node.contribution {
+        "contribution": match ss.contribution() {
             ContributionMode::Minimal => "minimal",
             ContributionMode::Moderate => "moderate",
             ContributionMode::Maximum => "maximum",

@@ -125,7 +125,9 @@ shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommend
 
 [auto_manage]
 # enabled = true               # Auto-acquire shards from peers and HuggingFace (default: on)
-# max_storage_mb = 0           # 0 = use 50% of max_disk_mb
+# max_storage_mb = 0           # 0 = a share of max_disk_mb by contribution level:
+                               # 25% minimal, 50% moderate, 75% maximum. A value set
+                               # here is honoured as written, up to max_disk_mb.
 # interval_minutes = 5         # How often to check for new shards to download
 # max_shards = 0               # 0 = unlimited within disk budget
 # default_model_shard_cap = 0  # 0 = unlimited. Stops auto-manage acquiring MORE than this many

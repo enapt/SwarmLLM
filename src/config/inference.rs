@@ -692,8 +692,14 @@ pub struct AutoManageConfig {
     /// Master toggle for auto shard management.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Maximum disk space (MB) the auto-manager may use for shard storage.
-    /// Defaults to the global `max_disk_mb` if 0.
+    /// Maximum disk space (MB) this node may hold in shards — the cap the
+    /// auto-manager downloads up to and prunes back towards. `0` means a
+    /// share of `resources.max_disk_mb` chosen by the contribution level
+    /// (25% / 50% / 75%); a value set here is honoured as written, never
+    /// scaled, and never above `max_disk_mb`. ONE function decides it —
+    /// `model::auto_manage::storage_budget` — because when the download
+    /// and prune passes priced it separately a node could be over budget
+    /// for one and under pressure for the other, and stuck (gotcha #448).
     #[serde(default)]
     pub max_storage_mb: u64,
     /// How often (in minutes) the auto-manager evaluates and downloads.

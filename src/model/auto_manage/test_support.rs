@@ -36,13 +36,25 @@ pub(super) fn register_manifest_with_shards(
     num_layers: u32,
     shard_ranges: &[(u32, u32)],
 ) -> ModelId {
+    register_manifest_with_sized_shards(state, model_id, num_layers, shard_ranges, 100_000_000)
+}
+
+/// Like [`register_manifest_with_shards`], with every shard `size_bytes` long —
+/// for a test that needs the node to HOLD a known number of bytes.
+pub(super) fn register_manifest_with_sized_shards(
+    state: &Arc<SharedState>,
+    model_id: &str,
+    num_layers: u32,
+    shard_ranges: &[(u32, u32)],
+    size_bytes: u64,
+) -> ModelId {
     let shards: Vec<ShardInfo> = shard_ranges
         .iter()
         .enumerate()
         .map(|(i, &(start, end))| ShardInfo {
             index: i as u32,
             layer_range: (start, end),
-            size_bytes: 100_000_000,
+            size_bytes,
             hash: [0u8; 32],
             tensors: vec![],
         })

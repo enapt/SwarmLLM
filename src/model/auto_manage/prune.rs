@@ -911,19 +911,18 @@ impl AutoShardManager {
     }
 
     /// Compute resource pressure (0.0-1.0) based on VRAM and disk usage.
-    fn compute_resource_pressure(&self, live_vram_used: Option<u64>) -> f64 {
-        let live = self.shared_state.cfg();
-        let local_node_id = self.shared_state.identity.node_id().clone();
-
-        // Disk pressure
-        let budget_mb = if live.auto_manage.max_storage_mb > 0 {
-            live.auto_manage.max_storage_mb
-        } else {
-            live.resources.max_disk_mb / 2
-        };
-        let (local_bytes, _) = self.local_shard_bytes(&local_node_id);
-        let disk_pressure = if budget_mb > 0 {
-            local_bytes as f64 / (budget_mb as f64 * 1024.0 * 1024.0)
+    pub(super) fn compute_resource_pressure(&self, live_vram_used: Option<u64>) -> f64 {
+        // Disk pressure, measured against THE storage budget — the same
+        // figure the download pass refuses against. This used to be its own
+        // arithmetic (`max_storage_mb` or half of `max_disk_mb`, never
+        // scaled by contribution), while the download side quartered the
+        // figure for Minimal: a node holding 18 GB was over budget for
+        // downloading and at 36% for pruning, so it refused every download
+        // and pruned nothing, indefinitely (gotcha #448). One figure, or the
+        // two passes wedge exactly where they disagree.
+        let (budget, held_bytes, _) = super::storage_budget_now(&self.shared_state);
+        let disk_pressure = if budget.bytes > 0 {
+            held_bytes as f64 / budget.bytes as f64
         } else {
             0.0
         };

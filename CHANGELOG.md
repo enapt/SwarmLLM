@@ -2,6 +2,37 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A node could sit "out of storage budget" for ever while its disk was
+  nowhere near the limit you set, and nothing said why.** A tester holding
+  18 GB of models against a 50 GB setting saw `no remaining storage budget`
+  every few minutes and the node never fetched the model it was being asked
+  for. Three parts of the software priced the same disk differently: the
+  download pass quartered the budget for the Minimal contribution level (the
+  default — a stock install got 6.25 GB, one 7B model and it was full for
+  good), the pruning pass and the pool page did not, and the settings bar
+  drew the budget as room left over rather than as the cap it is. So the node
+  was over budget for downloading and comfortably under it for pruning,
+  which is a state nothing can leave. There is now one rule everywhere: a
+  `max_storage_mb` you set is honoured as written, otherwise auto-manage may
+  fill 25%, 50% or 75% of your disk limit at Minimal, Moderate or Maximum —
+  the numbers the setup wizard has always shown — never more than the disk
+  limit and never into the last fifth of free space. The log line that
+  refuses now prints what is held, what the budget is and which rule set it,
+  `swarmllm diagnostics` carries the same figures, and the settings bar shows
+  the room left under the cap. On a default install the auto-manage budget
+  doubles, from 6.25 GB to 12.5 GB of a 50 GB limit.
+- **Shard downloads that arrived the wrong size were kept on disk for ever.**
+  A truncated transfer is moved aside as `shard_NNN.bin.mismatched` so the
+  bytes can be inspected, but the daily sweep that reclaims quarantined
+  files only knew the `.quarantine` name. Both are now reclaimed after a day.
+- **Changing the storage limit through the settings API took effect for
+  pruning but not for downloading until a restart.** The download pass read
+  its limit from the configuration the node started with.
+
 ## [0.3.152-alpha] — 2026-09-03
 
 ### Added

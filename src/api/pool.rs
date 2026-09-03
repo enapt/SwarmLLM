@@ -969,34 +969,11 @@ async fn compute_pool_coverage(shared: &crate::daemon::SharedState) -> serde_jso
         }));
     }
 
-    // Disk budget info
-    let max_storage_mb = if shared.cfg().auto_manage.max_storage_mb > 0 {
-        shared.cfg().auto_manage.max_storage_mb
-    } else {
-        shared.cfg().resources.max_disk_mb / 2
-    };
-    // Estimate current auto-managed disk usage from local shard files
-    let shard_store = shared.shard_store();
-    let mut used_bytes: u64 = 0;
-    for manifest in shared.model_registry.models() {
-        let my_id = shared.identity.node_id();
-        for shard in &manifest.shards {
-            let path = shard_store.shard_path(&manifest.id, shard.index);
-            if shared
-                .model_registry
-                .shard_holders(&crate::types::ShardId {
-                    model_id: manifest.id.clone(),
-                    index: shard.index,
-                })
-                .contains(my_id)
-            {
-                if let Ok(meta) = std::fs::metadata(&path) {
-                    used_bytes += meta.len();
-                }
-            }
-        }
-    }
-    let used_mb = used_bytes / (1024 * 1024);
+    // Disk budget info — the same figures the download pass and the settings
+    // bar use, not a third arithmetic (gotcha #448).
+    let (budget, held_bytes, _) = crate::model::auto_manage::storage_budget_now(shared);
+    let max_storage_mb = budget.bytes / (1024 * 1024);
+    let used_mb = held_bytes / (1024 * 1024);
 
     serde_json::json!({
         "models": models,

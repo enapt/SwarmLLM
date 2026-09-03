@@ -209,28 +209,6 @@ impl AutoShardManager {
     /// Run the auto-manage loop. Checks periodically based on config interval,
     /// and also wakes immediately when new HF sources or manifests arrive from peers.
     /// Always runs (even when disabled) so it can respond to runtime config changes.
-    /// Sum the on-disk byte count of all shards held by a given node.
-    /// Returns (total_bytes, shard_count).
-    pub(super) fn local_shard_bytes(&self, node_id: &crate::types::NodeId) -> (u64, u32) {
-        let local_shards = self.shared_state.model_registry.shards_for_node(node_id);
-        let count = local_shards.len() as u32;
-        let bytes = local_shards
-            .iter()
-            .filter_map(|sid| {
-                let manifest = self
-                    .shared_state
-                    .model_registry
-                    .get_manifest(&sid.model_id)?;
-                manifest
-                    .shards
-                    .iter()
-                    .find(|s| s.index == sid.index)
-                    .map(|si| si.size_bytes)
-            })
-            .sum();
-        (bytes, count)
-    }
-
     pub async fn run(mut self) {
         let config = &self.shared_state.config.auto_manage;
         if !config.enabled {
@@ -698,7 +676,12 @@ impl AutoShardManager {
 
     /// Download under-replicated shards based on geo-aware scoring.
     async fn evaluate_and_download(&self) {
-        let config = &self.shared_state.config.auto_manage;
+        // Live, not the boot snapshot: `max_storage_mb` and `max_shards` are
+        // accepted by `PUT /api/admin/config`, and the prune pass beside this
+        // one already reads them live (gotcha #281, reached through a local
+        // binding the live-config guard cannot see).
+        let live = self.shared_state.cfg();
+        let config = &live.auto_manage;
         let local_node_id = self.shared_state.identity.node_id().clone();
 
         // Clean up stale peer_shard_downloads: if a peer is now a registered
@@ -754,11 +737,27 @@ impl AutoShardManager {
         );
 
         // 1. Check budget: how much storage do we have left?
-        let budget = self.remaining_budget_bytes(config, &local_node_id);
+        //
+        // A refusal shows its arithmetic. "No remaining storage budget" on a
+        // node whose config read 50 GB and whose disk held 18 GB sent a
+        // tester hunting a phantom reservation (gotcha #448); the real answer
+        // was a rule nothing had printed. Every figure the decision used is
+        // on this one line, and the message says what to do about it.
+        let report = self.remaining_budget(config, &local_node_id);
+        let budget = report.remaining_bytes();
         if budget == 0 {
+            const MB: u64 = 1024 * 1024;
             tracing::info!(
                 peers = self.shared_state.peer_registry.len(),
-                "AutoShardManager: no remaining storage budget — skipping downloads"
+                held_mb = report.held_bytes / MB,
+                held_shards = report.held_shards,
+                budget_mb = report.budget.bytes / MB,
+                budget_from = %report.budget.limited_by,
+                max_shards = report.max_shards,
+                max_shards_reached = report.max_shards_reached,
+                "AutoShardManager: the storage budget is full, so nothing more is downloaded \
+                 — raise the disk limit or the contribution level in Settings, or remove a \
+                 model, to make room"
             );
             return;
         }
@@ -1022,6 +1021,82 @@ mod tests {
             score: 10.0 * 1.0, // popular but well-replicated
         };
         assert!(c1.score > c2.score);
+    }
+
+    /// A node that is OVER its storage budget must be under prune pressure,
+    /// and a node with room must not be — from the same figure.
+    ///
+    /// The reported wedge (gotcha #448): the download pass priced the budget
+    /// at a quarter of `max_disk_mb / 2` for Minimal contribution, the prune
+    /// pass at `max_disk_mb / 2` unscaled. A default install (Minimal, 50 GB)
+    /// holding 14 GB was over budget for downloading (6.25 GB) and at 56% for
+    /// pruning: it refused every download and pruned nothing, for ever, while
+    /// the settings said 50 GB. With one accountant the two passes agree.
+    #[test]
+    fn a_node_over_its_budget_is_under_pressure_not_merely_refused() {
+        use super::super::test_support::{make_test_manager, register_manifest_with_sized_shards};
+        use crate::types::ShardId;
+
+        let (state, manager) = make_test_manager();
+        // The default install: Minimal contribution, max_disk_mb 50000,
+        // max_storage_mb 0 → a 12.5 GB budget.
+        let live = state.cfg();
+        assert_eq!(
+            live.node.contribution,
+            crate::types::ContributionMode::Minimal
+        );
+        assert_eq!(live.resources.max_disk_mb, 50_000);
+        assert_eq!(live.auto_manage.max_storage_mb, 0);
+        let local = state.identity.node_id().clone();
+
+        // Hold 14 GB in 14 one-gigabyte shards.
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let ranges: Vec<(u32, u32)> = (0..14).map(|i| (i * 2, i * 2 + 2)).collect();
+        let mid = register_manifest_with_sized_shards(&state, "big-model", 28, &ranges, GIB);
+        for i in 0..14 {
+            state.model_registry.record_shard_holder(
+                ShardId {
+                    model_id: mid.clone(),
+                    index: i,
+                },
+                local.clone(),
+            );
+        }
+
+        let report = manager.remaining_budget(&live.auto_manage, &local);
+        assert_eq!(report.held_bytes, 14 * GIB);
+        assert!(
+            report.budget.bytes <= 12_500 * 1024 * 1024,
+            "the default budget is 25% of max_disk_mb ({} MB reported, {})",
+            report.budget.bytes / (1024 * 1024),
+            report.budget.limited_by
+        );
+        assert_eq!(
+            report.remaining_bytes(),
+            0,
+            "over budget: the download pass must refuse"
+        );
+        let pressure = manager.compute_resource_pressure(None);
+        assert!(
+            pressure > 0.95,
+            "over budget: the prune pass must be under URGENT pressure, got {pressure}"
+        );
+
+        // Control: the same node holding 4 GB has room, and is not under
+        // pressure — the accountant answers both questions, not only "full".
+        for i in 4..14 {
+            state.model_registry.remove_shard_holder(
+                &ShardId {
+                    model_id: mid.clone(),
+                    index: i,
+                },
+                &local,
+            );
+        }
+        let report = manager.remaining_budget(&live.auto_manage, &local);
+        assert_eq!(report.held_bytes, 4 * GIB);
+        assert!(report.remaining_bytes() > 0, "{}", report.budget.limited_by);
+        assert!(manager.compute_resource_pressure(None) < 0.95);
     }
 
     #[test]

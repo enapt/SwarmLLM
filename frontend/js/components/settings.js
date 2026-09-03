@@ -539,17 +539,19 @@
         var resp = await App.authFetch('/api/admin/shard-storage');
         var data = await resp.json();
         document.getElementById('settings-storage-used').textContent = U.formatBytes(data.disk_usage_bytes || 0);
-        var maxMb = data.auto_manage_max_storage_mb || 0;
-        document.getElementById('settings-storage-max').textContent = maxMb > 0 ? U.formatMB(maxMb) : I18n.t('settings.disk_50pct');
 
-        // R110: render the stacked-bar from the dedicated breakdown
-        // endpoint. Best-effort — we don't fail the whole storage panel
-        // if the new endpoint isn't reachable (e.g. older daemon during
-        // upgrade roll-out).
+        // The auto-manage limit is the EFFECTIVE figure the daemon decides
+        // by (`auto_target_mb` from the breakdown endpoint), not the raw
+        // config field. Showing "50 GB" from the config while the daemon
+        // was working to a quarter of that is how a tester came to hunt a
+        // phantom reservation (gotcha #448).
+        var maxEl = document.getElementById('settings-storage-max');
+        if (maxEl) maxEl.textContent = '--';
         try {
           var bResp = await App.authFetch('/api/admin/storage/breakdown');
           if (bResp.ok) {
             var b = await bResp.json();
+            if (maxEl) maxEl.textContent = U.formatMB(b.auto_target_mb || 0);
             App.settings._renderStorageBar(b);
           }
         } catch (e) { /* non-fatal */ }
@@ -615,10 +617,13 @@
       var total = Math.max(1, b.total_mb || 0);
       var used = Math.min(b.used_mb || 0, total);
       var freeRaw = b.free_mb || 0;
-      // The auto-manage budget is "head-room reserved for downloads".
-      // Visually it sits between used and free — capped so we never
-      // exceed the total. Fall back to free if the budget overlaps.
-      var budgetSlice = Math.max(0, Math.min(b.auto_target_mb || 0, freeRaw));
+      // `auto_target_mb` is the CAP on what auto-manage may hold in total,
+      // not head-room on top of what is used. The middle slice is the room
+      // left under that cap, so a node that is over it shows 0 — the old
+      // drawing put the whole cap AFTER "used", and a node that could not
+      // download anything displayed a healthy budget slice (gotcha #448).
+      var cap = Math.min(b.auto_target_mb || 0, total);
+      var budgetSlice = Math.max(0, Math.min(cap - used, freeRaw));
       var freeSlice = Math.max(0, freeRaw - budgetSlice);
 
       var pct = function(mb) { return ((mb / total) * 100).toFixed(2) + '%'; };

@@ -19,28 +19,55 @@ use super::vram::estimate_model_vram_mb_arch;
 const CONTIGUITY_EXTEND_BONUS: f64 = 1.5;
 const CONTIGUITY_GAP_FILL_BONUS: f64 = 3.0;
 
+/// The download pass's storage arithmetic, kept whole so the log line that
+/// refuses can show it. "No remaining storage budget" with no figures sent a
+/// tester (gotcha #448) hunting a phantom reservation that did not exist.
+#[derive(Clone, Debug)]
+pub(super) struct BudgetReport {
+    pub held_bytes: u64,
+    pub held_shards: u32,
+    pub budget: super::StorageBudget,
+    pub max_shards: u32,
+    pub max_shards_reached: bool,
+}
+
+impl BudgetReport {
+    /// Bytes the download pass may still add. Zero when the shard-count cap
+    /// is reached, whatever the byte figures say.
+    pub fn remaining_bytes(&self) -> u64 {
+        if self.max_shards_reached {
+            0
+        } else {
+            self.budget.remaining(self.held_bytes)
+        }
+    }
+}
+
 impl AutoShardManager {
     /// Compute remaining download budget in bytes.
-    pub(super) fn remaining_budget_bytes(
+    /// What the download pass may still add, and every figure behind that
+    /// answer — so a refusal can be logged with its arithmetic showing.
+    pub(super) fn remaining_budget(
         &self,
         config: &crate::config::AutoManageConfig,
         local_node_id: &NodeId,
-    ) -> u64 {
-        // Sum up bytes of shards we already hold (O(local_shards) via reverse index)
-        let (current_bytes, current_shard_count) = self.local_shard_bytes(local_node_id);
-
-        // Check max_shards limit
-        if config.max_shards > 0 && current_shard_count >= config.max_shards {
-            return 0;
-        }
-
-        let effective_max = super::compute_budget_max_bytes(
+    ) -> BudgetReport {
+        let (held_bytes, held_shards) = super::held_shard_bytes(&self.shared_state, local_node_id);
+        let budget = super::storage_budget(
             config.max_storage_mb,
             self.shared_state.cfg().resources.max_disk_mb,
             &self.shared_state.contribution(),
             super::free_disk_bytes_for(&self.shared_state.config.node.data_dir),
+            held_bytes,
         );
-        effective_max.saturating_sub(current_bytes)
+        let max_shards_reached = config.max_shards > 0 && held_shards >= config.max_shards;
+        BudgetReport {
+            held_bytes,
+            held_shards,
+            budget,
+            max_shards: config.max_shards,
+            max_shards_reached,
+        }
     }
 
     /// Gather all candidate shards we don't already hold, scored by value.

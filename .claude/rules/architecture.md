@@ -806,6 +806,45 @@ silently break at the wire if duplicated:
   targets idle models, so the common path returns without sleeping at all, and a
   test pins that so no unload pays for a race that is not happening.
 
+- **`model::auto_manage::storage_budget` is the ONE answer to "how much shard
+  storage may this node hold?", and `held_shard_bytes` the one answer to "how
+  much does it hold?"** (2026-09-03, gotcha #448). `storage_budget_now(&state)`
+  gives both for this node, live. Consumers: the download pass
+  (`scoring::remaining_budget`, whose refusal logs every figure and the rule
+  that produced it), prune's disk pressure (`prune::compute_resource_pressure`),
+  the settings storage bar (`api::admin::storage_breakdown`), the pool page
+  (`api::pool`) and the diagnostics report's `storage:` line.
+  `the_storage_budget_has_one_accountant` in `tests/repo_consistency.rs`
+  fails the build on a new spelling of the rule.
+  **Why**: there were three. The download pass quartered the figure for
+  Minimal contribution (the DEFAULT level) — half of `max_disk_mb`, then a
+  quarter of that, 6.25 GB on a stock install — while prune pressure and the
+  pool page used the unscaled figure, and the settings bar drew the cap as
+  headroom AFTER "used". A tester holding 18 GB against an explicit 50 GB
+  read "no remaining storage budget" every cycle with nothing on any surface
+  saying what the budget was, and built a careful theory about phantom
+  manifest reservations — there is none; held bytes come from the registry's
+  reverse index, so a manifest with no local shard contributes nothing. The
+  node was over budget for downloading and at 36% for pruning, so it refused
+  every download and pruned nothing, for ever. **Two accountants for one
+  resource wedge exactly where they disagree** — the same shape as the
+  graphics-memory rule above, on the disk.
+  The rule: an explicit `max_storage_mb` is honoured as written (the VRAM
+  precedent — a number the user typed is not silently scaled by a level they
+  may not connect to it); otherwise 25 / 50 / 75% of `max_disk_mb` by
+  contribution level, the shares the setup wizard has always promised
+  (`contribution_disk_share_pct`); never above `max_disk_mb`; never above
+  held + 80% of free disk — the held term makes the clamp invariant under our
+  own holdings, where the old form subtracted held from a figure that already
+  excluded it. **A refusal must name its arithmetic**: `held_mb`,
+  `budget_mb`, `budget_from`, and what to do about it. A competent reader
+  handed a bare "no remaining budget" will build a theory from the numbers
+  they CAN see.
+  Two siblings fixed in the same pass: `evaluate_and_download` read
+  `max_storage_mb`/`max_shards` from the boot snapshot through a local
+  binding the live-config guard cannot see (#281's shape); and the quarantine
+  sweep named only `.quarantine`, so `.mismatched` files (2026-07-27) were
+  never reclaimed — `QUARANTINE_EXTENSIONS` now lists both.
 - **`model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER
   BOUND on "idle since", and the worker's own `last_used` is the signal that
   moves** (2026-09-02, gotcha #437). The idle unload used to trust

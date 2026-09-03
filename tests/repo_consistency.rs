@@ -3518,3 +3518,106 @@ fn streamed_reply_text_goes_through_the_shared_emit_helpers() {
         offenders.join("\n  ")
     );
 }
+
+/// Does this statement compute a storage budget of its own, rather than ask
+/// `model::auto_manage::storage_budget`?
+///
+/// The two spellings the codebase had grown: "half of the disk limit" and
+/// "the auto-manage field if it is set". Both are the old rule, and any new
+/// site reproducing either is a second accountant.
+fn computes_its_own_storage_budget(statement: &str) -> bool {
+    statement.contains("max_disk_mb / 2")
+        || statement.contains("max_disk_mb/2")
+        || statement.contains("max_storage_mb > 0")
+}
+
+/// The storage-budget guard must catch both spellings, wrapped or not, and
+/// must not fire on the arithmetic-free reads that legitimately remain (the
+/// config API clamps the field on write; the shard-storage listing prints it).
+#[test]
+fn the_storage_budget_guard_catches_a_second_accountant() {
+    let half = "let budget_mb = live\n    .resources\n    .max_disk_mb / 2;";
+    assert!(statements(half)
+        .iter()
+        .any(|(_, l)| computes_its_own_storage_budget(l)));
+    let if_set =
+        "let max = if shared.cfg().auto_manage.max_storage_mb > 0 {\n  x\n} else {\n  y\n};";
+    assert!(statements(if_set)
+        .iter()
+        .any(|(_, l)| computes_its_own_storage_budget(l)));
+    let clamp =
+        "config.auto_manage.max_storage_mb = max_storage.clamp(1, MAX_AUTO_MANAGE_STORAGE_MB);";
+    assert!(!statements(clamp)
+        .iter()
+        .any(|(_, l)| computes_its_own_storage_budget(l)));
+    let print =
+        "\"auto_manage_max_storage_mb\": state.shared_state.cfg().auto_manage.max_storage_mb,";
+    assert!(!statements(print)
+        .iter()
+        .any(|(_, l)| computes_its_own_storage_budget(l)));
+}
+
+/// How much shard storage this node may hold is decided in ONE place —
+/// `model::auto_manage::storage_budget` — and every consumer asks it.
+///
+/// There were three (gotcha #448). The download pass quartered the figure for
+/// Minimal contribution; the prune pass's disk pressure and the pool page's
+/// disk bar did not; the settings bar used the download rule but drew the cap
+/// as headroom. A node holding 18 GB against a 50 GB setting was therefore OVER
+/// budget for downloading and at 36% for pruning: it refused every download
+/// and pruned nothing, indefinitely, and every surface a user could consult
+/// said 50 GB. A tester built a careful phantom-reservation theory from that.
+/// Two accountants for one disk wedge exactly where they disagree; a third
+/// spelling of the rule anywhere in `src/` is that bug coming back.
+#[test]
+fn the_storage_budget_has_one_accountant() {
+    let root = repo_root();
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                if let Ok(t) = std::fs::read_to_string(&p) {
+                    sources.push((p, t));
+                }
+            }
+        }
+    }
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut helper_seen = false;
+    for (path, text) in &sources {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == "src/model/auto_manage/mod.rs" {
+            helper_seen = text.contains("pub fn storage_budget(");
+            continue;
+        }
+        for (line_no, l) in statements(text) {
+            if computes_its_own_storage_budget(&l) {
+                offenders.push(format!("{rel}:{line_no}: {l}"));
+            }
+        }
+    }
+    assert!(
+        helper_seen,
+        "the single storage-budget accountant (`storage_budget`) has moved or been renamed; \
+         update this guard so it keeps checking the right place"
+    );
+    assert!(
+        offenders.is_empty(),
+        "a storage budget is being computed outside `model::auto_manage::storage_budget`. \
+         Ask `storage_budget_now(&state)` instead — two figures for one disk wedge the node \
+         (gotcha #448).\n{}",
+        offenders.join("\n")
+    );
+}

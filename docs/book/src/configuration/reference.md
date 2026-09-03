@@ -232,7 +232,7 @@ a tailnet — devices you authorised — which is why the LAN case stays opt-in.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | boolean | `true` | Auto-download popular shards (only for models at DemandVerified+ or Pinned trust level) |
-| `max_storage_mb` | integer | `0` | Max disk for auto-downloads. `0` = 50% of max_disk_mb |
+| `max_storage_mb` | integer | `0` | Cap on shard storage held. `0` = a share of `max_disk_mb` by contribution level (25% minimal / 50% moderate / 75% maximum); a set value is honoured as written, up to `max_disk_mb` |
 | `interval_minutes` | integer | `5` | Check interval for new shards |
 | `interval_seconds` | integer | none | Testing override for `interval_minutes`. Takes precedence when set |
 | `model_policies` | table | `{}` | Per-model overrides keyed by model id, e.g. `[auto_manage.model_policies."llama-3.1-8b"]` |
