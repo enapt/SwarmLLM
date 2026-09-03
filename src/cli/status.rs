@@ -80,13 +80,6 @@ fn print_summary(json: &serde_json::Value) {
         None => println!("Peer id:   not bound yet (still starting up)"),
     }
 
-    match json.get("model_loaded").and_then(|v| v.as_bool()) {
-        Some(true) => println!("Model:     {} — loaded and ready", s("model_name")),
-        // Not an error: a node with no model still relays and serves peers.
-        Some(false) => println!("Model:     none loaded (this node still helps the swarm)"),
-        None => println!("Model:     unknown"),
-    }
-
     // What the machine is computing right now. A worker still busy for a
     // client that has gone used to be visible only in `ps`, and the only way
     // to stop it was `kill -9` (gotcha #445).
@@ -95,6 +88,20 @@ fn print_summary(json: &serde_json::Value) {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+
+    match json.get("model_loaded").and_then(|v| v.as_bool()) {
+        Some(true) => println!("Model:     {} — loaded and ready", s("model_name")),
+        // `model_loaded` describes the legacy whole-file loader only; a node
+        // serving from shards keeps its models in the workers listed below,
+        // and "none loaded" beside a running worker read as a contradiction.
+        Some(false) if !workers.is_empty() => println!(
+            "Model:     {} loaded from shards (listed under Workers)",
+            workers.len()
+        ),
+        // Not an error: a node with no model still relays and serves peers.
+        Some(false) => println!("Model:     none loaded (this node still helps the swarm)"),
+        None => println!("Model:     unknown"),
+    }
     if workers.is_empty() {
         println!("Workers:   none running (a model starts its worker on first use)");
     } else {

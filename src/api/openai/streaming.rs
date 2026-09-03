@@ -1046,6 +1046,19 @@ pub(super) async fn split_stream_response(
             };
             if let Some(fr) = &event.finish_reason {
                 finish = fr.clone();
+                // Not `break` yet. The producer writes the token counts to the
+                // usage slot only after its `generate` returns — which is AFTER
+                // it sent this event — and the channel closes when that task
+                // ends. Draining to the close is what guarantees the counts
+                // are there when the trace and the usage chunk read them;
+                // read a moment earlier, `prompt_tokens` was 0 on every
+                // streamed request without `include_usage` (FUTURE_WORK,
+                // 2026-08-30). Bounded: a producer that does not end promptly
+                // must not hold the client's finish frame.
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while token_rx.recv().await.is_some() {}
+                })
+                .await;
                 break;
             }
             token_count += 1;

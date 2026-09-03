@@ -568,6 +568,15 @@ pub(super) async fn anthropic_split_stream(
                 )
                 .to_string();
                 matched_stop_sequence = event.matched_stop_sequence.clone();
+                // Drain to the channel's close before leaving: the producer
+                // writes the token counts only after its `generate` returns,
+                // which is after it sent this event (see the OpenAI sibling).
+                // Bounded so a producer that lingers cannot hold the client's
+                // final frames.
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while token_rx.recv().await.is_some() {}
+                })
+                .await;
                 break;
             }
             total_output_tokens += 1;
@@ -661,7 +670,17 @@ pub(super) async fn anthropic_split_stream(
         // Reaching here means the stream produced tokens and ended on a real
         // stop reason — the failure case returned above, after its `error`
         // frame. There is no longer an "error" stop_reason to test for.
-        stream_trace.mark_finished(crate::inference::trace::Outcome::Ok, 0, total_output_tokens);
+        //
+        // The counts come from the producer's usage slot, populated before the
+        // token channel closed (the loop above drains to that close). The
+        // trace used to be handed a literal 0 for the prompt while the
+        // response below read the slot — two answers for one number.
+        let (p_tok, c_tok) = usage
+            .lock()
+            .ok()
+            .and_then(|u| *u)
+            .unwrap_or((0, total_output_tokens));
+        stream_trace.mark_finished(crate::inference::trace::Outcome::Ok, p_tok, c_tok);
         state.shared_state.publish_request_trace(&stream_trace);
 
         // The split stream publishes (prompt, completion) once generation

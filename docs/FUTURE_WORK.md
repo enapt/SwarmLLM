@@ -131,7 +131,12 @@ Both surfaced while pricing `GET /api/admin/stats` (gotcha #417, fixed). Neither
 was fixed with it — recorded here so the next person has the measurement rather
 than the hunch.
 
-### `detect_hardware`'s no-GPU branch forks `nvidia-smi` twice
+### `detect_hardware`'s no-GPU branch forks `nvidia-smi` twice — FIXED 2026-09-01
+
+**Resolved in `25904d90`**: the `None` branch now calls
+`detect_gpu_nvidia_smi_with_used()` — name, total and used from ONE spawn —
+exactly the sibling this entry asked for. Found still listed as open on
+2026-09-03; the text below is the original note.
 
 `api::admin::detect_hardware` reads live graphics-card figures. The
 `gpu_info: Some(..)` branch forks `nvidia-smi` once (`query_gpu_vram_used`).
@@ -156,7 +161,21 @@ is why it was left.
 The figure is live VRAM, and the dashboard's whole point on that tile is telling
 you what the card is doing right now.
 
-### The `DIAG: request complete` trace under-reports `prompt_tokens`
+### The `DIAG: request complete` trace under-reports `prompt_tokens` — FIXED 2026-09-03
+
+**Cause, found by reading rather than the hunch recorded below**: the split
+stream's SSE consumer `break`s on the finish EVENT, and the producer task
+writes the token counts to the usage slot only after its `generate` returns —
+which is after it sent that event. The consumer's post-loop read of the slot
+therefore raced the write and usually lost; `include_usage` made no difference
+in principle, the measurement that showed 42 with it set was the race going
+the other way. Both SSE consumers (OpenAI and Anthropic split streams) now
+drain the token channel to its close after the finish event — the producer
+holds a sender until it has written the slot, so the close IS the write
+barrier — bounded at 2 s so a lingering producer cannot hold the finish frame.
+The Anthropic sibling additionally hardcoded `0` prompt tokens into its trace
+while reading the slot for the response's `input_tokens`; it reads the slot
+for both now. Original note follows.
 
 On the split fast path (`segments=0`), a STREAMING request whose caller did not
 ask for `stream_options.include_usage` is traced as `prompt_tokens=0`:

@@ -43,6 +43,13 @@ All notable changes to SwarmLLM are documented here.
   skipped, and a cancelled request is never retried. A running prompt pass
   now stops within one chunk of the cancel even on a segment of a single
   layer, because a long prompt is processed in chunks on that path too.
+- **A node's request trace no longer records zero prompt tokens for a streamed
+  reply served locally.** The stream's reader stopped at the finish event, a
+  moment before the worker's token counts were written down, so the per-request
+  trace that `docs/DIAGNOSTICS.md` tells people to grep showed
+  `prompt_tokens=0` on most streamed requests (the response itself was always
+  right). The reader now waits for the counts before recording the trace, on
+  both API surfaces.
 - **The graphics-memory budget for conversation history is now checked against
   the card as it stands, not as it looked when the model loaded.** The budget
   was taken from free memory at load time and could not see anything that
