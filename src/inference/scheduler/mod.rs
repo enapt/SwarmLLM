@@ -12,6 +12,17 @@ use crate::types::{
 #[derive(Clone)]
 pub struct PipelineScheduler {
     shared_state: Arc<SharedState>,
+    /// What THIS node's processor would manage on a 7B, pinned by a test.
+    ///
+    /// The real figure is measured on the machine the code runs on — which in
+    /// a test is whatever CI runner happens to be executing, under whatever
+    /// load. A loaded runner measured itself slow enough that a control arm
+    /// that must stay local (short prompt, cards 900 ms away) went to the
+    /// cards on paper, while the same test passed on a workstation
+    /// (2026-09-03). A routing test that depends on the tester's memory
+    /// bandwidth is not a test of routing.
+    #[cfg(test)]
+    local_processor_tokens_per_sec: Option<f32>,
 }
 
 /// A candidate node for layer ranges, with scoring metadata.
@@ -593,7 +604,36 @@ fn regions_adjacent(a: &str, b: &str) -> bool {
 
 impl PipelineScheduler {
     pub fn new(shared_state: Arc<SharedState>) -> Self {
-        Self { shared_state }
+        Self {
+            shared_state,
+            #[cfg(test)]
+            local_processor_tokens_per_sec: None,
+        }
+    }
+
+    /// A scheduler whose local node's PROCESSOR speed is `tokens_per_sec`
+    /// rather than whatever this machine measures — see the field.
+    #[cfg(test)]
+    pub(super) fn with_local_processor_speed(
+        shared_state: Arc<SharedState>,
+        tokens_per_sec: f32,
+    ) -> Self {
+        Self {
+            shared_state,
+            local_processor_tokens_per_sec: Some(tokens_per_sec),
+        }
+    }
+
+    /// The pinned processor speed, when a test set one; `None` in production.
+    fn pinned_local_processor_speed(&self) -> Option<f32> {
+        #[cfg(test)]
+        {
+            self.local_processor_tokens_per_sec
+        }
+        #[cfg(not(test))]
+        {
+            None
+        }
     }
 
     /// Assemble a pipeline for the given model.
@@ -1321,8 +1361,11 @@ impl PipelineScheduler {
                 // a real figure instead of the zero its consumers read as
                 // "unknown". 0.0 is still the answer when the machine's
                 // bandwidth genuinely could not be measured.
-                crate::model::auto_manage::vram::node_tokens_per_sec_7b(local_device_name)
-                    .unwrap_or(0.0)
+                match (local_on_processor, self.pinned_local_processor_speed()) {
+                    (true, Some(pinned)) => pinned,
+                    _ => crate::model::auto_manage::vram::node_tokens_per_sec_7b(local_device_name)
+                        .unwrap_or(0.0),
+                }
             } else {
                 self.shared_state
                     .peer_registry

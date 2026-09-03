@@ -2102,6 +2102,13 @@ fn an_unreadable_memory_figure_never_caps_a_peer() {
 // every assembly below is on the processor side of that question.
 // ---------------------------------------------------------------------------
 
+/// What the local processor is said to manage on a 7B in these tests: the
+/// tester's node (5.5 tok/s on its 14B, more on a 7B). Pinned, because the
+/// real figure is measured on the machine running the test — a loaded CI
+/// runner measured itself slow enough to send the short-prompt control to
+/// cards 900 ms away (2026-09-03).
+const LOCAL_PROCESSOR_TPS: f32 = 8.0;
+
 /// A holder with a card advertising room, at `latency_ms`, stating a speed.
 fn gpu_holder_info(node: &NodeId, latency_ms: u32, tokens_per_sec: f32) -> PeerInfo {
     let mut cap = capability_with_gpu(Some(24_000));
@@ -2193,7 +2200,7 @@ fn a_processor_bound_holder_hands_a_long_prompt_to_a_pipeline_of_faster_cards() 
         state.encrypted_pipeline_for(&ModelId("split-14b".into())),
         "the fixture holds both ends, so privacy must be auto-on"
     );
-    let scheduler = PipelineScheduler::new(state);
+    let scheduler = PipelineScheduler::with_local_processor_speed(state, LOCAL_PROCESSOR_TPS);
     let assignment = scheduler
         .assemble_pipeline_for(
             &ModelId("split-14b".into()),
@@ -2229,7 +2236,7 @@ fn with_privacy_off_the_processor_bound_holder_hands_the_whole_model_to_the_card
         .encrypted_pipeline_models
         .insert(ModelId("split-14b".into()), false);
     assert!(!state.encrypted_pipeline_for(&ModelId("split-14b".into())));
-    let scheduler = PipelineScheduler::new(state);
+    let scheduler = PipelineScheduler::with_local_processor_speed(state, LOCAL_PROCESSOR_TPS);
     let assignment = scheduler
         .assemble_pipeline_for(
             &ModelId("split-14b".into()),
@@ -2256,7 +2263,7 @@ fn with_privacy_off_the_processor_bound_holder_hands_the_whole_model_to_the_card
 fn a_short_prompt_stays_on_the_processor_when_the_cards_are_far_away() {
     let assemble = |peer_latency_ms: u32| {
         let (state, local, _b, _c) = processor_holder_beside_two_gpu_halves(peer_latency_ms, 20.0);
-        let scheduler = PipelineScheduler::new(state);
+        let scheduler = PipelineScheduler::with_local_processor_speed(state, LOCAL_PROCESSOR_TPS);
         let assignment = scheduler
             .assemble_pipeline_for(
                 &ModelId("split-14b".into()),
@@ -2279,6 +2286,29 @@ fn a_short_prompt_stays_on_the_processor_when_the_cards_are_far_away() {
         near.segments.iter().any(|s| s.node_id != local),
         "with the same cards on the LAN the route exists and is taken: {:?}",
         near.segments
+    );
+}
+
+/// The price decides, not a distance constant: a processor slow enough makes
+/// even cards 900 ms away the better route for a short prompt. This is the
+/// arm a loaded CI runner produced by accident when the local speed was still
+/// measured rather than pinned — correct routing for the input it was given.
+#[test]
+fn a_slow_enough_processor_hands_even_a_short_prompt_to_distant_cards() {
+    let (state, local, _b, _c) = processor_holder_beside_two_gpu_halves(900, 20.0);
+    let scheduler = PipelineScheduler::with_local_processor_speed(state, 0.2);
+    let assignment = scheduler
+        .assemble_pipeline_for(
+            &ModelId("split-14b".into()),
+            &local,
+            uuid::Uuid::new_v4(),
+            None,
+        )
+        .unwrap();
+    assert!(
+        assignment.segments.iter().any(|s| s.node_id != local),
+        "at 0.2 tok/s the processor loses to distant cards: {:?}",
+        assignment.segments
     );
 }
 
