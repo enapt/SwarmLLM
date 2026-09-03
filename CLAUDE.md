@@ -168,7 +168,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- **Counts** (re-measured 2026-09-02): **2246 lib** + 12 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 50 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
+- **Counts** (re-measured 2026-09-03 afternoon): **2267 lib** + 12 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 50 repo-consistency, 1 `api_key_side_effects`, 30 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
 - **Benches and harnesses — see `docs/DIAGNOSTICS.md` § Benchmarks for the full list and the traps.** The ones reached for most: `examples/prefill_bench.rs` (drives `SplitModel::forward` directly, no daemon — `SWARM_BENCH_MODEL`, `SWARM_BENCH_PROMPT`, `SWARM_BENCH_DECODE`, `SWARM_BENCH_REPS`, `SWARM_BENCH_DEVICE=cuda`, and `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` which prices a K-token forward against a 1-token one at the same history depth — the number that decides whether speculation pays; pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown), `examples/qmatmul_bench.rs` (asserts the tiled kernel is bit-identical to upstream), `examples/smoke_test.sh [binary] [port]` (9 checks on an isolated node — run it on the DOWNLOADED release artifact; it now reports checks that COULD NOT RUN separately and never says "all checks passed" over them, and fails fast if the node it started dies — before 2026-08-25 it skipped the three inference checks silently and still claimed success, so "smoke 8/8" had been passing here without ever exercising inference), `examples/soak_test.sh` (`HOURS=` must be a WHOLE number; data dir is per-`PORT`, so two soaks no longer kill each other), `examples/tokenizer_scaling.rs` (`SWARM_TOK_HEADER` at a model's `gguf_header.bin` — times `encode` against prompt length and prints `tokenizer_model`/`merges`/`scores`, which is what decides WHICH encode path a GGUF takes; a doubling that quadruples the time is the signature. `SWARM_TOK_TEXT` prints the ids for one string, which is how our output gets compared against HuggingFace `tokenizers`. Found #420 and #421).
 - **Measurement discipline** (paid for repeatedly): min-of-N on an IDLE box — the same unchanged code measured 0.42 ms and 0.97 ms across runs here, and a benchmark taken while a build runs is worthless. **min-of-N is for benchmarks, not for live measurement** (#367). A/B inside ONE binary via an env switch (`SWARMLLM_DECODE_CALIBRATE=0`, `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`, `SWARMLLM_FLASH_OFFSET_CAUSAL=0`, `SWARMLLM_GQA_DECODE_FLASH=1`, `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1`), never across two builds. **Verify the mechanism fired**, not just that the outcome improved. Pinned reference models: `docs/REFERENCE_MODELS.md`.
 - Unit tests: in-module `#[cfg(test)]` blocks
@@ -218,38 +218,79 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2246 lib (dev,claude-subscription) — re-measured 2026-09-03 morning, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 50 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the five advisories documented in `SECURITY.md` (`core2`/RUSTSEC-2026-0105 left the tree with the 2026-09-02 dependency update).
+All 20 build phases complete. All subsystems wired — no stubs. **2267 lib (dev,claude-subscription) — re-measured 2026-09-03 afternoon after v0.3.152, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 50 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the five advisories documented in `SECURITY.md` (`core2`/RUSTSEC-2026-0105 left the tree with the 2026-09-02 dependency update).
 
-**Next up (after the 09-02/03 round)**: (0) a processor-only node holding every
-shard of a model no single card holds runs it on its CPU instead of the GPU
-pipeline the swarm built the day before — the scheduler must price all-local at
-measured CPU speed against the Parallax search (#442/#443, tester's 14B case);
-(1) reconcile the KV budget with the card at admission (`cudaMemGetInfo`) — it
-is a load-time prediction that over-promises ~2 GB on an 8 GB card (#440) —
-and find the ~1 GB the store's live figure wanders by; (2) prefix-keyed remote
-KV across turns; (3) f16 stored KV on small cards; (4) accept/reject at the
-tail; then the #438 structural rung, peer↔peer RTT gossip, ring decode, prefill
-microbatching. Ordered list with pointers in `memory/MEMORY.md` § NEXT UP;
-entries in `docs/FUTURE_WORK.md`. OpenClaw stays parked at basic support
-(plugin built + verified; ClawHub publishing needs the user's credentials).
+**Next up (after the 09-03 round)**: (0) **#447** — make the priced search the
+ONE decision-maker when the local node is on its processor (`delegation_target`
+→ a filter; the DP compares every shape), subtract the prompt's KV from the
+weights-only capacity bound, and give the segment path whole-prompt admission
+(`admit_prompt` is `Generate`-only) — then re-run the live #444 measurement;
+(1) **#446 first half** — a multi-MB forward over ONE QUIC stream is killed by
+quinn's 1024-gap limit: rank TCP above QUIC for large requests, or chunked-over-
+RR behind a feature bit; (2) prefix-keyed remote KV across turns; (3) f16 stored
+KV on small cards; (4) accept/reject at the tail; then the #438 structural rung,
+peer↔peer RTT gossip, ring decode, prefill microbatching. **Needs the user's
+decision**: tool-call streaming buffers the whole reply when `tools` are present.
+Ordered list with pointers in `memory/MEMORY.md` § NEXT UP; entries in
+`docs/FUTURE_WORK.md`. OpenClaw stays parked at basic support.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.151-alpha (2026-09-03, tag on `24a36bd0`).** Local
-`225e6fe7` (CUDA asset, installed sha256 `9cb5d5f0…` == published, ready in 4 s,
-0 ERROR lines, first inference OK, rollback `~/.local/bin/swarmllm.0.3.150-alpha.bak`)
-and Proxmox `96842635` (.deb `0.3.151-alpha-1` over `0.3.150-alpha-1`, stayed
+**Released and deployed: v0.3.152-alpha (2026-09-03, tag on `bbecda89`).** Local
+`225e6fe7` (CUDA asset, installed sha256 `cd9eefec…` == published, ready in 2 s,
+0 ERROR lines, first inference OK, rollback `~/.local/bin/swarmllm.0.3.151-alpha.bak`)
+and Proxmox `96842635` (.deb `0.3.152-alpha-1` over `0.3.151-alpha-1`, stayed
 `enabled` + `active`, 0 errors) both on it, node ids kept. Gate: CI + Cache warm
 green, 25 assets, `latest`, sha256 on CUDA + deb, `ggml_cuda_init` = 1, **smoke
-9/9 + shapes 7/7 on the DOWNLOADED artifact**. Three releases in one round
-(.149 → .150 → .151, the last two correcting the first): see the section below.
-⚠ The `.sha256` assets hash the RAW binary, not the tarball. ⚠ `gh` needs
-`GH_REPO` (or a checkout cwd) from a scratch directory. ⚠ **A version bump
-changes `Cargo.lock`, so Cache warm RUNS on every release commit (~45 min) and
-the gate waits for it**; Release itself took 52-67 min on these three (Windows
-GPU the long pole). ⚠ `verify_release.sh` in the session scratchpad is the
-whole gate + deploy in one script — recreate it from
-`round_log_0902_perf_commits.md` if the scratchpad is gone.
+all checks passed (none skipped) + shapes all passed on the DOWNLOADED artifact**.
+Ten fixes in ONE release (user: batch — the Windows CUDA build is the long pole).
+⚠ The first CI run of the bump went RED: a routing test measured the CI runner's
+memory bandwidth as the local node's speed — `PipelineScheduler::
+with_local_processor_speed` pins it now; the tag went on the fix commit.
+⚠ A Monitor on `gh run list` never matched the Release run and timed out; the
+release had been done for two hours — read `gh release view` directly.
+
+### v0.3.152-alpha (2026-09-03) — the processor route, the card's own word, cancels that reach the work
+
+Full account in `round_log_0903_processor_route.md`; gotchas #444-#447.
+
+- **#444 — a processor-only node holding a whole model no card holds now gets a
+  pipeline.** Three defects: the fast path returned before the priced search;
+  the local candidate was priced by the CARD it would not use (`serves_on_cpu`
+  threads into `gather_candidates`); and under auto-on prompt privacy the router
+  had no split point inside a whole-model holder's range (layers 1 and N−1 added
+  for that topology). A chain wins only if remote AND every remote segment is
+  priced from a measurement (`pipeline_may_replace_processor_route`).
+  **Unit-tested with the tester's shape; NOT yet observed live** — see #447.
+- **#440 third half — the KV budget is reconciled with the card at every
+  admission** (`kv_budget_now` = min(load-time budget, live+cached+free_now −
+  5%/256 MB), cudarc `mem_get_info`). The .149 case now refuses at token 0.
+- **#445 — a cancel is READ at every long wait and SET by every surface.**
+  `inference::cancel::unless_cancelled` around the pool's response wait (drop →
+  `CancelRequest`) and the remote wait (→ `CancelInference`, no failover); both
+  SSE surfaces set the flag on `closed()`; the router never retries a cancelled
+  request; the segment path chunks a long prompt pass (`forward_prompt_in_chunks`,
+  parity-tested) so a ONE-layer segment stops within one chunk. From the tester's
+  81 CPU-minute orphan. **Unexplained: "a new model-worker per abandoned
+  attempt"** — the pool keys per model; asked for `ps`.
+- **#446 — the receipt-ACK deadline includes the payload** (`ack_deadline_with_
+  payload`, +bytes/1 MiB/s) and forwards > 256 KiB no longer feed the estimator
+  routing reads. Found live: a 20 MB forward to a 625 ms peer failed its 10 s
+  floor. **Open first half: one QUIC stream carrying a multi-MB forward is KILLED
+  by quinn's 1024-gap limit** (LAN, WSL2 NIC) — rank TCP above QUIC for large
+  requests (`connection_rank` needs the size), or chunked-over-RR + feature bit.
+- `swarmllm status` lists workers (`/v1/status.workers`); `swarmllm unload
+  <model>` retires one; the split-stream trace records real `prompt_tokens`.
+- **#447 (found by the live measurement, OPEN, top of NEXT UP)**: `delegation_
+  target` is a yes/no gate that fires BEFORE the priced search — it handed a
+  boomerang's middle to a 6 GB card ~500 ms away (over the LAN card and the
+  processor); the 8k prompt then OOM'd that worker in attention (24 layers ×
+  8,111 positions ≈ 2.4 GB KV the weights-only capacity bound never priced; the
+  segment path has no whole-prompt admission). Gate → filter, search → decision.
+⚠ **Measure at steady state** — run 1 happened 45 s after both nodes restarted
+and the scheduler saw ONE candidate (diagnosis rule 3, again).
+⚠ **Test it from the API, not the function** — the first #444 cut passed the
+router's tests and stayed local end to end (privacy auto-on, no split point).
 
 Prior line: .148 (OpenClaw plugin + `context_length`, #437, Rust 1.90,
 `round_log_0902_openclaw.md`), .147 (#434-#436 failover fixes,
@@ -270,56 +311,12 @@ per-push** (dependency-graph changes, weekly, on demand), so a source-only
 commit correctly shows no run and the tag restores `main`'s cache. Cache warm
 ~17 min; Release ~19-29.
 
-### v0.3.149 → .151-alpha (2026-09-02 evening → 09-03) — the performance batch, and what the card taught twice
-
-Full account in `round_log_0902_perf_commits.md`; gotchas #438-#443.
-
-- **#438 — a lost token no longer strands a peer-served reply's tail.** Serving
-  node retains what it sent (`daemon/state/retained_replies.rs`, bounded); the
-  requester asks `ResendTokens` for the hole after `hole_wait` (4×RTT, 1-5 s),
-  up to 4 times, gated on `features::RESEND_TOKENS`; a dispatcher drop answers
-  `SwarmResponse::Dropped` instead of a false ACK and the sender re-sends once.
-  `examples/dropped_token_test.sh` drops token 5 on purpose (fix arm 40/40 after
-  one ask; control arm 5/40) — ⚠ its control arm can route to the LIVE node over
-  loopback; it now flags that as INVALID.
-- **#439/#440 — the agent-prompt crawl (1.3-5 tok/s vs 33) was VRAM spill, not
-  the tools path.** The prefix cache's snapshot of the previous prompt was never
-  charged against the KV budget, so the next long prompt's cache was allocated
-  with ~300 MB free and landed in WSL2's host-backed memory. `kv_budget::
-  admit_prompt` decides once per prompt (evict cached prompts → refuse at token
-  0), `plan_snapshot` sizes the snapshot to the room beside the live cache,
-  `KvCacheStore::claim_room` evicts before the per-chunk guard refuses. Measured
-  on the card, both arms equally full: **6.9/4.9/4.5 → 23.3/23.7/8.1 tok/s**;
-  on the deployed release 22.9/13.1/17.2. The O(1) KV rollback (#439, own
-  `SeqCache`/`KvPair`) was the first, wrong story — measured no change, kept as
-  waste removed. ⚠ **A candle-only local CUDA build is NOT the release binary**:
-  its smaller footprint made #440 look complete; the release build still needs
-  the budget reconciled with `cudaMemGetInfo` (open).
-- **`PeerInfo::ack_srtt_ms`** — routing prices a peer by measured ACK latency
-  ahead of the health ping (local, never gossiped, capped 10 s).
-- **From the testers (three reports, .150/.151)**: **#441** cancel during a long
-  prompt now stops the worker (per-layer cancel oracle; confirmed in the field,
-  13-17 s vs 11+ min); **#442** a node with NO card delegates a whole model
-  (`serves_on_cpu`) — and **#443** that was unreachable until
-  `SharedState::local_fast_path_for` stood the API fast path aside (a whole-model
-  holder never reached the scheduler; confirmed on Proxmox post-deploy);
-  delegation rejections now log at `info`. Plugin README: `context_length` is
-  the node's configured context; declare models by hand when a gateway's own
-  discovery returns nothing.
-⚠ **Measure the mechanism on the card BEFORE writing the CHANGELOG line** — two
-"fixed" texts were rewritten after the A/B said no. ⚠ Both arms of a memory-
-pressure A/B must be in the SAME memory state; a restart between arms is a
-confound. ⚠ `pkill -f` / a cmdline-grep kill loop matches the shell whose
-COMMAND TEXT contains the pattern (#283/#385, twice more) — match `/proc/*/exe`.
-⚠ Editing `crates/swarmllm-types` mid-way through a release build fails that
-build. ⚠ The build-time question: warm release 18 min, cold 55; the cold case
-is a lockfile change, nothing in the pipeline to fix.
-
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.149 → .151** (09-02 evening → 09-03): #438 resend ladder (RetainedReplies + `ResendTokens`/`Dropped`, live drop harness 40/40 vs 5/40); the agent-prompt crawl was VRAM SPILL — #440 prefix-cache snapshots never charged (admit whole prompt, evict cached prompts, size the snapshot, guard evicts before refusing: 5 → 23 tok/s), not the O(1) rollback (#439); `ack_srtt_ms` into routing; testers' #441 cancel-during-prefill (per-layer probe), #442 CPU-only delegation (`serves_on_cpu`), #443 the fast path never reached the scheduler (`local_fast_path_for`). ⚠ A candle-only local CUDA build is NOT the release binary. ⚠ Both arms of a memory-pressure A/B must be in the SAME memory state. `round_log_0902_perf_commits.md`.
 - **v0.3.148** (09-02): OpenClaw provider plugin BUILT + verified (`integrations/openclaw/`), `context_length` on `/v1/models`, **#437** idle unload trusted a timestamp nothing writes, Rust 1.90 + 26 deps, Dependabot hygiene; measured the agent-prompt reality (14,633 tokens + 8192 reservation; 5 GB KV at 14.6k). `round_log_0902_openclaw.md`.
 - **v0.3.147** (09-02): three failover defects from ONE trace — **#434** a decode step of a remote segment 0 budgeted as a PREFILL (kind decides first), **#435** a standby's ERROR taken as the segment's output (`Tensor bytes too short` blamed on the wrong segment), **#436** a DEPARTED peer now fails its pinned forwards at once (`examples/departed_peer_test.sh`, 503 in 10.4 s). `round_log_0902_failover_paths.md`.
 - **v0.3.146** (09-01): benchmarking .145 on the LIVE node — hybrid holds on a 2nd arch (7B 13/28 **6.8** vs 3.8 CPU; 8B 12/32 **5.2** vs 4.0); **#432** a worker's decode-thread calibration settled by one-layer card-only segments it served for a peer (2.9 tok/s, ONE thread for life → keyed by processor depth, depth 0 never timed; confirmed in the field on the deployed binary); **#433** a streamed no-coverage request answered `200`+empty `stop`, and a peer's honest "not hosted" failed a 5-candidate request (both field-confirmed fixed). ⚠ The README's own `SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB` never existed. `round_log_0901_diagnostics_privacy.md`, `perf_baseline_0901_hybrid.md`.

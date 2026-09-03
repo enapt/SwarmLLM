@@ -10176,6 +10176,59 @@ against it, rather than short-circuiting on coverage. That is the shape
 now exist (#428/#429 advertised speeds, `ack_srtt_ms`). Measure on the live
 swarm with a processor-only node holding a whole 14B before shipping.
 
+## The whole-model hand-off is a yes/no gate that runs BEFORE the priced search, and it chose a card 500 ms away over the LAN card and the processor (measured 2026-09-03, gotcha #447)
+
+**What was measured** (live pair on v0.3.152; Proxmox holds gemma-2-2b whole
+on its processor, the WSL card 17 ms away holds shards 0-1 = layers 0-10, a
+Belgian RTX 4050 ~500 ms away holds it whole, prompt privacy auto-on):
+
+| prompt | route chosen | result |
+|---|---|---|
+| 19 tokens | boomerang: local(0,1) + **Belgian card (1,25)** + local(25,26) | 6.6 s (7.4 s on .151 via the WSL card) |
+| 8,111 tokens | same boomerang through the Belgian card | **503** after 40 s — its worker OOM'd in attention (below) |
+
+`delegation_target` found the Belgian card first: whole coverage, direct,
+trusted, room for the weights, 502 ms < the 1000 ms bound → hand-off, before
+`pipeline_may_beat_local` and the Parallax search ever ran. The gate cannot
+see that the WSL card is 17 ms away (it does not hold every layer, so it is
+not a delegation candidate at all), nor that a 24-layer middle 500 ms away is
+entered per token (64 round trips ≈ 64 s in the model's units against 24 s
+for the processor alone on the short prompt), nor that a 20 MB prompt forward
+across a WAN is itself a cost. It was written as a two-way choice ("run here
+or hand the WHOLE model to one named peer") because the search once priced
+local layers with a constant (`cbbed678`); the search now has honest inputs
+and a boomerang it can construct across several peers, so **the gate should
+become a filter and the search the decision**: when the local node is on its
+processor and the priced search is available, run the search over every
+candidate — delegation's trust and direct-reach requirements applied only to
+a chain whose FIRST segment is remote (the peer that would see the prompt;
+under privacy the first segment is local by construction) — and take the
+cheapest chain against the processor route. `DELEGATE_MAX_LATENCY_MS` and
+`DELEGATE_MIN_CPU_SPEEDUP` then have nothing left to do, which is what
+"Delegation distance should be a comparison, not a constant" asked for.
+
+**Two more things this run showed, both needed before the search can be
+trusted with a WAN card:**
+
+- **Capacity ignores the prompt's KV.** `max_hostable_layers` prices a peer
+  by weights only. An 8,111-token prefill through 24 Gemma-2 layers needs
+  ~2.4 GB of KV (295 KB per position — f32 plus the f16 mirror) on a card
+  with 6 GB; the peer's worker died with `attn: CUDA_ERROR_OUT_OF_MEMORY`.
+  Subtract `kv_bytes_per_token × prompt_positions × layers` from the
+  advertised free memory when bounding a peer's layers for THIS prompt.
+- **The segment path has no whole-prompt admission.** `admit_prompt` (gotcha
+  #440) guards the `Generate` path; a segment's prompt pass is admitted chunk
+  by chunk (`claim_room` at each growth boundary) and the card filled up
+  until attention's transient allocation, not the cache, hit the wall. Run
+  the whole-prompt decision for a segment's prompt pass too, so the refusal
+  is a 503 at token 0 that the coordinator can route around — instead of a
+  fatal worker error 22 s in with no standby.
+
+Reproduce: `measure_444.sh run` (session scratchpad) — Proxmox with
+auto-manage OFF holding gemma whole, WSL holding shards 0-1; both prompts.
+The processor-route comparison itself (#444) is therefore **still unmeasured
+on the live pair**: in this topology the hand-off gate fires first.
+
 ## A multi-megabyte forward over ONE QUIC stream can kill the connection (measured 2026-09-03, gotcha #446)
 
 **What was seen.** On the live pair — Proxmox (processor) coordinating,
@@ -10197,20 +10250,28 @@ request-response message on whichever connection the layer picks. On a link
 with any loss, a forward that size over QUIC fails by construction.
 
 **Mitigations, in order of preference:**
-1. **Chunk large forwards on the wire.** `inference.streaming_chunked_send`
-   (R139) already splits a forward into 256 KiB requests with AAD-bound chunk
-   metadata and reassembles by request id — each chunk is its own stream, so
-   no stream can accumulate 1024 gaps. It is default-off and, crucially, has
-   **no feature bit**: an older receiver does not understand the `chunk_meta`
-   trailer. Give it a `features::CHUNKED_FORWARD` bit, send chunked only to
-   peers advertising it, and switch the default on above a size floor of a
-   few MB (the failure needs a multi-MB burst; decode forwards must stay
-   single-frame). Measure the LAN cost first — the config comment argues
-   chunking is pure overhead there, but a failed connection costs more.
-2. **Rank TCP above QUIC for large payloads** in the vendored
-   request-response `connection_rank`: TCP has no equivalent failure mode.
-   Needs the rank to see the request size, which it does not today.
-3. Upstream: quinn's limit is deliberate (memory bound against pathological
+1. **Rank TCP above QUIC for large payloads** in the vendored
+   request-response `connection_rank`: TCP + yamux is flow-controlled with no
+   equivalent failure mode (a 256 KiB window is refilled per frame, so a
+   20 MB message is slow-but-certain rather than fatal). Both nodes here hold
+   a TCP and a QUIC connection to each other; the rank simply never sees the
+   request size. Threading `request.len()` into the choice is the smallest
+   change that removes the failure for the common two-transport case. It does
+   nothing for a peer reachable over QUIC only.
+2. **Chunk large forwards over request-response.** `inference.
+   streaming_chunked_send` (R139) exists but is wired ONLY on the persistent
+   pipeline stream path (`persistent_pipeline_stream`, also default-off); the
+   request-response path — the default, and the one that failed — ships one
+   frame per forward, and its comment says chunked-over-RR "needs explicit
+   Acks" still to be plumbed. That plumbing plus a `features::CHUNKED_FORWARD`
+   bit (an older receiver does not understand the `chunk_meta` trailer) would
+   make every chunk its own stream, so no stream can accumulate 1024 gaps on
+   any transport. Larger change; do (1) first.
+3. **Retry the same peer once** after an `OutboundFailure` whose connection
+   re-established (it did, within two seconds): cheap, but the same burst
+   over the same QUIC stream fails the same way, so it only helps once (1)
+   has changed which connection carries it.
+4. Upstream: quinn's limit is deliberate (memory bound against pathological
    peers); a larger receive window does not remove it.
 
 Until one lands, a prompt-pass forward above a few MB to a QUIC-connected
