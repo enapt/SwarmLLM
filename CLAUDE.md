@@ -218,21 +218,25 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2306 lib (dev,claude-subscription) — re-measured 2026-09-04, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 54 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` clean against the five advisories documented in `SECURITY.md` (`core2`/RUSTSEC-2026-0105 left the tree with the 2026-09-02 dependency update).
+All 20 build phases complete. All subsystems wired — no stubs. **2306 lib (dev,claude-subscription) — re-measured 2026-09-04, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 54 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .154 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
 
-**Next up (after the 09-03 round)**: (0) **#447** — make the priced search the
-ONE decision-maker when the local node is on its processor (`delegation_target`
-→ a filter; the DP compares every shape), subtract the prompt's KV from the
-weights-only capacity bound, and give the segment path whole-prompt admission
-(`admit_prompt` is `Generate`-only) — then re-run the live #444 measurement;
-(1) **#446 first half** — a multi-MB forward over ONE QUIC stream is killed by
-quinn's 1024-gap limit: rank TCP above QUIC for large requests, or chunked-over-
-RR behind a feature bit; (2) prefix-keyed remote KV across turns; (3) f16 stored
-KV on small cards; (4) accept/reject at the tail; then the #438 structural rung,
-peer↔peer RTT gossip, ring decode, prefill microbatching. **Needs the user's
-decision**: tool-call streaming buffers the whole reply when `tools` are present.
-Ordered list with pointers in `memory/MEMORY.md` § NEXT UP; entries in
-`docs/FUTURE_WORK.md`. OpenClaw stays parked at basic support.
+**Next up (after the v0.3.154 release)**: (0) **field-verify the three .154
+fixes** — #451 with an 11k-token distributed prompt, #452 with the Mac mini
+owner (its arithmetic is MARGINAL on their numbers: ~36 layers allowed against
+36 asked, so ask for their own `max_hostable_layers=` line), #453 with an
+OpenClaw user; (1) **#447 (iii)** — make the priced search the ONE
+decision-maker when the local node is on its processor (`delegation_target`
+becomes a filter; the DP compares every shape). Halves (i)+(ii) shipped in .153;
+then re-run the live #444 measurement, which is still unmeasured; (2) **#446
+first half** — a multi-MB forward over ONE QUIC stream is killed by quinn's
+1024-gap limit: rank TCP above QUIC for large requests, or chunked-over-RR
+behind a feature bit (the new contributor's AWS node is the right place to
+reproduce it); (3) prefix-keyed remote KV across turns; (4) f16 stored KV on
+small cards; (5) accept/reject at the tail — also the precondition for issue
+#21's economics; then the #438 structural rung, peer↔peer RTT gossip, ring
+decode, prefill microbatching. Ordered list with pointers in `memory/MEMORY.md`
+§ NEXT UP; entries in `docs/FUTURE_WORK.md`. **Parked**: the OpenClaw ClawHub /
+npm publish, which needs the user's credentials.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
@@ -241,9 +245,11 @@ Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_
 seconds, 0 ERROR lines, `release ok` served, rollback
 `~/.local/bin/swarmllm.0.3.153-alpha.bak`) and Proxmox `96842635` (.deb
 `0.3.154-alpha-1` over `0.3.153-alpha-1`, `enabled` + `active`, no `.dpkg-old`,
-journal errors "-- No entries --") both on it, node ids kept; the local node saw
-Proxmox at .154 within a minute, and a tester's node had already auto-updated to
-.154 by then. Gate: CI + Cache warm green (Cache warm ~22 min this time, not the
+journal errors "-- No entries --") both on it, node ids kept — and the USER
+updated the ANCHOR (`bfbfeebc`) to .154 the same afternoon. **5 of the 6 nodes
+were on .154 within ~20 minutes, most unattended**; only the Belgian RTX 4050
+(`bf7b3263`) lagged on .153, which matters because #451's cap is still live
+there. Gate: CI + Cache warm green (Cache warm ~22 min this time, not the
 1h56m of .153), 25 assets, not draft, `latest`, sha256 CUDA + deb,
 `ggml_cuda_init` = 1, **smoke 9/9 (none skipped) + shapes 7/7 on the DOWNLOADED
 artifact** — and both harnesses were baselined green on .153 FIRST, so a failure
@@ -273,104 +279,14 @@ with_local_processor_speed` pins it now; the tag went on the fix commit.
 ⚠ A Monitor on `gh run list` never matched the Release run and timed out; the
 release had been done for two hours — read `gh release view` directly.
 
-### v0.3.152-alpha (2026-09-03) — the processor route, the card's own word, cancels that reach the work
-
-Full account in `round_log_0903_processor_route.md`; gotchas #444-#447.
-
-- **#444 — a processor-only node holding a whole model no card holds now gets a
-  pipeline.** Three defects: the fast path returned before the priced search;
-  the local candidate was priced by the CARD it would not use (`serves_on_cpu`
-  threads into `gather_candidates`); and under auto-on prompt privacy the router
-  had no split point inside a whole-model holder's range (layers 1 and N−1 added
-  for that topology). A chain wins only if remote AND every remote segment is
-  priced from a measurement (`pipeline_may_replace_processor_route`).
-  **Unit-tested with the tester's shape; NOT yet observed live** — see #447.
-- **#440 third half — the KV budget is reconciled with the card at every
-  admission** (`kv_budget_now` = min(load-time budget, live+cached+free_now −
-  5%/256 MB), cudarc `mem_get_info`). The .149 case now refuses at token 0.
-- **#445 — a cancel is READ at every long wait and SET by every surface.**
-  `inference::cancel::unless_cancelled` around the pool's response wait (drop →
-  `CancelRequest`) and the remote wait (→ `CancelInference`, no failover); both
-  SSE surfaces set the flag on `closed()`; the router never retries a cancelled
-  request; the segment path chunks a long prompt pass (`forward_prompt_in_chunks`,
-  parity-tested) so a ONE-layer segment stops within one chunk. From the tester's
-  81 CPU-minute orphan. **Unexplained: "a new model-worker per abandoned
-  attempt"** — the pool keys per model; asked for `ps`.
-- **#446 — the receipt-ACK deadline includes the payload** (`ack_deadline_with_
-  payload`, +bytes/1 MiB/s) and forwards > 256 KiB no longer feed the estimator
-  routing reads. Found live: a 20 MB forward to a 625 ms peer failed its 10 s
-  floor. **Open first half: one QUIC stream carrying a multi-MB forward is KILLED
-  by quinn's 1024-gap limit** (LAN, WSL2 NIC) — rank TCP above QUIC for large
-  requests (`connection_rank` needs the size), or chunked-over-RR + feature bit.
-- `swarmllm status` lists workers (`/v1/status.workers`); `swarmllm unload
-  <model>` retires one; the split-stream trace records real `prompt_tokens`.
-- **#447 (found by the live measurement, OPEN, top of NEXT UP)**: `delegation_
-  target` is a yes/no gate that fires BEFORE the priced search — it handed a
-  boomerang's middle to a 6 GB card ~500 ms away (over the LAN card and the
-  processor); the 8k prompt then OOM'd that worker in attention (24 layers ×
-  8,111 positions ≈ 2.4 GB KV the weights-only capacity bound never priced; the
-  segment path has no whole-prompt admission). Gate → filter, search → decision.
-⚠ **Measure at steady state** — run 1 happened 45 s after both nodes restarted
-and the scheduler saw ONE candidate (diagnosis rule 3, again).
-⚠ **Test it from the API, not the function** — the first #444 cut passed the
-router's tests and stayed local end to end (privacy auto-on, no split point).
-
-### On main since .152 (2026-09-03 evening, UNRELEASED) — #448, the storage budget had three accountants
-
-A tester's node holding 18 GB against an explicit 50 GB read `no remaining
-storage budget` every cycle and never auto-fetched the 14B it was asked for;
-they built a careful (wrong) phantom-manifest theory because no surface printed
-the budget. The download pass QUARTERED the figure for Minimal contribution
-(the DEFAULT — 6.25 GB on a stock install), prune pressure and the pool page
-used the unscaled figure, the settings bar drew the cap as headroom after
-"used": over budget for downloading, at 36% for pruning, stuck for ever. Now
-ONE accountant (`auto_manage::storage_budget` / `held_shard_bytes` /
-`storage_budget_now`): an explicit `max_storage_mb` is honoured as written,
-else 25/50/75% of `max_disk_mb` by contribution level (what the setup wizard
-always promised), capped at `max_disk_mb` and at held + 80% of free disk; the
-refusal logs `held_mb`/`budget_mb`/`budget_from`; diagnostics carries a
-`storage:` line; `.mismatched` quarantine files are swept like `.quarantine`
-(they never were); `evaluate_and_download` reads the LIVE config. Guard:
-`the_storage_budget_has_one_accountant`. Both new tests go red with the
-defects restored. ⚠ **Not yet released** — the tester's workaround until then
-is contribution → Moderate. `round_log_0903_processor_route.md` (last section).
-
-**Also on main since .152 (same evening, UNRELEASED) — six future-work items
-closed**: #447 halves (i)+(ii) — `max_hostable_layers` charges the prompt's KV
-per layer (a WARM peer was uncapped; the #447 card was warm) and the segment
-path runs `ensure_room_for_prompt` on its prompt pass; the memory-bandwidth
-figure is re-measured idle at 10 min then hourly keeping the max
-(`remeasure_keeping_the_best`); two peers advertising the same adjacent newer
-version bring the update check forward (`PeerVersionWatch`, `events.update_nudge`
-— never selects an artifact); a hybrid split is visible on the dashboard,
-`swarmllm status`, `/v1/status.workers` and the models API
-(`gpu_layers_on_card`, `num_layers`; i18n 1320 keys); `swarmllm_empty_replies_
-total` on `/metrics`. Gate→filter (#447 iii) still waits for the live pair.
-
-Prior line: .148 (OpenClaw plugin + `context_length`, #437, Rust 1.90,
-`round_log_0902_openclaw.md`), .147 (#434-#436 failover fixes,
-`round_log_0902_failover_paths.md`), .146 (#432 + #433, both field-confirmed),
-.145 hybrid placement (#431), .144 Apple Silicon update fix (#430), .143
-advertised-speed correction (#428) — one-liners below.
-
-Release gate, unchanged and followed every time: bump the version FIRST,
-`cargo audit` (#334) and CI **and Cache warm** green BEFORE tagging, then verify
-on the **DOWNLOADED** artifact — 25 assets, not a draft, `latest` correct,
-sha256 on CUDA + deb, `strings | grep ggml_cuda_init` = 1, **smoke 9/9 + shapes
-7/7** — then **deploy local + Proxmox, which is part of the release and is not
-asked about**. ⚠ Background the tag push (it runs the pre-push hook). ⚠ Set
-`SWARM_SMOKE_MODEL` or smoke silently SKIPS its three inference checks.
-⚠ **`nohup setsid <script>` returns IMMEDIATELY — setsid forks, so the exit code
-is setsid's. Poll the log for its completion line.** ⚠ **Cache warm is NOT
-per-push** (dependency-graph changes, weekly, on demand), so a source-only
-commit correctly shows no run and the tag restores `main`'s cache. Cache warm
-~17 min; Release ~19-29.
-
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.154** (09-04): **#451** a fixed element cap in `bytes_to_tensor` (32M = exactly 8192 positions at hidden 4096) was an ~8000-token ceiling on EVERY distributed prompt, silent since March because local inference never serialises an activation — the payload now bounds the allocation; **#452** the planner priced the LOCAL node as memory-unbounded while the loader priced a WHOLE model for a partial segment, so a whole-model holder could serve no PART of a model too big for it; **#453** a tool-carrying reply got NO streaming (120 deltas → 1) — unparked by reading vLLM, which streams pre-marker text AND keeps the prose non-streaming. ⚠ Baseline the smoke/shapes harnesses on the PREVIOUS release first. ⚠ `jq` is not installed here — use `gh --jq`. `round_log_0904_tensor_cap.md`.
+- **v0.3.153** (09-04): **#449** ALL inference broken on every Mac (worker socket path over `sun_path`'s 104 bytes) and **#450** "cannot self-update" was a bare bool so the CLI downloaded ~1 GB before failing; **#448** the storage budget had THREE accountants and wedged a node "out of budget" for ever (→ `storage_budget` / `held_shard_bytes` / `storage_budget_now`, a refusal that shows its arithmetic); six future-work closures incl. #447 halves (i)+(ii) — the capacity bound charges the prompt's KV, the segment path admits a whole prompt. ⚠ A `gh release download` was reset mid-transfer and failed its checksum: compare SIZE against `gh release view` before doubting a release.
+- **v0.3.152** (09-03): the processor route — **#444** a processor-only node holding a whole model gets a pipeline (fast path returned before the priced search; the local candidate was priced by a card it would not use; no boomerang split points under auto-on privacy); **#440** third half (KV budget reconciled with the card at every admission); **#445** a cancel is READ at every long wait and SET by every surface; **#446** the ACK deadline includes the payload. **#447 found live** and still OPEN in part: `delegation_target` is a yes/no gate firing BEFORE the priced search. ⚠ Measure at steady state. ⚠ Test from the API, not the function. `round_log_0903_processor_route.md`.
 - **v0.3.149 → .151** (09-02 evening → 09-03): #438 resend ladder (RetainedReplies + `ResendTokens`/`Dropped`, live drop harness 40/40 vs 5/40); the agent-prompt crawl was VRAM SPILL — #440 prefix-cache snapshots never charged (admit whole prompt, evict cached prompts, size the snapshot, guard evicts before refusing: 5 → 23 tok/s), not the O(1) rollback (#439); `ack_srtt_ms` into routing; testers' #441 cancel-during-prefill (per-layer probe), #442 CPU-only delegation (`serves_on_cpu`), #443 the fast path never reached the scheduler (`local_fast_path_for`). ⚠ A candle-only local CUDA build is NOT the release binary. ⚠ Both arms of a memory-pressure A/B must be in the SAME memory state. `round_log_0902_perf_commits.md`.
 - **v0.3.148** (09-02): OpenClaw provider plugin BUILT + verified (`integrations/openclaw/`), `context_length` on `/v1/models`, **#437** idle unload trusted a timestamp nothing writes, Rust 1.90 + 26 deps, Dependabot hygiene; measured the agent-prompt reality (14,633 tokens + 8192 reservation; 5 GB KV at 14.6k). `round_log_0902_openclaw.md`.
 - **v0.3.147** (09-02): three failover defects from ONE trace — **#434** a decode step of a remote segment 0 budgeted as a PREFILL (kind decides first), **#435** a standby's ERROR taken as the segment's output (`Tensor bytes too short` blamed on the wrong segment), **#436** a DEPARTED peer now fails its pinned forwards at once (`examples/departed_peer_test.sh`, 503 in 10.4 s). `round_log_0902_failover_paths.md`.
