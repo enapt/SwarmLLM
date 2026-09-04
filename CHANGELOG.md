@@ -22,6 +22,16 @@ All notable changes to SwarmLLM are documented here.
   ordinary size for a coding agent — returned nothing at all for its full
   ten-minute deadline. The check now counts the memory this conversation
   actually needs, so a machine that cannot hold it is not offered it.
+- **Two requests sent at the same moment are no longer both given to the same
+  machine's last free gigabyte.** A machine tells the network how much graphics
+  memory it has free every thirty seconds, and nothing makes it announce early
+  when it takes on work. So two requests scheduled seconds apart both saw the
+  same free space and both claimed it: one of them died with a real
+  out-of-memory error from the graphics driver while the other carried on
+  answering on the very same machine. Sent again on its own afterwards, the
+  failed request completed in a minute — the machine had room for it, just not
+  for it twice. SwarmLLM now remembers what it has just asked of a machine
+  until that machine says so itself.
 - **A request whose helper machine disappears now comes home instead of
   failing.** When one machine is running a whole model on your behalf and it
   drops off the network, SwarmLLM was meant to re-plan and, if nothing else is

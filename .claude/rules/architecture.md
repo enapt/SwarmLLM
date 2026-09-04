@@ -377,6 +377,33 @@ claim, not a fact: grep that mechanism for the case being relied on. Two of
 these three were exactly that shape, as were #437 (a doc naming a writer nothing
 writes) and #451 (a guard whose input nothing fills).
 
+**A gossiped figure is a snapshot, and a decision made between two of them must
+remember itself.** `SharedState::peer_vram_commitments` holds
+`request_id -> [(peer, MB)]` for work this node has scheduled onto peers and not
+yet seen reflected in their capability broadcast, which arrives every 30 s on a
+small swarm. `gather_candidates` subtracts it ONCE, so both consumers — the
+advertised `gpu_vram_available_mb` and `max_hostable_layers` — inherit it.
+
+Measured live: two requests 3 ms apart, both accepted whole onto one peer
+against the identical `peer_free_vram_mb=Some(4598)`; sixteen seconds later one
+died with `CUDA_ERROR_OUT_OF_MEMORY` inside `mlp` while the other kept decoding
+on that peer, and the loser resent alone afterwards completed in 62 s
+(gotcha #457).
+
+Three things a change must keep. **The charge is what the bound weighs** — cold
+peers pay weights plus this prompt's KV, warm peers pay the KV alone — so the
+reservation and the capacity bound cannot come to describe different quantities.
+**It is recorded on the EXECUTING path** (`assemble_awaiting_dht`), never in
+`assemble_pipeline_for`, which the dashboard also calls to preview a route: a
+preview that booked memory would never release it, since nothing calls
+`release_request_state` for a request that does not exist. And **the request
+being scheduled is excluded from its own total**, or a re-assembly charges
+itself twice and routes around memory it reserved for nobody but itself.
+
+This is not a second accountant for the peer's memory — the peer owns that, and
+its own admission remains the backstop. It makes this node's estimate honest
+about the commitments this node has itself made.
+
 ## A cap sized in units of the WORK is a ceiling on the product
 
 **`inference::tensor_util::bytes_to_tensor` bounds its allocation by the

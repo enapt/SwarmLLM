@@ -2258,13 +2258,13 @@ fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
     let bytes_per_layer = 3_000u64 * 1_048_576 / 32;
     let cap = capability_with_gpu(Some(200));
 
-    let cold = super::max_hostable_layers(Some(&cap), bytes_per_layer, false, 0);
+    let cold = super::max_hostable_layers(Some(&cap), bytes_per_layer, false, 0, 0);
     assert!(
         cold.is_some_and(|k| k < 32),
         "a COLD peer with 200 MB free cannot take a 3 GB model: {cold:?}"
     );
 
-    let warm = super::max_hostable_layers(Some(&cap), bytes_per_layer, true, 0);
+    let warm = super::max_hostable_layers(Some(&cap), bytes_per_layer, true, 0, 0);
     assert_eq!(
         warm, None,
         "a peer already serving this model has already paid for it — the free \
@@ -2287,12 +2287,14 @@ fn a_long_prompt_shrinks_the_layers_a_peer_may_take() {
         bytes_per_layer,
         false,
         per_position_per_layer * 19,
+        0,
     );
     let long = super::max_hostable_layers(
         Some(&cap),
         bytes_per_layer,
         false,
         per_position_per_layer * 8_111,
+        0,
     );
     assert!(short.is_some() && long.is_some());
     assert!(
@@ -2317,7 +2319,7 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
     let per_position_per_layer = 2 * 4 * 256 * 6;
     // Unknown prompt: warm stays uncapped, as it always was.
     assert_eq!(
-        super::max_hostable_layers(Some(&cap), bytes_per_layer, true, 0),
+        super::max_hostable_layers(Some(&cap), bytes_per_layer, true, 0, 0),
         None
     );
     // 8,111 positions × 12 KB ≈ 99.6 MB per layer against ~909 MB usable → 9 layers.
@@ -2326,10 +2328,52 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
         bytes_per_layer,
         true,
         per_position_per_layer * 8_111,
+        0,
     );
     assert!(
         capped.is_some_and(|k| k < 24),
         "a warm card with 1 GB free cannot take 24 layers of an 8k prompt: {capped:?}"
+    );
+}
+
+/// Two requests scheduled inside one 30-second gossip window must not both be
+/// told the peer has all its memory free.
+///
+/// Live on v0.3.153/.154 (gotcha #457): two requests 3 ms apart, both accepted
+/// whole onto one peer against the identical `peer_free_vram_mb=Some(4598)`.
+/// Sixteen seconds later one died with a driver-level out-of-memory inside
+/// `mlp` while the other went on decoding — and the loser, resent alone
+/// afterwards, completed cleanly in 62 s.
+#[test]
+fn memory_already_booked_on_a_peer_is_not_offered_twice() {
+    let cap = capability_with_gpu(Some(4_600));
+    // 100 MB per layer, no prompt term — the arithmetic is not what is under
+    // test here, the deduction is.
+    let bytes_per_layer = 100 * 1_048_576;
+
+    let free = super::max_hostable_layers(Some(&cap), bytes_per_layer, false, 0, 0)
+        .expect("an advertised card yields a bound");
+    let booked = super::max_hostable_layers(Some(&cap), bytes_per_layer, false, 0, 4_000)
+        .expect("still a bound, just a smaller one");
+    assert!(
+        booked < free,
+        "memory this node has already committed must not be offered again: \
+         {free} layers free, {booked} after booking 4000 MB"
+    );
+
+    // Over-committed reads as no room, never as all of it — the subtraction
+    // saturates rather than wrapping.
+    assert_eq!(
+        super::max_hostable_layers(Some(&cap), bytes_per_layer, false, 0, 99_999),
+        Some(0)
+    );
+
+    // And a peer that has told us NOTHING is still unknown, not full: our own
+    // commitments cannot manufacture information the peer never sent.
+    let silent = capability_with_gpu(None);
+    assert_eq!(
+        super::max_hostable_layers(Some(&silent), bytes_per_layer, false, 0, 4_000),
+        None
     );
 }
 
@@ -2378,11 +2422,11 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
 /// zero every node before v0.3.103 sent, is routed to exactly as before.
 #[test]
 fn an_unreadable_memory_figure_never_caps_a_peer() {
-    assert_eq!(super::max_hostable_layers(None, 1024, false, 0), None);
+    assert_eq!(super::max_hostable_layers(None, 1024, false, 0, 0), None);
 
     let zeroed = capability_with_gpu(Some(0));
     assert_eq!(
-        super::max_hostable_layers(Some(&zeroed), 1024, false, 0),
+        super::max_hostable_layers(Some(&zeroed), 1024, false, 0, 0),
         None,
         "zero free VRAM is what a pre-v0.3.103 node always advertised — it is \
          no information, not 'no room' (gotcha #330)"

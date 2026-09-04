@@ -574,6 +574,29 @@ pub struct SharedState {
     /// Scoped to one request so a peer that fails once is not banned globally on
     /// a single data point. Same lifetime as `active_traces`.
     pub request_holder_blacklist: DashMap<uuid::Uuid, std::collections::HashSet<NodeId>>,
+    /// Graphics memory this node has COMMITTED to peers by scheduling work onto
+    /// them, and which their own gossip has not yet reported as spent.
+    /// `request_id -> [(peer, MB)]`, same lifetime as the two maps above.
+    ///
+    /// A peer's free memory reaches us only in its periodic capability
+    /// broadcast — every 30 s on a small swarm — and nothing a peer does
+    /// re-sends it early. So every request scheduled inside one window sees the
+    /// identical figure, and the check that is supposed to price a peer's room
+    /// cannot see the decision this node made three milliseconds ago.
+    ///
+    /// Measured live 2026-09-04 (gotcha #457): two requests for one 36-layer
+    /// model, 3 ms apart, both accepted whole onto the same peer against the
+    /// same `peer_free_vram_mb=Some(4598)`. Sixteen seconds later one died with
+    /// `DriverError(CUDA_ERROR_OUT_OF_MEMORY)` inside `mlp` while the other was
+    /// still decoding on that peer. Resent alone afterwards, the failed request
+    /// completed cleanly in 62 s — so the peer had room for it, and not for it
+    /// twice.
+    ///
+    /// This is NOT a second accountant for the peer's memory: the peer owns
+    /// that, and its own admission remains the backstop. It makes this node's
+    /// ESTIMATE honest about the commitments this node has itself made and not
+    /// yet seen reflected.
+    pub peer_vram_commitments: DashMap<uuid::Uuid, Vec<(NodeId, u64)>>,
     pub detected_region: RwLock<Option<String>>,
     pub shard_bytes_served: AtomicU64,
     pub relay_seconds_served: AtomicU64,
@@ -1025,6 +1048,7 @@ impl SharedState {
             local_capability: arc_swap::ArcSwapOption::empty(),
             perf_history: perf_history::PerfHistory::load(&db),
             request_holder_blacklist: DashMap::new(),
+            peer_vram_commitments: DashMap::new(),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {
                 let map = DashMap::new();

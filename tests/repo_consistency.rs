@@ -1438,6 +1438,7 @@ fn per_request_state_is_released_in_one_place() {
         "active_pipelines",
         "active_traces",
         "request_holder_blacklist",
+        "peer_vram_commitments",
     ];
     let allowed = [
         // Owns the helper.

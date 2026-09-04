@@ -124,6 +124,11 @@ fn max_hostable_layers(
     // bytes per position per layer, including the f16 mirror where its card
     // keeps one. 0 when the prompt length or the model's geometry is unknown.
     prompt_kv_bytes_per_layer: u64,
+    // What THIS node has already committed to that peer and not yet seen
+    // reported back — see `SharedState::peer_vram_commitments`. The advertised
+    // figure is a snapshot up to 30 s old, so without this every request
+    // scheduled inside one gossip window sees the same room and books it.
+    committed_mb: u64,
 ) -> Option<u32> {
     // A peer that is already serving this model has already paid for its
     // WEIGHTS. The advertised figure is free memory RIGHT NOW (`health/monitor`
@@ -162,6 +167,10 @@ fn max_hostable_layers(
         // Not "no room": no information. See the doc comment.
         return None;
     }
+    // Subtract AFTER the zero test, because zero means "told us nothing" and
+    // our own commitments cannot turn no information into a refusal. Saturating,
+    // so an over-commitment reads as no room rather than wrapping to all of it.
+    let free_mb = free_mb.saturating_sub(committed_mb);
     let usable_bytes = (free_mb as f64 * 1_048_576.0 / DELEGATE_VRAM_MARGIN) as u64;
     Some((usable_bytes / per_layer) as u32)
 }
@@ -1298,6 +1307,78 @@ impl PipelineScheduler {
         })
     }
 
+    /// Book what `assignment` is about to ask of each peer's graphics memory,
+    /// so a request scheduled moments later can see it.
+    ///
+    /// Called by the ROUTER, on the path a request actually executes — not from
+    /// `assemble_pipeline_for`, which the dashboard also calls to preview a
+    /// route. A preview that booked memory would never release it, because
+    /// nothing ever calls `release_request_state` for a request that does not
+    /// exist.
+    ///
+    /// The charge per layer is exactly what [`max_hostable_layers`] weighs, so
+    /// the reservation and the bound cannot describe different quantities: a
+    /// cold peer pays weights plus this prompt's KV, a warm one pays the KV
+    /// alone. Segments on this node are skipped — our own loader tracks that.
+    pub fn record_peer_commitments(
+        &self,
+        assignment: &PipelineAssignment,
+        local_node_id: &NodeId,
+        prompt_tokens: Option<u32>,
+    ) {
+        let Some(first) = assignment.segments.first() else {
+            return;
+        };
+        let model_id = &first.shard_id.model_id;
+        let Some(manifest) = self.shared_state.model_registry.get_manifest(model_id) else {
+            return;
+        };
+        let bytes_per_layer = manifest.total_size_bytes / manifest.num_layers.max(1) as u64;
+        let meta = self.shared_state.gguf_meta_for(model_id);
+        let mut charges: Vec<(NodeId, u64)> = Vec::new();
+        for seg in &assignment.segments {
+            if seg.node_id == *local_node_id {
+                continue;
+            }
+            let layers = u64::from(seg.layer_range.1.saturating_sub(seg.layer_range.0));
+            if layers == 0 {
+                continue;
+            }
+            let has_gpu = self
+                .shared_state
+                .peer_registry
+                .get(&seg.node_id)
+                .is_some_and(|p| p.capability.as_ref().is_some_and(|c| c.gpu.is_some()));
+            let kv_per_layer = match (prompt_tokens, meta.as_ref()) {
+                (Some(tokens), Some(m)) => {
+                    kv_bytes_per_position_per_layer(m, has_gpu).saturating_mul(u64::from(tokens))
+                }
+                _ => 0,
+            };
+            let warm = self.shared_state.peer_model_is_warm(
+                &seg.node_id,
+                model_id,
+                std::time::Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
+            );
+            let per_layer = if warm {
+                kv_per_layer
+            } else {
+                bytes_per_layer.saturating_add(kv_per_layer)
+            };
+            let mb = layers.saturating_mul(per_layer) / 1_048_576;
+            if mb > 0 {
+                // Several segments can land on one peer; charge each.
+                if let Some(entry) = charges.iter_mut().find(|(n, _)| *n == seg.node_id) {
+                    entry.1 = entry.1.saturating_add(mb);
+                } else {
+                    charges.push((seg.node_id.clone(), mb));
+                }
+            }
+        }
+        self.shared_state
+            .record_peer_vram_commitments(assignment.request_id, charges);
+    }
+
     /// Gather all candidate nodes for the given model's shards.
     ///
     /// Groups shards by node and computes combined layer ranges using actual GGUF
@@ -1612,6 +1693,15 @@ impl PipelineScheduler {
             // processor-only node holding every shard was handed 36 of a 14B's
             // 48 layers, refused them, retried and produced the same plan
             // (gotcha #452).
+            // What other in-flight requests have already booked on this peer
+            // since its last capability broadcast. Zero for the local node,
+            // whose loader knows exactly what it has committed.
+            let committed_mb = if node_id == *local_node_id {
+                0
+            } else {
+                self.shared_state
+                    .committed_peer_vram_mb(&node_id, request_id)
+            };
             let max_hostable_layers = if node_id == *local_node_id {
                 self.shared_state
                     .model_process_pool
@@ -1633,6 +1723,7 @@ impl PipelineScheduler {
                         bytes_per_layer,
                         warm,
                         prompt_kv_per_layer,
+                        committed_mb,
                     )
                 })
             };
@@ -1643,9 +1734,15 @@ impl PipelineScheduler {
                 None
             } else {
                 self.shared_state.peer_registry.get(&node_id).and_then(|p| {
-                    p.capability
-                        .as_ref()
-                        .and_then(|c| c.gpu.as_ref().map(|g| g.vram_available_mb))
+                    p.capability.as_ref().and_then(|c| {
+                        c.gpu.as_ref().map(|g| {
+                            // Same deduction as the bound above, for the same
+                            // reason: this figure is a snapshot the peer sends
+                            // every 30 s, and it cannot know what this node
+                            // booked onto it since.
+                            g.vram_available_mb.saturating_sub(committed_mb)
+                        })
+                    })
                 })
             };
             candidates.push(NodeCandidate {

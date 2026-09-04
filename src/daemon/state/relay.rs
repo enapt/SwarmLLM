@@ -101,6 +101,42 @@ impl super::SharedState {
         self.active_pipelines.remove(request_id);
         self.active_traces.remove(request_id);
         self.request_holder_blacklist.remove(request_id);
+        self.peer_vram_commitments.remove(request_id);
+    }
+
+    /// Record what this request has committed to each peer's graphics memory,
+    /// replacing any earlier record for the same request.
+    ///
+    /// Replacement rather than accumulation is the point: a request can be
+    /// assembled several times — the DHT grace loop retries, and so does the
+    /// router — and only the latest plan is outstanding. Released by
+    /// [`Self::release_request_state`] like every other per-request map.
+    pub fn record_peer_vram_commitments(
+        &self,
+        request_id: uuid::Uuid,
+        charges: Vec<(NodeId, u64)>,
+    ) {
+        if charges.is_empty() {
+            self.peer_vram_commitments.remove(&request_id);
+        } else {
+            self.peer_vram_commitments.insert(request_id, charges);
+        }
+    }
+
+    /// Graphics memory already committed to `peer` by OTHER in-flight requests,
+    /// in MB.
+    ///
+    /// `excluding` is the request being scheduled right now. Without it a
+    /// re-assembly of the same request would charge itself a second time and
+    /// route around a peer over memory it had reserved for nobody but itself.
+    pub fn committed_peer_vram_mb(&self, peer: &NodeId, excluding: uuid::Uuid) -> u64 {
+        self.peer_vram_commitments
+            .iter()
+            .filter(|e| *e.key() != excluding)
+            .flat_map(|e| e.value().clone())
+            .filter(|(node, _)| node == peer)
+            .map(|(_, mb)| mb)
+            .sum()
     }
 
     /// Record a failed inference for the diagnostics ring buffer.
@@ -835,6 +871,42 @@ mod tests {
         // Cleanup mirrors active_traces; after removal the peer is usable again.
         state.request_holder_blacklist.remove(&a);
         assert!(!state.holder_blacklisted_for_request(a, &holder));
+    }
+
+    /// A peer's advertised free memory is up to 30 s old, so the scheduler has
+    /// to remember what it has already booked onto that peer — and must not
+    /// count the request it is scheduling right now against itself.
+    #[test]
+    fn a_peers_booked_memory_is_counted_once_and_released_with_the_request() {
+        let state = test_state(crate::config::Config::default());
+        let peer = crate::types::NodeId([3u8; 32]);
+        let other_peer = crate::types::NodeId([4u8; 32]);
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+
+        state.record_peer_vram_commitments(a, vec![(peer.clone(), 2_000)]);
+        state.record_peer_vram_commitments(b, vec![(peer.clone(), 1_500)]);
+
+        // Scheduling B sees A's booking and not its own — charging itself twice
+        // would route around memory it had reserved for nobody but itself.
+        assert_eq!(state.committed_peer_vram_mb(&peer, b), 2_000);
+        assert_eq!(state.committed_peer_vram_mb(&peer, a), 1_500);
+        // A third request sees both.
+        assert_eq!(
+            state.committed_peer_vram_mb(&peer, uuid::Uuid::new_v4()),
+            3_500
+        );
+        // Bookings are per peer.
+        assert_eq!(state.committed_peer_vram_mb(&other_peer, a), 0);
+
+        // Re-assembling a request REPLACES its booking rather than adding to
+        // it: only the latest plan is outstanding.
+        state.record_peer_vram_commitments(a, vec![(peer.clone(), 500)]);
+        assert_eq!(state.committed_peer_vram_mb(&peer, b), 500);
+
+        // And the booking has the same lifetime as every other per-request map.
+        state.release_request_state(&a);
+        assert_eq!(state.committed_peer_vram_mb(&peer, b), 0);
     }
 
     /// Our own inventory is ground truth; a peer's error must never revise it.

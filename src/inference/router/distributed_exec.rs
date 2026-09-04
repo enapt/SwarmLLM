@@ -336,6 +336,13 @@ async fn assemble_awaiting_dht(
 ) -> Result<PipelineAssignment, SwarmError> {
     let first = scheduler.assemble_pipeline_for(model_id, local_node_id, request_id, prompt_tokens);
     let Err(err) = first else {
+        if let Ok(ref a) = first {
+            // Book this plan's demand on each peer before anyone else is
+            // scheduled. A peer's own free-memory figure reaches us every 30 s
+            // and cannot mention what we decided three milliseconds ago
+            // (gotcha #457).
+            scheduler.record_peer_commitments(a, local_node_id, prompt_tokens);
+        }
         return first;
     };
     if !assembly_failed_for_lack_of_holders(&err) {
@@ -348,6 +355,7 @@ async fn assemble_awaiting_dht(
         if let Ok(assignment) =
             scheduler.assemble_pipeline_for(model_id, local_node_id, request_id, prompt_tokens)
         {
+            scheduler.record_peer_commitments(&assignment, local_node_id, prompt_tokens);
             tracing::info!(
                 %request_id,
                 model = %model_id,

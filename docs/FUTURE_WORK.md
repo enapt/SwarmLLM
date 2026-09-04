@@ -125,6 +125,39 @@ a third-party node that cannot be observed from here, and it may simply have bee
 loaded. **That does not weaken the finding**: the point is that the system cannot
 tell the difference either, and re-picks it every time at the same wrong price.
 
+## A peer's own prompt admission can still race itself (open, 2026-09-04)
+
+Found while fixing gotcha #457, and deliberately left open there.
+
+The coordinator now reserves what it has committed to a peer between that peer's
+30-second capability broadcasts, so two requests scheduled milliseconds apart no
+longer both claim the same free memory. That closes the case that was measured —
+two whole-model delegations onto one card, one dying with
+`DriverError(CUDA_ERROR_OUT_OF_MEMORY)` inside `mlp` while the other kept
+decoding.
+
+**It does not close the peer-side half.** `ensure_room_for_prompt` →
+`admit_prompt` reads live KV occupancy plus the prefix cache, decides, evicts,
+and only then does the prefill allocate. Two requests arriving at one worker
+close together can both pass that read before either allocates. The coordinator's
+reservation makes it much rarer — it is now the only way to get two large
+concurrent prompts onto one peer at all — but the window is real and it is the
+peer's own admission that the architecture rules call "the backstop".
+
+**What it needs**: admission and the allocation it authorises must be atomic with
+respect to each other — either one lock spanning both, or a claim recorded at
+admission that the prefill draws down, the same shape as
+`ModelProcessPool::vram_reserved_mb` does for whole models. Note the KV store
+already has `claim_room`, which evicts through the external evictor before
+refusing; the gap is that `admit_prompt`'s whole-prompt decision is not itself
+recorded anywhere until the positions are actually written.
+
+**Why it was not done in the same pass**: it is a change inside the worker's hot
+path, and the measured failure was fully explained by the coordinator half. Doing
+both at once would have made an unverified peer-side change indistinguishable
+from the fix that was actually needed. Reproduce it with two large concurrent
+prompts sent DIRECTLY at one node's API, bypassing the coordinator's reservation.
+
 ## Two smaller costs found beside #417 (open, 2026-08-30)
 
 Both surfaced while pricing `GET /api/admin/stats` (gotcha #417, fixed). Neither
