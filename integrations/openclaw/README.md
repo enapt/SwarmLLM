@@ -133,8 +133,8 @@ the node and streams. The honest numbers from an RTX 3070 (8 GB) running a
 3B model: OpenClaw's 14,633-token first turn is read in about 15 s, but the
 KV cache for that many tokens is 5 GB beside the weights and fills the card,
 and a reply to a 30-tool agent prompt then came back at about one token per
-second — and only once the model stopped, because a reply that may be a tool
-call is buffered until it can be told from prose. A 3B model also does not
+second (it now streams as it is written; before the release after v0.3.153 it
+arrived only once the model stopped). A 3B model also does not
 follow a prompt of that size; it rambles to the reply cap. Use the largest
 model the swarm offers you, keep `maxTokens` modest (the README config sets
 4096), and expect a card with more memory, or a peer that has it, to be what
@@ -182,10 +182,13 @@ your machine could not hold alone is what the swarm is for.
     tokens was refused outright by the machine receiving it, so OpenClaw's
     retries each hit the same wall and the session eventually gave up. Fixed
     in the release after v0.3.153 — upgrade the nodes.
-  - *Nothing arrives until the model stops.* Expected, for now: a reply that
-    might be a tool call is buffered until it can be told from prose, and
-    OpenClaw always sends tools. Raise `timeoutSeconds` as above; the node
-    keeps the connection alive throughout.
+  - *Nothing arrives until the model stops.* Fixed in the release after
+    v0.3.153. Before it, a reply that might be a tool call was held back until
+    it could be told from prose, and OpenClaw always sends tools — so an agent
+    turn showed nothing at all until the model finished. Now everything up to
+    the first thing that could begin a tool call is sent as it is written.
+    Upgrade the node; `timeoutSeconds` above is still worth raising for a long
+    prompt on a processor.
   - *Reading the prompt is simply slow.* `DIAG` lines in the node's log time
     the prompt pass. A 14 k-token turn is minutes on a processor and seconds
     on a card — use the largest model the swarm offers, and check the node's
