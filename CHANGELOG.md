@@ -28,6 +28,19 @@ All notable changes to SwarmLLM are documented here.
   time) it quietly did nothing until the next restart. A 6 GB card was given 28
   layers of an 11,200-token prompt as a result. The shape is now read the first
   time it is needed, wherever the model came from.
+- **A machine that holds a whole model can now serve part of one it could not
+  hold.** Two things went wrong together, and both are about memory being
+  weighed at the wrong moment or for the wrong thing. When SwarmLLM decided how
+  to split a model across machines, every other machine was checked against how
+  much memory it had free and *your own* was not — the check on your machine
+  happened later, when the model was actually loading, by which point the plan
+  was fixed and could only fail. And that later check priced the whole model
+  even when only part of it was being loaded, so a machine holding every piece
+  of a model was refused a third of it as though it had been asked for all of
+  it. Together they meant a request could be planned, refused, retried,
+  planned identically, and refused again. Both now use the same arithmetic, on
+  the part actually being loaded, before the plan is settled. Reported from a
+  16 GB Mac mini asked to help serve a 14B model it was hosting.
 - **The pipeline log no longer looks like it contradicts itself when a segment
   fails.** A plan reported "1 standby" while the failure reported "no standby
   available", and both were true: backups are chosen per segment, and that one

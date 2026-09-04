@@ -396,6 +396,15 @@ struct WorkerHandle {
     /// true` and no placement note for a model running 13 of its 28 layers on
     /// the card, so a user could not tell why it was slower than expected.
     gpu_layers_on_card: Option<(usize, usize)>,
+    /// Is this worker's memory charged against the system-RAM budget?
+    ///
+    /// Decided ONCE at spawn by `charges_ram` and recorded, because a later
+    /// segment charged to the same worker must go to the same accountant. Its
+    /// three inputs — going to the processor, no card detected, a build with no
+    /// CUDA — are stable for a running worker, but re-deriving them would be
+    /// the same "prediction versus fact" mistake `placed_on_cpu_because` exists
+    /// to avoid.
+    charged_against_ram: bool,
 }
 
 /// Longest path a Unix domain socket may have, INCLUDING its NUL terminator.
@@ -1153,6 +1162,63 @@ pub(crate) fn charges_ram(going_to_cpu: bool, gpu_detected: bool, build_has_cuda
     going_to_cpu || !gpu_detected || !build_has_cuda
 }
 
+/// Add `mb` to a model's recorded charge.
+///
+/// Segments of one model share a worker, so a second segment ADDS to what the
+/// first reserved rather than replacing it. Replacing was correct only while a
+/// spawn charged the WHOLE model whatever it was about to load; now that it
+/// prices the segment, an overwrite would silently forget the first one.
+fn add_reserved(map: &dashmap::DashMap<ModelId, u64>, model_id: &ModelId, mb: u64) {
+    *map.entry(model_id.clone()).or_insert(0) += mb;
+}
+
+/// The layer count, first-segment flag and weight bytes a footprint estimate
+/// should describe for `segment` of a `block_count`-layer model whose shards
+/// total `shard_bytes`.
+///
+/// `None` asks about the whole model. Weights are charged in proportion to the
+/// layers mapped — the same approximation `auto_manage::estimate_segment_vram_mb`
+/// and the scheduler's `bytes_per_layer` make, so the planner and the loader
+/// price a segment identically.
+pub(crate) fn segment_shape(
+    block_count: u64,
+    shard_bytes: u64,
+    segment: Option<(u32, u32)>,
+) -> (u64, bool, u64) {
+    let Some((start, end)) = segment else {
+        return (block_count, true, shard_bytes);
+    };
+    let layers = u64::from(end.saturating_sub(start)).clamp(1, block_count.max(1));
+    let weights = if block_count == 0 || layers >= block_count {
+        shard_bytes
+    } else {
+        shard_bytes / block_count * layers
+    };
+    (layers, start == 0, weights)
+}
+
+/// `(fixed_mb, per_layer_mb)` from the cost of a one-layer and a two-layer
+/// segment. The estimate is affine in the layer count — weights and KV scale
+/// with it, the process overhead does not — so two points determine it, and
+/// taking them from the estimator itself means nothing here restates its
+/// arithmetic.
+pub(crate) fn cost_curve_from(one_layer_mb: u64, two_layer_mb: u64) -> (u64, u64) {
+    let per_layer = two_layer_mb.saturating_sub(one_layer_mb);
+    (one_layer_mb.saturating_sub(per_layer), per_layer)
+}
+
+/// How many layers fit in `free_mb` once the fixed terms are paid.
+///
+/// `None` when there is no per-layer cost to divide by — unknowable, never
+/// "no room" (see `max_hostable_layers` for why that distinction is load
+/// bearing).
+pub(crate) fn layers_that_fit(free_mb: u64, fixed_mb: u64, per_layer_mb: u64) -> Option<u32> {
+    if per_layer_mb == 0 {
+        return None;
+    }
+    Some((free_mb.saturating_sub(fixed_mb) / per_layer_mb) as u32)
+}
+
 /// One resident model-worker subprocess as the status surfaces report it.
 ///
 /// Read through [`ModelProcessPool::worker_summaries`]; every field is a fact
@@ -1277,6 +1343,14 @@ pub struct ModelProcessPool {
     /// footprint from the moment it is admitted, long before it has loaded
     /// anything to measure.
     ram_reserved_mb: dashmap::DashMap<ModelId, u64>,
+    /// Layer ranges of each model that have been priced and charged.
+    ///
+    /// One worker serves a model and its own `models` map is keyed by layer
+    /// range, so it can come to hold several segments at once — a privacy
+    /// boomerang gives the local worker both ends. Charging the whole model at
+    /// spawn made that safe by over-pricing; charging the segment makes it
+    /// exact, and this is what keeps the second segment from arriving free.
+    charged_segments: dashmap::DashMap<ModelId, Vec<(u32, u32)>>,
     /// Live RAM budget source, installed once by the daemon
     /// (`set_ram_budget_provider`): returns the cap from the CURRENT config and
     /// the anti-swap headroom from memory free NOW. Without one (tests), the
@@ -1434,6 +1508,7 @@ impl ModelProcessPool {
             cpu_kv_budget_bytes: dashmap::DashMap::new(),
             ram_budget_note: std::sync::Mutex::new(String::new()),
             ram_reserved_mb: dashmap::DashMap::new(),
+            charged_segments: dashmap::DashMap::new(),
             activity_tx: std::sync::OnceLock::new(),
             kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(DEFAULT_KV_CACHE_TTL_SECS),
             prefix_cache_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -1701,7 +1776,12 @@ impl ModelProcessPool {
     /// `(layers on the card, layers in total)` for a model that does not fit
     /// whole but partly does; `None` when it fits, when nothing fits, or when
     /// hybrid placement is switched off.
-    fn partial_gpu_layers(&self, model_id: &ModelId, estimated_mb: u64) -> Option<(usize, usize)> {
+    fn partial_gpu_layers(
+        &self,
+        model_id: &ModelId,
+        segment: Option<(u32, u32)>,
+        estimated_mb: u64,
+    ) -> Option<(usize, usize)> {
         if std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0") {
             return None;
         }
@@ -1713,7 +1793,7 @@ impl ModelProcessPool {
         if available_mb >= estimated_mb {
             return None;
         }
-        let inputs = self.footprint_inputs(model_id)?;
+        let inputs = self.footprint_inputs(model_id, segment)?;
         let layers = inputs.segment_layers as usize;
         if layers == 0 {
             return None;
@@ -1854,9 +1934,9 @@ impl ModelProcessPool {
     /// geometry cannot be read, which `admit_to_gpu` treats as "do not judge" —
     /// refusing the GPU because a file was unreadable would be a worse failure
     /// than the one being prevented.
-    fn estimate_gpu_footprint_mb(&self, model_id: &ModelId) -> u64 {
+    fn estimate_gpu_footprint_mb(&self, model_id: &ModelId, segment: Option<(u32, u32)>) -> u64 {
         use crate::model::auto_manage::vram::estimate_worker_vram_mb;
-        self.footprint_inputs(model_id)
+        self.footprint_inputs(model_id, segment)
             .map(|i| estimate_worker_vram_mb(&i))
             .unwrap_or(0)
     }
@@ -1867,9 +1947,9 @@ impl ModelProcessPool {
     /// not judge" — refusing to load because a file could not be read would be
     /// a worse failure than the one being prevented, and matches how the GPU
     /// side handles the same gap.
-    fn estimate_cpu_footprint_mb(&self, model_id: &ModelId) -> u64 {
+    fn estimate_cpu_footprint_mb(&self, model_id: &ModelId, segment: Option<(u32, u32)>) -> u64 {
         use crate::model::auto_manage::vram::estimate_worker_ram_mb;
-        self.footprint_inputs(model_id)
+        self.footprint_inputs(model_id, segment)
             .map(|i| estimate_worker_ram_mb(&i))
             .unwrap_or(0)
     }
@@ -1879,13 +1959,14 @@ impl ModelProcessPool {
     fn cpu_footprint_detail(
         &self,
         model_id: &ModelId,
+        segment: Option<(u32, u32)>,
     ) -> Option<(
         crate::model::auto_manage::vram::ResidentFootprint,
         u64,
         crate::model::auto_manage::vram::ContextSource,
     )> {
         use crate::model::auto_manage::vram::{cpu_footprint, ContextSource};
-        let inputs = self.footprint_inputs(model_id)?;
+        let inputs = self.footprint_inputs(model_id, segment)?;
         let source = if self
             .max_seq_len_override
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -1904,9 +1985,14 @@ impl ModelProcessPool {
     /// disagree about the model's shape — only about the per-process overhead
     /// that is genuinely device-specific. Returns `None` when the header or
     /// geometry cannot be read.
+    /// `segment` is the layer range a spawn is about to load; `None` asks
+    /// about the WHOLE model, which is the right question for "could this node
+    /// host it at all" (the dashboard, `would_fit_on_gpu`) and the wrong one
+    /// for a spawn.
     fn footprint_inputs(
         &self,
         model_id: &ModelId,
+        segment: Option<(u32, u32)>,
     ) -> Option<crate::model::auto_manage::vram::VramFootprintInputs> {
         use crate::model::auto_manage::vram::VramFootprintInputs;
         let model_dir = crate::model::shard::model_dir(&self.data_dir, &model_id.0);
@@ -1995,18 +2081,34 @@ impl ModelProcessPool {
                 )
             });
 
+        // What this worker will ACTUALLY map. `VramFootprintInputs` has always
+        // documented `segment_layers` as "Layers in THIS segment, not the whole
+        // model" and `quantized_weight_bytes` as "the shard bytes this worker
+        // will map" — and its only caller passed the whole model for both,
+        // whatever it was about to load. On a node holding every shard, which
+        // is the node most likely to be given a fraction of a big model, that
+        // priced a 36-of-48-layer segment as all 48, and a privacy boomerang's
+        // two end layers as the entire model. Reported from the field: a 16 GB
+        // Mac mini refused every part of a 14B it was holding, retried, and
+        // produced the identical plan (gotcha #452).
+        // Proportional weights slightly under-charge a first segment (shard 0
+        // also carries the embedding table) and the estimator adds that table
+        // back whenever `is_first`.
+        let (segment_layers, is_first, segment_weight_bytes) =
+            segment_shape(tensor_meta.block_count as u64, shard_bytes, segment);
+
         Some(VramFootprintInputs {
-            quantized_weight_bytes: shard_bytes,
+            quantized_weight_bytes: segment_weight_bytes,
             unquantized_bytes_per_element,
             embedding_gatherable,
             vocab_size: vocab,
             embedding_length: tensor_meta.embedding_length as u64,
-            segment_layers: tensor_meta.block_count as u64,
+            segment_layers,
             head_count_kv: tensor_meta.head_count_kv as u64,
             head_dim: tensor_meta.head_dim as u64,
             rope_dim: tensor_meta.rope_dim as u64,
             effective_context: effective_ctx,
-            is_first: true,
+            is_first,
         })
     }
 
@@ -2072,7 +2174,7 @@ impl ModelProcessPool {
         let budget = self
             .vram_budget_mb
             .load(std::sync::atomic::Ordering::Relaxed);
-        let estimated = self.estimate_gpu_footprint_mb(model_id);
+        let estimated = self.estimate_gpu_footprint_mb(model_id, None);
         let fits = if resident_on_gpu == Some(true) {
             Some(true)
         } else {
@@ -2136,7 +2238,7 @@ impl ModelProcessPool {
         // The early returns above are about avoiding WORK — pricing a model
         // means reading its header off disk. The verdict itself is shared, so
         // this and `gpu_estimate_and_fit` cannot answer differently.
-        self.fits_in_budget(self.estimate_gpu_footprint_mb(model_id), budget)
+        self.fits_in_budget(self.estimate_gpu_footprint_mb(model_id, None), budget)
     }
 
     /// This model's real GPU footprint in MB, or `None` when its geometry
@@ -2148,7 +2250,7 @@ impl ModelProcessPool {
     /// next to `cpu_placement_reason: not_enough_vram`, so the dashboard showed
     /// a model comfortably fitting a card the daemon had just refused it on.
     pub fn estimated_gpu_mb(&self, model_id: &ModelId) -> Option<u64> {
-        match self.estimate_gpu_footprint_mb(model_id) {
+        match self.estimate_gpu_footprint_mb(model_id, None) {
             0 => None,
             mb => Some(mb),
         }
@@ -2249,7 +2351,7 @@ impl ModelProcessPool {
         if budget == 0 || estimated_mb == 0 {
             // No budget configured, or nothing to weigh: preserve the previous
             // behaviour rather than inventing a limit.
-            self.vram_reserved_mb.insert(model_id.clone(), estimated_mb);
+            add_reserved(&self.vram_reserved_mb, model_id, estimated_mb);
             return true;
         }
         let committed = self.vram_committed_mb();
@@ -2274,7 +2376,7 @@ impl ModelProcessPool {
                 headroom_mb = budget.saturating_sub(committed.saturating_add(estimated_mb)),
                 "DIAG: admitting model to GPU"
             );
-            self.vram_reserved_mb.insert(model_id.clone(), estimated_mb);
+            add_reserved(&self.vram_reserved_mb, model_id, estimated_mb);
             return true;
         }
         // Deliberately DEBUG, and deliberately silent about what happens next.
@@ -2534,6 +2636,7 @@ impl ModelProcessPool {
     /// Release a worker's charge. Must pair with every `admit_to_gpu`.
     fn release_vram_charge(&self, model_id: &ModelId) {
         self.vram_reserved_mb.remove(model_id);
+        self.charged_segments.remove(model_id);
     }
 
     /// Set the system RAM budget used for CPU admission. 0 disables the check.
@@ -2601,12 +2704,12 @@ impl ModelProcessPool {
     /// so its runtime guard refuses a conversation that would outgrow the
     /// room, with a 503 that re-routes, instead of swapping the machine.
     /// No budget configured → no guard (the pre-2026-08-21 behaviour).
-    fn record_cpu_kv_budget(&self, model_id: &ModelId) {
+    fn record_cpu_kv_budget(&self, model_id: &ModelId, segment: Option<(u32, u32)>) {
         let Some(budget) = self.ram_budget_now() else {
             self.cpu_kv_budget_bytes.remove(model_id);
             return;
         };
-        let Some(inputs) = self.footprint_inputs(model_id) else {
+        let Some(inputs) = self.footprint_inputs(model_id, segment) else {
             self.cpu_kv_budget_bytes.remove(model_id);
             return;
         };
@@ -2638,17 +2741,17 @@ impl ModelProcessPool {
         let Some(budget) = self.ram_budget_now() else {
             // No budget derivable: preserve the previous behaviour rather than
             // inventing a limit.
-            self.ram_reserved_mb.insert(model_id.clone(), estimated_mb);
+            add_reserved(&self.ram_reserved_mb, model_id, estimated_mb);
             return true;
         };
         if estimated_mb == 0 {
             // The model's geometry could not be read: nothing to weigh.
-            self.ram_reserved_mb.insert(model_id.clone(), estimated_mb);
+            add_reserved(&self.ram_reserved_mb, model_id, estimated_mb);
             return true;
         }
         let committed = self.ram_committed_mb();
         if budget.allows(committed, estimated_mb) {
-            self.ram_reserved_mb.insert(model_id.clone(), estimated_mb);
+            add_reserved(&self.ram_reserved_mb, model_id, estimated_mb);
             return true;
         }
         tracing::warn!(
@@ -2722,10 +2825,159 @@ impl ModelProcessPool {
         freed
     }
 
+    /// Has this model's worker already been charged for `segment`?
+    fn segment_is_charged(&self, model_id: &ModelId, segment: (u32, u32)) -> bool {
+        self.charged_segments
+            .get(model_id)
+            .is_some_and(|v| v.contains(&segment))
+    }
+
+    fn record_charged_segment(&self, model_id: &ModelId, segment: (u32, u32)) {
+        let mut e = self.charged_segments.entry(model_id.clone()).or_default();
+        if !e.contains(&segment) {
+            e.push(segment);
+        }
+    }
+
+    /// Weigh and charge a layer range a live worker has not held before.
+    ///
+    /// Only the LAYERS are charged, never the fixed terms again: the process
+    /// overhead and — unless this is the model's first segment — the embedding
+    /// table are already inside the first segment's reservation, and charging
+    /// them twice would refuse a second segment that fits perfectly well.
+    /// `segment_cost_curve` takes both figures from the same estimator the
+    /// admission gate uses, so nothing here restates its arithmetic.
+    ///
+    /// Refusing is a `ServiceUnavailable`, i.e. a 503 the coordinator fails
+    /// over from — the same answer the worker's own KV guard gives, and the
+    /// right one: this node cannot take that range, another might.
+    async fn charge_additional_segment(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        handle: &Arc<WorkerHandle>,
+    ) -> Result<(), SwarmError> {
+        // Serialised against spawns for the same read-decide-charge atomicity
+        // the admission gates already rely on.
+        let _guard = self.spawn_lock.lock().await;
+        if self.segment_is_charged(model_id, segment) {
+            return Ok(());
+        }
+        let on_gpu = handle.placed_on_cpu_because.is_none();
+        let layers = u64::from(segment.1.saturating_sub(segment.0)).max(1);
+        let Some((_fixed_mb, per_layer_mb)) = self.segment_cost_curve(model_id, on_gpu) else {
+            // Unreadable geometry: nothing to weigh, and refusing on a file we
+            // could not read would be a worse failure than the one prevented —
+            // the same treatment `admit_to_gpu` and `admit_to_cpu` give it.
+            self.record_charged_segment(model_id, segment);
+            return Ok(());
+        };
+        let delta_mb = per_layer_mb.saturating_mul(layers);
+        let admitted = if on_gpu {
+            self.admit_to_gpu(model_id, delta_mb)
+        } else if handle.charged_against_ram {
+            self.admit_to_cpu(model_id, delta_mb)
+        } else {
+            true
+        };
+        if !admitted {
+            return Err(SwarmError::ServiceUnavailable(format!(
+                "{} layers {}..{} of {} need about {} MB more than this node has left — \
+                 another holder will have to take that part",
+                layers, segment.0, segment.1, model_id.0, delta_mb
+            )));
+        }
+        self.record_charged_segment(model_id, segment);
+        tracing::info!(
+            model = %model_id,
+            layers = format!("[{}..{})", segment.0, segment.1),
+            delta_mb,
+            on_gpu,
+            "Charging an additional segment to a live worker"
+        );
+        Ok(())
+    }
+
+    /// `(fixed_mb, per_layer_mb)` for this model on the given device.
+    ///
+    /// Derived by pricing two segment sizes through the SAME estimator the
+    /// admission gate uses and taking the difference, so the incremental charge
+    /// above and the scheduler's local capacity bound cannot drift from what
+    /// the loader will actually be weighed against. Priced as a MIDDLE segment
+    /// (`is_first: false`), so `fixed_mb` is the process overhead alone.
+    pub(crate) fn segment_cost_curve(
+        &self,
+        model_id: &ModelId,
+        on_gpu: bool,
+    ) -> Option<(u64, u64)> {
+        use crate::model::auto_manage::vram::{estimate_worker_ram_mb, estimate_worker_vram_mb};
+        let base = self.footprint_inputs(model_id, None)?;
+        if base.segment_layers == 0 {
+            return None;
+        }
+        let at = |layers: u64| {
+            let mut i = base;
+            i.segment_layers = layers;
+            i.is_first = false;
+            i.quantized_weight_bytes = base.quantized_weight_bytes / base.segment_layers * layers;
+            if on_gpu {
+                estimate_worker_vram_mb(&i)
+            } else {
+                estimate_worker_ram_mb(&i)
+            }
+        };
+        // Two points on a line that is affine in the layer count: the weights
+        // and the KV cache both scale with it, everything else does not.
+        Some(cost_curve_from(at(1), at(2)))
+    }
+
+    /// The most layers of `model_id` this node could admit right now, on the
+    /// device a request for it would actually use.
+    ///
+    /// **The scheduler's answer to the question the loader will be asked**, and
+    /// deliberately built from the same estimator and the same budgets — so a
+    /// plan this node makes is a plan it can load.
+    ///
+    /// Before this existed, the local candidate was the ONE candidate the
+    /// pipeline search priced as memory-unconstrained: every peer carried a
+    /// `max_hostable_layers` from its advertised free memory, and the local
+    /// node carried `None`, on the reasoning that our own admission check is
+    /// the authority. That reasoning is right about WHO decides and wrong about
+    /// WHEN: admission runs at load time, after the plan is committed and too
+    /// late to reshape it. Reported from the field — a 16 GB processor-only Mac
+    /// mini holding every shard of a 48-layer 14B was assigned 36 of its
+    /// layers, refused them at load, retried, and produced the identical plan
+    /// (gotcha #452). This node has the BEST information about its own memory,
+    /// not the worst; it should be the most accurately bounded candidate.
+    ///
+    /// `None` means unknowable — no budget, or geometry that could not be read
+    /// — and never "no room", the same reading `max_hostable_layers` gives an
+    /// unreadable peer.
+    pub fn max_local_hostable_layers(&self, model_id: &ModelId, on_gpu: bool) -> Option<u32> {
+        let (fixed_mb, per_layer_mb) = self.segment_cost_curve(model_id, on_gpu)?;
+        // What is free after everything already charged, on whichever budget
+        // this model would be weighed against.
+        let free_mb = if on_gpu {
+            let budget = self
+                .vram_budget_mb
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if budget == 0 {
+                return None;
+            }
+            budget.saturating_sub(self.vram_committed_mb())
+        } else {
+            let budget = self.ram_budget_now()?;
+            budget.headroom_after(self.ram_committed_mb(), 0)
+        };
+        // The fixed terms are paid once, whatever the segment's length.
+        layers_that_fit(free_mb, fixed_mb, per_layer_mb)
+    }
+
     /// Release a worker's RAM charge. Must pair with every `admit_to_cpu`.
     fn release_ram_charge(&self, model_id: &ModelId) {
         self.ram_reserved_mb.remove(model_id);
         self.cpu_kv_budget_bytes.remove(model_id);
+        self.charged_segments.remove(model_id);
     }
 
     /// Models currently forced onto the CPU after a GPU OOM.
@@ -2823,12 +3075,28 @@ impl ModelProcessPool {
     }
 
     /// Get or spawn a worker for this model.
-    async fn get_or_spawn(&self, model_id: &ModelId) -> Result<Arc<WorkerHandle>, SwarmError> {
+    /// `segment` is the layer range this request needs. One worker serves a
+    /// model, and its `models` map is keyed by layer range — so a worker can
+    /// come to hold SEVERAL segments of one model, and each is charged as it is
+    /// first asked for. See [`Self::charge_additional_segment`].
+    async fn get_or_spawn(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+    ) -> Result<Arc<WorkerHandle>, SwarmError> {
         // Fast path: worker already exists — and, unless this node demoted it
         // to the processor and the card has since made room, that is the answer.
-        if let Some(handle) = self.workers.get(model_id) {
+        let existing = self.workers.get(model_id).map(|h| h.clone());
+        if let Some(handle) = existing {
             if !self.worker_should_return_to_gpu(model_id, &handle) {
-                return Ok(handle.clone());
+                if self.segment_is_charged(model_id, segment) {
+                    return Ok(handle);
+                }
+                // A range this worker has not been asked for before: it is
+                // about to load more weights, so weigh them first.
+                self.charge_additional_segment(model_id, segment, &handle)
+                    .await?;
+                return Ok(handle);
             }
         }
 
@@ -2908,7 +3176,7 @@ impl ModelProcessPool {
         // spawn: the admission gate weighs it, the CPU-fallback log reports it,
         // and the worker carries it so a later request can ask whether the
         // model would fit now without re-reading the geometry.
-        let estimated = self.estimate_gpu_footprint_mb(model_id);
+        let estimated = self.estimate_gpu_footprint_mb(model_id, Some(segment));
         if !going_to_cpu {
             // Demoting to the CPU is the last resort, not the first answer:
             // reclaim the card from models nothing is using, then ask again.
@@ -2934,7 +3202,9 @@ impl ModelProcessPool {
             // it (three reports, most recently 5151 MB free while the model
             // ran on the processor).
             if !admitted {
-                if let Some((n, total)) = self.partial_gpu_layers(model_id, estimated) {
+                if let Some((n, total)) =
+                    self.partial_gpu_layers(model_id, Some(segment), estimated)
+                {
                     tracing::info!(
                         model = %model_id,
                         gpu_layers = n,
@@ -3040,7 +3310,7 @@ impl ModelProcessPool {
             );
         }
         if charge_ram {
-            let estimated = self.estimate_cpu_footprint_mb(model_id);
+            let estimated = self.estimate_cpu_footprint_mb(model_id, Some(segment));
             // Refusing is the last resort: first reclaim memory from models
             // nothing is using, then ask again. Only then does the user see an
             // error.
@@ -3090,7 +3360,7 @@ impl ModelProcessPool {
                             self.ram_budget_note(),
                         )
                     });
-                let message = match self.cpu_footprint_detail(model_id) {
+                let message = match self.cpu_footprint_detail(model_id, Some(segment)) {
                     Some((footprint, effective_context, source)) => {
                         crate::model::auto_manage::vram::describe_cpu_refusal(
                             &model_id.0,
@@ -3111,11 +3381,17 @@ impl ModelProcessPool {
                 };
                 return Err(SwarmError::ServiceUnavailable(message));
             }
-            self.record_cpu_kv_budget(model_id);
+            self.record_cpu_kv_budget(model_id, Some(segment));
         }
 
         match self
-            .spawn_worker(model_id, placed_on_cpu_because, estimated, hybrid_layers)
+            .spawn_worker(
+                model_id,
+                placed_on_cpu_because,
+                charge_ram,
+                estimated,
+                hybrid_layers,
+            )
             .await
         {
             Ok(handle) => {
@@ -3123,6 +3399,11 @@ impl ModelProcessPool {
                 self.spawn_failures.remove(model_id);
                 let handle = Arc::new(handle);
                 self.workers.insert(model_id.clone(), handle.clone());
+                // The range the admission above weighed is now this worker's
+                // first charged segment. Without recording it, every later
+                // forward for the same range would look like a new one and be
+                // charged again.
+                self.record_charged_segment(model_id, segment);
                 // Only now is it a fact. The user was told when this model was
                 // demoted to the processor, so they are told when it comes
                 // back — and if admission refused it a second time they were
@@ -3203,6 +3484,7 @@ impl ModelProcessPool {
         &self,
         model_id: &ModelId,
         placed_on_cpu_because: Option<CpuReason>,
+        charged_against_ram: bool,
         gpu_estimate_mb: u64,
         // A partial split decided by admission: `(this many of the worker's
         // layers go on the card, layers in total)`, the rest on the processor.
@@ -3555,6 +3837,7 @@ impl ModelProcessPool {
             spawned_at: std::time::Instant::now(),
             last_used: AtomicU64::new(0),
             placed_on_cpu_because,
+            charged_against_ram,
             gpu_estimate_mb,
             // Only a split is worth recording; a worker wholly on the card
             // says so through `placed_on_cpu_because: None` alone.
@@ -3634,7 +3917,7 @@ impl ModelProcessPool {
         // documentation on `LayerForward`.
         let forward_sampling = forward.sampling.clone().unwrap_or_default();
         let model_id = forward.model_id.clone();
-        let handle = self.get_or_spawn(&model_id).await?;
+        let handle = self.get_or_spawn(&model_id, forward.layer_range).await?;
 
         // Destructure to avoid cloning activations (can be large tensor data)
         let crate::types::LayerForward {
@@ -3807,7 +4090,11 @@ impl ModelProcessPool {
                 "forward_batch: all inputs must share model_id".into(),
             ));
         }
-        let handle = self.get_or_spawn(&model_id).await?;
+        // Every forward in a batch shares a model AND a layer range — see
+        // `batch_eligible`, which is what put them in one batch.
+        let handle = self
+            .get_or_spawn(&model_id, forwards[0].layer_range)
+            .await?;
         if handle.dead.load(Ordering::Acquire) {
             self.workers.remove(&model_id);
             return Err(SwarmError::ServiceUnavailable("worker is dead".into()));
@@ -4035,7 +4322,7 @@ impl ModelProcessPool {
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
         emitted: &std::sync::atomic::AtomicBool,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
-        let handle = self.get_or_spawn(model_id).await?;
+        let handle = self.get_or_spawn(model_id, layer_range).await?;
 
         // Kept for the post-generation stop-marker trim below; `sampling` is
         // moved into the IPC message.
@@ -5000,6 +5287,124 @@ mod tests {
         assert!(p.admit_to_cpu(&ModelId("small".into()), 1500));
     }
 
+    /// A worker loads the layer range it is asked for, not the whole model, and
+    /// the estimate must say so — this is the field defect (gotcha #452) at the
+    /// arithmetic level.
+    #[test]
+    fn a_segment_is_priced_as_a_segment_not_as_the_whole_model() {
+        const SHARDS: u64 = 8_566 * 1024 * 1024;
+        // The Mac mini's plan: 36 of a 48-layer 14B, starting at layer 0.
+        let (layers, is_first, weights) = super::segment_shape(48, SHARDS, Some((0, 36)));
+        assert_eq!(layers, 36);
+        assert!(is_first, "layer 0 carries the embedding table");
+        assert_eq!(weights, SHARDS / 48 * 36);
+
+        // A privacy boomerang's far end: one layer, no embedding table. This is
+        // the case the old whole-model charge got worst — a node was priced for
+        // an entire model to hold two of its layers.
+        let (layers, is_first, weights) = super::segment_shape(48, SHARDS, Some((47, 48)));
+        assert_eq!(layers, 1);
+        assert!(!is_first);
+        assert_eq!(weights, SHARDS / 48);
+
+        // Asking about the whole model is still the whole model — the question
+        // `would_fit_on_gpu` and the dashboard ask.
+        assert_eq!(
+            super::segment_shape(48, SHARDS, None),
+            (48, true, SHARDS),
+            "None must keep meaning the whole model"
+        );
+        // A range covering everything is the whole model, exactly.
+        assert_eq!(
+            super::segment_shape(48, SHARDS, Some((0, 48))),
+            (48, true, SHARDS)
+        );
+        // Degenerate inputs must not divide by zero or price nothing.
+        assert_eq!(
+            super::segment_shape(0, SHARDS, Some((0, 0))),
+            (1, true, SHARDS)
+        );
+    }
+
+    /// The curve the planner and the incremental charge both read is taken from
+    /// the estimator, not restated.
+    #[test]
+    fn the_segment_cost_curve_recovers_the_fixed_and_per_layer_terms() {
+        // cost(n) = 300 + 210n
+        assert_eq!(super::cost_curve_from(510, 720), (300, 210));
+        // A flat estimate has no per-layer term, which is unknowable rather
+        // than unlimited.
+        assert_eq!(super::cost_curve_from(400, 400), (400, 0));
+        assert_eq!(super::layers_that_fit(7910, 300, 0), None);
+        // 7910 MB of headroom, 300 fixed, 210 a layer → 36.
+        assert_eq!(super::layers_that_fit(7910, 300, 210), Some(36));
+        // Less headroom than the fixed cost is zero layers, not an underflow.
+        assert_eq!(super::layers_that_fit(100, 300, 210), Some(0));
+    }
+
+    /// Two segments of one model share a worker, so the second must be charged
+    /// on top of the first rather than replacing it.
+    #[test]
+    fn a_second_segment_adds_to_the_charge_it_does_not_replace_it() {
+        let p = test_pool();
+        p.set_ram_budget_mb(6000);
+        let m = ModelId("boomerang".into());
+        assert!(p.admit_to_cpu(&m, 4000), "the first segment fits");
+        assert!(p.admit_to_cpu(&m, 1500), "and so does the second");
+        assert_eq!(
+            p.ram_committed_mb(),
+            5500,
+            "both segments are charged; an overwrite would report 1500"
+        );
+        assert!(
+            !p.admit_to_cpu(&ModelId("other".into()), 1000),
+            "5500 + 1000 exceeds 6000 — the second segment must still be visible"
+        );
+        p.release_ram_charge(&m);
+        assert_eq!(p.ram_committed_mb(), 0, "releasing frees every segment");
+        assert!(p.admit_to_cpu(&ModelId("other".into()), 1000));
+    }
+
+    /// A range is charged the first time it is asked for and not again — the
+    /// spawn path records its own, or every later forward would re-charge it.
+    #[test]
+    fn a_layer_range_is_charged_once_and_forgotten_on_release() {
+        let p = test_pool();
+        let m = ModelId("m".into());
+        assert!(!p.segment_is_charged(&m, (0, 8)));
+        p.record_charged_segment(&m, (0, 8));
+        assert!(p.segment_is_charged(&m, (0, 8)));
+        assert!(
+            !p.segment_is_charged(&m, (8, 16)),
+            "a different range is a different charge"
+        );
+        p.record_charged_segment(&m, (0, 8));
+        p.record_charged_segment(&m, (8, 16));
+        assert_eq!(
+            p.charged_segments.get(&m).map(|v| v.len()),
+            Some(2),
+            "recording the same range twice must not double it"
+        );
+        p.release_ram_charge(&m);
+        assert!(
+            !p.segment_is_charged(&m, (0, 8)),
+            "a retired worker's segments go with its charge"
+        );
+    }
+
+    /// Unknowable is not "no room": a model this node holds no header for must
+    /// leave the scheduler's local bound unset, exactly as an unreadable peer
+    /// capability does.
+    #[test]
+    fn an_unreadable_model_leaves_the_local_capacity_bound_unset() {
+        let p = test_pool();
+        p.set_ram_budget_mb(6000);
+        assert_eq!(
+            p.max_local_hostable_layers(&ModelId("no-such-model".into()), false),
+            None
+        );
+    }
+
     /// Releasing must credit the budget back, or churn shrinks it permanently.
     #[test]
     fn releasing_a_ram_charge_frees_the_budget_again() {
@@ -5655,7 +6060,10 @@ mod admission_tests {
     #[test]
     fn estimating_a_missing_model_is_zero() {
         let p = pool();
-        assert_eq!(p.estimate_gpu_footprint_mb(&ModelId("nope".into())), 0);
+        assert_eq!(
+            p.estimate_gpu_footprint_mb(&ModelId("nope".into()), None),
+            0
+        );
     }
     /// Where a request would RUN is the delegation precondition, not whether
     /// a card we have is too small (gotcha #442). No card, or a node told to

@@ -12376,3 +12376,31 @@ queueing. They differ by a lot on a busy node, and `est_tokens_per_sec` is
 currently used as if it were the first while being justified as if it were the
 second. Whatever is chosen, the same reading has to hold for both device
 classes, or the ratio goes wrong again.
+
+## A node that appears twice in one chain is bounded per segment, not in total (2026-09-04)
+
+`ModelProcessPool::max_local_hostable_layers` gives the pipeline search a real
+memory ceiling for the local node (gotcha #452), and `route_shortest_path`
+applies it to each segment it assigns. Under prompt privacy the local node
+appears in the chain **twice** — the embedding at the front and the sampling at
+the back — and the cap bounds each of those separately, not their sum.
+
+In practice the second segment is one layer, so the overshoot is one layer's
+worth of weights and KV; the case that could bite is a chain that gives this
+node two substantial ranges. Admission then refuses the second range with a 503
+and the coordinator fails over, which is the pre-existing safety net and is why
+this is a refinement rather than a defect.
+
+Fixing it properly means carrying "layers already assigned to this node" in the
+DP's state, so the cap is checked against the running total. That is a change to
+the search's state space, and it should be measured against a real two-segment
+plan before being made — the marginal case is where the arithmetic matters and
+it is exactly the case a synthetic test will get wrong.
+
+Related: `charge_additional_segment` deliberately does NOT reclaim memory before
+refusing (no `free_ram_for_admission` / `free_vram_for_admission`). A first
+segment is worth evicting an idle model for; a second range on a worker that is
+already serving is not obviously worth it, and reclaiming re-enters
+`unload_model` while the spawn lock is held. If a real workload shows this
+refusing ranges a reclaim would have admitted, the reclaim needs to happen
+outside the lock.

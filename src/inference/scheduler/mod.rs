@@ -1519,12 +1519,21 @@ impl PipelineScheduler {
                     .get(&node_id)
                     .is_some_and(|p| p.capability.as_ref().is_some_and(|c| c.gpu.is_some()))
             };
-            // The local node is deliberately unconstrained: our own loader's
-            // admission check is the authority on what we can fit, and it knows
-            // what is already committed to live workers, which a gossiped
-            // free-memory figure does not.
+            // The local node is bounded by asking OUR OWN loader, which is the
+            // authority on what we can fit and knows what is already committed
+            // to live workers — information no gossiped figure carries. It used
+            // to be left unconstrained on that same reasoning, which is right
+            // about who decides and wrong about when: admission runs at load
+            // time, after the plan is committed and too late to reshape it. So
+            // the one candidate with the best information was the only one the
+            // search priced as having no memory ceiling at all, and a
+            // processor-only node holding every shard was handed 36 of a 14B's
+            // 48 layers, refused them, retried and produced the same plan
+            // (gotcha #452).
             let max_hostable_layers = if node_id == *local_node_id {
-                None
+                self.shared_state
+                    .model_process_pool
+                    .max_local_hostable_layers(&manifest.id, has_gpu)
             } else {
                 let warm = self.shared_state.peer_model_is_warm(
                     &node_id,

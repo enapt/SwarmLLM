@@ -198,6 +198,61 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
+## The component that will refuse must be asked while the plan can still change
+
+Two halves of one rule, both learned from a 16 GB processor-only Mac mini that
+was assigned 36 of a 48-layer 14B, refused them at load, retried, and produced
+the identical plan (gotcha #452).
+
+**`ModelProcessPool::max_local_hostable_layers` is the scheduler's bound on the
+LOCAL node**, built from the same estimator and the same budgets the loader will
+use. Every peer already carried a `max_hostable_layers` from its advertised free
+memory; the local node carried `None`, on the reasoning that *"our own loader's
+admission check is the authority on what we can fit"*. That is right about WHO
+decides and wrong about WHEN — admission runs at load time, after the plan is
+committed and too late to reshape it. The one candidate with the best
+information about its own memory was the only one priced as unbounded. `None`
+still means unknowable, never "no room".
+
+**`process_pool::segment_shape` prices what the worker will actually map.**
+`VramFootprintInputs` has always documented `segment_layers` as "Layers in THIS
+segment, not the whole model" and `quantized_weight_bytes` as "the shard bytes
+this worker will map" — and its only caller passed `block_count` and every shard
+on disk, with `is_first: true`, whatever the spawn was about to load. On a node
+holding every shard, which is the node most likely to be handed a fraction of a
+big model, that priced a 36-of-48 segment as all 48 and a privacy boomerang's
+two end layers as the entire model: such a node could never serve ANY part of a
+model it could not hold whole, which is the case pipeline parallelism exists
+for.
+
+Three things a change here must keep.
+
+- **One worker can hold several segments.** Its `models` map is keyed by
+  `(layer_start, layer_end, tp_rank, tp_size)`, so `charged_segments` records
+  what has been paid for and `charge_additional_segment` weighs a range the
+  first time it is asked for. `add_reserved` ACCUMULATES; the overwrite it
+  replaced was correct only while a spawn charged the whole model regardless.
+  **The spawn path records its own segment** — the fast path is the common path,
+  and without that record every later forward for the same range re-charges it.
+- **Nothing restates the estimator's arithmetic.** `segment_cost_curve` gets
+  `(fixed_mb, per_layer_mb)` by pricing a one-layer and a two-layer segment
+  through the estimator itself and differencing them, so the planner's bound,
+  the incremental charge and the loader cannot drift. The estimate is affine in
+  the layer count, which is why two points determine it.
+- **A refused additional range is a 503**, the answer that fails over. It
+  deliberately does not reclaim memory first: a first segment is worth evicting
+  an idle model for, a second range on a worker already serving is not
+  obviously, and reclaiming would re-enter `unload_model` under the spawn lock.
+
+`Some(0)` from the bound still moves one layer (`cap.max(1)` in
+`route_shortest_path`), so a privacy end can always be served and the loop
+terminates.
+
+**The general rule**: asking the gate after the decision only converts a bad
+plan into an error. And when a struct's own field documentation describes a
+generality — "THIS segment, not the whole model" — check what its callers
+actually pass.
+
 ## A cap sized in units of the WORK is a ceiling on the product
 
 **`inference::tensor_util::bytes_to_tensor` bounds its allocation by the
