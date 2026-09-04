@@ -10218,6 +10218,48 @@ against it, rather than short-circuiting on coverage. That is the shape
 now exist (#428/#429 advertised speeds, `ack_srtt_ms`). Measure on the live
 swarm with a processor-only node holding a whole 14B before shipping.
 
+## Cache warm takes ~2 h with every cache HITTING, and it is not #318 (measured 2026-09-04)
+
+`cache-warm.yml`'s header documents 16.1-18.2 min and warns that ~40 min more
+means gotcha #318 — the flash-attention kernels recompiling despite a reported
+cache hit. Measured on the v0.3.153 warm, that is not what is happening.
+
+| cell | v0.3.152 (09-03) | v0.3.153 (09-04) |
+|---|---|---|
+| Warm Linux x86_64 | 5m18s | 9m27s |
+| **Warm Linux x86_64 CUDA** | **31m41s** | **1h56m** |
+| Warm Windows x86_64 GPU | 44m23s | 58m48s |
+
+The CUDA job's log says both caches hit: `Cache restored from key:
+flash-attn-kernels-v1-…` and, at the end, `Cache hit occurred on the primary
+key …, not saving cache`; rust-cache (`shared-key:
+release-x86_64-unknown-linux-gnu---features cuda-gpuarch4`) reports `Cache
+restored successfully`. A plain grep finds ONE `Compiling` line. And yet:
+`Finished release profile [optimized] target(s) in 109m 41s`.
+
+Scanning the log for gaps between adjacent timestamps puts the time in two
+places: **~43 min before `candle-flash-attn@0.10.1: Using 4 threads for
+compilation`** and **~50 min before `Compiling llama-cpp-2 v0.1.138`**.
+
+So the two suspects are candle-flash-attn's build script doing work even with
+a warm kernel directory, and `llama-cpp-2` — which builds llama.cpp's own CUDA
+kernels and which **no kernel cache covers**; the `.flash-attn-build`
+directory from gotcha #318 is only for candle-flash-attn. A second
+content-hashed kernel cache for llama.cpp is the obvious candidate, but the
+first question is why `llama-cpp-2` rebuilds at all against a restored target
+directory (check whether the GPU build env passes `cache-targets: false`).
+
+Note the other two cells are 1.3-1.8x slower on the same day, so some of this
+is runner variance; the CUDA cell's 3.7x is not. It costs about an hour of
+every release and nothing else — the workflow's own header is explicit that a
+failure here never blocks a release, since a cold release build is exactly the
+old behaviour.
+
+**The technique is worth keeping** regardless of the outcome: diffing adjacent
+log timestamps found where two hours went in one pass, where reading the log
+forwards would not have. The header's own advice ("read the compile lines, not
+the restore line") was right in spirit and pointed at the wrong crate.
+
 ## The whole-model hand-off is a yes/no gate that runs BEFORE the priced search, and it chose a card 500 ms away over the LAN card and the processor (measured 2026-09-03, gotcha #447)
 
 **What was measured** (live pair on v0.3.152; Proxmox holds gemma-2-2b whole

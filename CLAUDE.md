@@ -236,7 +236,29 @@ Ordered list with pointers in `memory/MEMORY.md` § NEXT UP; entries in
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.152-alpha (2026-09-03, tag on `bbecda89`).** Local
+**Released and deployed: v0.3.153-alpha (2026-09-04, tag on `8f8edd61`).** Local
+`225e6fe7` (CUDA asset, sha256 `25329b61…` == published, ready in 1 s, 0 ERROR
+lines, `Pong` in 6.1 s, rollback `~/.local/bin/swarmllm.0.3.152-alpha.bak`) and
+Proxmox `96842635` (.deb `0.3.153-alpha-1` over `0.3.152-alpha-1`, `enabled` +
+`active`, journal errors "-- No entries --") both on it, node ids kept; the
+local node sees Proxmox at .153 within a minute. Gate: CI + Cache warm green,
+25 assets, not draft, `latest`, sha256 CUDA + deb, `ggml_cuda_init` = 1,
+**smoke 9/9 (none skipped) + shapes 7/7 on the DOWNLOADED artifact**.
+Carries the two macOS fixes (#449/#450), #448's storage budget, and the six
+future-work closures.
+⚠ **A `gh release download` of the ~1 GB CUDA binary was reset mid-transfer
+and its checksum FAILED — 860 MB of a published 1052 MB.** The published
+artifact was fine; the download was not. Compare the SIZE against
+`gh release view --json assets` before doubting a release, and re-fetch with
+`curl -L --retry 5 --retry-all-errors -C -`.
+⚠ **Cache warm took 1h56m against the 16-18 min its own header claims** — and
+it is NOT #318: both the flash-attn kernel cache and rust-cache reported hits
+and the kernels were not rebuilt. The time went to candle-flash-attn's build
+script (~43 min) and `llama-cpp-2` (~50 min, llama.cpp's own CUDA kernels,
+which no kernel cache covers). Diagnosis + technique (scan a job log for gaps
+between adjacent timestamps) in `round_log_0903_processor_route.md`.
+
+Prior line: v0.3.152-alpha (2026-09-03, tag on `bbecda89`). Local
 `225e6fe7` (CUDA asset, installed sha256 `cd9eefec…` == published, ready in 2 s,
 0 ERROR lines, first inference OK, rollback `~/.local/bin/swarmllm.0.3.151-alpha.bak`)
 and Proxmox `96842635` (.deb `0.3.152-alpha-1` over `0.3.151-alpha-1`, stayed
