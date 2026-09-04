@@ -125,6 +125,36 @@ a third-party node that cannot be observed from here, and it may simply have bee
 loaded. **That does not weaken the finding**: the point is that the system cannot
 tell the difference either, and re-picks it every time at the same wrong price.
 
+## A local admission refusal does not teach the planner (open, 2026-09-04)
+
+Reported live on v0.3.153 in `SwarmLLM_PipelineMemoryAwareness_20260904.md`: a
+processor-only Mac mini holding every shard was assigned 36 of a 14B's 48
+layers, its own loader refused them ("needs about 10362 MB... budget allows
+7910 MB"), the request retried, and **the retry produced the identical chain and
+failed identically**, twice, before returning 503.
+
+The primary cause — the local candidate priced as memory-unbounded
+(`max_hostable_layers=None` in their log) — shipped as #452 in v0.3.154, which
+gives the local node a bound from the same estimator the loader uses.
+
+**The residual is the boundary.** On their numbers the bound works out at ~36
+layers against 36 asked, so the planner's estimate and the loader's admission
+may still disagree by a layer, and when they do the retry has learned nothing
+and repeats itself. That is the two-accountants shape: the planner ESTIMATES,
+the loader MEASURES, and only the loader is right.
+
+**The fix, when it is warranted**: a refusal from `ModelProcessPool` records the
+layer count it refused for that model, and `max_local_hostable_layers` returns
+`min(estimate, refused - 1)` while that record is fresh. One-way, short TTL —
+the refusal describes memory conditions now, and a transient shortage must not
+cap the node for its lifetime.
+
+**Do not build it yet.** #452 is not field-verified: nobody has seen a
+`max_hostable_layers=Some(N)` line for the local node on a real Mac. Building a
+learning ratchet on a hypothesis about how the shipped fix behaves is the
+mistake `.claude/rules/diagnosis.md` rule 1 exists to prevent. Ask for that one
+line first.
+
 ## A peer's own prompt admission can still race itself (open, 2026-09-04)
 
 Found while fixing gotcha #457, and deliberately left open there.

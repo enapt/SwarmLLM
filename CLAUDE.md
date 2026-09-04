@@ -220,11 +220,23 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2320 lib (dev,claude-subscription) — re-measured 2026-09-04, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 56 repo-consistency + 1 api_key_side_effects + 30 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .154 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
 
-**Next up (after the v0.3.154 release)**: (0) **field-verify the three .154
-fixes** — #451 with an 11k-token distributed prompt, #452 with the Mac mini
-owner (its arithmetic is MARGINAL on their numbers: ~36 layers allowed against
-36 asked, so ask for their own `max_hostable_layers=` line), #453 with an
-OpenClaw user; (1) **#447 (iii)** — make the priced search the ONE
+**Next up (after the v0.3.155 release)**: (0) **field-verify, and get ONE log
+line that unblocks two open questions.** (a) The 8B GPU-delegate avoidance
+(#460's subject) is UNDIAGNOSED — ask for `Not handing this model to peer:` and
+the `This node holds the whole model and runs it on its processor: <reason>`
+line, which now carries `cheapest_peer_cost_ms`. Leading hypothesis: the peer is
+priced from the shared prior, not a measurement, so `pipeline_may_replace_
+processor_route` declines it — but that is a HYPOTHESIS and `cbbed678` is what
+guessing produced last time. (b) **#452 is still unverified and its residual is
+live**: `SwarmLLM_PipelineMemoryAwareness_20260904.md` is a .153 reproduction
+(local `max_hostable_layers=None`, 36 of 48 layers assigned, refused at load,
+retry produced the IDENTICAL plan twice). .154 gives the local node a bound, but
+the arithmetic is MARGINAL — ~36 allowed against 36 asked — so the planner and
+the loader may still disagree at the boundary and the retry will still repeat
+itself. Ask the Mac mini owner for their own `max_hostable_layers=` line on .155
+BEFORE building the obvious fix (a refusal that teaches the planner a ceiling);
+also #451 with an 11k-token distributed prompt and #453 with an OpenClaw user;
+(1) **#447 (iii)** — make the priced search the ONE
 decision-maker when the local node is on its processor (`delegation_target`
 becomes a filter; the DP compares every shape). Halves (i)+(ii) shipped in .153;
 then re-run the live #444 measurement, which is still unmeasured; (2) **#446
