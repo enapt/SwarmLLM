@@ -308,6 +308,75 @@ plan into an error. And when a struct's own field documentation describes a
 generality — "THIS segment, not the whole model" — check what its callers
 actually pass.
 
+## Delegation asks the same capacity bound routing does, and the retry it promises must exist
+
+Three defects reported from one live node on v0.3.153, all in the path that
+hands a whole model — or a boomerang's middle — to a single peer.
+
+**`inference::scheduler::delegation_target` gates on `max_hostable_layers`**,
+the same bound `route_shortest_path` uses, checked against
+`delegated_layer_span(num_layers, encrypted)` — every layer for a whole-model
+hand-off, `num_layers - 2` for a boomerang, read by both the gate and
+`boomerang_assignment` so the span checked is the span handed over.
+
+**What it replaced.** The function had two accept branches and neither could
+see this request. The processor-speed branch had no memory test whatsoever, so
+anything clearing `2x` our processor won; and `boomerang_assignment` checked
+only `covers()` — whether the peer HOLDS those layers, never whether it can run
+them. Measured: a peer whose own `max_hostable_layers` read 2-15 throughout was
+handed 34 of a 36-layer model, timed out at 156 s, and answered the immediate
+retry with `CUDA_ERROR_OUT_OF_MEMORY` (gotcha #454). The bound was on the very
+candidate being accepted.
+
+The whole-model branch did have a check, priced at `ADMISSION_KV_CONTEXT` — a
+fixed 4,096 tokens however long the prompt is. The same peer took a 29-token
+request in 0.98 s, an 8,841-token one in 238 s, and returned **nothing at all**
+for an ~18,000-token one across its full 600 s deadline; proportional scaling
+predicts ~486 s, so it was not merely slow (gotcha #455). The code comment
+defended the constant by naming the peer's runtime head-room check as the thing
+that "refuses gracefully" past it. No refusal ever arrived.
+
+`needed` survives as the discriminator between the two accept reasons — "has a
+card worth preferring to our processor" against "is a measurably faster
+processor" — and can no longer admit anything the bound refuses. Unknown
+capacity still never excludes, per `max_hostable_layers`'s own contract.
+
+**Both accept branches log the same fields.** The whole-model line carried
+`peer_free_vram_mb` and the boomerang line carried none, so the log written to
+explain "why this peer" omitted the one number that showed the mismatch.
+
+**`router::should_retry_after` is the whole retry decision, as four terms.**
+Single-peer delegation sets `standbys: vec![]` deliberately, with a comment
+naming its safety net: *"the retry in `dispatch_single` re-routes, and this node
+still holds every layer, so the request can always come home."* That retry fired
+on two error classes and the error a departed peer actually produces —
+`SegmentFailoverExhausted` — was in neither, so both of two concurrent requests
+died with the local node in the same candidate list holding every layer, and no
+retry line in the log (gotcha #456).
+
+Three things a change here must keep:
+
+- **The bar and the retry move together.** `failover_segment`'s exhaustion arm
+  blacklists the failed node and every standby it tried, for this request id
+  only. `is_transient_remote_failure`'s doc already states the principle —
+  *"the blacklist is what makes the retry actually work"* — and without it the
+  retry re-learns the same holders and reproduces the plan that just ran out of
+  memory. Pinned by `an_exhausted_segment_bars_the_machines_that_just_failed_it`,
+  which is itself pinned by planting the violation (#413).
+- **Nothing is retried once text has reached the client.** A retry restarts
+  generation from the prompt, so on a streamed reply the reader watches the
+  answer begin a second time. `TraceSnapshot::ttft_ms` is stamped on the first
+  event carrying real text — empty terminal events do not set it, a
+  non-streaming request never does — so it is exactly "output has left this
+  node". This binds the two pre-existing classes as well.
+- **The condition stays a function.** It had four terms inline, and the missing
+  one could not have been tested for while it lived in the `if`.
+
+**The general rule.** A comment describing a mechanism in another module is a
+claim, not a fact: grep that mechanism for the case being relied on. Two of
+these three were exactly that shape, as were #437 (a doc naming a writer nothing
+writes) and #451 (a guard whose input nothing fills).
+
 ## A cap sized in units of the WORK is a ceiling on the product
 
 **`inference::tensor_util::bytes_to_tensor` bounds its allocation by the

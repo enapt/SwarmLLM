@@ -361,6 +361,12 @@ pub(crate) fn segments_without_standby(
 /// - **The peer covers every layer.** This is a delegation, not a split. A
 ///   split pays a network round trip per token and measured slower than a
 ///   single remote segment every time it was tried (see `docs/FUTURE_WORK.md`).
+/// - **The peer has room for the layers it is about to be given**, judged by
+///   the same [`max_hostable_layers`] bound the routing search uses — which
+///   charges this prompt's KV cache per layer, not a nominal context. This is
+///   the capacity authority for the whole function; the two reasons below only
+///   decide WHICH KIND of improvement a surviving peer offers. Unknown never
+///   excludes, per that bound's own contract.
 /// - **The peer can plausibly do better**, one of two ways: it advertises a GPU
 ///   with room for the model plus [`DELEGATE_VRAM_MARGIN`], or it is at least
 ///   [`DELEGATE_MIN_CPU_SPEEDUP`] times faster than this node's own processor.
@@ -386,6 +392,12 @@ fn delegation_target<'a>(
     candidates: &'a [NodeCandidate],
     local_node_id: &NodeId,
     num_layers: u32,
+    // How many of those layers the peer would ACTUALLY be given — every layer
+    // for a whole-model hand-off, the middle for a boomerang. The peer must
+    // still HOLD all `num_layers`; this is what it must have room to RUN. See
+    // [`delegated_layer_span`], which both this and the boomerang builder read
+    // so the bound and the assignment cannot disagree.
+    layers_to_assign: u32,
     local_serves_on_cpu: bool,
     model_vram_mb: u64,
     local_cpu_tokens_per_sec: f32,
@@ -423,6 +435,30 @@ fn delegation_target<'a>(
             "too far away"
         } else if c.trust_score < DELEGATE_MIN_TRUST {
             "not trusted enough to be shown the prompt"
+        } else if c
+            .max_hostable_layers
+            .is_some_and(|cap| cap < layers_to_assign)
+        {
+            // The capacity authority, and the only term here that knows how
+            // long THIS prompt is. Applied before either accept branch so both
+            // inherit it: the branches below decide what kind of improvement a
+            // peer offers, not whether it has the memory to deliver one.
+            //
+            // The two failures this closes were the same omission seen from
+            // opposite ends (gotchas #454, #455). The boomerang branch had no
+            // memory check whatsoever, so a peer whose own bound read 2-15
+            // layers was handed 34 and answered with
+            // `CUDA_ERROR_OUT_OF_MEMORY`. And the whole-model branch's
+            // `needed` is priced at `ADMISSION_KV_CONTEXT` (4096 tokens)
+            // however long the prompt really is, so an 18,000-token request
+            // was accepted by a card that could not hold its KV cache and
+            // returned nothing at all for the full 600 s deadline.
+            //
+            // `needed` stays below because it still answers a different
+            // question — "is there a card here worth preferring to our
+            // processor" — and it can no longer admit anything this bound
+            // refuses.
+            "not enough free memory for the layers this request needs"
         } else if c.gpu_vram_available_mb.is_some_and(|free| free >= needed) {
             // A graphics card with room beats our processor fallback outright.
             return Some(c);
@@ -447,6 +483,8 @@ fn delegation_target<'a>(
             trust = c.trust_score,
             free_vram_mb = ?c.gpu_vram_available_mb,
             needed_vram_mb = needed,
+            max_hostable_layers = ?c.max_hostable_layers,
+            layers_to_assign,
             peer_tokens_per_sec = c.est_tokens_per_sec,
             local_cpu_tokens_per_sec,
             "Not handing this model to peer: {reason}"
@@ -507,6 +545,27 @@ fn pipeline_may_replace_processor_route(
     Ok(())
 }
 
+/// How many layers a delegated peer actually RUNS, given the shape the caller
+/// will build.
+///
+/// The whole model when privacy is off; the middle when it is on, because
+/// [`boomerang_assignment`] keeps one layer at each end here. Both that builder
+/// and [`delegation_target`]'s capacity gate read this, so the number the peer
+/// is checked against is by construction the number it is handed — the
+/// arithmetic being written out twice is precisely how the boomerang came to be
+/// sized by a check that had never been given its span.
+fn delegated_layer_span(num_layers: u32, encrypted: bool) -> u32 {
+    if encrypted && num_layers >= BOOMERANG_MIN_LAYERS {
+        num_layers - 2
+    } else {
+        num_layers
+    }
+}
+
+/// Fewest layers a boomerang can be cut from: one at each end and at least one
+/// in the middle.
+const BOOMERANG_MIN_LAYERS: u32 = 3;
+
 /// Build the boomerang: embedding here, the middle layers on `peer`, sampling
 /// back here.
 ///
@@ -533,7 +592,7 @@ fn boomerang_assignment(
     num_layers: u32,
 ) -> Option<Vec<PipelineSegment>> {
     // Need a layer at each end and at least one in the middle.
-    if num_layers < 3 {
+    if num_layers < BOOMERANG_MIN_LAYERS {
         return None;
     }
     let covers = |c: &NodeCandidate, from: u32, to: u32| {
@@ -884,6 +943,10 @@ impl PipelineScheduler {
                     &candidates,
                     local_node_id,
                     num_layers,
+                    // Privacy decides the shape, and the shape decides how many
+                    // layers the peer must have room for — the middle only,
+                    // when the two ends stay here.
+                    delegated_layer_span(num_layers, encrypted),
                     true,
                     pool.estimated_gpu_mb(model_id).unwrap_or(0),
                     // OUR processor speed, not our graphics card's: this only
@@ -920,6 +983,15 @@ impl PipelineScheduler {
                             peer = %peer.node_id,
                             peer_latency_ms = peer.latency_ms,
                             middle = ?(1, num_layers - 1),
+                            // The two numbers that decide whether this peer can
+                            // hold what it is being given. The sibling
+                            // whole-model line has always carried its memory
+                            // figure and this one carried none, so the one log
+                            // written to explain "why this peer" omitted the
+                            // only field that would have shown the mismatch
+                            // (gotcha #454).
+                            peer_free_vram_mb = ?peer.gpu_vram_available_mb,
+                            peer_max_hostable_layers = ?peer.max_hostable_layers,
                             "This model does not fit our GPU. Prompt privacy is on, so the \
                              first and last layers stay here and a nearby peer runs the \
                              middle — it sees encrypted activations, never the prompt"
@@ -938,6 +1010,7 @@ impl PipelineScheduler {
                         peer = %peer.node_id,
                         peer_latency_ms = peer.latency_ms,
                         peer_free_vram_mb = ?peer.gpu_vram_available_mb,
+                        peer_max_hostable_layers = ?peer.max_hostable_layers,
                         "This model does not fit our GPU, so a nearby peer runs the whole \
                          of it instead of falling back to our CPU"
                     );
@@ -951,6 +1024,15 @@ impl PipelineScheduler {
                         // No standby. If this peer fails, the retry in
                         // `dispatch_single` re-routes — and this node still holds
                         // every layer, so the request can always come home.
+                        //
+                        // That retry is `segment_ran_out_of_machines`, added
+                        // 2026-09-04. Until then this comment described an
+                        // intention rather than a behaviour: the error a lost
+                        // peer produces here is `SegmentFailoverExhausted`,
+                        // which was on neither of the retry gate's two lists,
+                        // so a delegated request whose peer disconnected simply
+                        // failed with the local node idle beside it holding
+                        // every layer (gotcha #456).
                         standbys: vec![],
                         tp_groups: vec![],
                         supports_speculative: true,

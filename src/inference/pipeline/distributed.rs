@@ -1656,6 +1656,23 @@ impl PipelineExecutor {
                     standby_nodes = ?self.assignment.standbys.iter().map(|s| format!("{}[{:?}]", s.node_id, s.layer_range)).collect::<Vec<_>>(),
                     "DIAG: NO standby available for failed segment — pipeline will fail"
                 );
+                // Bar every machine that just failed this segment from the
+                // router's retry. The retry re-runs the whole scheduler, and
+                // without this it re-learns the same holders and produces the
+                // identical plan — observed live, a peer that answered
+                // `CUDA_ERROR_OUT_OF_MEMORY` was handed the same 34 layers
+                // again on the very next attempt (gotcha #454). This is the
+                // same pairing the missing-shard path already makes, and for
+                // the same reason: a retry only helps if the routing input has
+                // changed by the time it runs.
+                //
+                // Scoped to this request id, so nothing here is held against
+                // the peer for anyone else's traffic — it may be perfectly
+                // healthy and merely full.
+                for node in std::iter::once(&failed_segment.node_id).chain(tried.iter()) {
+                    self.shared_state
+                        .blacklist_holder_for_request(request_id, node);
+                }
                 // `SegmentFailoverExhausted`, not `PipelineError`: 503, so
                 // the caller learns nothing is wrong with their request or
                 // this node — there was simply nobody free to take the

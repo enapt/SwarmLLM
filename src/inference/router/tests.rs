@@ -333,6 +333,86 @@ fn the_retry_and_the_blacklist_agree_on_what_counts() {
     ));
 }
 
+/// The error single-peer delegation actually produces when its one peer goes
+/// away. Both delegation shapes are assembled with no standby by design, on the
+/// stated reasoning that the retry re-routes and "the request can always come
+/// home" — and the error a lost peer raises there, `SegmentFailoverExhausted`,
+/// was on neither of the retry gate's two lists (gotcha #456).
+#[test]
+fn a_segment_that_ran_out_of_machines_is_retryable() {
+    use crate::error::SwarmError;
+    let err = SwarmError::SegmentFailoverExhausted(
+        "Segment 0 failed with no standby available: Peer departed: its connection closed and \
+         it could not be reached again"
+            .into(),
+    );
+    assert!(super::segment_ran_out_of_machines(&err));
+
+    // Deliberately kept out of the two existing predicates. It is gated by the
+    // caller on a remote segment having been involved, exactly like
+    // `remote_peer_could_not_serve` — a purely local pipeline that exhausted
+    // its standbys has nothing new to route to.
+    assert!(!super::is_transient_remote_failure(&err));
+    assert!(!super::remote_peer_could_not_serve(&err));
+}
+
+/// The negative control: everything else keeps its old verdict, so the new arm
+/// cannot be turning terminal failures into doubled work.
+#[test]
+fn ordinary_failures_do_not_look_like_an_exhausted_segment() {
+    use crate::error::SwarmError;
+    for err in [
+        SwarmError::Internal("shape mismatch in rms-norm".into()),
+        SwarmError::Validation("prompt is 41000 tokens, the limit is 8192".into()),
+        SwarmError::ModelNotAvailable(ModelId("llama-3.2-1b".into())),
+        SwarmError::ServiceUnavailable("spawn worker: No such file or directory".into()),
+    ] {
+        assert!(
+            !super::segment_ran_out_of_machines(&err),
+            "{err} is not an exhausted segment"
+        );
+    }
+}
+
+/// The whole retry decision, as four terms rather than four reads of one long
+/// condition.
+#[test]
+fn the_retry_gate_weighs_every_term() {
+    use crate::error::SwarmError;
+    let departed = SwarmError::SegmentFailoverExhausted(
+        "Segment 0 failed with no standby available: Peer departed".into(),
+    );
+
+    // The case these fixes are about: a delegated peer vanished, a remote
+    // segment was involved, nothing has been streamed, the client is waiting.
+    assert!(super::should_retry_after(&departed, true, false, false));
+
+    // A purely local pipeline that exhausted its standbys has nowhere new to
+    // go — the same gating `remote_peer_could_not_serve` already carries.
+    assert!(!super::should_retry_after(&departed, false, false, false));
+
+    // The client has gone (gotcha #445).
+    assert!(!super::should_retry_after(&departed, true, true, false));
+
+    // Text has already reached the client. A retry restarts generation, so the
+    // reader would watch the reply begin a second time.
+    assert!(!super::should_retry_after(&departed, true, false, true));
+
+    // The streamed guard binds every class, not just the new one — a silent
+    // drop mid-reply is the same hazard.
+    let silent = SwarmError::PeerUnresponsive(
+        "remote-generate: peer never acknowledged request_id=x (silent drop or disconnect)".into(),
+    );
+    assert!(super::should_retry_after(&silent, true, false, false));
+    assert!(!super::should_retry_after(&silent, true, false, true));
+
+    // And a terminal failure is still terminal on every combination.
+    let ours = SwarmError::Internal("shape mismatch in rms-norm".into());
+    for remote in [true, false] {
+        assert!(!super::should_retry_after(&ours, remote, false, false));
+    }
+}
+
 /// A wallet that could not be READ is not a wallet that is EMPTY.
 ///
 /// `credit_balance` is a writer-fair `RwLock`, so `try_read` fails whenever a

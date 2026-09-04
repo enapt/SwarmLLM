@@ -100,6 +100,61 @@ fn is_transient_remote_failure(err: &SwarmError) -> bool {
         || crate::inference::pipeline::remote_error_means_missing_shard(&msg)
 }
 
+/// Did a segment run out of machines to try?
+///
+/// [`SwarmError::SegmentFailoverExhausted`] is what a pipeline returns when a
+/// remote segment failed and no standby covering its layer range was left. It
+/// is retryable for the same reason a missing-shard error is: the failover path
+/// blacklists every node it tried before returning, so the retry's assembly
+/// cannot re-pick them and must produce a different plan or none at all.
+///
+/// **This is the error single-peer delegation actually produces**, which is why
+/// its absence mattered. Both delegation shapes — a whole model handed to one
+/// peer, and the boomerang's middle segment — are assembled with no standby by
+/// design, on the stated reasoning that "the retry in `dispatch_single`
+/// re-routes, and this node still holds every layer, so the request can always
+/// come home". The retry existed; this error was not on its list. Observed live
+/// on v0.3.153: two concurrent requests whose delegated peer disconnected
+/// 96 seconds in, the local node sitting in the same candidate list with full
+/// coverage, and no retry line in the log for either (gotcha #456).
+///
+/// Paired with evidence that a remote segment was involved, like
+/// [`remote_peer_could_not_serve`]: a purely local pipeline that exhausted its
+/// standbys has nothing new to route to.
+fn segment_ran_out_of_machines(err: &SwarmError) -> bool {
+    matches!(err, SwarmError::SegmentFailoverExhausted(_))
+}
+
+/// May this failed attempt be run again through a freshly assembled pipeline?
+///
+/// The single answer, so the four terms can be tested rather than only read.
+/// Each one is here because leaving it out produced a real fault:
+///
+/// - **The client is still there.** A cancelled request would send the same
+///   prompt through a fresh pipeline for nobody (gotcha #445).
+/// - **Nothing has reached the client yet.** A retry restarts generation from
+///   the prompt, so on a streamed reply it appends a second attempt to a
+///   partial first one and the reader watches the answer begin again. `ttft_ms`
+///   is stamped by `TracedTokenSender` on the first event carrying actual text,
+///   which is exactly "output has left this node" — a terminal empty event does
+///   not set it and a non-streaming request never does.
+/// - **The failure is one a different route could answer.**
+/// - **A remote segment was actually involved**, for the two classes whose
+///   wording or shape our own worker can also produce.
+fn should_retry_after(
+    err: &SwarmError,
+    used_remote_segment: bool,
+    cancelled: bool,
+    already_streamed: bool,
+) -> bool {
+    if cancelled || already_streamed {
+        return false;
+    }
+    is_transient_remote_failure(err)
+        || (used_remote_segment
+            && (remote_peer_could_not_serve(err) || segment_ran_out_of_machines(err)))
+}
+
 /// Whether a request must be refused for want of credit.
 ///
 /// `balance` is `None` when the wallet could not be read, which is a different
@@ -1004,14 +1059,13 @@ impl InferenceRouter {
             // A peer reporting it cannot serve is retryable too, but only when
             // a remote segment was actually part of this attempt — otherwise the
             // identical message from our own worker would retry pointlessly.
-            let used_remote_segment = trace.snapshot().remote_segments() > 0;
-            // Never for a request whose client has gone: a retry would send
-            // the same prompt through a fresh pipeline for nobody, which is
-            // exactly the waste the cancel exists to stop (gotcha #445).
-            if !request.is_cancelled()
-                && matches!(&output, Err(e) if is_transient_remote_failure(e)
-                    || (used_remote_segment && remote_peer_could_not_serve(e)))
-            {
+            let snapshot = trace.snapshot();
+            if matches!(&output, Err(e) if should_retry_after(
+                e,
+                snapshot.remote_segments() > 0,
+                request.is_cancelled(),
+                snapshot.ttft_ms.is_some(),
+            )) {
                 tracing::warn!(
                     request_id = %request.id,
                     error = %output.as_ref().err().unwrap(),

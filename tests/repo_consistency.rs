@@ -3700,3 +3700,76 @@ fn the_storage_budget_has_one_accountant() {
         offenders.join("\n")
     );
 }
+
+/// A retry only helps if the routing input has changed by the time it runs.
+///
+/// `dispatch_single` now re-runs the whole scheduler for an exhausted segment
+/// (`should_retry_after` → `segment_ran_out_of_machines`), which is what makes
+/// single-peer delegation's deliberate `standbys: vec![]` survivable. Without
+/// barring the machines that just failed, that retry re-learns the same holders
+/// and produces the identical plan — observed live, a peer that answered
+/// `CUDA_ERROR_OUT_OF_MEMORY` was handed the same 34 layers again on the very
+/// next attempt (gotcha #454).
+///
+/// The pairing is stated in `is_transient_remote_failure`'s own doc — *"the
+/// blacklist is what makes the retry actually work"* — and a doc comment is
+/// what this codebase keeps being caught by, so it is checked instead.
+#[test]
+fn an_exhausted_segment_bars_the_machines_that_just_failed_it() {
+    let root = repo_root();
+    let src = std::fs::read_to_string(root.join("src/inference/pipeline/distributed.rs"))
+        .expect("read distributed.rs");
+    let body = fn_body(&src, "fn failover_segment(").expect(
+        "`failover_segment` has moved or been renamed; update this guard so it keeps checking          the right place",
+    );
+    assert!(
+        exhaustion_arm_bars_its_tried_nodes(body),
+        "the failover-exhaustion arm returns `SegmentFailoverExhausted` without calling          `blacklist_holder_for_request` for the nodes it tried. The router retries that error          by re-running the scheduler, so without the bar it re-picks the machine that just ran          out of memory (gotcha #454)."
+    );
+}
+
+/// Is a `blacklist_holder_for_request` call present ahead of the
+/// `SegmentFailoverExhausted` return, in the same arm?
+///
+/// Scanned over whole statements, not raw lines, so rustfmt wrapping the call
+/// across four lines cannot retire the check (gotcha #413). The window is the
+/// text before the return, since the bar has to happen first to be of any use.
+fn exhaustion_arm_bars_its_tried_nodes(body: &str) -> bool {
+    let Some(ret) = body.find("SegmentFailoverExhausted") else {
+        return false;
+    };
+    statements(&body[..ret])
+        .iter()
+        .any(|(_, l)| l.contains("blacklist_holder_for_request("))
+}
+
+/// The guard above must be able to SEE the violation it exists to catch — a
+/// scan that cannot fire is indistinguishable from one that finds nothing.
+#[test]
+fn the_exhaustion_guard_catches_a_return_that_bars_nobody() {
+    let bad = r#"
+            let Some(backup) = standby else {
+                tracing::error!(failed_node = %failed_segment.node_id, "no standby");
+                return Err(SwarmError::SegmentFailoverExhausted(exhausted_message(
+                    failed_idx,
+                    last_failure.as_deref(),
+                )));
+            };
+"#;
+    assert!(!exhaustion_arm_bars_its_tried_nodes(bad));
+
+    // And it must still see the call when rustfmt has wrapped it.
+    let good = r#"
+            let Some(backup) = standby else {
+                for node in std::iter::once(&failed_segment.node_id).chain(tried.iter()) {
+                    self.shared_state
+                        .blacklist_holder_for_request(request_id, node);
+                }
+                return Err(SwarmError::SegmentFailoverExhausted(exhausted_message(
+                    failed_idx,
+                    last_failure.as_deref(),
+                )));
+            };
+"#;
+    assert!(exhaustion_arm_bars_its_tried_nodes(good));
+}

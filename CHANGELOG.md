@@ -2,6 +2,35 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A machine is no longer given more of a model than its memory can hold.**
+  When your own graphics card is too small for a model, SwarmLLM looks for a
+  nearby machine to run it instead. That search checked whether the other
+  machine *had* the model, and — on the private-mode route, where the first and
+  last layers stay on your own machine — never checked whether it had the
+  memory to run it. A card with room for two layers was handed thirty-four,
+  twice in a row: the first attempt timed out after two and a half minutes, the
+  second came back out of memory. The same search now asks the same
+  memory question the ordinary routing already asks, before it commits.
+- **A long conversation is no longer sent to a machine that cannot hold it.**
+  The room a machine needed was worked out as though every conversation were
+  about 4,000 tokens long. Short requests were fine; an 8,800-token one took
+  four minutes where a short one took a second, and an 18,000-token one — an
+  ordinary size for a coding agent — returned nothing at all for its full
+  ten-minute deadline. The check now counts the memory this conversation
+  actually needs, so a machine that cannot hold it is not offered it.
+- **A request whose helper machine disappears now comes home instead of
+  failing.** When one machine is running a whole model on your behalf and it
+  drops off the network, SwarmLLM was meant to re-plan and, if nothing else is
+  free, simply run the model on your own machine. That fallback had never been
+  connected to the failure a disappearing machine actually produces, so the
+  request just failed — with your own machine sitting there holding every
+  layer. It now re-plans, skipping whichever machines just failed, and a reply
+  already part-way to you is never restarted from the beginning.
+
 ## [0.3.154-alpha] — 2026-09-04
 
 ### Fixed
