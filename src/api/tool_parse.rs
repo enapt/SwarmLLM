@@ -206,6 +206,134 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
         .map(assign_unique_ids)
 }
 
+/// The strings that can begin a tool call, in any format this module parses.
+///
+/// A bare `{` is one of them, and it is the load-bearing entry: `try_generic`
+/// and `try_llama3` accept an object with no marker at all, so an unadorned
+/// brace is the start of a possible call. Given that, the bare word
+/// `tool_call` needs no entry of its own — every parser that keys on it also
+/// needs an object, so the brace is reached first or the text cannot parse as
+/// a call at all. Leaving it out lets prose that merely mentions tool calls
+/// keep streaming.
+const CALL_MARKERS: [&str; 4] = ["<tool_call>", "[TOOL_CALLS]", "<|python_tag|>", "{"];
+
+/// How many bytes at the END of `text` could be the beginning of `marker`.
+///
+/// A marker arrives a token at a time, so `<tool` may be all that has been
+/// generated when we are asked whether it is safe to emit. Emitting it would
+/// leak half a control marker into the reply; holding the whole reply back
+/// because of it is the bug this exists to fix. So hold back exactly the
+/// ambiguous suffix and no more.
+///
+/// vLLM calls the same thing `partial_tag_overlap`; the technique is theirs.
+fn partial_marker_overlap(text: &str, marker: &str) -> usize {
+    let max = marker.len().min(text.len()).saturating_sub(1);
+    (1..=max)
+        .rev()
+        .find(|&n| {
+            text.is_char_boundary(text.len() - n)
+                && text.as_bytes().ends_with(&marker.as_bytes()[..n])
+        })
+        .unwrap_or(0)
+}
+
+/// Length of the prefix of `text` that is certainly ordinary content: it can be
+/// neither part of a tool call nor the beginning of one.
+///
+/// **This is what makes a tool-carrying request streamable.** A local model can
+/// only express a call as text, so `parse_tool_calls` needs the whole reply to
+/// recognise one — and the streaming encoders therefore buffered every token
+/// and flushed once at the end. Measured on llama-3.2-3b: 120 content deltas
+/// without `tools`, **1 with them**. Every agentic client sends `tools`, so
+/// every agentic client got a single lump at the end of a generation that can
+/// run for minutes, which is indistinguishable from a hang and is what a client
+/// timeout actually fires on.
+///
+/// The rule: emit up to the first thing that could start a call, hold back the
+/// rest. A reply with no brace and no marker — the common case when a model is
+/// answering rather than calling — streams in full. A reply that opens with a
+/// call streams nothing, which is right, because there is no content in it.
+///
+/// Prose BEFORE a call is now kept rather than discarded, on both surfaces.
+/// That is what vLLM's reference parser does (`content = model_output[:
+/// model_output.find(start_token)]`, `None` only when empty) and what the
+/// OpenAI wire format allows — `content` and `tool_calls` coexist in one
+/// message. The alternative, which this replaced, threw away text the model
+/// had actually produced.
+pub fn content_prefix_len(text: &str) -> usize {
+    let mut safe = text.len();
+    for marker in CALL_MARKERS {
+        if let Some(at) = text.find(marker) {
+            safe = safe.min(at);
+        } else {
+            safe = safe.min(text.len() - partial_marker_overlap(text, marker));
+        }
+    }
+    // Never cut inside a character.
+    while safe > 0 && !text.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    safe
+}
+
+/// A tool-carrying reply as it is generated, releasing the part that is
+/// certainly ordinary content as soon as it is certainly content.
+///
+/// The single place both streaming encoders decide what may go out early, so
+/// the two cannot disagree about the same reply. See [`content_prefix_len`] for
+/// why holding the whole thing back was the bug.
+#[derive(Default)]
+pub struct StreamingToolText {
+    text: String,
+    emitted: usize,
+}
+
+impl StreamingToolText {
+    /// Append a token and return whatever has just become safe to emit.
+    pub fn push(&mut self, token: &str) -> Option<String> {
+        self.text.push_str(token);
+        // `safe` cannot fall below `emitted`: nothing already released could be
+        // the start of a marker, because a possible marker prefix is exactly
+        // what was withheld. `max` is belt and braces against a future marker
+        // set that breaks that.
+        let safe = content_prefix_len(&self.text).max(self.emitted);
+        (safe > self.emitted).then(|| {
+            let out = self.text[self.emitted..safe].to_string();
+            self.emitted = safe;
+            out
+        })
+    }
+
+    /// Content not yet emitted that is still certainly content — flushed
+    /// alongside the tool calls when the reply turned out to contain one.
+    pub fn pending_content(&mut self) -> Option<String> {
+        let safe = content_prefix_len(&self.text).max(self.emitted);
+        (safe > self.emitted).then(|| {
+            let out = self.text[self.emitted..safe].to_string();
+            self.emitted = safe;
+            out
+        })
+    }
+
+    /// Everything not yet emitted — the fallback for a reply that turned out
+    /// to be ordinary text after all (a model given tools may simply answer).
+    pub fn pending_all(&mut self) -> Option<String> {
+        (self.emitted < self.text.len()).then(|| {
+            let out = self.text[self.emitted..].to_string();
+            self.emitted = self.text.len();
+            out
+        })
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+}
+
 /// Replace whatever id the model wrote with one that is actually unique.
 ///
 /// Done here rather than in each parser or each API layer because this is the
@@ -653,6 +781,152 @@ fn synth_id(index: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Tokenise a reply the way a model produces it and count what a client
+    /// would actually receive. This is the measurement the fix exists for:
+    /// llama-3.2-3b, identical prompt, 120 content deltas without `tools` and
+    /// **1** with them.
+    fn deltas_for(reply: &str, token_len: usize) -> (Vec<String>, super::StreamingToolText) {
+        let mut buf = super::StreamingToolText::default();
+        let mut out = Vec::new();
+        let chars: Vec<char> = reply.chars().collect();
+        for chunk in chars.chunks(token_len) {
+            let token: String = chunk.iter().collect();
+            if let Some(safe) = buf.push(&token) {
+                out.push(safe);
+            }
+        }
+        (out, buf)
+    }
+
+    #[test]
+    fn a_tool_carrying_reply_that_is_ordinary_prose_streams_as_it_is_produced() {
+        let reply = "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten.";
+        let (deltas, mut buf) = deltas_for(reply, 4);
+        assert!(
+            deltas.len() > 10,
+            "prose must stream, not arrive in one lump: got {} deltas",
+            deltas.len()
+        );
+        assert!(super::parse_tool_calls(buf.text()).is_none());
+        // Everything emitted plus whatever is left is exactly the reply — no
+        // token lost, none duplicated.
+        let mut seen = deltas.concat();
+        seen.push_str(&buf.pending_all().unwrap_or_default());
+        assert_eq!(seen, reply);
+    }
+
+    #[test]
+    fn a_call_is_still_withheld_whole_while_the_prose_before_it_goes_out() {
+        let reply = "Let me look that up for you.\n<tool_call>{\"name\": \"read\", \"arguments\": {\"path\": \"/x\"}}</tool_call>";
+        let (deltas, mut buf) = deltas_for(reply, 3);
+        let streamed = deltas.concat();
+        assert!(
+            streamed.starts_with("Let me look"),
+            "the prose must go out early, got {streamed:?}"
+        );
+        assert!(
+            !streamed.contains('<'),
+            "not one character of the marker may leak: {streamed:?}"
+        );
+        // The call is recognised from the whole text, exactly as before.
+        let calls = super::parse_tool_calls(buf.text()).expect("still parses");
+        assert_eq!(calls[0].name, "read");
+        // And the leftover content is the tail of the prose, never the call.
+        let leftover = buf.pending_content().unwrap_or_default();
+        assert!(!leftover.contains("tool_call"), "leftover was {leftover:?}");
+        assert_eq!(
+            format!("{streamed}{leftover}"),
+            "Let me look that up for you.\n"
+        );
+    }
+
+    #[test]
+    fn a_reply_that_is_nothing_but_a_call_streams_nothing_early() {
+        let reply = "{\"name\": \"read\", \"arguments\": {\"path\": \"/x\"}}";
+        let (deltas, mut buf) = deltas_for(reply, 3);
+        assert!(deltas.is_empty(), "nothing to stream, got {deltas:?}");
+        assert!(super::parse_tool_calls(buf.text()).is_some());
+        assert_eq!(buf.pending_content(), None, "there is no content in it");
+    }
+
+    #[test]
+    fn nothing_is_ever_emitted_twice_or_lost() {
+        // The invariant every caller depends on: emitted + pending == the text.
+        for reply in [
+            "plain words only",
+            "prose then <tool_call>{\"name\":\"f\"}</tool_call>",
+            "{\"name\":\"f\"}",
+            "",
+            "brace at the end {",
+            "a partial marker at the end <tool_c",
+        ] {
+            let (deltas, mut buf) = deltas_for(reply, 2);
+            let mut seen = deltas.concat();
+            seen.push_str(&buf.pending_all().unwrap_or_default());
+            assert_eq!(seen, reply, "round trip failed for {reply:?}");
+            assert_eq!(buf.pending_all(), None, "draining twice must yield nothing");
+        }
+    }
+
+    #[test]
+    fn ordinary_prose_is_entirely_safe_to_stream() {
+        // The case that matters: a reply with no brace and no marker must be
+        // emitted as it is produced, not held to the end.
+        let t = "Here is the answer you asked for, in plain words.";
+        assert_eq!(super::content_prefix_len(t), t.len());
+    }
+
+    #[test]
+    fn nothing_is_streamed_from_a_reply_that_opens_with_a_call() {
+        for t in [
+            "<tool_call>{\"name\": \"f\"}</tool_call>",
+            "[TOOL_CALLS][{\"name\": \"f\"}]",
+            "<|python_tag|>{\"name\": \"f\"}",
+            "{\"name\": \"f\", \"arguments\": {}}",
+        ] {
+            assert_eq!(
+                super::content_prefix_len(t),
+                0,
+                "must hold back all of: {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn prose_before_a_call_is_streamed_and_the_call_is_held_back() {
+        let t = "Let me check that.\n<tool_call>{\"name\": \"f\"}</tool_call>";
+        assert_eq!(super::content_prefix_len(t), "Let me check that.\n".len());
+        // And what is held back is exactly what the parser then recognises.
+        assert!(super::parse_tool_calls(t).is_some());
+    }
+
+    #[test]
+    fn a_marker_split_across_tokens_never_leaks_half_of_itself() {
+        // The reply so far is prose plus the first characters of a marker. The
+        // marker's own bytes must be withheld; everything before them must not.
+        for partial in ["<tool", "<tool_c", "[TOOL_", "<|pyth"] {
+            let t = format!("Checking.{partial}");
+            assert_eq!(
+                super::content_prefix_len(&t),
+                "Checking.".len(),
+                "a partial {partial:?} must be withheld"
+            );
+        }
+        // A complete word that merely SHARES a prefix is not withheld once it
+        // can no longer become the marker.
+        let t = "Checking. <tools are fine>";
+        assert_eq!(super::content_prefix_len(t), t.len());
+    }
+
+    #[test]
+    fn the_cut_never_lands_inside_a_character() {
+        // Multi-byte text followed by a partial marker: slicing at the returned
+        // index must not panic, which is the whole point of the boundary walk.
+        let t = "Vérification en cours…<tool";
+        let n = super::content_prefix_len(t);
+        assert_eq!(&t[..n], "Vérification en cours…");
+    }
+
     use super::*;
 
     /// **The exact string a live model produced**, llama-3.2-3b at default

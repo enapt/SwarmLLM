@@ -198,6 +198,61 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
+## A tool-carrying reply streams the part that cannot be a tool call
+
+**`tool_parse::content_prefix_len`** is the single answer to "how much of this
+reply so far is certainly ordinary content", and **`tool_parse::StreamingToolText`**
+is the buffer all four API paths share — OpenAI streaming and not, Anthropic
+streaming and not.
+
+**What it replaced.** A local model can only express a tool call as text, so
+`parse_tool_calls` needs the whole reply to recognise one, and both streaming
+encoders therefore appended every token to a `String` and flushed once at the
+end. Measured on llama-3.2-3b, identical prompt: **120 content deltas without
+`tools`, 1 with them.** Every agentic client sends `tools`, so every agentic
+client got a single lump after a generation that can run for minutes — which is
+indistinguishable from a hang and is what a client timeout actually fires on.
+Reported as OpenClaw "takes ages and times out".
+
+**Why the obvious guard is wrong, and what makes this one right.** "If it does
+not start with `{`, stream freely" fails because `parse_tool_calls`
+deliberately finds a call EMBEDDED after prose, and the non-streaming path used
+to DISCARD that prose. Streaming it first would have made the two surfaces
+disagree about the same reply.
+
+The resolution is not a cleverer guard, it is **matching the reference
+implementation**: vLLM streams text before the marker as content, and its
+non-streaming path keeps that text too (`content = model_output[:start]`, null
+only when empty). `content` and `tool_calls` coexist in one OpenAI message, and
+in Anthropic a text block precedes the `tool_use` blocks. So the non-streaming
+paths now keep the preamble as well, and the surfaces agree by being the shape
+clients already expect. Discarding it was throwing away text the model
+produced.
+
+Four things a change here must keep:
+
+- **A bare `{` is a marker.** `try_generic` and `try_llama3` accept an object
+  with no marker at all, so an unadorned brace begins a possible call. The bare
+  word `tool_call` deliberately is NOT one — every parser keying on it also
+  needs an object, so the brace is reached first, and leaving it out lets prose
+  that merely mentions tool calls keep streaming.
+- **Hold back a suffix that could be half a marker.** A marker arrives a token
+  at a time, so `<tool` must not go out. `partial_marker_overlap` withholds
+  exactly the ambiguous tail and no more; vLLM calls the same thing
+  `partial_tag_overlap`. Never emit a cut that lands inside a character.
+- **The emitter owns BOTH outcomes.** `emit_openai_tool_calls` /
+  `emit_anthropic_tool_blocks` take the buffer by `&mut` and flush either the
+  remaining prose (call found) or the whole remainder (no call). Splitting that
+  across the caller is how one of them gets forgotten — the shape this codebase
+  keeps being caught by.
+- **Nothing emitted twice, nothing lost.** `emitted + pending == text` is the
+  invariant every caller depends on, pinned by
+  `nothing_is_ever_emitted_twice_or_lost` over six reply shapes.
+
+Verified end to end against the released binary as the control, same model and
+prompt: 1 delta → 99 (OpenAI), 1 → 55 (Anthropic), tool calls still emitted and
+no marker character leaked.
+
 ## The component that will refuse must be asked while the plan can still change
 
 Two halves of one rule, both learned from a 16 GB processor-only Mac mini that

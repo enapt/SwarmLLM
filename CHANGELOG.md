@@ -6,6 +6,20 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A reply now arrives as it is written, even when the request offers the
+  model tools.** Any request that lists tools — which is every coding agent,
+  every time — got its whole reply in one piece at the end instead of word by
+  word. On a fast machine that is a curiosity; on a slow one, or a long prompt,
+  it is minutes of a completely silent connection that looks exactly like a
+  crash, and it is what makes a client give up and report a timeout. The reason
+  was real: a local model can only write a tool call as ordinary text, so the
+  whole reply had to be read before we could tell a call from an answer.
+  SwarmLLM now sends everything up to the first thing that could begin a tool
+  call and holds back only the rest, so an ordinary answer streams in full and
+  a real tool call is still recognised whole. Measured on the same model and
+  prompt, before and after: 1 chunk became 99. Text the model writes before a
+  tool call is also kept now rather than discarded, which is what the OpenAI
+  and Anthropic formats both expect.
 - **A prompt longer than about 8,000 tokens could not be answered by more than
   one machine.** Whenever a model was split across nodes, the hidden state the
   first machine hands the next is one number per token per channel — so past a

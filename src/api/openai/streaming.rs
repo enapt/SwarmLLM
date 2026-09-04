@@ -82,10 +82,20 @@ fn build_chat_completion_response(
                         },
                     })
                     .collect();
-                // OpenAI sends content: null alongside tool_calls, and
-                // finish_reason must be "tool_calls" or clients never dispatch
-                // them (the reported response said "length").
-                (None, Some(calls), "tool_calls".to_string())
+                // Content BEFORE the call is kept, not discarded. OpenAI's
+                // wire format allows `content` and `tool_calls` in one message
+                // and vLLM's reference parser does exactly this
+                // (`content = model_output[:start]`, null only when empty) —
+                // and it is what lets the streaming path emit that prose as it
+                // is produced instead of holding the whole reply back. Dropping
+                // it was silently throwing away text the model had produced.
+                //
+                // `finish_reason` must be "tool_calls" or clients never
+                // dispatch them (the reported response said "length").
+                let prefix = &content[..crate::api::tool_parse::content_prefix_len(&content)];
+                let prefix = prefix.trim();
+                let leading = (!prefix.is_empty()).then(|| prefix.to_string());
+                (leading, Some(calls), "tool_calls".to_string())
             }
             None => (Some(content), None, finish_reason),
         }
@@ -552,11 +562,36 @@ pub(super) async fn router_inference(
 /// `finish_reason: "tool_calls"`. Shared by the router path and the local
 /// split-model fast path: a wire format written twice diverges, which is
 /// precisely the class of bug this release fixed in stop-string handling.
+/// Flush what tool inspection withheld: the tool calls if the text turned out
+/// to contain any, otherwise the text unchanged (a model given tools is free to
+/// just reply).
+///
+/// It owns BOTH outcomes so no caller can flush one and forget the other, and
+/// so that content preceding a call is emitted rather than discarded — the
+/// non-streaming path does the same, and vLLM's reference parser does the same.
 async fn emit_openai_tool_calls(
     tx: &tokio::sync::mpsc::Sender<StreamEvent>,
-    buffered: &str,
+    buffered: &mut crate::api::tool_parse::StreamingToolText,
 ) -> bool {
-    let Some(parsed) = crate::api::tool_parse::parse_tool_calls(buffered) else {
+    let parsed = crate::api::tool_parse::parse_tool_calls(buffered.text());
+    // Whatever is left over: the prose before a call, or the whole reply when
+    // there is none.
+    let leftover = match parsed {
+        Some(_) => buffered.pending_content(),
+        None => buffered.pending_all(),
+    };
+    if let Some(text) = leftover {
+        let _ = crate::api::sse_send_live(
+            tx,
+            StreamEvent::Delta {
+                content: Some(text),
+                role: None,
+                finish_reason: None,
+            },
+        )
+        .await;
+    }
+    let Some(parsed) = parsed else {
         return false;
     };
     let calls: Vec<crate::api::openai::StreamToolCall> = parsed
@@ -646,8 +681,9 @@ async fn router_inference_stream(
 
         // Read tokens from the pipeline as they arrive
         let mut got_finish = false;
-        // Withheld text when tools are in play — see `emit_openai_tool_calls`.
-        let mut buffered = String::new();
+        // Text held back for tool inspection — but only the part that could
+        // still BE a tool call. See `tool_parse::content_prefix_len`.
+        let mut buffered = crate::api::tool_parse::StreamingToolText::default();
         let mut client_disconnected = false;
         loop {
             let event = tokio::select! {
@@ -678,7 +714,17 @@ async fn router_inference_stream(
                 if !event.text.is_empty() {
                     token_count += 1;
                     if tools_requested {
-                        buffered.push_str(&event.text);
+                        if let Some(safe) = buffered.push(&event.text) {
+                            let _ = crate::api::sse_send_live(
+                                &sse_tx,
+                                StreamEvent::Delta {
+                                    content: Some(safe),
+                                    role: None,
+                                    finish_reason: None,
+                                },
+                            )
+                            .await;
+                        }
                     } else if sse_tx
                         .send(StreamEvent::Delta {
                             content: Some(event.text),
@@ -697,20 +743,11 @@ async fn router_inference_stream(
                 // Flush what tool inspection withheld before the finish delta,
                 // so finish_reason can reflect a tool call.
                 let mut reason = reason.clone();
-                if tools_requested && !buffered.is_empty() {
-                    if emit_openai_tool_calls(&sse_tx, &buffered).await {
-                        reason = "tool_calls".to_string();
-                    } else {
-                        let _ = crate::api::sse_send_live(
-                            &sse_tx,
-                            StreamEvent::Delta {
-                                content: Some(buffered.clone()),
-                                role: None,
-                                finish_reason: None,
-                            },
-                        )
-                        .await;
-                    }
+                if tools_requested
+                    && !buffered.is_empty()
+                    && emit_openai_tool_calls(&sse_tx, &mut buffered).await
+                {
+                    reason = "tool_calls".to_string();
                 }
                 if sse_tx
                     .send(StreamEvent::Delta {
@@ -728,7 +765,25 @@ async fn router_inference_stream(
             if !event.text.is_empty() {
                 token_count += 1;
                 if tools_requested {
-                    buffered.push_str(&event.text);
+                    if let Some(safe) = buffered.push(&event.text) {
+                        if !crate::api::sse_send_live(
+                            &sse_tx,
+                            StreamEvent::Delta {
+                                content: Some(safe),
+                                role: None,
+                                finish_reason: None,
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                token_count,
+                                "DIAG: SSE consumer gone mid-stream — cancelling pipeline"
+                            );
+                            client_disconnected = true;
+                            break;
+                        }
+                    }
                     continue;
                 }
                 // Closed OR stalled (non-reading) consumer → cancel the pipeline.
@@ -1022,7 +1077,7 @@ pub(super) async fn split_stream_response(
         // streamed the raw JSON we could not retract it. So buffer, then emit
         // either tool_calls or the text at the end. Matches OpenAI, which does
         // not stream partial text for a tool call either.
-        let mut buffered = String::new();
+        let mut buffered = crate::api::tool_parse::StreamingToolText::default();
         loop {
             let event = tokio::select! {
                 biased;
@@ -1063,8 +1118,26 @@ pub(super) async fn split_stream_response(
             }
             token_count += 1;
             if tools_requested {
-                // Hold it back until we know whether this is a tool call.
-                buffered.push_str(&event.text);
+                // Hold back only what could still BE a tool call; everything
+                // before it goes out now.
+                if let Some(safe) = buffered.push(&event.text) {
+                    if !crate::api::sse_send_live(
+                        &tx,
+                        StreamEvent::Delta {
+                            content: Some(safe),
+                            role: None,
+                            finish_reason: None,
+                        },
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            token_count,
+                            "DIAG: split stream consumer gone (closed or not reading) — cancelling decode"
+                        );
+                        return;
+                    }
+                }
                 continue;
             }
             // Stop the instant the consumer closes OR stops reading (a stalled
@@ -1093,20 +1166,11 @@ pub(super) async fn split_stream_response(
         // Flush what we withheld for tool inspection: either structured calls,
         // or the text unchanged if it turned out to be an ordinary answer (a
         // model given tools is free to just reply).
-        if tools_requested && !buffered.is_empty() {
-            if emit_openai_tool_calls(&tx, &buffered).await {
-                finish = "tool_calls".to_string();
-            } else {
-                let _ = crate::api::sse_send_live(
-                    &tx,
-                    StreamEvent::Delta {
-                        content: Some(buffered.clone()),
-                        role: None,
-                        finish_reason: None,
-                    },
-                )
-                .await;
-            }
+        if tools_requested
+            && !buffered.is_empty()
+            && emit_openai_tool_calls(&tx, &mut buffered).await
+        {
+            finish = "tool_calls".to_string();
         }
 
         // Zero tokens plus a recorded failure means generation never started —

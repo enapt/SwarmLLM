@@ -40,19 +40,35 @@ fn build_messages_response(
     // (see `api::tool_parse`).
     if tools_requested {
         if let Some(parsed) = crate::api::tool_parse::parse_tool_calls(&output.content) {
-            let blocks: Vec<super::types::ResponseContentBlock> = parsed
+            // Text the model produced BEFORE the call is a text block, not
+            // something to throw away — the shape Anthropic's own API uses and
+            // the shape the OpenAI sibling now returns. It is also what lets
+            // the streaming path emit that text as it arrives rather than
+            // holding the whole reply back (`tool_parse::content_prefix_len`).
+            let prefix = output.content
+                [..crate::api::tool_parse::content_prefix_len(&output.content)]
+                .trim();
+            let leading = (!prefix.is_empty()).then(|| super::types::ResponseContentBlock::Text {
+                text: prefix.to_string(),
+            });
+            let blocks: Vec<super::types::ResponseContentBlock> = leading
                 .into_iter()
-                .map(|c| super::types::ResponseContentBlock::ToolUse {
-                    id: c.id,
-                    name: c.name,
-                    // Anthropic wants `input` as an object, not a string.
-                    // A tool with no arguments becomes `{}` rather than being
-                    // dropped.
-                    input: serde_json::from_str(&c.arguments)
-                        .unwrap_or_else(|_| serde_json::json!({})),
-                })
+                .chain(parsed.into_iter().map(|c| {
+                    super::types::ResponseContentBlock::ToolUse {
+                        id: c.id,
+                        name: c.name,
+                        // Anthropic wants `input` as an object, not a string.
+                        // A tool with no arguments becomes `{}` rather than being
+                        // dropped.
+                        input: serde_json::from_str(&c.arguments)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                    }
+                }))
                 .collect();
-            if !blocks.is_empty() {
+            if blocks
+                .iter()
+                .any(|b| matches!(b, super::types::ResponseContentBlock::ToolUse { .. }))
+            {
                 return MessagesResponse::with_content(
                     request_id,
                     model,
@@ -121,11 +137,30 @@ fn is_anthropic_server_tool(kind: &str) -> bool {
 /// start(0) → start(1) → stop(1) → stop(0), which nests them (live 2026-07-26).
 /// Callers must therefore pass `TextBlock::AlreadyClosed` to the epilogue when
 /// this returns true.
+/// Flush what tool inspection withheld: `tool_use` blocks if the text turned
+/// out to contain calls, otherwise the text itself into the open text block.
+///
+/// Owns BOTH outcomes so no caller can flush one and forget the other — the
+/// same shape as the OpenAI sibling, and for the same reason.
 async fn emit_anthropic_tool_blocks(
     sse_tx: &tokio::sync::mpsc::Sender<AnthropicSseEvent>,
-    buffered: &str,
+    buffered: &mut crate::api::tool_parse::StreamingToolText,
 ) -> bool {
-    let Some(parsed) = crate::api::tool_parse::parse_tool_calls(buffered) else {
+    let parsed = crate::api::tool_parse::parse_tool_calls(buffered.text());
+    // Into block 0, which is still open: the prose before a call, or the whole
+    // reply when there is none.
+    let leftover = match parsed {
+        Some(_) => buffered.pending_content(),
+        None => buffered.pending_all(),
+    };
+    if let Some(text) = leftover {
+        let _ = crate::api::sse_send_live(
+            sse_tx,
+            AnthropicSseEvent::ContentBlockDelta { index: 0, text },
+        )
+        .await;
+    }
+    let Some(parsed) = parsed else {
         return false;
     };
     // Sequential, not nested: close the opening text block before the first
@@ -256,7 +291,7 @@ pub(super) async fn anthropic_stream(
         let mut finish_matched_stop: Option<String> = None;
         // See the split-path sibling: with tools requested, text is withheld
         // until complete because a tool call is only recognisable in full.
-        let mut buffered = String::new();
+        let mut buffered = crate::api::tool_parse::StreamingToolText::default();
         loop {
             let event = tokio::select! {
                 biased;
@@ -283,7 +318,14 @@ pub(super) async fn anthropic_stream(
                 if !event.text.is_empty() {
                     streamed_token_count += 1;
                     if tools_requested {
-                        buffered.push_str(&event.text);
+                        if let Some(safe) = buffered.push(&event.text) {
+                            let _ = sse_tx
+                                .send(AnthropicSseEvent::ContentBlockDelta {
+                                    index: 0,
+                                    text: safe,
+                                })
+                                .await;
+                        }
                     } else {
                         let _ = sse_tx
                             .send(AnthropicSseEvent::ContentBlockDelta {
@@ -304,7 +346,22 @@ pub(super) async fn anthropic_stream(
             if !event.text.is_empty() {
                 streamed_token_count += 1;
                 if tools_requested {
-                    buffered.push_str(&event.text);
+                    // Only what could still BE a call is held back.
+                    if let Some(safe) = buffered.push(&event.text) {
+                        if !crate::api::sse_send_live(
+                            &sse_tx,
+                            AnthropicSseEvent::ContentBlockDelta {
+                                index: 0,
+                                text: safe,
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!("DIAG: Anthropic SSE consumer gone mid-stream");
+                            client_disconnected = true;
+                            break;
+                        }
+                    }
                     continue;
                 }
                 // Closed OR stalled (non-reading) consumer → cancel the pipeline.
@@ -352,20 +409,12 @@ pub(super) async fn anthropic_stream(
             let matched = finish_matched_stop.or(matched_from_result);
             let mut finish_stop_reason = finish_stop_reason;
             let mut text_block = TextBlock::Open;
-            if tools_requested && !buffered.is_empty() {
-                if emit_anthropic_tool_blocks(&sse_tx, &buffered).await {
-                    finish_stop_reason = "tool_use".to_string();
-                    text_block = TextBlock::AlreadyClosed;
-                } else {
-                    let _ = crate::api::sse_send_live(
-                        &sse_tx,
-                        AnthropicSseEvent::ContentBlockDelta {
-                            index: 0,
-                            text: buffered.clone(),
-                        },
-                    )
-                    .await;
-                }
+            if tools_requested
+                && !buffered.is_empty()
+                && emit_anthropic_tool_blocks(&sse_tx, &mut buffered).await
+            {
+                finish_stop_reason = "tool_use".to_string();
+                text_block = TextBlock::AlreadyClosed;
             }
             send_sse_epilogue_with_stop(
                 &sse_tx,
@@ -540,7 +589,7 @@ pub(super) async fn anthropic_split_stream(
         let mut stop_reason = "max_tokens".to_string();
         let mut text_block = TextBlock::Open;
         let mut matched_stop_sequence: Option<String> = None;
-        let mut buffered = String::new();
+        let mut buffered = crate::api::tool_parse::StreamingToolText::default();
 
         loop {
             let event = tokio::select! {
@@ -581,9 +630,22 @@ pub(super) async fn anthropic_split_stream(
             }
             total_output_tokens += 1;
             if tools_requested {
-                // Withheld until complete — a tool call is only recognisable
-                // once the whole text is in (see the OpenAI sibling).
-                buffered.push_str(&event.text);
+                // Only what could still BE a call is withheld; the rest goes
+                // out now (see the OpenAI sibling).
+                if let Some(safe) = buffered.push(&event.text) {
+                    if !crate::api::sse_send_live(
+                        &sse_tx,
+                        AnthropicSseEvent::ContentBlockDelta {
+                            index: 0,
+                            text: safe,
+                        },
+                    )
+                    .await
+                    {
+                        tracing::warn!("DIAG: Anthropic split-stream consumer gone");
+                        return;
+                    }
+                }
                 continue;
             }
             // Stop on a closed OR stalled (non-reading) consumer — returning
@@ -610,21 +672,12 @@ pub(super) async fn anthropic_split_stream(
         // shape: open a tool_use block, stream its arguments as one
         // input_json_delta, close it. A client concatenating input_json_delta
         // fragments handles a single complete fragment correctly.
-        if tools_requested && !buffered.is_empty() {
-            if emit_anthropic_tool_blocks(&sse_tx, &buffered).await {
-                stop_reason = "tool_use".to_string();
-                text_block = TextBlock::AlreadyClosed;
-            } else {
-                // Not a tool call after all — deliver it as the text it is.
-                let _ = crate::api::sse_send_live(
-                    &sse_tx,
-                    AnthropicSseEvent::ContentBlockDelta {
-                        index: 0,
-                        text: buffered.clone(),
-                    },
-                )
-                .await;
-            }
+        if tools_requested
+            && !buffered.is_empty()
+            && emit_anthropic_tool_blocks(&sse_tx, &mut buffered).await
+        {
+            stop_reason = "tool_use".to_string();
+            text_block = TextBlock::AlreadyClosed;
         }
 
         // Nothing generated + a recorded failure: say why instead of emitting a

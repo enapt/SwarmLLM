@@ -1157,7 +1157,7 @@ with a long prompt and a short one, checking the choice flips. Changing a
 routing cost model without that is how the delegation penalty in `cbbed678`
 came to price out every good split.
 
-### A request that carries tools gets no streaming at all (2026-08-23)
+### A request that carries tools gets no streaming at all (2026-08-23, FIXED 2026-09-04)
 
 Measured on llama-3.2-3b, identical prompt, `stream: true`, counting content
 deltas actually delivered to the client:
@@ -1191,6 +1191,27 @@ tool_calls together is the honest answer and change the non-streaming path to
 match. (c) is the only one that leaves the two surfaces agreeing, and it is a
 deliberate change to what a tool-calling reply looks like — worth a decision
 rather than a patch.
+
+**Resolved as (c), 2026-09-04, because it is what the reference implementation
+already does.** vLLM's tool parsers stream text before the marker as ordinary
+content (`_extract_content`), withhold only a suffix that could be a partial
+marker (`partial_tag_overlap`), and — the part that settles the question —
+their NON-streaming path keeps the prose too: `content =
+model_output[:model_output.find(start_token)]`, null only when that is empty.
+So "content plus tool_calls together" is not a deliberate divergence, it is
+the OpenAI-compatible shape, and the surfaces agree by matching it.
+
+Shipped as `tool_parse::content_prefix_len` (the boundary) and
+`tool_parse::StreamingToolText` (the per-reply buffer both encoders share),
+applied to all four paths — OpenAI streaming and not, Anthropic streaming and
+not. Measured on the live node before and a dev build after, same model, same
+prompt, only the binary differing: **1 content delta → 99** on the OpenAI
+surface and **1 → 55** on the Anthropic one, with tool-calling replies still
+emitting their calls and no marker character leaking.
+
+Option (b) was not taken and is not needed: the keep-alive ticker already runs
+(`api::sse::progress_ticker`), and a keep-alive comment cannot tell a client
+the model is producing an answer. Real deltas can.
 
 ### Two prefill hypotheses MEASURED AND FALSIFIED (2026-08-23)
 
