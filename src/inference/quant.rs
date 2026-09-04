@@ -96,6 +96,14 @@ pub fn q8_0_byte_len(n: usize) -> usize {
     n.div_ceil(GROUP_SIZE) * BLOCK_BYTES
 }
 
+/// `q8_0_byte_len` for a count that came off the wire: `None` rather than a
+/// wrapped product when the multiply overflows. A wrapped length would be
+/// SMALLER than the truth, so a caller sizing a payload check with it would
+/// accept a buffer far too short and then read past what it validated.
+pub fn q8_0_byte_len_checked(n: usize) -> Option<usize> {
+    n.div_ceil(GROUP_SIZE).checked_mul(BLOCK_BYTES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

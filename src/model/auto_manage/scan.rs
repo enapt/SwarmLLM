@@ -437,6 +437,13 @@ pub async fn check_and_load_model(
         None => return,
     };
 
+    // Learn this model's geometry now that a shard has landed, off the routing
+    // path — the scheduler's per-peer capacity bound needs it to charge a peer
+    // for the prompt's KV cache, and it would otherwise be read for the first
+    // time while assembling a pipeline (gotcha #451). Cheap and idempotent:
+    // one `exists()` once the map holds the entry.
+    let _ = shared.gguf_meta_for(model_id);
+
     let local_node_id = shared.identity.node_id().clone();
     let model_dir = shared.model_dir(&model_id.0);
 

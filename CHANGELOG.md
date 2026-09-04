@@ -2,6 +2,39 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A prompt longer than about 8,000 tokens could not be answered by more than
+  one machine.** Whenever a model was split across nodes, the hidden state the
+  first machine hands the next is one number per token per channel — so past a
+  fixed internal ceiling the receiving machine refused the whole thing, every
+  time, with `Tensor too large`. On a typical 8B model that ceiling was exactly
+  8192 tokens, and on a very large model as few as 4096, which is well inside
+  what a coding agent sends in a single turn. The limit was there to stop a
+  malicious peer claiming an enormous size and making the receiver reserve
+  memory for it; that check now compares the claim against the data that
+  actually arrived, which is exact, cannot be fooled, and does not put a cap on
+  how long a prompt may be. Reported from the field on v0.3.153 with a 32-layer
+  model split across two nodes and an 11,200-token agent request that failed
+  four times in a row.
+- **A machine that picked up a model while running now sizes other machines'
+  share of it correctly.** v0.3.153 added a check that stops a graphics card
+  being handed more layers of a long prompt than it has memory for. It reads
+  the model's shape from the copy on disk — and nothing loaded that shape when
+  a model's pieces arrived from the swarm rather than at start-up, so on the
+  very case the check was written for (a model being shared out for the first
+  time) it quietly did nothing until the next restart. A 6 GB card was given 28
+  layers of an 11,200-token prompt as a result. The shape is now read the first
+  time it is needed, wherever the model came from.
+- **The pipeline log no longer looks like it contradicts itself when a segment
+  fails.** A plan reported "1 standby" while the failure reported "no standby
+  available", and both were true: backups are chosen per segment, and that one
+  covered a different part of the model. The plan now names which segments have
+  no backup at all, and the failure says how many backups covered the part that
+  actually failed.
+
 ## [0.3.153-alpha] — 2026-09-04
 
 ### Fixed

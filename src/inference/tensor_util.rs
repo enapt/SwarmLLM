@@ -101,6 +101,28 @@ pub fn raw_f32_to_tensor_bytes(raw: &[u8], shape: &[u32]) -> Vec<u8> {
 }
 
 /// Deserialize bytes back to a candle Tensor.
+///
+/// **The payload bounds the allocation — there is deliberately no fixed cap on
+/// the element count.** The shape comes off the wire, and the risk it carries
+/// is `Vec::with_capacity(num_elements)`: a twelve-byte message declaring a
+/// billion elements would reserve 4 GB before the first bounds check. Checking
+/// the declared count against the bytes that are ACTUALLY here answers that
+/// exactly, and caps the allocation at roughly the size of a message the
+/// transport already accepted (128 MB per activation on the wire, 512 MB over
+/// worker IPC).
+///
+/// This replaced a flat `MAX_TENSOR_ELEMENTS = 32 * 1024 * 1024`, added in a
+/// March 2026 hardening pass for the same reason and correct about the hazard.
+/// A fixed element count is not a memory bound, though — it is a bound on the
+/// WORK, and it silently became the shortest prompt any distributed pipeline
+/// could carry: a hidden state is `positions × hidden_dim` elements, so 32 M is
+/// exactly 8192 positions at hidden 4096 and only 4096 at the 8192-wide hidden
+/// of a 70 B. Reported from the field on v0.3.153 (gotcha #451) — an 11.2 k
+/// token agent prompt on an 8 B model produced 43,876,352 elements and every
+/// attempt failed identically, on a pipeline that was otherwise fine.
+///
+/// A payload LONGER than the shape needs is still accepted: callers hand this
+/// whole buffers whose tail belongs to something else.
 pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
     if bytes.len() < 4 {
         return Err(SwarmError::Internal("Tensor bytes too short".into()));
@@ -157,29 +179,42 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
         .try_fold(1usize, |acc, &d| acc.checked_mul(d))
         .ok_or_else(|| SwarmError::Internal("Tensor shape overflow".into()))?;
 
-    const MAX_TENSOR_ELEMENTS: usize = 32 * 1024 * 1024; // 32M elements = 128MB of f32
-    if num_elements > MAX_TENSOR_ELEMENTS {
-        return Err(SwarmError::Internal(format!(
-            "Tensor too large: {} elements (max {})",
-            num_elements, MAX_TENSOR_ELEMENTS
-        )));
-    }
     if num_elements == 0 {
         return Err(SwarmError::Internal("Tensor has zero elements".into()));
     }
 
+    // How many bytes this payload must contain for the shape it declares.
+    // Unknown dtype is answered here, before anything is allocated.
+    let required = match dtype_tag {
+        DTYPE_TAG_F32 => num_elements.checked_mul(4),
+        DTYPE_TAG_Q8_0 => quant::q8_0_byte_len_checked(num_elements),
+        unknown => {
+            return Err(SwarmError::Internal(format!(
+                "Unknown tensor dtype tag: {unknown}"
+            )));
+        }
+    };
+    let Some(required) = required else {
+        return Err(SwarmError::Internal(format!(
+            "Tensor shape overflow: {num_elements} elements of dtype {dtype_tag}"
+        )));
+    };
+    let available = bytes.len() - pos;
+    if required > available {
+        // Truncated wire payload from a peer is a network/remote fault, not a
+        // local code bug — `Inference` (rather than `Internal`) so the
+        // upstream caller doesn't surface it as a 500.
+        return Err(SwarmError::Inference(format!(
+            "Tensor data truncated: shape {shape:?} needs {required} bytes, {available} present"
+        )));
+    }
+    let payload = &bytes[pos..pos + required];
+
     let data = match dtype_tag {
         DTYPE_TAG_F32 => {
             let mut data = Vec::with_capacity(num_elements);
-            for _ in 0..num_elements {
-                if pos + 4 > bytes.len() {
-                    // Truncated wire payload from a peer is a network/remote
-                    // fault, not a local code bug — `Inference` (rather than
-                    // `Internal`) so the upstream caller doesn't surface it
-                    // as a 500.
-                    return Err(SwarmError::Inference("Tensor data truncated".into()));
-                }
-                let val = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
+            for chunk in payload.as_chunks::<4>().0 {
+                let val = f32::from_le_bytes(*chunk);
                 if !val.is_finite() {
                     // NaN/Inf in an inference activation isn't a code bug
                     // (could be an fp16-overflow on a CUDA layer that
@@ -191,19 +226,12 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
                     ));
                 }
                 data.push(val);
-                pos += 4;
             }
             data
         }
         DTYPE_TAG_Q8_0 => {
-            let payload_len = quant::q8_0_byte_len(num_elements);
-            if pos + payload_len > bytes.len() {
-                return Err(SwarmError::Inference(
-                    "Tensor Q8_0 payload truncated".into(),
-                ));
-            }
-            let data = quant::dequantize_q8_0(&bytes[pos..pos + payload_len], num_elements)
-                .map_err(SwarmError::Inference)?;
+            let data =
+                quant::dequantize_q8_0(payload, num_elements).map_err(SwarmError::Inference)?;
             // Mirror the F32 path's non-finite guard — a malicious or
             // broken peer could ship a Q8_0 block whose dequantized values
             // include NaN/Inf and corrupt subsequent attention.

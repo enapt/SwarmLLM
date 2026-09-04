@@ -57,6 +57,77 @@ fn tensor_q8_0_compresses_vs_f32() {
     assert!(ratio > 3.5, "expected >3.5× compression, got {ratio}");
 }
 
+/// Header for a tensor of `shape` and `dtype_tag`, with no payload after it.
+fn tensor_header(shape: &[u32], dtype_tag: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(shape.len() as u32).to_le_bytes());
+    for &d in shape {
+        bytes.extend_from_slice(&d.to_le_bytes());
+    }
+    bytes.extend_from_slice(&dtype_tag.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn a_long_prompts_activation_is_not_refused_by_a_fixed_element_count() {
+    // [1, 10712, 4096] — the hidden state an ~11.2k-token agent prompt
+    // produces on an 8B model, and the exact element count (43,876,352) a
+    // v0.3.153 node refused four times in a row. The old cap was
+    // 32 * 1024 * 1024, i.e. exactly 8192 positions at hidden 4096, so every
+    // prompt past the default context length was unroutable across nodes.
+    //
+    // Only the header is built: the guard must answer from the shape and the
+    // bytes present, before allocating anything, so the test costs nothing.
+    let header = tensor_header(&[1, 10712, 4096], 0);
+    let err = bytes_to_tensor(&header).unwrap_err().to_string();
+    assert!(
+        err.contains("truncated"),
+        "expected a complaint about the missing payload, got: {err}"
+    );
+    assert!(
+        !err.contains("too large"),
+        "the element count itself must no longer be a refusal: {err}"
+    );
+}
+
+#[test]
+fn a_shape_the_payload_cannot_back_is_refused_before_anything_is_allocated() {
+    // The hazard the element cap was written for: a header declaring a
+    // billion elements with nothing behind it. `Vec::with_capacity` would
+    // reserve 4 GB; the payload check refuses first.
+    for (shape, dtype_tag) in [
+        (&[1u32, 1_000_000_000u32][..], 0u32),
+        (&[1, 1_000_000_000], 1),
+    ] {
+        let err = bytes_to_tensor(&tensor_header(shape, dtype_tag))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("truncated"),
+            "dtype {dtype_tag} must be refused for want of payload, got: {err}"
+        );
+    }
+    // One byte short is still short — the check is exact, not approximate.
+    let mut nearly = tensor_header(&[2, 3], 0);
+    nearly.extend_from_slice(&[0u8; 23]);
+    assert!(bytes_to_tensor(&nearly).is_err());
+    nearly.push(0);
+    assert!(bytes_to_tensor(&nearly).is_ok());
+}
+
+#[test]
+fn a_tensor_far_past_the_old_cap_still_round_trips() {
+    // 36 M elements — over the retired 33,554,432 ceiling — as Q8_0, which
+    // keeps the payload at ~38 MB rather than 144. Proves the path works at
+    // that scale, not merely that the refusal is gone.
+    let n = 36 * 1024 * 1024usize;
+    let data: Vec<f32> = (0..n).map(|i| ((i % 97) as f32 - 48.0) * 0.01).collect();
+    let tensor = Tensor::from_vec(data, &[1, n], &Device::Cpu).unwrap();
+    let bytes = tensor_to_bytes_q8_0(&tensor).unwrap();
+    let restored = bytes_to_tensor(&bytes).unwrap();
+    assert_eq!(restored.shape().dims(), &[1, n]);
+}
+
 #[test]
 fn sample_greedy() {
     let logits = Tensor::from_vec(vec![0.1f32, 0.2, 5.0, 0.3], &[1, 4], &Device::Cpu).unwrap();

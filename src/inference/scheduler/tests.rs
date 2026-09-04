@@ -2020,6 +2020,38 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
     let _ = local;
 }
 
+#[test]
+fn a_plan_reports_which_segments_have_no_standby_not_just_how_many_it_found() {
+    let node = |b: u8| NodeId([b; 32]);
+    let seg = |n: u8, range: (u32, u32)| PipelineSegment {
+        node_id: node(n),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        layer_range: range,
+    };
+    // The shape the field report carried: local ends, one peer holding the
+    // middle nobody else has, and a standby that covers only the tail.
+    let segments = vec![seg(1, (0, 2)), seg(2, (2, 30)), seg(1, (30, 32))];
+    let standbys = vec![seg(2, (30, 32))];
+
+    assert_eq!(
+        super::segments_without_standby(&segments, &standbys),
+        vec![0, 1],
+        "a standby for the tail covers neither of the other two segments"
+    );
+    // …and the plain count that used to be the only thing logged says "1",
+    // which is what made the failure look like a contradiction.
+    assert_eq!(standbys.len(), 1);
+
+    // Control: a standby whose range spans the middle segment does cover it.
+    let wide = vec![seg(3, (0, 32))];
+    assert!(super::segments_without_standby(&segments, &wide).is_empty());
+    assert!(super::standby_covers(&seg(3, (0, 32)), (2, 30)));
+    assert!(!super::standby_covers(&seg(2, (30, 32)), (2, 30)));
+}
+
 /// A peer already serving this model must never be capped by its free memory.
 ///
 /// `vram_available_mb` is what the card has spare RIGHT NOW, so a resident

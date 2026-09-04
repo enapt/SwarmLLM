@@ -1625,8 +1625,7 @@ impl PipelineExecutor {
                 .standbys
                 .iter()
                 .find(|s| {
-                    s.layer_range.0 <= failed_segment.layer_range.0
-                        && s.layer_range.1 >= failed_segment.layer_range.1
+                    crate::inference::scheduler::standby_covers(s, failed_segment.layer_range)
                         && !tried.contains(&s.node_id)
                 })
                 .cloned();
@@ -1639,7 +1638,21 @@ impl PipelineExecutor {
                     failed_layer_range = ?failed_segment.layer_range,
                     tried = ?tried.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
                     last_failure = ?last_failure,
+                    // Both counts, because only the second one is about THIS
+                    // segment: standbys are chosen per segment, so a plan can
+                    // carry one and still have none for the range that failed.
+                    // Reporting only the total made this line read as a
+                    // contradiction of the plan's own `standbys=N` (gotcha #451).
                     total_standbys = self.assignment.standbys.len(),
+                    standbys_covering_this_segment = self
+                        .assignment
+                        .standbys
+                        .iter()
+                        .filter(|s| crate::inference::scheduler::standby_covers(
+                            s,
+                            failed_segment.layer_range
+                        ))
+                        .count(),
                     standby_nodes = ?self.assignment.standbys.iter().map(|s| format!("{}[{:?}]", s.node_id, s.layer_range)).collect::<Vec<_>>(),
                     "DIAG: NO standby available for failed segment — pipeline will fail"
                 );

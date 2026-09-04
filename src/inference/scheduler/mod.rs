@@ -290,6 +290,38 @@ const DELEGATE_MIN_CPU_SPEEDUP: f32 = 2.0;
 /// than a bare fit keeps a borderline case on the local node, where the outcome
 /// is merely slow instead of a failed hand-off.
 const DELEGATE_VRAM_MARGIN: f64 = 1.2;
+/// Does this standby cover the whole of `range`, and so stand a chance of
+/// taking that segment over?
+///
+/// The one predicate behind both the plan's coverage report and the failover
+/// search in `pipeline::distributed::failover_segment`. A standby is chosen per
+/// segment, so its range is normally an exact match — but the failover search
+/// scans the whole list, and a standby for a DIFFERENT segment covers nothing
+/// it needs.
+pub(crate) fn standby_covers(standby: &PipelineSegment, range: (u32, u32)) -> bool {
+    standby.layer_range.0 <= range.0 && standby.layer_range.1 >= range.1
+}
+
+/// Indices of the segments no standby covers — the ones whose holder failing
+/// takes the whole request down.
+///
+/// Reported alongside the plan because a plain count could not answer the
+/// question anyone asks of it. A three-segment boomerang whose middle is held
+/// by the only peer that has those layers logs `standbys=1`, and that one
+/// standby covers an end segment: the count says "there is a backup", the
+/// request then fails with "NO standby available", and both lines are true.
+/// A tester read the pair as a contradiction and was right to (gotcha #451).
+pub(crate) fn segments_without_standby(
+    segments: &[PipelineSegment],
+    standbys: &[PipelineSegment],
+) -> Vec<usize> {
+    segments
+        .iter()
+        .enumerate()
+        .filter(|(_, seg)| !standbys.iter().any(|s| standby_covers(s, seg.layer_range)))
+        .map(|(idx, _)| idx)
+        .collect()
+}
 
 /// Pick a peer to hand this whole model to, or `None` to run it here.
 ///
@@ -1158,12 +1190,16 @@ impl PipelineScheduler {
             self.detect_tp_groups(&segments, &candidates)
         };
 
+        let uncovered = segments_without_standby(&segments, &standbys);
         tracing::info!(
             request_id = %request_id,
             model = %model_id,
             candidates_count = candidates.len(),
             segments = segments.len(),
             standbys = standbys.len(),
+            // Which segments a failure would be FATAL for. The bare standby
+            // count says nothing about that — see `segments_without_standby`.
+            segments_without_standby = ?uncovered,
             tp_groups = tp_groups.len(),
             elapsed_ms = start.elapsed().as_millis() as u64,
             "DIAG: assemble_pipeline_for completed"
@@ -1226,11 +1262,14 @@ impl PipelineScheduler {
         // against its budget too.
         let bytes_per_layer = manifest.total_size_bytes / manifest.num_layers.max(1) as u64;
         // What THIS prompt's KV cache costs per layer, on a card and on a
-        // processor, from the model's geometry when this node holds its
-        // header (`gguf_meta` is filled for every model with a local header).
+        // processor, from the model's geometry when this node holds its header.
+        // `gguf_meta_for` is the only way to ask — it reads the header on a
+        // miss, because nothing filled the map when a model's shards arrived
+        // from the swarm mid-run and this bound was therefore inert on exactly
+        // the fresh-distribution case it was written for (gotcha #451).
         // Unknown → 0 → the bound charges weights only, as it always did.
         let (prompt_kv_per_layer_gpu, prompt_kv_per_layer_cpu) =
-            match (prompt_tokens, self.shared_state.gguf_meta.get(&manifest.id)) {
+            match (prompt_tokens, self.shared_state.gguf_meta_for(&manifest.id)) {
                 (Some(tokens), Some(meta)) => (
                     kv_bytes_per_position_per_layer(&meta, true).saturating_mul(u64::from(tokens)),
                     kv_bytes_per_position_per_layer(&meta, false).saturating_mul(u64::from(tokens)),

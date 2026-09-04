@@ -235,24 +235,12 @@ pub(super) async fn restore_persistent_state(
                 if registered_manifests.insert(model_id.clone()) {
                     let model_dir = shard_store.model_dir(model_id);
 
-                    // Ensure GGUF header exists (extract from shard_000 if available)
-                    // and load GGUF metadata for split inference.
-                    if !shared_state.gguf_meta.contains_key(model_id) {
-                        if let Ok(()) = crate::inference::split::ensure_gguf_header(&model_dir) {
-                            let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
-                            if let Ok(meta) =
-                                crate::inference::split::GgufTensorMeta::from_gguf_file(
-                                    &header_path,
-                                )
-                            {
-                                tracing::info!(
-                                    model = %model_id,
-                                    layers = meta.block_count,
-                                    "Loaded GGUF metadata from shard header"
-                                );
-                                shared_state.gguf_meta.insert(model_id.clone(), meta);
-                            }
-                        }
+                    // Materialise the header (extracting it from shard_000 if
+                    // that is all we have), then let `gguf_meta_for` learn the
+                    // geometry from it — the one place that does, so this and
+                    // the runtime shard-landing path cannot disagree.
+                    if let Ok(()) = crate::inference::split::ensure_gguf_header(&model_dir) {
+                        let _ = shared_state.gguf_meta_for(model_id);
                     }
 
                     let manifest_loaded = if let Ok(manifest) =
@@ -334,7 +322,7 @@ pub(super) async fn restore_persistent_state(
 
                     // Regenerate manifest if missing/invalid and GGUF header available
                     if !manifest_loaded {
-                        if let Some(meta) = shared_state.gguf_meta.get(model_id) {
+                        if let Some(meta) = shared_state.gguf_meta_for(model_id) {
                             tracing::info!(
                                 model = %model_id,
                                 "Regenerating manifest from GGUF header + shard files"
@@ -358,7 +346,7 @@ pub(super) async fn restore_persistent_state(
                     // Auto-extract tied_output_weight.bin for weight-tied models.
                     let tied_path = model_dir.join(crate::inference::split::TIED_OUTPUT_FILENAME);
                     if !tied_path.exists() {
-                        if let Some(meta) = shared_state.gguf_meta.get(model_id) {
+                        if let Some(meta) = shared_state.gguf_meta_for(model_id) {
                             let has_output = meta.tensors.contains_key("output.weight");
                             let has_embd = meta.tensors.contains_key("token_embd.weight");
                             if !has_output && has_embd {

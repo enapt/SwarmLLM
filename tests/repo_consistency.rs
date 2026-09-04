@@ -1135,6 +1135,85 @@ fn the_statement_scanner_sees_a_chain_rustfmt_has_wrapped() {
 ///
 /// So: the two `*_served_atomic` counters and `pending_credit_earn` may be
 /// written only inside `record_peer_serve`. Everywhere else reads them.
+/// A model's tensor geometry is read through one accessor, which learns it on
+/// a miss.
+///
+/// `SharedState.gguf_meta` was filled at startup, by the admin HuggingFace
+/// shard download and by local manifest generation — and by nothing at all on
+/// the path a model takes when its shards arrive from the swarm while the
+/// daemon is running. Its one reader is the scheduler's per-peer capacity
+/// bound, which charges a peer for what the prompt's KV cache will cost per
+/// layer and treats an absent geometry as "charge nothing". So the bound was
+/// silently inert on the one case it was written for: a model being
+/// distributed for the first time. A 6 GB card was handed 28 layers of an
+/// 11.2 k-token prompt, four attempts in a row (gotcha #451).
+///
+/// `SharedState::gguf_meta_for` is now the only read, and reads the local
+/// shard header on a miss. `insert` / `remove` / `contains_key` remain open:
+/// those are the writers and their idempotence guards, and the accessor is
+/// built out of one of them.
+#[test]
+fn the_model_geometry_is_read_through_one_accessor() {
+    let root = repo_root();
+    let mut stack = vec![root.join("src")];
+    let mut offenders: Vec<String> = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            // The accessor itself lives here, and is the only legitimate read.
+            if rel == "src/daemon/state/mod.rs" {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            // Statements, not lines: a chain rustfmt has wrapped across
+            // `shared_state` / `.gguf_meta` / `.get(..)` is the ordinary shape
+            // here, and a line scan cannot see it.
+            for (line_no, l) in statements(&text) {
+                if l.contains("gguf_meta.get(") {
+                    offenders.push(format!("{rel}:{line_no}: {}", l.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "read the model's geometry through SharedState::gguf_meta_for, which \
+         learns it from the local shard header on a miss — a bare `gguf_meta.get` \
+         reports \"unknown\" for every model acquired since the last restart:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The scan above must see the wrapped form, or it asserts nothing.
+#[test]
+fn the_geometry_accessor_guard_catches_a_wrapped_read() {
+    let src =
+        "fn f() {\n    let m = self.shared_state\n        .gguf_meta\n        .get(&id);\n}\n";
+    assert!(
+        statements(src)
+            .iter()
+            .any(|(_, l)| l.contains("gguf_meta.get(")),
+        "a chain rustfmt has wrapped must still be caught"
+    );
+}
+
 #[test]
 fn serving_is_counted_and_paid_in_exactly_one_place() {
     let root = repo_root();

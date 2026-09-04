@@ -1772,6 +1772,70 @@ impl SharedState {
         Some(arc)
     }
 
+    /// This model's tensor geometry — head counts, hidden width, layer count —
+    /// read from the local `gguf_header.bin` the first time it is asked for and
+    /// cached in `gguf_meta` thereafter.
+    ///
+    /// **The only way to ask, and the only place that learns a shape from a
+    /// shard header.** Never read `gguf_meta` directly — `the_model_geometry_is_
+    /// read_through_one_accessor` in `tests/repo_consistency.rs` fails the build
+    /// on a new direct `get`. (One other site fills the map: the startup scan
+    /// parses a full GGUF named by a `source_path` sidecar, a source this cannot
+    /// reach and which its own containment check governs.) The map used to be
+    /// filled at startup and by the admin HuggingFace shard download, and by
+    /// nothing on the path a model takes when its shards arrive from the swarm
+    /// at runtime.
+    /// Its one reader is the scheduler's per-peer capacity bound, which charges
+    /// a peer for what THIS prompt's KV cache will cost per layer and treats an
+    /// unknown geometry as "charge nothing" (`max_hostable_layers`) — so on
+    /// exactly the case that bound exists for, a model being distributed for
+    /// the first time, it was silently inert until the next restart. Reported
+    /// from the field on v0.3.153: a 6 GB card was handed 28 layers of an
+    /// 11.2 k-token prompt (gotcha #451).
+    ///
+    /// `None` when this node holds no header for the model — a coordinator that
+    /// holds none of its shards genuinely cannot know the geometry, and unknown
+    /// must keep meaning unknown rather than becoming a zero.
+    pub fn gguf_meta_for(
+        &self,
+        model_id: &crate::types::ModelId,
+    ) -> Option<
+        dashmap::mapref::one::Ref<
+            '_,
+            crate::types::ModelId,
+            crate::inference::split::GgufTensorMeta,
+        >,
+    > {
+        if let Some(m) = self.gguf_meta.get(model_id) {
+            return Some(m);
+        }
+        let header_path = self
+            .model_dir(&model_id.0)
+            .join(crate::model::shard::HEADER_FILENAME);
+        if !header_path.exists() {
+            return None;
+        }
+        match crate::inference::split::GgufTensorMeta::from_gguf_file(&header_path) {
+            Ok(meta) => {
+                tracing::info!(
+                    model = %model_id.0,
+                    layers = meta.block_count,
+                    "Learned GGUF geometry from the local shard header"
+                );
+                self.gguf_meta.insert(model_id.clone(), meta);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    model = %model_id.0,
+                    error = %e,
+                    "gguf_meta_for: could not read the local gguf header"
+                );
+                return None;
+            }
+        }
+        self.gguf_meta.get(model_id)
+    }
+
     /// SWARM-SPEC Layer 2: record a successful forward observation
     /// against the hedge tracker. Keyed on (model, segment, holder)
     /// rather than just holder because different models/segments have

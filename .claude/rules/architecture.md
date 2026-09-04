@@ -198,6 +198,81 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
+## A cap sized in units of the WORK is a ceiling on the product
+
+**`inference::tensor_util::bytes_to_tensor` bounds its allocation by the
+PAYLOAD, and deliberately has no ceiling on the element count.** The declared
+shape is compared against the bytes actually present — `num_elements * 4` for
+f32, `quant::q8_0_byte_len_checked` for Q8_0 — before `Vec::with_capacity` is
+reached. That caps the allocation at roughly one message the transport already
+accepted (`MAX_ACTIVATION_SIZE` 128 MB on the wire, `MAX_PAYLOAD` 512 MB over
+worker IPC) and it is exact.
+
+**What it replaced, and why the replacement is not a weakening.** A March 2026
+hardening pass added `MAX_TENSOR_ELEMENTS = 32 * 1024 * 1024`, and it was right
+about the hazard: the count comes off the wire, so a twelve-byte message
+declaring a billion elements reserves 4 GB before the first bounds check. But
+an element count is not a memory bound — it is a bound on the WORK. A hidden
+state is `positions × hidden_dim` elements, so 32 M is **exactly 8192 positions
+at hidden 4096** and only 4096 at the 8192-wide hidden of a 70 B. Every prompt
+past that was unroutable across nodes, on every model, for six months, with a
+message (`Tensor too large: 43876352 elements`) that named no model, no shape
+and no prompt. Reported from the field on v0.3.153 — a 32-layer 8 B split over
+two nodes, an 11.2 k-token agent prompt, four identical failures (gotcha #451).
+The element count varying with prompt length was the whole tell.
+
+**The rule to carry.** When adding a limit to something a peer declares, ask
+what the EXACT bound is before reaching for a round number — it is usually the
+input you are already holding. A constant that happens to be large enough today
+is a product limit nobody chose, and it will be discovered by a user rather than
+by a test. And when a refusal is a hard wall, its message must name the shape it
+refused, or the person who hits it cannot tell a policy from a bug.
+
+## A model's geometry is learned in one place, and unknown must not be silent
+
+**`SharedState::gguf_meta_for` is the only read of `gguf_meta`**, and it learns
+the geometry from the local `gguf_header.bin` on a miss.
+`the_model_geometry_is_read_through_one_accessor` in
+`tests/repo_consistency.rs` fails the build on a bare `gguf_meta.get(`.
+
+**Why.** The map was filled at startup, by the admin HuggingFace shard download
+and by local manifest generation — and by nothing at all on the path a model
+takes when its shards arrive from the swarm while the daemon runs. Its one
+reader is `gather_candidates`, which uses it to charge a peer for what THIS
+prompt's KV cache costs per layer (`max_hostable_layers`, the #447 fix), and
+that bound treats an absent geometry as *charge nothing*. So the bound was inert
+on precisely the case it was written for — a model being distributed for the
+first time — and a warm 6 GB card was handed 28 layers of an 11.2 k-token prompt
+on a release that already contained the fix (gotcha #451).
+
+Three things a change must keep. The accessor reads only an EXISTING header
+(one `exists()` on a miss); materialising a header out of `shard_000` copies
+megabytes and belongs on the startup and shard-landing paths, which call
+`ensure_gguf_header` first. `check_and_load_model` — the choke point every
+shard landing funnels through — warms it, so the routing path does not normally
+pay the parse. And **`None` still means unknown, never zero**: a coordinator
+holding none of a model's shards genuinely cannot know its shape, and the
+capacity bound must keep declining to judge rather than charging nothing while
+pretending to.
+
+**The general shape**: a guard whose input is "unknown → do not apply" is
+worthless until you check that something fills that input on the path the guard
+exists for. Grep for the writer, and check it runs where the reader runs.
+
+## A count and an outcome that disagree are two different questions
+
+`scheduler::standby_covers` is the one predicate for "could this standby take
+that segment over", used by `segments_without_standby` (reported with the plan)
+and by `pipeline::distributed::failover_segment`'s search.
+
+Standbys are chosen per segment, so a plan can log `standbys=1` and still have
+none for the range that fails — the failure then logs `total_standbys=1` beside
+"NO standby available for failed segment", and both lines are true. A tester
+read the pair as a contradiction and lost an hour to it. The plan now names
+`segments_without_standby`, and the failure reports
+`standbys_covering_this_segment` next to the total. When a summary count cannot
+answer the question a reader will ask of it, print the answer, not the count.
+
 ## Additive Protocol Evolution (NETWORKING_PLAN cross-cutting)
 
 Version-breaking network changes were a top adoption blocker: a node on vN
