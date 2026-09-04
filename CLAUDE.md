@@ -252,7 +252,35 @@ npm publish, which needs the user's credentials.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.154-alpha (2026-09-04, tag on `4b3a8080`).** Local
+**Released and deployed: v0.3.155-alpha (2026-09-04, tag on `7bb10813`).** Local
+`225e6fe7` (CUDA asset, downloaded sha256 `6054cb80…` == published, size ==
+published, ready in ~15 s, 0 ERROR lines, `release ok` served, rollback
+`~/.local/bin/swarmllm.0.3.154-alpha.bak`) and Proxmox `96842635` (.deb
+`0.3.155-alpha-1` over `0.3.154-alpha-1`, `enabled` + `active`, no `.dpkg-old`,
+journal errors "-- No entries --", back in the peer list at 113 ms) both on it,
+node ids kept. Gate: CI + Cache warm green on the tagged commit, 25 assets, not
+draft, `latest`, sha256 CUDA + deb both matching, `ggml_cuda_init` = 1, **smoke
+9/9 (none skipped) + shapes 7/7 on the DOWNLOADED artifact** — and both
+harnesses were baselined green on .154 FIRST, so a failure would have been a
+real regression rather than a harness fault.
+**Eight defects, all from ONE tester's live two-node pool in a single evening**,
+all still present at HEAD when checked: **#454** the boomerang route had NO
+memory check (a card whose own bound read 2-15 layers was handed 34); **#455**
+peer capacity priced at a fixed 4096-token KV, so an 18k-token request returned
+NOTHING for its full 600 s; **#456** `standbys: vec![]` named a retry in its
+comment that never covered `SegmentFailoverExhausted`; **#457** two requests
+3 ms apart both given the same `peer_free_vram_mb=Some(4598)`, one OOM'd while
+the other decoded on that peer; **#458** the standby the scheduler PREFERS — the
+local node — was the one that could not work (`No peer_id_bytes for backup
+node`), plus three silent losses on that path (`pre_embedded`, `generated_ids`,
+`vision_embeddings` hardcoded to nothing); the exhaustion error dropped its own
+cause; **#459** cancelling was wired to every long wait except the model LOAD;
+**#460** decisions logged a reason but never named the peer it was about.
+⚠ The first Release monitor matched the PREVIOUS release's run — read
+`gh release view` / filter on the tag. ⚠ A `gh api .../git/refs/tags/<tag>`
+404 does NOT mean the tag failed to push; `git ls-remote` is the check.
+
+Prior line: v0.3.154-alpha (2026-09-04, tag on `4b3a8080`). Local
 `225e6fe7` (CUDA asset, downloaded sha256 OK, size == published, ready in
 seconds, 0 ERROR lines, `release ok` served, rollback
 `~/.local/bin/swarmllm.0.3.153-alpha.bak`) and Proxmox `96842635` (.deb
