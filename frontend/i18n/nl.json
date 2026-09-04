@@ -1260,6 +1260,8 @@
   "update.apply_restart": "Toepassen en herstarten",
   "update.applying": "Toepassen...",
   "update.available": "Update beschikbaar: v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM kan zichzelf niet bijwerken: de map waarin het is geïnstalleerd ({dir}) vereist beheerdersrechten. Verplaats SwarmLLM naar een eigen map — ergens in je persoonlijke map — dan werkt het zichzelf voortaan bij.",
+  "update.blocked_other": "SwarmLLM kan niet schrijven in de map waarin het is geïnstalleerd ({dir}) en kan deze update dus niet installeren. Download de nieuwe versie en vervang het bestand zelf.",
   "update.checking": "Controleren...",
   "update.download_apply": "Downloaden en toepassen",
   "update.error": "Fout",

@@ -277,14 +277,23 @@
     var text = I18n.t('update.available', { from: data.current_version, to: data.latest_version });
     banner.innerHTML = '<span>' + U.escapeHtml(text) + '</span>';
 
-    // A managed install (deb/rpm service, hardened anchor) cannot replace its
-    // own binary — its unit only grants write access to the data directory. An
-    // Install button there fails every time, so say how this node actually
-    // updates instead of offering one.
+    // This node cannot replace its own binary. An Install button here fails
+    // every time, so say how this node actually updates instead of offering
+    // one — and say it for the RIGHT reason. This used to be one sentence
+    // about a package manager, which is right for a `.deb` under
+    // `ProtectSystem=strict` and useless to someone on a Mac whose binary
+    // sits in /Applications, a folder needing administrator rights (reported
+    // 2026-09-03). The daemon now sends a stable key plus the folder.
     if (data.self_update_supported === false) {
       var note = document.createElement('span');
       note.className = 'update-banner-note';
-      note.textContent = I18n.t('update.managed');
+      var reasonKeys = {
+        packaged: 'update.managed',
+        install_dir_not_writable: 'update.blocked_not_writable',
+        other: 'update.blocked_other'
+      };
+      var key = reasonKeys[data.self_update_blocked] || 'update.managed';
+      note.textContent = I18n.t(key, { dir: data.install_dir || '' });
       banner.appendChild(note);
       document.body.prepend(banner);
       return;

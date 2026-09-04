@@ -1260,6 +1260,8 @@
   "update.apply_restart": "应用并重启",
   "update.applying": "应用中...",
   "update.available": "有可用更新：v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM 无法自我更新：它所在的文件夹（{dir}）需要管理员权限。把 SwarmLLM 移到你自己的文件夹（主目录下任意位置）后，它就能自动更新了。",
+  "update.blocked_other": "SwarmLLM 无法写入它所在的文件夹（{dir}），因此无法安装此更新。请下载新版本并自行替换文件。",
   "update.checking": "检查中...",
   "update.download_apply": "下载并应用",
   "update.error": "错误",

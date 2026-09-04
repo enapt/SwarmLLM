@@ -1260,6 +1260,8 @@
   "update.apply_restart": "Uygula ve Yeniden Başlat",
   "update.applying": "Uygulanıyor...",
   "update.available": "Güncelleme mevcut: v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM kendini güncelleyemiyor: kurulu olduğu klasör ({dir}) yönetici izni istiyor. Kendi klasörünüze taşıyın — ev klasörünüzün altında herhangi bir yere — bundan sonra kendini güncelleyecektir.",
+  "update.blocked_other": "SwarmLLM kurulu olduğu klasöre ({dir}) yazamıyor, bu yüzden bu güncellemeyi kuramıyor. Yeni sürümü indirip dosyayı kendiniz değiştirin.",
   "update.checking": "Kontrol ediliyor...",
   "update.download_apply": "İndir ve Uygula",
   "update.error": "Hata",

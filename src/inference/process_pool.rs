@@ -398,6 +398,126 @@ struct WorkerHandle {
     gpu_layers_on_card: Option<(usize, usize)>,
 }
 
+/// Longest path a Unix domain socket may have, INCLUDING its NUL terminator.
+///
+/// `sun_path` in `sockaddr_un` is a fixed-size array, not a pointer: 104 bytes
+/// on macOS and the BSDs, 108 on Linux. A path one byte over does not truncate
+/// — `bind` refuses outright, and the failure surfaces from `interprocess` as
+/// "local socket name length exceeds capacity of sun_path of sockaddr_un".
+///
+/// **This is not a theoretical limit.** macOS gives every user a private
+/// per-boot temporary directory (`/var/folders/xx/…/T/`, measured at 49
+/// characters on a Mac mini M4), and the old name — `swarmllm-worker-` plus a
+/// 36-character UUID plus `.sock`, 57 characters — took that to 106. So EVERY
+/// worker spawn failed on macOS, which means every request failed: with prompt
+/// privacy on, the first and last layers are always local, so a node that
+/// cannot start a worker cannot answer at all, whatever the swarm holds
+/// (reported 2026-09-03, two models, first attempt each time). `TMPDIR=/tmp`
+/// was the tester's workaround. Linux never saw it: `/tmp` is 4 characters.
+#[cfg(unix)]
+const SUN_PATH_MAX: usize = if cfg!(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)) {
+    104
+} else {
+    108
+};
+
+/// The socket filename, kept SHORT on purpose.
+///
+/// 12 hex characters of randomness rather than a 36-character UUID: the name
+/// only has to be unique among this machine's live workers, and every
+/// character spent here is a character the containing directory cannot use.
+/// 48 bits collides with probability ~1e-10 at a thousand concurrent workers,
+/// and a collision is a clean bind failure and a retry, not corruption.
+#[cfg(unix)]
+fn worker_socket_filename() -> String {
+    let u = Uuid::new_v4();
+    format!("swarmllm-{}.sock", &u.simple().to_string()[..12])
+}
+
+/// The first candidate directory in which `filename` fits inside `limit`.
+///
+/// Pure so the arithmetic can be tested without a filesystem, on any platform:
+/// the macOS failure was a length calculation, and length calculations are
+/// exactly what a Linux-only test suite cannot see.
+///
+/// `limit` counts the NUL terminator, so the path itself must be strictly
+/// shorter than it.
+#[cfg(unix)]
+fn first_dir_that_fits(
+    candidates: &[std::path::PathBuf],
+    filename: &str,
+    limit: usize,
+) -> Option<std::path::PathBuf> {
+    candidates
+        .iter()
+        .map(|d| d.join(filename))
+        .find(|p| p.as_os_str().len() < limit)
+}
+
+/// A short, private per-user directory to fall back to when `$TMPDIR` is too
+/// long for a socket path.
+///
+/// `/tmp/swarmllm-<uid>`, created 0700 and then VERIFIED: `/tmp` is world
+/// writable, so another local user can pre-create the directory and would
+/// otherwise own the place our sockets live. A directory that is not a real
+/// directory, not ours, or group/world accessible is refused rather than
+/// repaired — repairing someone else's directory is not this code's business,
+/// and the caller still has `$TMPDIR`.
+#[cfg(unix)]
+fn short_private_socket_dir() -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let uid = unsafe { libc::getuid() };
+    let dir = std::path::PathBuf::from(format!("/tmp/swarmllm-{uid}"));
+    // `create_dir_all` is happy if it already exists, which is why the checks
+    // below are not optional.
+    std::fs::create_dir_all(&dir).ok()?;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    // `symlink_metadata`, not `metadata`: a symlink pointing somewhere else is
+    // precisely the attack, and following it is how you fail to notice.
+    let md = std::fs::symlink_metadata(&dir).ok()?;
+    (md.is_dir() && md.uid() == uid && md.permissions().mode() & 0o077 == 0).then_some(dir)
+}
+
+/// Where this worker's IPC socket goes: the first directory whose resulting
+/// path fits [`SUN_PATH_MAX`].
+///
+/// `$TMPDIR` first, because on macOS it is per-user and private and on Linux it
+/// is short; the `/tmp/swarmllm-<uid>` fallback exists only for the case that
+/// made this function necessary. Returns the path AND the directories that
+/// were tried, so a failure can name them — the reported error said only that
+/// the limit was exceeded, and the tester could not get the offending path out
+/// of the logs even at debug level.
+#[cfg(unix)]
+fn worker_socket_path() -> Result<String, SwarmError> {
+    let filename = worker_socket_filename();
+    let mut candidates = vec![std::env::temp_dir()];
+    if let Some(short) = short_private_socket_dir() {
+        candidates.push(short);
+    }
+    match first_dir_that_fits(&candidates, &filename, SUN_PATH_MAX) {
+        Some(p) => p
+            .to_str()
+            .map(str::to_string)
+            .ok_or_else(|| SwarmError::Internal("socket path not UTF-8".into())),
+        None => Err(SwarmError::ServiceUnavailable(format!(
+            "no directory short enough for a worker socket (the limit is {SUN_PATH_MAX} \
+             characters on this platform, including the file name): tried {}. Set TMPDIR to \
+             a shorter path, for example TMPDIR=/tmp.",
+            candidates
+                .iter()
+                .map(|d| format!("{} ({} chars)", d.display(), d.as_os_str().len()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
 /// Pull the `request_id` field out of any `WorkerMsg` variant that carries one.
 /// `Ready` / `Bye` have no request_id and are dropped by the reader actor
 /// (they're only relevant during spawn, which handshakes synchronously).
@@ -3082,15 +3202,12 @@ impl ModelProcessPool {
         //    `\\.\pipe\swarmllm-worker-<uuid>`). The default DACL on a named
         //    pipe grants access only to the current logon session — the
         //    equivalent of 0o600 for cross-user isolation.
-        let uuid_str = uuid::Uuid::new_v4().to_string();
+        // Unix: the shortest path that fits `sun_path` — see
+        // [`worker_socket_path`] for why that is not a detail.
         #[cfg(unix)]
-        let socket_name: String = std::env::temp_dir()
-            .join(format!("swarmllm-worker-{uuid_str}.sock"))
-            .to_str()
-            .ok_or_else(|| SwarmError::Internal("socket path not UTF-8".into()))?
-            .to_string();
+        let socket_name: String = worker_socket_path()?;
         #[cfg(windows)]
-        let socket_name: String = format!("swarmllm-worker-{uuid_str}");
+        let socket_name: String = format!("swarmllm-worker-{}", uuid::Uuid::new_v4());
 
         // RAII guard: remove the Unix socket file if spawn errors out partway.
         // Defused on success; WorkerHandle's Drop then owns the cleanup.
@@ -3142,7 +3259,14 @@ impl ModelProcessPool {
                 unsafe {
                     libc::umask(prev_umask);
                 }
-                SwarmError::ServiceUnavailable(format!("socket bind: {e}"))
+                // Name the path. The reported failure ("length exceeds
+                // capacity of sun_path") said what was wrong and not what
+                // it was wrong about, and the path could not be recovered
+                // from the logs at any verbosity.
+                SwarmError::ServiceUnavailable(format!(
+                    "socket bind at {socket_name} ({} chars): {e}",
+                    socket_name.len()
+                ))
             })?;
 
         #[cfg(unix)]
@@ -4477,6 +4601,81 @@ impl ModelProcessPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reported macOS failure, as arithmetic (2026-09-03, Mac mini M4).
+    ///
+    /// macOS hands every user a private per-boot temp directory; the tester
+    /// measured theirs at 49 characters. The old socket name was
+    /// `swarmllm-worker-` + a 36-character UUID + `.sock` = 57, so the path
+    /// came to 49 + 1 + 57 = 107 against a 104-byte `sun_path` — every worker
+    /// spawn failed, and with it every request. The new name is short enough
+    /// that the same directory fits with room to spare.
+    ///
+    /// Written against the CONSTANT rather than the host so it fails on Linux
+    /// too: this is exactly the class of bug a Linux-only suite cannot see.
+    #[cfg(unix)]
+    #[test]
+    fn a_mac_style_temp_dir_fits_a_worker_socket() {
+        // Trailing slash included: that is the form macOS hands out
+        // (`confstr(_CS_DARWIN_USER_TEMP_DIR)`), and it is the character that
+        // takes the reported directory to the measured 49.
+        let tmpdir = std::path::PathBuf::from("/var/folders/8k/9mzq0l7d5xv3r1p2t6y4w8x00000gn/T/");
+        assert_eq!(tmpdir.as_os_str().len(), 49, "the reported TMPDIR length");
+
+        // Control: the name this replaced did NOT fit.
+        let old_name = format!("swarmllm-worker-{}.sock", uuid::Uuid::new_v4());
+        assert_eq!(old_name.len(), 57);
+        assert!(
+            first_dir_that_fits(std::slice::from_ref(&tmpdir), &old_name, 104).is_none(),
+            "the old name must be what broke, or this test proves nothing"
+        );
+
+        // The fix: the same directory now fits, on the tightest platform.
+        let name = worker_socket_filename();
+        let chosen = first_dir_that_fits(&[tmpdir], &name, 104)
+            .expect("a 49-character temp dir must fit a short socket name");
+        assert!(chosen.as_os_str().len() < 104);
+    }
+
+    /// A directory too long for the limit is skipped for the next candidate —
+    /// which is what the `/tmp/swarmllm-<uid>` fallback is for.
+    #[cfg(unix)]
+    #[test]
+    fn an_over_long_directory_falls_through_to_a_shorter_one() {
+        let long = std::path::PathBuf::from(format!("/var/folders/{}", "x".repeat(90)));
+        let short = std::path::PathBuf::from("/tmp/swarmllm-501");
+        let name = worker_socket_filename();
+        assert_eq!(
+            first_dir_that_fits(&[long.clone(), short.clone()], &name, SUN_PATH_MAX),
+            Some(short.join(&name))
+        );
+        // And when nothing fits, nothing is invented.
+        assert_eq!(first_dir_that_fits(&[long], &name, SUN_PATH_MAX), None);
+    }
+
+    /// The name stays short and stays unique — the two properties in tension.
+    #[cfg(unix)]
+    #[test]
+    fn the_socket_filename_is_short_and_unique() {
+        let a = worker_socket_filename();
+        let b = worker_socket_filename();
+        assert_ne!(a, b);
+        assert!(a.len() <= 32, "socket filename grew: {a}");
+        assert!(a.starts_with("swarmllm-") && a.ends_with(".sock"));
+    }
+
+    /// On THIS machine, whatever its temp directory, a worker socket path can
+    /// be built and is inside the limit. The end-to-end form of the above.
+    #[cfg(unix)]
+    #[test]
+    fn this_machine_can_build_a_worker_socket_path() {
+        let p = worker_socket_path().expect("a socket path must be buildable here");
+        assert!(
+            p.len() < SUN_PATH_MAX,
+            "{p} is {} chars, limit {SUN_PATH_MAX}",
+            p.len()
+        );
+    }
 
     /// A worker with nothing in flight retires immediately — the common case,
     /// since both displacement paths only retire idle models. If this ever

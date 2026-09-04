@@ -1260,6 +1260,8 @@
   "update.apply_restart": "Applica e riavvia",
   "update.applying": "Applicazione in corso...",
   "update.available": "Aggiornamento disponibile: v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM non può aggiornarsi da solo: la cartella in cui è installato ({dir}) richiede i diritti di amministratore. Spostalo in una cartella tua — una qualsiasi nella tua cartella personale — e da quel momento si aggiornerà da solo.",
+  "update.blocked_other": "SwarmLLM non può scrivere nella cartella in cui è installato ({dir}), quindi non può installare questo aggiornamento. Scarica la nuova versione e sostituisci il file manualmente.",
   "update.checking": "Verifica...",
   "update.download_apply": "Scarica e applica",
   "update.error": "Errore",

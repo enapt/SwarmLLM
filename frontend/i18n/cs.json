@@ -1260,6 +1260,8 @@
   "update.apply_restart": "Použít a restartovat",
   "update.applying": "Aplikování...",
   "update.available": "Dostupná aktualizace: v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM se nemůže sám aktualizovat: složka, ve které je nainstalován ({dir}), vyžaduje práva správce. Přesuňte jej do vlastní složky — kamkoli do domovské složky — a od té chvíle se bude aktualizovat sám.",
+  "update.blocked_other": "SwarmLLM nemůže zapisovat do složky, ve které je nainstalován ({dir}), takže tuto aktualizaci nedokáže nainstalovat. Stáhněte novou verzi a soubor nahraďte ručně.",
   "update.checking": "Kontroluji...",
   "update.download_apply": "Stáhnout a použít",
   "update.error": "Chyba",

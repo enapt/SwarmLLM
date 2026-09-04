@@ -1260,6 +1260,8 @@
   "update.apply_restart": "적용 및 재시작",
   "update.applying": "적용 중...",
   "update.available": "업데이트 사용 가능: v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM이 스스로 업데이트할 수 없습니다. 설치된 폴더({dir})에 관리자 권한이 필요합니다. 홈 폴더 아래 등 사용자 소유 폴더로 옮기면 이후에는 자동으로 업데이트됩니다.",
+  "update.blocked_other": "SwarmLLM이 설치된 폴더({dir})에 쓸 수 없어 이 업데이트를 설치할 수 없습니다. 새 버전을 내려받아 파일을 직접 교체하세요.",
   "update.checking": "확인 중...",
   "update.download_apply": "다운로드 및 적용",
   "update.error": "오류",

@@ -1260,6 +1260,8 @@
   "update.apply_restart": "Aplicar e Reiniciar",
   "update.applying": "Aplicando...",
   "update.available": "Atualização disponível: v{from} → v{to}",
+  "update.blocked_not_writable": "O SwarmLLM não consegue atualizar-se: a pasta onde está instalado ({dir}) exige permissões de administrador. Move-o para uma pasta tua — qualquer uma dentro da tua pasta pessoal — e passará a atualizar-se sozinho.",
+  "update.blocked_other": "O SwarmLLM não consegue escrever na pasta onde está instalado ({dir}), por isso não consegue instalar esta atualização. Descarrega a nova versão e substitui o ficheiro tu mesmo.",
   "update.checking": "Verificando...",
   "update.download_apply": "Baixar e Aplicar",
   "update.error": "Erro",

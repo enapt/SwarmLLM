@@ -1260,6 +1260,8 @@
   "update.apply_restart": "Áp dụng & Khởi động lại",
   "update.applying": "Đang áp dụng...",
   "update.available": "Có bản cập nhật: v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM không thể tự cập nhật: thư mục cài đặt ({dir}) cần quyền quản trị. Hãy chuyển SwarmLLM sang thư mục của bạn — bất kỳ đâu trong thư mục cá nhân — và từ đó nó sẽ tự cập nhật.",
+  "update.blocked_other": "SwarmLLM không ghi được vào thư mục cài đặt ({dir}) nên không thể cài bản cập nhật này. Hãy tải phiên bản mới và tự thay thế tệp.",
   "update.checking": "Đang kiểm tra...",
   "update.download_apply": "Tải & Áp dụng",
   "update.error": "Lỗi",

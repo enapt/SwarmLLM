@@ -4,6 +4,30 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Inference was completely broken on macOS, for every model.** The local
+  worker process could not start at all: the address of the socket the daemon
+  and the worker talk over was longer than macOS allows, so every attempt
+  failed before any model was touched, and every request failed with it —
+  there is always work for the local machine, so nothing could complete no
+  matter which peers were available. macOS gives each user a long private
+  temporary folder, and SwarmLLM's socket name was long too; together they
+  went past the limit. The name is now short, and if a machine's temporary
+  folder is still too long SwarmLLM uses a short one of its own instead. If
+  the address ever cannot be built, the error now says which folders were
+  tried and how long they were. Reported on a Mac mini M4; Linux was never
+  affected, because `/tmp` is short.
+- **A Mac that cannot install its own updates now says why, and says it before
+  downloading a gigabyte.** SwarmLLM installed in `/Applications` — a folder
+  that needs administrator rights — could check for updates, download them,
+  and then fail with "Permission denied". `swarmllm update` now checks first
+  and stops with nothing downloaded and nothing changed. The dashboard and the
+  daemon's log say the same thing: which folder is the problem, and that
+  moving SwarmLLM anywhere under your home folder makes updates work by
+  themselves. All three used to say "use your package manager", which is
+  right for a Linux package and useless on a Mac.
+
 ### Added
 
 - **A node learns about a new release from its peers.** When two different

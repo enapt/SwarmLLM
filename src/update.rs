@@ -70,6 +70,20 @@ pub struct UpdateInfo {
     /// say how THIS node updates instead of offering a button that cannot work.
     #[serde(default)]
     pub self_update_supported: bool,
+    /// WHY it cannot, as a stable key the dashboard translates:
+    /// `packaged`, `install_dir_not_writable`, or `other`. `None` when it can.
+    ///
+    /// A key rather than a sentence, for the reason `error_hint_with_key`
+    /// exists: the dashboard ships in 21 languages and English prose from the
+    /// daemon can only ever be shown to a third of the people who read it. The
+    /// key is the contract; `SelfUpdateBlocker::advice` is the same decision in
+    /// English for the log and the terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_update_blocked: Option<String>,
+    /// The folder the running binary lives in — what the person has to act on
+    /// when the answer is "move it somewhere you own".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_dir: Option<String>,
 }
 
 /// State for the update checker, stored in SharedState.
@@ -306,6 +320,84 @@ const NUDGED_CHECK_MIN_SPACING: std::time::Duration = std::time::Duration::from_
 /// and a triggered one needs it more, not less.
 const NUDGED_CHECK_MAX_JITTER_SECS: u64 = 90;
 
+/// Why a node cannot install its own updates.
+///
+/// Built by [`UpdateChecker::self_update_blocker`] and rendered by
+/// [`Self::advice`], which is the ONE wording for this situation: the daemon
+/// logs it, the dashboard shows it and `swarmllm update` prints it, so a node
+/// cannot give three different answers to "why won't this update?".
+#[derive(Debug, Clone)]
+pub struct SelfUpdateBlocker {
+    /// The folder the running binary lives in — the thing the user has to act
+    /// on, and the thing no previous message named.
+    pub install_dir: PathBuf,
+    /// The probe failed for want of permission, as opposed to a read-only
+    /// mount, a missing directory or a full disk.
+    pub permission_denied: bool,
+    /// There is evidence this node was installed from a package.
+    pub packaged: bool,
+    /// The underlying I/O error, for the log rather than the user.
+    pub reason: String,
+}
+
+impl SelfUpdateBlocker {
+    /// Stable key for this situation, for the dashboard to translate. Paired
+    /// with [`Self::advice`], which is the same three cases in English — they
+    /// are written together so a new case cannot reach one surface only.
+    pub fn key(&self) -> &'static str {
+        if self.packaged {
+            "packaged"
+        } else if self.permission_denied {
+            "install_dir_not_writable"
+        } else {
+            "other"
+        }
+    }
+
+    /// What to tell the person running this node, in their terms.
+    pub fn advice(&self) -> String {
+        if self.packaged {
+            return format!(
+                "This node was installed from a package, so it updates through your package \
+                 manager rather than by itself: `sudo apt install --only-upgrade swarmllm` \
+                 (or `dnf upgrade swarmllm`). On a hardened anchor, swarmllm-update.timer \
+                 does it. Install folder: {}.",
+                self.install_dir.display()
+            );
+        }
+        if self.permission_denied {
+            return format!(
+                "SwarmLLM cannot update itself because it does not have permission to write to \
+                 the folder it is installed in ({}). Folders like /Applications and /usr/bin \
+                 need administrator rights. Move SwarmLLM to a folder you own — anywhere under \
+                 your home folder works, and nothing else needs changing — and it will update \
+                 itself from then on. Otherwise download the new version and replace the file \
+                 yourself.",
+                self.install_dir.display()
+            );
+        }
+        format!(
+            "SwarmLLM cannot write to the folder it is installed in ({}), so it cannot replace \
+             its own binary: {}. Download the new version and replace the file yourself, or \
+             install SwarmLLM somewhere writable.",
+            self.install_dir.display(),
+            self.reason
+        )
+    }
+}
+
+/// Is there evidence this node came from a `.deb`/`.rpm` rather than a
+/// downloaded binary?
+///
+/// The packaging installs this unit file; nothing else in this project writes
+/// it. Deliberately evidence-based rather than inferred from the binary's
+/// path — `/usr/local/bin` is equally a manual install — because the advice
+/// that follows is wrong for the other case, which is the whole reason this
+/// distinction exists.
+fn looks_like_packaged_install() -> bool {
+    std::path::Path::new("/usr/lib/systemd/system/swarmllm.service").exists()
+}
+
 impl UpdateChecker {
     pub fn new(
         config: UpdateConfig,
@@ -516,6 +608,7 @@ impl UpdateChecker {
             None
         };
 
+        let blocker = self.self_update_blocker().await;
         let info = UpdateInfo {
             latest_version: latest_tag,
             current_version: current.to_string(),
@@ -524,7 +617,14 @@ impl UpdateChecker {
             published_at: release.published_at.clone().unwrap_or_default(),
             checksum_sha256,
             downloaded: false,
-            self_update_supported: self.can_self_update().await,
+            // One probe, three fields: whether it can, why not, and where. A
+            // second call to `can_self_update` here would create and delete
+            // the staging file twice for the same answer.
+            self_update_supported: blocker.is_none(),
+            self_update_blocked: blocker.as_ref().map(|b| b.key().to_string()),
+            install_dir: blocker
+                .as_ref()
+                .map(|b| b.install_dir.display().to_string()),
         };
 
         Ok(Some(info))
@@ -551,13 +651,37 @@ impl UpdateChecker {
     /// apply an update does not fetch ~1 GB every hour to stage a file it will
     /// then refuse to use.
     pub async fn can_self_update(&self) -> bool {
+        self.self_update_blocker().await.is_none()
+    }
+
+    /// Why this installation cannot replace its own binary, or `None` when it
+    /// can. Same probe as [`Self::can_self_update`], which is a thin wrapper.
+    ///
+    /// The REASON matters because the advice differs completely, and until now
+    /// there was only a boolean: the daemon's log line named a package manager
+    /// and the anchor's timer, which is right for a `.deb` and useless to
+    /// someone on a Mac who put the binary in `/Applications` — a folder that
+    /// needs administrator rights to write. That person is not running a
+    /// package manager and has nothing to act on (reported 2026-09-03, Mac
+    /// mini M4: `swarmllm update` downloaded the release and then failed with
+    /// a bare "Permission denied" from the backup step).
+    pub async fn self_update_blocker(&self) -> Option<SelfUpdateBlocker> {
         let probe = self.binary_path.with_extension("update.probe");
         match tokio::fs::File::create(&probe).await {
             Ok(_) => {
                 let _ = tokio::fs::remove_file(&probe).await;
-                true
+                None
             }
-            Err(_) => false,
+            Err(e) => Some(SelfUpdateBlocker {
+                install_dir: self
+                    .binary_path
+                    .parent()
+                    .unwrap_or(&self.binary_path)
+                    .to_path_buf(),
+                permission_denied: e.kind() == std::io::ErrorKind::PermissionDenied,
+                packaged: looks_like_packaged_install(),
+                reason: e.to_string(),
+            }),
         }
     }
 
@@ -1108,11 +1232,17 @@ impl UpdateChecker {
                     let mut info = info;
                     let should_download = should_stage_download(mode, &info);
                     if mode >= UpdateMode::Download && !info.self_update_supported {
+                        // One wording for this, shared with `swarmllm update`
+                        // and the dashboard: it names the folder and what to
+                        // do about it, which "use your package manager" did
+                        // not on a Mac with the binary in /Applications.
+                        let advice = match self.self_update_blocker().await {
+                            Some(b) => b.advice(),
+                            None => "This installation cannot replace its own binary.".to_string(),
+                        };
                         tracing::info!(
                             latest = %info.latest_version,
-                            "Update available, but this installation cannot replace its own \
-                             binary — update via your package manager (deb/rpm) or, on an \
-                             anchor, swarmllm-update.timer"
+                            "Update available, but this node cannot install it. {advice}"
                         );
                     }
                     if should_download {
@@ -1859,6 +1989,8 @@ mod tests {
             checksum_sha256: Some("abc123".into()),
             downloaded: false,
             self_update_supported: true,
+            self_update_blocked: None,
+            install_dir: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: UpdateInfo = serde_json::from_str(&json).unwrap();
@@ -1898,6 +2030,8 @@ mod staged_reuse_tests {
             checksum_sha256: checksum,
             downloaded: false,
             self_update_supported: true,
+            self_update_blocked: None,
+            install_dir: None,
         }
     }
 
@@ -2248,5 +2382,65 @@ mod pending_restart_tests {
         assert_eq!(w.observe(a, "0.3.152-alpha", current), None);
         // Only one OTHER peer now says 153: not enough.
         assert_eq!(w.observe(NodeId([2u8; 32]), "0.3.153-alpha", current), None);
+    }
+
+    /// The advice a Mac user gets when the binary sits in a folder needing
+    /// administrator rights. It has to name the folder and a next step; the
+    /// message it replaces named a package manager they are not running.
+    #[test]
+    fn an_unwritable_install_folder_is_explained_in_terms_a_user_can_act_on() {
+        use super::SelfUpdateBlocker;
+        let b = SelfUpdateBlocker {
+            install_dir: std::path::PathBuf::from("/Applications"),
+            permission_denied: true,
+            packaged: false,
+            reason: "Permission denied (os error 13)".into(),
+        };
+        let a = b.advice();
+        assert!(a.contains("/Applications"), "must name the folder: {a}");
+        assert!(a.contains("permission"), "must say what is wrong: {a}");
+        assert!(
+            a.contains("home folder"),
+            "must say what to do about it: {a}"
+        );
+        assert!(
+            !a.contains("apt") && !a.contains("dnf"),
+            "a package manager is not the answer here: {a}"
+        );
+    }
+
+    /// A packaged install gets the package-manager answer, which for it is the
+    /// correct one — the two situations must not share a message.
+    #[test]
+    fn a_packaged_install_is_pointed_at_its_package_manager() {
+        use super::SelfUpdateBlocker;
+        let b = SelfUpdateBlocker {
+            install_dir: std::path::PathBuf::from("/usr/bin"),
+            permission_denied: true,
+            packaged: true,
+            reason: "Permission denied (os error 13)".into(),
+        };
+        let a = b.advice();
+        assert!(a.contains("apt") || a.contains("dnf"), "{a}");
+        assert!(
+            !a.contains("home folder"),
+            "moving a packaged install is not the advice: {a}"
+        );
+    }
+
+    /// A failure that is not about permission says so rather than telling the
+    /// user to move a folder they can already write.
+    #[test]
+    fn a_non_permission_failure_reports_what_actually_happened() {
+        use super::SelfUpdateBlocker;
+        let b = SelfUpdateBlocker {
+            install_dir: std::path::PathBuf::from("/mnt/ro"),
+            permission_denied: false,
+            packaged: false,
+            reason: "Read-only file system (os error 30)".into(),
+        };
+        let a = b.advice();
+        assert!(a.contains("Read-only file system"), "{a}");
+        assert!(a.contains("/mnt/ro"), "{a}");
     }
 }

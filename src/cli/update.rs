@@ -42,6 +42,25 @@ pub async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
                 return Ok(());
             }
 
+            // Ask whether this install CAN replace its own binary before
+            // fetching ~1 GB to find out. It could not on a Mac with the
+            // binary in `/Applications`, and the tester learnt that from a
+            // bare "Permission denied" after the whole download (reported
+            // 2026-09-03). The check is a file create-and-delete beside the
+            // binary, and the message names the folder and the fix.
+            if let Some(blocker) = checker.self_update_blocker().await {
+                eprintln!();
+                eprintln!("Cannot install this update.");
+                eprintln!();
+                eprintln!("{}", blocker.advice());
+                eprintln!();
+                eprintln!(
+                    "Nothing was downloaded and nothing was changed. This node stays on v{}.",
+                    info.current_version
+                );
+                std::process::exit(1);
+            }
+
             println!("\nDownloading...");
             match checker.download_update(&info).await {
                 Ok(tmp_path) => {

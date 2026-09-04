@@ -1260,6 +1260,8 @@
   "update.apply_restart": "適用して再起動",
   "update.applying": "適用中...",
   "update.available": "アップデートあり：v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM は自分自身を更新できません。インストール先のフォルダ（{dir}）には管理者権限が必要です。ホームフォルダ内など自分のフォルダへ移動すれば、以後は自動で更新されます。",
+  "update.blocked_other": "SwarmLLM はインストール先のフォルダ（{dir}）に書き込めないため、この更新を適用できません。新しいバージョンをダウンロードし、ファイルを手動で置き換えてください。",
   "update.checking": "確認中...",
   "update.download_apply": "ダウンロードして適用",
   "update.error": "エラー",

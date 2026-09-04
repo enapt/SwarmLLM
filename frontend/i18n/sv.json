@@ -1260,6 +1260,8 @@
   "update.apply_restart": "Tillämpa och starta om",
   "update.applying": "Tillämpar...",
   "update.available": "Uppdatering tillgänglig: v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM kan inte uppdatera sig själv: mappen det är installerat i ({dir}) kräver administratörsrättigheter. Flytta SwarmLLM till en egen mapp – var som helst under din hemmapp – så uppdaterar det sig självt i fortsättningen.",
+  "update.blocked_other": "SwarmLLM kan inte skriva till mappen det är installerat i ({dir}) och kan därför inte installera den här uppdateringen. Ladda ner den nya versionen och byt ut filen själv.",
   "update.checking": "Kontrollerar...",
   "update.download_apply": "Ladda ner och tillämpa",
   "update.error": "Fel",

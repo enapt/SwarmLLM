@@ -1260,6 +1260,8 @@
   "update.apply_restart": "تطبيق وإعادة التشغيل",
   "update.applying": "جارٍ التطبيق...",
   "update.available": "تحديث متاح: v{from} ← v{to}",
+  "update.blocked_not_writable": "لا يستطيع SwarmLLM تحديث نفسه: المجلد المثبَّت فيه ({dir}) يتطلب صلاحيات المسؤول. انقله إلى مجلد تملكه — أي مكان داخل مجلدك الشخصي — وسيحدّث نفسه بعد ذلك.",
+  "update.blocked_other": "لا يستطيع SwarmLLM الكتابة في المجلد المثبَّت فيه ({dir})، لذلك لا يمكنه تثبيت هذا التحديث. نزّل الإصدار الجديد واستبدل الملف بنفسك.",
   "update.checking": "جارٍ التحقق...",
   "update.download_apply": "تنزيل وتطبيق",
   "update.error": "خطأ",

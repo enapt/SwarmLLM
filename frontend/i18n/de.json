@@ -1260,6 +1260,8 @@
   "update.apply_restart": "Anwenden & Neu starten",
   "update.applying": "Wird angewendet...",
   "update.available": "Update verfügbar: v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM kann sich nicht selbst aktualisieren: Der Ordner, in dem es installiert ist ({dir}), erfordert Administratorrechte. Verschiebe SwarmLLM in einen eigenen Ordner – irgendwo in deinem Benutzerordner – dann aktualisiert es sich künftig selbst.",
+  "update.blocked_other": "SwarmLLM kann nicht in den Ordner schreiben, in dem es installiert ist ({dir}), und kann dieses Update daher nicht installieren. Lade die neue Version herunter und ersetze die Datei selbst.",
   "update.checking": "Prüfe...",
   "update.download_apply": "Herunterladen & Anwenden",
   "update.error": "Fehler",

@@ -55,7 +55,17 @@ chmod +x swarmllm
 ./swarmllm run
 ```
 
-> **Note:** macOS aarch64 binaries are compile-validated and exercised in CI (test + clippy on `macos-15`); integration tests stay Linux-only for now. Intel Mac users should build from source. If macOS blocks the binary on first launch: System Settings > Privacy & Security > click **Open Anyway** next to SwarmLLM.
+> **Note:** macOS aarch64 binaries are compile-validated and exercised in CI (test + clippy on `macos-15`); integration tests stay Linux-only for now. Intel Mac users should build from source.
+
+> **Where you put it matters on a Mac.** Keep SwarmLLM in a folder you own — anywhere under your home folder, as in the commands above. Folders like `/Applications` need administrator rights, and SwarmLLM cannot then replace its own binary, so it will tell you an update is available and decline to install it. Nothing else about it changes; move the file and updates work by themselves.
+
+> **First launch: "cannot be opened because it is from an unidentified developer."** The binaries are not yet signed with an Apple developer certificate, so Gatekeeper stops the first run of anything downloaded **in a browser**. Either open System Settings > Privacy & Security and click **Open Anyway**, or remove the quarantine flag the browser added:
+>
+> ```bash
+> xattr -d com.apple.quarantine swarmllm
+> ```
+>
+> Downloading with `curl` avoids it entirely — the quarantine flag is set by the browser, not by macOS in general — and it is a one-time thing per download, not something that recurs on every update (confirmed on a Mac mini M4, 2026-09-03).
 
 ### Linux
 

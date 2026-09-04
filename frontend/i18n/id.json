@@ -1260,6 +1260,8 @@
   "update.apply_restart": "Terapkan & Mulai Ulang",
   "update.applying": "Menerapkan...",
   "update.available": "Pembaruan tersedia: v{from} → v{to}",
+  "update.blocked_not_writable": "SwarmLLM tidak bisa memperbarui dirinya: folder tempatnya terpasang ({dir}) memerlukan hak administrator. Pindahkan ke folder milik Anda — di mana saja dalam folder beranda — dan setelah itu ia akan memperbarui dirinya sendiri.",
+  "update.blocked_other": "SwarmLLM tidak dapat menulis ke folder tempatnya terpasang ({dir}), sehingga tidak bisa memasang pembaruan ini. Unduh versi baru dan ganti berkasnya sendiri.",
   "update.checking": "Memeriksa...",
   "update.download_apply": "Unduh & Terapkan",
   "update.error": "Kesalahan",
