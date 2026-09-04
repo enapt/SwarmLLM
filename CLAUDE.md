@@ -236,29 +236,30 @@ Ordered list with pointers in `memory/MEMORY.md` § NEXT UP; entries in
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-**Released and deployed: v0.3.153-alpha (2026-09-04, tag on `8f8edd61`).** Local
-`225e6fe7` (CUDA asset, sha256 `25329b61…` == published, ready in 1 s, 0 ERROR
-lines, `Pong` in 6.1 s, rollback `~/.local/bin/swarmllm.0.3.152-alpha.bak`) and
-Proxmox `96842635` (.deb `0.3.153-alpha-1` over `0.3.152-alpha-1`, `enabled` +
-`active`, journal errors "-- No entries --") both on it, node ids kept; the
-local node sees Proxmox at .153 within a minute. Gate: CI + Cache warm green,
-25 assets, not draft, `latest`, sha256 CUDA + deb, `ggml_cuda_init` = 1,
-**smoke 9/9 (none skipped) + shapes 7/7 on the DOWNLOADED artifact**.
-Carries the two macOS fixes (#449/#450), #448's storage budget, and the six
-future-work closures.
-⚠ **A `gh release download` of the ~1 GB CUDA binary was reset mid-transfer
-and its checksum FAILED — 860 MB of a published 1052 MB.** The published
-artifact was fine; the download was not. Compare the SIZE against
-`gh release view --json assets` before doubting a release, and re-fetch with
-`curl -L --retry 5 --retry-all-errors -C -`.
-⚠ **Cache warm took 1h56m against the 16-18 min its own header claims** — and
-it is NOT #318: both the flash-attn kernel cache and rust-cache reported hits
-and the kernels were not rebuilt. The time went to candle-flash-attn's build
-script (~43 min) and `llama-cpp-2` (~50 min, llama.cpp's own CUDA kernels,
-which no kernel cache covers). Diagnosis + technique (scan a job log for gaps
-between adjacent timestamps) in `round_log_0903_processor_route.md`.
+**Released and deployed: v0.3.154-alpha (2026-09-04, tag on `4b3a8080`).** Local
+`225e6fe7` (CUDA asset, downloaded sha256 OK, size == published, ready in
+seconds, 0 ERROR lines, `release ok` served, rollback
+`~/.local/bin/swarmllm.0.3.153-alpha.bak`) and Proxmox `96842635` (.deb
+`0.3.154-alpha-1` over `0.3.153-alpha-1`, `enabled` + `active`, no `.dpkg-old`,
+journal errors "-- No entries --") both on it, node ids kept; the local node saw
+Proxmox at .154 within a minute, and a tester's node had already auto-updated to
+.154 by then. Gate: CI + Cache warm green (Cache warm ~22 min this time, not the
+1h56m of .153), 25 assets, not draft, `latest`, sha256 CUDA + deb,
+`ggml_cuda_init` = 1, **smoke 9/9 (none skipped) + shapes 7/7 on the DOWNLOADED
+artifact** — and both harnesses were baselined green on .153 FIRST, so a failure
+would have been a real regression rather than a harness fault.
+Three fixes, all reported from real nodes this week: **#451** an ~8000-token
+ceiling on every distributed prompt (a fixed element cap in `bytes_to_tensor`
+that was exactly 8192 positions at hidden 4096 — silent since March, because
+local inference never serializes an activation); **#452** the planner priced the
+LOCAL node as memory-unbounded while the loader priced a whole model for a
+partial segment, so a whole-model holder could serve no PART of a model too big
+for it; **#453** a tool-carrying reply got no streaming at all (120 content
+deltas → 1), which is what "OpenClaw times out" was.
 
-Prior line: v0.3.152-alpha (2026-09-03, tag on `bbecda89`). Local
+Prior line: v0.3.153-alpha (2026-09-04, tag on `8f8edd61`) — the two macOS fixes (#449/#450), #448's storage budget, six future-work closures.
+
+Older line: v0.3.152-alpha (2026-09-03, tag on `bbecda89`). Local
 `225e6fe7` (CUDA asset, installed sha256 `cd9eefec…` == published, ready in 2 s,
 0 ERROR lines, first inference OK, rollback `~/.local/bin/swarmllm.0.3.151-alpha.bak`)
 and Proxmox `96842635` (.deb `0.3.152-alpha-1` over `0.3.151-alpha-1`, stayed
