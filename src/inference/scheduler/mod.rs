@@ -510,6 +510,40 @@ fn priced_from_a_measurement(c: &NodeCandidate) -> bool {
         || c.est_tokens_per_sec > 0.0
 }
 
+/// The cheapest remote candidate for the whole model, and what it was priced
+/// at — the option a reader looking at a slow local decision will ask about.
+///
+/// The candidate list is logged with a cost per node, so when this node keeps a
+/// request that a peer was priced far cheaper for, the numbers sit in the log
+/// side by side and the DECISION does not mention either of them. Three reports
+/// in one day reduced to "a cheaper option was right there and nothing says why
+/// it was not used" — twice with the reporter reasonably inferring a penalty
+/// that does not exist. The reason was always logged; the thing it was a reason
+/// ABOUT was not.
+fn cheapest_whole_model_peer<'a>(
+    candidates: &'a [NodeCandidate],
+    local_node_id: &NodeId,
+    num_layers: u32,
+    prompt_tokens: Option<u32>,
+) -> Option<(&'a NodeCandidate, f32)> {
+    candidates
+        .iter()
+        .filter(|c| {
+            c.node_id != *local_node_id
+                && c.available_ranges
+                    .iter()
+                    .any(|r| r.0 == 0 && r.1 >= num_layers)
+        })
+        .map(|c| {
+            (
+                c,
+                parallax::vertex_cost(c, (0, num_layers), local_node_id, num_layers, prompt_tokens)
+                    .total(),
+            )
+        })
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+}
+
 /// May the chain the search produced replace this node's own processor route?
 /// `Err` names why not.
 ///
@@ -1081,10 +1115,22 @@ impl PipelineScheduler {
                     .any(|r| r.0 == 0 && r.1 >= num_layers)
         });
         if let Some(local_cand) = local_cand.filter(|_| !pipeline_may_beat_local) {
+            // Why this node kept the request, in the same line that says it
+            // did. Reaching here with peers in the list means the priced search
+            // was not allowed to compete — this node is not on its processor,
+            // or parallax routing is off, or nothing else was a candidate — and
+            // that is the question a slow local answer provokes.
+            let passed_over =
+                cheapest_whole_model_peer(&candidates, local_node_id, num_layers, prompt_tokens);
             tracing::info!(
                 model = %model_id,
                 num_layers,
-                "Local node has full layer coverage — single local segment (no remote peers)"
+                candidates = candidates.len(),
+                cheapest_peer = ?passed_over.map(|(c, _)| c.node_id.to_string()),
+                cheapest_peer_cost_ms = ?passed_over.map(|(_, ms)| ms),
+                local_runs_on_processor = pipeline_may_beat_local,
+                parallax_routing = self.shared_state.config.inference.parallax_routing,
+                "Local node has full layer coverage — single local segment"
             );
             return Ok(Self::local_only_assignment(
                 request_id,
@@ -1193,10 +1239,23 @@ impl PipelineScheduler {
                                  so the request goes there"
                             ),
                             Err(reason) => {
+                                // Name the option a reader will ask about. The
+                                // candidate list already carries a cost per
+                                // node, so without this the log shows a peer
+                                // priced 55x cheaper and a decision that never
+                                // mentions it.
+                                let passed_over = cheapest_whole_model_peer(
+                                    &candidates,
+                                    local_node_id,
+                                    num_layers,
+                                    prompt_tokens,
+                                );
                                 tracing::info!(
                                     model = %model_id,
                                     local_processor_cost_ms = local_ms,
                                     pipeline_cost_ms = chain_ms,
+                                    cheapest_peer = ?passed_over.map(|(c, _)| c.node_id.to_string()),
+                                    cheapest_peer_cost_ms = ?passed_over.map(|(_, ms)| ms),
                                     prompt_tokens = ?prompt_tokens,
                                     "This node holds the whole model and runs it on its \
                                      processor: {reason}"
@@ -1217,9 +1276,17 @@ impl PipelineScheduler {
                     // greedy has no cost to compare against the processor, so
                     // the fast path it would have taken is the answer.
                     if let (true, Some(local_cand)) = (pipeline_may_beat_local, local_cand) {
+                        let passed_over = cheapest_whole_model_peer(
+                            &candidates,
+                            local_node_id,
+                            num_layers,
+                            prompt_tokens,
+                        );
                         tracing::info!(
                             model = %model_id,
                             err = %e,
+                            cheapest_peer = ?passed_over.map(|(c, _)| c.node_id.to_string()),
+                            cheapest_peer_cost_ms = ?passed_over.map(|(_, ms)| ms),
                             "DIAG: parallax routing unavailable — this node holds the whole \
                              model, so it runs here"
                         );

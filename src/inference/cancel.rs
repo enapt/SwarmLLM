@@ -14,14 +14,23 @@
 //! which had queued its own full prompt pass behind the last (the second half
 //! of gotcha #441; #445).
 //!
-//! The waits that matter are the ones that can run for minutes with nothing to
-//! send: the worker's answer to a local segment (`ModelProcessPool::
+//! Two of the waits that matter are the ones that can run for minutes with
+//! nothing to send: the worker's answer to a local segment (`ModelProcessPool::
 //! forward_for_request`) and a remote segment's result (`PipelineExecutor::
 //! wait_for_result`). Both go through [`unless_cancelled`]. Dropping the wait is
 //! what stops the work: the pool's `ResponseGuard` sends `CancelRequest` to the
 //! worker on drop, and the worker skips a forward it has not started and stops
 //! between layers if it has; the remote caller sends `CancelInference` to the
 //! peer. The router then declines to retry a request whose flag is set.
+//!
+//! **The third is LOADING the model, and it was missed** — the paragraph above
+//! named two and read as complete. A request whose segment is not resident waits
+//! for a spawn and a multi-gigabyte load before there is any forward to cancel,
+//! and on the node that produced the report that was minutes: the client pressed
+//! Ctrl+C, nothing anywhere logged a cancellation, and the request went on to
+//! claim a KV cache and run a prefill for a client that had gone (gotcha #459).
+//! That wait is BRACKETED by [`bail_if_cancelled`] rather than wrapped, because
+//! a load must not be dropped half-done — see that function for why.
 //!
 //! The flag is polled rather than awaited because it is an `AtomicBool` shared
 //! with code that has no runtime handle; [`CANCEL_POLL`] bounds the latency of
@@ -59,6 +68,25 @@ pub(crate) fn request_abandoned() -> SwarmError {
 /// matched by substring.
 pub(crate) fn is_request_abandoned(err: &SwarmError) -> bool {
     matches!(err, SwarmError::ServiceUnavailable(m) if m == REQUEST_ABANDONED)
+}
+
+/// Stop here if the request has already been abandoned.
+///
+/// The checkpoint form, for work that must NOT be dropped half-done. Loading a
+/// model is the case it exists for: [`unless_cancelled`] stops a wait by
+/// dropping the future, and dropping a load mid-way abandons a spawning
+/// subprocess and a partly-registered worker — and the model may be exactly what
+/// the next request wants, so throwing it away is not obviously right even when
+/// this requester has gone.
+///
+/// So the load runs to completion and this brackets it instead: nothing is
+/// started for a client that has already left, and nothing is sent to the worker
+/// once it has. Minutes pass inside that bracket, which is the whole point.
+pub(crate) fn bail_if_cancelled(cancel: Option<&Arc<AtomicBool>>) -> Result<(), SwarmError> {
+    match cancel {
+        Some(flag) if flag.load(Ordering::Acquire) => Err(request_abandoned()),
+        _ => Ok(()),
+    }
 }
 
 /// Await `fut`, but stop — dropping it — the moment `cancel` reads true.
@@ -157,6 +185,19 @@ mod tests {
     async fn no_flag_means_the_plain_await() {
         let r: Result<u8, SwarmError> = unless_cancelled(std::future::ready(Ok(3u8)), None).await;
         assert_eq!(r.unwrap(), 3);
+    }
+
+    /// The checkpoint form: no future to drop, just a verdict.
+    #[test]
+    fn a_checkpoint_stops_an_abandoned_request_and_passes_a_live_one() {
+        assert!(bail_if_cancelled(Some(&flag(false))).is_ok());
+        assert!(bail_if_cancelled(None).is_ok(), "no flag, no opinion");
+        let err = bail_if_cancelled(Some(&flag(true))).unwrap_err();
+        assert!(
+            is_request_abandoned(&err),
+            "a checkpoint reports the same abandonment a watched wait does, so the router \
+             declines to retry it and no peer is docked for it"
+        );
     }
 
     /// Only this module's marker is recognised — not the variant, not the text

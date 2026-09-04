@@ -32,6 +32,23 @@ All notable changes to SwarmLLM are documented here.
   failed request completed in a minute — the machine had room for it, just not
   for it twice. SwarmLLM now remembers what it has just asked of a machine
   until that machine says so itself.
+- **Closing your client while a model is still loading now actually stops the
+  request.** Cancelling was wired to every long wait except the longest one:
+  loading the model itself, which on a big model is minutes. A client that gave
+  up during that phase cancelled nothing — the load ran on, and the request then
+  went and claimed memory and started reading the prompt for somebody who had
+  already left. Nothing anywhere in the log even recorded a cancellation. The
+  load still finishes once started, deliberately, because the next request may
+  want that same model and abandoning a half-loaded one leaves a stray process
+  behind; what stops now is everything after it.
+- **When your machine keeps a request that another machine was priced to do far
+  faster, the log now says which machine and how much faster.** The comparison
+  was already written down — every candidate is listed with an estimated cost —
+  and the decision that rejected the cheaper one gave its reason but never named
+  what it was a reason about. Three separate reports came down to "a much
+  cheaper option was right there and nothing explains why it wasn't used", two
+  of them reasonably concluding there was a penalty mechanism at work, which
+  there isn't.
 - **When a machine running part of a request fails, your own machine can now
   take that part over.** The scheduler deliberately picks your own node as the
   first fallback whenever it holds the whole model — it is the most reliable

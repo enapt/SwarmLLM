@@ -2336,6 +2336,42 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
     );
 }
 
+/// When this node keeps a request a peer was priced far cheaper for, the
+/// decision has to name that peer.
+///
+/// The candidate list is logged with a cost per node, so three reports in one
+/// day reduced to "a peer priced 55x cheaper was right there and nothing says
+/// why it was not used" — twice with the reporter reasonably inferring a
+/// penalty mechanism that does not exist. The reason was always logged; what it
+/// was a reason ABOUT was not.
+#[test]
+fn the_cheapest_peer_that_was_passed_over_can_be_named() {
+    let local = local_full_coverage();
+    let mut near = willing_peer(0xBB, LAYERS);
+    near.latency_ms = 5;
+    near.est_tokens_per_sec = 40.0;
+    let mut far = willing_peer(0xCC, LAYERS);
+    far.latency_ms = 400;
+    far.est_tokens_per_sec = 3.0;
+    // Holds only half the model, so it is not a whole-model alternative at all.
+    let partial = willing_peer(0xDD, LAYERS / 2);
+
+    let cands = vec![local, far, near, partial];
+    let (peer, cost) =
+        super::cheapest_whole_model_peer(&cands, &local_id(), LAYERS, Some(4_000)).expect("a peer");
+    assert_eq!(
+        peer.node_id,
+        NodeId([0xBB; 32]),
+        "the nearest, fastest whole-model holder is the one a reader will ask about"
+    );
+    assert!(cost > 0.0);
+
+    // The local node is never its own alternative, and a node holding only part
+    // of the model is not one either.
+    let alone = vec![local_full_coverage(), willing_peer(0xDD, LAYERS / 2)];
+    assert!(super::cheapest_whole_model_peer(&alone, &local_id(), LAYERS, Some(4_000)).is_none());
+}
+
 /// Two requests scheduled inside one 30-second gossip window must not both be
 /// told the peer has all its memory free.
 ///

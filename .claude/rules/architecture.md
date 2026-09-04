@@ -377,6 +377,35 @@ claim, not a fact: grep that mechanism for the case being relied on. Two of
 these three were exactly that shape, as were #437 (a doc naming a writer nothing
 writes) and #451 (a guard whose input nothing fills).
 
+**A decision that rejects a cheaper option names it.**
+`scheduler::cheapest_whole_model_peer` is reported as `cheapest_peer` /
+`cheapest_peer_cost_ms` on every arm that keeps a request on this node, and the
+fast-path line also carries `candidates`, `local_runs_on_processor` and
+`parallax_routing` so a reader can tell which of the three ways it got there.
+
+The candidate list has always been logged with a cost per holder, and every arm
+has always logged a reason — but no arm named the peer the reason was ABOUT. One
+tester filed three reports in a day off a log showing a peer priced 55x cheaper
+beside a local decision that never mentioned it, twice concluding there was a
+penalty mechanism overriding cost. There is none: `delegation_target` is a yes/no
+gate that runs before any pricing (#447 (iii), open), and
+`pipeline_may_replace_processor_route` declines a chain whose remote peers are
+priced from a prior rather than a measurement (#444). Both correct, both logged,
+neither legible (gotcha #460). **A reason without its subject makes a competent
+reader invent a mechanism.**
+
+**Every long wait in a request's life has a cancel checkpoint — including the
+load.** `inference::cancel`'s module doc named two waits and read as complete;
+the third, `ModelProcessPool::get_or_spawn`, is the longest and had none, so a
+client that gave up while its segment was loading cancelled nothing and the
+request went on to claim a KV cache and prefill for nobody (gotcha #459). That
+one is BRACKETED by `cancel::bail_if_cancelled` rather than wrapped in
+`unless_cancelled`: the wrap stops a wait by dropping the future, and dropping a
+load half-done abandons a spawning subprocess and a partly-registered worker —
+and the model may be exactly what the next request wants. A new wait that can run
+for minutes needs one of the two forms, and the choice between them is whether
+the work can safely be abandoned mid-flight.
+
 **A failover reproduces the forward the segment was given, and the local node is
 run in-process.** `FailoverInput` carries everything `failover_segment` needs —
 activations, `pre_embedded`, `generated_ids`, the vision embeddings, `is_last`,

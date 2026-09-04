@@ -175,8 +175,13 @@ A node that holds every layer of a model decides, on every pipeline assembly,
 whether to run it alone. Since v0.3.152 the whole decision is at `info`:
 
 ```
-Local node has full layer coverage — single local segment (no remote peers)
-        (the card runs it, or there is no peer to ask — the fast path)
+Local node has full layer coverage — single local segment
+        candidates= cheapest_peer= cheapest_peer_cost_ms=
+        local_runs_on_processor= parallax_routing=
+        (the card runs it, or there is no peer to ask — the fast path.
+         `local_runs_on_processor=false` means the card is expected to
+         handle it, so no peer was sought; `parallax_routing=false` means
+         the priced search was switched off and the fast path stands)
 Not handing this model to peer: <reason>  peer= latency_ms= free_vram_mb= peer_tokens_per_sec= local_cpu_tokens_per_sec=
         (one line per peer that did not qualify for a whole-model hand-off)
 This model does not fit our GPU, so a nearby peer runs the whole of it ...
@@ -191,9 +196,23 @@ This node holds the whole model but would run it on its processor; a pipeline ac
         local_processor_cost_ms= pipeline_cost_ms= segments= prompt_tokens=
 This node holds the whole model and runs it on its processor: <reason>
         local_processor_cost_ms= pipeline_cost_ms=
+        cheapest_peer= cheapest_peer_cost_ms=
         (reasons: "no pipeline across peers is priced faster", or the
          faster-looking chain includes a peer whose speed is unknown)
+DIAG: parallax routing unavailable — this node holds the whole model, so it runs here
+        err= cheapest_peer= cheapest_peer_cost_ms=
 ```
+
+**`cheapest_peer_cost_ms` is the line to read first** when a local answer took
+minutes and a peer was priced at seconds. The candidate list already prices
+every holder, so the two numbers have always been in the log — but the DECISION
+never named either of them, and three separate reports in one day reduced to "a
+cheaper option was right there and nothing says why it was not used", two of
+them reasonably inferring a penalty mechanism that does not exist. The reason
+was always logged; what it was a reason ABOUT was not. A peer priced far cheaper
+and still passed over means one of the stated reasons applied to it — most often
+that its speed is a prior rather than a measurement, which the candidate line's
+`est_tokens_per_sec` will show as zero.
 
 The two `_cost_ms` figures are in the router's own milliseconds — decode
 priced over `ASSUMED_FORWARD_PASSES` tokens plus the prompt — and are

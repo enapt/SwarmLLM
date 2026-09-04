@@ -3917,7 +3917,22 @@ impl ModelProcessPool {
         // documentation on `LayerForward`.
         let forward_sampling = forward.sampling.clone().unwrap_or_default();
         let model_id = forward.model_id.clone();
+        // Loading a model is the long wait nothing was watching. Every cancel
+        // checkpoint sat downstream of it, so a client that gave up while its
+        // segment was still loading cancelled nothing at all — the load ran on
+        // and the request then went on to claim a KV cache and run a prefill
+        // for nobody (gotcha #459).
+        //
+        // Bracketed, not wrapped: `unless_cancelled` stops a wait by dropping
+        // the future, and dropping a load half-done abandons a spawning
+        // subprocess — and the model may be exactly what the next request
+        // wants. So a client that has already gone starts no load, the load
+        // itself always finishes, and a client that leaves DURING it gets no
+        // forward sent on its behalf, which is where the memory would have
+        // gone.
+        crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
         let handle = self.get_or_spawn(&model_id, forward.layer_range).await?;
+        crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
 
         // Destructure to avoid cloning activations (can be large tensor data)
         let crate::types::LayerForward {
