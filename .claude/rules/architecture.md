@@ -1555,6 +1555,42 @@ silently break at the wire if duplicated:
   withdraws its vote; the map is capped. **Never let the gossiped value name,
   select or fetch an artifact** — announcing `9.9.9` would otherwise be a
   one-message way to make the whole swarm hit the update path at once.
+- **`inference::process_pool::worker_socket_path`** (2026-09-04, gotcha #449) —
+  the worker IPC socket path, and the ONLY place it is built. `sun_path` in
+  `sockaddr_un` is a fixed array of **104 bytes on macOS/BSD and 108 on
+  Linux**, so a path one byte over does not truncate — `bind` refuses, the
+  worker never starts, and since prompt privacy keeps the first and last
+  layers local, the node answers nothing at all whatever the swarm holds.
+  That was every request on every Mac: macOS hands each user a private
+  per-boot temp dir (49 characters, measured) and the name was
+  `swarmllm-worker-<36-char uuid>.sock` (57).
+  Three things a change must keep. The name stays SHORT
+  (`worker_socket_filename`, 12 hex chars — every character here is one the
+  directory cannot use). `$TMPDIR` is tried first (per-user and private on
+  macOS, short on Linux) and `/tmp/swarmllm-<uid>` only as a fallback,
+  created 0700 and **verified after creation** — `/tmp` is world-writable, so
+  a pre-created hostile directory is the attack, and the check is
+  `symlink_metadata` + uid + `mode & 0o077 == 0`, refusing rather than
+  repairing. And the arithmetic lives in `first_dir_that_fits`, a pure
+  function tested against the literal 104: **a platform-dependent length
+  limit is invisible to a single-platform suite**, so a test that asks the
+  host cannot see the bug that only exists on the other host.
+- **`update::SelfUpdateBlocker` — "this node cannot update itself" carries WHY**
+  (2026-09-04, gotcha #450). `UpdateChecker::self_update_blocker` probes and
+  returns the reason; `can_self_update` is a thin wrapper over it. `key()` is
+  the stable string the dashboard translates (21 locales), `advice()` the
+  English one the daemon log and `swarmllm update` print — written together,
+  in one match, so a new case cannot reach one surface and not the others.
+  **Why**: it used to be a bare bool, and each of the three surfaces rendered
+  its own sentence about a package manager, correct for a `.deb` under
+  `ProtectSystem=strict` and useless to the Mac user whose binary sat in
+  `/Applications`. `UpdateInfo` now also carries `install_dir`, because the
+  folder is the thing the person has to act on and nothing named it.
+  **The CLI asks before downloading**: the probe is a file create-and-delete,
+  and `swarmllm update` used to fetch ~1 GB before discovering the answer.
+  `looks_like_packaged_install` keys on the unit file the packaging installs,
+  not on the binary's path — `/usr/local/bin` is equally a manual install, and
+  the advice that follows is wrong for the other case.
 - **`inference::scheduler::delegation_target`** (2026-08-18) — the single decision
   to hand a WHOLE model to a peer rather than run it on this node's CPU. Fires only
   when `ModelProcessPool::is_cpu_bound_for_lack_of_vram` says we have a working GPU
