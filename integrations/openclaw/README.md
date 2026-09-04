@@ -101,7 +101,11 @@ as the catalog and skips discovery:
         baseUrl: "http://192.168.1.20:8800/v1",
         apiKey: "${SWARMLLM_API_KEY}",
         api: "openai-completions",
-        timeoutSeconds: 300,
+        // Generous on purpose. An agent turn sends thousands of tokens of
+        // tool schema, reading them takes minutes on a processor-only node,
+        // and a reply that might be a tool call arrives in one piece at the
+        // end — so OpenClaw can legitimately see nothing for a long time.
+        timeoutSeconds: 1800,
       },
     },
   },
@@ -171,6 +175,22 @@ your machine could not hold alone is what the swarm is for.
   `models.providers.swarmllm` with a `models:` array (`id` and `contextWindow`
   per model, as `/v1/models` reports them) and `agents.defaults.model.primary`
   set to `swarmllm/<id>`. Requests then reach the node normally.
+- **The turn takes ages and then times out.** Three different causes, and
+  they are easy to tell apart from the node's own log.
+  - *A model split across machines, and the node is v0.3.153 or older.* Look
+    for `Tensor too large` in the node's log. Any prompt past about 8,000
+    tokens was refused outright by the machine receiving it, so OpenClaw's
+    retries each hit the same wall and the session eventually gave up. Fixed
+    in the release after v0.3.153 — upgrade the nodes.
+  - *Nothing arrives until the model stops.* Expected, for now: a reply that
+    might be a tool call is buffered until it can be told from prose, and
+    OpenClaw always sends tools. Raise `timeoutSeconds` as above; the node
+    keeps the connection alive throughout.
+  - *Reading the prompt is simply slow.* `DIAG` lines in the node's log time
+    the prompt pass. A 14 k-token turn is minutes on a processor and seconds
+    on a card — use the largest model the swarm offers, and check the node's
+    dashboard says the model is on the graphics card rather than the
+    processor.
 - **Embeddings.** A node does not serve `/v1/embeddings`; point OpenClaw's
   memory search at another embedding provider.
 
@@ -180,6 +200,9 @@ your machine could not hold alone is what the swarm is for.
 npm install
 npm run build     # tsc → dist/ (what the package ships and OpenClaw loads)
 npm test          # vitest: registration + wizard wiring, and discovery against a real node's /v1/models body
+                  # Needs Node 22.5+ — OpenClaw's own state DB imports `node:sqlite`,
+                  # so on Node 20 the suite fails to load with
+                  # `No such built-in module: node:sqlite` before any test runs.
 npm run validate  # build + `clawhub package validate`
 ```
 
