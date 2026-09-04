@@ -91,6 +91,17 @@ pub(crate) fn message_means_peer_cannot_serve(msg: &str) -> bool {
     msg.contains("Service unavailable")
 }
 
+/// [`is_transient_remote_failure`] for tests outside this module.
+///
+/// The pipeline's own tests assert that a failure it constructs is one the
+/// router will retry — which is the whole point of carrying the cause into the
+/// message, and cannot be checked from inside `router` because that is not
+/// where the message is built.
+#[cfg(test)]
+pub(crate) fn is_transient_remote_failure_for_test(err: &SwarmError) -> bool {
+    is_transient_remote_failure(err)
+}
+
 fn is_transient_remote_failure(err: &SwarmError) -> bool {
     let msg = err.to_string();
     msg.contains("never acknowledged")

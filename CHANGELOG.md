@@ -32,6 +32,14 @@ All notable changes to SwarmLLM are documented here.
   failed request completed in a minute — the machine had room for it, just not
   for it twice. SwarmLLM now remembers what it has just asked of a machine
   until that machine says so itself.
+- **A failure now says what actually went wrong, not only that nothing could
+  take over.** When the machine running a segment fails and there is no second
+  machine standing by — which is always the case when a whole model has been
+  handed to one machine — the error was a bare "no standby available". The real
+  cause, such as a connection dropping mid-transfer, was written to the log
+  somewhere else entirely, so reading one line told you nothing. The cause now
+  travels with the error, which also means the automatic retry can recognise a
+  dropped connection for what it is.
 - **A request whose helper machine disappears now comes home instead of
   failing.** When one machine is running a whole model on your behalf and it
   drops off the network, SwarmLLM was meant to re-plan and, if nothing else is

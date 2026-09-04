@@ -1198,6 +1198,69 @@ mod tests {
         }
     }
 
+    /// With no standby at all — which is every single-peer delegation, by
+    /// design — the failure must still say WHY the segment failed.
+    ///
+    /// `last_failure` was seeded to `None` and only written inside the standby
+    /// loop, so a plan carrying zero standbys never entered that loop and the
+    /// caller got a bare "no standby available". Reported live on v0.3.154: a
+    /// delegated segment lost its connection mid-stream
+    /// (`OutboundFailure: IO error on outbound stream: connection lost`) and
+    /// the operator had to correlate two log lines to learn that. It also cost
+    /// the retry, which matches "OutboundFailure" in the message text.
+    #[tokio::test]
+    async fn a_segment_with_no_standby_still_reports_why_it_failed() {
+        let state = make_test_state();
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        let request = make_test_request(&state);
+        let request_id = request.id;
+        let (a, d) = (NodeId([0xA1; 32]), NodeId([0xD4; 32]));
+        let mut peers = std::collections::HashMap::new();
+        for (node, byte) in [(&a, 0xA1u8), (&d, 0xD4)] {
+            state.peer_id_map.insert(node.clone(), vec![byte]);
+            peers.insert(vec![byte], node.clone());
+        }
+        let assignment = PipelineAssignment {
+            request_id,
+            segments: vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))],
+            // The shape single-peer delegation always produces.
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        let a2 = a.clone();
+        let peers = spawn_peers(state, rx, peers, move |node| {
+            if *node == a2 {
+                PeerReply::Error("OutboundFailure: IO error on outbound stream: connection lost")
+            } else {
+                PeerReply::Token(7)
+            }
+        });
+
+        let result = executor
+            .forward_through_segments(request_id, 0, 0, b"hello".to_vec(), None, false, &[])
+            .await;
+        drop(executor);
+        let _ = peers.await.unwrap();
+
+        let err = result.expect_err("segment 0 failed and nothing could take it over");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, SwarmError::SegmentFailoverExhausted(_)),
+            "wrong class: {msg}"
+        );
+        assert!(
+            msg.contains("connection lost"),
+            "the failure must name the cause, not only that nothing could take over: {msg}"
+        );
+        // And carrying the cause is what puts it back in front of the retry.
+        assert!(
+            crate::inference::router::is_transient_remote_failure_for_test(&err),
+            "a lost connection is retryable, and the message is how the router sees it: {msg}"
+        );
+    }
+
     /// The live failure of 2026-09-01 (gotcha #435), in miniature: the first
     /// segment's holder fails, its only standby REFUSES the segment, and the
     /// refusal's empty activations used to be forwarded to segment 1 as though

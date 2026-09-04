@@ -1323,11 +1323,11 @@ impl PipelineExecutor {
                             let failover_result = self
                                 .failover_segment(
                                     idx,
+                                    err_msg,
                                     request_id,
                                     sequence_num,
                                     index_pos,
                                     &activations,
-                                    is_last,
                                 )
                                 .await?;
                             if run_is_last {
@@ -1435,11 +1435,11 @@ impl PipelineExecutor {
                                 let failover_result = self
                                     .failover_segment(
                                         idx,
+                                        "remote segment returned the wrong activation shape",
                                         request_id,
                                         sequence_num,
                                         index_pos,
                                         &activations,
-                                        is_last,
                                     )
                                     .await?;
                                 // The standby covered THIS segment only, so
@@ -1491,11 +1491,11 @@ impl PipelineExecutor {
                         let failover_result = self
                             .failover_segment(
                                 idx,
+                                &e.to_string(),
                                 request_id,
                                 sequence_num,
                                 index_pos,
                                 &activations,
-                                is_last,
                             )
                             .await?;
                         if is_last {
@@ -1600,11 +1600,22 @@ impl PipelineExecutor {
     async fn failover_segment(
         &mut self,
         failed_idx: usize,
+        // Why the segment failed in the first place, in the words the failing
+        // node or the transport used. Seeds `last_failure`, so a request with
+        // NO standby — which is every single-peer delegation, by design — still
+        // reports the actual cause instead of only "no standby available".
+        //
+        // Without it, a mid-stream `OutboundFailure: connection lost` reached
+        // the caller as a bare `Segment 1 failed with no standby available`,
+        // and an operator had to correlate two log lines to learn what had
+        // happened. It also cost the retry: `is_transient_remote_failure`
+        // matches "OutboundFailure" in the message text, and the message no
+        // longer carried it.
+        original_failure: &str,
         request_id: uuid::Uuid,
         sequence_num: u32,
         index_pos: usize,
         activations: &[u8],
-        _is_last: bool,
     ) -> Result<LayerResult, SwarmError> {
         let failed_segment = self.assignment.segments[failed_idx].clone();
         // Everyone this segment has been tried on for this request.
@@ -1612,7 +1623,7 @@ impl PipelineExecutor {
         // The node abandoned on the previous round — the failed holder first,
         // then each standby that failed in turn.
         let mut abandoned = failed_segment.node_id.clone();
-        let mut last_failure: Option<String> = None;
+        let mut last_failure: Option<String> = Some(original_failure.to_string());
 
         loop {
             self.cancel_segment_on(&abandoned, request_id, failed_idx)
@@ -1869,14 +1880,19 @@ impl PipelineExecutor {
     }
 }
 
-/// How many characters of a standby's own failure message the exhaustion
+/// How many characters of the failing machine's own message the exhaustion
 /// error carries. A worker's refusal names sizes and context lengths and can
 /// run to several hundred characters; the caller needs the reason, not the
 /// arithmetic.
 const EXHAUSTED_REASON_MAX_CHARS: usize = 200;
 
 /// The message a request fails with when every standby for `segment` has been
-/// tried, carrying the last standby's stated reason where there is one.
+/// tried, carrying the last stated reason.
+///
+/// "Last failure", not "last standby": with no standby at all — which is every
+/// single-peer delegation, by design — the reason carried is the ORIGINAL
+/// segment failure, and calling that a standby's words would be a lie about
+/// which machine said it.
 pub(super) fn exhausted_message(segment: usize, last_failure: Option<&str>) -> String {
     let base = format!("Segment {segment} failed with no standby available");
     match last_failure.map(str::trim).filter(|s| !s.is_empty()) {
@@ -1888,7 +1904,7 @@ pub(super) fn exhausted_message(segment: usize, last_failure: Option<&str>) -> S
             } else {
                 ""
             };
-            format!("{base} (last standby: {shown}{ellipsis})")
+            format!("{base} (last failure: {shown}{ellipsis})")
         }
     }
 }
