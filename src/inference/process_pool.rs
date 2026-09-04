@@ -463,23 +463,35 @@ fn first_dir_that_fits(
 /// A short, private per-user directory to fall back to when `$TMPDIR` is too
 /// long for a socket path.
 ///
-/// `/tmp/swarmllm-<uid>`, created 0700 and then VERIFIED: `/tmp` is world
-/// writable, so another local user can pre-create the directory and would
-/// otherwise own the place our sockets live. A directory that is not a real
-/// directory, not ours, or group/world accessible is refused rather than
-/// repaired — repairing someone else's directory is not this code's business,
-/// and the caller still has `$TMPDIR`.
+/// **Only consulted when `$TMPDIR` does not fit**, which on Linux is never —
+/// so an ordinary node neither creates this nor touches `/tmp` at all.
+///
+/// `/tmp` is world-writable, so another local user can pre-create
+/// `/tmp/swarmllm-<uid>` and would otherwise own the place our sockets live.
+/// Two rules follow, and both matter:
+///
+/// - **Create it with its mode, never chmod it afterwards.** `mkdir(2)` with
+///   0700 is atomic and fails outright if the name is taken, so there is no
+///   moment when the directory exists more permissively than intended — and,
+///   more to the point, we never change the permissions of something we did
+///   not just create. `create_dir_all` + `set_permissions` would have
+///   followed a planted symlink and chmod'd its target.
+/// - **An existing directory is VERIFIED, not repaired.** `symlink_metadata`,
+///   not `metadata`, because a symlink pointing elsewhere is precisely the
+///   attack and following it is how you fail to notice. Anything that is not
+///   a real directory, not ours, or group/world accessible is refused; the
+///   caller still has `$TMPDIR` and the error names both.
 #[cfg(unix)]
 fn short_private_socket_dir() -> Option<std::path::PathBuf> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let uid = unsafe { libc::getuid() };
     let dir = std::path::PathBuf::from(format!("/tmp/swarmllm-{uid}"));
-    // `create_dir_all` is happy if it already exists, which is why the checks
-    // below are not optional.
-    std::fs::create_dir_all(&dir).ok()?;
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    // `symlink_metadata`, not `metadata`: a symlink pointing somewhere else is
-    // precisely the attack, and following it is how you fail to notice.
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        // Ours, made just now, with the mode already applied.
+        Ok(()) => return Some(dir),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
     let md = std::fs::symlink_metadata(&dir).ok()?;
     (md.is_dir() && md.uid() == uid && md.permissions().mode() & 0o077 == 0).then_some(dir)
 }
@@ -497,8 +509,13 @@ fn short_private_socket_dir() -> Option<std::path::PathBuf> {
 fn worker_socket_path() -> Result<String, SwarmError> {
     let filename = worker_socket_filename();
     let mut candidates = vec![std::env::temp_dir()];
-    if let Some(short) = short_private_socket_dir() {
-        candidates.push(short);
+    // The fallback is built ONLY if the temp directory does not fit. On Linux
+    // it never does not, so an ordinary node never creates it — a directory
+    // nobody needs is still a directory somebody has to explain.
+    if first_dir_that_fits(&candidates, &filename, SUN_PATH_MAX).is_none() {
+        if let Some(short) = short_private_socket_dir() {
+            candidates.push(short);
+        }
     }
     match first_dir_that_fits(&candidates, &filename, SUN_PATH_MAX) {
         Some(p) => p
@@ -4662,6 +4679,36 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.len() <= 32, "socket filename grew: {a}");
         assert!(a.starts_with("swarmllm-") && a.ends_with(".sock"));
+    }
+
+    /// An ordinary node must not create the `/tmp` fallback it never uses.
+    /// The directory is only built when the temp directory does not fit, so on
+    /// Linux — where `$TMPDIR` is `/tmp` — building a path leaves nothing
+    /// behind. A directory nobody needs is still a directory somebody has to
+    /// explain, and this one lives in a world-writable place.
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    #[test]
+    fn a_node_whose_temp_dir_fits_never_creates_the_fallback() {
+        let uid = unsafe { libc::getuid() };
+        let fallback = std::path::PathBuf::from(format!("/tmp/swarmllm-{uid}"));
+        let existed = fallback.exists();
+        let name = worker_socket_filename();
+        assert!(
+            first_dir_that_fits(
+                std::slice::from_ref(&std::env::temp_dir()),
+                &name,
+                SUN_PATH_MAX
+            )
+            .is_some(),
+            "control: this machine's temp dir must fit, or the test proves nothing"
+        );
+        let _ = worker_socket_path().expect("a path must be buildable");
+        assert_eq!(
+            fallback.exists(),
+            existed,
+            "building a socket path must not create {} when the temp dir already fits",
+            fallback.display()
+        );
     }
 
     /// On THIS machine, whatever its temp directory, a worker socket path can
