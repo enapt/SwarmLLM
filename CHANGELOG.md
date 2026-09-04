@@ -32,6 +32,22 @@ All notable changes to SwarmLLM are documented here.
   failed request completed in a minute — the machine had room for it, just not
   for it twice. SwarmLLM now remembers what it has just asked of a machine
   until that machine says so itself.
+- **When a machine running part of a request fails, your own machine can now
+  take that part over.** The scheduler deliberately picks your own node as the
+  first fallback whenever it holds the whole model — it is the most reliable
+  machine available, because it is the one you are sitting at. But the fallback
+  could only reach other machines over the network, and your own node is not
+  something to dial, so the most-preferred fallback was a guaranteed second
+  failure and the request ended there. Reported on a 48-layer model where the
+  helper machine ran out of graphics memory and the local node, holding every
+  layer, was never asked. A fallback that cannot be reached also no longer ends
+  the attempt — the next one is tried.
+- **A reply that falls back to another machine keeps its context.** The fallback
+  path was built as a simplified copy of the normal one and had drifted from it:
+  it dropped the flag that says the text has already been converted for the
+  model, the record of what had been written so far (which stops a model
+  repeating itself), and any image in the request. None of these failed loudly —
+  they quietly changed the answer.
 - **A failure now says what actually went wrong, not only that nothing could
   take over.** When the machine running a segment fails and there is no second
   machine standing by — which is always the case when a whole model has been

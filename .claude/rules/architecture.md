@@ -377,6 +377,30 @@ claim, not a fact: grep that mechanism for the case being relied on. Two of
 these three were exactly that shape, as were #437 (a doc naming a writer nothing
 writes) and #451 (a guard whose input nothing fills).
 
+**A failover reproduces the forward the segment was given, and the local node is
+run in-process.** `FailoverInput` carries everything `failover_segment` needs —
+activations, `pre_embedded`, `generated_ids`, the vision embeddings, `is_last`,
+and the originating failure — as a struct, so a field added to the wire forward
+has to be decided about rather than defaulted to nothing by omission.
+
+`find_standbys` sorts the LOCAL node first, deliberately: a node holding every
+shard is the most reliable fallback there is, and its own comment says so.
+`failover_segment` only knew how to dial, and the local node has no
+`peer_id_bytes` — so the most-preferred standby was a guaranteed second failure,
+and a request whose holder died with `CUDA_ERROR_OUT_OF_MEMORY` ended one line
+later with `Network error: No peer_id_bytes for backup node`, with the machine
+that could have answered sitting right there (gotcha #458). The main loop has run
+local segments in-process since the beginning; failover never learned to.
+
+Three things a change must keep. **A standby that cannot be addressed is that
+standby's failure, not the request's** — the `None` arm continues to the next
+one, where returning `Err` ended the whole failover on the first unaddressable
+entry. **The local attempt is subject to the same rule**: if running here fails,
+the next standby is still tried. And **nothing is defaulted by omission** — the
+three fields that had been hardcoded to nothing (`pre_embedded`,
+`generated_ids`, `vision_embeddings`) each silently changed the answer rather
+than failing, which is why none of them was ever reported.
+
 **A gossiped figure is a snapshot, and a decision made between two of them must
 remember itself.** `SharedState::peer_vram_commitments` holds
 `request_id -> [(peer, MB)]` for work this node has scheduled onto peers and not

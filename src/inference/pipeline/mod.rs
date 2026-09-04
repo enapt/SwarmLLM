@@ -1198,6 +1198,81 @@ mod tests {
         }
     }
 
+    /// The standby the scheduler prefers is THIS node, and it was the one
+    /// standby that could not work.
+    ///
+    /// `find_standbys` sorts the local node first on purpose — a node holding
+    /// every shard is the most reliable fallback there is. `failover_segment`
+    /// only knew how to DIAL, and the local node has no `peer_id_bytes`, so the
+    /// most-preferred standby ended the request with
+    /// `Network error: No peer_id_bytes for backup node` one line after the
+    /// scheduler correctly chose the machine that could have answered
+    /// (gotcha #458). Reported live on a 48-layer model over an 8-segment
+    /// route, after the primary died with a driver-level out-of-memory.
+    ///
+    /// Here the local node has no loaded model, so running in-process fails —
+    /// which is the point: the failure must be that standby's, and the NEXT
+    /// standby must still be tried. Before the fix the request ended on the
+    /// local entry with a network error and never reached the second one.
+    #[tokio::test]
+    async fn a_local_standby_is_run_here_and_a_failed_standby_does_not_end_the_request() {
+        let state = make_test_state();
+        let local = state.identity.node_id().clone();
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        let request = make_test_request(&state);
+        let request_id = request.id;
+        let (a, b, d) = (NodeId([0xA1; 32]), NodeId([0xB2; 32]), NodeId([0xD4; 32]));
+        let mut peers = std::collections::HashMap::new();
+        for (node, byte) in [(&a, 0xA1u8), (&b, 0xB2), (&d, 0xD4)] {
+            state.peer_id_map.insert(node.clone(), vec![byte]);
+            peers.insert(vec![byte], node.clone());
+        }
+        // Deliberately NO peer_id_map entry for `local` — that is what the node
+        // running this code looks like, and what the old code tripped over.
+        let assignment = PipelineAssignment {
+            request_id,
+            segments: vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))],
+            // Local first, exactly as `find_standbys` orders them.
+            standbys: vec![remote_segment(&local, (0, 16)), remote_segment(&b, (0, 16))],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        let a2 = a.clone();
+        let peers_task = spawn_peers(state.clone(), rx, peers, move |node| {
+            if *node == a2 {
+                PeerReply::Error("Worker: Service unavailable: worker fatal error: out of memory")
+            } else {
+                // The second standby answers, and so does segment 1.
+                PeerReply::Token(7)
+            }
+        });
+
+        let result = executor
+            .forward_through_segments(request_id, 0, 0, b"hello".to_vec(), None, false, &[])
+            .await;
+        drop(executor);
+        let sent = peers_task.await.unwrap();
+
+        if let Err(ref e) = result {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("No peer_id_bytes"),
+                "the local node is run in-process, never dialled: {msg}"
+            );
+        }
+        // The whole point: the local standby's own failure did not end the
+        // failover, so the next standby was reached.
+        assert!(
+            sent.iter().any(|(n, _)| *n == b),
+            "the second standby must still be tried after the local one fails"
+        );
+        assert!(
+            !sent.iter().any(|(n, _)| *n == local),
+            "nothing is ever sent to ourselves over the network"
+        );
+    }
+
     /// With no standby at all — which is every single-peer delegation, by
     /// design — the failure must still say WHY the segment failed.
     ///

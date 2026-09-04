@@ -1323,11 +1323,17 @@ impl PipelineExecutor {
                             let failover_result = self
                                 .failover_segment(
                                     idx,
-                                    err_msg,
                                     request_id,
-                                    sequence_num,
-                                    index_pos,
-                                    &activations,
+                                    FailoverInput {
+                                        sequence_num,
+                                        index_pos,
+                                        activations: &activations,
+                                        pre_embedded,
+                                        generated_ids,
+                                        is_last,
+                                        precomputed_vision: precomputed_vision.as_deref(),
+                                        original_failure: err_msg,
+                                    },
                                 )
                                 .await?;
                             if run_is_last {
@@ -1435,11 +1441,18 @@ impl PipelineExecutor {
                                 let failover_result = self
                                     .failover_segment(
                                         idx,
-                                        "remote segment returned the wrong activation shape",
                                         request_id,
-                                        sequence_num,
-                                        index_pos,
-                                        &activations,
+                                        FailoverInput {
+                                            sequence_num,
+                                            index_pos,
+                                            activations: &activations,
+                                            pre_embedded,
+                                            generated_ids,
+                                            is_last,
+                                            precomputed_vision: precomputed_vision.as_deref(),
+                                            original_failure:
+                                                "remote segment returned the wrong activation shape",
+                                        },
                                     )
                                     .await?;
                                 // The standby covered THIS segment only, so
@@ -1491,11 +1504,17 @@ impl PipelineExecutor {
                         let failover_result = self
                             .failover_segment(
                                 idx,
-                                &e.to_string(),
                                 request_id,
-                                sequence_num,
-                                index_pos,
-                                &activations,
+                                FailoverInput {
+                                    sequence_num,
+                                    index_pos,
+                                    activations: &activations,
+                                    pre_embedded,
+                                    generated_ids,
+                                    is_last,
+                                    precomputed_vision: precomputed_vision.as_deref(),
+                                    original_failure: &e.to_string(),
+                                },
                             )
                             .await?;
                         if is_last {
@@ -1600,23 +1619,19 @@ impl PipelineExecutor {
     async fn failover_segment(
         &mut self,
         failed_idx: usize,
-        // Why the segment failed in the first place, in the words the failing
-        // node or the transport used. Seeds `last_failure`, so a request with
-        // NO standby — which is every single-peer delegation, by design — still
-        // reports the actual cause instead of only "no standby available".
-        //
-        // Without it, a mid-stream `OutboundFailure: connection lost` reached
-        // the caller as a bare `Segment 1 failed with no standby available`,
-        // and an operator had to correlate two log lines to learn what had
-        // happened. It also cost the retry: `is_transient_remote_failure`
-        // matches "OutboundFailure" in the message text, and the message no
-        // longer carried it.
-        original_failure: &str,
         request_id: uuid::Uuid,
-        sequence_num: u32,
-        index_pos: usize,
-        activations: &[u8],
+        input: FailoverInput<'_>,
     ) -> Result<LayerResult, SwarmError> {
+        let FailoverInput {
+            sequence_num,
+            index_pos,
+            activations,
+            pre_embedded,
+            generated_ids,
+            is_last,
+            original_failure,
+            precomputed_vision,
+        } = input;
         let failed_segment = self.assignment.segments[failed_idx].clone();
         // Everyone this segment has been tried on for this request.
         let mut tried: Vec<crate::types::NodeId> = vec![failed_segment.node_id.clone()];
@@ -1712,6 +1727,65 @@ impl PipelineExecutor {
                 "DIAG: failing over to standby node"
             );
 
+            // The standby the scheduler most often picks is THIS node, and it
+            // was the one case that could not work.
+            //
+            // `find_standbys` sorts the local node FIRST, deliberately — a node
+            // holding every shard is the most reliable fallback there is, and
+            // its own comment says so. But this function only ever knew how to
+            // DIAL a standby, and the local node has no `peer_id_bytes`: it is
+            // the node running this code, not something to reach. So the most
+            // preferred standby was a guaranteed second failure, and the whole
+            // request died with `No peer_id_bytes for backup node` one line
+            // after the scheduler correctly chose the machine that could have
+            // answered (gotcha #458).
+            //
+            // The main loop has run local segments in-process since the
+            // beginning; failover simply never learned to. It goes before the
+            // waiter registration below because there is nothing to wait for.
+            if backup.node_id == *self.shared_state.identity.node_id() {
+                match self
+                    .process_local_segment(
+                        &backup,
+                        sequence_num,
+                        index_pos,
+                        activations.to_vec(),
+                        // Same conditions the main loop applies: the image and
+                        // the pre-embedded flag belong to segment 0 alone, the
+                        // generated ids to the segment that samples.
+                        if failed_idx == 0 {
+                            precomputed_vision
+                        } else {
+                            None
+                        },
+                        pre_embedded && failed_idx == 0,
+                        if is_last { generated_ids } else { &[] },
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        self.assignment.segments[failed_idx].node_id = backup.node_id;
+                        self.assignment.segments[failed_idx].layer_range = backup.layer_range;
+                        return Ok(result);
+                    }
+                    Err(e) => {
+                        // Our own failure is a failure of this standby like any
+                        // other — try the next one rather than ending the
+                        // request (gotcha #435's rule, applied to ourselves).
+                        tracing::warn!(
+                            request_id = %request_id,
+                            segment = failed_idx,
+                            error = %e,
+                            "Local standby could not run the segment — trying the next standby"
+                        );
+                        last_failure = Some(e.to_string());
+                        tried.push(backup.node_id.clone());
+                        abandoned = backup.node_id;
+                        continue;
+                    }
+                }
+            }
+
             // Register a response channel BEFORE sending the request.
             // SEC: a RAII guard removes the entry on every error path
             // (including a panic between insert and wait). Without it a
@@ -1747,15 +1821,23 @@ impl PipelineExecutor {
                 model_id: backup.shard_id.model_id.clone(),
                 layer_range: backup.layer_range,
                 tp_meta: None,
-                vision_embeddings: None,
+                vision_embeddings: if failed_idx == 0 && sequence_num == 0 {
+                    precomputed_vision.map(|v| v.to_vec())
+                } else {
+                    None
+                },
                 chain: Vec::new(),
                 sender_peer_bytes: None,
                 // Unchained failover: the standby answers its sender, which is
                 // us. Naming ourselves would put a 0x07 trailer on a frame an
                 // older standby does not expect.
                 requester_node_id: None,
-                pre_embedded: false,
-                generated_ids: Vec::new(),
+                pre_embedded: pre_embedded && failed_idx == 0,
+                generated_ids: if is_last {
+                    generated_ids.to_vec()
+                } else {
+                    Vec::new()
+                },
                 adapter_id: None,
                 draft_tokens: Vec::new(),
                 spec_logits_requested: false,
@@ -1764,14 +1846,22 @@ impl PipelineExecutor {
                 sampling: None,
             };
 
-            let target_peer_bytes = match self.shared_state.resolve_peer_id_bytes(&backup.node_id) {
-                Some(b) => b,
-                None => {
-                    return Err(SwarmError::Network(format!(
-                        "No peer_id_bytes for backup node {}",
-                        backup.node_id
-                    )));
-                }
+            let Some(target_peer_bytes) = self.shared_state.resolve_peer_id_bytes(&backup.node_id)
+            else {
+                // A standby we cannot address is a failure of that standby, not
+                // of the request: try the next one. Returning here ended the
+                // whole failover on the first unreachable entry, however many
+                // good standbys stood behind it.
+                tracing::warn!(
+                    request_id = %request_id,
+                    segment = failed_idx,
+                    standby = %backup.node_id,
+                    "Standby has no reachable address — trying the next standby"
+                );
+                last_failure = Some(format!("standby {} is not reachable", backup.node_id));
+                tried.push(backup.node_id.clone());
+                abandoned = backup.node_id;
+                continue;
             };
             if self
                 .network_tx
@@ -1893,6 +1983,50 @@ const EXHAUSTED_REASON_MAX_CHARS: usize = 200;
 /// single-peer delegation, by design — the reason carried is the ORIGINAL
 /// segment failure, and calling that a standby's words would be a lie about
 /// which machine said it.
+/// Everything a failover needs to reproduce the forward the failed segment was
+/// given.
+///
+/// It is a struct because the list kept being trimmed. `failover_segment` was
+/// written as a simplified copy of the main send and drifted from it: the
+/// forward it built hardcoded `pre_embedded: false`, `generated_ids: []` and
+/// `vision_embeddings: None`, so failing over segment 0 under local-embedding
+/// privacy handed a standby hidden states labelled as token ids, failing over
+/// the last segment dropped the repetition-penalty context, and failing over a
+/// vision request dropped the image. None of those crash — they quietly change
+/// the answer, which is why none of them was reported.
+///
+/// Adding a field to the wire forward means adding it here and deciding what a
+/// failover should send, rather than defaulting it to nothing by omission.
+struct FailoverInput<'a> {
+    sequence_num: u32,
+    index_pos: usize,
+    activations: &'a [u8],
+    /// True when `activations` are already embedded hidden states rather than
+    /// token ids. Only ever true for segment 0, under local-embedding privacy.
+    pre_embedded: bool,
+    /// Tokens generated so far, for the repetition penalties the LAST segment
+    /// applies when it samples. Empty everywhere else, and empty when the
+    /// caller has no penalties configured.
+    generated_ids: &'a [u32],
+    /// Whether the failed segment is the one that samples.
+    is_last: bool,
+    /// Image embeddings, for the first segment of the first forward of a
+    /// vision request.
+    precomputed_vision: Option<&'a [u8]>,
+    /// Why the segment failed in the first place, in the words the failing node
+    /// or the transport used. Seeds `last_failure`, so a request with NO
+    /// standby — which is every single-peer delegation, by design — still
+    /// reports the actual cause instead of only "no standby available".
+    ///
+    /// Without it, a mid-stream `OutboundFailure: connection lost` reached the
+    /// caller as a bare `Segment 1 failed with no standby available`, and an
+    /// operator had to correlate two log lines to learn what had happened. It
+    /// also cost the retry: `is_transient_remote_failure` matches
+    /// "OutboundFailure" in the message text, and the message no longer carried
+    /// it.
+    original_failure: &'a str,
+}
+
 pub(super) fn exhausted_message(segment: usize, last_failure: Option<&str>) -> String {
     let base = format!("Segment {segment} failed with no standby available");
     match last_failure.map(str::trim).filter(|s| !s.is_empty()) {
