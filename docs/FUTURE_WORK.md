@@ -125,6 +125,33 @@ a third-party node that cannot be observed from here, and it may simply have bee
 loaded. **That does not weaken the finding**: the point is that the system cannot
 tell the difference either, and re-picks it every time at the same wrong price.
 
+## The ACK fast-fail asks whether the REQUEST has a standby, not the segment (open, 2026-09-05)
+
+`network::manager::request_has_standby` reads `!a.standbys.is_empty()` — a
+property of the whole request. The gate it feeds decides whether to abandon a
+silent peer early, and its justification (architecture.md, the `AckRttEstimator`
+rule) is precisely that abandoning is only worth it when a failover can follow:
+"With none, abandoning cannot buy a failover and can only turn a slow success
+into a 503."
+
+But standbys are chosen PER SEGMENT. A five-segment plan where only one segment
+has a standby reports `standbys=1`, and every segment — including the four with
+no backup at all — is treated as fast-failable. That is the exact shape of
+gotcha #451, where a count of standbys was read as a statement about coverage,
+and of #464, where it was read as a statement about capacity.
+
+`scheduler::standby_covers` is already the predicate that answers it properly;
+what the ACK site lacks is the segment context — it holds a `request_id` and a
+`PeerId`, and would need to resolve which segment that peer is serving before it
+could ask whether any standby covers it.
+
+Not fixed with #464 because it is a different module and a different lookup, and
+because #464 errs toward the previous behaviour: on the reported topology the
+local node remains standby for one segment, so `standbys` stays non-empty and
+this gate behaves exactly as it did before. Worth doing next time this area is
+open — the failure it produces is a slow peer abandoned for a segment nothing
+can take over, i.e. a 503 where waiting would have succeeded.
+
 ## The RAM headroom clamp has a floor that can never refuse (open, 2026-09-04)
 
 `RamBudget::from_machine` computes

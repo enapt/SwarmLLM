@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::daemon::SharedState;
@@ -309,6 +310,79 @@ const DELEGATE_VRAM_MARGIN: f64 = 1.2;
 /// it needs.
 pub(crate) fn standby_covers(standby: &PipelineSegment, range: (u32, u32)) -> bool {
     standby.layer_range.0 <= range.0 && standby.layer_range.1 >= range.1
+}
+
+/// Could this candidate actually STAND IN for `segment_layers` more layers, on
+/// top of the `already_committed` layers this same plan has already given it?
+///
+/// [`standby_covers`] asks whether a node HOLDS the range. This asks whether it
+/// could RUN it — the two questions that #452 (the planner) and #454
+/// (delegation) each had to learn to separate, on the third and last path that
+/// assigns layers to a machine.
+///
+/// **Why the running total, and not the bound alone.** A standby is chosen per
+/// segment, and one node can be picked for several — the local node especially,
+/// since `find_standbys` sorts it first on the sound reasoning that a node
+/// holding everything is the most reliable fallback there is. Each choice was
+/// weighed against nothing at all, so a 16 GB processor-only Mac mini holding
+/// 12 of a 48-layer 14B became the standby for all four remote segments. Three
+/// of them failed over to it in turn during one request, it was charged +9 and
+/// +8 layers on top of its own 12, and at 29 of 48 the worker process was
+/// killed — losing a reply that had already streamed 238 tokens over ~10
+/// minutes (gotcha #462).
+///
+/// The plan said `standbys=4`. It had capacity to be one. HA practice has a
+/// name for that: a cluster at high utilisation is "HA capable on paper" and
+/// cannot actually fail over, because nothing ever checked that the spare
+/// capacity was really spare.
+///
+/// The accounting is the one Kubernetes' scheduler uses for the same hazard —
+/// a node's resources are decremented as each assignment is *decided*, not when
+/// it is bound, so later decisions in the same pass see the reduced capacity
+/// ("assumed pods"). Ours is simpler because a plan is built synchronously in
+/// one pass, so a running tally is all it takes.
+///
+/// **Primary duty counts.** A node that is primary for one segment and standby
+/// for another must be able to run both at once, which is exactly what happens
+/// when the second segment's holder dies.
+///
+/// **Standbys are charged at FULL weight, not discounted by the chance of
+/// being used.** Two reasons. `charge_additional_segment` never gives a range
+/// back — a worker charged for a failed-over segment holds it for its life —
+/// so the memory genuinely accumulates. And this cannot lose a standby that
+/// would have worked: one that does not fit is refused by that same charge with
+/// a 503, and `find_standbys` picks only one candidate per segment, so before
+/// this the request simply died. Choosing a candidate that fits instead is a
+/// strict improvement; where none fits there was never a standby, and
+/// `segments_without_standby` now says so honestly rather than counting a
+/// fiction (gotcha #451's lesson, on the other side).
+///
+/// `None` still means unknowable and never excludes — the contract
+/// [`max_hostable_layers`] sets, and the reason a mixed-version swarm keeps
+/// working during a rollout.
+pub(crate) fn standby_has_room(
+    max_hostable_layers: Option<u32>,
+    already_committed: u32,
+    segment_layers: u32,
+) -> bool {
+    match max_hostable_layers {
+        None => true,
+        Some(cap) => already_committed.saturating_add(segment_layers) <= cap,
+    }
+}
+
+/// Layers each node is already on the hook for as a PRIMARY in this plan.
+///
+/// Seeds the running tally in [`find_standbys`]. A node can appear more than
+/// once: under prompt privacy the local node holds both ends of a boomerang,
+/// so it is primary twice before any standby is considered.
+fn primary_layer_commitments(segments: &[PipelineSegment]) -> HashMap<NodeId, u32> {
+    let mut m: HashMap<NodeId, u32> = HashMap::new();
+    for seg in segments {
+        let layers = seg.layer_range.1.saturating_sub(seg.layer_range.0);
+        *m.entry(seg.node_id.clone()).or_insert(0) += layers;
+    }
+    m
 }
 
 /// Indices of the segments no standby covers — the ones whose holder failing
@@ -2599,7 +2673,14 @@ impl PipelineScheduler {
 
         let local_node_id = self.shared_state.identity.node_id();
 
+        // What this plan has already asked of each node. Seeded with primary
+        // duty, then grown as standbys are chosen, so the fourth segment's
+        // standby search sees what the first three already committed. See
+        // `standby_has_room`.
+        let mut committed = primary_layer_commitments(segments);
+
         for segment in segments {
+            let segment_layers = segment.layer_range.1.saturating_sub(segment.layer_range.0);
             // Collect all eligible standbys, then pick the local node first.
             // Preferring local prevents "no standby available" when a remote
             // primary returns an inference error — the local node can always
@@ -2611,6 +2692,12 @@ impl PipelineScheduler {
                         && c.available_ranges
                             .iter()
                             .any(|r| r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1)
+                        // Holding the range is not being able to run it.
+                        && standby_has_room(
+                            c.max_hostable_layers,
+                            committed.get(&c.node_id).copied().unwrap_or(0),
+                            segment_layers,
+                        )
                 })
                 .collect();
             // For standby anti-affinity: prefer DIFFERENT regions from primary
@@ -2670,6 +2757,9 @@ impl PipelineScheduler {
                 })
             });
             if let Some(backup) = eligible.first() {
+                // Decide-time accounting: this node is now on the hook for
+                // these layers as far as the rest of this plan is concerned.
+                *committed.entry(backup.node_id.clone()).or_insert(0) += segment_layers;
                 standbys.push(PipelineSegment {
                     node_id: backup.node_id.clone(),
                     shard_id: backup.shard_id.clone(),

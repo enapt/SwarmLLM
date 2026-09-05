@@ -518,6 +518,51 @@ pretending to.
 worthless until you check that something fills that input on the path the guard
 exists for. Grep for the writer, and check it runs where the reader runs.
 
+## A standby is a capacity commitment, not just a coverage claim
+
+`scheduler::standby_has_room(max_hostable_layers, already_committed,
+segment_layers)` is asked of every standby candidate, beside
+`standby_covers`. The two are the same pair of questions #452 and #454 each had
+to separate: `standby_covers` asks whether a node HOLDS the range,
+`standby_has_room` whether it could RUN it.
+
+**Why the running total.** `find_standbys` picks one standby per segment and
+sorts the LOCAL node first — deliberately, since a node holding everything is
+the most reliable fallback there is. Each pick was weighed against nothing, so a
+16 GB processor-only Mac mini holding 12 of a 48-layer 14B was named standby for
+all four remote segments; three failed over to it in turn and its worker was
+killed mid-reply (gotcha #464). The plan logged `standbys=4` and it had the
+capacity to be one — what HA practice calls "HA capable on paper".
+
+`primary_layer_commitments` seeds the tally from the plan's primaries and each
+chosen standby adds to it, so the fourth segment's search sees what the first
+three committed. This is **decide-time accounting**, the same thing Kubernetes'
+scheduler does with assumed pods: capacity is decremented when an assignment is
+DECIDED, not when it is bound. Ours needs no cache because a plan is built
+synchronously in one pass.
+
+Four things a change must keep.
+
+- **Primary duty counts.** A failover is precisely when a node runs its own
+  segment and the one it stood in for, at the same time.
+- **Standbys are charged at FULL weight**, never discounted by the chance of
+  being used: `charge_additional_segment` never gives a range back, so a
+  worker charged for a failed-over segment holds it for its life.
+- **Unknown never excludes** — `max_hostable_layers`'s own contract, and what
+  keeps a mixed-version swarm routable during a rollout.
+- **This cannot lose a usable standby.** One candidate is picked per segment and
+  one that does not fit is refused at `charge_additional_segment` with a 503, so
+  before this the request died. Where nothing fits there was never a standby and
+  `segments_without_standby` now reports that honestly instead of counting a
+  fiction.
+
+Note what the tally does NOT duplicate: `max_hostable_layers` already nets off
+`peer_vram_commitments`, but that is CROSS-request and deliberately excludes the
+request being scheduled — so within one plan it is always zero. This is the
+missing within-plan piece, and it is not double-counting for a warm peer either,
+since a warm peer's advertised free memory excludes its resident weights but not
+the KV the new segment will claim.
+
 ## A count and an outcome that disagree are two different questions
 
 `scheduler::standby_covers` is the one predicate for "could this standby take

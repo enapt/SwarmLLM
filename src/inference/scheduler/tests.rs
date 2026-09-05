@@ -2115,6 +2115,180 @@ fn a_card_with_room_needs_no_speed_comparison() {
     );
 }
 
+/// Gotcha #462, the routing half. A standby is chosen per segment and the local
+/// node is sorted first for every one of them, so one machine became the
+/// standby for all four remote segments of a 48-layer model it held 12 of.
+/// Three failed over to it in turn and its worker was killed.
+///
+/// The plan said `standbys=4`; it had the capacity to be one.
+#[test]
+fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
+    use crate::inference::scheduler::{NodeCandidate, ReachTier};
+    use crate::types::{ModelId, ShardId};
+
+    let small = NodeId([1u8; 32]);
+
+    // Holds the whole 48-layer model, but can only run 20 layers at once.
+    let mk = |byte: u8, cap: Option<u32>| NodeCandidate {
+        node_id: NodeId([byte; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        available_ranges: vec![(0, 48)],
+        reach: ReachTier::DirectMeasured,
+        latency_ms: 5,
+        load: 0.0,
+        trust_score: 1.0,
+        can_be_first: true,
+        can_be_last: true,
+        region_score: 1.0,
+        est_tokens_per_sec: 5.0,
+        observed_latency_ms_per_layer: None,
+        observed_delegated_ms_per_layer: None,
+        expected_attempts: 1.0,
+        is_pool_member: false,
+        gpu_vram_available_mb: None,
+        max_hostable_layers: cap,
+        observed_prefill_ms_per_layer_byte: None,
+        has_gpu: false,
+    };
+
+    // Four remote primaries of 12 layers each; `small` is the only other
+    // holder, so it is the only standby candidate for all four.
+    let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
+        node_id: NodeId([byte; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        layer_range: r,
+    };
+    let segments = vec![
+        seg(10, (0, 12)),
+        seg(11, (12, 24)),
+        seg(12, (24, 36)),
+        seg(13, (36, 48)),
+    ];
+    let candidates = vec![
+        mk(10, Some(12)),
+        mk(11, Some(12)),
+        mk(12, Some(12)),
+        mk(13, Some(12)),
+        mk(1, Some(20)), // `small`
+    ];
+
+    let scheduler = PipelineScheduler::new(make_shared_state());
+    let standbys = scheduler.find_standbys(&segments, &candidates, Some(100), 48);
+
+    let taken = standbys.iter().filter(|s| s.node_id == small).count();
+    assert_eq!(
+        taken, 1,
+        "a node that can run 20 layers may stand in for one 12-layer segment, \
+         not four — before this it was named standby for every segment and its \
+         worker was killed when three of them came home"
+    );
+    // And the plan is honest about what that leaves uncovered.
+    assert_eq!(
+        super::segments_without_standby(&segments, &standbys).len(),
+        3,
+        "the three it cannot cover must be reported, not counted as covered"
+    );
+}
+
+/// The other side: the check must not be a blanket refusal. Raise the same
+/// node's ceiling and it stands in for all four again.
+///
+/// This is deliberately NOT called a control — it fails without the fix too,
+/// for a different reason (with no capacity check the tie-break hands the role
+/// to whichever peer sorts first). The real control is
+/// `a_standby_is_chosen_by_cost_not_by_ping`, whose candidates all carry
+/// `max_hostable_layers: None`: the fix is inert there, and it must keep
+/// passing unchanged.
+///
+/// Worth noting what excludes the peers here: each is primary for 12 layers
+/// and can host 12, so its own segment uses its whole ceiling. That is correct
+/// — it genuinely could not absorb another segment — and it is why this fix
+/// reduces standby coverage on a tight swarm rather than only re-ordering it.
+#[test]
+fn a_node_with_room_still_stands_in_for_every_segment() {
+    use crate::inference::scheduler::{NodeCandidate, ReachTier};
+    use crate::types::{ModelId, ShardId};
+
+    let big = NodeId([1u8; 32]);
+    let mk = |byte: u8, cap: Option<u32>| NodeCandidate {
+        node_id: NodeId([byte; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        available_ranges: vec![(0, 48)],
+        reach: ReachTier::DirectMeasured,
+        latency_ms: 5,
+        load: 0.0,
+        trust_score: 1.0,
+        can_be_first: true,
+        can_be_last: true,
+        region_score: 1.0,
+        est_tokens_per_sec: 5.0,
+        observed_latency_ms_per_layer: None,
+        observed_delegated_ms_per_layer: None,
+        expected_attempts: 1.0,
+        is_pool_member: false,
+        gpu_vram_available_mb: None,
+        max_hostable_layers: cap,
+        observed_prefill_ms_per_layer_byte: None,
+        has_gpu: false,
+    };
+    let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
+        node_id: NodeId([byte; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        layer_range: r,
+    };
+    let segments = vec![
+        seg(10, (0, 12)),
+        seg(11, (12, 24)),
+        seg(12, (24, 36)),
+        seg(13, (36, 48)),
+    ];
+    let candidates = vec![
+        mk(10, Some(12)),
+        mk(11, Some(12)),
+        mk(12, Some(12)),
+        mk(13, Some(12)),
+        mk(1, Some(48)),
+    ];
+
+    let scheduler = PipelineScheduler::new(make_shared_state());
+    let standbys = scheduler.find_standbys(&segments, &candidates, Some(100), 48);
+    assert_eq!(
+        standbys.iter().filter(|s| s.node_id == big).count(),
+        4,
+        "48 layers of room covers four 12-layer segments"
+    );
+}
+
+/// Primary duty is part of the tally: a node running a segment must be able to
+/// run that segment AND anything it stands in for, because a failover is when
+/// it does both at once.
+#[test]
+fn being_primary_uses_up_the_room_a_standby_would_need() {
+    assert!(
+        super::standby_has_room(Some(20), 0, 12),
+        "control: with nothing committed, 12 layers fit inside 20"
+    );
+    assert!(
+        !super::standby_has_room(Some(20), 12, 12),
+        "already holding 12 of its 20, it cannot also stand in for 12 more"
+    );
+    // Unknown never excludes — the contract `max_hostable_layers` sets, and
+    // what keeps a mixed-version swarm working during a rollout.
+    assert!(super::standby_has_room(None, 9_000, 9_000));
+}
+
 /// A standby serves the SAME request the primary was chosen for, so it has to be
 /// priced by the same model. It used to be ranked on `latency_ms` alone — a
 /// health-ping round trip, which says nothing about how fast a machine computes
