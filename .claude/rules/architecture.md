@@ -198,6 +198,44 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
+## A reasoning model's scratchpad is not the reply
+
+`inference::take_leading_reasoning_block` removes a leading `<think>…</think>`
+in `finalize_reply_text` (the non-streaming choke point), and
+`tool_parse::StreamingToolText` withholds the same block while streaming — the
+buffer both encoders already share, so all four API paths inherit it.
+
+**Why both.** A reply's content must not depend on whether the caller asked for
+`stream`; a fork on a presentation flag is a fork in policy. Fixing only the
+finaliser would mean the same question answered by a reasoning model returns the
+scratchpad when streamed and the answer when not.
+
+**Why it is removed at all.** Qwen3, QwQ and DeepSeek-R1 write their working out
+first and the answer after it. Every serving stack separates the two — vLLM
+extracts it with a `--reasoning-parser` into `reasoning_content`, llama.cpp
+defaults Qwen3.5 to non-thinking so it is never produced — and we did neither,
+so someone asking "Say OK" got several hundred tokens of deliberation with the
+answer at the end. Same class as gotcha #169: content that is not the reply
+reaching the user as the reply.
+
+Four things a change here must keep:
+
+- **Only at the START, and only CLOSED.** A `<think>` later in the text is the
+  model writing about thinking. An unterminated one means the reply was cut off
+  mid-reasoning, so the whole thing is scratchpad — the non-streaming path
+  leaves it rather than returning an empty message the caller cannot tell from a
+  real blank answer, and the streaming path releases it through `pending_all`.
+- **The streaming side waits for the answer to START.** The blank line between
+  scratchpad and answer arrives in a LATER token than `</think>`, so deciding on
+  first sight of the closer emits it and the reply opens with a stray newline.
+- **The silence is covered.** `sse::progress_ticker` is already merged into both
+  encoders precisely so a slow reply does not look dead — which is what makes
+  withholding during reasoning safe rather than a hang.
+- **The reasoning is DISCARDED, not surfaced.** Exposing it wants a field on
+  both surfaces (`reasoning_content` on OpenAI, a thinking block on Anthropic)
+  and is worth doing; returning it glued to the answer is not a smaller version
+  of that, it is the bug.
+
 ## A prompt that closed someone else's turn is finished for the model
 
 `chat_template::open_the_models_turn_if_the_prompt_closed_it` runs in

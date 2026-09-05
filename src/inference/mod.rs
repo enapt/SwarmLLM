@@ -120,6 +120,7 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
     };
 
     strip_control_token_artifacts(text);
+    take_leading_reasoning_block(text);
     let mut matched = None;
     for stop in stops {
         if let Some(pos) = text.find(stop.as_str()) {
@@ -351,6 +352,47 @@ const EMPTIED_REPLY_LOG_CHARS: usize = 240;
 /// leakage and editing someone's content — a reply that genuinely discusses
 /// `<|im_end|>` will lose it, which is the accepted cost of not showing control
 /// tokens to every user of a mismatched model file.
+/// Remove a reasoning model's `<think>…</think>` preamble from the reply.
+///
+/// A reasoning model — Qwen3, QwQ, DeepSeek-R1 — writes its working out first
+/// and the answer after it, and every serving stack separates the two: vLLM
+/// extracts it with a `--reasoning-parser` into `reasoning_content`, and
+/// llama.cpp defaults Qwen3.5 to non-thinking so it is never produced. We did
+/// neither, so the whole scratchpad was returned as the assistant's message —
+/// someone asking "Say OK" gets several hundred tokens of deliberation with the
+/// answer somewhere at the end. Same class as gotcha #169: content that is not
+/// the reply reaching the user as the reply.
+///
+/// Three conditions, and all of them matter:
+///
+/// - **It must be at the START.** A `<think>` later in the text is the model
+///   writing about thinking, not thinking.
+/// - **The block must be CLOSED.** An unterminated one means the reply was cut
+///   off mid-reasoning (`max_tokens`), so the whole thing is scratchpad —
+///   removing it returns an empty message, and the caller cannot tell that from
+///   a real blank answer. Leaving it is the lesser harm, and the emptied-reply
+///   warning below is the thing that would otherwise fire on every such reply.
+/// - **Only the block, plus the whitespace after it.** The answer follows.
+///
+/// The reasoning itself is DISCARDED rather than surfaced. Exposing it wants a
+/// field on both API surfaces (`reasoning_content` on OpenAI, a thinking block
+/// on Anthropic) and is worth doing; returning it glued to the answer is not a
+/// smaller version of that, it is the bug.
+pub(crate) fn take_leading_reasoning_block(text: &mut String) {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+    let lead = text.len() - text.trim_start().len();
+    if !text[lead..].starts_with(OPEN) {
+        return;
+    }
+    let Some(rel) = text[lead..].find(CLOSE) else {
+        return;
+    };
+    let mut end = lead + rel + CLOSE.len();
+    end += text[end..].len() - text[end..].trim_start().len();
+    text.drain(..end);
+}
+
 pub(crate) fn strip_control_token_artifacts(text: &mut String) {
     if !text.contains("<|") {
         return;
@@ -920,5 +962,76 @@ mod qmatmul_exactness_tests {
     fn multi_row_kernels_are_bit_identical_to_the_per_row_ordering() {
         check::<BlockQ4K>("Q4_K");
         check::<BlockQ6K>("Q6_K");
+    }
+}
+
+#[cfg(test)]
+mod reasoning_block_tests {
+    use super::{finalize_reply_text, take_leading_reasoning_block};
+
+    /// A reasoning model writes its working out first. The answer is the
+    /// answer; the scratchpad is not part of it.
+    #[test]
+    fn a_closed_reasoning_block_is_removed_and_the_answer_kept() {
+        let mut t =
+            "<think>\nThe user wants a greeting. Keep it short.\n</think>\n\nOK".to_string();
+        take_leading_reasoning_block(&mut t);
+        assert_eq!(t, "OK");
+    }
+
+    /// An UNTERMINATED block means the reply was cut off mid-reasoning, so the
+    /// whole thing is scratchpad. Removing it returns an empty message, which
+    /// the caller cannot tell from a genuine blank answer — the worse failure.
+    #[test]
+    fn an_unterminated_block_is_left_alone() {
+        let mut t = "<think>\nStill working through this and then I ran out of room".to_string();
+        let before = t.clone();
+        take_leading_reasoning_block(&mut t);
+        assert_eq!(t, before, "a truncated reply must not be emptied");
+    }
+
+    /// A model writing ABOUT thinking is not thinking. Only a block at the very
+    /// start is the preamble.
+    #[test]
+    fn a_think_tag_later_in_the_reply_is_content() {
+        let mut t = "You can wrap reasoning in <think>like this</think> if you want.".to_string();
+        let before = t.clone();
+        take_leading_reasoning_block(&mut t);
+        assert_eq!(t, before);
+    }
+
+    /// The ordinary case must cost nothing and change nothing.
+    #[test]
+    fn a_reply_without_reasoning_is_untouched() {
+        let mut t = "OK".to_string();
+        take_leading_reasoning_block(&mut t);
+        assert_eq!(t, "OK");
+    }
+
+    /// It runs inside the one finaliser every reply path goes through, so no
+    /// caller can be exempt — and it must run BEFORE stop-string truncation, or
+    /// a stop sequence occurring inside the reasoning cuts the reply there and
+    /// the real answer is lost with it.
+    #[test]
+    fn the_shared_finaliser_applies_it_before_stop_sequences() {
+        let mut t =
+            "<think>\nI should not say STOP here.\n</think>\n\nThe answer is 4.".to_string();
+        let matched = finalize_reply_text(&mut t, &["STOP".to_string()]);
+        assert_eq!(t, "The answer is 4.");
+        assert_eq!(
+            matched, None,
+            "a stop sequence inside the scratchpad must not truncate the answer"
+        );
+    }
+
+    /// Idempotent, like every other step in the finaliser — the router runs it
+    /// again with template-derived stops the executor never saw.
+    #[test]
+    fn running_it_twice_changes_nothing() {
+        let mut t = "<think>\nreasoning\n</think>\n\nanswer".to_string();
+        finalize_reply_text(&mut t, &[]);
+        let once = t.clone();
+        finalize_reply_text(&mut t, &[]);
+        assert_eq!(t, once);
     }
 }

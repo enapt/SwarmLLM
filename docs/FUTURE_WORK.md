@@ -460,11 +460,34 @@ would be dangerous. The consequence — a prompt left on a closed turn — is no
 repaired at the choke point (see `.claude/rules/architecture.md` § "A prompt that
 closed someone else's turn"), so a Qwen3 model gets a usable prompt.
 
-**What is still missing** is Qwen3's thinking-mode handling. Its template emits
-`<think>\n\n</think>\n\n` after the generation prompt when `enable_thinking`
-is false, and strips prior `<think>` blocks out of assistant turns on the way
-in. We do neither, so a Qwen3 model is prompted in its default (thinking) mode
-with no way to turn that off, and prior reasoning is fed back verbatim.
+**The reply side is handled** (2026-09-05): a leading `<think>…</think>` is
+removed from the answer on every path, streaming and not — see
+`.claude/rules/architecture.md` § "A reasoning model's scratchpad is not the
+reply". So a Qwen3 model returns its answer rather than its deliberation.
+
+**What is still missing is the PROMPT side**, and it is now an efficiency and
+API question rather than a correctness one:
+
+- **No way to turn thinking off.** Qwen3's template emits
+  `<think>\n\n</think>\n\n` after the generation prompt when `enable_thinking`
+  is false, which makes the model skip reasoning entirely. We always prompt in
+  its default (thinking) mode, so every reply pays for reasoning tokens that are
+  then discarded. llama.cpp exposes this as
+  `--chat-template-kwargs '{"enable_thinking":false}'` and vLLM/SGLang as an
+  `enable_thinking` switch; Qwen also supports `/think` and `/no_think` in the
+  prompt itself as a soft switch.
+- **Prior reasoning is fed back verbatim.** The template strips `<think>` blocks
+  out of earlier assistant turns on the way in; we send the conversation as-is.
+  Since we now remove them from what we RETURN, a client replaying our own
+  output is unaffected — this only bites a client that kept the raw text from
+  elsewhere.
+- **The reasoning is discarded rather than surfaced.** Exposing it properly
+  wants `reasoning_content` on the OpenAI surface (vLLM's convention) and a
+  thinking block on the Anthropic one.
+
+The smallest first step remains a family fallback that emits Qwen3's shape,
+the way `fallback_by_model_name` already does for others — that is where the
+non-thinking prefill would go.
 
 **Worth doing when** a Qwen3-family model is actually being served here. Two
 routes: teach the renderer enough Jinja for this template (large, and the

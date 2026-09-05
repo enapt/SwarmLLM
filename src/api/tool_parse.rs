@@ -282,16 +282,104 @@ pub fn content_prefix_len(text: &str) -> usize {
 /// The single place both streaming encoders decide what may go out early, so
 /// the two cannot disagree about the same reply. See [`content_prefix_len`] for
 /// why holding the whole thing back was the bug.
+/// Where a reasoning model's `<think>` preamble has got to.
+#[derive(Default, PartialEq, Clone, Copy)]
+enum Reasoning {
+    /// Too early to say — the reply so far could still be the start of
+    /// `<think>`, so nothing may go out yet.
+    #[default]
+    Undecided,
+    /// Inside the block. Everything up to `</think>` is scratchpad.
+    Inside,
+    /// Either it never began or it has ended; ordinary streaming from here.
+    Absent,
+}
+
 #[derive(Default)]
 pub struct StreamingToolText {
     text: String,
     emitted: usize,
+    reasoning: Reasoning,
 }
 
+/// Opening and closing markers of a reasoning preamble.
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
 impl StreamingToolText {
+    /// Advance the reasoning state, consuming a completed preamble.
+    ///
+    /// Returns `true` while content must be withheld — either because the reply
+    /// is still too short to tell whether it opens with `<think>`, or because we
+    /// are inside the block.
+    ///
+    /// **Why streaming needs this at all.** `finalize_reply_text` removes the
+    /// preamble on the non-streaming paths, and a reply's content must not
+    /// depend on whether the caller asked for `stream` — a fork on a
+    /// presentation flag is a fork in policy, which is what
+    /// `a_stream_that_fails_never_pretends_the_model_chose_to_stop` exists
+    /// about one level up. Without this, the same question answered by a
+    /// reasoning model returns the scratchpad when streamed and the answer when
+    /// not.
+    ///
+    /// The silence while the model reasons is real and is covered: `sse::
+    /// progress_ticker` is already merged into both encoders precisely so a
+    /// slow reply does not look dead to the client.
+    ///
+    /// Unlike the non-streaming path this cannot decline an UNTERMINATED block,
+    /// because it does not know the reply has ended — `pending_all` is the
+    /// escape hatch and releases everything, so a reply cut off mid-reasoning
+    /// still reaches the caller rather than vanishing.
+    fn withholding_reasoning(&mut self) -> bool {
+        match self.reasoning {
+            Reasoning::Absent => false,
+            Reasoning::Undecided => {
+                let lead = self.text.len() - self.text.trim_start().len();
+                let rest = &self.text[lead..];
+                if rest.starts_with(THINK_OPEN) {
+                    self.reasoning = Reasoning::Inside;
+                    return self.withholding_reasoning();
+                }
+                // Still a possible prefix of `<think>`? Then wait. Otherwise the
+                // reply plainly does not open with one and never will.
+                let undecidable = THINK_OPEN.starts_with(rest) && !rest.is_empty();
+                if undecidable {
+                    true
+                } else {
+                    self.reasoning = Reasoning::Absent;
+                    false
+                }
+            }
+            Reasoning::Inside => match self.text.find(THINK_CLOSE) {
+                Some(at) => {
+                    let after = at + THINK_CLOSE.len();
+                    let tail = &self.text[after..];
+                    let ws = tail.len() - tail.trim_start().len();
+                    // Keep waiting while everything after the closer is still
+                    // whitespace. The blank line between scratchpad and answer
+                    // arrives in a LATER token than `</think>` does, so
+                    // deciding on the first sight of the closer emits it — the
+                    // reply then opens with a stray newline.
+                    if ws == tail.len() {
+                        return true;
+                    }
+                    // Never emitted, and never will be: this is the deliberate
+                    // loss the non-streaming finaliser also makes.
+                    self.emitted = self.emitted.max(after + ws);
+                    self.reasoning = Reasoning::Absent;
+                    false
+                }
+                None => true,
+            },
+        }
+    }
+
     /// Append a token and return whatever has just become safe to emit.
     pub fn push(&mut self, token: &str) -> Option<String> {
         self.text.push_str(token);
+        if self.withholding_reasoning() {
+            return None;
+        }
         // `safe` cannot fall below `emitted`: nothing already released could be
         // the start of a marker, because a possible marker prefix is exactly
         // what was withheld. `max` is belt and braces against a future marker
@@ -307,6 +395,9 @@ impl StreamingToolText {
     /// Content not yet emitted that is still certainly content — flushed
     /// alongside the tool calls when the reply turned out to contain one.
     pub fn pending_content(&mut self) -> Option<String> {
+        if self.withholding_reasoning() {
+            return None;
+        }
         let safe = content_prefix_len(&self.text).max(self.emitted);
         (safe > self.emitted).then(|| {
             let out = self.text[self.emitted..safe].to_string();
@@ -1428,5 +1519,89 @@ mod tool_choice_tests {
             );
         }
         assert!(!tool_choice_forbids_tools(&None));
+    }
+}
+
+#[cfg(test)]
+mod streaming_reasoning_tests {
+    use super::StreamingToolText;
+
+    fn stream(chunks: &[&str]) -> (String, StreamingToolText) {
+        let mut b = StreamingToolText::default();
+        let mut out = String::new();
+        for c in chunks {
+            if let Some(s) = b.push(c) {
+                out.push_str(&s);
+            }
+        }
+        (out, b)
+    }
+
+    /// A reasoning model's scratchpad must not stream to the user as the reply.
+    /// The non-streaming paths already remove it, and the same request must not
+    /// give different content depending on `stream`.
+    #[test]
+    fn a_reasoning_preamble_is_not_streamed() {
+        let (out, mut b) = stream(&["<think>", "\nweighing it up\n", "</think>", "\n\n", "OK"]);
+        assert_eq!(out, "OK");
+        assert_eq!(b.pending_all(), None, "and nothing is left over");
+    }
+
+    /// The answer streams normally once the block closes — it is not held to
+    /// the end.
+    #[test]
+    fn the_answer_still_streams_token_by_token() {
+        let mut b = StreamingToolText::default();
+        for c in ["<think>", "hmm", "</think>", "\n\n"] {
+            assert_eq!(b.push(c), None, "nothing escapes while reasoning");
+        }
+        assert_eq!(b.push("The ").as_deref(), Some("The "));
+        assert_eq!(b.push("answer").as_deref(), Some("answer"));
+    }
+
+    /// An ordinary reply is released as it arrives — the check must not hold
+    /// content back waiting for a block that never comes.
+    #[test]
+    fn an_ordinary_reply_is_not_delayed() {
+        let mut b = StreamingToolText::default();
+        assert_eq!(b.push("Hello").as_deref(), Some("Hello"));
+        assert_eq!(b.push(" there").as_deref(), Some(" there"));
+    }
+
+    /// A reply that merely STARTS with `<` is withheld only until it is clear
+    /// it is not `<think>`, then released whole.
+    #[test]
+    fn a_leading_angle_bracket_is_released_once_it_cannot_be_a_preamble() {
+        let (out, _) = stream(&["<", "p>hi</p>"]);
+        assert_eq!(out, "<p>hi</p>");
+    }
+
+    /// A reply cut off mid-reasoning must still reach the caller rather than
+    /// vanishing. Streaming cannot tell "not finished yet" from "ended here",
+    /// so `pending_all` is the escape hatch the encoders already call.
+    #[test]
+    fn an_unterminated_block_is_still_released_at_the_end() {
+        let (out, mut b) = stream(&["<think>", "still going when the budget ran out"]);
+        assert_eq!(out, "", "nothing streamed while it looked like reasoning");
+        assert_eq!(
+            b.pending_all().as_deref(),
+            Some("<think>still going when the budget ran out"),
+            "but the reply is not lost"
+        );
+    }
+
+    /// Tool-call withholding still works on the far side of a preamble.
+    #[test]
+    fn a_tool_call_after_reasoning_is_still_withheld() {
+        let (out, _) = stream(&[
+            "<think>",
+            "pick a tool",
+            "</think>",
+            "\n\n",
+            "Sure. ",
+            "<tool_call>",
+            "{\"name\":\"f\"}",
+        ]);
+        assert_eq!(out, "Sure. ", "the marker and after it stay withheld");
     }
 }
