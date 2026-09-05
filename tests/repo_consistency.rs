@@ -3701,6 +3701,58 @@ fn a_streaming_pipeline_path_sends_its_terminal_finish_event() {
 /// Reply text reaches a streaming client through the shared emit helpers, never
 /// through a hand-rolled `StreamingTokenEvent`.
 ///
+/// Is the statement at `idx` inside an end-of-turn guard?
+///
+/// Looks back over the preceding statements for `!eos.contains(`, which is the
+/// filter an inline decoder applies in place of the shared emit helpers. The
+/// window is generous because the guard opens a loop body that does real work
+/// (decode, stop-string search) before the send; it is bounded so a guard in a
+/// different function cannot vouch for this one.
+fn eos_guarded(stmts: &[(usize, String)], idx: usize) -> bool {
+    const LOOKBACK: usize = 40;
+    let start = idx.saturating_sub(LOOKBACK);
+    stmts[start..idx]
+        .iter()
+        .any(|(_, s)| s.contains("!eos.contains("))
+}
+
+/// The end-of-turn lookback must see a guard that opens a loop body doing real
+/// work before the send, and must NOT vouch for one too far away to be the same
+/// block — otherwise the exclusion it replaces has just moved.
+#[test]
+fn the_eos_lookback_sees_a_real_guard_and_not_a_distant_one() {
+    let stmt = |s: &str| (0usize, s.to_string());
+
+    // The shape in `distributed.rs`: guard, then decode + stop-string work,
+    // then the send.
+    let mut near = vec![stmt("if !eos.contains(&tid) {")];
+    for _ in 0..12 {
+        near.push(stmt("let text = decoder.decode_tokens(&[tid]);"));
+    }
+    near.push(stmt(".send(StreamingTokenEvent {"));
+    let idx = near.len() - 1;
+    assert!(
+        eos_guarded(&near, idx),
+        "a guard 12 statements back must count"
+    );
+
+    // A guard in some earlier function cannot vouch for this send.
+    let mut far = vec![stmt("if !eos.contains(&tid) {")];
+    for _ in 0..80 {
+        far.push(stmt("let unrelated = 1;"));
+    }
+    far.push(stmt(".send(StreamingTokenEvent {"));
+    let idx = far.len() - 1;
+    assert!(
+        !eos_guarded(&far, idx),
+        "a guard 80 statements away is a different block and must not count"
+    );
+
+    // No guard at all.
+    let none = vec![stmt("let x = 1;"), stmt(".send(StreamingTokenEvent {")];
+    assert!(!eos_guarded(&none, 1));
+}
+
 /// `emit_streaming_batch` / `emit_first_streaming_token` own the end-of-turn
 /// filter. A coordinator that builds its own event with decoded text bypasses
 /// that filter, which is how `<|eot_id|>` reached clients as reply text from
@@ -3725,15 +3777,16 @@ fn streamed_reply_text_goes_through_the_shared_emit_helpers() {
         // content event. `remote_generate.rs` forwards `t.text` verbatim from
         // the serving peer, which produced it through its own local executor —
         // there is no token id here to test, only text someone else decoded.
-        // `distributed.rs` decodes inline and is already inside its own
-        // `if !eos.contains(&tid)` guard at its single decode site; it does not
-        // use the helper pattern at all. LIMITATION, stated rather than hidden:
-        // a NEW content send added to that file outside its guard is not caught
-        // here. The three speculative coordinators are where the defect lived
-        // and where the helpers are the established mechanism.
-        if name == "mod.rs" || name == "remote_generate.rs" || name == "distributed.rs" {
+        // `distributed.rs` decodes inline and does not use the helper pattern
+        // at all; it is checked against the guard it actually relies on
+        // instead of being skipped — see `eos_guarded` below. This used to be
+        // an exclusion with the hole written down beside it ("a NEW content
+        // send added to that file outside its guard is not caught here"), and
+        // a stated limitation is still a limitation.
+        if name == "mod.rs" || name == "remote_generate.rs" {
             continue;
         }
+        let decodes_inline = name == "distributed.rs";
         let src = std::fs::read_to_string(&path).expect("read");
         let stmts = statements(&src);
         for (i, (line, stmt)) in stmts.iter().enumerate() {
@@ -3748,15 +3801,27 @@ fn streamed_reply_text_goes_through_the_shared_emit_helpers() {
                 .collect::<Vec<_>>()
                 .join(" ");
             let text_is_empty = window.contains("text: String::new()");
-            if !text_is_empty {
-                offenders.push(format!(
-                    "{}:{} builds a StreamingTokenEvent carrying reply text — \
-                     route it through emit_streaming_batch so it inherits the \
-                     end-of-turn filter",
-                    path.display(),
-                    line
-                ));
+            if text_is_empty {
+                continue;
             }
+            // A file that decodes inline may carry reply text, but only from
+            // inside the end-of-turn guard that does the filtering the helpers
+            // would otherwise have done.
+            if decodes_inline && eos_guarded(&stmts, i) {
+                continue;
+            }
+            offenders.push(format!(
+                "{}:{} builds a StreamingTokenEvent carrying reply text — \
+                 route it through emit_streaming_batch so it inherits the \
+                 end-of-turn filter{}",
+                path.display(),
+                line,
+                if decodes_inline {
+                    " (or put it inside the `!eos.contains` guard)"
+                } else {
+                    ""
+                }
+            ));
         }
     }
     assert!(

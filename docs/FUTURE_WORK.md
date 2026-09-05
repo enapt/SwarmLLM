@@ -366,7 +366,7 @@ Still unverified against a real pair of large concurrent prompts on one node —
 the arithmetic and the claim lifecycle are pinned by tests (each fails with the
 mechanism disabled), but nobody has watched the second prompt get its 503.
 
-## Two smaller costs found beside #417 (open, 2026-08-30)
+## Two smaller costs found beside #417 (both FIXED — 2026-09-01 and 2026-09-03)
 
 Both surfaced while pricing `GET /api/admin/stats` (gotcha #417, fixed). Neither
 was fixed with it — recorded here so the next person has the measurement rather
