@@ -69,6 +69,22 @@ pub(super) async fn finalize_request(
                         "DIAG: refunded escrow on inference failure"
                     );
                 }
+                Err(re) if crate::credit::escrow::already_settled(&re) => {
+                    // The expiry sweep got there first. `ESCROW_TTL_SECS` is
+                    // 10 minutes and a distributed request can legitimately run
+                    // longer, so this is the ORDINARY outcome for a long
+                    // request, not a fault — the credits were refunded, by the
+                    // other path. Warning about it (and claiming a retry that
+                    // will never come, because the entry is gone) reported
+                    // correct accounting as broken accounting: a tester whose
+                    // request ran 816 s cited this line as evidence the ledger
+                    // had been left "in a bad state".
+                    tracing::debug!(
+                        request_id = %request.id,
+                        escrow_id = %eid,
+                        "Escrow was already settled by the expiry sweep — nothing to refund"
+                    );
+                }
                 Err(re) => {
                     // Don't propagate — the user already got their failure.
                     // Log so the cleanup sweep can still mop up.

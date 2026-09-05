@@ -15,6 +15,27 @@ const TREE_ESCROW: &str = "escrow";
 /// Default escrow threshold — requests costing more than this get escrowed.
 pub const DEFAULT_ESCROW_THRESHOLD: i64 = 10;
 
+/// What `refund_escrow` says when the entry is gone — the expiry sweep
+/// removes it after refunding, so this is "already settled", not "lost".
+const ERR_NOT_FOUND: &str = "Escrow not found";
+
+/// Is this refund error just "somebody already settled it"?
+///
+/// A distributed request may legitimately outlive `ESCROW_TTL_SECS`, and when
+/// it does the expiry sweep has already refunded and removed the entry before
+/// the request finishes. The caller must be able to tell that apart from a
+/// real failure, and it lives HERE, beside the strings it matches, so the two
+/// cannot drift across modules — the same reason `reclassify_flattened_error`
+/// keeps its markers next to the variants that produce them.
+pub fn already_settled(e: &SwarmError) -> bool {
+    match e {
+        SwarmError::CreditError(m) => {
+            m == ERR_NOT_FOUND || (m.starts_with("Escrow ") && m.contains(", not Pending"))
+        }
+        _ => false,
+    }
+}
+
 /// Escrow entry TTL in seconds (10 minutes).
 const ESCROW_TTL_SECS: u64 = 600;
 
@@ -181,7 +202,7 @@ impl EscrowManager {
             let mut entry = self
                 .entries
                 .get_mut(&escrow_id)
-                .ok_or_else(|| SwarmError::CreditError("Escrow not found".into()))?;
+                .ok_or_else(|| SwarmError::CreditError(ERR_NOT_FOUND.into()))?;
 
             if entry.status != EscrowStatus::Pending {
                 return Err(SwarmError::CreditError(format!(
@@ -268,7 +289,7 @@ impl EscrowManager {
             let mut entry = self
                 .entries
                 .get_mut(&escrow_id)
-                .ok_or_else(|| SwarmError::CreditError("Escrow not found".into()))?;
+                .ok_or_else(|| SwarmError::CreditError(ERR_NOT_FOUND.into()))?;
 
             if entry.status != EscrowStatus::Pending {
                 return Err(SwarmError::CreditError(format!(
