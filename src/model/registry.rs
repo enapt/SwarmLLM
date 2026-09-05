@@ -693,6 +693,28 @@ impl ModelRegistry {
             .unwrap_or(swarmllm_types::BUILD_TAG_UNKNOWN)
     }
 
+    /// Is the different-build holder filter switched on?
+    ///
+    /// `SWARMLLM_BUILD_FILTER=0` turns it off, restoring the pre-2026-09-05
+    /// behaviour of routing to any holder of the shard id. This is a
+    /// swarm-wide protocol change and the filter can, in principle, leave a
+    /// model with no holders at all — if this node's manifest hash disagrees
+    /// with every holder's, it is now correctly the case that none of them can
+    /// give us bytes we would accept, but a node in that state used to reach
+    /// the model (wastefully, via a failed transfer and an origin refetch) and
+    /// now will not. The escape hatch exists so that case can be diagnosed in
+    /// the field without a downgrade, the same role `SWARMLLM_KV_RECONCILE=0`
+    /// plays for gotcha #462.
+    fn build_filter_enabled() -> bool {
+        use std::sync::OnceLock;
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            !std::env::var("SWARMLLM_BUILD_FILTER")
+                .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+                .unwrap_or(false)
+        })
+    }
+
     /// Get all nodes that hold a specific shard (from the bounded cache).
     ///
     /// **Holders claiming a different BUILD of the model are filtered out**
@@ -707,7 +729,11 @@ impl ModelRegistry {
     /// the tree goes through it — which is why the filter lives here rather
     /// than at the ~60 call sites.
     pub fn shard_holders(&self, shard_id: &ShardId) -> Vec<NodeId> {
-        let expected = self.expected_build_tag(shard_id);
+        let expected = if Self::build_filter_enabled() {
+            self.expected_build_tag(shard_id)
+        } else {
+            swarmllm_types::BUILD_TAG_UNKNOWN
+        };
         self.shard_holders
             .get(shard_id)
             .map(|v| {

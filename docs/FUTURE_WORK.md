@@ -711,8 +711,20 @@ describing one file and authenticating another.
 **What remains.** The holder map. Consequences, in order of how much they
 matter:
 
-- **Correctness is safe.** Every shard is hash-verified before load, so a model
-  assembled from two builds fails loudly rather than answering wrongly.
+- **Correctness is safe FOR A LOCALLY ASSEMBLED MODEL.** Every shard is
+  hash-verified against this node's manifest before load, so a model assembled
+  HERE from two builds fails loudly rather than answering wrongly.
+  **Corrected 2026-09-05: this does not extend to a distributed pipeline.**
+  Each node loads its own shards and verifies them against its OWN manifest,
+  and nothing compares the build between segments — grep `manifest_hash` under
+  `inference/scheduler/` and `inference/pipeline/` and the only hits are test
+  fixtures. So a chain could run layers 0-10 from one build and 10-20 from
+  another, each side passing its own check. It is not garbage — both are
+  quantisations of the same model and the activations live in the same space —
+  but it is neither model's output, and nothing would have reported it. The
+  holder filter closes this as a side effect; a build discriminator carried
+  per SEGMENT would close it directly, and is the residual if the filter is
+  ever switched off (`SWARMLLM_BUILD_FILTER=0`).
 - **Bandwidth is not.** A node fetching from a different-build holder downloads
   the whole shard, fails the hash, quarantines it and refetches from the
   origin. Bounded by `can_fetch_shard_from_origin` and the per-shard backoff,

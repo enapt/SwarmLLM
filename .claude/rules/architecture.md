@@ -656,6 +656,23 @@ invisible rather than merely wrong. Adding a field extends the helper, not the
 eight call sites. `shard_announce_is_built_in_one_place` fails the build on a
 bare literal.
 
+**Switchable in the field**: `SWARMLLM_BUILD_FILTER=0` restores the old
+behaviour. This is a swarm-wide protocol change and the filter can in principle
+leave a model with no holders — correctly, since none of them could give us
+bytes we would accept, but a node in that state used to reach the model via a
+failed transfer and an origin refetch. The hatch is for diagnosing that without
+a downgrade, the role `SWARMLLM_KV_RECONCILE=0` plays for #462.
+
+**What it also closed, which the original write-up got wrong.** That entry said
+"correctness is safe — every shard is hash-verified before load". True for a
+model assembled on ONE node. In a distributed pipeline each node verifies its
+own shards against its own manifest and **nothing compares the build between
+segments**, so a chain could run layers 0-10 from one build and 10-20 from
+another with both sides passing. Not garbage — both are quantisations of the
+same model — but neither model's output, and silent. Closing it directly needs
+a build discriminator carried per segment; that is the residual if the filter
+is switched off.
+
 **Still open**: the reverse index (`node_shards`) is unfiltered, which is
 correct today because every consumer reads it about the LOCAL node. A consumer
 that asked it about a peer would bypass this filter.
