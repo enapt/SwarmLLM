@@ -2,6 +2,36 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.158-alpha] — 2026-09-05
+
+Three fixes, all from one report about a Qwen3 model that would not answer.
+
+### Fixed
+
+- **A model with a large context no longer fails to start on a small graphics
+  card.** This backend asked for the model's entire training window as its
+  conversation length. Qwen3 8B declares nearly 41,000 tokens, which for that
+  model is 5.6 GB of memory for the conversation alone — more than a 6 GB card
+  has left after the weights — so it loaded and then failed on every request.
+  Capped to what the node actually serves it needs 1.1 GB and fits. Any model
+  with a large training window on a modest card was affected; that one just
+  declares a big enough number to make it certain. The setting for raising the
+  limit now reaches this backend too.
+- **A model whose chat template we cannot render now gets a usable prompt.** If
+  the rendered prompt stops where someone else's turn ended, the model is being
+  shown a finished conversation and replies with a single token. We already
+  detected that exact situation and said so in the log, then sent the prompt
+  anyway. The model's own turn is now opened for it — only where the closing
+  marker identifies one model family, since guessing wrong is worse than a
+  prompt someone can diagnose.
+- **A reasoning model now returns its answer rather than its working out.**
+  Models that think before answering write their reasoning first, wrapped in
+  think tags, and we returned the whole thing as the reply — asking one to say
+  OK gave hundreds of tokens of deliberation with the answer at the end. The
+  working out is now separated, on streamed replies as well as plain ones, so
+  the answer does not depend on how it was requested. A reply cut off partway
+  through reasoning is still delivered whole rather than arriving empty.
+
 ## [0.3.157-alpha] — 2026-09-05
 
 Thirteen changes. Three came from testers' reports in a single day; the rest
