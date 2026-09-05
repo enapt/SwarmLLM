@@ -310,13 +310,22 @@ impl IoRead for ShardReader {
                     )
                 })
                 .collect();
-            tracing::error!(
+            // DEBUG, not ERROR. A node is never expected to hold every shard —
+            // "No full model download required" is a design decision, not a
+            // degraded state — so reading outside what this node holds is the
+            // ordinary case, and the CALLER decides whether it matters. A
+            // loader that needed the tensor fails and says so with its own
+            // message; a diagnostic probe that can miss ignores the `Err`.
+            // Logging it at ERROR asserted this node was broken while it went
+            // on to load and serve the segment correctly, which is exactly what
+            // `failure_log_level` exists to stop (gotcha #316).
+            tracing::debug!(
                 pos = self.position,
                 total_size = self.total_size,
                 header_len = self.header.len(),
                 buf_len = buf.len(),
                 tensor_map_sample = ?map_info,
-                "ShardReader: position is in a missing shard region"
+                "ShardReader: position is in a region this node does not hold"
             );
             Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,

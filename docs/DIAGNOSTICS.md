@@ -224,6 +224,36 @@ peers' cards in between.
 `segments=1` beside a local-only result is the search AGREEING with the fast
 path, not failing to run.
 
+## An ERROR that is not a fault: reads outside the shards this node holds
+
+`ShardReader` is a virtual view of a whole GGUF built from the shards this node
+actually has. Asking it for a byte range covered by a shard the node does NOT
+hold is the ordinary case — "no full model download required" is a design
+decision — so it returns `UnexpectedEof` and logs at **debug**:
+
+```
+ShardReader: position is in a region this node does not hold pos=... tensor_map_sample=[...]
+```
+
+Whether that matters is the CALLER's to say. A loader that needed the tensor
+fails with its own message; the load-time integrity probe ignores it. Until
+2026-09-05 this was logged at ERROR, and the load-time probe read
+`blk.0.attn_norm.weight` unconditionally — layer 0, which lives in the model's
+first shard. A node serving a middle segment has no reason to hold that shard,
+so it emitted an ERROR and then loaded and served the segment perfectly:
+
+```
+ERROR ShardReader: position is in a missing shard region pos=443912320 ...
+INFO  Loaded split model segment layers="[29..32)" total=48
+INFO  DIAG: LayerForward processed via worker subprocess elapsed_ms=6558
+```
+
+The probe now reads the segment's OWN first layer (`blk.<layer_start>.
+attn_norm.weight`), which is both a real check of the data the worker is about
+to use and one the node can satisfy. If you are reading an older log, those
+ERROR lines are noise — check whether a `Loaded split model segment` line
+follows.
+
 ## "Why is this node talking to a stranger?"
 
 ```

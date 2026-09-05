@@ -201,18 +201,30 @@ impl SplitModel {
             );
         }
 
-        // DIAG: Read first 16 bytes of blk.0.attn_norm.weight via ShardReader
-        // to verify data integrity
-        if let Some(norm_info) = ct.tensor_infos.get("blk.0.attn_norm.weight") {
+        // DIAG: read the first 16 bytes of a tensor THIS SEGMENT holds, to
+        // check the shard mapping resolves to real bytes.
+        //
+        // It used to probe `blk.0.attn_norm.weight` unconditionally. Layer 0
+        // lives in the model's first shard, which a node serving a middle
+        // segment has no reason to hold — so on every such node the probe
+        // read into a gap, and although its failure is ignored here (the
+        // `is_ok()`), `ShardReader` reported it at ERROR. A node that went on
+        // to load and serve the segment perfectly well was announcing a fault
+        // it did not have. Probing layer 0 also verified nothing about the
+        // data this worker is about to use.
+        let probe_tensor = probe_tensor_name(layer_start, |n| ct.tensor_infos.contains_key(n))
+            .and_then(|n| ct.tensor_infos.get(&n).map(|i| (n, i)));
+        if let Some((name, norm_info)) = probe_tensor {
             use std::io::{Read as IoReadTrait, Seek as SeekTrait};
             let seek_pos = ct.tensor_data_offset + norm_info.offset;
             reader.seek(SeekFrom::Start(seek_pos)).ok();
             let mut probe = [0u8; 16];
             if reader.read_exact(&mut probe).is_ok() {
                 tracing::info!(
+                    tensor = %name,
                     seek_pos,
                     first_bytes = ?&probe,
-                    "DIAG: blk.0.attn_norm.weight first 16 bytes via ShardReader"
+                    "DIAG: first 16 bytes of a held tensor via ShardReader"
                 );
             }
         }
@@ -263,5 +275,65 @@ impl SplitModel {
                 gpu_layers: crate::inference::split::gpu_layer_limit(),
             },
         )
+    }
+}
+
+/// Which tensor should the load-time integrity probe read?
+///
+/// This segment's OWN first layer, falling back to layer 0 only if the model
+/// has no such tensor. The probe used to name layer 0 unconditionally, which
+/// is in the model's first shard — a node serving a middle segment has no
+/// reason to hold it, so the read landed in a gap on exactly the nodes
+/// partial holding is designed for, and verified nothing about the data the
+/// worker was about to use either way.
+///
+/// `has` asks whether the model declares that tensor; `None` means there is
+/// nothing sensible to probe and the caller skips it.
+fn probe_tensor_name(layer_start: usize, has: impl Fn(&str) -> bool) -> Option<String> {
+    let own = format!("blk.{layer_start}.attn_norm.weight");
+    if has(&own) {
+        return Some(own);
+    }
+    let first = "blk.0.attn_norm.weight".to_string();
+    has(&first).then_some(first)
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::probe_tensor_name;
+
+    #[test]
+    fn a_middle_segment_probes_its_own_first_layer() {
+        let declared = |n: &str| n.starts_with("blk.") && n.ends_with(".attn_norm.weight");
+        assert_eq!(
+            probe_tensor_name(29, declared).as_deref(),
+            Some("blk.29.attn_norm.weight"),
+            "a node serving [29..32) must probe data it actually holds, not layer 0 \
+             — layer 0 is in the first shard, which it has no reason to have"
+        );
+    }
+
+    #[test]
+    fn a_first_segment_probes_layer_zero_as_before() {
+        let declared = |n: &str| n.starts_with("blk.") && n.ends_with(".attn_norm.weight");
+        assert_eq!(
+            probe_tensor_name(0, declared).as_deref(),
+            Some("blk.0.attn_norm.weight")
+        );
+    }
+
+    #[test]
+    fn an_architecture_without_that_tensor_is_not_probed() {
+        assert_eq!(probe_tensor_name(29, |_| false), None);
+    }
+
+    /// A model that declares layer 0 but not this segment's own layer still
+    /// gets a probe rather than none — the fallback is a fallback.
+    #[test]
+    fn the_fallback_still_applies_when_the_segments_tensor_is_absent() {
+        assert_eq!(
+            probe_tensor_name(29, |n| n == "blk.0.attn_norm.weight").as_deref(),
+            Some("blk.0.attn_norm.weight")
+        );
     }
 }
