@@ -78,6 +78,18 @@ pub struct MetricsProviders {
     pub layers_served: AtomicU64,
     pub segment_serve_micros: AtomicU64,
     pub segment_bytes_out: AtomicU64,
+    /// Tokens this node has produced for other people.
+    ///
+    /// The panel used to describe served work only as segments, layers and an
+    /// average ms-per-layer. None of those is a rate a person can act on, and
+    /// the average in particular CANNOT be turned into one: a prompt pass and a
+    /// single decode step each count as one segment, and they differ by orders
+    /// of magnitude, so the mean is over two different quantities. An operator
+    /// asked us directly what tokens per second his machine was managing —
+    /// the number was not on his screen and could not be derived from what was.
+    /// It was already in hand at the one place serving is recorded, and thrown
+    /// away.
+    pub tokens_served: AtomicU64,
     pub channel_metrics: ChannelMetricsSet,
     pub ws_connection_count: std::sync::atomic::AtomicUsize,
     pub node_stats: RwLock<NodeStats>,

@@ -752,6 +752,11 @@ impl super::SharedState {
             m.requests_served_atomic.fetch_add(1, Relaxed);
         }
 
+        // What the machine actually produced for other people. Counted before
+        // the billing clamp, because this is a description of the work, not a
+        // price for it.
+        m.tokens_served.fetch_add(u64::from(work.tokens), Relaxed);
+
         let tokens = work.tokens.clamp(1, MAX_CREDITABLE_TOKENS) as i64;
         let earned = crate::credit::ledger::RATE_INFERENCE_SERVE.saturating_mul(tokens);
         self.credits.pending_credit_earn.fetch_add(earned, Relaxed);
@@ -1252,6 +1257,44 @@ mod tests {
         // The segment telemetry that already worked must keep working.
         assert_eq!(m.segments_served.load(relaxed), 1);
         assert_eq!(m.layers_served.load(relaxed), 28);
+        assert_eq!(
+            m.tokens_served.load(relaxed),
+            43,
+            "the words produced for someone else are what the panel reports as \
+             a rate — segments and layers cannot be turned into one"
+        );
+    }
+
+    /// Tokens are counted as WORK DONE, before the billing clamp.
+    ///
+    /// The clamp exists to bound what one serve can be paid for; applying it to
+    /// the description of the work would understate a long reply on the panel
+    /// that reports it, which is a different question from what it is worth.
+    #[test]
+    fn the_words_produced_are_counted_before_the_billing_clamp() {
+        let state = test_state(crate::config::Config::default());
+        let m = &state.metrics;
+        let relaxed = std::sync::atomic::Ordering::Relaxed;
+        let over = MAX_CREDITABLE_TOKENS + 500;
+
+        state.record_peer_serve(PeerServe {
+            kind: ServeKind::WholeRequest,
+            layers: 8,
+            elapsed_ms: 1000,
+            activation_bytes: 0,
+            tokens: over,
+        });
+
+        assert_eq!(
+            m.tokens_served.load(relaxed),
+            u64::from(over),
+            "the panel reports what was produced"
+        );
+        assert_eq!(
+            state.credits.pending_credit_earn.load(relaxed),
+            crate::credit::ledger::RATE_INFERENCE_SERVE * i64::from(MAX_CREDITABLE_TOKENS),
+            "while billing stays clamped"
+        );
     }
 
     /// A segment is a forward, not a request — the requester assembles the

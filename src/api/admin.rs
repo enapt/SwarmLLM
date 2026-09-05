@@ -212,6 +212,7 @@ pub async fn performance(State(state): State<AppState>) -> impl axum::response::
 
     let layers = m.layers_served.load(Ordering::Relaxed);
     let micros = m.segment_serve_micros.load(Ordering::Relaxed);
+    let tokens_served = m.tokens_served.load(Ordering::Relaxed);
 
     // Hourly trend, oldest first. Aggregates only, and the series is capped at
     // a week, so this stays a few KB regardless of traffic.
@@ -242,6 +243,16 @@ pub async fn performance(State(state): State<AppState>) -> impl axum::response::
             "layers": layers,
             "compute_secs": micros as f64 / 1_000_000.0,
             "activation_bytes_out": m.segment_bytes_out.load(Ordering::Relaxed),
+            "tokens": tokens_served,
+            // What a person actually wants to know, and what the figures below
+            // cannot be used to derive: a prompt pass and a single decode step
+            // each count as ONE segment, so `ms_per_layer` is a mean over two
+            // quantities that differ by orders of magnitude.
+            "tokens_per_sec": if micros > 0 && tokens_served > 0 {
+                Some(tokens_served as f64 / (micros as f64 / 1_000_000.0))
+            } else {
+                None
+            },
             // The comparable figure: what a peer's scheduler ranks us on.
             "ms_per_layer": if layers > 0 {
                 Some((micros as f64 / 1000.0) / layers as f64)

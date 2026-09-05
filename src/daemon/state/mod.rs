@@ -831,6 +831,7 @@ impl SharedState {
                 layers_served: AtomicU64::new(0),
                 segment_serve_micros: AtomicU64::new(0),
                 segment_bytes_out: AtomicU64::new(0),
+                tokens_served: AtomicU64::new(0),
                 channel_metrics: ChannelMetricsSet::new(),
                 ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
                 providers_config: RwLock::new({

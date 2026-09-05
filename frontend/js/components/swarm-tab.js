@@ -848,10 +848,25 @@
     if (!served.segments) {
       html += '<div class="text-muted text-sm mb-3">' + I18n.t('perf.served_none') + '</div>';
     } else {
-      html += '<div class="text-sm mb-3">' + I18n.t('perf.served_summary', {
+      // Lead with what a person actually wants to know — how much work, how
+      // fast — and keep the engine-room figures below it, labelled. The old
+      // single line was "135 segments · 4868 layers · 1089.6s compute · 223.8
+      // ms per layer", which prompted an operator to ask us what tokens per
+      // second his machine was managing: the number was not on his screen, and
+      // ms-per-layer cannot be used to work it out (a whole prompt and a single
+      // token each count as one segment).
+      html += '<div class="text-sm mb-1">' + I18n.t('perf.served_plain', {
+        tokens: (served.tokens || 0).toLocaleString(),
+        minutes: ((served.compute_secs || 0) / 60).toFixed(1),
+      }) + '</div>';
+      if (served.tokens_per_sec) {
+        html += '<div class="text-sm mb-1">' + I18n.t('perf.served_rate', {
+          rate: served.tokens_per_sec.toFixed(1),
+        }) + '</div>';
+      }
+      html += '<div class="text-muted text-sm mb-3">' + I18n.t('perf.served_detail', {
         segments: served.segments,
         layers: served.layers,
-        seconds: (served.compute_secs || 0).toFixed(1),
         per_layer: served.ms_per_layer ? served.ms_per_layer.toFixed(1) : '—',
       }) + '</div>';
     }
