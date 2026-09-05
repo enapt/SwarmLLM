@@ -3036,25 +3036,51 @@ impl ModelProcessPool {
         self.retire_dead_worker_locked(model_id)
     }
 
+    /// Take a worker out of the pool and release what it held. **The one way a
+    /// worker leaves `workers`**, apart from `unload_model`, which must drain
+    /// before killing and so does its own removal before ending in the same
+    /// `after_worker_gone`.
+    ///
+    /// `pred` decides whether the entry currently under that key is the one
+    /// being evicted, so a caller holding a dead handle cannot remove the live
+    /// worker that has already replaced it.
+    ///
+    /// **Why it exists.** Gotcha #461 fixed three sites that removed a dead
+    /// worker without releasing its memory charge — and there were nine. The
+    /// other six are the paths a worker dies on in practice: a failed IPC send,
+    /// a closed reader channel on forward / batch-forward / generate, and
+    /// `classify_worker_error`'s fatal arm, which is the CUDA-OOM path and the
+    /// one the reporting node hits most. None of them released anything, and
+    /// the health-tick reap cannot save them: it scans `workers`, and these
+    /// have already removed the entry, so the charge leaked permanently
+    /// (gotcha #467).
+    fn evict_worker_where(
+        &self,
+        model_id: &ModelId,
+        pred: impl Fn(&Arc<WorkerHandle>) -> bool,
+        how: &str,
+    ) -> bool {
+        let Some((_, handle)) = self.workers.remove_if(model_id, |_, cur| pred(cur)) else {
+            return false;
+        };
+        let freed_gpu_memory = handle.placed_on_cpu_because.is_none();
+        self.after_worker_gone(model_id, freed_gpu_memory, how);
+        true
+    }
+
+    /// Evict the worker the caller was talking to, and only that one.
+    fn evict_this_worker(&self, model_id: &ModelId, handle: &Arc<WorkerHandle>, how: &str) {
+        self.evict_worker_where(model_id, |cur| Arc::ptr_eq(cur, handle), how);
+    }
+
     /// The body of [`Self::retire_dead_worker`], with `spawn_lock` already
     /// held. Split out so the background reap can use `try_lock`.
     fn retire_dead_worker_locked(&self, model_id: &ModelId) -> bool {
-        let Some((_, handle)) = self
-            .workers
-            .remove_if(model_id, |_, h| h.dead.load(Ordering::Acquire))
-        else {
-            return false;
-        };
-        // Was it holding graphics memory? A crash frees the card exactly as a
-        // graceful unload does, so the same follow-up applies — including
-        // lifting the CPU pins its occupancy caused.
-        let freed_gpu_memory = handle.placed_on_cpu_because.is_none();
-        tracing::warn!(
-            model_id = %model_id,
-            "A model worker exited unexpectedly — releasing what it held"
-        );
-        self.after_worker_gone(model_id, freed_gpu_memory, "exited unexpectedly");
-        true
+        self.evict_worker_where(
+            model_id,
+            |h| h.dead.load(Ordering::Acquire),
+            "exited unexpectedly",
+        )
     }
 
     /// Retire every worker whose process has exited. Wired to the health tick.
@@ -4136,7 +4162,7 @@ impl ModelProcessPool {
                 send_daemon(&mut *writer, &DaemonMsg::Forward(ipc_fwd), &payload_buf).await
             {
                 drop(writer);
-                self.workers.remove(&model_id);
+                self.evict_this_worker(&model_id, &handle, "IPC send failed");
                 tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
                 // The worker never received the request; nothing to cancel.
                 guard.disarm();
@@ -4190,7 +4216,7 @@ impl ModelProcessPool {
                         // Reader actor closed the channel — worker died while we were waiting.
                         // Subprocess lifecycle failure → ServiceUnavailable (per
                         // .claude/rules/completeness.md); Internal is for code bugs.
-                        self.workers.remove(&model_id);
+                        self.evict_this_worker(&model_id, &handle, "closed its connection");
                         guard.disarm();
                         return Err(SwarmError::ServiceUnavailable(
                             "worker closed connection before reply".into(),
@@ -4319,7 +4345,7 @@ impl ModelProcessPool {
             .await
             {
                 drop(writer);
-                self.workers.remove(&model_id);
+                self.evict_this_worker(&model_id, &handle, "IPC send failed");
                 tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
                 return Err(SwarmError::ServiceUnavailable(format!(
                     "send BatchForward: {e}"
@@ -4366,7 +4392,7 @@ impl ModelProcessPool {
                     None => {
                         // Subprocess lifecycle failure → ServiceUnavailable
                         // (mirrors the single-forward arm above).
-                        self.workers.remove(&model_id);
+                        self.evict_this_worker(&model_id, &handle, "closed its connection");
                         return Err(SwarmError::ServiceUnavailable(
                             "worker closed connection during batch forward".into(),
                         ));
@@ -4488,7 +4514,7 @@ impl ModelProcessPool {
             let mut writer = handle.writer.lock().await;
             if let Err(e) = send_daemon(&mut *writer, &DaemonMsg::Generate(gen), &[]).await {
                 drop(writer);
-                self.workers.remove(model_id);
+                self.evict_this_worker(model_id, &handle, "IPC send failed");
                 tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
                 // The worker never received the request; nothing to cancel.
                 guard.disarm();
@@ -4528,7 +4554,7 @@ impl ModelProcessPool {
                     // Subprocess lifecycle failure → ServiceUnavailable.
                     // Was Internal; operators saw 500s here and misattributed
                     // them to code bugs rather than worker crashes.
-                    self.workers.remove(model_id);
+                    self.evict_this_worker(model_id, &handle, "closed its connection");
                     return Err(SwarmError::ServiceUnavailable(
                         "worker closed connection mid-generate".into(),
                     ));
@@ -4664,7 +4690,9 @@ impl ModelProcessPool {
         // well: a worker binary older than the `fatal` field always sends
         // `false`, and a stranded worker is much worse than a needless respawn.
         if fatal_flag || crate::inference::worker_ipc::worker_error_is_fatal(&message) {
-            self.workers.remove(model_id);
+            // No handle in scope here, so this evicts whatever is under the key
+            // — the behaviour it has always had. The release is the new part.
+            self.evict_worker_where(model_id, |_| true, "fatal error");
             tracing::warn!(
                 model = %model_id,
                 error = %message,
@@ -5414,6 +5442,54 @@ mod tests {
     /// asks for THAT model again. A node whose big model died and is then
     /// asked for a different one would otherwise keep the corpse's charge for
     /// ever — and it is the other model that gets refused.
+    /// Gotcha #467: the fatal-error arm — the CUDA out-of-memory path, and the
+    /// one the reporting node hits — removed the worker and released nothing.
+    ///
+    /// The health-tick reap cannot cover this: it scans `workers`, and this has
+    /// already taken the entry out. So the charge leaked for the daemon's life.
+    #[tokio::test]
+    async fn a_worker_killed_by_a_fatal_error_gives_its_memory_back() {
+        let p = test_pool();
+        p.set_ram_budget_mb(8000);
+        let m = ModelId("oomed".into());
+        assert!(p.admit_to_cpu(&m, 6000));
+        p.workers.insert(m.clone(), fake_worker_handle(false).await);
+
+        let err = p.classify_worker_error(&m, "CUDA_ERROR_OUT_OF_MEMORY".into(), true);
+        assert!(matches!(err, SwarmError::ServiceUnavailable(_)));
+
+        assert!(p.workers.get(&m).is_none(), "the worker is evicted");
+        assert_eq!(
+            p.ram_committed_mb(),
+            0,
+            "and its charge is released — the reap cannot do it afterwards, \
+             because the entry is already gone from `workers`"
+        );
+        assert!(p.admit_to_cpu(&ModelId("next".into()), 6000));
+    }
+
+    /// A caller holding a handle that has already been replaced must not evict
+    /// the live worker that replaced it. `evict_this_worker` compares identity,
+    /// not just the key.
+    #[tokio::test]
+    async fn evicting_a_stale_handle_leaves_the_live_worker_alone() {
+        let p = test_pool();
+        p.set_ram_budget_mb(8000);
+        let m = ModelId("replaced".into());
+        let stale = fake_worker_handle(true).await;
+        let live = fake_worker_handle(false).await;
+        p.workers.insert(m.clone(), live.clone());
+        assert!(p.admit_to_cpu(&m, 3000));
+
+        p.evict_this_worker(&m, &stale, "IPC send failed");
+
+        assert!(
+            p.workers.get(&m).is_some(),
+            "the live worker under that key is not the one the caller was using"
+        );
+        assert_eq!(p.ram_committed_mb(), 3000, "and its charge stands");
+    }
+
     /// A worker that CRASHED frees the card exactly as a graceful unload does,
     /// so the CPU pins its occupancy caused must lift either way.
     ///

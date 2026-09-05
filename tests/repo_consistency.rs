@@ -1431,6 +1431,80 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
 /// asserting it. Dropping one is silent and unbounded — `active_traces` is the
 /// oracle behind `model_is_in_use`, so a stranded entry refuses to delete that
 /// model for the daemon's lifetime.
+/// A worker leaves the pool in exactly two places, and both release what it
+/// held.
+///
+/// Gotcha #461 fixed three sites that removed a dead worker and released
+/// nothing — and there were NINE. The other six are the paths a worker actually
+/// dies on: a failed IPC send, a closed reader channel on forward /
+/// batch-forward / generate, and `classify_worker_error`'s fatal arm, which is
+/// the CUDA-OOM path. The health-tick reap cannot cover them, because it scans
+/// `workers` and they have already removed the entry — so the memory charge
+/// leaked for the daemon's lifetime and refused every later model (#467).
+#[test]
+fn a_worker_only_leaves_the_pool_where_its_memory_is_released() {
+    let root = repo_root();
+    let path = root.join("src/inference/process_pool.rs");
+    let text = std::fs::read_to_string(&path).expect("read process_pool.rs");
+    let src = &text[..text.find("#[cfg(test)]").unwrap_or(text.len())];
+
+    let offenders: Vec<usize> = worker_removal_lines(src);
+    assert!(
+        offenders.is_empty(),
+        "`self.workers.remove(...)` outside the two sanctioned paths, at line(s) {offenders:?}.\n         Removing a worker without releasing its RAM/VRAM charge leaves a phantom \
+         reservation that refuses every later model until the daemon restarts \
+         (gotchas #461, #467). Go through `evict_this_worker` / \
+         `evict_worker_where`, or — if you must drain first, as `unload_model` \
+         does — end in `after_worker_gone`."
+    );
+}
+
+/// The guard above is only worth having if it can see the shape it forbids.
+#[test]
+fn the_worker_removal_guard_catches_a_bare_remove() {
+    let planted = r#"
+        fn some_new_path(&self) {
+            self.workers.remove(&model_id);
+        }
+    "#;
+    assert_eq!(
+        worker_removal_lines(planted).len(),
+        1,
+        "a bare `workers.remove` must be caught"
+    );
+    // And the two sanctioned forms are not offenders.
+    let ok = r#"
+        let Some((_, handle)) = self.workers.remove_if(model_id, |_, cur| pred(cur)) else {
+            return false;
+        };
+        // unload_model drains first, then ends in after_worker_gone.
+        if let Some((_, handle)) = self.workers.remove(model_id) {
+            self.after_worker_gone(model_id, freed_gpu_memory, "stopped");
+        }
+    "#;
+    assert!(
+        worker_removal_lines(ok).is_empty(),
+        "remove_if and the drain-then-release form are the sanctioned paths"
+    );
+}
+
+/// Lines doing a bare `self.workers.remove(` that are not the `unload_model`
+/// drain form. `remove_if` is the helper's own call and is always fine.
+fn worker_removal_lines(src: &str) -> Vec<usize> {
+    src.lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            let t = l.trim();
+            !t.starts_with("//")
+                && t.contains("self.workers.remove(")
+                // `unload_model` binds the handle so it can drain before
+                // killing; it ends in `after_worker_gone` like everything else.
+                && !t.contains("if let Some((_, handle)) = self.workers.remove(")
+        })
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
 #[test]
 fn per_request_state_is_released_in_one_place() {
     let root = repo_root();

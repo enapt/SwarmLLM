@@ -1190,6 +1190,28 @@ silently break at the wire if duplicated:
   different places must be told which place each one is in — and a component
   that does not own a resource must not be able to reclaim it.
 
+  **`evict_worker_where` / `evict_this_worker` is how a worker leaves
+  `workers`** (2026-09-05, gotcha #467), and `unload_model` is the one
+  exception — it must DRAIN before killing, so it removes the entry itself and
+  ends in the same `after_worker_gone`.
+  `a_worker_only_leaves_the_pool_where_its_memory_is_released` in
+  `tests/repo_consistency.rs` fails the build on a tenth site, with a self-test
+  that plants the violation.
+  **Why**: #461 fixed the three `handle.dead` fast-fail sites; there were NINE.
+  The other six are the paths a worker actually dies on — a failed IPC send and
+  a closed reader channel on each of `forward` / `forward_batch` / `generate`,
+  plus `classify_worker_error`'s fatal arm, which is the CUDA-OOM path. And the
+  health-tick reap could not cover them: it scans `workers` for `dead` entries,
+  and these had already removed the entry, so the charge leaked exactly as
+  before on the six paths that matter most.
+  **`evict_this_worker` compares identity, not just the key** (`Arc::ptr_eq`).
+  A bare `remove(key)` lets a caller holding a handle that has already been
+  replaced evict the LIVE worker that replaced it — a latent hazard on all six
+  sites, closed on the way past.
+  **When a report names three call sites, it is describing symptoms, not scope**
+  — grep the operation and count them before calling the fix complete, and ask
+  what the safety net you just added can actually see.
+
   **`after_worker_gone` is everything that follows a worker's process no longer
   existing**, however it stopped: release BOTH budgets, and — if it held
   graphics memory — lift the CPU pins its occupancy caused. `unload_model` and
