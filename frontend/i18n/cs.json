@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Zařízení se připojilo do skupiny",
   "activity.pool_device_left": "Zařízení opustilo skupinu",
   "activity.pool_member_removed": "Zařízení odebráno ze skupiny",
+  "activity.privacy_cost": "Udržet váš dotaz v soukromí přidá k odpovědím od {model} zhruba {count}s. První a poslední krok zůstávají na tomto počítači, takže vaše slova nevidí žádný jiný stroj — a pomalou částí je právě tento počítač. V Nastavení to lze pro tento model vypnout, pokud dáváte přednost rychlosti.",
   "activity.rebalance_peer_left": "Jeden z účastníků odešel — kontroluji, jestli je potřeba přerozdělit nějaké části modelu",
   "activity.shard_announced": "{node} oznámil fragmenty modelu {model}",
   "activity.shard_deleted": "Fragment {shard} modelu {model} smazán",

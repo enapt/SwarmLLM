@@ -367,7 +367,7 @@ release follows a fact rather than an expectation. Note the spawn range is
 recorded at 0 mb (its cost sits in the handle's opening `charged_mb`), so a
 naive release would under-release for it, which is again the safe direction.
 
-## Auto-enabled prompt privacy can cost 6x on a long prompt, and nothing says so (NEEDS A DECISION, 2026-09-05)
+## Auto-enabled prompt privacy can cost 6x on a long prompt (DECIDED + TOLD, 2026-09-05)
 
 Reported with numbers. A 36-layer model, ~10.3k-token prompt, one GPU peer and
 one processor-only node:
@@ -406,13 +406,45 @@ agent-sized prompts. Three options, and this is not ours to pick:
    `encrypted_pipeline`, and it means a node sometimes sends prompts to a peer
    that previously did not — which must be announced, not silent.
 
-**Do not implement 3 without an explicit decision.** Silently downgrading a
-privacy property because it is slow is the one option that cannot be taken back
-once someone has relied on it.
+**Decision: option 2. Option 3 is rejected, and not only on taste.**
 
-The numbers are now available to whichever is chosen: `delegation_target`
-receives `prompt_tokens` as of the #447(iii) fix below, so the boomerang's local
-ends can be priced with the same `parallax::vertex_cost` the search uses.
+Researched against four systems that have faced the same trade:
+
+- **RFC 7507 (TLS_FALLBACK_SCSV)** exists because browsers auto-downgraded on
+  handshake failure for compatibility. The RFC's own words: "handshake errors
+  due to network glitches could be misinterpreted as interaction with a legacy
+  server and result in a protocol downgrade" — a TRANSIENT condition inducing a
+  security downgrade, which an active attacker can then trigger deliberately.
+- **Chrome HTTPS-First**: try the secure path, *warn before falling back*; the
+  stated aim is "explicit permission from users before connecting insecurely",
+  because a passive indicator arrives after the damage.
+- **Apple iCloud Private Relay**: even when a NETWORK forces it off, the user is
+  told — "Private Relay is turned off for '<network>'". Never silent.
+- **Firefox DoH** is the one that does fall back automatically, and the
+  documented criticism is precisely the silence: "an application may not inform
+  the user if it skips DoH querying... this is where it flies right out of the
+  window."
+
+**The decisive argument is not UX, it is that option 3 is exploitable here.**
+The trigger would be "the boomerang is slow", and the reward for triggering it
+is the plaintext prompt — exactly what the boomerang withholds. A peer that
+wants to read prompts only has to be slow: answer the middle segment sluggishly
+and the coordinator stops keeping the ends at home and hands over the whole
+model, prompt included. That is RFC 7507's failure with the incentive pointing
+straight at the attacker. It is worse than TLS's case, where a downgrade weakens
+a cipher; here it hands over the plaintext.
+
+**What shipped (option 2).** `privacy_cost_ms` prices the boomerang against the
+plain hand-off with `parallax::vertex_cost` — the same function the router uses
+— and when privacy adds both more than `PRIVACY_COST_REPORT_MS` (5 s) and more
+than 100% of the alternative, the node says so once per model per ten minutes,
+in plain language, naming the seconds and pointing at the per-model setting.
+Rate-limited because a boomerang is chosen on EVERY request to that model, and
+anything repeated per request is repeated at the user for ever.
+
+**The figure is reported and never acted on.** Nothing in the routing reads it.
+That separation is the decision, and a future change that makes the router
+consult it has re-opened everything above.
 
 ## A peer's own prompt admission can still race itself (FIXED 2026-09-05)
 

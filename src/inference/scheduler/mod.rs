@@ -696,7 +696,10 @@ fn costs_more_than_staying_here(
     num_layers: u32,
     prompt_tokens: Option<u32>,
 ) -> bool {
-    if prompt_tokens.is_none_or(|t| t == 0) || !priced_from_a_measurement(c) {
+    if !price_gate_enabled()
+        || prompt_tokens.is_none_or(|t| t == 0)
+        || !priced_from_a_measurement(c)
+    {
         return false;
     }
     let Some(local) = candidates.iter().find(|x| x.node_id == *local_node_id) else {
@@ -707,6 +710,70 @@ fn costs_more_than_staying_here(
     let local_ms =
         parallax::vertex_cost(local, range, local_node_id, num_layers, prompt_tokens).total();
     peer_ms > local_ms
+}
+
+/// Privacy must add at least this long, and at least this multiple of the
+/// alternative, before it is worth interrupting anyone about. Below either, the
+/// guarantee is essentially free and saying so is noise.
+const PRIVACY_COST_REPORT_MS: f32 = 5_000.0;
+const PRIVACY_COST_REPORT_RATIO: f32 = 1.0;
+/// How often the same model may say it, at most.
+const PRIVACY_COST_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// What prompt privacy is expected to ADD to this request, in milliseconds, by
+/// keeping the first and last layers on this machine instead of handing the
+/// whole model to `peer`.
+///
+/// Priced with `parallax::vertex_cost`, the same function everything else in
+/// this module uses. `None` when it cannot be priced, which is not a claim that
+/// privacy is free.
+///
+/// **This figure is REPORTED, never acted on.** See
+/// `docs/FUTURE_WORK.md` § "Auto-enabled prompt privacy" for why the option to
+/// drop the guarantee automatically was researched and rejected: an automatic
+/// downgrade triggered by slowness is one an adversary can trigger by being
+/// slow, which is the failure RFC 7507 exists to prevent for TLS. The user is
+/// told what it costs and left to decide.
+fn privacy_cost_ms(
+    peer: &NodeCandidate,
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    num_layers: u32,
+    prompt_tokens: Option<u32>,
+) -> Option<f32> {
+    if num_layers < 3 || prompt_tokens.is_none_or(|t| t == 0) {
+        return None;
+    }
+    let local = candidates.iter().find(|c| c.node_id == *local_node_id)?;
+    let price = |c: &NodeCandidate, range: (u32, u32)| {
+        parallax::vertex_cost(c, range, local_node_id, num_layers, prompt_tokens).total()
+    };
+    let whole_on_peer = price(peer, (0, num_layers));
+    let boomerang = price(local, (0, 1))
+        + price(peer, (1, num_layers - 1))
+        + price(local, (num_layers - 1, num_layers));
+    Some(boomerang - whole_on_peer)
+}
+
+/// Is the delegation price gate switched on?
+///
+/// `SWARMLLM_DELEGATE_PRICE_GATE=0` restores the pre-2026-09-05 behaviour of
+/// deciding without a price. This is the one change in its release that can
+/// DECLINE work a node previously handed away, and the cost model it consults
+/// falls back to device-class priors for a peer whose prefill has never been
+/// measured — so if it turns out to be over-cautious in the field, the symptom
+/// is a node grinding on its own processor beside an idle peer, which is
+/// exactly what `delegation_target` exists to prevent. The hatch is for
+/// diagnosing that without a downgrade, the role `SWARMLLM_KV_RECONCILE=0`
+/// plays for gotcha #462 and `SWARMLLM_BUILD_FILTER=0` for #406.
+fn price_gate_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("SWARMLLM_DELEGATE_PRICE_GATE")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    })
 }
 
 /// Is this candidate's speed KNOWN — measured by us, or advertised by it — as
@@ -981,6 +1048,72 @@ fn regions_adjacent(a: &str, b: &str) -> bool {
 }
 
 impl PipelineScheduler {
+    /// Say what prompt privacy is costing this request, when it is material.
+    ///
+    /// Rate-limited per model: a boomerang is chosen on EVERY request to that
+    /// model, and anything repeated per request is repeated at the user for
+    /// ever — the lesson the manifest-rejection limiter already carries.
+    fn report_privacy_cost(
+        &self,
+        model_id: &ModelId,
+        peer: &NodeCandidate,
+        candidates: &[NodeCandidate],
+        local_node_id: &NodeId,
+        num_layers: u32,
+        prompt_tokens: Option<u32>,
+    ) {
+        let Some(extra_ms) =
+            privacy_cost_ms(peer, candidates, local_node_id, num_layers, prompt_tokens)
+        else {
+            return;
+        };
+        let whole_on_peer = parallax::vertex_cost(
+            peer,
+            (0, num_layers),
+            local_node_id,
+            num_layers,
+            prompt_tokens,
+        )
+        .total();
+        if extra_ms < PRIVACY_COST_REPORT_MS
+            || whole_on_peer <= 0.0
+            || extra_ms / whole_on_peer < PRIVACY_COST_REPORT_RATIO
+        {
+            return;
+        }
+        if !self
+            .shared_state
+            .note_privacy_cost_reported(model_id, PRIVACY_COST_REPORT_INTERVAL)
+        {
+            return;
+        }
+        let seconds = (extra_ms / 1000.0).round() as i64;
+        tracing::info!(
+            model = %model_id.0,
+            peer = %peer.node_id,
+            privacy_extra_ms = extra_ms,
+            whole_on_peer_ms = whole_on_peer,
+            prompt_tokens = ?prompt_tokens,
+            "Prompt privacy is keeping the first and last layers on this node, \
+             which is what most of this request's wait will be"
+        );
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "inference",
+                "privacy_cost",
+                format!(
+                    "Keeping your prompt private is adding about {seconds}s to replies from \
+                     {}. The first and last steps stay on this computer so no other machine \
+                     sees your words, and this computer is the slow part. You can turn this \
+                     off for this model in Settings if you would rather have speed.",
+                    model_id.0
+                ),
+            )
+            .with_model(model_id.0.clone())
+            .with_detail_num(seconds),
+        );
+    }
+
     pub fn new(shared_state: Arc<SharedState>) -> Self {
         Self {
             shared_state,
@@ -1217,6 +1350,32 @@ impl PipelineScheduler {
             };
             if let Some(peer) = delegate_to {
                 if encrypted {
+                    // Tell the user what privacy is costing, when it is
+                    // material — and do nothing else about it.
+                    //
+                    // Researched and decided 2026-09-05 (report: 73.8s with the
+                    // boomerang against 12.4s without, on a ~10k-token prompt;
+                    // the two layers kept here were 55.3s of the 73.8). The
+                    // option of dropping the guarantee automatically past some
+                    // ratio was rejected: a downgrade triggered by slowness is
+                    // one a hostile peer can trigger BY BEING SLOW, and what it
+                    // would win is the plaintext prompt — precisely the thing
+                    // the boomerang exists to withhold. That is the failure
+                    // RFC 7507 exists to prevent for TLS, where a transient
+                    // network fault was enough to induce a permanent-feeling
+                    // downgrade. Chrome's HTTPS-First warns before falling
+                    // back; Apple's Private Relay tells you when a network has
+                    // turned it off; the one system that does downgrade
+                    // silently, Firefox's DoH fallback, is criticised for
+                    // exactly that silence.
+                    self.report_privacy_cost(
+                        model_id,
+                        peer,
+                        &candidates,
+                        local_node_id,
+                        num_layers,
+                        prompt_tokens,
+                    );
                     // Boomerang. Skipping the local fast path is the whole
                     // change: the distributed assembly below already forces the
                     // first and last segments onto this node and already

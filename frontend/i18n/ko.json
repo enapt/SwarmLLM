@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "기기가 풀에 참여했습니다",
   "activity.pool_device_left": "기기가 풀에서 떠났습니다",
   "activity.pool_member_removed": "기기가 풀에서 제거되었습니다",
+  "activity.privacy_cost": "입력 내용을 비공개로 유지하느라 {model}의 응답에 약 {count}초가 더 걸립니다. 첫 단계와 마지막 단계는 이 컴퓨터에 남아 다른 기기가 당신의 글을 보지 못하게 하며, 느린 쪽은 이 컴퓨터입니다. 속도를 원한다면 설정에서 이 모델에 대해 끌 수 있습니다.",
   "activity.rebalance_peer_left": "한 참여자가 떠났습니다 — 모델 일부를 다시 분배해야 하는지 확인 중입니다",
   "activity.shard_announced": "{node}이(가) {model}의 샤드를 공지했습니다",
   "activity.shard_deleted": "{model}의 샤드 {shard} 삭제됨",

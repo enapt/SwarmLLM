@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Gerät der Gruppe beigetreten",
   "activity.pool_device_left": "Gerät hat Gruppe verlassen",
   "activity.pool_member_removed": "Gerät aus Gruppe entfernt",
+  "activity.privacy_cost": "Ihre Eingabe privat zu halten kostet etwa {count}s zusätzlich bei Antworten von {model}. Der erste und der letzte Schritt bleiben auf diesem Rechner, damit kein anderer Ihre Worte sieht — und dieser Rechner ist der langsame Teil. In den Einstellungen können Sie es für dieses Modell abschalten, wenn Ihnen Tempo wichtiger ist.",
   "activity.rebalance_peer_left": "Ein anderes Gerät hat das Netzwerk verlassen — prüfe, ob Modellteile neu verteilt werden müssen",
   "activity.shard_announced": "{node} hat Shards von {model} angekündigt",
   "activity.shard_deleted": "Shard {shard} von {model} gelöscht",

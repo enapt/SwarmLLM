@@ -472,6 +472,9 @@ pub struct SharedState {
     /// an earlier run that warned at 06:47 was contradicted by an inbound
     /// connection of its own at 07:41.
     pub observed_inbound_connection: std::sync::atomic::AtomicBool,
+    /// When each model last told the user what prompt privacy is costing it.
+    /// See `note_privacy_cost_reported`.
+    privacy_cost_reported: dashmap::DashMap<crate::types::ModelId, std::time::Instant>,
     /// When the most recent health ping went out, and with which nonce.
     ///
     /// The health ping/pong runs every 30s to every peer and already carries a
@@ -1032,6 +1035,7 @@ impl SharedState {
             )),
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
             listen_multiaddrs: arc_swap::ArcSwap::from_pointee(Vec::new()),
+            privacy_cost_reported: dashmap::DashMap::new(),
             observed_inbound_connection: std::sync::atomic::AtomicBool::new(
                 db.get_json::<bool>(INBOUND_REACHABILITY_TREE, INBOUND_REACHABILITY_KEY)
                     .ok()
@@ -2829,6 +2833,34 @@ impl SharedState {
 
     /// Emit a rich activity event to the dashboard.
     /// Lightweight fire-and-forget — if no WebSocket subscribers, the event is dropped.
+    /// May this model say what prompt privacy is costing, or has it said so
+    /// recently? `true` means go ahead, and records that it did.
+    ///
+    /// A boomerang is chosen on EVERY request to a privacy-enabled model, so
+    /// without this the notice would arrive once per request for as long as the
+    /// user keeps talking — the shape `note_manifest_rejection` exists for.
+    pub fn note_privacy_cost_reported(
+        &self,
+        model_id: &crate::types::ModelId,
+        interval: std::time::Duration,
+    ) -> bool {
+        let now = std::time::Instant::now();
+        let mut allowed = false;
+        self.privacy_cost_reported
+            .entry(model_id.clone())
+            .and_modify(|at| {
+                if now.duration_since(*at) >= interval {
+                    *at = now;
+                    allowed = true;
+                }
+            })
+            .or_insert_with(|| {
+                allowed = true;
+                now
+            });
+        allowed
+    }
+
     pub fn emit_activity(&self, event: ActivityEvent) {
         // Store in history for replay to new WS clients.
         {

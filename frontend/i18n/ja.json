@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "デバイスがプールに参加しました",
   "activity.pool_device_left": "デバイスがプールから離脱しました",
   "activity.pool_member_removed": "デバイスがプールから削除されました",
+  "activity.privacy_cost": "プロンプトを非公開に保つため、{model} の応答に約 {count} 秒余分にかかっています。最初と最後の処理をこのパソコンで行うので、ほかの機器があなたの文章を見ることはありません。ただし遅いのはこのパソコンです。速度を優先するなら設定でこのモデルについて無効にできます。",
   "activity.rebalance_peer_left": "参加者の1人が離脱しました — モデルのパーツを再配置する必要があるか確認しています",
   "activity.shard_announced": "{node}が{model}のシャードを発表しました",
   "activity.shard_deleted": "{model}のシャード{shard}を削除しました",

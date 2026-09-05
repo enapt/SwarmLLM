@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Thiết bị đã tham gia pool",
   "activity.pool_device_left": "Thiết bị đã rời pool",
   "activity.pool_member_removed": "Thiết bị đã bị xóa khỏi pool",
+  "activity.privacy_cost": "Giữ riêng tư câu hỏi của bạn khiến câu trả lời từ {model} lâu thêm khoảng {count} giây. Bước đầu và bước cuối ở lại máy này nên không máy nào khác thấy lời bạn viết — và máy này chính là phần chậm. Bạn có thể tắt cho mô hình này trong Cài đặt nếu muốn nhanh hơn.",
   "activity.rebalance_peer_left": "Một thành viên đã rời đi — đang kiểm tra xem có cần phân phối lại phần nào của mô hình không",
   "activity.shard_announced": "{node} thông báo mảnh của {model}",
   "activity.shard_deleted": "Đã xóa mảnh {shard} của {model}",

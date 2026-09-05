@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Perangkat bergabung ke pool",
   "activity.pool_device_left": "Perangkat meninggalkan pool",
   "activity.pool_member_removed": "Perangkat dihapus dari pool",
+  "activity.privacy_cost": "Menjaga kerahasiaan pesan Anda menambah sekitar {count} detik pada jawaban dari {model}. Langkah pertama dan terakhir tetap di komputer ini sehingga tidak ada mesin lain yang melihat kata-kata Anda — dan komputer inilah bagian yang lambat. Anda bisa mematikannya untuk model ini di Pengaturan jika lebih mengutamakan kecepatan.",
   "activity.rebalance_peer_left": "Salah satu peserta keluar — memeriksa apakah ada bagian model yang perlu didistribusikan ulang",
   "activity.shard_announced": "{node} mengumumkan shard dari {model}",
   "activity.shard_deleted": "Shard {shard} dari {model} dihapus",

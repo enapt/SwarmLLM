@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "อุปกรณ์เข้าร่วม pool",
   "activity.pool_device_left": "อุปกรณ์ออกจาก pool",
   "activity.pool_member_removed": "ลบอุปกรณ์ออกจาก pool แล้ว",
+  "activity.privacy_cost": "การเก็บข้อความของคุณเป็นความลับทำให้คำตอบจาก {model} ช้าลงราว {count} วินาที ขั้นแรกและขั้นสุดท้ายอยู่บนเครื่องนี้ จึงไม่มีเครื่องอื่นเห็นข้อความของคุณ และเครื่องนี้เองคือส่วนที่ช้า หากต้องการความเร็วมากกว่า สามารถปิดสำหรับโมเดลนี้ได้ในการตั้งค่า",
   "activity.rebalance_peer_left": "มีผู้ใช้คนหนึ่งออกไป — กำลังตรวจสอบว่าต้องกระจายส่วนของโมเดลใหม่หรือไม่",
   "activity.shard_announced": "{node} ประกาศ shards ของ {model}",
   "activity.shard_deleted": "ลบ shard {shard} ของ {model} แล้ว",

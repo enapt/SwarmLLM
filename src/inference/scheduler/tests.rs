@@ -1838,6 +1838,58 @@ fn an_unmeasured_peer_is_still_tried() {
     );
 }
 
+/// Privacy's cost is REPORTED and never acted on — but the figure has to be
+/// right, or the notice is noise. Keeping the two end layers on a machine that
+/// is slow at reading a prompt must price as a real addition.
+#[test]
+fn keeping_the_ends_local_prices_as_a_real_cost_on_a_long_prompt() {
+    let mut peer = willing_peer(0xBB, LAYERS);
+    peer.observed_prefill_ms_per_layer_byte = Some(0.000_001); // a fast card
+
+    let mut local = local_full_coverage();
+    // A processor that is dreadful at reading a prompt — the reported shape.
+    local.observed_prefill_ms_per_layer_byte = Some(0.01);
+
+    let cands = vec![local, peer.clone()];
+    let extra = super::privacy_cost_ms(&peer, &cands, &local_id(), LAYERS, Some(10_000))
+        .expect("both sides are priceable");
+    assert!(
+        extra > 0.0,
+        "holding the first and last layers on a slow processor must cost \
+         something against handing the whole model to the card, not nothing"
+    );
+}
+
+/// The control: when the local machine reads a prompt as fast as the peer,
+/// privacy is nearly free and must not produce a notice.
+#[test]
+fn privacy_is_not_reported_as_expensive_when_it_is_cheap() {
+    let mut peer = willing_peer(0xBB, LAYERS);
+    peer.observed_prefill_ms_per_layer_byte = Some(0.000_001);
+
+    let mut local = local_full_coverage();
+    local.observed_prefill_ms_per_layer_byte = Some(0.000_001);
+
+    let cands = vec![local, peer.clone()];
+    let extra = super::privacy_cost_ms(&peer, &cands, &local_id(), LAYERS, Some(10_000))
+        .expect("priceable");
+    assert!(
+        extra < super::PRIVACY_COST_REPORT_MS,
+        "an equally fast local machine must not trigger a notice — got {extra}"
+    );
+}
+
+/// A short prompt cannot be priced into a privacy warning, and a model too
+/// small to have a middle has no boomerang to price at all.
+#[test]
+fn there_is_nothing_to_report_without_a_prompt_or_a_middle() {
+    let peer = willing_peer(0xBB, LAYERS);
+    let cands = vec![local_full_coverage(), peer.clone()];
+    assert!(super::privacy_cost_ms(&peer, &cands, &local_id(), LAYERS, None).is_none());
+    assert!(super::privacy_cost_ms(&peer, &cands, &local_id(), LAYERS, Some(0)).is_none());
+    assert!(super::privacy_cost_ms(&peer, &cands, &local_id(), 2, Some(10_000)).is_none());
+}
+
 /// Widening the bound must not change WHICH peer wins when several qualify.
 /// `candidates` arrives sorted nearest-first, so a distant peer can only ever
 /// be a fallback — that ordering is what makes raising the ceiling safe, and

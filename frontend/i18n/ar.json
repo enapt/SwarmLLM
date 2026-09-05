@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "انضم جهاز إلى المجموعة",
   "activity.pool_device_left": "غادر جهاز المجموعة",
   "activity.pool_member_removed": "تم إزالة الجهاز من المجموعة",
+  "activity.privacy_cost": "الحفاظ على خصوصية رسالتك يضيف نحو {count} ثانية إلى ردود {model}. تبقى الخطوة الأولى والأخيرة على هذا الجهاز حتى لا يرى أي جهاز آخر كلماتك، وهذا الجهاز هو الجزء البطيء. يمكنك إيقافه لهذا النموذج من الإعدادات إن كنت تفضّل السرعة.",
   "activity.rebalance_peer_left": "غادر أحد المشاركين — جارٍ التحقق مما إذا كانت بعض أجزاء النموذج تحتاج لإعادة التوزيع",
   "activity.shard_announced": "أعلن {node} عن شظايا {model}",
   "activity.shard_deleted": "تم حذف الشظية {shard} من {model}",

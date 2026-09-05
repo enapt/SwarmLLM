@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Dispositivo entrato nel gruppo",
   "activity.pool_device_left": "Dispositivo uscito dal gruppo",
   "activity.pool_member_removed": "Dispositivo rimosso dal gruppo",
+  "activity.privacy_cost": "Mantenere privato il tuo messaggio aggiunge circa {count}s alle risposte di {model}. Il primo e l'ultimo passaggio restano su questo computer così nessun'altra macchina vede le tue parole, e questo computer è la parte lenta. Puoi disattivarlo per questo modello nelle Impostazioni se preferisci la velocità.",
   "activity.rebalance_peer_left": "Un partecipante è uscito — controllo se serve ridistribuire qualche parte di modello",
   "activity.shard_announced": "{node} ha annunciato frammenti di {model}",
   "activity.shard_deleted": "Frammento {shard} di {model} eliminato",

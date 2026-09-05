@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Enhet gick med i pool",
   "activity.pool_device_left": "Enhet lämnade pool",
   "activity.pool_member_removed": "Enhet borttagen från pool",
+  "activity.privacy_cost": "Att hålla din fråga privat lägger till ungefär {count}s på svar från {model}. Första och sista steget stannar på den här datorn så att ingen annan maskin ser dina ord — och den här datorn är den långsamma delen. Du kan stänga av det för den här modellen i Inställningar om du hellre vill ha fart.",
   "activity.rebalance_peer_left": "En deltagare lämnade — kollar om några modelldelar behöver omfördelas",
   "activity.shard_announced": "{node} annonserade shards av {model}",
   "activity.shard_deleted": "Raderade shard {shard} av {model}",

@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Appareil rejoint le groupe",
   "activity.pool_device_left": "Appareil quitté le groupe",
   "activity.pool_member_removed": "Appareil retiré du groupe",
+  "activity.privacy_cost": "Garder votre message privé ajoute environ {count}s aux réponses de {model}. La première et la dernière étape restent sur cet ordinateur pour qu'aucune autre machine ne voie vos mots, et c'est cet ordinateur qui est lent. Vous pouvez le désactiver pour ce modèle dans les Réglages si vous préférez la vitesse.",
   "activity.rebalance_peer_left": "Un pair s'est déconnecté — vérification s'il faut redistribuer des parties de modèle",
   "activity.shard_announced": "{node} a annoncé des fragments de {model}",
   "activity.shard_deleted": "Fragment {shard} de {model} supprimé",

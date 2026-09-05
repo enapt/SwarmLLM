@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Apparaat aan pool toegevoegd",
   "activity.pool_device_left": "Apparaat heeft pool verlaten",
   "activity.pool_member_removed": "Apparaat uit pool verwijderd",
+  "activity.privacy_cost": "Je vraag privé houden kost ongeveer {count}s extra bij antwoorden van {model}. De eerste en laatste stap blijven op deze computer zodat geen andere machine je woorden ziet — en deze computer is het trage deel. Je kunt het voor dit model uitzetten in Instellingen als je liever snelheid hebt.",
   "activity.rebalance_peer_left": "Een deelnemer is vertrokken — wordt gecontroleerd of er modeldelen opnieuw verdeeld moeten worden",
   "activity.shard_announced": "{node} heeft shards van {model} aangekondigd",
   "activity.shard_deleted": "Shard {shard} van {model} verwijderd",

@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Urządzenie dołączyło do grupy",
   "activity.pool_device_left": "Urządzenie opuściło grupę",
   "activity.pool_member_removed": "Urządzenie usunięte z grupy",
+  "activity.privacy_cost": "Zachowanie prywatności zapytania dodaje około {count}s do odpowiedzi z {model}. Pierwszy i ostatni krok zostają na tym komputerze, więc żadna inna maszyna nie widzi twoich słów — i to ten komputer jest wolny. Możesz to wyłączyć dla tego modelu w Ustawieniach, jeśli wolisz szybkość.",
   "activity.rebalance_peer_left": "Jeden z uczestników się rozłączył — sprawdzanie, czy trzeba rozdzielić któreś części modelu",
   "activity.shard_announced": "{node} ogłosił shardy modelu {model}",
   "activity.shard_deleted": "Usunięto shard {shard} modelu {model}",

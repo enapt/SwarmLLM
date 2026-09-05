@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "设备已加入设备池",
   "activity.pool_device_left": "设备已离开设备池",
   "activity.pool_member_removed": "设备已从设备池移除",
+  "activity.privacy_cost": "让您的提问保持私密，会使 {model} 的回复多花约 {count} 秒。第一步和最后一步留在本机，因此没有其他机器看得到您的文字——而本机正是慢的那一环。如果更看重速度，可以在设置中为该模型关闭。",
   "activity.rebalance_peer_left": "一位伙伴离线 — 正在检查是否需要重新分配某些模型部分",
   "activity.shard_announced": "{node} 宣告了 {model} 的分片",
   "activity.shard_deleted": "已删除 {model} 的第 {shard} 个分片",

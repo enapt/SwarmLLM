@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "डिवाइस पूल में जुड़ा",
   "activity.pool_device_left": "डिवाइस पूल से अलग हुआ",
   "activity.pool_member_removed": "डिवाइस पूल से हटाया गया",
+  "activity.privacy_cost": "आपका संदेश निजी रखने से {model} के उत्तरों में लगभग {count}s और लगते हैं। पहला और आखिरी चरण इसी कंप्यूटर पर रहता है ताकि कोई दूसरी मशीन आपके शब्द न देखे — और धीमा हिस्सा यही कंप्यूटर है। गति चाहिए तो सेटिंग्स में इस मॉडल के लिए इसे बंद कर सकते हैं।",
   "activity.rebalance_peer_left": "एक साथी चला गया — जाँच रहे हैं कि क्या मॉडल के कुछ हिस्सों को फिर से बाँटना है",
   "activity.shard_announced": "{node} ने {model} के शार्ड की घोषणा की",
   "activity.shard_deleted": "{model} का शार्ड {shard} डिलीट हुआ",

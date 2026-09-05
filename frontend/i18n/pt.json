@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Dispositivo entrou no grupo",
   "activity.pool_device_left": "Dispositivo saiu do grupo",
   "activity.pool_member_removed": "Dispositivo removido do grupo",
+  "activity.privacy_cost": "Manter a sua mensagem privada acrescenta cerca de {count}s às respostas de {model}. O primeiro e o último passo ficam neste computador para que mais nenhuma máquina veja as suas palavras, e este computador é a parte lenta. Pode desligá-lo para este modelo nas Definições se preferir velocidade.",
   "activity.rebalance_peer_left": "Um colega saiu — verificando se alguma parte de modelo precisa ser redistribuída",
   "activity.shard_announced": "{node} anunciou fragmentos de {model}",
   "activity.shard_deleted": "Fragmento {shard} de {model} excluído",

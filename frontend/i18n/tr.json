@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Cihaz havuza katıldı",
   "activity.pool_device_left": "Cihaz havuzdan ayrıldı",
   "activity.pool_member_removed": "Cihaz havuzdan çıkarıldı",
+  "activity.privacy_cost": "İsteminizi gizli tutmak {model} yanıtlarına yaklaşık {count} sn ekliyor. İlk ve son adım bu bilgisayarda kalıyor, böylece başka hiçbir makine sözlerinizi görmüyor — yavaş olan kısım da bu bilgisayar. Hızı tercih ediyorsanız Ayarlar'dan bu model için kapatabilirsiniz.",
   "activity.rebalance_peer_left": "Bir katılımcı ayrıldı — bazı model parçalarının yeniden dağıtılması gerekip gerekmediği kontrol ediliyor",
   "activity.shard_announced": "{node}, {model} modelinin parçalarını duyurdu",
   "activity.shard_deleted": "{model} modelinin {shard}. parçası silindi",

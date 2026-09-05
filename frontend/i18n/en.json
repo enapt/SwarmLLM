@@ -58,6 +58,7 @@
   "activity.pool_device_joined": "Device joined pool",
   "activity.pool_device_left": "Device left pool",
   "activity.pool_member_removed": "Device removed from pool",
+  "activity.privacy_cost": "Keeping your prompt private is adding about {count}s to replies from {model}. The first and last steps stay on this computer so no other machine sees your words — and this computer is the slow part. You can turn it off for this model in Settings if you would rather have speed.",
   "activity.rebalance_peer_left": "A peer left — checking whether any model parts need redistributing",
   "activity.shard_announced": "{node} announced shards of {model}",
   "activity.shard_deleted": "Deleted shard {shard} of {model}",
