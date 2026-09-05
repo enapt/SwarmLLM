@@ -1252,8 +1252,14 @@ fn both_prompt_entry_points_go_through_the_same_renderer() {
     // successfully and still leaves the turn closed. Using an invalid template
     // instead makes the renderer fall back to ChatML, which appends the opener
     // and quietly stops the test exercising anything.
+    //
+    // It closes on `</s>` rather than `<|im_end|>` because a ChatML closer is
+    // now REPAIRED (`open_the_models_turn_if_the_prompt_closed_it`) — which
+    // would leave this test asserting nothing, exactly as its own guard below
+    // says. `</s>` names three families at once, so it is deliberately left
+    // alone and still reaches the check this test is about.
     let closing = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' \
-                   + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}";
+                   + message['content'] + '</s>' + '\n'}}{% endfor %}";
     let msgs = vec![ChatMessage {
         role: Role::User,
         content: "hi".into(),
@@ -1273,5 +1279,128 @@ fn both_prompt_entry_points_go_through_the_same_renderer() {
         !super::prompt_hands_over_to_the_model(&via_inner),
         "this fixture is supposed to produce a turn-closing prompt; if it does not, \
          the test is no longer exercising the check"
+    );
+}
+
+/// The official Qwen3 template must at minimum OPEN the assistant's turn.
+///
+/// Reported against a Qwen3-8B: every request logged "the rendered prompt ends
+/// by CLOSING a turn rather than opening the model's", which is our own
+/// warning for a prompt that shows the model a finished conversation — it then
+/// answers with one token and `finish_reason: "stop"`.
+///
+/// This template is the most demanding in common use: `namespace()`, a reversed
+/// slice `messages[::-1]`, `loop.index0` / `loop.first` / `loop.last`, the
+/// `tojson` and `length` filters, `is string` / `is defined` tests, and string
+/// methods (`startswith`, `split`, `rstrip`). The renderer is deliberately a
+/// subset of Jinja, so the question this pins is not "do we implement all of
+/// that" — it is that whatever we DO produce must still open the turn, because
+/// a prompt without it cannot get an answer out of any model.
+#[test]
+fn the_official_qwen3_template_opens_the_assistants_turn() {
+    let tmpl = include_str!("fixtures/qwen3_official.jinja");
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "Say OK".into(),
+        images: vec![],
+    }];
+
+    let rendered = apply_chat_template(tmpl, &msgs, "", "<|im_end|>", true);
+
+    // Declining is an acceptable outcome — `build_prompt_with_model` then falls
+    // back, and the turn-opening repair covers what the fallback leaves closed.
+    // What must not happen is a HALF-render that silently drops the generation
+    // prompt, because that reaches the model as a finished conversation.
+    if let Some(out) = rendered {
+        assert!(
+            out.trim_end().ends_with("<|im_start|>assistant"),
+            "rendered prompt must open the model's turn, got tail: {:?}",
+            &out[out.len().saturating_sub(80)..]
+        );
+    }
+}
+
+/// A prompt that ends on a turn-CLOSING marker is finished for the model, so
+/// the model's own turn is opened before the request goes out.
+///
+/// This was detected and logged and then sent anyway, which guaranteed a
+/// one-token reply. Reported against a Qwen3-8B whose template this renderer
+/// declines, leaving every prompt ending on `<|im_end|>`.
+#[test]
+fn a_prompt_left_on_a_closed_turn_gets_the_models_turn_opened() {
+    // A template that renders the conversation and stops — no generation
+    // prompt, exactly the shape the report showed.
+    let no_gen_prompt =
+        "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}";
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "Say OK".into(),
+        images: vec![],
+    }];
+
+    let prompt = build_prompt_with_model(
+        &msgs,
+        Some(no_gen_prompt),
+        "",
+        "<|im_end|>",
+        Some("qwen3-8b"),
+    );
+    assert!(
+        prompt.ends_with("<|im_start|>assistant\n"),
+        "the model's turn must be opened; got tail {:?}",
+        &prompt[prompt.len().saturating_sub(60)..]
+    );
+    assert!(
+        crate::inference::chat_template::prompt_hands_over_to_the_model(&prompt),
+        "and the repaired prompt must satisfy the check that found the problem"
+    );
+}
+
+/// Each family gets ITS opener, not ChatML's. Reaching ChatML for a model that
+/// is not a ChatML model is the failure that produced stray `<|im_end|>` in
+/// Llama-3 replies for several releases.
+#[test]
+fn the_opener_matches_the_family_that_closed_the_turn() {
+    assert_eq!(
+        super::generation_prompt_after("<|eot_id|>"),
+        Some("<|start_header_id|>assistant<|end_header_id|>\n\n")
+    );
+    assert_eq!(
+        super::generation_prompt_after("<end_of_turn>"),
+        Some("<start_of_turn>model\n")
+    );
+    assert_eq!(
+        super::generation_prompt_after("<|end|>"),
+        Some("<|assistant|>\n")
+    );
+    assert_eq!(
+        super::generation_prompt_after("<|im_end|>"),
+        Some("<|im_start|>assistant\n")
+    );
+}
+
+/// An ambiguous closer names no single family, so nothing is appended — a
+/// confidently wrong opener is worse than a diagnosable prompt. `</s>` is
+/// Llama-2, Mistral AND vicuna.
+#[test]
+fn an_ambiguous_closer_is_left_alone() {
+    assert_eq!(super::generation_prompt_after("</s>"), None);
+    assert_eq!(super::generation_prompt_after("<|endoftext|>"), None);
+}
+
+/// The control: a prompt that already opens the model's turn is untouched.
+#[test]
+fn a_correct_prompt_is_not_rewritten() {
+    let good = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "Say OK".into(),
+        images: vec![],
+    }];
+    let prompt = build_prompt_with_model(&msgs, Some(good), "", "<|im_end|>", Some("qwen2.5"));
+    assert_eq!(
+        prompt.matches("<|im_start|>assistant").count(),
+        1,
+        "an already-correct prompt must not gain a second opener"
     );
 }

@@ -849,7 +849,7 @@ pub(super) fn draft_prefill(
         .raw_backend()
         .ok_or_else(|| SwarmError::Inference("draft backend not initialized".into()))?;
 
-    let n_ctx = model.n_ctx_train();
+    let n_ctx = crate::inference::executor::effective_llama_context(model.n_ctx_train());
     let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx));
     // SAFETY: We cast the context's lifetime to 'static. The real lifetime is
     // bounded by the backend+model references inside the locked ModelExecutor.

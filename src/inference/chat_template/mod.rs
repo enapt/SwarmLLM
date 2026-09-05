@@ -357,9 +357,74 @@ pub fn build_prompt_with_model(
     eos_token: &str,
     model_name: Option<&str>,
 ) -> String {
-    let prompt = build_prompt_inner(messages, template, bos_token, eos_token, model_name);
+    let mut prompt = build_prompt_inner(messages, template, bos_token, eos_token, model_name);
+    open_the_models_turn_if_the_prompt_closed_it(&mut prompt, model_name);
     warn_if_the_prompt_closes_the_turn(&prompt, model_name);
     prompt
+}
+
+/// The token sequence that opens the model's turn, for a prompt that ended on
+/// `closer`.
+///
+/// `None` where the closer does not name one family: `</s>` is Llama-2,
+/// Mistral and vicuna, and `<|endoftext|>` is used by several unrelated
+/// vocabularies. Guessing there would replace a diagnosable prompt with a
+/// confidently wrong one, which is worse — those keep the warning and nothing
+/// else.
+fn generation_prompt_after(closer: &str) -> Option<&'static str> {
+    match closer {
+        "<|im_end|>" => Some("<|im_start|>assistant\n"),
+        "<|eot_id|>" => Some("<|start_header_id|>assistant<|end_header_id|>\n\n"),
+        "<|end|>" => Some("<|assistant|>\n"),
+        "<end_of_turn>" => Some("<start_of_turn>model\n"),
+        _ => None,
+    }
+}
+
+/// Finish a prompt that stopped at the end of someone else's turn.
+///
+/// **We already knew this prompt was broken and sent it anyway.** The condition
+/// is established before a single token is generated, it is deterministic, and
+/// it guarantees the reply: the model is shown a finished conversation, so it
+/// ends its turn at once — one token, `finish_reason: "stop"`. Logging that and
+/// proceeding explains the failure without preventing it.
+///
+/// The evidence is positive, not an absence: the prompt ENDS with one of the
+/// six markers in [`TURN_ENDING_MARKERS`], so it demonstrably closed a turn.
+/// Four of those name exactly one family, and appending that family's opener is
+/// the same string its own template would have added. The two ambiguous ones
+/// are left alone.
+///
+/// Reported against a Qwen3-8B whose template this renderer declines (it uses
+/// `namespace()`, a reversed slice, `loop.index0`, `tojson` and string methods),
+/// leaving a prompt ending on `<|im_end|>` on every request.
+fn open_the_models_turn_if_the_prompt_closed_it(prompt: &mut String, model_name: Option<&str>) {
+    if prompt_hands_over_to_the_model(prompt) {
+        return;
+    }
+    let Some(closer) = TURN_ENDING_MARKERS
+        .iter()
+        .find(|m| prompt.trim_end().ends_with(*m))
+        .copied()
+    else {
+        return;
+    };
+    let Some(opener) = generation_prompt_after(closer) else {
+        return;
+    };
+    // Trailing whitespace between the closed turn and the opener is what the
+    // templates themselves emit, so normalise to exactly one newline.
+    while prompt.ends_with('\n') || prompt.ends_with(' ') {
+        prompt.pop();
+    }
+    prompt.push('\n');
+    prompt.push_str(opener);
+    tracing::info!(
+        model = model_name.unwrap_or("<unknown>"),
+        closed_with = %closer,
+        "the chat template left the prompt at the end of a finished turn, so the model's own \
+         turn was opened for it — without this the reply is a single end-of-turn token"
+    );
 }
 
 /// Report a rendered prompt that ends by closing a turn instead of opening the

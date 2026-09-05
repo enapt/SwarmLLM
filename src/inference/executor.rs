@@ -62,6 +62,26 @@ impl Default for ModelExecutor {
     }
 }
 
+/// How long a conversation this backend will serve for a model trained at
+/// `n_ctx_train`, as a `u32` for llama.cpp.
+///
+/// A thin adapter over [`crate::inference::split::effective_context_length`],
+/// which is the single answer to that question and already governs the split
+/// loader, the memory estimator and `/v1/models`. This backend was the one path
+/// that did not ask it, and the cost of that is not a rounding error: a model
+/// declaring a large training window sizes its KV cache for the whole of it, so
+/// context creation fails outright on a card that would serve the same model
+/// comfortably at the shipped default.
+///
+/// Same rule, so `inference.max_seq_len_override` raises this backend exactly as
+/// it raises the others, and neither can exceed what the model declares.
+pub fn effective_llama_context(n_ctx_train: u32) -> u32 {
+    let effective = crate::inference::split::effective_context_length(n_ctx_train as usize);
+    // The cap only ever lowers the figure, so this cannot widen past the u32 it
+    // came from; clamped rather than cast so a future change cannot make it.
+    effective.min(n_ctx_train as usize) as u32
+}
+
 impl ModelExecutor {
     pub fn new() -> Self {
         Self {
@@ -302,8 +322,24 @@ impl ModelExecutor {
             .as_ref()
             .ok_or_else(|| SwarmError::Inference("Model not loaded".into()))?;
 
-        // Read context length from GGUF metadata if available, otherwise use default
-        let n_ctx = model.n_ctx_train();
+        // What this node will actually serve, NOT what the model was trained at.
+        //
+        // `effective_context_length` documents itself as "the single answer to
+        // what is this model's context here", and this backend was a fourth
+        // path that never asked it — it handed llama.cpp `n_ctx_train()`
+        // verbatim, so the KV cache was sized for the model's whole training
+        // window however small the card.
+        //
+        // Reported against a Qwen3-8B on a 6 GB card: the model loaded and then
+        // "Failed to create context: null reference from llama.cpp" on every
+        // request. Nothing to do with Qwen3 — the architecture is handled
+        // (`model_arch.rs` maps it) and the model had already loaded. It
+        // declares 40,960 tokens, and at 36 layers x 8 KV heads x 128 dims in
+        // f16 that is 144 KB a token, so the context alone asked for 5.6 GB
+        // against roughly 1.3 GB left after the weights. Capped it needs
+        // 1.1 GB. Any model with a large training window on a modest card hits
+        // this; that one just declares a big enough number to make it certain.
+        let n_ctx = effective_llama_context(model.n_ctx_train());
         let ctx_size = NonZeroU32::new(n_ctx);
         let ctx_params = LlamaContextParams::default().with_n_ctx(ctx_size);
         let mut ctx = model
@@ -605,7 +641,7 @@ impl ModelExecutor {
             .as_ref()
             .ok_or_else(|| SwarmError::Inference("Target model not loaded".into()))?;
 
-        let t_n_ctx = target_model.n_ctx_train();
+        let t_n_ctx = effective_llama_context(target_model.n_ctx_train());
         let t_ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(t_n_ctx));
         let mut target_ctx = target_model
             .new_context(target_backend, t_ctx_params)
@@ -621,7 +657,7 @@ impl ModelExecutor {
             .as_ref()
             .ok_or_else(|| SwarmError::Inference("Draft model not loaded".into()))?;
 
-        let d_n_ctx = draft_model.n_ctx_train();
+        let d_n_ctx = effective_llama_context(draft_model.n_ctx_train());
         let d_ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(d_n_ctx));
         let mut draft_ctx = draft_model
             .new_context(draft_backend, d_ctx_params)
@@ -1024,6 +1060,45 @@ fn extract_gguf_name(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::effective_llama_context;
+    use crate::inference::split::DEFAULT_MAX_SEQ_LEN;
+
+    /// The reported failure, as arithmetic. A Qwen3-8B declares 40,960 tokens;
+    /// at 36 layers x 8 KV heads x 128 dims in f16 that is 144 KB a token, so
+    /// asking llama.cpp for the whole training window wants 5.6 GB of KV cache
+    /// on a 6 GB card that has ~1.3 GB left after the weights — and context
+    /// creation fails outright. Capped, the same model needs 1.1 GB.
+    #[test]
+    fn a_large_training_window_is_capped_to_what_this_node_serves() {
+        assert_eq!(
+            effective_llama_context(40_960),
+            DEFAULT_MAX_SEQ_LEN as u32,
+            "the model's training window is not a statement about this machine"
+        );
+    }
+
+    /// The control: a model that already declares less than the cap keeps its
+    /// own figure. The cap only ever lowers.
+    #[test]
+    fn a_small_context_is_left_alone() {
+        assert_eq!(effective_llama_context(4096), 4096);
+        assert_eq!(
+            effective_llama_context(DEFAULT_MAX_SEQ_LEN as u32),
+            DEFAULT_MAX_SEQ_LEN as u32
+        );
+    }
+
+    /// This backend must obey the same override as every other path, or the
+    /// setting means one thing for a sharded model and another for a whole one.
+    #[test]
+    fn the_override_reaches_this_backend_too() {
+        use crate::inference::split::effective_context_length_with;
+        // The rule this adapter defers to, exercised directly: an explicit
+        // override raises the cap but can never exceed what the model declares.
+        assert_eq!(effective_context_length_with(40_960, Some(32_768)), 32_768);
+        assert_eq!(effective_context_length_with(4_096, Some(32_768)), 4_096);
+    }
+
     use super::*;
 
     #[test]

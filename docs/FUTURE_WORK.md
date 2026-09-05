@@ -446,6 +446,32 @@ anything repeated per request is repeated at the user for ever.
 That separation is the decision, and a future change that makes the router
 consult it has re-opened everything above.
 
+## The chat-template renderer is a Jinja subset, and Qwen3 is past its edge (open, 2026-09-05)
+
+`apply_chat_template` DECLINES the official Qwen3 template — verified against
+the real thing, now kept at `chat_template/fixtures/qwen3_official.jinja`. It
+needs `namespace()`, a reversed slice `messages[::-1]`, `loop.index0` /
+`loop.first` / `loop.last`, the `tojson` and `length` filters, `is string` /
+`is defined` tests, and string methods (`startswith`, `endswith`, `split`,
+`rstrip`, `lstrip`, `strip`). That is most of Jinja.
+
+**Declining is the correct behaviour** and is not the bug: a half-render is what
+would be dangerous. The consequence — a prompt left on a closed turn — is now
+repaired at the choke point (see `.claude/rules/architecture.md` § "A prompt that
+closed someone else's turn"), so a Qwen3 model gets a usable prompt.
+
+**What is still missing** is Qwen3's thinking-mode handling. Its template emits
+`<think>\n\n</think>\n\n` after the generation prompt when `enable_thinking`
+is false, and strips prior `<think>` blocks out of assistant turns on the way
+in. We do neither, so a Qwen3 model is prompted in its default (thinking) mode
+with no way to turn that off, and prior reasoning is fed back verbatim.
+
+**Worth doing when** a Qwen3-family model is actually being served here. Two
+routes: teach the renderer enough Jinja for this template (large, and the
+subset has been deliberate), or add a family fallback that emits Qwen3's shape
+directly the way `fallback_by_model_name` already does for others — much
+smaller, and the established pattern.
+
 ## A peer's own prompt admission can still race itself (FIXED 2026-09-05)
 
 Found while fixing gotcha #457, and deliberately left open there.

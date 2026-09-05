@@ -198,6 +198,47 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
+## A prompt that closed someone else's turn is finished for the model
+
+`chat_template::open_the_models_turn_if_the_prompt_closed_it` runs in
+`build_prompt_with_model` — the choke point every prompt passes through — and
+appends the family's own generation prompt when the rendered prompt ends on a
+turn-CLOSING marker.
+
+**What it replaced.** The condition was already DETECTED there, named precisely,
+logged at WARN, and then sent anyway. Its comment justified that as "being wrong
+about this must never cost someone an answer", which is the right instinct about
+warning-versus-erroring and skips the third option: the outcome is not in doubt.
+A model shown a finished conversation ends its turn at once — one token,
+`finish_reason: "stop"` — so proceeding costs the answer just as surely, while
+explaining it.
+
+**The evidence is positive, which is what makes repair safe.** The prompt ENDS
+with one of the six `TURN_ENDING_MARKERS`; that is the presence of a closer, not
+the absence of a recognised opener, so a correct-but-unusual prompt cannot be
+mistaken for a broken one.
+
+**Four of the six name one family; two do not.** `<|im_end|>`, `<|eot_id|>`,
+`<|end|>` and `<end_of_turn>` each map to exactly one opener, and appending it
+produces the same string that family's own template would have. `</s>` is
+Llama-2, Mistral AND vicuna, and `<|endoftext|>` spans unrelated vocabularies —
+those keep the warning and nothing else, because a confidently wrong opener is
+worse than a diagnosable prompt. Reaching ChatML for a non-ChatML model is the
+failure that put stray `<|im_end|>` in Llama-3 replies for several releases
+(gotcha #169); this must never become "fall back to ChatML".
+
+Reported against a Qwen3-8B (2026-09-05). This renderer DECLINES that template —
+it uses `namespace()`, a reversed slice `messages[::-1]`, `loop.index0`, the
+`tojson` filter and string methods, and is deliberately a subset of Jinja — so
+every request rendered a prompt ending on `<|im_end|>`. Pinned by
+`a_prompt_left_on_a_closed_turn_gets_the_models_turn_opened`, with the official
+template kept as a fixture.
+
+**A test that fixtures a turn-closing prompt must now close on `</s>`**, or the
+repair fixes it and the test asserts nothing — which is what
+`both_prompt_entry_points_go_through_the_same_renderer` caught about itself, via
+the guard it already carried.
+
 ## A tool-carrying reply streams the part that cannot be a tool call
 
 **`tool_parse::content_prefix_len`** is the single answer to "how much of this
