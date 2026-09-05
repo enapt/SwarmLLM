@@ -2858,15 +2858,17 @@ impl SharedState {
         let node_id = self.identity.node_id().clone();
         self.model_registry
             .record_shard_holder(shard_id.clone(), node_id.clone());
-        let announce = crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
-            node_id,
-            shards: vec![shard_id.clone()],
-            timestamp: chrono::Utc::now(),
+        let announce = crate::types::SwarmMessage::ShardAnnounce(
             // Incremental: one shard we just acquired says nothing about the
             // rest, so declaring completeness here would delete every other
             // shard of this model we hold.
-            complete_for_models: Vec::new(),
-        });
+            crate::model::manifest::shard_announce(
+                &self.model_registry,
+                node_id,
+                vec![shard_id.clone()],
+                Vec::new(),
+            ),
+        );
         let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
         let _ = net_tx.try_send(crate::types::NetworkCommand::StartProviding(vec![
             shard_id.clone()

@@ -383,12 +383,12 @@ pub async fn rescan_local_shards(
                     .collect::<std::collections::HashSet<_>>()
                     .into_iter()
                     .collect();
-                let announce = crate::types::ShardAnnounce {
-                    node_id: local_node_id,
-                    shards: hosted_shards,
-                    timestamp: chrono::Utc::now(),
+                let announce = crate::model::manifest::shard_announce(
+                    &shared.model_registry,
+                    local_node_id,
+                    hosted_shards,
                     complete_for_models,
-                };
+                );
                 let _ = tx
                     .send(NetworkCommand::Broadcast(
                         crate::types::SwarmMessage::ShardAnnounce(announce),

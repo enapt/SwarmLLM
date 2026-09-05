@@ -867,17 +867,33 @@ pub(crate) async fn dispatch_network_messages(
                                         if let Some(mut peer) = shared_state.peer_registry.get_mut(&announce.node_id) {
                                             peer.last_seen = chrono::Utc::now();
                                         }
+                                        // Build tags are positionally parallel to `shards`. A
+                                        // length that does not match is not partially usable —
+                                        // an off-by-one would attribute one shard's build to
+                                        // another, which is worse than knowing nothing — so a
+                                        // desynced vector is discarded wholesale. An older peer
+                                        // sends none and lands here too.
+                                        let build_tags: &[u64] =
+                                            if announce.shard_builds.len() == announce.shards.len() {
+                                                &announce.shard_builds
+                                            } else {
+                                                &[]
+                                            };
                                         // Group shards by model for activity logging
                                         let mut models_announced: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-                                        for shard_id in &announce.shards {
+                                        for (i, shard_id) in announce.shards.iter().enumerate() {
                                             // Don't record holders for a backup-copy model name —
                                             // it would inflate replica counts for a model that
                                             // isn't real. Mirrors the manifest-ingress guard.
                                             if crate::model::manifest::is_backup_artifact_id(&shard_id.model_id.0) {
                                                 continue;
                                             }
+                                            let build = build_tags
+                                                .get(i)
+                                                .copied()
+                                                .unwrap_or(swarmllm_types::BUILD_TAG_UNKNOWN);
                                             shared_state.model_registry
-                                                .record_shard_holder(shard_id.clone(), announce.node_id.clone());
+                                                .record_shard_holder_with_build(shard_id.clone(), announce.node_id.clone(), build);
                                             *models_announced.entry(shard_id.model_id.0.clone()).or_insert(0) += 1;
                                         }
                                         // Retract whatever this node no longer holds, for the

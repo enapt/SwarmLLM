@@ -145,13 +145,13 @@ impl ShardRebalancer {
                     // a thundering-herd departure, suppressing them
                     // leaves locally-held shards undiscoverable for up
                     // to REBALANCE_COOLDOWN_SECS while peers retry HF.
-                    let announce = crate::types::ShardAnnounce {
-                        node_id: local_node_id.clone(),
-                        shards: vec![shard_id.clone()],
-                        timestamp: chrono::Utc::now(),
-                        // Re-announcing one shard we still hold — incremental.
-                        complete_for_models: Vec::new(),
-                    };
+                    // Re-announcing one shard we still hold — incremental.
+                    let announce = crate::model::manifest::shard_announce(
+                        &self.shared_state.model_registry,
+                        local_node_id.clone(),
+                        vec![shard_id.clone()],
+                        Vec::new(),
+                    );
                     let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
                     if let Err(e) = self.network_tx.send(msg).await {
                         tracing::warn!(error = %e, "Failed to broadcast shard rebalance announce");

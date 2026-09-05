@@ -43,13 +43,25 @@ pub const ORIGIN_VERIFIED_TREE: &str = "origin_verified_hashes";
 /// against the new reference.
 type ManifestUpdateHook = Box<dyn Fn(&ModelManifest, bool, &[u32]) + Send + Sync>;
 
+/// What we know about one node's claim on one shard.
+///
+/// `build` is the holder's own content hash for that shard, truncated
+/// (`build_tag_from_hash`), or `BUILD_TAG_UNKNOWN` when the claim carried none
+/// — an older peer, a DHT provider record, or a local registration. Unknown is
+/// never treated as a mismatch.
+#[derive(Clone, Copy, Debug)]
+struct HolderRecord {
+    seen: Instant,
+    build: u64,
+}
+
 pub struct ModelRegistry {
     /// Known model manifests, keyed by model ID.
     manifests: DashMap<ModelId, ModelManifest>,
     /// Shard location tracking: which nodes hold which shards.
-    /// HashMap value maps NodeId → last_seen timestamp for LRU eviction.
-    /// Bounded at MAX_HOLDERS_PER_SHARD entries per shard.
-    shard_holders: DashMap<ShardId, HashMap<NodeId, Instant>>,
+    /// HashMap value maps NodeId → `HolderRecord` (last-seen for LRU eviction,
+    /// plus the build the holder claims). Bounded at MAX_HOLDERS_PER_SHARD.
+    shard_holders: DashMap<ShardId, HashMap<NodeId, HolderRecord>>,
     /// Reverse index: which shards each node holds.
     /// Maintained in sync by record_shard_holder() / remove_shard_holder().
     /// Enables O(shards_held) peer departure instead of O(all_shards).
@@ -450,6 +462,17 @@ impl ModelRegistry {
     /// Bounded: if the holder set is at capacity, the oldest non-local holder
     /// is evicted to make room. Maintains reverse index.
     pub fn record_shard_holder(&self, shard_id: ShardId, node_id: NodeId) {
+        self.record_shard_holder_with_build(shard_id, node_id, swarmllm_types::BUILD_TAG_UNKNOWN);
+    }
+
+    /// As `record_shard_holder`, but recording which BUILD the holder claims.
+    ///
+    /// Only a claim that actually carries build information should pass a real
+    /// tag here — today that is the `ShardAnnounce` gossip handler. A DHT
+    /// provider record carries none, and a local registration does not need
+    /// one (our own shards are the reference `shard_holders` filters against),
+    /// so both keep `BUILD_TAG_UNKNOWN`.
+    pub fn record_shard_holder_with_build(&self, shard_id: ShardId, node_id: NodeId, build: u64) {
         // A first-hand claim supersedes any earlier retraction: the node is
         // telling us it has the shard now. Only this path clears it — the DHT
         // merge must not, or a stale provider record would undo a retraction.
@@ -458,9 +481,18 @@ impl ModelRegistry {
         let mut entry = self.shard_holders.entry(shard_id.clone()).or_default();
         let holders = entry.value_mut();
 
-        // Update timestamp if already present (always succeeds, no eviction needed)
-        if holders.contains_key(&node_id) {
-            holders.insert(node_id.clone(), Instant::now());
+        // Update timestamp if already present (always succeeds, no eviction needed).
+        // A re-announcement carrying a build tag updates it; one that carries
+        // none must NOT erase what we already learned, or a single older-peer
+        // re-announce would blank a known build.
+        if let Some(existing) = holders.get_mut(&node_id) {
+            existing.seen = Instant::now();
+            if build != swarmllm_types::BUILD_TAG_UNKNOWN && existing.build != build {
+                let was = existing.build;
+                existing.build = build;
+                drop(entry);
+                self.note_build_tag(&shard_id, &node_id, was, build);
+            }
             // Reverse index already has this entry
             return;
         }
@@ -470,7 +502,7 @@ impl ModelRegistry {
             let evict_id = holders
                 .iter()
                 .filter(|(nid, _)| Some(*nid) != self.local_node_id.as_ref())
-                .min_by_key(|(_, ts)| *ts)
+                .min_by_key(|(_, rec)| rec.seen)
                 .map(|(nid, _)| nid.clone());
 
             if let Some(evict) = evict_id {
@@ -485,14 +517,59 @@ impl ModelRegistry {
             }
         }
 
-        holders.insert(node_id.clone(), Instant::now());
+        holders.insert(
+            node_id.clone(),
+            HolderRecord {
+                seen: Instant::now(),
+                build,
+            },
+        );
+        let announced_build = build;
         // Update reverse index BEFORE dropping shard_holders guard so concurrent
         // remove_peer_from_all_shards sees a consistent state (no half-update window).
         self.node_shards
-            .entry(node_id)
+            .entry(node_id.clone())
             .or_default()
-            .insert(shard_id);
+            .insert(shard_id.clone());
         drop(entry);
+        self.note_build_tag(
+            &shard_id,
+            &node_id,
+            swarmllm_types::BUILD_TAG_UNKNOWN,
+            announced_build,
+        );
+    }
+
+    /// Report a holder whose claimed build disagrees with ours, ONCE per
+    /// transition rather than once per announcement.
+    ///
+    /// A peer re-announces on a timer, so the same disagreement arrives
+    /// indefinitely — 556 times for one model on this node's log before the
+    /// filter existed. Logging per announcement would be the noise the
+    /// manifest-rejection limiter was added to stop. Only a change of state
+    /// (first record, or a tag that moved) says anything new.
+    ///
+    /// It is logged rather than merely counted because the consequence —
+    /// `shard_holders` omits this node from every routing decision — is
+    /// otherwise invisible from outside the process.
+    fn note_build_tag(&self, shard_id: &ShardId, node_id: &NodeId, was: u64, now: u64) {
+        let expected = self.expected_build_tag(shard_id);
+        if !swarmllm_types::build_tags_conflict(expected, now) {
+            return;
+        }
+        tracing::info!(
+            model = %shard_id.model_id.0,
+            shard = shard_id.index,
+            node = %node_id,
+            expected_build = format!("{expected:016x}"),
+            claimed_build = format!("{now:016x}"),
+            previous_build = %if was == swarmllm_types::BUILD_TAG_UNKNOWN {
+                "none".to_string()
+            } else {
+                format!("{was:016x}")
+            },
+            "A peer holds a different build of this model — not routing to it              for this part, because its bytes could not pass our hash check"
+        );
     }
 
     /// Remove a node from shard holders (e.g., node went offline).
@@ -593,11 +670,70 @@ impl ModelRegistry {
         })
     }
 
+    /// The build tag THIS node expects for a shard, from its own manifest.
+    ///
+    /// `BUILD_TAG_UNKNOWN` when we hold no manifest for the model or the
+    /// manifest carries no hash for that shard (a partial holder writes zeros
+    /// for shards it does not have). Unknown means "do not judge", never
+    /// "nothing matches".
+    ///
+    /// Note this is deliberately our OWN expectation, not an adjudication of
+    /// which build is "correct": our manifest's hash is what a download from
+    /// that holder would be verified against, so a holder that disagrees with
+    /// it cannot give us bytes we would accept, whoever is right.
+    pub fn expected_build_tag(&self, shard_id: &ShardId) -> u64 {
+        self.manifests
+            .get(&shard_id.model_id)
+            .and_then(|m| {
+                m.shards
+                    .iter()
+                    .find(|s| s.index == shard_id.index)
+                    .map(|s| swarmllm_types::build_tag_from_hash(&s.hash))
+            })
+            .unwrap_or(swarmllm_types::BUILD_TAG_UNKNOWN)
+    }
+
     /// Get all nodes that hold a specific shard (from the bounded cache).
+    ///
+    /// **Holders claiming a different BUILD of the model are filtered out**
+    /// (gotcha #406). A model id comes from a display name, so independent
+    /// GGUF builds of one model share an id; a holder of another build cannot
+    /// serve bytes that pass our hash check, so routing to it is a guaranteed
+    /// wasted transfer. Measured live 2026-09-05: one peer gossiped hashes
+    /// contradicting our origin-verified ones 556 times while remaining a
+    /// routing candidate 14,190 times.
+    ///
+    /// This is the single read accessor for the holder map — every consumer in
+    /// the tree goes through it — which is why the filter lives here rather
+    /// than at the ~60 call sites.
     pub fn shard_holders(&self, shard_id: &ShardId) -> Vec<NodeId> {
+        let expected = self.expected_build_tag(shard_id);
         self.shard_holders
             .get(shard_id)
-            .map(|v| v.keys().cloned().collect())
+            .map(|v| {
+                v.iter()
+                    .filter(|(_, rec)| !swarmllm_types::build_tags_conflict(expected, rec.build))
+                    .map(|(node, _)| node.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Holders of `shard_id` that positively claim a DIFFERENT build from ours.
+    ///
+    /// Exists so the filter above is observable: a peer silently dropped from
+    /// every routing decision is exactly the kind of thing that is impossible
+    /// to diagnose from the outside.
+    pub fn conflicting_build_holders(&self, shard_id: &ShardId) -> Vec<NodeId> {
+        let expected = self.expected_build_tag(shard_id);
+        self.shard_holders
+            .get(shard_id)
+            .map(|v| {
+                v.iter()
+                    .filter(|(_, rec)| swarmllm_types::build_tags_conflict(expected, rec.build))
+                    .map(|(node, _)| node.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -1462,6 +1598,167 @@ mod tests {
         let mut fewer = ours.clone();
         fewer.shard_count = 1;
         assert!(ModelRegistry::describes_a_different_build(&ours, &fewer));
+    }
+
+    /// A holder of a DIFFERENT GGUF build is not offered to routing.
+    ///
+    /// This is gotcha #406's residual. Model ids come from display names, so
+    /// two builds of one model share an id; before this, both were pooled
+    /// under the same `ShardId` and the scheduler routed to either, costing a
+    /// guaranteed wasted transfer whenever it picked the wrong one.
+    #[test]
+    fn a_holder_of_a_different_build_is_not_a_holder() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me);
+        let mut manifest = test_manifest("m", "M");
+        manifest.shards = vec![test_shard(0, [7u8; 32])];
+        registry.register_manifest(manifest);
+
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        };
+        let ours = swarmllm_types::build_tag_from_hash(&[7u8; 32]);
+        let theirs = swarmllm_types::build_tag_from_hash(&[8u8; 32]);
+        assert_ne!(ours, theirs, "the two builds must be distinguishable");
+
+        let same_build = NodeId([2u8; 32]);
+        let other_build = NodeId([3u8; 32]);
+        registry.record_shard_holder_with_build(sid.clone(), same_build.clone(), ours);
+        registry.record_shard_holder_with_build(sid.clone(), other_build.clone(), theirs);
+
+        let holders = registry.shard_holders(&sid);
+        assert!(
+            holders.contains(&same_build),
+            "a holder of OUR build must still be routed to"
+        );
+        assert!(
+            !holders.contains(&other_build),
+            "a holder of another build cannot serve bytes that pass our hash check"
+        );
+        assert_eq!(
+            registry.conflicting_build_holders(&sid),
+            vec![other_build],
+            "and the drop must be observable, not silent"
+        );
+    }
+
+    /// The control. Without it the test above would pass just as happily if
+    /// `shard_holders` returned nothing at all, or if every holder carrying a
+    /// tag were dropped.
+    #[test]
+    fn a_holder_that_states_no_build_is_never_excluded() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me);
+        let mut manifest = test_manifest("m", "M");
+        manifest.shards = vec![test_shard(0, [7u8; 32])];
+        registry.register_manifest(manifest);
+
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        };
+        let older_peer = NodeId([4u8; 32]);
+        // What an older node's announcement decodes to: no tags at all.
+        registry.record_shard_holder(sid.clone(), older_peer.clone());
+
+        assert!(
+            registry.shard_holders(&sid).contains(&older_peer),
+            "unknown must mean 'do not judge', never 'wrong' — a mixed-version \
+             swarm has to stay routable during a rollout"
+        );
+        assert!(registry.conflicting_build_holders(&sid).is_empty());
+    }
+
+    /// With no hash of our own there is nothing to compare against, and
+    /// refusing every holder would make the model unroutable rather than
+    /// merely mis-routed. A partial holder writes zeros for shards it does not
+    /// have, so this is the common case, not an edge one.
+    #[test]
+    fn nothing_is_filtered_when_we_have_no_hash_to_compare_against() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me);
+        let mut manifest = test_manifest("m", "M");
+        manifest.shards = vec![test_shard(0, [0u8; 32])];
+        registry.register_manifest(manifest);
+
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        };
+        let a = NodeId([2u8; 32]);
+        let b = NodeId([3u8; 32]);
+        registry.record_shard_holder_with_build(
+            sid.clone(),
+            a.clone(),
+            swarmllm_types::build_tag_from_hash(&[7u8; 32]),
+        );
+        registry.record_shard_holder_with_build(
+            sid.clone(),
+            b.clone(),
+            swarmllm_types::build_tag_from_hash(&[8u8; 32]),
+        );
+
+        let holders = registry.shard_holders(&sid);
+        assert_eq!(
+            holders.len(),
+            2,
+            "an unknown expectation must not exclude anyone, even two holders \
+             who plainly disagree with each other"
+        );
+    }
+
+    /// A re-announcement from an older peer carries no tags. It must not blank
+    /// a build we have already learned, or one such message would restore the
+    /// pooling this fix removes — and peers re-announce on a timer.
+    #[test]
+    fn a_tagless_reannounce_does_not_erase_a_build_we_know() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me);
+        let mut manifest = test_manifest("m", "M");
+        manifest.shards = vec![test_shard(0, [7u8; 32])];
+        registry.register_manifest(manifest);
+
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        };
+        let other_build = NodeId([3u8; 32]);
+        registry.record_shard_holder_with_build(
+            sid.clone(),
+            other_build.clone(),
+            swarmllm_types::build_tag_from_hash(&[8u8; 32]),
+        );
+        assert!(!registry.shard_holders(&sid).contains(&other_build));
+
+        // The same peer re-announces without tags.
+        registry.record_shard_holder(sid.clone(), other_build.clone());
+        assert!(
+            !registry.shard_holders(&sid).contains(&other_build),
+            "a tagless refresh must leave the known build in place"
+        );
+    }
+
+    /// An all-zero hash is a manifest's way of saying "I do not hold this", so
+    /// it must not become a real tag that other zeros then match.
+    #[test]
+    fn an_unknown_hash_does_not_become_a_build_everyone_shares() {
+        assert_eq!(
+            swarmllm_types::build_tag_from_hash(&[0u8; 32]),
+            swarmllm_types::BUILD_TAG_UNKNOWN
+        );
+        assert!(!swarmllm_types::build_tags_conflict(
+            swarmllm_types::BUILD_TAG_UNKNOWN,
+            swarmllm_types::build_tag_from_hash(&[7u8; 32])
+        ));
+        assert!(!swarmllm_types::build_tags_conflict(
+            swarmllm_types::build_tag_from_hash(&[7u8; 32]),
+            swarmllm_types::BUILD_TAG_UNKNOWN
+        ));
+        assert!(swarmllm_types::build_tags_conflict(
+            swarmllm_types::build_tag_from_hash(&[7u8; 32]),
+            swarmllm_types::build_tag_from_hash(&[8u8; 32])
+        ));
     }
 
     fn test_shard(index: u32, hash: Blake3Hash) -> ShardInfo {

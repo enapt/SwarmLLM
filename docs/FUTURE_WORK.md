@@ -571,7 +571,7 @@ the newest; (3) on a forward timeout, retry once on a different connection
 before failing over to another holder. `max_connections_per_peer = 1` is not
 an option (gotcha #163: it disables DCUtR).
 
-### Shard holders are pooled across different BUILDS of one model (2026-08-29)
+### Shard holders are pooled across different BUILDS of one model (2026-08-29) — FIXED 2026-09-05
 
 `ModelRegistry::record_shard_holder` keys on `ShardId { model_id, index }` and
 nothing else, so a node holding a *different GGUF build* of a model is recorded
@@ -611,46 +611,61 @@ nearest thing available and it is not the same question — a holder re-gossips 
 manifest without claiming publication (`manifests_to_gossip`), so the publisher
 identifies the build, not who is announcing it.
 
-**What it would take.** A build discriminator on the wire — the manifest hash,
-or a short prefix of it — carried by `ShardAnnounce` and stored alongside each
-holder. Additive per the protocol rules: a new `#[serde(default)]` field plus a
-feature bit, with an absent discriminator meaning "unknown, treat as today" so
-a mixed-version swarm keeps working. `shard_holders` then keys on
-`(ShardId, build)` or filters on read.
+**What it took (built 2026-09-05).** `ShardAnnounce` carries `shard_builds`, a
+`#[serde(default)] Vec<u64>` positionally parallel to `shards`, each entry the
+sender's own content hash for that shard truncated by
+`swarmllm_types::build_tag_from_hash`. `ModelRegistry`'s holder map now stores a
+`HolderRecord { seen, build }`, and `shard_holders` — the single read accessor
+every consumer in the tree goes through — filters out holders whose tag
+positively conflicts with `expected_build_tag`, our own manifest's hash for that
+shard.
 
-**Worth doing when** more than one build of a popular model is common on the
-swarm. Today it is one model and the cost is bounded; the manifest half was the
-urgent part because it silently corrupted metadata rather than wasting a
-transfer.
+Five decisions in it that a change here should keep:
 
-**Live observation, 2026-09-05 — the residual is real and the shape guard cannot
-see this case.** On this node's log: peer `e561df35d8c9a3ac` has gossiped
-contradicting shard hashes for `qwen2.5-coder-7b-instruct-q4-k-m` **556 times**
-(shards 6 and 7 among others), every one correctly refused by `origin_verified`
-— so nothing corrupt was adopted and that half is working exactly as designed.
+- **Per-shard content hash, NOT the manifest hash**, though the manifest hash is
+  what this entry originally proposed. `merge_known_shard_hashes` recomputes a
+  manifest hash locally whenever it recovers a hash the sender lacked, so two
+  nodes on the SAME build routinely carry different manifest hashes — it would
+  have produced false mismatches. A shard's content hash is a property of the
+  bytes alone.
+- **Our own manifest is the reference, and that is not an adjudication of who is
+  right.** Our hash is what a download would be verified against, so a holder
+  disagreeing with it cannot give us bytes we would accept, whichever build is
+  "correct". That is what makes the filter safe without origin knowledge.
+- **Unknown never excludes**, on either side — an older peer, a DHT provider
+  record, or a manifest carrying the all-zero placeholder a partial holder
+  writes. Same contract `max_hostable_layers` keeps for unknown capacity, and
+  what keeps a mixed-version swarm routable during a rollout.
+- **A tagless re-announce does not erase a build already learned.** Peers
+  re-announce on a timer, so one older-peer refresh would otherwise restore the
+  pooling. Pinned by `a_tagless_reannounce_does_not_erase_a_build_we_know`.
+- **No feature bit.** This is an added field on an existing message, not a new
+  variant, and `#[serde(default)]` covers both directions — exactly the
+  precedent `complete_for_models` set on the same struct.
 
-Two things worth carrying forward:
+The eight construction sites went through `model::manifest::shard_announce`,
+because a site that forgot the field would send an announcement claiming
+nothing, which is indistinguishable on the wire from an older peer — the
+omission would be invisible rather than merely wrong.
+`shard_announce_is_built_in_one_place` fails the build on a bare literal, and
+was verified by reverting a real call site, not only against its planted-string
+self-test (#413).
 
-- **`describes_a_different_build` has never fired on this node** (zero
-  occurrences in the whole log), including against these 556. It compares
-  SHAPE, and these two builds evidently agree on every `size_bytes` while
-  disagreeing on the bytes — which is the case the three-build measurement
-  above already hinted at, since those three sizes were within 800 bytes of
-  each other. So the shape comparison is a coarse screen, not a build
-  identity, and **a size-derived discriminator would not fix the holder map
-  either**. The manifest-hash discriminator named above is the only proposal
-  here that would actually separate these two.
-- **The peer is still ranked as a holder**: it appears as a `pipeline
-  candidate` 14,190 times in the same log, for a model whose bytes we know
-  differ from origin on at least two shards. That is precisely the documented
-  consequence — a guaranteed wasted transfer per (shard, wrong holder) — now
-  with a named peer and a count rather than as a prediction.
+**What prompted it.** The entry said "worth doing when more than one build of a
+popular model is common on the swarm". The live node's log said that had already
+happened: peer `e561df35d8c9a3ac` gossiped hashes contradicting our
+origin-verified ones for `qwen2.5-coder-7b-instruct-q4-k-m` **556 times** (every
+one correctly refused, so nothing corrupt was adopted) while remaining a
+`pipeline candidate` **14,190 times** — the wasted-transfer cost, measured
+rather than predicted.
 
-This does not change the priority argument (correctness is still safe, and the
-cost is still bounded by hash verification plus the per-shard backoff), but it
-does retire "today it is one model" as the reason to wait: one publisher is
-generating this at a steady rate, and the screen that was assumed to catch the
-shape half does not fire on it.
+**And `describes_a_different_build` could not see any of them.** It has never
+fired on this node, zero occurrences in the whole log: it compares SHAPE, and
+these two builds agree on every `size_bytes` while disagreeing on the bytes —
+consistent with the three-build measurement above, whose sizes were within 800
+bytes of each other. So the shape screen is coarse, and **a size-derived
+discriminator would not have closed this either.** The per-shard hash is what
+separates them.
 
 ### Manual shard download ignores private mode when picking a peer (2026-08-21) — FIXED 2026-08-23
 

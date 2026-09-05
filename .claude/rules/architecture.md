@@ -604,6 +604,62 @@ read the pair as a contradiction and lost an hour to it. The plan now names
 `standbys_covering_this_segment` next to the total. When a summary count cannot
 answer the question a reader will ask of it, print the answer, not the count.
 
+## A holder record names a BUILD, not just a shard
+
+**`ModelRegistry::shard_holders` filters out holders that positively claim a
+different GGUF build**, against `expected_build_tag` — this node's own manifest
+hash for that shard. It is the single read accessor for the holder map (~60
+consumers), which is why the filter lives there and not at the call sites.
+
+**Why.** A model id comes from a display name (`slugify_model_name`,
+deliberately — it unified three disagreeing derivations, #310), so every
+independent build of one model collapses into one identity. Three Q4_K_M builds
+of Qwen2.5-Coder-7B were live on the swarm at once, within 800 bytes of each
+other, sharing not one shard hash. Holder records keyed on `ShardId` alone
+pooled them, so the scheduler routed to either: correctness was safe (every
+shard is hash-verified before load) but a wrong pick is a guaranteed wasted
+transfer of the whole shard. Measured live 2026-09-05 — one peer gossiped
+contradicting hashes **556 times** while remaining a routing candidate **14,190
+times** (gotcha #406).
+
+Five things a change here must keep:
+
+- **The tag is a per-shard CONTENT hash** (`build_tag_from_hash`), not the
+  manifest hash the original design proposed. `merge_known_shard_hashes`
+  recomputes a manifest hash locally whenever it recovers one the sender
+  lacked, so two nodes on the same build routinely disagree on it — it would
+  have produced false mismatches. Shard bytes have no such problem.
+- **Our own manifest is the reference, and that is deliberately not a judgement
+  about which build is correct.** Our hash is what a download would be verified
+  against, so a holder that disagrees with it cannot hand us bytes we would
+  accept, whoever is right. That is what makes the filter sound even when we
+  have no origin knowledge.
+- **Unknown never excludes**, on either side — `build_tags_conflict` is the one
+  place that decides, so a caller cannot read "unknown" as "wrong". An older
+  peer, a DHT provider record, a local registration and a partial holder's
+  all-zero placeholder all land there. Same contract as
+  `max_hostable_layers`, and what keeps a rollout routable.
+- **A tagless re-announce must not erase a build already learned.** Peers
+  re-announce on a timer, so one older-peer refresh would otherwise restore
+  the pooling on the next tick.
+- **The drop is reported.** `note_build_tag` logs once per *transition*, never
+  per announcement — a peer repeats itself indefinitely (556 times here), and
+  anything a peer repeats on a timer will be repeated at you for ever. A peer
+  silently absent from every routing decision is otherwise undiagnosable from
+  outside the process; `conflicting_build_holders` is the programmatic view.
+
+**`model::manifest::shard_announce` is the ONE constructor for
+`ShardAnnounce`**, for the reason the "one invariant, N paths" rule gives: a
+site that forgot the tag would send an announcement claiming nothing, which is
+indistinguishable on the wire from an older peer — so a missed site is
+invisible rather than merely wrong. Adding a field extends the helper, not the
+eight call sites. `shard_announce_is_built_in_one_place` fails the build on a
+bare literal.
+
+**Still open**: the reverse index (`node_shards`) is unfiltered, which is
+correct today because every consumer reads it about the LOCAL node. A consumer
+that asked it about a peer would bypass this filter.
+
 ## Additive Protocol Evolution (NETWORKING_PLAN cross-cutting)
 
 Version-breaking network changes were a top adoption blocker: a node on vN

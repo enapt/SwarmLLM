@@ -3945,3 +3945,100 @@ fn the_exhaustion_guard_catches_a_return_that_bars_nobody() {
 "#;
     assert!(exhaustion_arm_bars_its_tried_nodes(good));
 }
+
+/// Lines that construct a `ShardAnnounce` by struct literal.
+///
+/// Comment lines are excluded: this file and the helper's own doc comment both
+/// name the pattern, and a guard that trips over the documentation explaining
+/// it is the trap a sibling test in this file already hit once.
+fn bare_shard_announce_literals(src: &str) -> Vec<usize> {
+    statements(src)
+        .into_iter()
+        .filter(|(_, s)| {
+            let t = s.trim_start();
+            !t.starts_with("//") && !t.starts_with("///") && !t.starts_with("*")
+        })
+        .filter(|(_, s)| s.contains("ShardAnnounce {"))
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// A shard announcement is built in ONE place (gotcha #406).
+///
+/// Every announcement must carry a per-shard build tag, so a receiver can tell
+/// a holder of THIS GGUF build from a holder of a different one sharing the
+/// same model id. Eight sites construct announcements, and a site that forgot
+/// the field would send an announcement claiming nothing — indistinguishable
+/// on the wire from an older peer, so the omission would be invisible rather
+/// than merely wrong.
+///
+/// `model::manifest::shard_announce` is that place. Adding a field to
+/// `ShardAnnounce` extends it, not the call sites — the same contract
+/// `build_spec_verify_forward` keeps for `LayerForward`.
+#[test]
+fn shard_announce_is_built_in_one_place() {
+    let root = repo_root();
+    let mut stack = vec![root.join("src")];
+    let mut offenders: Vec<String> = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            // The constructor itself.
+            if rel == "src/model/manifest.rs" {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            for line in bare_shard_announce_literals(&text) {
+                offenders.push(format!("{rel}:{line}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "ShardAnnounce must be built via model::manifest::shard_announce so every \
+         announcement carries its per-shard build tag (gotcha #406). Bare literals at: {offenders:#?}"
+    );
+}
+
+/// The guard above must be able to see the violation it exists to catch —
+/// including the wrapped form rustfmt produces at depth, which is how four
+/// other guards in this file came to be inert (gotcha #413).
+#[test]
+fn the_shard_announce_guard_catches_a_planted_literal() {
+    let caught = |src: &str| !bare_shard_announce_literals(src).is_empty();
+
+    assert!(caught(
+        "let a = crate::types::ShardAnnounce { node_id, shards };"
+    ));
+    // Wrapped across lines by rustfmt at depth — `statements` rejoins it.
+    assert!(caught(
+        "let a = crate::types::SwarmMessage::ShardAnnounce(\n    crate::types::ShardAnnounce {\n        node_id,\n    },\n);"
+    ));
+    // The constructor call is the correct form and must stay quiet.
+    assert!(!caught(
+        "let a = crate::model::manifest::shard_announce(&reg, node_id, shards, vec![]);"
+    ));
+    // Matching on the enum variant is not construction.
+    assert!(!caught("SwarmMessage::ShardAnnounce(announce) => {}"));
+    // Prose naming the pattern is not the pattern.
+    assert!(!caught(
+        "// never write crate::types::ShardAnnounce { .. } here"
+    ));
+}

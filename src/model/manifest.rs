@@ -532,6 +532,39 @@ fn note_rejection_in(
     Some(0)
 }
 
+/// Build a `ShardAnnounce` — the ONE place that struct is constructed.
+///
+/// **Every announcement carries a build tag per shard**, taken from this
+/// node's own manifest, so a receiver can tell a holder of THIS build from a
+/// holder of a different GGUF build sharing the same model id (gotcha #406).
+/// Getting that from a call site would mean eight copies of the derivation and
+/// eight chances to send an announcement that silently claims nothing; a
+/// receiver cannot distinguish "older peer" from "newer peer that forgot", so
+/// a missed site is invisible.
+///
+/// Adding a field to `ShardAnnounce` extends this helper, not the call sites —
+/// the same contract `build_spec_verify_forward` keeps for `LayerForward`.
+/// `shard_announce_is_built_in_one_place` in `tests/repo_consistency.rs` fails
+/// the build on a bare struct literal anywhere else.
+pub fn shard_announce(
+    registry: &crate::model::registry::ModelRegistry,
+    node_id: crate::types::NodeId,
+    shards: Vec<crate::types::ShardId>,
+    complete_for_models: Vec<crate::types::ModelId>,
+) -> crate::types::ShardAnnounce {
+    let shard_builds = shards
+        .iter()
+        .map(|s| registry.expected_build_tag(s))
+        .collect();
+    crate::types::ShardAnnounce {
+        node_id,
+        shards,
+        timestamp: chrono::Utc::now(),
+        complete_for_models,
+        shard_builds,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{classify_p2p_shard_acceptance as classify, P2pShardAcceptance as A};

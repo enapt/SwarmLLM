@@ -427,12 +427,12 @@ pub(super) fn spawn_initial_announcements(
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .collect();
-            let announce = crate::types::ShardAnnounce {
-                node_id: node_id.clone(),
-                shards: hosted_shards,
-                timestamp: chrono::Utc::now(),
+            let announce = crate::model::manifest::shard_announce(
+                &shared_state.model_registry,
+                node_id.clone(),
+                hosted_shards,
                 complete_for_models,
-            };
+            );
             tracing::info!(
                 shards = announce.shards.len(),
                 "Broadcasting initial shard announcement"

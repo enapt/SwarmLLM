@@ -766,12 +766,12 @@ impl HealthMonitor {
                     .collect::<std::collections::HashSet<_>>()
                     .into_iter()
                     .collect();
-                let announce = crate::types::ShardAnnounce {
+                let announce = crate::model::manifest::shard_announce(
+                    &self.shared_state.model_registry,
                     node_id,
-                    shards: hosted_shards,
-                    timestamp: chrono::Utc::now(),
+                    hosted_shards,
                     complete_for_models,
-                };
+                );
                 let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
                 if let Err(e) = self.network_tx.send(msg).await {
                     tracing::debug!(error = %e, shard_count, "DIAG: failed to broadcast shard announce");

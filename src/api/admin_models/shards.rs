@@ -282,13 +282,15 @@ pub async fn delete_shard(
             .map(|(sid, _)| sid.clone())
             .collect();
 
-        let announce = crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
-            node_id: local_node_id,
-            shards: remaining_shards,
-            timestamp: chrono::Utc::now(),
+        let announce = crate::types::SwarmMessage::ShardAnnounce(
             // Complete for this model: whatever is absent was just deleted.
-            complete_for_models: vec![mid.clone()],
-        });
+            crate::model::manifest::shard_announce(
+                &shared.model_registry,
+                local_node_id,
+                remaining_shards,
+                vec![mid.clone()],
+            ),
+        );
         let _ = ntx
             .send(crate::types::NetworkCommand::Broadcast(announce))
             .await;

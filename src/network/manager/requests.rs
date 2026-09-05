@@ -1063,13 +1063,13 @@ impl NetworkManager {
                         // The announce will be sent on the next event loop iteration.
                         self.deferred_broadcasts
                             .push(crate::types::SwarmMessage::ShardAnnounce(
-                                crate::types::ShardAnnounce {
-                                    node_id: local_node_id,
-                                    shards: vec![shard_id.clone()],
-                                    timestamp: chrono::Utc::now(),
-                                    // One shard we just fetched — incremental.
-                                    complete_for_models: Vec::new(),
-                                },
+                                // One shard we just fetched — incremental.
+                                crate::model::manifest::shard_announce(
+                                    &self.shared_state.model_registry,
+                                    local_node_id,
+                                    vec![shard_id.clone()],
+                                    Vec::new(),
+                                ),
                             ));
 
                         // Load the model with the new shard (spawned async — can't block event loop)

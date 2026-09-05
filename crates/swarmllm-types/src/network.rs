@@ -233,6 +233,75 @@ pub struct ShardAnnounce {
     /// is exactly the pre-existing behaviour.
     #[serde(default)]
     pub complete_for_models: Vec<ModelId>,
+    /// Build tag for each entry of `shards`, positionally parallel to it.
+    ///
+    /// A model id is derived from a display name (`slugify_model_name`), so
+    /// every independent GGUF build of one model collapses into one identity —
+    /// three Q4_K_M builds of Qwen2.5-Coder-7B were live on the swarm at once,
+    /// within 800 bytes of each other, sharing not one shard hash. Holder
+    /// records keyed on `ShardId` alone therefore pool nodes holding DIFFERENT
+    /// FILES, and the scheduler routes to either: correctness is safe (every
+    /// shard is hash-verified before load) but the fetch is a guaranteed
+    /// wasted transfer.
+    ///
+    /// This is the sender's own content hash for that shard, truncated by
+    /// `build_tag_from_hash` — see there for why a *per-shard* hash and not
+    /// the manifest hash.
+    ///
+    /// `#[serde(default)]` keeps this compatible with older nodes: their
+    /// announcements arrive with an empty vector, which reads as
+    /// `BUILD_TAG_UNKNOWN` for every shard and is exactly the pre-existing
+    /// behaviour. A length that does not match `shards` is treated the same
+    /// way, wholesale — a positional field that has desynced says nothing
+    /// trustworthy about any position, so guessing per-index is worse than
+    /// admitting ignorance.
+    #[serde(default)]
+    pub shard_builds: Vec<u64>,
+}
+
+/// "I could not say which build this is." Never compare equal to anything,
+/// including itself — an unknown tag must never *exclude* a holder, the same
+/// contract `max_hostable_layers` keeps for unknown capacity.
+pub const BUILD_TAG_UNKNOWN: u64 = 0;
+
+/// The build identity of one shard, as carried on the wire.
+///
+/// **Per-shard content hash, deliberately not the manifest hash.** A manifest
+/// hash is recomputed locally whenever `merge_known_shard_hashes` recovers a
+/// hash the sender did not have, so two nodes holding the SAME build can carry
+/// different manifest hashes depending on what each has learned — which would
+/// make it a source of false mismatches. A shard's content hash is a property
+/// of the bytes and nothing else, so two holders of one build always agree.
+///
+/// The first 8 bytes of BLAKE3 are ample: this separates concurrent builds of
+/// one model, it is not a security boundary (the full hash is still verified
+/// on load), and a collision costs one wasted transfer — exactly what happens
+/// today for every such holder.
+///
+/// An all-zero hash means "not known" in a manifest (`build_shard_infos_from_
+/// layouts` writes zeros for shards its author does not hold), and maps to
+/// `BUILD_TAG_UNKNOWN` here rather than to a real tag of zero.
+pub fn build_tag_from_hash(hash: &[u8; 32]) -> u64 {
+    if hash.iter().all(|b| *b == 0) {
+        return BUILD_TAG_UNKNOWN;
+    }
+    let tag = u64::from_le_bytes([
+        hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+    ]);
+    // Vanishingly unlikely, but a real hash must never render as "unknown".
+    if tag == BUILD_TAG_UNKNOWN {
+        1
+    } else {
+        tag
+    }
+}
+
+/// Do a known-expected and a claimed build tag positively DISAGREE?
+///
+/// Unknown on either side is not a disagreement. This is the single place that
+/// decides, so a caller cannot accidentally read "unknown" as "wrong".
+pub fn build_tags_conflict(expected: u64, claimed: u64) -> bool {
+    expected != BUILD_TAG_UNKNOWN && claimed != BUILD_TAG_UNKNOWN && expected != claimed
 }
 
 /// State of a shard download.
@@ -589,4 +658,77 @@ pub struct PruneEvent {
     pub holder_count_before: usize,
     pub holder_count_after: usize,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[cfg(test)]
+mod build_tag_tests {
+    use super::*;
+    use crate::ids::{ModelId, NodeId, ShardId};
+
+    /// The shape an older node sends: no `shard_builds` key at all.
+    ///
+    /// The protocol rule is that a new field is not done until the pair has
+    /// been run in BOTH directions — the swarm is always mixed-version during
+    /// a rollout, and there is no second chance once an announcement fails to
+    /// decode.
+    #[test]
+    fn an_older_nodes_announcement_still_decodes() {
+        let older = serde_json::json!({
+            "node_id": NodeId([1u8; 32]),
+            "shards": [ShardId { model_id: ModelId("m".into()), index: 0 }],
+            "timestamp": chrono::Utc::now(),
+            "complete_for_models": [],
+        });
+        let decoded: ShardAnnounce =
+            serde_json::from_value(older).expect("an older announcement must still decode");
+        assert!(
+            decoded.shard_builds.is_empty(),
+            "and must read as 'no build stated', which the receiver treats as unknown"
+        );
+    }
+
+    /// The other direction: a NEWER node's announcement reaching an older one.
+    /// `ShardAnnounce` carries no `deny_unknown_fields`, so the extra key is
+    /// ignored — reproduced here against a struct with the pre-change shape,
+    /// because "serde ignores unknown fields" is the kind of assumption that
+    /// is cheap to check and expensive to be wrong about.
+    #[test]
+    fn a_newer_announcement_decodes_on_a_node_that_predates_the_field() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct OldShardAnnounce {
+            node_id: NodeId,
+            shards: Vec<ShardId>,
+            timestamp: chrono::DateTime<chrono::Utc>,
+            #[serde(default)]
+            complete_for_models: Vec<ModelId>,
+        }
+
+        let newer = ShardAnnounce {
+            node_id: NodeId([1u8; 32]),
+            shards: vec![ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            }],
+            timestamp: chrono::Utc::now(),
+            complete_for_models: vec![],
+            shard_builds: vec![build_tag_from_hash(&[7u8; 32])],
+        };
+        let wire = serde_json::to_string(&newer).expect("serialize");
+        let old: OldShardAnnounce =
+            serde_json::from_str(&wire).expect("an older node must not choke on the new field");
+        assert_eq!(old.shards.len(), 1);
+    }
+
+    /// Two builds of one model must be distinguishable, and one build must
+    /// look the same from every holder of it.
+    #[test]
+    fn a_tag_identifies_the_bytes_and_nothing_else() {
+        let a = build_tag_from_hash(&[7u8; 32]);
+        let b = build_tag_from_hash(&[8u8; 32]);
+        assert_ne!(a, b);
+        assert_eq!(a, build_tag_from_hash(&[7u8; 32]));
+        assert_ne!(a, BUILD_TAG_UNKNOWN);
+        assert_eq!(build_tag_from_hash(&[0u8; 32]), BUILD_TAG_UNKNOWN);
+    }
 }

@@ -37,11 +37,12 @@ pub use model::{
     ShardInfo, ShardTensorEntry, VisionConfig,
 };
 pub use network::{
-    AuthenticatedMessage, CancelInference, DownloadState, EphemeralKeyExchange, HfSourceGossip,
-    ModelDemandGossip, NetworkCommand, PoolModelAvailability, PrefixBlockEntry,
-    PrefixCacheAnnounce, PruneEvent, RebalanceEvent, RegionShardSummary, RelayedEnvelope,
-    ResendTokens, ShardAnnounce, ShardDownloadProgress, ShardRequest, ShardResponse, SwarmMessage,
-    WishlistAnnouncement, WishlistAnnouncementEntry,
+    build_tag_from_hash, build_tags_conflict, AuthenticatedMessage, CancelInference, DownloadState,
+    EphemeralKeyExchange, HfSourceGossip, ModelDemandGossip, NetworkCommand, PoolModelAvailability,
+    PrefixBlockEntry, PrefixCacheAnnounce, PruneEvent, RebalanceEvent, RegionShardSummary,
+    RelayedEnvelope, ResendTokens, ShardAnnounce, ShardDownloadProgress, ShardRequest,
+    ShardResponse, SwarmMessage, WishlistAnnouncement, WishlistAnnouncementEntry,
+    BUILD_TAG_UNKNOWN,
 };
 pub use node::{
     features, ContributionLevel, CpuInfo, GpuInfo, LatencyObservation, NodeCapability, NodeStats,
