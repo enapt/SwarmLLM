@@ -2,6 +2,79 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.156-alpha] — 2026-09-05
+
+Ten fixes. Two came from a tester's reports; the other eight were found by
+checking whether those fixes were actually complete — two of them were not.
+
+### Fixed
+
+- **A model that crashes or is closed no longer leaves your node refusing
+  everything.** When the part of SwarmLLM that runs a model stopped for any
+  reason other than SwarmLLM shutting it down itself — it crashed, the operating
+  system killed it to reclaim memory, or you closed it yourself from a system
+  monitor — the node went on reserving all the memory it had been using. Every
+  later request was then refused, quoting memory that was in fact already free,
+  and the only way out was restarting SwarmLLM. Reported after six chat requests
+  in a row were refused over more than a minute with an identical message,
+  immediately after the tester had closed a model to make room.
+  The reservation is shared across every model, so a large model that died was
+  refusing every *other* model too.
+- **Every way a model can stop now gives its memory back.** The fix above
+  covered the three places SwarmLLM notices a model has died before talking to
+  it. There are nine, and the other six are the ones that happen in practice:
+  the connection failing while sending, the connection closing while waiting for
+  a reply, and the model reporting it has run out of graphics memory — which is
+  the case both reports came from. There is now one way for a model to leave the
+  pool, and a build-time check that fails if a tenth appears.
+- **A crashed model no longer leaves the others stuck on the slow path.** A
+  model pushed onto the processor to make room for another runs at roughly a
+  tenth of the speed. When the model holding the graphics card shut down
+  cleanly, the others were allowed back onto the card; when it crashed, they were
+  not, and stayed on the processor indefinitely.
+- **A busy machine now slows a request down instead of killing the model.** The
+  memory a model may use for its conversation cache is decided when it loads,
+  and since v0.3.152 that figure has been re-checked against the graphics card
+  before every decision that takes more of it. There was no equivalent check for
+  machines running on the processor, so the figure stayed as it was for the life
+  of the model — blind to the machine filling up, or to the model itself being
+  handed more layers to run when work elsewhere failed. One node went from
+  holding 12 layers of a 48-layer model to 29, and was killed by the operating
+  system, losing a reply that had been streaming for about ten minutes.
+  If this turns out to be too strict on your machine, `SWARMLLM_KV_RECONCILE=0`
+  restores the previous behaviour without a downgrade.
+- **A machine is no longer made backup for more of a model than it can run.**
+  When part of a request fails, another machine takes it over, chosen in advance.
+  The only question asked was whether it held the right layers, never whether it
+  had the memory to run them — and your own computer is preferred as the backup
+  for *every* part at once. That is how the node above came to be running 29 of
+  48 layers. Where no machine can really take a part over, the logs now say so
+  rather than naming one that cannot.
+- **A slow machine is no longer given up on when nothing can take its place.**
+  Abandoning a machine that has gone quiet is only worth it when there is a
+  backup to move to; without one it turns a slow answer into a failed one. The
+  check asked whether the request had any backup at all, rather than whether the
+  part that machine was working on did.
+- **Giving up on a slow reply now stops the work.** When another machine answers
+  a request, this node waits for the first token — a wait sized to the prompt,
+  reaching ten minutes. Closing your client during it went unnoticed for the
+  whole wait while the other machine generated a reply nobody would read. Remote
+  image encoding had no check at all. Cancelling now also happens before this
+  node asks the other machine to re-send anything.
+- **A long request no longer reports its refunded credits as lost.** Credits set
+  aside for a request are released automatically after ten minutes, and a request
+  spread across several machines can legitimately run longer. When it did, the
+  refund had already happened correctly, and the log then said it had failed and
+  would be retried. It had not, and nothing would.
+
+### Internal
+
+- Four new build-time consistency checks, each verified by reverting the real
+  fix and confirming the check names the real file and line.
+- `docs/FUTURE_WORK.md` records two things deliberately not changed: the
+  anti-swap headroom floor that can never refuse below a quarter of the machine,
+  and memory charges being recorded per model rather than per worker.
+
 ## [0.3.155-alpha] — 2026-09-04
 
 ### Fixed

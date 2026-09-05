@@ -200,10 +200,40 @@ pub(crate) fn device_free_and_total_bytes(device: &candle_core::Device) -> Optio
             .map(|(free, total)| (free as u64, total as u64));
     }
     if matches!(device, candle_core::Device::Cpu) {
+        if !processor_reconciliation_enabled() {
+            return None;
+        }
         return system_free_and_total_bytes();
     }
     let _ = device;
     None
+}
+
+/// `SWARMLLM_KV_RECONCILE=0` → the processor keeps its load-time budget, the
+/// behaviour before gotcha #462. An A/B switch inside ONE binary, the same
+/// discipline as `SWARMLLM_DECODE_ATTN` and `SWARMLLM_KV_TRUNCATE`.
+///
+/// It exists because this is the one change in its release that can refuse work
+/// the node previously completed: a processor node under real memory pressure
+/// now returns a 503 that re-routes, and where no peer holds the model there is
+/// nowhere for it to go. That is the intended trade — the alternative is
+/// swapping, or the OS killing the worker, which is what #462 was reported for
+/// — but it is a trade, and a node that turns out to be on the wrong side of it
+/// should not need a rollback to say so.
+///
+/// The CUDA arm is deliberately NOT switchable: it has been in the field since
+/// v0.3.152 and nothing about it is in question.
+fn processor_reconciliation_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        reconciliation_enabled_for(std::env::var("SWARMLLM_KV_RECONCILE").ok().as_deref())
+    })
+}
+
+/// The switch's reading of the variable, split out because the wrapper above
+/// caches in a `OnceLock` and so cannot be exercised twice in one process.
+fn reconciliation_enabled_for(v: Option<&str>) -> bool {
+    !matches!(v, Some("0") | Some("off"))
 }
 
 /// How long a system-memory reading is reused before it is taken again.
@@ -720,6 +750,17 @@ mod tests {
             admit_prompt(now, 0, cached, per_token, 6000),
             PromptAdmission::EvictBytes(_)
         ));
+    }
+
+    /// The escape hatch for the one change in its release that can refuse work
+    /// the node previously completed. Unset means ON — a switch nobody sets
+    /// must not change behaviour.
+    #[test]
+    fn the_processor_reconciliation_can_be_turned_off_in_the_field() {
+        assert!(reconciliation_enabled_for(None), "unset means on");
+        assert!(reconciliation_enabled_for(Some("1")));
+        assert!(!reconciliation_enabled_for(Some("0")));
+        assert!(!reconciliation_enabled_for(Some("off")));
     }
 
     /// Gotcha #462: the processor had no live reading, so a CPU worker's KV
