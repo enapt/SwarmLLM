@@ -3039,21 +3039,21 @@ impl ModelProcessPool {
     /// The body of [`Self::retire_dead_worker`], with `spawn_lock` already
     /// held. Split out so the background reap can use `try_lock`.
     fn retire_dead_worker_locked(&self, model_id: &ModelId) -> bool {
-        if self
+        let Some((_, handle)) = self
             .workers
             .remove_if(model_id, |_, h| h.dead.load(Ordering::Acquire))
-            .is_none()
-        {
+        else {
             return false;
-        }
-        // The process is gone, so it holds neither device's memory. Releasing
-        // both is what `unload_model` does for the same reason.
-        self.release_vram_charge(model_id);
-        self.release_ram_charge(model_id);
+        };
+        // Was it holding graphics memory? A crash frees the card exactly as a
+        // graceful unload does, so the same follow-up applies — including
+        // lifting the CPU pins its occupancy caused.
+        let freed_gpu_memory = handle.placed_on_cpu_because.is_none();
         tracing::warn!(
             model_id = %model_id,
-            "A model worker exited unexpectedly — its memory budget has been released"
+            "A model worker exited unexpectedly — releasing what it held"
         );
+        self.after_worker_gone(model_id, freed_gpu_memory, "exited unexpectedly");
         true
     }
 
@@ -4859,43 +4859,61 @@ impl ModelProcessPool {
                      a load starting now could still find the device occupied"
                 );
             }
-            self.release_vram_charge(model_id);
-            // The process is gone, so it holds neither device's memory. A CPU
-            // worker never had a VRAM charge and vice versa; releasing both is
-            // correct and keeps the two budgets from drifting on churn.
-            self.release_ram_charge(model_id);
-            tracing::info!(
-                model_id = %model_id,
-                device = if freed_gpu_memory { "gpu" } else { "cpu" },
-                "Model worker stopped and its memory budget released"
-            );
+            self.after_worker_gone(model_id, freed_gpu_memory, "stopped");
+        }
+    }
 
-            // A GPU OOM pins its model to the CPU, and that pin used to last for
-            // the life of the process — a ~10x throughput loss that no API
-            // response mentioned, triggered by nothing more than the daemon's
-            // own background model churn. The pin's reasoning ("the OOM will
-            // repeat verbatim on respawn") only held while VRAM pressure was
-            // static, which it was, because eviction never actually freed
-            // anything. Now that it does, releasing memory is exactly the event
-            // that makes a retry worth it — the same condition
-            // `clear_cpu_pin`'s own documentation names.
-            //
-            // Worst case a pinned model retries the GPU, OOMs again and re-pins,
-            // costing one model load. That is a far better trade than staying on
-            // the CPU for ever.
-            if freed_gpu_memory && !self.cpu_pinned_models.is_empty() {
-                let lifted: Vec<String> = self
-                    .cpu_pinned_models
-                    .iter()
-                    .map(|m| m.key().0.clone())
-                    .collect();
-                self.cpu_pinned_models.clear();
-                tracing::info!(
-                    freed_by = %model_id,
-                    lifted = ?lifted,
-                    "GPU memory freed — clearing CPU pins so these models may use the GPU again"
-                );
-            }
+    /// Everything that follows a worker's process no longer existing, however
+    /// it stopped: release both memory budgets, and — if it was holding
+    /// graphics memory — lift the CPU pins that its occupancy was the reason
+    /// for.
+    ///
+    /// **One place, because the two halves are one event and were implemented
+    /// separately.** `unload_model` did both; `retire_dead_worker` (added the
+    /// same day, for gotcha #461) did only the first, so a GPU worker that
+    /// CRASHED or was OOM-killed freed its card and left every other model
+    /// pinned to the processor — the ~10x throughput loss gotcha #401 exists to
+    /// prevent, reachable by a route that fix never covered. A crash frees the
+    /// card exactly as a graceful unload does; the pin's own clearing condition
+    /// ("GPU memory freed") does not care which happened.
+    fn after_worker_gone(&self, model_id: &ModelId, freed_gpu_memory: bool, how: &str) {
+        self.release_vram_charge(model_id);
+        // The process is gone, so it holds neither device's memory. A CPU
+        // worker never had a VRAM charge and vice versa; releasing both is
+        // correct and keeps the two budgets from drifting on churn.
+        self.release_ram_charge(model_id);
+        tracing::info!(
+            model_id = %model_id,
+            device = if freed_gpu_memory { "gpu" } else { "cpu" },
+            how,
+            "Model worker stopped and its memory budget released"
+        );
+
+        // A GPU OOM pins its model to the CPU, and that pin used to last for
+        // the life of the process — a ~10x throughput loss that no API
+        // response mentioned, triggered by nothing more than the daemon's
+        // own background model churn. The pin's reasoning ("the OOM will
+        // repeat verbatim on respawn") only held while VRAM pressure was
+        // static, which it was, because eviction never actually freed
+        // anything. Now that it does, releasing memory is exactly the event
+        // that makes a retry worth it — the same condition
+        // `clear_cpu_pin`'s own documentation names.
+        //
+        // Worst case a pinned model retries the GPU, OOMs again and re-pins,
+        // costing one model load. That is a far better trade than staying on
+        // the CPU for ever.
+        if freed_gpu_memory && !self.cpu_pinned_models.is_empty() {
+            let lifted: Vec<String> = self
+                .cpu_pinned_models
+                .iter()
+                .map(|m| m.key().0.clone())
+                .collect();
+            self.cpu_pinned_models.clear();
+            tracing::info!(
+                freed_by = %model_id,
+                lifted = ?lifted,
+                "GPU memory freed — clearing CPU pins so these models may use the GPU again"
+            );
         }
     }
 
@@ -5291,6 +5309,14 @@ mod tests {
     /// retirement path can be exercised without spawning a subprocess.
     /// `child: None` — `Drop` skips the kill and marks `exited` directly.
     async fn fake_worker_handle(dead_now: bool) -> Arc<WorkerHandle> {
+        fake_worker_handle_on(dead_now, Some(CpuReason::Configured)).await
+    }
+
+    /// `placed_on_cpu_because: None` means the worker was holding the card.
+    async fn fake_worker_handle_on(
+        dead_now: bool,
+        placed_on_cpu_because: Option<CpuReason>,
+    ) -> Arc<WorkerHandle> {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
         let name = format!(
             "/tmp/swarmllm-retire-test-{}.sock",
@@ -5330,7 +5356,7 @@ mod tests {
             reader_handle,
             spawned_at: std::time::Instant::now(),
             last_used: AtomicU64::new(0),
-            placed_on_cpu_because: Some(CpuReason::Configured),
+            placed_on_cpu_because,
             charged_against_ram: true,
             gpu_estimate_mb: 0,
             gpu_layers_on_card: None,
@@ -5388,6 +5414,52 @@ mod tests {
     /// asks for THAT model again. A node whose big model died and is then
     /// asked for a different one would otherwise keep the corpse's charge for
     /// ever — and it is the other model that gets refused.
+    /// A worker that CRASHED frees the card exactly as a graceful unload does,
+    /// so the CPU pins its occupancy caused must lift either way.
+    ///
+    /// `unload_model` had always done this; `retire_dead_worker` — added hours
+    /// earlier the same day for gotcha #461 — released the memory and stopped
+    /// there, so a GPU worker killed by the OS left every other model on the
+    /// processor at ~10x the cost, which is the loss gotcha #401 exists to
+    /// prevent. One invariant, two paths, and the new path had half of it.
+    #[tokio::test]
+    async fn a_crashed_gpu_worker_lets_pinned_models_try_the_card_again() {
+        let p = test_pool();
+        let pinned = ModelId("was-pushed-to-the-cpu".into());
+        p.cpu_pinned_models.insert(pinned.clone());
+
+        let on_card = ModelId("held-the-card".into());
+        p.workers
+            .insert(on_card.clone(), fake_worker_handle_on(true, None).await);
+        assert!(p.retire_dead_worker(&on_card).await);
+
+        assert!(
+            p.cpu_pinned_models.is_empty(),
+            "the card is free again, so the pin its occupancy caused must lift"
+        );
+    }
+
+    /// The control: a PROCESSOR worker dying frees no graphics memory, so it
+    /// must not lift anything. Without this the test above would pass on code
+    /// that cleared pins unconditionally, which would send a model back to a
+    /// card that is still full.
+    #[tokio::test]
+    async fn a_crashed_cpu_worker_lifts_no_pins() {
+        let p = test_pool();
+        let pinned = ModelId("still-pushed-to-the-cpu".into());
+        p.cpu_pinned_models.insert(pinned.clone());
+
+        let on_cpu = ModelId("was-on-the-cpu".into());
+        p.workers
+            .insert(on_cpu.clone(), fake_worker_handle(true).await);
+        assert!(p.retire_dead_worker(&on_cpu).await);
+
+        assert!(
+            p.cpu_pinned_models.contains(&pinned),
+            "no graphics memory was freed, so nothing may be sent back to the card"
+        );
+    }
+
     #[tokio::test]
     async fn the_reap_frees_a_dead_worker_nobody_asks_about_again() {
         let p = test_pool();

@@ -1190,6 +1190,22 @@ silently break at the wire if duplicated:
   different places must be told which place each one is in — and a component
   that does not own a resource must not be able to reclaim it.
 
+  **`after_worker_gone` is everything that follows a worker's process no longer
+  existing**, however it stopped: release BOTH budgets, and — if it held
+  graphics memory — lift the CPU pins its occupancy caused. `unload_model` and
+  `retire_dead_worker` both end in it.
+  **Why it is one function.** The two halves are one event and were written
+  separately: `unload_model` had done both since gotcha #401,
+  `retire_dead_worker` was added for #461 and did only the release. So a GPU
+  worker that CRASHED or was OOM-killed — the exact case #461 was written for —
+  freed the card and left every other model pinned to the processor at ~10x the
+  cost, indefinitely (gotcha #466). The pin's clearing condition is "GPU memory
+  freed"; it does not care how the process ended.
+  **After adding a second path to an existing invariant, read what the old path
+  does AFTER the part you copied.** Knowing the "one invariant, N paths" rule
+  did not prevent this; applying it deliberately, as a checklist over the new
+  path's siblings, is what caught it within hours.
+
   **A worker that DIED gives its budget back too** (2026-09-04, gotcha #461).
   `ModelProcessPool::retire_dead_worker` is the single answer to "this worker's
   process is gone": under `spawn_lock`, `remove_if(dead)` then
