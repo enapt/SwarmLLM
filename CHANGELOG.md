@@ -2,6 +2,62 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.157-alpha] — 2026-09-05
+
+Thirteen changes. Three came from testers' reports in a single day; the rest
+were found by reading the live node's own log and by checking the dashboard in
+a browser.
+
+### Fixed
+
+- **Comparing models no longer throws away an answer your machine had
+  finished.** The Compare screen gave up on each request after 45 seconds. On a
+  machine without a graphics card — which this software is meant to support —
+  a mid-size model routinely takes longer, so it reported a timeout for models
+  that were working correctly, and discarded replies that had already been
+  produced. Pending results now show how long they have been waiting, so a slow
+  machine reads as busy rather than frozen.
+- **A long prompt is no longer sent to a machine that is slow at reading it.**
+  The choice of which machine to hand a whole model to compared how fast each
+  one writes words. Reading the prompt is a different kind of work, and on a
+  long prompt it is nearly all of the wait — so the comparison was made on the
+  wrong thing. One reporter saw a machine that looked fastest on paper take five
+  to six minutes before the first word came back, twice.
+- **Downloads are no longer sent to a machine holding a different build of the
+  same model.** Independently produced copies of one model share a name, so
+  requests could go to a machine whose file simply is not the one being asked
+  for. The whole download came back before the check could reject it. This also
+  closes a subtler problem: a reply split across machines could be produced half
+  from one build and half from another, which nothing would have reported.
+- **A model that crashes no longer takes its replacement's memory with it**, and
+  **a machine no longer loads a model twice** when its share of the work is
+  described differently than before — on one reported machine that took a minute
+  and left it swapping.
+- **A second large request is now weighed against memory the first was already
+  promised.** Both could previously be accepted against the same free space.
+- **A healthy machine no longer reports a fault for parts of a model it was
+  never meant to have.** Downloading only the parts you serve is the point, so
+  asking for the rest is ordinary, not an error.
+
+### Added
+
+- **Your contribution is now shown in plain language** — roughly how many words
+  you have produced for other people, over how many minutes, and how fast that
+  is — with the technical figures kept underneath. Someone had to ask us for
+  that number because it was not on their screen and could not be worked out
+  from what was. Note this counter starts from zero on this release; earlier
+  work was never recorded in these terms.
+- **Your node now tells you what keeping your prompt private is costing.** On a
+  long prompt it can be most of the wait. Nothing acts on this automatically:
+  dropping the guarantee when it gets slow would mean a machine could obtain
+  your prompt in the clear simply by being slow.
+
+### Changed
+
+- The dashboard's performance table and its coloured labels asked for styling
+  that was never written, so the table rendered with no spacing and the colours
+  never appeared at all. Both now display as intended.
+
 ## [0.3.156-alpha] — 2026-09-05
 
 Ten fixes. Two came from a tester's reports; the other eight were found by
