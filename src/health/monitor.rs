@@ -306,6 +306,19 @@ impl HealthMonitor {
                     }
                     // Decay trust scores toward default (0.5) on each health ping cycle
                     self.shared_state.credits.trust_manager.decay_all(&self.shared_state.peer_registry);
+                    // A worker that exited any way other than a graceful unload
+                    // leaves its memory charge behind, and that charge is a
+                    // single shared budget — so a dead 14B keeps refusing every
+                    // OTHER model too. The request-path check only fires when
+                    // that same model is asked for again; this catches the rest.
+                    let reaped = self.shared_state.model_process_pool.reap_dead_workers().await;
+                    if reaped > 0 {
+                        tracing::info!(
+                            target: "swarmllm::health::monitor",
+                            reaped,
+                            "Released the memory budget of workers that had exited"
+                        );
+                    }
                     // Clean up stale AllReduce/RingChunk entries (receiver dropped/timed out)
                     self.shared_state.allreduce_registry.cleanup_stale();
                     self.shared_state.ring_chunk_registry.cleanup_stale();

@@ -2851,6 +2851,32 @@ impl ModelProcessPool {
     /// Refusing is a `ServiceUnavailable`, i.e. a 503 the coordinator fails
     /// over from — the same answer the worker's own KV guard gives, and the
     /// right one: this node cannot take that range, another might.
+    ///
+    /// **What this charge does NOT bound**, and what does. One request may pile
+    /// several segments onto one worker: a node is its own preferred standby
+    /// (`find_standbys` sorts it first), so each remote segment that fails over
+    /// lands here again. Reported from a 16 GB processor-only Mac mini on
+    /// v0.3.155: a 5-segment plan gave the local node 12 of a 48-layer 14B,
+    /// two remote segments then failed over to it in turn, it was charged +9
+    /// and +8 layers, and at 29 of 48 the worker process died — losing a
+    /// request that had already streamed 238 tokens over ~10 minutes.
+    ///
+    /// Neither top-up was wrongly admitted. The running total IS tracked —
+    /// `add_reserved` accumulates and `budget.allows` weighs
+    /// `committed + estimate` against the cap — and on a 16 GB machine the cap
+    /// (13107 MB) was never reached. What ran out was the machine, not the
+    /// budget, because the budget's other term is a LOAD-TIME prediction: the
+    /// worker is granted "whatever of the RAM budget nothing else has claimed"
+    /// as room for its KV cache to grow into (`record_cpu_kv_budget`), and
+    /// nothing revisited that grant as the same worker took on 17 more layers
+    /// of weights.
+    ///
+    /// So the bound lives with the worker, not here:
+    /// `SplitModel::kv_budget_now` reconciles the grant against free system
+    /// memory at every decision that takes memory, exactly as the graphics
+    /// side has done since gotcha #440. A count cap would have been the wrong
+    /// bound anyway — the number of segments one worker may hold is not the
+    /// quantity that runs out.
     async fn charge_additional_segment(
         &self,
         model_id: &ModelId,
@@ -2882,9 +2908,15 @@ impl ModelProcessPool {
         };
         if !admitted {
             return Err(SwarmError::ServiceUnavailable(format!(
-                "{} layers {}..{} of {} need about {} MB more than this node has left — \
-                 another holder will have to take that part",
-                layers, segment.0, segment.1, model_id.0, delta_mb
+                "{} layers {}..{} of {} need about {} MB more than this node has left \
+                 (its worker is already holding {} MB) — another holder will have to \
+                 take that part",
+                layers,
+                segment.0,
+                segment.1,
+                model_id.0,
+                delta_mb,
+                self.ram_reserved_mb.get(model_id).map(|v| *v).unwrap_or(0),
             )));
         }
         self.record_charged_segment(model_id, segment);
@@ -2971,6 +3003,75 @@ impl ModelProcessPool {
         };
         // The fixed terms are paid once, whatever the segment's length.
         layers_that_fit(free_mb, fixed_mb, per_layer_mb)
+    }
+
+    /// Retire a worker whose process is gone, releasing the memory it no
+    /// longer holds. Returns whether this call was the one that retired it.
+    ///
+    /// **The single answer to "this worker died".** Every site that discovers
+    /// `dead == true` goes through it, and so does the periodic reap below —
+    /// so a worker that nobody asks about again is still cleaned up.
+    ///
+    /// What it replaced: three call sites did `workers.remove(&model_id)` and
+    /// nothing else, and only the graceful `unload_model` released the charge.
+    /// So a worker that exited any other way — an internal crash, an OS
+    /// OOM-kill, or a user closing the process in a system monitor to free
+    /// memory — left its whole reservation charged for the daemon's lifetime.
+    /// The charge is summed across every model by `ram_committed_mb` /
+    /// `vram_committed_mb`, so the phantom blocked not just that model but
+    /// every later load on the node, quoting memory that was in fact free.
+    /// Reported from a 16 GB Mac mini: 6 consecutive requests refused with a
+    /// byte-for-byte identical "11487 MB is already in use" over a minute,
+    /// right after the tester had killed the worker to free RAM. Only a daemon
+    /// restart cleared it.
+    ///
+    /// Two things a change here must keep. It takes `spawn_lock`, because a
+    /// spawn charges and inserts under that lock and releasing between the two
+    /// would free the NEW worker's charge. And it removes CONDITIONALLY
+    /// (`remove_if` on `dead`), so a live worker that replaced this one in the
+    /// map is never retired by a late caller holding the corpse — releasing is
+    /// reached only when the remove actually happened.
+    async fn retire_dead_worker(&self, model_id: &ModelId) -> bool {
+        let _guard = self.spawn_lock.lock().await;
+        if self
+            .workers
+            .remove_if(model_id, |_, h| h.dead.load(Ordering::Acquire))
+            .is_none()
+        {
+            return false;
+        }
+        // The process is gone, so it holds neither device's memory. Releasing
+        // both is what `unload_model` does for the same reason.
+        self.release_vram_charge(model_id);
+        self.release_ram_charge(model_id);
+        tracing::warn!(
+            model_id = %model_id,
+            "A model worker exited unexpectedly — its memory budget has been released"
+        );
+        true
+    }
+
+    /// Retire every worker whose process has exited. Wired to the health tick.
+    ///
+    /// The call-site path above only fires when someone asks for that same
+    /// model again. A node whose 14B worker died and is then asked for a
+    /// different model would otherwise keep the dead one's reservation for
+    /// ever — the charge is a single shared budget, so it refuses the OTHER
+    /// model. Returns how many were retired.
+    pub async fn reap_dead_workers(&self) -> usize {
+        let dead: Vec<ModelId> = self
+            .workers
+            .iter()
+            .filter(|e| e.value().dead.load(Ordering::Acquire))
+            .map(|e| e.key().clone())
+            .collect();
+        let mut n = 0;
+        for model_id in dead {
+            if self.retire_dead_worker(&model_id).await {
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Release a worker's RAM charge. Must pair with every `admit_to_cpu`.
@@ -3993,7 +4094,7 @@ impl ModelProcessPool {
         };
 
         if handle.dead.load(Ordering::Acquire) {
-            self.workers.remove(&model_id);
+            self.retire_dead_worker(&model_id).await;
             return Err(SwarmError::ServiceUnavailable("worker is dead".into()));
         }
 
@@ -4111,7 +4212,7 @@ impl ModelProcessPool {
             .get_or_spawn(&model_id, forwards[0].layer_range)
             .await?;
         if handle.dead.load(Ordering::Acquire) {
-            self.workers.remove(&model_id);
+            self.retire_dead_worker(&model_id).await;
             return Err(SwarmError::ServiceUnavailable("worker is dead".into()));
         }
 
@@ -4357,7 +4458,7 @@ impl ModelProcessPool {
         };
 
         if handle.dead.load(Ordering::Acquire) {
-            self.workers.remove(model_id);
+            self.retire_dead_worker(model_id).await;
             return Err(SwarmError::ServiceUnavailable("worker is dead".into()));
         }
 
@@ -5166,6 +5267,127 @@ mod tests {
 
     fn test_pool() -> ModelProcessPool {
         ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-test-pool"))
+    }
+
+    /// Build a real `WorkerHandle` over a loopback socket pair, so the
+    /// retirement path can be exercised without spawning a subprocess.
+    /// `child: None` — `Drop` skips the kill and marks `exited` directly.
+    async fn fake_worker_handle(dead_now: bool) -> Arc<WorkerHandle> {
+        use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
+        let name = format!(
+            "/tmp/swarmllm-retire-test-{}.sock",
+            uuid::Uuid::new_v4().simple()
+        );
+        let _ = std::fs::remove_file(&name);
+        let sockname = name
+            .clone()
+            .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+            .expect("fs name");
+        let listener = ListenerOptions::new()
+            .name(sockname.clone())
+            .create_tokio()
+            .expect("listen");
+        let connect = tokio::spawn(async move {
+            interprocess::local_socket::tokio::Stream::connect(sockname).await
+        });
+        let server = listener.accept().await.expect("accept");
+        let client = connect.await.expect("join").expect("connect");
+        // Keep the client end alive for the handle's lifetime.
+        std::mem::forget(client);
+        let (read_half, write_half) = server.split();
+        let responses: ResponseMap = Arc::new(DashMap::new());
+        let dead = Arc::new(AtomicBool::new(dead_now));
+        let reader_handle = tokio::spawn(async move {
+            let _ = read_half;
+            std::future::pending::<()>().await;
+        });
+        Arc::new(WorkerHandle {
+            child: None,
+            exited: Arc::new(AtomicBool::new(true)),
+            writer: Mutex::new(write_half),
+            responses,
+            dead,
+            #[cfg(unix)]
+            socket_name: name,
+            reader_handle,
+            spawned_at: std::time::Instant::now(),
+            last_used: AtomicU64::new(0),
+            placed_on_cpu_because: Some(CpuReason::Configured),
+            charged_against_ram: true,
+            gpu_estimate_mb: 0,
+            gpu_layers_on_card: None,
+        })
+    }
+
+    /// Report #008: a worker that exits any way other than a graceful unload
+    /// used to keep its whole reservation charged for the daemon's lifetime.
+    /// The charge is one shared budget, so the phantom refused every later
+    /// load on the node — quoting memory that was in fact free.
+    #[tokio::test]
+    async fn a_worker_that_died_gives_its_memory_budget_back() {
+        let p = test_pool();
+        p.set_ram_budget_mb(8000);
+        let m = ModelId("dead-one".into());
+        assert!(p.admit_to_cpu(&m, 5000), "the model is admitted");
+        assert_eq!(p.ram_committed_mb(), 5000);
+
+        p.workers.insert(m.clone(), fake_worker_handle(true).await);
+        assert!(p.retire_dead_worker(&m).await, "a dead worker is retired");
+
+        assert_eq!(
+            p.ram_committed_mb(),
+            0,
+            "the dead worker's charge must be released — before this fix the \
+             three `dead` call sites removed the map entry and nothing else, \
+             so the budget stayed spent until the daemon restarted"
+        );
+        assert!(p.workers.get(&m).is_none());
+        // And the budget is genuinely usable again.
+        assert!(p.admit_to_cpu(&ModelId("next".into()), 5000));
+    }
+
+    /// The control: a LIVE worker is never retired, and its charge stands.
+    /// Without it the test above would pass on code that released
+    /// unconditionally, which would free memory a running worker still holds.
+    #[tokio::test]
+    async fn a_live_worker_keeps_its_memory_budget() {
+        let p = test_pool();
+        p.set_ram_budget_mb(8000);
+        let m = ModelId("live-one".into());
+        assert!(p.admit_to_cpu(&m, 5000));
+        p.workers.insert(m.clone(), fake_worker_handle(false).await);
+
+        assert!(
+            !p.retire_dead_worker(&m).await,
+            "a live worker is not retired"
+        );
+        assert_eq!(p.ram_committed_mb(), 5000);
+        assert!(p.workers.get(&m).is_some());
+        assert_eq!(p.reap_dead_workers().await, 0);
+    }
+
+    /// The reap exists because the call-site check only fires when someone
+    /// asks for THAT model again. A node whose big model died and is then
+    /// asked for a different one would otherwise keep the corpse's charge for
+    /// ever — and it is the other model that gets refused.
+    #[tokio::test]
+    async fn the_reap_frees_a_dead_worker_nobody_asks_about_again() {
+        let p = test_pool();
+        p.set_ram_budget_mb(8000);
+        let big = ModelId("big-and-dead".into());
+        assert!(p.admit_to_cpu(&big, 7000));
+        p.workers
+            .insert(big.clone(), fake_worker_handle(true).await);
+
+        // A DIFFERENT model is refused while the corpse holds the budget.
+        assert!(
+            !p.admit_to_cpu(&ModelId("small".into()), 2000),
+            "the dead worker's charge blocks an unrelated model"
+        );
+
+        assert_eq!(p.reap_dead_workers().await, 1);
+        assert_eq!(p.ram_committed_mb(), 0);
+        assert!(p.admit_to_cpu(&ModelId("small".into()), 2000));
     }
 
     #[test]

@@ -1118,6 +1118,30 @@ silently break at the wire if duplicated:
   different places must be told which place each one is in — and a component
   that does not own a resource must not be able to reclaim it.
 
+  **A worker that DIED gives its budget back too** (2026-09-04, gotcha #461).
+  `ModelProcessPool::retire_dead_worker` is the single answer to "this worker's
+  process is gone": under `spawn_lock`, `remove_if(dead)` then
+  `release_vram_charge` + `release_ram_charge`. Every site that discovers
+  `handle.dead` goes through it, and so does `reap_dead_workers` on the health
+  tick.
+  **Why both.** Only the graceful `unload_model` released the charge; the three
+  `dead` fast-fail sites did `workers.remove(&model_id)` and nothing else. So a
+  worker that exited any other way — an internal crash, an OS OOM-kill, or a
+  user closing the process in a system monitor to free memory — left its whole
+  reservation charged until the daemon restarted. Measured on a 16 GB Mac mini:
+  six consecutive requests refused with a byte-for-byte identical "11487 MB is
+  already in use", over a minute, immediately after real free memory had gone
+  UP.
+  And the call-site half alone is not enough: the charge is ONE shared budget
+  (`ram_committed_mb` sums every model), so a dead 14B refuses every OTHER
+  model, while the call-site check only fires if someone asks for *that* model
+  again — which nobody need ever do. `spawn_lock` is required because a spawn
+  charges and inserts under it, and releasing between the two would free the
+  NEW worker's charge; `remove_if` is required so a late caller holding the
+  corpse cannot retire the live worker that replaced it.
+  **Ask of any "clean up on next use" fix: what if there is no next use, and
+  who else is paying meanwhile?**
+
   **Retirement DRAINS, it does not kill** (2026-08-29).
   `unload_model` waits for the worker's `responses` map to empty
   (`await_responses_drained`, bounded by `WORKER_DRAIN_WAIT`) before sending
