@@ -3236,6 +3236,9 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .mb-0 { margin-bottom: 4px; }
 .mb-1 { margin-bottom: 8px; }
 .mb-2 { margin-bottom: 14px; }
+/* `.mb-3` was used by the performance panel and never existed, so every
+   "space below this block" it asked for did nothing. */
+.mb-3 { margin-bottom: 20px; }
 .ml-1 { margin-left: 8px; }
 .mx-auto { margin-left: auto; margin-right: auto; }
 
@@ -3297,6 +3300,50 @@ textarea:focus:not(:focus-visible) {
 .badge-red { background: var(--red-dim); color: var(--red-text); border: 1px solid rgba(239, 68, 68, 0.3); }
 .badge-purple { background: var(--purple-dim); color: var(--purple-text); border: 1px solid rgba(167, 139, 250, 0.3); }
 .badge-muted { background: var(--bg-tertiary); color: var(--text-secondary); border: 1px solid var(--border); }
+/* Semantic aliases. These names were already in use — `_routeBadge` builds
+   `badge-ok` / `badge-info` / `badge-warning` from its route map, and two
+   components write `badge-warning` and `badge-amber` directly — but none of
+   them existed, so every badge that asked for a colour rendered with none and
+   the route colour-coding did nothing at all. Aliased onto the palette that is
+   already there rather than inventing new colours. */
+.badge-ok { background: var(--green-dim); color: var(--green-text); border: 1px solid rgba(34, 197, 94, 0.3); }
+.badge-info { background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(59, 130, 246, 0.3); }
+.badge-warning,
+.badge-amber { background: var(--orange-dim); color: var(--orange-text); border: 1px solid rgba(245, 158, 11, 0.3); }
+
+/* Tables.
+   `.table` / `.table-sm` were used by the performance panel and defined
+   nowhere, so its peer table rendered as raw browser default: no cell
+   padding, headers and values running into each other, and a layout that
+   read as broken rather than dense. */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.table th,
+.table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.table th {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.table tbody tr:last-child td { border-bottom: none; }
+.table tbody tr:hover td { background: var(--bg-tertiary); }
+/* Numbers line up with each other, not with the prose beside them. */
+.table td:not(:first-child) { font-variant-numeric: tabular-nums; }
+.table-sm th,
+.table-sm td { padding: 5px 10px; }
+/* A wide table must scroll inside its own box rather than the page. */
+.table-wrap { overflow-x: auto; }
 
 /* Card utilities */
 .card { background: var(--bg-tertiary); border-radius: var(--radius); padding: 10px 12px; border: 1px solid var(--border); }

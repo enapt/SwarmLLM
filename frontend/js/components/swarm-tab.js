@@ -877,7 +877,7 @@
     if (!peers.length) {
       html += '<div class="text-muted text-sm mb-3">' + I18n.t('perf.peers_none') + '</div>';
     } else {
-      html += '<table class="table table-sm mb-3"><thead><tr>'
+      html += '<div class="table-wrap mb-3"><table class="table table-sm"><thead><tr>'
         + '<th>' + I18n.t('perf.th_peer') + '</th>'
         + '<th>' + I18n.t('perf.th_rtt') + '</th>'
         + '<th>' + I18n.t('perf.th_per_layer') + '</th>'
@@ -886,14 +886,16 @@
         + '<th>' + I18n.t('perf.th_region') + '</th>'
         + '</tr></thead><tbody>';
       peers.forEach(function (p) {
-        html += '<tr><td><code>' + U.escapeHtml((p.node_id || '').slice(0, 16)) + '</code></td>'
+        // 8 characters, as the activity feed and peer list already show. This
+        // table was the only surface printing 16 and it read as a machine dump.
+        html += '<tr><td><code>' + U.escapeHtml((p.node_id || '').slice(0, 8)) + '</code></td>'
           + '<td>' + (p.rtt_ms != null ? _fmtMs(p.rtt_ms) : '—') + '</td>'
           + '<td>' + (p.ms_per_layer != null ? p.ms_per_layer.toFixed(1) : '—') + '</td>'
           + '<td>' + (p.ewma_ms != null ? _fmtMs(p.ewma_ms) : '—') + '</td>'
           + '<td>' + (p.samples || 0) + '</td>'
           + '<td>' + U.escapeHtml(p.region || '—') + '</td></tr>';
       });
-      html += '</tbody></table>';
+      html += '</tbody></table></div>';
     }
 
     // Recent requests, newest first.
