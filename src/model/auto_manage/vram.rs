@@ -473,6 +473,24 @@ impl RamBudget {
             && estimate_mb <= self.live_headroom_mb
     }
 
+    /// Is the `total/4` floor the reason `live_headroom_mb` is what it is?
+    ///
+    /// The live term is `max(70% of available, total/4)`, so whenever the floor
+    /// wins, the headroom test is answering a question about the machine's SIZE
+    /// rather than about how much memory is free — it cannot refuse anything
+    /// smaller than a quarter of the machine however loaded that machine is.
+    ///
+    /// Reported so the question can be settled with data from a node that
+    /// actually fills up: if `70% of available` never falls below `total/4`
+    /// while the machine is healthy, the floor is dead weight; if it does, the
+    /// floor is load-bearing and the live term needs a platform-aware source.
+    /// See `docs/FUTURE_WORK.md` § "The RAM headroom clamp has a floor that can
+    /// never refuse". Meaningless when memory is unreadable, hence the
+    /// `available_mb == 0` arm.
+    pub fn floor_is_binding(&self) -> bool {
+        self.available_mb > 0 && self.total_mb / 4 > self.available_mb / 100 * FREE_RAM_HEADROOM_PCT
+    }
+
     /// What is left for the admitted model's KV cache to grow into: the
     /// smaller of the uncommitted cap and the live headroom beyond the model's
     /// own charge.
@@ -1871,5 +1889,53 @@ mod footprint_tests {
         assert_eq!(quiet.headroom_after(13149, 13149), 18000 - 13149);
         // …and the live term when THAT is tighter.
         assert_eq!(busy.headroom_after(5000, 5000), 10500 - 5000);
+    }
+}
+
+#[cfg(test)]
+mod floor_tests {
+    use super::*;
+
+    /// The floor wins exactly when the machine is loaded enough that 70% of
+    /// what is free falls under a quarter of what it has — the condition an
+    /// open item needs measured on a real node.
+    #[test]
+    fn the_floor_is_reported_when_it_is_the_binding_term() {
+        // 16 GB machine with 2 GB free: 70% of 2048 = 1433, floor = 4096.
+        let loaded = RamBudget::from_machine(13107, 0, 16384, 2048);
+        assert_eq!(loaded.live_headroom_mb, 4096);
+        assert!(
+            loaded.floor_is_binding(),
+            "a nearly-full machine is exactly where the floor takes over"
+        );
+
+        // Same machine idle: 70% of 14336 = 10010, well over the floor.
+        let idle = RamBudget::from_machine(13107, 0, 16384, 14336);
+        assert_eq!(idle.live_headroom_mb, 10010); // 14336/100*70 — the divide truncates first
+        assert!(
+            !idle.floor_is_binding(),
+            "with memory free the live term decides, as intended"
+        );
+    }
+
+    /// Unreadable memory is not judged at all, so the floor cannot be "binding"
+    /// there — reporting true would put noise into the very measurement this
+    /// exists to support.
+    #[test]
+    fn unreadable_memory_reports_no_binding_floor() {
+        let unknown = RamBudget::from_machine(13107, 0, 16384, 0);
+        assert_eq!(unknown.live_headroom_mb, u64::MAX);
+        assert!(!unknown.floor_is_binding());
+    }
+
+    /// The floor being binding is what makes the guard inert: it admits a model
+    /// far larger than the free memory would allow.
+    #[test]
+    fn a_binding_floor_admits_more_than_is_actually_free() {
+        let loaded = RamBudget::from_machine(13107, 0, 16384, 2048);
+        assert!(
+            loaded.allows(0, 4000),
+            "4000 MB is admitted against 2048 MB free — the looseness being measured"
+        );
     }
 }

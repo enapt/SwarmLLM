@@ -2843,6 +2843,29 @@ impl ModelProcessPool {
         }
         let committed = self.ram_committed_mb();
         if budget.allows(committed, estimated_mb) {
+            // Record what the gate believed BEFORE the worker allocates
+            // anything — the same reason `admit_to_gpu` logs its admissions,
+            // and the CPU side never learned it. A model that was admitted and
+            // then died because the machine filled up left no trace of what
+            // this gate had expected, which is exactly the case that needs
+            // explaining.
+            //
+            // `floor_is_binding` is the specific question an open item turns
+            // on: the live headroom term cannot refuse anything smaller than a
+            // quarter of the machine, so whenever the floor wins, the anti-swap
+            // guard is inert. Whether that ever happens on a machine that is
+            // still healthy can only be answered from a node that fills up.
+            tracing::debug!(
+                model = %model_id,
+                estimated_mb,
+                committed_mb = committed,
+                cap_mb = budget.cap_mb,
+                total_mb = budget.total_mb,
+                available_mb = budget.available_mb,
+                live_headroom_mb = budget.live_headroom_mb,
+                floor_is_binding = budget.floor_is_binding(),
+                "DIAG: admitting model to system RAM"
+            );
             add_reserved(&self.ram_reserved_mb, model_id, estimated_mb);
             return true;
         }

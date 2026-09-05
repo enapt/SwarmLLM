@@ -250,6 +250,21 @@ that fills memory, and check whether `0.7 × available` ever drops below
 dead weight and can go; if it does, the floor is load-bearing on macOS and the
 live term needs a platform-aware source instead.
 
+**The instrumentation for that landed 2026-09-05** (behaviour unchanged).
+`admit_to_cpu` now emits `DIAG: admitting model to system RAM` with all four
+figures plus `floor_is_binding` — `RamBudget::floor_is_binding()`, true exactly
+when `total/4` beat `70% of available` and so decided the headroom test. Run
+the node at `-v` and grep that line: **`floor_is_binding=true` on a machine
+that is still healthy is the evidence that the floor is load-bearing; only
+`false` throughout says it is dead weight.**
+
+Why it had to be on the ADMIT path: the refusal already logged every figure,
+and refusal is precisely what never happens — that is the entry. This is the
+same lesson `admit_to_gpu` was taught on 2026-08-25 ("Admission only ever
+logged when it refused, so a model that was admitted and then died left no
+trace of what this gate had expected it to cost"), which the CPU sibling never
+received. One invariant, two paths, fixed on one of them.
+
 Related: gotcha #462 fixed the binding half of report #007 — the worker's own
 KV ceiling is now reconciled with free system memory at every decision, so a
 filling machine produces a 503 that re-routes rather than an OOM-killed
