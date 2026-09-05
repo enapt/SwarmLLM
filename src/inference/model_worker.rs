@@ -582,6 +582,29 @@ pub async fn run_worker(
 
 /// Send a `WorkerMsg::Error` back to the daemon. Used by the `run_worker`
 /// dispatch loop to report handler failures without crashing the subprocess.
+/// Loaded ranges that `incoming` entirely covers, and which are therefore
+/// about to be redundant.
+///
+/// Strict subsumption only, and within the same tensor-parallel shape: a range
+/// equal to `incoming` is the caller's own cache hit, and a partial overlap
+/// describes layers each range still needs on its own.
+fn subsumed_segment_keys<'a>(
+    loaded: impl Iterator<Item = &'a (usize, usize, usize, usize)>,
+    incoming: (usize, usize, usize, usize),
+) -> Vec<(usize, usize, usize, usize)> {
+    let (start, end, tp_rank, tp_size) = incoming;
+    loaded
+        .filter(|(ls, le, tr, ts)| {
+            *tr == tp_rank
+                && *ts == tp_size
+                && *ls >= start
+                && *le <= end
+                && (*ls, *le) != (start, end)
+        })
+        .copied()
+        .collect()
+}
+
 async fn send_worker_error(writer: &mut IpcWriter, request_id: uuid::Uuid, err: SwarmError) {
     let message = err.to_string();
     let fatal = crate::inference::worker_ipc::worker_error_is_fatal(&message);
@@ -749,6 +772,31 @@ fn ensure_model_loaded(
     let key = (layer_start, layer_end, tp_rank, tp_size);
     if models.contains_key(&key) {
         return Ok(());
+    }
+
+    // A range that SUBSUMES ranges we already hold makes them redundant, and
+    // holding both means holding those layers' weights twice.
+    //
+    // The map is keyed by the exact `(start, end, tp_rank, tp_size)`, so a plan
+    // restating coverage this worker already has — [16..48) plus [0..16)
+    // becoming [0..48) — is a miss, and the whole model is read from disk again
+    // beside the copy already resident. Reported on a 16 GB processor-only node
+    // (#010): one worker, never restarted, loaded [16..48), then [0..16), then
+    // the full [0..48) sixty-three seconds later, ending in sustained swap.
+    //
+    // Dropped BEFORE the load, so the process holds `max(old, new)` rather than
+    // their sum — the point of the fix is the peak, not just the steady state.
+    // Only strict subsumption: a partial overlap ([0..20) against [16..48)) is
+    // two ranges that each genuinely need their own layers, and dropping either
+    // would cost a reload for nothing.
+    for stale in subsumed_segment_keys(models.keys(), key) {
+        models.remove(&stale);
+        tracing::info!(
+            model = %model_id,
+            dropped = format!("[{}..{})", stale.0, stale.1),
+            superseded_by = format!("[{layer_start}..{layer_end})"),
+            "model-worker: dropping a layer range the incoming one already covers"
+        );
     }
 
     let model_dir = crate::model::shard::model_dir(data_dir, &model_id.0);
@@ -2254,6 +2302,59 @@ const REPLY_RESERVE_POSITIONS: usize = crate::inference::layers::KV_CACHE_GROWTH
 
 /// `SWARMLLM_KV_PREFIX_CHARGE=0` turns off the whole-prompt admission below,
 /// so the two arms can be compared inside ONE binary. Read once.
+#[cfg(test)]
+mod subsumption_tests {
+    use super::subsumed_segment_keys;
+
+    /// The reported sequence (#010): a worker holding [16..48) and [0..16) is
+    /// asked for [0..48). Both are covered, so both are redundant — before
+    /// this, the map missed on the exact key and read the whole model from
+    /// disk a second time beside the copy already resident.
+    #[test]
+    fn a_full_range_supersedes_the_pieces_that_already_cover_it() {
+        let loaded = [(16, 48, 0, 1), (0, 16, 0, 1)];
+        let mut got = subsumed_segment_keys(loaded.iter(), (0, 48, 0, 1));
+        got.sort();
+        assert_eq!(got, vec![(0, 16, 0, 1), (16, 48, 0, 1)]);
+    }
+
+    /// A partial overlap is NOT subsumption: each range still needs layers the
+    /// other does not have, so dropping either would cost a reload for nothing.
+    #[test]
+    fn a_partial_overlap_is_left_alone() {
+        let loaded = [(0, 20, 0, 1)];
+        assert!(subsumed_segment_keys(loaded.iter(), (16, 48, 0, 1)).is_empty());
+    }
+
+    /// The identical range is the caller's own cache hit, not something to drop
+    /// — returning it here would have the loader remove the entry it is about
+    /// to find.
+    #[test]
+    fn the_same_range_is_never_dropped() {
+        let loaded = [(0, 48, 0, 1)];
+        assert!(subsumed_segment_keys(loaded.iter(), (0, 48, 0, 1)).is_empty());
+    }
+
+    /// A narrower incoming range supersedes nothing — this is the direction
+    /// that must NOT thrash: asking for a piece of what we hold keeps both.
+    #[test]
+    fn a_narrower_range_supersedes_nothing() {
+        let loaded = [(0, 48, 0, 1)];
+        assert!(subsumed_segment_keys(loaded.iter(), (0, 16, 0, 1)).is_empty());
+    }
+
+    /// Tensor-parallel shape is part of the identity: a rank's range says
+    /// nothing about another rank's, and dropping across ranks would take away
+    /// weights a different worker slot is using.
+    #[test]
+    fn a_different_tensor_parallel_shape_is_untouched() {
+        let loaded = [(0, 16, 1, 2)];
+        assert!(subsumed_segment_keys(loaded.iter(), (0, 48, 0, 1)).is_empty());
+        let loaded = [(0, 16, 0, 2)];
+        assert!(subsumed_segment_keys(loaded.iter(), (0, 48, 0, 1)).is_empty());
+    }
+}
+
 fn prefix_cache_charged() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();

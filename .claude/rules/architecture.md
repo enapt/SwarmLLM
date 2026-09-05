@@ -1301,6 +1301,24 @@ silently break at the wire if duplicated:
   did not prevent this; applying it deliberately, as a checklist over the new
   path's siblings, is what caught it within hours.
 
+  **A range that subsumes loaded ranges replaces them, before it loads**
+  (2026-09-05, report #010). `model_worker::subsumed_segment_keys`; the worker's
+  `models` map is keyed by the exact `(start, end, tp_rank, tp_size)`, so a plan
+  restating coverage the worker already has — [16..48) plus [0..16) becoming
+  [0..48) — misses, and the whole model is read from disk again beside the copy
+  already resident. Measured: 63 seconds, and sustained swap on a 16 GB
+  processor-only node.
+  **Dropped BEFORE the load**, so the process holds `max(old, new)` and not
+  their sum; the peak is the thing that kills a small machine. **Strict
+  subsumption only** — a partial overlap describes layers each range still needs
+  — and **within one tensor-parallel shape**, since another rank's range says
+  nothing about this one's.
+  **Do not "fix" this by skipping the CHARGE for a covered range**, which is what
+  the report proposed: the worker really did load a second copy, so the charge
+  was accurate, and skipping it would have under-counted real memory on a machine
+  that was already swapping. The accounting was the part working correctly. Ask
+  which side of a double-count is the lie before removing either.
+
   **A worker's charge is released by SUBTRACTING what THAT worker owed**
   (2026-09-05). `WorkerHandle::charged_mb` records the spawn's admission charge
   plus every range `charge_additional_segment` adds; `charged_segments` records

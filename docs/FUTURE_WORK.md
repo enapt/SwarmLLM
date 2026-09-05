@@ -329,6 +329,44 @@ body) and the reported harm was fully fixed without it.
 Worth doing when someone is next in `compare.js`. A Stop control needs one new
 i18n key across 21 locales.
 
+## A worker's memory reservation over-counts after it drops a superseded range (open, 2026-09-05)
+
+Report #010 caught a live worker holding [16..48) and [0..16) being asked for
+[0..48), missing on the exact key, and reading the whole 14B from disk a second
+time beside the copy already resident — 63 seconds, and sustained swap on a
+16 GB processor-only node.
+
+**The report's proposed fix would have been wrong, and it is worth saying why.**
+It reads the defect as double-CHARGING and proposes that
+`charge_additional_segment` compute the union of already-charged ranges and skip
+a range already covered. But the worker keys its loaded segments by the same
+exact `(start, end, tp_rank, tp_size)` tuple, so it really did load a second
+copy: the charge was *accurate*. Skipping it would have made the reservation
+under-count real memory, and since that reservation is what refuses the next
+model, the machine that was already swapping would have been given more to
+hold. The accounting was the one part working correctly.
+
+**Fixed at the load instead** (`subsumed_segment_keys`): a range that strictly
+subsumes ranges already loaded drops them BEFORE the new one is read, so the
+process holds `max(old, new)` rather than their sum. Strict subsumption only —
+a partial overlap describes layers each range still needs — and within one
+tensor-parallel shape.
+
+**The residual is the daemon's side of the books.** It charged for [16..48),
+[0..16) and [0..48); the worker now holds only the last, so the reservation is
+roughly twice what is resident. That is the SAFE direction — it refuses more
+than it needs to, never less — but it can decline a model that would have fitted.
+
+Releasing the superseded ranges' charge is easy in itself (`WorkerHandle::
+charged_segments` already records mb per range) and was deliberately NOT done in
+the same pass: the daemon charges *before* the worker loads, so releasing on the
+assumption the worker will drop them means under-counting whenever that load
+fails. Doing it properly wants the worker to report what it dropped — the
+`WorkerMsg` reply, or an ack on the existing `DaemonMsg::Unload` — so the
+release follows a fact rather than an expectation. Note the spawn range is
+recorded at 0 mb (its cost sits in the handle's opening `charged_mb`), so a
+naive release would under-release for it, which is again the safe direction.
+
 ## A peer's own prompt admission can still race itself (FIXED 2026-09-05)
 
 Found while fixing gotcha #457, and deliberately left open there.
