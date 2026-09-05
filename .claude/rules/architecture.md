@@ -518,6 +518,33 @@ pretending to.
 worthless until you check that something fills that input on the path the guard
 exists for. Grep for the writer, and check it runs where the reader runs.
 
+## Three consumers have now read `standbys.len()` as an answer it cannot give
+
+`scheduler::standby_covers` (does this standby hold that range),
+`standby_has_room` (could it run it), and `peer_segment_has_standby` (can
+anything take over what THIS peer is serving) are the three questions a plan's
+standby list is actually asked. The bare count answers none of them, and each
+consumer that used it was wrong in its own way:
+
+- **#451** — a plan logged `standbys=1` beside "NO standby available for failed
+  segment"; both true, and a tester lost an hour to the contradiction. Fixed by
+  reporting `segments_without_standby`.
+- **#464** — a count is not a statement about CAPACITY. One node was named
+  standby for four segments it could run one of.
+- **#465** — a count is not a statement about the SEGMENT in front of you.
+  `request_has_standby` gated the ACK fast-fail on the whole request, so the
+  four segments of a five-segment plan that had no backup were abandoned early
+  anyway. Abandoning without a replica can only turn a slow success into a 503
+  (Dean & Barroso, *The Tail at Scale*; measured in #386, where the result
+  arrived 1.6 s after we gave up).
+
+The three are related in the direction that matters: #464 made #465 WORSE, since
+segments that used to carry a fictional standby now honestly carry none.
+
+**Before using a collection's length as an answer, check the granularity the
+question is asked at.** `standbys.len()` is a fact about a plan; every consumer
+so far has wanted a fact about one segment.
+
 ## A standby is a capacity commitment, not just a coverage claim
 
 `scheduler::standby_has_room(max_hostable_layers, already_committed,

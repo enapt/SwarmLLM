@@ -2115,6 +2115,64 @@ fn a_card_with_room_needs_no_speed_comparison() {
     );
 }
 
+/// The ACK fast-fail abandons a silent peer early, and is justified ONLY by the
+/// failover it enables. It asked whether the REQUEST had any standby — but
+/// standbys are per segment, so a plan with one standby was fast-failing the
+/// four segments that had none, where giving up can only turn a slow success
+/// into a 503.
+#[test]
+fn a_peer_whose_segment_has_no_backup_is_not_abandoned_early() {
+    use crate::types::{ModelId, ShardId};
+    let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
+        node_id: NodeId([byte; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        layer_range: r,
+    };
+    let segments = vec![seg(10, (0, 16)), seg(11, (16, 32))];
+    // One standby, and it covers only the FIRST segment.
+    let standbys = vec![seg(20, (0, 16))];
+
+    assert!(
+        super::peer_segment_has_standby(&segments, &standbys, &NodeId([10u8; 32])),
+        "segment 0 has a backup, so abandoning its holder can buy a failover"
+    );
+    assert!(
+        !super::peer_segment_has_standby(&segments, &standbys, &NodeId([11u8; 32])),
+        "segment 1 has none — abandoning its holder can only turn a slow \
+         success into a 503, which is the whole reason this gate exists"
+    );
+}
+
+/// A peer this plan cannot place — a chain hop, a tensor-parallel member —
+/// keeps the behaviour it had before the standby gate existed, which is to
+/// fast-fail. Same convention as a missing pipeline entry counting as "yes".
+#[test]
+fn a_peer_the_plan_cannot_place_keeps_the_old_behaviour() {
+    use crate::types::{ModelId, ShardId};
+    let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
+        node_id: NodeId([byte; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        layer_range: r,
+    };
+    let segments = vec![seg(10, (0, 16))];
+    assert!(
+        super::peer_segment_has_standby(&segments, &[], &NodeId([99u8; 32])),
+        "a stranger to this plan is not something we can reason about"
+    );
+    // And a holder we CAN place, with no standby anywhere, is still refused.
+    assert!(!super::peer_segment_has_standby(
+        &segments,
+        &[],
+        &NodeId([10u8; 32])
+    ));
+}
+
 /// Gotcha #462, the routing half. A standby is chosen per segment and the local
 /// node is sorted first for every one of them, so one machine became the
 /// standby for all four remote segments of a 48-layer model it held 12 of.

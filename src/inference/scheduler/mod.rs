@@ -371,6 +371,44 @@ pub(crate) fn standby_has_room(
     }
 }
 
+/// Could anything take over the segment(s) `node_id` is serving in this plan?
+///
+/// **The question the ACK fast-fail actually needs**, as opposed to "does this
+/// request have any standby at all". Standbys are chosen PER SEGMENT, so a
+/// five-segment plan with one standby reports `standbys=1` while four segments
+/// have no backup whatsoever — and abandoning a silent peer is only justified
+/// by the failover it enables (Dean & Barroso, *The Tail at Scale*: the point
+/// of a second copy is that it goes to a DIFFERENT replica). Without one,
+/// giving up converts a slow success into a hard 503; measured on the live
+/// swarm, a peer's result arrived 1.6 s after it had been abandoned and was
+/// discarded (gotcha #386).
+///
+/// This became more exposed, not less, once standbys stopped being assigned to
+/// machines that could not run them (`standby_has_room`, gotcha #464): segments
+/// that used to carry a fictional standby now honestly carry none, and the
+/// per-request count would have gone on fast-failing every one of them.
+///
+/// **Unknown keeps the OLD behaviour, which is to fast-fail.** A peer we cannot
+/// place in the plan is a path this check cannot see — a chain hop, a
+/// tensor-parallel member — and those behaved this way before the standby gate
+/// existed. Same reasoning as the caller treating a missing pipeline entry as
+/// "yes".
+pub(crate) fn peer_segment_has_standby(
+    segments: &[PipelineSegment],
+    standbys: &[PipelineSegment],
+    node_id: &NodeId,
+) -> bool {
+    let mut serves_something = false;
+    for seg in segments.iter().filter(|s| s.node_id == *node_id) {
+        serves_something = true;
+        if standbys.iter().any(|s| standby_covers(s, seg.layer_range)) {
+            return true;
+        }
+    }
+    // Not a segment holder we can see: keep the pre-gate behaviour.
+    !serves_something
+}
+
 /// Layers each node is already on the hook for as a PRIMARY in this plan.
 ///
 /// Seeds the running tally in [`find_standbys`]. A node can appear more than

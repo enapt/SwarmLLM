@@ -908,12 +908,27 @@ impl NetworkManager {
     /// the previous behaviour stands for anything that is not a coordinator-side
     /// distributed request (a chain hop, say), rather than silently disabling
     /// the fast-fail for paths this check cannot see.
-    fn request_has_standby(&self, request_id: &uuid::Uuid) -> bool {
-        self.shared_state
-            .active_pipelines
-            .get(request_id)
-            .map(|a| !a.standbys.is_empty())
-            .unwrap_or(true)
+    ///
+    /// Asks about the SEGMENT this peer is serving, not the request as a whole:
+    /// standbys are chosen per segment, so a plan reporting `standbys=1` can
+    /// have four segments with no backup at all, and abandoning a peer serving
+    /// one of those buys nothing. See `scheduler::peer_segment_has_standby`.
+    fn request_has_standby(&self, request_id: &uuid::Uuid, peer: &libp2p::PeerId) -> bool {
+        let Some(assignment) = self.shared_state.active_pipelines.get(request_id) else {
+            // Absence counts as yes — paths this check cannot see keep the
+            // behaviour they had before the gate existed.
+            return true;
+        };
+        let Some(node_id) = self.peer_to_node.get(peer).map(|r| r.clone()) else {
+            // Cannot place the peer in the plan; fall back to the whole-request
+            // question rather than guessing.
+            return !assignment.standbys.is_empty();
+        };
+        crate::inference::scheduler::peer_segment_has_standby(
+            &assignment.segments,
+            &assignment.standbys,
+            &node_id,
+        )
     }
 
     fn forward_ack_deadline_secs(
@@ -1575,7 +1590,7 @@ impl NetworkManager {
                                 // deadline governs, which is what bounds the
                                 // genuinely-dead case.
                                 if age.as_secs() > deadline_secs
-                                    && self.request_has_standby(uuid)
+                                    && self.request_has_standby(uuid, target_peer)
                                 {
                                     unacked.push((*req_id, *uuid, *target_peer, deadline_secs));
                                 }
