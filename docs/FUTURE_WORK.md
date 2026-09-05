@@ -300,6 +300,35 @@ learning ratchet on a hypothesis about how the shipped fix behaves is the
 mistake `.claude/rules/diagnosis.md` rule 1 exists to prevent. Ask for that one
 line first.
 
+## The Compare tab still waits without showing progress or letting you stop (open, 2026-09-05)
+
+Report #009's fixed 45 s client abort is gone — it was discarding replies the
+daemon had completed — and pending cards now tick an elapsed count so a slow
+processor node reads as working rather than frozen. Two residuals:
+
+- **There is still a last-resort ceiling** (`COMPARE_BACKSTOP_MS`, 600 s). It is
+  derived rather than invented — it matches the longest single wait the daemon
+  itself permits, `remote_generate`'s first-token deadline — so it can only fire
+  after the node has already given up. But it IS a number, and the honest answer
+  is that the client should not be deciding at all.
+- **No way to stop a run.** The button is disabled while a comparison is in
+  flight, so a user watching a ten-minute cold start on a processor node can
+  only wait or reload. That was tolerable when the ceiling was 45 s and is the
+  thing the ceiling was really doing for them.
+
+**Both are answered by the same change: make Compare stream**, as the chat tab
+already does (`stream: true`, and its 30 s `authFetch` default then bounds only
+time-to-headers, which is why chat does not have this defect). Streaming gives
+an inactivity timeout — rule 1 of § "Timeouts: bound what actually varies", the
+one this path cannot currently satisfy because a non-streaming fetch has no
+intermediate bytes to observe — plus visible tokens and a natural cancel via the
+reader. It was not done in the same pass because it rewrites the result-handling
+(usage and token counts arrive in the terminal event rather than the response
+body) and the reported harm was fully fixed without it.
+
+Worth doing when someone is next in `compare.js`. A Stop control needs one new
+i18n key across 21 locales.
+
 ## A peer's own prompt admission can still race itself (FIXED 2026-09-05)
 
 Found while fixing gotcha #457, and deliberately left open there.

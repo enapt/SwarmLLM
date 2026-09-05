@@ -3107,6 +3107,22 @@ Rules that follow:
    reasoned about one quantity ("before the first token") while the constant
    bounded another (the total). A stale comment asserting an invariant reads as
    verification and stops anyone re-deriving it.
+6. **The frontend is part of "the whole path".** The five instances above were
+   all in Rust, and the tightest ceiling on a comparison request turned out to
+   be a hardcoded 45 s `AbortController` in `frontend/js/components/compare.js`
+   — on the very requests the daemon deliberately serves outside its own
+   `TimeoutLayer`. It discarded replies the daemon had finished computing
+   (report #009: `execute_ms=44886`, `finish_reason=stop`, aborted a fraction of
+   a second earlier), and the duration was baked into the translated string in
+   all 21 locales, so it was not even greppable as a number. A generation
+   request from the browser gets no client-invented deadline either; where one
+   is unavoidable it is derived from what the daemon permits and says something
+   true when it fires — the node may still be working, and the reply was not
+   necessarily lost.
+   **Streaming is what makes rule 1 available to a browser**: a non-streaming
+   `fetch` has no intermediate bytes, so it cannot have an inactivity timeout.
+   The chat tab streams, which is why its 30 s `authFetch` default bounds only
+   time-to-headers and is harmless there.
 
 ## Config defaults must stay live
 

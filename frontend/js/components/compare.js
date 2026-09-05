@@ -8,6 +8,31 @@
 (function() {
   var U = App.utils;
 
+  // Last-resort backstop for a compare request, in ms. Deliberately as long as
+  // the longest single wait the daemon permits for a generation, so it can only
+  // fire after the node has itself given up — see the comment at its use.
+  var COMPARE_BACKSTOP_MS = 600000;
+
+  // Live elapsed seconds on each pending card, so a slow processor node looks
+  // like it is working rather than frozen. Report #009: "The user has no way to
+  // know from the UI that the model actually succeeded server-side."
+  var elapsedTimer = null;
+  function startElapsedTicker() {
+    if (elapsedTimer) return;
+    elapsedTimer = setInterval(function() {
+      var nodes = document.querySelectorAll('#compare-results .compare-elapsed');
+      if (!nodes.length) { stopElapsedTicker(); return; }
+      nodes.forEach(function(el) {
+        var since = parseInt(el.getAttribute('data-since'), 10);
+        if (!since) return;
+        el.textContent = Math.round((Date.now() - since) / 1000) + 's';
+      });
+    }, 1000);
+  }
+  function stopElapsedTicker() {
+    if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+  }
+
   App.compare = {
     models: [],
     selected: [],
@@ -122,10 +147,12 @@
         card.querySelector('.compare-card-model').textContent = modelId;
         card.querySelector('.compare-card-model').title = modelId;
         card.querySelector('.compare-card-status').innerHTML = '<span class="spinner" style="width:14px;height:14px"></span>';
-        card.querySelector('.compare-card-body').innerHTML = '<div class="compare-spinner"><div class="spinner"></div> ' + U.escapeHtml(I18n.t('compare.waiting')) + '</div>';
+        card.querySelector('.compare-card-body').innerHTML = '<div class="compare-spinner"><div class="spinner"></div> ' + U.escapeHtml(I18n.t('compare.waiting')) + ' <span class="compare-elapsed" data-since="' + Date.now() + '">0s</span></div>';
         card.querySelector('.compare-card-actions').style.display = 'none';
         resultsDiv.appendChild(card);
       });
+
+      startElapsedTicker();
 
       var statusDiv = document.getElementById('compare-status');
       if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">' + U.escapeHtml(I18n.t('compare.sending', { n: n })) + '</span>'; }
@@ -142,7 +169,27 @@
 
         var start = performance.now();
         var controller = new AbortController();
-        var timeoutId = setTimeout(function() { controller.abort(); }, 45000);
+        // Generation gets no deadline of the CLIENT's invention.
+        //
+        // This was a flat 45 s. A distributed forward for an 8B-14B on a
+        // processor-only node routinely takes tens of seconds, and those nodes
+        // are explicitly supported — so the ceiling was a minimum-capability
+        // requirement nobody chose, and it DISCARDED work the daemon had
+        // finished: report #009 caught a reply completing at execute_ms=44886
+        // with finish_reason=stop, thrown away because the browser had aborted
+        // a fraction of a second earlier.
+        //
+        // The daemon deliberately serves generation OUTSIDE its own timeout
+        // layer for exactly this reason; the browser then reimposed one, which
+        // is `.claude/rules/architecture.md` § "Timeouts: bound what actually
+        // varies" rule 3 on the other side of the wire — and rule 4, since the
+        // tightest ceiling was in another file nobody grepped.
+        //
+        // What remains is a last-resort backstop, not a judgement about how
+        // long an answer may take: it matches the longest single wait the
+        // daemon itself permits (`remote_generate`'s 600 s first-token
+        // deadline), so it can only fire once the node has already given up.
+        var timeoutId = setTimeout(function() { controller.abort(); }, COMPARE_BACKSTOP_MS);
         return App.authFetch('/v1/messages', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -156,7 +203,9 @@
           });
         }).catch(function(err) {
           clearTimeout(timeoutId);
-          var msg = err.name === 'AbortError' ? I18n.t('compare.timed_out') : err.message;
+          // NOT "this model failed": the daemon may well still be working, and
+          // on the reported case it had already produced a complete reply.
+          var msg = err.name === 'AbortError' ? I18n.t('compare.no_reply_yet') : err.message;
           return { model: modelId, error: msg, ok: false, latency_ms: Math.round(performance.now() - start) };
         });
       });
@@ -178,6 +227,7 @@
 
       Promise.all(promises).then(function(results) {
         App.compare.running = false;
+        stopElapsedTicker();
         if (btn) { btn.disabled = false; btn.textContent = I18n.t('compare.run_compare'); }
         try {
           var history = JSON.parse(localStorage.getItem(App.COMPARE_HISTORY_KEY) || '[]');
