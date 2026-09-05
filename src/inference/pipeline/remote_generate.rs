@@ -514,6 +514,31 @@ impl PipelineExecutor {
         let mut hole_since: Option<std::time::Instant> = None;
 
         loop {
+            // Honor external cancel — same pattern as execute_distributed
+            // line 174. Without this, a cancelled request keeps draining
+            // tokens until INTER_TOKEN_TIMEOUT (60s) per gap.
+            if self.request.is_cancelled() {
+                tracing::info!(
+                    %request_id,
+                    "DIAG: remote-generate cancelled externally"
+                );
+                // Tell the remote to stop streaming wasted tokens too. Best
+                // effort — if the send drops, the remote will hit its own
+                // timeout/EOS naturally.
+                let _ = self
+                    .network_tx
+                    .send(NetworkCommand::SendDirectMessage {
+                        target_peer_bytes: target_peer_bytes.clone(),
+                        message: crate::types::SwarmMessage::CancelInference(
+                            swarmllm_types::CancelInference { request_id },
+                        ),
+                        delivery_request_id: None,
+                    })
+                    .await;
+                self.shared_state.streaming_token_txs.remove(&request_id);
+                finish_reason = "stop".to_string();
+                break;
+            }
             if stream.has_hole() {
                 let since = *hole_since.get_or_insert_with(std::time::Instant::now);
                 if since.elapsed() >= hole_wait && resend.can_ask() {
@@ -549,31 +574,6 @@ impl PipelineExecutor {
             } else {
                 hole_since = None;
             }
-            // Honor external cancel — same pattern as execute_distributed
-            // line 174. Without this, a cancelled request keeps draining
-            // tokens until INTER_TOKEN_TIMEOUT (60s) per gap.
-            if self.request.is_cancelled() {
-                tracing::info!(
-                    %request_id,
-                    "DIAG: remote-generate cancelled externally"
-                );
-                // Tell the remote to stop streaming wasted tokens too. Best
-                // effort — if the send drops, the remote will hit its own
-                // timeout/EOS naturally.
-                let _ = self
-                    .network_tx
-                    .send(NetworkCommand::SendDirectMessage {
-                        target_peer_bytes: target_peer_bytes.clone(),
-                        message: crate::types::SwarmMessage::CancelInference(
-                            swarmllm_types::CancelInference { request_id },
-                        ),
-                        delivery_request_id: None,
-                    })
-                    .await;
-                self.shared_state.streaming_token_txs.remove(&request_id);
-                finish_reason = "stop".to_string();
-                break;
-            }
             let timeout_dur = if stream.has_hole() && resend.can_ask() {
                 hole_wait
             } else if stream.done_seen() {
@@ -583,7 +583,22 @@ impl PipelineExecutor {
             } else {
                 INTER_TOKEN_TIMEOUT
             };
-            let maybe = tokio::time::timeout(timeout_dur, stream_rx.recv()).await;
+            // Watched, not merely checked beforehand. The first-token budget
+            // is prompt-scaled and reaches ten minutes, so a client that gave
+            // up during it went unnoticed for that whole time while the peer
+            // generated a reply nobody would read — the same shape as gotchas
+            // #445 and #459, on the path a peer-served whole model takes. A
+            // cancel here goes round the loop and the check above does the
+            // real work: tell the peer, drop the channel, stop.
+            let maybe = match crate::inference::cancel::unless_cancelled(
+                async { Ok(tokio::time::timeout(timeout_dur, stream_rx.recv()).await) },
+                self.request.cancel.as_ref(),
+            )
+            .await
+            {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
             // A wait on a hole ran out in silence: go round and ask (the check
             // at the top of the loop does it, since the hole has now stood
             // for at least `hole_wait`), rather than treating a lost send as

@@ -159,9 +159,30 @@ impl PipelineExecutor {
             )));
         }
 
-        // Wait for response with timeout
+        // Wait for response with timeout.
+        //
+        // Watched, not merely bounded: two minutes is long enough for a client
+        // to give up, and until this was added nothing noticed — the remote
+        // went on encoding an image for a request that no longer existed. Same
+        // rule as every other long wait in a request's life (`inference::
+        // cancel`); the cleanup below is shared with the timeout arm because a
+        // cancelled request must not leave a waiter behind either.
         let timeout = std::time::Duration::from_secs(VISION_ENCODE_TIMEOUT_SECS);
-        match tokio::time::timeout(timeout, rx).await {
+        let waited = crate::inference::cancel::unless_cancelled(
+            async { Ok(tokio::time::timeout(timeout, rx).await) },
+            self.request.cancel.as_ref(),
+        )
+        .await;
+        let waited = match waited {
+            Ok(w) => w,
+            Err(e) => {
+                self.shared_state
+                    .pending_vision_results
+                    .remove(&self.request.id);
+                return Err(e);
+            }
+        };
+        match waited {
             Ok(Ok(resp)) => {
                 self.shared_state
                     .pending_vision_results

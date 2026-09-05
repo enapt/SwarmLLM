@@ -1431,6 +1431,103 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
 /// asserting it. Dropping one is silent and unbounded — `active_traces` is the
 /// oracle behind `model_is_in_use`, so a stranded entry refuses to delete that
 /// model for the daemon's lifetime.
+/// Every long per-request wait in the pipeline watches the cancel flag.
+///
+/// `inference::cancel`'s module doc has now been wrong about being complete
+/// TWICE — it named two waits when there were three (gotcha #459, the model
+/// load), and three when there were five (#468: the peer fast path's
+/// first-token wait, up to ten minutes, and the remote vision encode's two).
+/// A doc comment cannot enforce this and a helper nobody is obliged to call
+/// will eventually not be called, so the rule is checked instead.
+///
+/// The shape it forbids: `tokio::time::timeout(...)` awaiting a channel in
+/// `src/inference/pipeline/`, not wrapped in `unless_cancelled`. Those are the
+/// waits that can run for minutes with a client on the other end.
+#[test]
+fn every_long_pipeline_wait_watches_the_cancel_flag() {
+    let root = repo_root();
+    let dir = root.join("src/inference/pipeline");
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![dir];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            // Test code sets its own deadlines and has no client to abandon it.
+            let src = &text[..text.find("#[cfg(test)]").unwrap_or(text.len())];
+            for line_no in unwatched_pipeline_waits(src) {
+                offenders.push(format!(
+                    "{}:{}",
+                    p.strip_prefix(&root).unwrap_or(&p).display(),
+                    line_no
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "long pipeline wait(s) that do not watch the request's cancel flag:\n  {}\n\
+         Wrap the wait in `inference::cancel::unless_cancelled(async {{ Ok(..) }}, \
+         self.request.cancel.as_ref())`. Checking the flag BEFORE the wait is not \
+         enough — that is what left a ten-minute first-token wait unnoticed \
+         (gotcha #468).",
+        offenders.join("\n  ")
+    );
+}
+
+/// The guard is only worth having if it can see the shape it forbids.
+#[test]
+fn the_cancel_watch_guard_catches_an_unwatched_wait() {
+    let planted = r#"
+        let maybe = tokio::time::timeout(timeout_dur, stream_rx.recv()).await;
+    "#;
+    assert_eq!(
+        unwatched_pipeline_waits(planted).len(),
+        1,
+        "a bare timeout on a channel must be caught"
+    );
+    let watched = r#"
+            let maybe = match crate::inference::cancel::unless_cancelled(
+                async { Ok(tokio::time::timeout(timeout_dur, stream_rx.recv()).await) },
+                self.request.cancel.as_ref(),
+            )
+    "#;
+    assert!(
+        unwatched_pipeline_waits(watched).is_empty(),
+        "the wrapped form is the sanctioned one"
+    );
+}
+
+/// Lines awaiting a channel under `tokio::time::timeout` without
+/// `unless_cancelled` on the same line.
+fn unwatched_pipeline_waits(src: &str) -> Vec<usize> {
+    src.lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            let t = l.trim();
+            !t.starts_with("//")
+                && t.contains("tokio::time::timeout(")
+                && !t.contains("unless_cancelled")
+                // `Ok(tokio::time::timeout(..))` is the body of the async block
+                // handed to `unless_cancelled` on the line above it.
+                && !t.starts_with("async { Ok(tokio::time::timeout(")
+        })
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
 /// A worker leaves the pool in exactly two places, and both release what it
 /// held.
 ///

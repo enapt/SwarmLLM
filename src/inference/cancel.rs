@@ -32,6 +32,22 @@
 //! That wait is BRACKETED by [`bail_if_cancelled`] rather than wrapped, because
 //! a load must not be dropped half-done — see that function for why.
 //!
+//! **The fourth and fifth are the peer paths, and they were missed the same
+//! way** (gotcha #468). `remote_generate`'s token loop — how a whole-model peer
+//! serves a request — DID read the flag, at the top of the loop, immediately
+//! before a wait that for the first token is `first_token_timeout(prompt_tokens)`
+//! and reaches ten minutes; and `vision::encode_remote` waits two minutes for a
+//! peer's image embeddings with no check at all. Both now go through
+//! [`unless_cancelled`].
+//!
+//! **Checking the flag before a long wait is not watching it.** That is the
+//! same point the SSE surfaces above make — dropping `token_rx` is noticed at
+//! the pipeline's next send, which is after the prompt pass — and it was sitting
+//! in the loop that comment was written beside. Since this paragraph has now
+//! been wrong about being complete twice, the rule is enforced rather than
+//! documented: `every_long_pipeline_wait_watches_the_cancel_flag` in
+//! `tests/repo_consistency.rs`.
+//!
 //! The flag is polled rather than awaited because it is an `AtomicBool` shared
 //! with code that has no runtime handle; [`CANCEL_POLL`] bounds the latency of
 //! noticing, and a quarter-second is nothing against the minutes it saves.
