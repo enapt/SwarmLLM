@@ -658,7 +658,7 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 | INFO  | `DIAG: KV-cache store cleanup — expired entries removed` — `removed`, `remaining` | split/kv_cache.rs |
 | INFO  | `DIAG: KV admission — evicted cached prompts so this prompt's cache fits on the device` — `budget_mb` (as the card can honour it NOW), `load_time_budget_mb`, `live_mb`, `cached_mb`, `freed_mb` | model_worker.rs |
 | WARN  | `DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device` — the 503 that re-routes; `short_by_mb` is against the reconciled budget | model_worker.rs |
-| DEBUG | `DIAG: KV budget reconciled with the card — less room than the load-time figure` — `load_time_budget_mb`, `budget_now_mb`, `live_mb`, `cached_mb`; fires whenever the card has less room than the loader predicted (another tenant, a snapshot, the llama.cpp context). `budget_mb` in the two lines above is this figure. | split/model.rs |
+| DEBUG | `DIAG: KV budget reconciled with the device — less room than the load-time figure` — `load_time_budget_mb`, `budget_now_mb`, `live_mb`, `cached_mb`, `device`; fires whenever the device has less room than the loader predicted (another tenant, a snapshot, the llama.cpp context — or, on a processor, the rest of the machine filling up, or this worker's own weights growing when a failover hands it more layers). `device` is `card` or `processor`; the processor arm arrived with gotcha #462. `budget_mb` in the two lines above is this figure. | split/model.rs |
 | WARN  | `DIAG: refusing to grow the KV cache past this worker's budget` — the per-chunk guard, at a growth-quantum boundary, after evicting cached prompts | split/executor.rs |
 
 ## Split Model Forward Pass Diagnostics

@@ -3033,6 +3033,12 @@ impl ModelProcessPool {
     /// reached only when the remove actually happened.
     async fn retire_dead_worker(&self, model_id: &ModelId) -> bool {
         let _guard = self.spawn_lock.lock().await;
+        self.retire_dead_worker_locked(model_id)
+    }
+
+    /// The body of [`Self::retire_dead_worker`], with `spawn_lock` already
+    /// held. Split out so the background reap can use `try_lock`.
+    fn retire_dead_worker_locked(&self, model_id: &ModelId) -> bool {
         if self
             .workers
             .remove_if(model_id, |_, h| h.dead.load(Ordering::Acquire))
@@ -3065,13 +3071,25 @@ impl ModelProcessPool {
             .filter(|e| e.value().dead.load(Ordering::Acquire))
             .map(|e| e.key().clone())
             .collect();
-        let mut n = 0;
-        for model_id in dead {
-            if self.retire_dead_worker(&model_id).await {
-                n += 1;
-            }
+        if dead.is_empty() {
+            // The common case takes no lock at all.
+            return 0;
         }
-        n
+        // `try_lock`, never `lock`: a spawn holds `spawn_lock` for the whole
+        // model load, which is minutes for a large model on a processor, and
+        // this runs on the health monitor's task alongside peer pings and
+        // gossip. A corpse can wait 30 s for the next tick — the same trade
+        // the anti-gaming cleanup on that tick already makes.
+        let Ok(_guard) = self.spawn_lock.try_lock() else {
+            tracing::debug!(
+                pending = dead.len(),
+                "A spawn is in progress — leaving dead workers for the next tick"
+            );
+            return 0;
+        };
+        dead.iter()
+            .filter(|m| self.retire_dead_worker_locked(m))
+            .count()
     }
 
     /// Release a worker's RAM charge. Must pair with every `admit_to_cpu`.
