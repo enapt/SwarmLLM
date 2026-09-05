@@ -300,7 +300,7 @@ learning ratchet on a hypothesis about how the shipped fix behaves is the
 mistake `.claude/rules/diagnosis.md` rule 1 exists to prevent. Ask for that one
 line first.
 
-## A peer's own prompt admission can still race itself (open, 2026-09-04)
+## A peer's own prompt admission can still race itself (FIXED 2026-09-05)
 
 Found while fixing gotcha #457, and deliberately left open there.
 
@@ -330,8 +330,41 @@ recorded anywhere until the positions are actually written.
 **Why it was not done in the same pass**: it is a change inside the worker's hot
 path, and the measured failure was fully explained by the coordinator half. Doing
 both at once would have made an unverified peer-side change indistinguishable
-from the fix that was actually needed. Reproduce it with two large concurrent
-prompts sent DIRECTLY at one node's API, bypassing the coordinator's reservation.
+from the fix that was actually needed.
+
+**Fixed 2026-09-05, and the window is wider than this entry said.** It does not
+need two requests to be concurrent at all. `admit_slot` on the batched path
+marks the slot `Prefilling` and RETURNS to the worker's message loop; the prompt
+chunks run on later scheduler ticks. So the very next message — a second prompt
+— is weighed against an occupancy that cannot contain the first, and the
+worker's loop being strictly sequential does nothing to prevent it. The entry's
+"arriving close together" is the sequential path's version of the same thing;
+the batched path is the reachable one.
+
+`KvCacheStore` now records the claim (`record_prompt_admission`) and
+`ensure_room_for_prompt` adds `outstanding_admission_bytes()` to the live figure
+before deciding — the shape this entry proposed, and the one
+`ModelProcessPool::vram_reserved_mb` uses a level up.
+
+Three properties a change must keep:
+
+- **The claim is drawn down by what that request has actually allocated**, so
+  the same memory is never charged twice as the prefill proceeds. That is also
+  what bounds the damage if a claim is ever left behind: a fully-prefilled
+  request contributes zero whether or not anything removed its entry.
+- **`clear_request` releases it.** Every worker path that finishes or abandons
+  a request already calls that, so all eight inherited the release with no
+  edit — and no new path can forget it.
+- **The TTL sweep is the backstop for the one case draw-down cannot bound**: a
+  prompt admitted and then never prefilled at all, which nothing else would
+  ever remove.
+
+`promised_mb` is reported beside `live_mb` in both admission DIAG lines, so the
+mechanism is checkable from a log rather than inferred.
+
+Still unverified against a real pair of large concurrent prompts on one node —
+the arithmetic and the claim lifecycle are pinned by tests (each fails with the
+mechanism disabled), but nobody has watched the second prompt get its 503.
 
 ## Two smaller costs found beside #417 (open, 2026-08-30)
 

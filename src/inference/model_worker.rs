@@ -2338,7 +2338,14 @@ fn ensure_room_for_prompt(
         return Ok(());
     }
     let occupancy = kv_store.occupancy();
-    let live = occupancy.allocated_bytes;
+    // Prompts already admitted whose prefill has not written its cache yet.
+    // Without this the decision is made against an occupancy that does not
+    // contain them: on the batched path `admit_slot` marks a slot `Prefilling`
+    // and returns to the message loop, so the next prompt is weighed against
+    // memory the previous one has already been promised. Drawn down by what
+    // each has actually allocated, so nothing is charged twice.
+    let promised = kv_store.outstanding_admission_bytes();
+    let live = occupancy.allocated_bytes.saturating_add(promised);
     let cached = prefix_cache.bytes_total() as u64;
     // Nothing of THIS request is in the store yet, so anything live belongs to
     // an earlier one — a request still decoding, or one whose cache outlived
@@ -2375,8 +2382,16 @@ fn ensure_room_for_prompt(
     let mb = |b: u64| b / (1024 * 1024);
     use crate::inference::split::kv_budget::{admit_prompt, PromptAdmission};
     let verdict = admit_prompt(budget, live, cached, per_token, positions);
+    // Record what this prompt has been promised, so the NEXT one is weighed
+    // against it rather than against memory it is about to take. Released by
+    // `clear_request`, which every path that finishes or abandons a request
+    // already calls.
+    let claim = || kv_store.record_prompt_admission(request_id, positions as u64 * per_token);
     let short_by = match verdict {
-        PromptAdmission::Fits => return Ok(()),
+        PromptAdmission::Fits => {
+            claim();
+            return Ok(());
+        }
         PromptAdmission::EvictBytes(needed) => {
             let freed = prefix_cache.release(needed as usize) as u64;
             // Charging is on here (checked above), so keep the guard's figure current.
@@ -2386,6 +2401,7 @@ fn ensure_room_for_prompt(
                 prompt_tokens,
                 positions,
                 live_mb = mb(live),
+                promised_mb = mb(promised),
                 cached_mb = mb(cached),
                 budget_mb = mb(budget),
                 load_time_budget_mb = mb(load_time_budget),
@@ -2394,6 +2410,7 @@ fn ensure_room_for_prompt(
                 "DIAG: KV admission — evicted cached prompts so this prompt's cache fits on the device"
             );
             if freed >= needed {
+                claim();
                 return Ok(());
             }
             needed - freed
@@ -2405,6 +2422,7 @@ fn ensure_room_for_prompt(
         prompt_tokens,
         positions,
         live_mb = mb(live),
+        promised_mb = mb(promised),
         cached_mb = mb(cached),
         budget_mb = mb(budget),
         load_time_budget_mb = mb(load_time_budget),

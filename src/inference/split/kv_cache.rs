@@ -459,6 +459,22 @@ pub struct KvCacheStore {
     /// running to the end for nobody (gotcha #441). Installed by the worker
     /// over its cancelled-request set; `None` means never cancelled here.
     cancel_oracle: std::sync::Mutex<Option<CancelOracle>>,
+    /// Prompts admitted whose cache has not been fully written yet:
+    /// `request_id -> (bytes admission promised, when)`.
+    ///
+    /// **Why a prompt's admission has to be recorded, not just decided.**
+    /// `ensure_room_for_prompt` reads live occupancy, decides, evicts and
+    /// returns; the prefill allocates afterwards. On the batched path those
+    /// are not even adjacent — `admit_slot` marks the slot `Prefilling` and
+    /// the chunks are run on later scheduler ticks — so a second prompt
+    /// admitted in between reads an occupancy that does not yet contain the
+    /// first, and both pass against the same free memory. No concurrency is
+    /// needed for this: the worker's message loop is sequential and the window
+    /// is still open, because it spans a return to that loop.
+    ///
+    /// Same shape as `ModelProcessPool::vram_reserved_mb` does for whole
+    /// models, one level down.
+    admitted_claims: dashmap::DashMap<String, (u64, std::time::Instant)>,
 }
 
 /// Given a request id, is that request cancelled?
@@ -681,7 +697,59 @@ impl KvCacheStore {
             external_reserved: std::sync::atomic::AtomicU64::new(0),
             external_evictor: std::sync::Mutex::new(None),
             cancel_oracle: std::sync::Mutex::new(None),
+            admitted_claims: dashmap::DashMap::new(),
         }
+    }
+
+    /// Record that a prompt has been admitted for `bytes` it has not yet
+    /// allocated. Replaces any earlier claim for the same request — a retry
+    /// re-admits rather than stacking.
+    pub(crate) fn record_prompt_admission(&self, request_id: &str, bytes: u64) {
+        if bytes == 0 {
+            self.admitted_claims.remove(request_id);
+            return;
+        }
+        self.admitted_claims
+            .insert(request_id.to_string(), (bytes, std::time::Instant::now()));
+    }
+
+    /// Bytes promised to admitted prompts that their caches do not hold yet.
+    ///
+    /// **Drawn down by what each request has actually allocated**, so a claim
+    /// shrinks to nothing as its prefill proceeds rather than double-charging
+    /// the same memory. That is also what bounds the damage if a claim is ever
+    /// left behind: a fully-prefilled request contributes zero whether or not
+    /// anything removed its entry.
+    pub(crate) fn outstanding_admission_bytes(&self) -> u64 {
+        if self.admitted_claims.is_empty() {
+            // The overwhelming common case — no scan at all.
+            return 0;
+        }
+        // One pass over the caches, summing per request id. The cache key is
+        // "model_key request_id", and one request can hold several entries
+        // (tensor-parallel ranks), so they are added together.
+        let mut allocated_by_request: std::collections::HashMap<&str, u64> =
+            std::collections::HashMap::new();
+        let keys: Vec<(String, u64)> = self
+            .caches
+            .iter()
+            .map(|e| (e.key().clone(), e.value().occupancy().0))
+            .collect();
+        for (k, allocated) in &keys {
+            if let Some(rid) = k.split('\0').nth(1) {
+                *allocated_by_request.entry(rid).or_insert(0) += *allocated;
+            }
+        }
+        self.admitted_claims
+            .iter()
+            .map(|c| {
+                let written = allocated_by_request
+                    .get(c.key().as_str())
+                    .copied()
+                    .unwrap_or(0);
+                c.value().0.saturating_sub(written)
+            })
+            .sum()
     }
 
     /// Install the cancellation oracle a forward pass consults between layers.
@@ -833,6 +901,10 @@ impl KvCacheStore {
     /// Clear (remove) the KV-cache for a specific request.
     /// Also clears any TP-keyed variants (tp{rank}-{model_key}).
     pub fn clear_request(&self, model_key: &str, request_id: &str) {
+        // The request is over, so whatever its admission promised is no longer
+        // owed. Every worker path that finishes or abandons a request already
+        // comes through here.
+        self.admitted_claims.remove(request_id);
         let key = Self::cache_key(model_key, request_id);
         self.caches.remove(key.as_str());
         // Also clear TP-keyed cache entries for the same request
@@ -844,6 +916,13 @@ impl KvCacheStore {
     /// Clean up all expired cache entries. Returns the number of entries removed.
     pub fn cleanup_expired(&self) -> usize {
         let ttl = self.ttl;
+        // A claim outlives its request only if something failed to clear it.
+        // The draw-down already makes a stale one contribute nothing once its
+        // prefill finished, so this is the belt to that braces: it bounds a
+        // claim from a prompt that was admitted and then never prefilled at
+        // all, which nothing else would ever remove.
+        self.admitted_claims
+            .retain(|_, (_, at)| at.elapsed() <= ttl);
         let before = self.caches.len();
         self.caches
             .retain(|_, entry| entry.last_accessed.elapsed() <= ttl);
@@ -901,6 +980,94 @@ mod tests {
     use super::*;
     use crate::inference::layers::{kv_cache_reservation, new_kv_cache, KV_CACHE_GROWTH_TOKENS};
     use candle_core::{DType, Device, Tensor};
+
+    /// Fill one layer of NAMED request's cache with `n` positions.
+    fn append_for(store: &KvCacheStore, request_id: &str, n: usize, max_seq_len: usize) {
+        let mut entry = store.get_or_create("m", request_id, 1);
+        let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
+        let mut kv = new_kv_cache(max_seq_len, true);
+        kv.append(&k, &k.clone()).unwrap();
+        entry.layers[0] = Some(kv);
+    }
+
+    /// The sequence the batched path actually produces: a prompt is admitted
+    /// and its slot marked `Prefilling`, control returns to the message loop,
+    /// and the next prompt is weighed — before the first has written a byte.
+    ///
+    /// Without the claim, that second read sees an empty store and both
+    /// prompts pass against the same free memory.
+    #[test]
+    fn a_prompt_admitted_but_not_yet_prefilled_is_still_charged() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        assert_eq!(
+            store.outstanding_admission_bytes(),
+            0,
+            "nothing admitted yet"
+        );
+
+        store.record_prompt_admission("first", 4_000_000);
+        assert_eq!(
+            store.outstanding_admission_bytes(),
+            4_000_000,
+            "a prompt that has been promised memory must be visible to the next one"
+        );
+    }
+
+    /// And it must not be charged twice: as the prefill writes, the claim is
+    /// drawn down by what that request has actually allocated.
+    #[test]
+    fn a_claim_shrinks_as_its_own_prefill_allocates() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        append_for(&store, "r", 8, 64);
+        let allocated = store.occupancy().allocated_bytes;
+        assert!(allocated > 0, "the fixture must actually allocate");
+
+        // Promised twice what it has written so far.
+        store.record_prompt_admission("r", allocated * 2);
+        assert_eq!(
+            store.outstanding_admission_bytes(),
+            allocated,
+            "only the part not yet written is still owed"
+        );
+
+        // Once it has written at least what it promised, it owes nothing —
+        // which is also what bounds a claim nothing ever removes.
+        store.record_prompt_admission("r", allocated);
+        assert_eq!(store.outstanding_admission_bytes(), 0);
+        store.record_prompt_admission("r", allocated / 2);
+        assert_eq!(
+            store.outstanding_admission_bytes(),
+            0,
+            "saturating: a request that overshot its promise is not a credit"
+        );
+    }
+
+    /// Finishing a request releases what it was promised. Every worker path
+    /// that ends or abandons a request already calls `clear_request`.
+    #[test]
+    fn finishing_a_request_releases_its_promise() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        store.record_prompt_admission("r", 4_000_000);
+        assert_eq!(store.outstanding_admission_bytes(), 4_000_000);
+        store.clear_request("m", "r");
+        assert_eq!(store.outstanding_admission_bytes(), 0);
+    }
+
+    /// A prompt admitted and then never prefilled at all is the one case the
+    /// draw-down cannot bound, so the TTL sweep does.
+    #[test]
+    fn a_promise_that_was_never_taken_up_expires() {
+        let store = KvCacheStore::new(std::time::Duration::from_millis(0));
+        store.record_prompt_admission("abandoned", 4_000_000);
+        assert_eq!(store.outstanding_admission_bytes(), 4_000_000);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.cleanup_expired();
+        assert_eq!(
+            store.outstanding_admission_bytes(),
+            0,
+            "a claim must not outlive its request for ever"
+        );
+    }
 
     /// Fill one layer of a request's cache with `n` positions, the way a
     /// forward pass does.

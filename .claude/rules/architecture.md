@@ -1406,6 +1406,29 @@ silently break at the wire if duplicated:
   A new "how long has X been idle" judgement must be bounded by "how long has
   X existed", and must read a signal the COMMON path actually writes — grep for
   the writer before trusting a doc comment that names one.
+- **An admitted prompt is RECORDED, not just decided** (2026-09-05).
+  `KvCacheStore::record_prompt_admission` / `outstanding_admission_bytes`;
+  `ensure_room_for_prompt` adds the outstanding total to the live figure before
+  calling `admit_prompt`, and records its own claim once admitted.
+  **Why**: admission reads occupancy, decides, evicts and returns — and the
+  prefill allocates afterwards. On the batched path they are not even adjacent:
+  `admit_slot` marks the slot `Prefilling` and returns to the worker's message
+  loop, with the chunks run on later scheduler ticks. So the next prompt is
+  weighed against memory the previous one has already been promised, and the
+  loop being strictly sequential does not help — the window spans a return to
+  it. The coordinator-side reservation (`peer_vram_commitments`, #457) makes two
+  large prompts reaching one worker rare, not impossible, and the peer's own
+  admission is what these rules call the backstop.
+  Three things a change must keep. **The claim is drawn down by what that
+  request has actually allocated**, so nothing is charged twice — and a claim
+  nothing removed contributes zero once its prefill finished, which is what
+  bounds a leak. **`clear_request` releases it**, so all eight worker paths that
+  end or abandon a request inherited the release unedited and a new one cannot
+  forget. And **the TTL sweep covers the case draw-down cannot** — a prompt
+  admitted and then never prefilled at all. `promised_mb` appears beside
+  `live_mb` in both DIAG lines, because a refusal caused by an invisible
+  reservation is the kind of thing a reader invents a mechanism to explain.
+
 - **`inference::split::kv_budget::admit_prompt` + `PrefixCache::release`**
   (2026-09-02, gotcha #440) — ONE decision for a whole prompt, before prefill,
   charging live caches PLUS the prefix cache's snapshots (the same device

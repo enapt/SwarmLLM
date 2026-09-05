@@ -416,6 +416,50 @@ pub(crate) fn plan_snapshot(
 }
 
 #[cfg(test)]
+mod promised_tests {
+    use super::*;
+
+    /// Two prompts of the same size against a budget with room for one.
+    ///
+    /// The second is only refused if the first's admission is counted, which
+    /// is the whole of the fix: on the batched path the first prompt's cache
+    /// has not been written when the second is weighed, so an occupancy-only
+    /// read passes both.
+    #[test]
+    fn counting_an_admitted_prompt_is_what_refuses_the_second_one() {
+        let budget = 10_000_000;
+        let per_token = 1_000;
+        let positions = 6_000; // 6 MB each — two do not fit in 10 MB.
+
+        // First prompt: nothing live, nothing promised.
+        assert!(matches!(
+            admit_prompt(budget, 0, 0, per_token, positions),
+            PromptAdmission::Fits
+        ));
+
+        // Second, weighed the OLD way — the first has not allocated yet, so
+        // live is still zero and it is admitted too. This is the defect.
+        assert!(
+            matches!(
+                admit_prompt(budget, 0, 0, per_token, positions),
+                PromptAdmission::Fits
+            ),
+            "control: without counting the promise, both prompts pass"
+        );
+
+        // Weighed with the first's promise included, it is correctly refused.
+        let promised = per_token * positions as u64;
+        assert!(
+            matches!(
+                admit_prompt(budget, promised, 0, per_token, positions),
+                PromptAdmission::Refuse { .. }
+            ),
+            "with the promise counted the second prompt is refused at token 0"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
