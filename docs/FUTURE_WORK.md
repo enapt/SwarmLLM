@@ -623,6 +623,35 @@ swarm. Today it is one model and the cost is bounded; the manifest half was the
 urgent part because it silently corrupted metadata rather than wasting a
 transfer.
 
+**Live observation, 2026-09-05 — the residual is real and the shape guard cannot
+see this case.** On this node's log: peer `e561df35d8c9a3ac` has gossiped
+contradicting shard hashes for `qwen2.5-coder-7b-instruct-q4-k-m` **556 times**
+(shards 6 and 7 among others), every one correctly refused by `origin_verified`
+— so nothing corrupt was adopted and that half is working exactly as designed.
+
+Two things worth carrying forward:
+
+- **`describes_a_different_build` has never fired on this node** (zero
+  occurrences in the whole log), including against these 556. It compares
+  SHAPE, and these two builds evidently agree on every `size_bytes` while
+  disagreeing on the bytes — which is the case the three-build measurement
+  above already hinted at, since those three sizes were within 800 bytes of
+  each other. So the shape comparison is a coarse screen, not a build
+  identity, and **a size-derived discriminator would not fix the holder map
+  either**. The manifest-hash discriminator named above is the only proposal
+  here that would actually separate these two.
+- **The peer is still ranked as a holder**: it appears as a `pipeline
+  candidate` 14,190 times in the same log, for a model whose bytes we know
+  differ from origin on at least two shards. That is precisely the documented
+  consequence — a guaranteed wasted transfer per (shard, wrong holder) — now
+  with a named peer and a count rather than as a prediction.
+
+This does not change the priority argument (correctness is still safe, and the
+cost is still bounded by hash verification plus the per-shard backoff), but it
+does retire "today it is one model" as the reason to wait: one publisher is
+generating this at a steady rate, and the screen that was assumed to catch the
+shape half does not fire on it.
+
 ### Manual shard download ignores private mode when picking a peer (2026-08-21) — FIXED 2026-08-23
 
 _**Fixed in `401447ab`** ("private mode now scopes where a shard is downloaded
@@ -10564,6 +10593,61 @@ with any loss, a forward that size over QUIC fails by construction.
 Until one lands, a prompt-pass forward above a few MB to a QUIC-connected
 peer is a coin flip on lossy links, and the failover it triggers is to a
 worse peer.
+
+
+### The same failure is hitting SHARD TRANSFERS, and there it is routine (observed live 2026-09-05)
+
+The entry above is scoped to inference forwards, which is where it was first
+measured. The live node's log says the more frequent trigger is a **shard
+transfer**, and that path carries a payload *larger* than the 19.9 MB forward
+that was measured: `network::protocol::SHARD_CHUNK_SIZE` is **32 MiB**, shipped
+as ONE request-response message, on the acquisition, download and serve paths
+alike.
+
+**What the log shows** (`node.log`, 2026-09-02 → 09-05, this node serving):
+
+- 22 `too many gaps in stream buffer` connection kills. Six of them fire within
+  30 ms of each other across six different peers at 2026-09-02T17:26:55 — that
+  cluster is a local NIC event, not this. Of the remaining 16, **14 follow a
+  `Shard transfer request` from that same peer**, 6.6–26.2 s earlier.
+- The delay clusters tightly at 24–26 s (24.1, 24.6, 24.7, 25.7, 25.8×3, 26.2×2)
+  — the signature of a fixed-size transfer dying at a reproducible point in the
+  stream, not of a random link failure.
+- 13 of the 22 are immediately preceded by `DIAG: InboundFailure — response send
+  may have failed` for an *inbound* request id, i.e. the response WE were sending
+  died. The only multi-MB response this node sends is a shard chunk.
+- `pending_tensor_forwards=0` on all 22, and there is no tensor traffic in any of
+  the windows — the scheduler lines nearby are the dashboard's capacity-plan
+  preview. So this is not the forward path.
+- Six distinct peers, **including a LAN one** (192.168.1.200, 7 of the 22) as
+  well as WAN. It is not one flaky link.
+
+**Why this matters more than the forward case.** Shard transfer is how a node
+acquires a model at all. Progress is not blocked — the protocol is offset-based
+and 37 distinct offsets appear in the log, so transfers do complete — but 146
+requests sit at `offset=0` against 90 at the next offset, so a large share of the
+bytes moved are re-sends of a chunk that died. Every failure also costs the
+connection, and `handle_shard_transfer_retry` restarts a peer retry at
+`chunk_offset: 0` rather than resuming.
+
+**The cheapest mitigation is one constant, and it is available on this path only.**
+Lowering `SHARD_CHUNK_SIZE` bounds the packets in flight on a single stream, so no
+stream can reach quinn's `MAX_CHUNKS = 1024` gaps. It needs no protocol change, no
+feature bit and no receiver change, because chunk size is already carried per
+request and the serve path clamps to its own ceiling
+(`chunk_size.min(SHARD_CHUNK_SIZE)`) — a smaller asker is already served correctly
+today, so a mixed-version swarm needs nothing.
+
+The cost is round trips, and it is small: transfers are sequential, and at the
+~1.26 MB/s observed here a 32 MiB chunk is ~26 s of transfer against one ~0.6 s
+RTT. At 8 MiB that is four RTTs per 32 MiB — under 10% of one chunk's transfer
+time, against a failure that currently destroys the whole chunk *and* the
+connection. Measure the real distribution before picking the number; 8 MiB is the
+obvious first candidate, not a derived answer.
+
+This does **not** replace mitigations (1) and (2) above. The forward path has no
+equivalent dial — an activation is one indivisible message — so ranking TCP above
+QUIC for large payloads, and chunked-over-RR, are still what that path needs.
 
 ## Speeding up inference BETWEEN nodes — ranked, with the physics (research sprint 2026-09-02)
 
