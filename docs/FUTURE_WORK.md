@@ -125,6 +125,45 @@ a third-party node that cannot be observed from here, and it may simply have bee
 loaded. **That does not weaken the finding**: the point is that the system cannot
 tell the difference either, and re-picks it every time at the same wrong price.
 
+## A worker's memory charge is per MODEL, not per worker (open, 2026-09-05)
+
+`ram_reserved_mb` / `vram_reserved_mb` are keyed by `ModelId`, and
+`add_reserved` ACCUMULATES — correct, since one worker can hold several
+segments (the #452 work). But it means `release_ram_charge` / `release_vram_charge`
+drop the whole entry, and neither can say "release only what THIS worker was
+charged".
+
+That leaves a narrow race on every path that removes a worker and then
+releases:
+
+1. Caller holds handle `H` for model `M`; `H` dies.
+2. `get_or_spawn` takes `spawn_lock`, charges `M` for a replacement (`add_reserved`
+   accumulates onto whatever `H` already had), and is about to insert `H2`.
+3. The caller evicts. If it runs before the insert, it removes `H` and releases
+   the whole entry — including the charge just taken for `H2`, which then runs
+   un-accounted.
+
+The consequence is UNDER-charging, not a leak: the node believes it has more
+memory free than it does, and the backstops are the worker's own runtime KV
+guard and the next admission. That is the milder direction, and the opposite of
+gotchas #461/#467.
+
+Not introduced by those fixes — `unload_model` has had the same shape for
+longer, and a wider window (it removes, then drains, then releases). What
+changed is that six more paths now release at all, so the shape is worth
+writing down.
+
+**Not fixed by taking `spawn_lock` in the eviction path**: six of those callers
+are on the request hot path, and that lock is held for the whole of a model
+load — minutes for a large model on a processor. Blocking an error path behind
+a load is a worse trade than a rare under-charge.
+
+**The real fix is per-worker accounting**: record what each spawn charged on the
+`WorkerHandle` (`charged_mb`, beside the existing `gpu_estimate_mb`) and have
+the release subtract that rather than removing the key. That also makes
+`charge_additional_segment`'s increments attributable, which the current
+whole-key release cannot express. Worth doing next time this area is open.
+
 ## The RAM headroom clamp has a floor that can never refuse (open, 2026-09-04)
 
 `RamBudget::from_machine` computes
