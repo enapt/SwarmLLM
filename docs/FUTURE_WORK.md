@@ -10630,20 +10630,40 @@ bytes moved are re-sends of a chunk that died. Every failure also costs the
 connection, and `handle_shard_transfer_retry` restarts a peer retry at
 `chunk_offset: 0` rather than resuming.
 
-**The cheapest mitigation is one constant, and it is available on this path only.**
-Lowering `SHARD_CHUNK_SIZE` bounds the packets in flight on a single stream, so no
-stream can reach quinn's `MAX_CHUNKS = 1024` gaps. It needs no protocol change, no
-feature bit and no receiver change, because chunk size is already carried per
-request and the serve path clamps to its own ceiling
-(`chunk_size.min(SHARD_CHUNK_SIZE)`) — a smaller asker is already served correctly
-today, so a mixed-version swarm needs nothing.
+**CORRECTION (same day, before any fix was built).** This entry first claimed that
+lowering `SHARD_CHUNK_SIZE` "bounds the packets in flight on a single stream, so no
+stream can reach quinn's `MAX_CHUNKS = 1024` gaps". **That is wrong, and the
+arithmetic says so.** Read `quinn-proto`'s `Assembler::insert`: the check is
+`self.data.len() > MAX_CHUNKS` evaluated *after* `defragment()`, i.e. the number of
+DISCONTIGUOUS buffers held between `bytes_read` and `end`. That region is bounded by
+**flow control — the stream receive window — not by the message size.** libp2p-quic
+defaults `max_stream_data` to 10,000,000 bytes and this project does not override it
+(`SwarmBuilder::with_quic()` with no config, `network/manager/mod.rs`). At a ~1200-byte
+QUIC payload that is ~8,300 packets of buffered unread data, which is ample room for
+more than 1024 holes.
 
-The cost is round trips, and it is small: transfers are sequential, and at the
-~1.26 MB/s observed here a 32 MiB chunk is ~26 s of transfer against one ~0.6 s
-RTT. At 8 MiB that is four RTTs per 32 MiB — under 10% of one chunk's transfer
-time, against a failure that currently destroys the whole chunk *and* the
-connection. Measure the real distribution before picking the number; 8 MiB is the
-obvious first candidate, not a derived answer.
+So chunk size does not bound the gap count. What it bounds is the number of *draws*:
+failure probability scales with total packets sent, so 32 MiB → 8 MiB is roughly a 4x
+reduction in the chance any one transfer dies. That is a real mitigation and a cheap
+one — transfers are sequential, and at the ~1.26 MB/s observed here a 32 MiB chunk is
+~26 s of transfer against one ~0.6 s RTT, so four RTTs per 32 MiB is under 10% — but
+it is a probability reduction, **not** a structural bound, and it must not be
+described as one. (It is independently defensible on other grounds: 32 MiB is held in
+memory on both sides, gives no progress reporting within a chunk, and loses 32 MiB of
+transfer per failure.)
+
+**The structural bound on this failure is the receive window**, and it is one line:
+`with_quic_config(|c| c.max_stream_data = ...)`. For the gap count to be unreachable
+the window must hold fewer than 1024 packets — about 1.2 MB. The cost is that a
+single stream is then capped at `window / RTT`: fine on a LAN (1 ms → ~1.2 GB/s),
+but ~2 MB/s at the 600 ms RTT of our WAN peers, which is close to the 1.26 MB/s
+actually observed and would bind on any faster long-haul link. It also applies to
+every QUIC stream, tensor forwards included. **So it is a real trade, not a free
+win, and it wants measurement before it ships** — which is why nothing here has
+been changed yet.
+
+Note this also means mitigations (1) and (2) above are not merely preferable, they
+are the only two that actually remove the failure mode rather than making it rarer.
 
 This does **not** replace mitigations (1) and (2) above. The forward path has no
 equivalent dial — an activation is one indivisible message — so ranking TCP above
