@@ -509,20 +509,41 @@ pub(crate) fn segments_without_standby(
 /// sampled tokens. Refusing to involve a peer at all under privacy would leave
 /// the node on its CPU for no privacy gain, since the boomerang is exactly the
 /// mode `encrypted_pipeline` exists to provide.
+/// What [`delegation_target`] needs to know about this request.
+///
+/// A struct rather than a parameter list because there are enough of these
+/// that a new one has to be DECIDED about rather than defaulted by position —
+/// the same reason `FailoverInput` exists.
+pub(crate) struct DelegationInput<'a> {
+    pub local_node_id: &'a NodeId,
+    pub num_layers: u32,
+    /// How many of those layers the peer would ACTUALLY be given — every layer
+    /// for a whole-model hand-off, the middle for a boomerang. The peer must
+    /// still HOLD all `num_layers`; this is what it must have room to RUN. See
+    /// [`delegated_layer_span`], which both this and the boomerang builder read
+    /// so the bound and the assignment cannot disagree.
+    pub layers_to_assign: u32,
+    pub local_serves_on_cpu: bool,
+    pub model_vram_mb: u64,
+    pub local_cpu_tokens_per_sec: f32,
+    /// How long the prompt is, so the peer can be priced on the work it would
+    /// actually be given. `None` means unknown and the price gate stands aside.
+    pub prompt_tokens: Option<u32>,
+}
+
 fn delegation_target<'a>(
     candidates: &'a [NodeCandidate],
-    local_node_id: &NodeId,
-    num_layers: u32,
-    // How many of those layers the peer would ACTUALLY be given — every layer
-    // for a whole-model hand-off, the middle for a boomerang. The peer must
-    // still HOLD all `num_layers`; this is what it must have room to RUN. See
-    // [`delegated_layer_span`], which both this and the boomerang builder read
-    // so the bound and the assignment cannot disagree.
-    layers_to_assign: u32,
-    local_serves_on_cpu: bool,
-    model_vram_mb: u64,
-    local_cpu_tokens_per_sec: f32,
+    input: &DelegationInput<'_>,
 ) -> Option<&'a NodeCandidate> {
+    let DelegationInput {
+        local_node_id,
+        num_layers,
+        layers_to_assign,
+        local_serves_on_cpu,
+        model_vram_mb,
+        local_cpu_tokens_per_sec,
+        prompt_tokens,
+    } = *input;
     // Only a request that would run on this node's PROCESSOR is worth handing
     // away: a card the model does not fit, or no usable card at all.
     // `ModelProcessPool::serves_on_cpu` owns that distinction (gotcha #442).
@@ -580,6 +601,31 @@ fn delegation_target<'a>(
             // processor" — and it can no longer admit anything this bound
             // refuses.
             "not enough free memory for the layers this request needs"
+        } else if costs_more_than_staying_here(
+            c,
+            candidates,
+            local_node_id,
+            num_layers,
+            prompt_tokens,
+        ) {
+            // Priced on THIS prompt, by the same cost model the routing search
+            // uses — the only term here that knows how long reading it takes.
+            //
+            // Everything above compares decode: `est_tokens_per_sec` is
+            // `bandwidth / 4.4 * efficiency`, a memory-bandwidth estimate of
+            // how fast a machine WRITES tokens. Prefill is compute-bound, and
+            // the hardware spread on it is ~55x against the ~6x on decode
+            // (see `parallax::vertex_cost`) — so on a long prompt the gate was
+            // comparing machines on the wrong axis entirely.
+            //
+            // Measured live on v0.3.156: an Apple M4 advertising 14.82 tok/s
+            // against a local 6.46 cleared the processor branch twice in a row
+            // and took 5-6 MINUTES to the first token on ~11-12k-token
+            // prompts, while the routing search had priced that same peer at
+            // ~234 minutes of prefill — an order of magnitude above every
+            // other candidate — and correctly avoided it. Two paths, one cost
+            // model between them, and only one was consulting it.
+            "priced slower for this prompt than running it here"
         } else if c.gpu_vram_available_mb.is_some_and(|free| free >= needed) {
             // A graphics card with room beats our processor fallback outright.
             return Some(c);
@@ -608,10 +654,59 @@ fn delegation_target<'a>(
             layers_to_assign,
             peer_tokens_per_sec = c.est_tokens_per_sec,
             local_cpu_tokens_per_sec,
+            // The two figures the price gate compared, so a reader can check
+            // the verdict instead of inferring a mechanism from its absence.
+            peer_cost_ms = prompt_tokens.map(|_| {
+                parallax::vertex_cost(c, (0, num_layers), local_node_id, num_layers, prompt_tokens)
+                    .total()
+            }),
+            local_cost_ms = prompt_tokens.and_then(|_| {
+                candidates
+                    .iter()
+                    .find(|x| x.node_id == *local_node_id)
+                    .map(|l| parallax::vertex_cost(l, (0, num_layers), local_node_id, num_layers, prompt_tokens).total())
+            }),
+            prompt_tokens = ?prompt_tokens,
             "Not handing this model to peer: {reason}"
         );
     }
     None
+}
+
+/// Would handing the whole model to `c` cost MORE than running it here?
+///
+/// Priced with `parallax::vertex_cost`, the same function the routing search
+/// uses, so the delegation gate and the search cannot come to different
+/// conclusions about the same peer — which is exactly what was observed
+/// (report of 2026-09-05: the search priced a peer at ~234 minutes of prefill
+/// and avoided it; this gate, which never looked at a price, chose it twice).
+///
+/// **Answers `false` whenever it cannot say.** No prompt length, no local
+/// candidate to compare against, or a peer standing at the shared unknown
+/// prior — none of those is evidence the peer is bad, and refusing on missing
+/// information would strand a node on its processor beside a genuinely faster
+/// machine, which is the failure `delegation_target` exists to fix. A peer
+/// never measured is still tried; the measurement that first request produces
+/// is what stops the second one, and the live report showed the same bad peer
+/// being picked twice precisely because nothing learned.
+fn costs_more_than_staying_here(
+    c: &NodeCandidate,
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    num_layers: u32,
+    prompt_tokens: Option<u32>,
+) -> bool {
+    if prompt_tokens.is_none_or(|t| t == 0) || !priced_from_a_measurement(c) {
+        return false;
+    }
+    let Some(local) = candidates.iter().find(|x| x.node_id == *local_node_id) else {
+        return false;
+    };
+    let range = (0, num_layers);
+    let peer_ms = parallax::vertex_cost(c, range, local_node_id, num_layers, prompt_tokens).total();
+    let local_ms =
+        parallax::vertex_cost(local, range, local_node_id, num_layers, prompt_tokens).total();
+    peer_ms > local_ms
 }
 
 /// Is this candidate's speed KNOWN — measured by us, or advertised by it — as
@@ -1096,21 +1191,26 @@ impl PipelineScheduler {
             let delegate_to = if local_is_degraded {
                 delegation_target(
                     &candidates,
-                    local_node_id,
-                    num_layers,
-                    // Privacy decides the shape, and the shape decides how many
-                    // layers the peer must have room for — the middle only,
-                    // when the two ends stay here.
-                    delegated_layer_span(num_layers, encrypted),
-                    true,
-                    pool.estimated_gpu_mb(model_id).unwrap_or(0),
-                    // OUR processor speed, not our graphics card's: this only
-                    // runs when the model does not fit the card, so the
-                    // processor is what the request would actually get here.
-                    crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(
-                        crate::inference::mem_bandwidth::measured_gbps().unwrap_or(0.0),
-                        false,
-                    ),
+                    &DelegationInput {
+                        local_node_id,
+                        num_layers,
+                        // Privacy decides the shape, and the shape decides how
+                        // many layers the peer must have room for — the middle
+                        // only, when the two ends stay here.
+                        layers_to_assign: delegated_layer_span(num_layers, encrypted),
+                        local_serves_on_cpu: true,
+                        model_vram_mb: pool.estimated_gpu_mb(model_id).unwrap_or(0),
+                        // OUR processor speed, not our graphics card's: this
+                        // only runs when the model does not fit the card, so
+                        // the processor is what the request would actually get
+                        // here.
+                        local_cpu_tokens_per_sec:
+                            crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(
+                                crate::inference::mem_bandwidth::measured_gbps().unwrap_or(0.0),
+                                false,
+                            ),
+                        prompt_tokens,
+                    },
                 )
             } else {
                 None

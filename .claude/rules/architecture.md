@@ -338,7 +338,29 @@ that "refuses gracefully" past it. No refusal ever arrived.
 
 `needed` survives as the discriminator between the two accept reasons — "has a
 card worth preferring to our processor" against "is a measurably faster
-processor" — and can no longer admit anything the bound refuses. Unknown
+processor" — and can no longer admit anything the bound refuses.
+
+**And the gate is priced on the prompt** (2026-09-05).
+`costs_more_than_staying_here` runs `parallax::vertex_cost` — the routing
+search's own function — over the peer and over the local candidate, and refuses
+a peer that prices above running the model here. Before this the gate and the
+search could disagree about the same machine, and did: a reporter's Apple M4
+(`est_tokens_per_sec` 14.82 against a local 6.46, the best figure on their
+network) was fully delegated two ~11-12k-token prompts and took **5-6 minutes
+to the first token, twice**, while the search had priced it at ~234 minutes of
+prefill and avoided it.
+**Why the old terms could not see it**: `est_tokens_per_sec` is
+`bandwidth / 4.4 * efficiency`, a memory-bandwidth estimate of how fast a
+machine WRITES tokens. Prefill is compute-bound and `vertex_cost`'s own comment
+puts the hardware spread at ~55x on prefill against ~6x on decode — so an M4,
+with excellent unified-memory bandwidth and ten cores doing the matmuls, looks
+fast on the decode axis and is dreadful on the one that dominates a long
+prompt. **A gate comparing machines needs the axis the WORK is on.**
+Unknown still never excludes — no prompt length, no local candidate, or a peer
+at the shared prior all leave it open, since refusing on missing information
+strands a node beside a machine that may be faster. The first request produces
+the measurement that stops the second; the report showed the same peer chosen
+twice because nothing learned. Unknown
 capacity still never excludes, per `max_hostable_layers`'s own contract.
 
 **Both accept branches log the same fields.** The whole-model line carried

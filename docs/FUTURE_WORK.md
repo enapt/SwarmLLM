@@ -367,6 +367,53 @@ release follows a fact rather than an expectation. Note the spawn range is
 recorded at 0 mb (its cost sits in the handle's opening `charged_mb`), so a
 naive release would under-release for it, which is again the safe direction.
 
+## Auto-enabled prompt privacy can cost 6x on a long prompt, and nothing says so (NEEDS A DECISION, 2026-09-05)
+
+Reported with numbers. A 36-layer model, ~10.3k-token prompt, one GPU peer and
+one processor-only node:
+
+```
+privacy ON  (boomerang, 3 segments)   seg0 26.8s (CPU) + seg1 12.2s (GPU) + seg2 28.5s (CPU) = 73.8s total
+privacy OFF (whole model to the GPU)                                                          12.4s total
+```
+
+**The two layers kept local for privacy — 1/36th of the model — cost 55.3s,
+against 12.2s for the other 34 on the card.** Prefill is linear in prompt
+length and the processor/card spread on it is ~55x, so the two "cheap" end
+layers are not cheap at all on a long prompt; they are the whole cost.
+
+**This is working as designed, and that is the problem.** `boomerang_assignment`
+keeps layer 0 and the final layer local because that is what the guarantee IS —
+the embedding and the sampling never leave. The caller builds it
+unconditionally whenever `delegation_target` returns a peer and `encrypted` is
+set; there is no comparison with the plain hand-off, deliberately, because you
+cannot trade away a privacy guarantee for speed.
+
+**The decision needed is about `encrypted_pipeline_auto`, which is ON BY
+DEFAULT** for any node holding both ends. The user did not ask for privacy
+there — the system chose it on their behalf — and it is now known to cost 6x on
+agent-sized prompts. Three options, and this is not ours to pick:
+
+1. **Leave it.** Privacy by default is a real product position and the cost is
+   the cost. But it should at least be *visible*: today nothing tells the user
+   that the slow reply they are watching is the privacy default, and the
+   dashboard says nothing about it either.
+2. **Tell and let them choose** — surface the measured cost the first time it
+   is material, with a one-click way to turn it off for that model. Keeps the
+   guarantee intact and removes the mystery.
+3. **Let the auto default weigh it**, dropping to plain delegation past some
+   ratio. Only defensible for `_auto`, never for an explicitly-set
+   `encrypted_pipeline`, and it means a node sometimes sends prompts to a peer
+   that previously did not — which must be announced, not silent.
+
+**Do not implement 3 without an explicit decision.** Silently downgrading a
+privacy property because it is slow is the one option that cannot be taken back
+once someone has relied on it.
+
+The numbers are now available to whichever is chosen: `delegation_target`
+receives `prompt_tokens` as of the #447(iii) fix below, so the boomerang's local
+ends can be priced with the same `parallax::vertex_cost` the search uses.
+
 ## A peer's own prompt admission can still race itself (FIXED 2026-09-05)
 
 Found while fixing gotcha #457, and deliberately left open there.
@@ -10720,10 +10767,39 @@ on the live pair**: in this topology the hand-off gate fires first.
   model in the unit tests; the admission arithmetic itself is
   `kv_budget::admit_prompt`, already pinned.
 
-**Still open: the gate itself.** `delegation_target` still runs before the
-priced search and still decides yes/no. Making it a filter wants the live pair
-(`measure_444.sh`) to confirm the search's verdict before it ships — the
-comparison it exists to make has not yet been observed on real machines.
+**The gate now consults the price (2026-09-05).** `delegation_target` takes
+`prompt_tokens` and refuses a peer that `parallax::vertex_cost` — the routing
+search's own function — prices above running the model here. The two paths
+therefore share one cost model instead of disagreeing about the same peer.
+
+**What made this shippable was the measurement this entry said was missing.** A
+reporter running an Apple M4 (`est_tokens_per_sec` 14.82, the best figure on
+their network, against a local 6.46) had two ~11-12k-token prompts fully
+delegated to it and waited **5-6 minutes for the first token**, twice — while
+the routing search had priced that same peer at `cost_prefill_ms=14073940`
+(~234 minutes), an order of magnitude above every other candidate, and had
+correctly avoided it on the boomerang path. Their hypothesis — "the two routing
+paths may not share the same cost model" — was exactly right.
+
+**The mechanism.** `est_tokens_per_sec` is `bandwidth / 4.4 * efficiency`: a
+memory-bandwidth estimate of how fast a machine WRITES tokens. Prefill is
+compute-bound, and `vertex_cost`'s own comment records the spread as ~55x on
+prefill against ~6x on decode. An Apple M4 has excellent unified-memory
+bandwidth and ten CPU cores doing the matmuls, so it looks fast on the decode
+axis and is dreadful on the one that dominates a long prompt. The gate was
+comparing machines on the wrong axis.
+
+**Unknown still never excludes.** No prompt length, no local candidate, or a
+peer standing at the shared prior all leave the gate open — refusing on missing
+information would strand a node on its processor beside a machine that may well
+be faster, which is the failure this whole feature exists to fix. A peer never
+measured is still tried; the measurement that first request produces is what
+stops the second, and the report showed the same bad peer chosen twice precisely
+because nothing learned.
+
+**Still open**: making the DP the sole decision-maker for every shape
+(boomerangs across several peers, partial splits) remains the larger change.
+What shipped is the gate agreeing with the search, not being replaced by it.
 
 ## A multi-megabyte forward over ONE QUIC stream can kill the connection (measured 2026-09-03, gotcha #446)
 
