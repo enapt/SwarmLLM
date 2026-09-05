@@ -396,6 +396,35 @@ struct WorkerHandle {
     /// true` and no placement note for a model running 13 of its 28 layers on
     /// the card, so a user could not tell why it was slower than expected.
     gpu_layers_on_card: Option<(usize, usize)>,
+    /// What this worker put into the pool's reserved-memory map, in MB — its
+    /// spawn's admission charge plus every additional segment charged to it.
+    /// `charged_against_ram` says which of the two maps.
+    ///
+    /// **Released by SUBTRACTING this, never by dropping the model's whole
+    /// entry.** The maps are keyed by `ModelId` and `add_reserved`
+    /// accumulates, which is right — one worker can hold several segments —
+    /// but it means a release that removes the key cannot say "only what THIS
+    /// worker was charged". That left a race on every path that evicts a dead
+    /// worker: a replacement can have been admitted and charged under the same
+    /// key before the eviction runs, and removing the key threw the
+    /// replacement's charge away too, leaving it running un-accounted. The
+    /// direction is under-charging, so the node believes it has more memory
+    /// free than it has — the opposite of gotchas #461/#467 and milder, but
+    /// the same class of bookkeeping error.
+    ///
+    /// Taking `spawn_lock` in the eviction paths would also close it and is
+    /// the wrong trade: six of those callers are on the request hot path and
+    /// that lock is held for a whole model load, minutes for a large model on
+    /// a processor.
+    charged_mb: AtomicU64,
+    /// Layer ranges this worker has already been charged for.
+    ///
+    /// On the HANDLE rather than in a map keyed by model, for the same reason
+    /// as `charged_mb`: the ranges belong to the process that loaded them, so
+    /// they must die with it. Keyed by model they outlived their worker, and a
+    /// replacement asked for a range its predecessor had paid for would be
+    /// waved through without being weighed.
+    charged_segments: std::sync::Mutex<Vec<(u32, u32)>>,
     /// Is this worker's memory charged against the system-RAM budget?
     ///
     /// Decided ONCE at spawn by `charges_ram` and recorded, because a later
@@ -893,6 +922,26 @@ fn response_slot_superseded(map: &ResponseMap, request_id: Uuid, token: u64) -> 
 }
 
 impl WorkerHandle {
+    /// Has this worker already been charged for `segment`?
+    fn segment_is_charged(&self, segment: (u32, u32)) -> bool {
+        self.charged_segments
+            .lock()
+            .map(|v| v.contains(&segment))
+            .unwrap_or(false)
+    }
+
+    /// Record that this worker has been charged for `segment`, and add `mb` to
+    /// what it owes. Idempotent on the range.
+    fn record_charged_segment(&self, segment: (u32, u32), mb: u64) {
+        if let Ok(mut v) = self.charged_segments.lock() {
+            if v.contains(&segment) {
+                return;
+            }
+            v.push(segment);
+        }
+        self.charged_mb.fetch_add(mb, Ordering::AcqRel);
+    }
+
     /// Register `tx` as the response channel for `request_id` and return the
     /// guard that owns the entry. This is the ONLY supported way to populate
     /// `responses`: inserting directly cannot produce a correctly-tokened
@@ -1172,6 +1221,53 @@ fn add_reserved(map: &dashmap::DashMap<ModelId, u64>, model_id: &ModelId, mb: u6
     *map.entry(model_id.clone()).or_insert(0) += mb;
 }
 
+/// What a departing worker owed, read off its handle before it is dropped.
+///
+/// Exists because `unload_model` waits for the subprocess to exit — which
+/// outlives the handle — and the release still needs that worker's own figures
+/// rather than whatever the model's entry holds by then.
+struct DepartedWorker {
+    freed_gpu_memory: bool,
+    charged_mb: u64,
+    charged_against_ram: bool,
+}
+
+impl From<&WorkerHandle> for DepartedWorker {
+    fn from(h: &WorkerHandle) -> Self {
+        Self {
+            // Read from the WORKER, not from `effective_gpu_layers`. That asks
+            // where a spawn happening *now* would go, and its pin is cleared
+            // while the processor worker it produced is still running — so a
+            // model on its way back to the card answered "GPU" and lifted every
+            // other model's pin on the strength of memory it never held.
+            freed_gpu_memory: h.placed_on_cpu_because.is_none(),
+            charged_mb: h.charged_mb.load(Ordering::Acquire),
+            charged_against_ram: h.charged_against_ram,
+        }
+    }
+}
+
+/// Take `mb` back off a model's recorded charge. Returns whether the model is
+/// now charged nothing at all.
+///
+/// The inverse of `add_reserved`, and it must be a subtraction rather than a
+/// removal: several workers' lifetimes can overlap under one model id — a
+/// replacement is admitted and charged before the dead one is evicted — so
+/// dropping the key would discard a charge that is still live. Saturating,
+/// because an under-run would otherwise wrap to a budget of 18 exabytes and
+/// admit everything for ever.
+fn release_reserved(map: &dashmap::DashMap<ModelId, u64>, model_id: &ModelId, mb: u64) -> bool {
+    let mut emptied = false;
+    if let Some(mut e) = map.get_mut(model_id) {
+        *e = e.saturating_sub(mb);
+        emptied = *e == 0;
+    }
+    if emptied {
+        map.remove_if(model_id, |_, v| *v == 0);
+    }
+    emptied
+}
+
 /// The layer count, first-segment flag and weight bytes a footprint estimate
 /// should describe for `segment` of a `block_count`-layer model whose shards
 /// total `shard_bytes`.
@@ -1343,14 +1439,6 @@ pub struct ModelProcessPool {
     /// footprint from the moment it is admitted, long before it has loaded
     /// anything to measure.
     ram_reserved_mb: dashmap::DashMap<ModelId, u64>,
-    /// Layer ranges of each model that have been priced and charged.
-    ///
-    /// One worker serves a model and its own `models` map is keyed by layer
-    /// range, so it can come to hold several segments at once — a privacy
-    /// boomerang gives the local worker both ends. Charging the whole model at
-    /// spawn made that safe by over-pricing; charging the segment makes it
-    /// exact, and this is what keeps the second segment from arriving free.
-    charged_segments: dashmap::DashMap<ModelId, Vec<(u32, u32)>>,
     /// Live RAM budget source, installed once by the daemon
     /// (`set_ram_budget_provider`): returns the cap from the CURRENT config and
     /// the anti-swap headroom from memory free NOW. Without one (tests), the
@@ -1508,7 +1596,6 @@ impl ModelProcessPool {
             cpu_kv_budget_bytes: dashmap::DashMap::new(),
             ram_budget_note: std::sync::Mutex::new(String::new()),
             ram_reserved_mb: dashmap::DashMap::new(),
-            charged_segments: dashmap::DashMap::new(),
             activity_tx: std::sync::OnceLock::new(),
             kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(DEFAULT_KV_CACHE_TTL_SECS),
             prefix_cache_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -2633,10 +2720,15 @@ impl ModelProcessPool {
             .sum()
     }
 
-    /// Release a worker's charge. Must pair with every `admit_to_gpu`.
-    fn release_vram_charge(&self, model_id: &ModelId) {
-        self.vram_reserved_mb.remove(model_id);
-        self.charged_segments.remove(model_id);
+    /// Release `mb` of a worker's graphics charge. Must pair with every
+    /// `admit_to_gpu`.
+    ///
+    /// Subtracts rather than dropping the key, so a replacement worker already
+    /// admitted under the same model id keeps its own charge — see
+    /// `WorkerHandle::charged_mb`. The entry is removed once it reaches zero so
+    /// the map does not fill with zeroes for every model ever loaded.
+    fn release_vram_charge(&self, model_id: &ModelId, mb: u64) {
+        release_reserved(&self.vram_reserved_mb, model_id, mb);
     }
 
     /// Set the system RAM budget used for CPU admission. 0 disables the check.
@@ -2825,20 +2917,6 @@ impl ModelProcessPool {
         freed
     }
 
-    /// Has this model's worker already been charged for `segment`?
-    fn segment_is_charged(&self, model_id: &ModelId, segment: (u32, u32)) -> bool {
-        self.charged_segments
-            .get(model_id)
-            .is_some_and(|v| v.contains(&segment))
-    }
-
-    fn record_charged_segment(&self, model_id: &ModelId, segment: (u32, u32)) {
-        let mut e = self.charged_segments.entry(model_id.clone()).or_default();
-        if !e.contains(&segment) {
-            e.push(segment);
-        }
-    }
-
     /// Weigh and charge a layer range a live worker has not held before.
     ///
     /// Only the LAYERS are charged, never the fixed terms again: the process
@@ -2886,7 +2964,7 @@ impl ModelProcessPool {
         // Serialised against spawns for the same read-decide-charge atomicity
         // the admission gates already rely on.
         let _guard = self.spawn_lock.lock().await;
-        if self.segment_is_charged(model_id, segment) {
+        if handle.segment_is_charged(segment) {
             return Ok(());
         }
         let on_gpu = handle.placed_on_cpu_because.is_none();
@@ -2895,7 +2973,7 @@ impl ModelProcessPool {
             // Unreadable geometry: nothing to weigh, and refusing on a file we
             // could not read would be a worse failure than the one prevented —
             // the same treatment `admit_to_gpu` and `admit_to_cpu` give it.
-            self.record_charged_segment(model_id, segment);
+            handle.record_charged_segment(segment, 0);
             return Ok(());
         };
         let delta_mb = per_layer_mb.saturating_mul(layers);
@@ -2919,7 +2997,7 @@ impl ModelProcessPool {
                 self.ram_reserved_mb.get(model_id).map(|v| *v).unwrap_or(0),
             )));
         }
-        self.record_charged_segment(model_id, segment);
+        handle.record_charged_segment(segment, delta_mb);
         tracing::info!(
             model = %model_id,
             layers = format!("[{}..{})", segment.0, segment.1),
@@ -3063,8 +3141,7 @@ impl ModelProcessPool {
         let Some((_, handle)) = self.workers.remove_if(model_id, |_, cur| pred(cur)) else {
             return false;
         };
-        let freed_gpu_memory = handle.placed_on_cpu_because.is_none();
-        self.after_worker_gone(model_id, freed_gpu_memory, how);
+        self.after_worker_gone(model_id, &handle, how);
         true
     }
 
@@ -3118,11 +3195,14 @@ impl ModelProcessPool {
             .count()
     }
 
-    /// Release a worker's RAM charge. Must pair with every `admit_to_cpu`.
-    fn release_ram_charge(&self, model_id: &ModelId) {
-        self.ram_reserved_mb.remove(model_id);
-        self.cpu_kv_budget_bytes.remove(model_id);
-        self.charged_segments.remove(model_id);
+    /// Release `mb` of a worker's system-RAM charge. Must pair with every
+    /// `admit_to_cpu`. Subtracts, for the reason `release_vram_charge` gives.
+    fn release_ram_charge(&self, model_id: &ModelId, mb: u64) {
+        if release_reserved(&self.ram_reserved_mb, model_id, mb) {
+            // The KV grant was sized against this worker's share of the budget,
+            // so it only stops meaning anything once nothing is charged.
+            self.cpu_kv_budget_bytes.remove(model_id);
+        }
     }
 
     /// Models currently forced onto the CPU after a GPU OOM.
@@ -3234,7 +3314,7 @@ impl ModelProcessPool {
         let existing = self.workers.get(model_id).map(|h| h.clone());
         if let Some(handle) = existing {
             if !self.worker_should_return_to_gpu(model_id, &handle) {
-                if self.segment_is_charged(model_id, segment) {
+                if handle.segment_is_charged(segment) {
                     return Ok(handle);
                 }
                 // A range this worker has not been asked for before: it is
@@ -3322,6 +3402,12 @@ impl ModelProcessPool {
         // and the worker carries it so a later request can ask whether the
         // model would fit now without re-reading the geometry.
         let estimated = self.estimate_gpu_footprint_mb(model_id, Some(segment));
+        // What THIS spawn attempt put into each reserved map. Carried onto the
+        // handle so the release can subtract exactly this worker's share
+        // instead of dropping the model's whole entry — see
+        // `WorkerHandle::charged_mb`.
+        let mut charged_vram_mb: u64 = 0;
+        let mut charged_ram_mb: u64 = 0;
         if !going_to_cpu {
             // Demoting to the CPU is the last resort, not the first answer:
             // reclaim the card from models nothing is using, then ask again.
@@ -3339,6 +3425,9 @@ impl ModelProcessPool {
                     );
                     admitted = self.admit_to_gpu(model_id, estimated);
                 }
+            }
+            if admitted {
+                charged_vram_mb = estimated;
             }
             // Before giving the card up entirely, ask whether PART of the
             // model fits. This is the whole point of hybrid placement: a model
@@ -3476,8 +3565,11 @@ impl ModelProcessPool {
                 }
                 admitted = self.admit_to_cpu(model_id, estimated);
             }
+            if admitted {
+                charged_ram_mb = estimated;
+            }
             if !admitted {
-                self.release_vram_charge(model_id);
+                self.release_vram_charge(model_id, charged_vram_mb);
                 if let Some(tx) = self.activity_tx.get() {
                     let _ = tx.send(
                         crate::daemon::state::ActivityEvent::new(
@@ -3534,6 +3626,13 @@ impl ModelProcessPool {
                 model_id,
                 placed_on_cpu_because,
                 charge_ram,
+                // Whichever budget this worker is charged against is the one
+                // its release must subtract from.
+                if charge_ram {
+                    charged_ram_mb
+                } else {
+                    charged_vram_mb
+                },
                 estimated,
                 hybrid_layers,
             )
@@ -3547,8 +3646,9 @@ impl ModelProcessPool {
                 // The range the admission above weighed is now this worker's
                 // first charged segment. Without recording it, every later
                 // forward for the same range would look like a new one and be
-                // charged again.
-                self.record_charged_segment(model_id, segment);
+                // charged again. `charged_mb` is already set from the spawn's
+                // own admission, so the range is recorded at zero extra cost.
+                handle.record_charged_segment(segment, 0);
                 // Only now is it a fact. The user was told when this model was
                 // demoted to the processor, so they are told when it comes
                 // back — and if admission refused it a second time they were
@@ -3575,8 +3675,8 @@ impl ModelProcessPool {
                 // The worker never started, so it owes nothing. Leaving the
                 // charge would shrink the budget permanently on every failure.
                 // Both devices: a CPU-bound spawn was charged RAM above.
-                self.release_vram_charge(model_id);
-                self.release_ram_charge(model_id);
+                self.release_vram_charge(model_id, charged_vram_mb);
+                self.release_ram_charge(model_id, charged_ram_mb);
                 let count = self
                     .spawn_failures
                     .entry(model_id.clone())
@@ -3630,6 +3730,11 @@ impl ModelProcessPool {
         model_id: &ModelId,
         placed_on_cpu_because: Option<CpuReason>,
         charged_against_ram: bool,
+        // What this spawn's admission actually put into the reserved map, in
+        // MB, against whichever budget `charged_against_ram` names. Carried so
+        // the release can subtract this worker's own share — see
+        // `WorkerHandle::charged_mb`.
+        charged_mb: u64,
         gpu_estimate_mb: u64,
         // A partial split decided by admission: `(this many of the worker's
         // layers go on the card, layers in total)`, the rest on the processor.
@@ -3982,6 +4087,8 @@ impl ModelProcessPool {
             spawned_at: std::time::Instant::now(),
             last_used: AtomicU64::new(0),
             placed_on_cpu_because,
+            charged_mb: AtomicU64::new(charged_mb),
+            charged_segments: std::sync::Mutex::new(Vec::new()),
             charged_against_ram,
             gpu_estimate_mb,
             // Only a split is worth recording; a worker wholly on the card
@@ -4827,13 +4934,6 @@ impl ModelProcessPool {
         if let Some((_, handle)) = self.workers.remove(model_id) {
             // Was this worker holding GPU memory? Only then does killing it
             // change the pressure that caused any outstanding CPU pins.
-            //
-            // Read from the WORKER, not from `effective_gpu_layers`. That asks
-            // where a spawn happening *now* would go, and its pin is cleared
-            // while the processor worker it produced is still running — so a
-            // model on its way back to the card answered "GPU" and lifted every
-            // other model's pin on the strength of memory it never held.
-            let freed_gpu_memory = handle.placed_on_cpu_because.is_none();
 
             // Retire by DRAINING, not by killing under a live request.
             //
@@ -4874,6 +4974,10 @@ impl ModelProcessPool {
             // CUDA_ERROR_OUT_OF_MEMORY — the exact failure admission exists to
             // prevent.
             let exited = handle.exited.clone();
+            // What this worker owes, taken BEFORE the handle is dropped — the
+            // wait below outlives it, and the release needs this worker's own
+            // figure rather than the model's whole entry.
+            let departed = DepartedWorker::from(&*handle);
             drop(handle);
             let freed_cleanly = Self::await_worker_exit(&exited, WORKER_EXIT_WAIT).await;
             if !freed_cleanly {
@@ -4887,7 +4991,7 @@ impl ModelProcessPool {
                      a load starting now could still find the device occupied"
                 );
             }
-            self.after_worker_gone(model_id, freed_gpu_memory, "stopped");
+            self.after_worker_gone_charge(model_id, departed, "stopped");
         }
     }
 
@@ -4904,12 +5008,31 @@ impl ModelProcessPool {
     /// prevent, reachable by a route that fix never covered. A crash frees the
     /// card exactly as a graceful unload does; the pin's own clearing condition
     /// ("GPU memory freed") does not care which happened.
-    fn after_worker_gone(&self, model_id: &ModelId, freed_gpu_memory: bool, how: &str) {
-        self.release_vram_charge(model_id);
-        // The process is gone, so it holds neither device's memory. A CPU
-        // worker never had a VRAM charge and vice versa; releasing both is
-        // correct and keeps the two budgets from drifting on churn.
-        self.release_ram_charge(model_id);
+    fn after_worker_gone(&self, model_id: &ModelId, handle: &WorkerHandle, how: &str) {
+        self.after_worker_gone_charge(model_id, DepartedWorker::from(handle), how);
+    }
+
+    /// As [`Self::after_worker_gone`], for a caller whose handle is already
+    /// gone — `unload_model` waits for the process to exit, which outlives the
+    /// handle, and the figures have to be read before the drop.
+    fn after_worker_gone_charge(&self, model_id: &ModelId, departed: DepartedWorker, how: &str) {
+        let DepartedWorker {
+            freed_gpu_memory,
+            charged_mb,
+            charged_against_ram,
+        } = departed;
+        // Exactly what THIS worker was charged, not the model's whole entry: a
+        // replacement can already have been admitted under the same key while
+        // this one was dying, and it must keep its own charge.
+        //
+        // The process is gone, so it holds neither device's memory. A worker is
+        // charged against one budget or the other — `charged_against_ram` says
+        // which — so releasing from just that one keeps the two from drifting.
+        if charged_against_ram {
+            self.release_ram_charge(model_id, charged_mb);
+        } else {
+            self.release_vram_charge(model_id, charged_mb);
+        }
         tracing::info!(
             model_id = %model_id,
             device = if freed_gpu_memory { "gpu" } else { "cpu" },
@@ -5340,6 +5463,23 @@ mod tests {
         fake_worker_handle_on(dead_now, Some(CpuReason::Configured)).await
     }
 
+    /// Admit `mb` against the RAM budget and insert a worker that records
+    /// having been charged it — what a real spawn does, in the order it does
+    /// it. Tests that charge the pool but leave the handle at zero are testing
+    /// nothing, since the release subtracts the HANDLE's figure.
+    async fn admit_and_insert_cpu_worker(
+        p: &ModelProcessPool,
+        m: &ModelId,
+        mb: u64,
+        dead_now: bool,
+    ) -> Arc<WorkerHandle> {
+        assert!(p.admit_to_cpu(m, mb), "the model must be admitted");
+        let h = fake_worker_handle(dead_now).await;
+        h.charged_mb.store(mb, Ordering::Release);
+        p.workers.insert(m.clone(), h.clone());
+        h
+    }
+
     /// `placed_on_cpu_because: None` means the worker was holding the card.
     async fn fake_worker_handle_on(
         dead_now: bool,
@@ -5384,8 +5524,12 @@ mod tests {
             reader_handle,
             spawned_at: std::time::Instant::now(),
             last_used: AtomicU64::new(0),
+            charged_mb: AtomicU64::new(0),
+            charged_segments: std::sync::Mutex::new(Vec::new()),
             placed_on_cpu_because,
-            charged_against_ram: true,
+            // As production decides it: a worker holding the card is charged
+            // against the graphics budget, one on the processor against RAM.
+            charged_against_ram: placed_on_cpu_because.is_some(),
             gpu_estimate_mb: 0,
             gpu_layers_on_card: None,
         })
@@ -5400,10 +5544,8 @@ mod tests {
         let p = test_pool();
         p.set_ram_budget_mb(8000);
         let m = ModelId("dead-one".into());
-        assert!(p.admit_to_cpu(&m, 5000), "the model is admitted");
+        admit_and_insert_cpu_worker(&p, &m, 5000, true).await;
         assert_eq!(p.ram_committed_mb(), 5000);
-
-        p.workers.insert(m.clone(), fake_worker_handle(true).await);
         assert!(p.retire_dead_worker(&m).await, "a dead worker is retired");
 
         assert_eq!(
@@ -5416,6 +5558,96 @@ mod tests {
         assert!(p.workers.get(&m).is_none());
         // And the budget is genuinely usable again.
         assert!(p.admit_to_cpu(&ModelId("next".into()), 5000));
+    }
+
+    /// A replacement admitted while the corpse is still in the map keeps its
+    /// own charge when the corpse is evicted.
+    ///
+    /// The maps are keyed by model and `add_reserved` accumulates, so a release
+    /// that dropped the whole entry threw away a charge belonging to a worker
+    /// that is about to run. The direction is UNDER-charging — the node
+    /// believes it has more memory free than it has — which is the opposite of
+    /// gotchas #461/#467 and milder, but the same class of error.
+    ///
+    /// The window is real: `get_or_spawn` takes `spawn_lock`, charges, and is
+    /// then still loading the model when the dead handle's holder gets round to
+    /// evicting it. Closing it by taking `spawn_lock` in the eviction paths was
+    /// rejected — six of those callers are on the request hot path and that
+    /// lock is held for a whole model load.
+    #[tokio::test]
+    async fn evicting_a_dead_worker_leaves_a_replacements_charge_alone() {
+        let p = test_pool();
+        p.set_ram_budget_mb(20_000);
+        let m = ModelId("m".into());
+
+        let dead = admit_and_insert_cpu_worker(&p, &m, 5000, true).await;
+
+        // The replacement is admitted under the same key, and is still loading
+        // — so `workers` still holds the corpse.
+        assert!(p.admit_to_cpu(&m, 3000));
+        assert_eq!(
+            p.ram_committed_mb(),
+            8000,
+            "both charges stand while both exist"
+        );
+
+        p.evict_this_worker(&m, &dead, "test");
+
+        assert_eq!(
+            p.ram_committed_mb(),
+            3000,
+            "only the dead worker's own 5000 comes back — releasing the whole \
+             entry would leave the replacement running un-accounted"
+        );
+    }
+
+    /// A release can never credit back more than was charged. An under-run on
+    /// a `u64` wraps to a budget of 18 exabytes, which admits everything for
+    /// ever — a far worse failure than the one being fixed.
+    #[tokio::test]
+    async fn a_release_can_never_hand_back_more_than_was_taken() {
+        let p = test_pool();
+        p.set_ram_budget_mb(6000);
+        let m = ModelId("m".into());
+        assert!(p.admit_to_cpu(&m, 1000));
+
+        p.release_ram_charge(&m, 9_999_999);
+
+        assert_eq!(p.ram_committed_mb(), 0);
+        assert!(
+            !p.admit_to_cpu(&ModelId("huge".into()), 7000),
+            "the budget must still refuse what does not fit"
+        );
+    }
+
+    /// A worker charged against the card must not have its release taken off
+    /// the RAM budget, or the two drift apart on every eviction.
+    #[tokio::test]
+    async fn a_release_comes_off_the_budget_the_worker_was_charged_against() {
+        let p = test_pool();
+        p.set_ram_budget_mb(8000);
+        p.set_vram_budget_mb(8000);
+        let m = ModelId("on-the-card".into());
+
+        assert!(p.admit_to_gpu(&m, 4000));
+        let h = fake_worker_handle_on(true, None).await;
+        h.charged_mb.store(4000, Ordering::Release);
+        // A worker on the card is not charged against RAM.
+        assert!(!h.charged_against_ram);
+        p.workers.insert(m.clone(), h.clone());
+
+        // An unrelated model holds RAM at the same time.
+        let other = ModelId("in-ram".into());
+        assert!(p.admit_to_cpu(&other, 5000));
+
+        p.evict_this_worker(&m, &h, "test");
+
+        assert_eq!(p.vram_committed_mb(), 0, "the card's charge comes back");
+        assert_eq!(
+            p.ram_committed_mb(),
+            5000,
+            "and the RAM budget is untouched"
+        );
     }
 
     /// The control: a LIVE worker is never retired, and its charge stands.
@@ -5452,8 +5684,7 @@ mod tests {
         let p = test_pool();
         p.set_ram_budget_mb(8000);
         let m = ModelId("oomed".into());
-        assert!(p.admit_to_cpu(&m, 6000));
-        p.workers.insert(m.clone(), fake_worker_handle(false).await);
+        admit_and_insert_cpu_worker(&p, &m, 6000, false).await;
 
         let err = p.classify_worker_error(&m, "CUDA_ERROR_OUT_OF_MEMORY".into(), true);
         assert!(matches!(err, SwarmError::ServiceUnavailable(_)));
@@ -5541,9 +5772,7 @@ mod tests {
         let p = test_pool();
         p.set_ram_budget_mb(8000);
         let big = ModelId("big-and-dead".into());
-        assert!(p.admit_to_cpu(&big, 7000));
-        p.workers
-            .insert(big.clone(), fake_worker_handle(true).await);
+        admit_and_insert_cpu_worker(&p, &big, 7000, true).await;
 
         // A DIFFERENT model is refused while the corpse holds the budget.
         assert!(
@@ -5674,7 +5903,7 @@ mod tests {
         );
         free.store(26000, std::sync::atomic::Ordering::Relaxed);
         assert!(p.admit_to_cpu(&m, 13149), "18200 MB of headroom can");
-        p.release_ram_charge(&m);
+        p.release_ram_charge(&m, 13149);
     }
 
     #[test]
@@ -5763,35 +5992,34 @@ mod tests {
             !p.admit_to_cpu(&ModelId("other".into()), 1000),
             "5500 + 1000 exceeds 6000 — the second segment must still be visible"
         );
-        p.release_ram_charge(&m);
+        p.release_ram_charge(&m, p.ram_committed_mb());
         assert_eq!(p.ram_committed_mb(), 0, "releasing frees every segment");
         assert!(p.admit_to_cpu(&ModelId("other".into()), 1000));
     }
 
     /// A range is charged the first time it is asked for and not again — the
     /// spawn path records its own, or every later forward would re-charge it.
-    #[test]
-    fn a_layer_range_is_charged_once_and_forgotten_on_release() {
-        let p = test_pool();
-        let m = ModelId("m".into());
-        assert!(!p.segment_is_charged(&m, (0, 8)));
-        p.record_charged_segment(&m, (0, 8));
-        assert!(p.segment_is_charged(&m, (0, 8)));
+    #[tokio::test]
+    async fn a_layer_range_is_charged_once_and_forgotten_on_release() {
+        let h = fake_worker_handle(false).await;
+        assert!(!h.segment_is_charged((0, 8)));
+        h.record_charged_segment((0, 8), 100);
+        assert!(h.segment_is_charged((0, 8)));
         assert!(
-            !p.segment_is_charged(&m, (8, 16)),
+            !h.segment_is_charged((8, 16)),
             "a different range is a different charge"
         );
-        p.record_charged_segment(&m, (0, 8));
-        p.record_charged_segment(&m, (8, 16));
+        h.record_charged_segment((0, 8), 100);
+        h.record_charged_segment((8, 16), 50);
         assert_eq!(
-            p.charged_segments.get(&m).map(|v| v.len()),
+            h.charged_segments.lock().map(|v| v.len()).ok(),
             Some(2),
             "recording the same range twice must not double it"
         );
-        p.release_ram_charge(&m);
-        assert!(
-            !p.segment_is_charged(&m, (0, 8)),
-            "a retired worker's segments go with its charge"
+        assert_eq!(
+            h.charged_mb.load(Ordering::Acquire),
+            150,
+            "and must not charge for it twice either"
         );
     }
 
@@ -5816,7 +6044,7 @@ mod tests {
         let a = ModelId("a".into());
         assert!(p.admit_to_cpu(&a, 5000));
         assert!(!p.admit_to_cpu(&ModelId("b".into()), 2000));
-        p.release_ram_charge(&a);
+        p.release_ram_charge(&a, 5000);
         assert!(
             p.admit_to_cpu(&ModelId("b".into()), 2000),
             "the freed charge must be usable again"
@@ -6395,7 +6623,7 @@ mod admission_tests {
         let a = ModelId("a".into());
         assert!(p.admit_to_gpu(&a, 5000));
         assert!(!p.admit_to_gpu(&ModelId("b".into()), 2000));
-        p.release_vram_charge(&a);
+        p.release_vram_charge(&a, 5000);
         assert_eq!(p.vram_committed_mb(), 0);
         assert!(p.admit_to_gpu(&ModelId("b".into()), 2000));
     }

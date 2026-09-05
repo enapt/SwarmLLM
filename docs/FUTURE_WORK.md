@@ -125,7 +125,7 @@ a third-party node that cannot be observed from here, and it may simply have bee
 loaded. **That does not weaken the finding**: the point is that the system cannot
 tell the difference either, and re-picks it every time at the same wrong price.
 
-## A worker's memory charge is per MODEL, not per worker (open, 2026-09-05)
+## A worker's memory charge is per MODEL, not per worker (FIXED 2026-09-05)
 
 `ram_reserved_mb` / `vram_reserved_mb` are keyed by `ModelId`, and
 `add_reserved` ACCUMULATES — correct, since one worker can hold several
@@ -158,11 +158,49 @@ are on the request hot path, and that lock is held for the whole of a model
 load — minutes for a large model on a processor. Blocking an error path behind
 a load is a worse trade than a rare under-charge.
 
-**The real fix is per-worker accounting**: record what each spawn charged on the
-`WorkerHandle` (`charged_mb`, beside the existing `gpu_estimate_mb`) and have
-the release subtract that rather than removing the key. That also makes
-`charge_additional_segment`'s increments attributable, which the current
-whole-key release cannot express. Worth doing next time this area is open.
+**Fixed by per-worker accounting**, as anticipated here. `WorkerHandle` carries
+`charged_mb` (the spawn's admission charge plus every additional segment charged
+to it) and `charged_segments` (the ranges it has paid for); `release_reserved`
+subtracts rather than dropping the key, removing the entry only once it reaches
+zero. `after_worker_gone` reads both off the departing handle and takes them off
+whichever budget `charged_against_ram` names — so a release can no longer come
+off the budget the worker was never charged against.
+
+Four details worth keeping:
+
+- **The segment list moved onto the handle too.** Keyed by model it outlived its
+  worker, so a replacement asked for a range its predecessor had paid for was
+  waved through unweighed — the same defect one level down, which the whole-key
+  release had been hiding by clearing the list.
+- **The subtraction saturates.** An under-run on a `u64` wraps to a budget of 18
+  exabytes and admits everything for ever, which is far worse than the leak
+  being fixed. Pinned by `a_release_can_never_hand_back_more_than_was_taken`.
+- **`unload_model` reads the figures BEFORE dropping the handle** — it then
+  waits for the process to exit, which outlives the handle. That is what
+  `DepartedWorker` is for.
+- **The test helper mirrors a real spawn** (`admit_and_insert_cpu_worker`):
+  charging the pool while leaving the handle at zero tests nothing now that the
+  release subtracts the handle's figure, and three existing tests had exactly
+  that shape until this landed.
+
+Verified by reverting `release_reserved` to the old whole-key removal:
+`evicting_a_dead_worker_leaves_a_replacements_charge_alone` goes red and the
+rest of the pool suite stays green — they assert the release happens at all,
+which both forms do.
+
+## `r134_receiver_applies_diff_and_advances_generation` is load-sensitive (open, 2026-09-05)
+
+Failed once inside a full-suite run that was sharing the box with a
+`clippy --all-targets` build, and passed 3/3 on an idle box immediately
+afterwards, plus in isolation. It builds two complete `SharedState` instances
+with their own temp databases and drains channels with `try_recv`, which is the
+shape that goes wrong when the machine is busy rather than when the code is.
+
+Not investigated further because nothing depended on it, but worth knowing
+before anyone attributes a red CI run to their own change: check whether the
+runner was loaded, and re-run it alone. If it recurs, the `try_recv` drain is
+where to look — a broadcast that has not been delivered yet reads identically
+to one that was never sent.
 
 ## The RAM headroom clamp has a floor that can never refuse (open, 2026-09-04)
 

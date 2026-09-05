@@ -1284,6 +1284,31 @@ silently break at the wire if duplicated:
   did not prevent this; applying it deliberately, as a checklist over the new
   path's siblings, is what caught it within hours.
 
+  **A worker's charge is released by SUBTRACTING what THAT worker owed**
+  (2026-09-05). `WorkerHandle::charged_mb` records the spawn's admission charge
+  plus every range `charge_additional_segment` adds; `charged_segments` records
+  the ranges. `release_reserved` subtracts and removes the key only at zero.
+  **Why**: `ram_reserved_mb` / `vram_reserved_mb` are keyed by `ModelId` and
+  `add_reserved` accumulates — right, because one worker can hold several
+  segments — so a release that dropped the key could not say "only this
+  worker's share". Several workers' lifetimes overlap under one id: a
+  replacement is admitted and charged while the corpse is still in `workers`,
+  and dropping the key discarded the replacement's charge, leaving it running
+  un-accounted. That is UNDER-charging, the opposite direction from #461/#467
+  and milder, but the same class.
+  Taking `spawn_lock` in the eviction paths would also close it and is the
+  wrong trade — six of those callers are on the request hot path and that lock
+  is held for a whole model load, minutes on a processor.
+  Three things a change must keep. **The subtraction saturates**: an under-run
+  wraps a `u64` budget to 18 exabytes and admits everything for ever. **It
+  comes off the budget the worker was charged against** (`charged_against_ram`),
+  or the two drift apart on churn. And **`unload_model` reads the figures before
+  dropping the handle** — it waits for the process to exit afterwards, which
+  outlives the handle; `DepartedWorker` carries them across.
+  A test that charges the pool but leaves the handle's figure at zero now
+  asserts nothing; `admit_and_insert_cpu_worker` does what a spawn does, in the
+  order it does it.
+
   **A worker that DIED gives its budget back too** (2026-09-04, gotcha #461).
   `ModelProcessPool::retire_dead_worker` is the single answer to "this worker's
   process is gone": under `spawn_lock`, `remove_if(dead)` then
