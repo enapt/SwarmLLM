@@ -211,16 +211,19 @@ impl SplitModel {
         (self.kv_budget_bytes, self.kv_bytes_per_token)
     }
 
-    /// The KV budget as the card can honour it NOW, for a decision about to
-    /// take device memory: the load-time figure capped by what the KV cache
-    /// already holds (`live_bytes` in the store, `cached_bytes` of prefix-cache
+    /// The KV budget as the device can honour it NOW, for a decision about to
+    /// take memory: the load-time figure capped by what the KV cache already
+    /// holds (`live_bytes` in the store, `cached_bytes` of prefix-cache
     /// snapshots) plus what the device has left free, less a margin. See
     /// `kv_budget::budget_reconciled_with_device` for why the load-time figure
-    /// alone over-promised by ~2 GB on an 8 GB card.
+    /// alone over-promised by ~2 GB on an 8 GB card — and, on the processor,
+    /// let a worker keep filling a cache sized for a third of the layers it
+    /// had ended up holding (gotcha #462).
     ///
     /// Same contract as [`Self::kv_budget`]: `None` means unknown and admits
-    /// everything. A device that cannot report its memory (the processor, a
-    /// driver that will not say) leaves the load-time budget as it was.
+    /// everything. A device that cannot report its memory (a driver that will
+    /// not say, a machine whose totals read zero) leaves the load-time budget
+    /// as it was.
     pub(crate) fn kv_budget_now(&self, live_bytes: u64, cached_bytes: u64) -> (Option<u64>, u64) {
         let Some(budget) = self.kv_budget_bytes else {
             return (None, self.kv_bytes_per_token);
@@ -241,7 +244,12 @@ impl SplitModel {
                 budget_now_mb = reconciled / (1024 * 1024),
                 live_mb = live_bytes / (1024 * 1024),
                 cached_mb = cached_bytes / (1024 * 1024),
-                "DIAG: KV budget reconciled with the card — less room than the load-time figure"
+                device = if self.device.is_cpu() {
+                    "processor"
+                } else {
+                    "card"
+                },
+                "DIAG: KV budget reconciled with the device — less room than the load-time figure"
             );
         }
         (Some(reconciled), self.kv_bytes_per_token)

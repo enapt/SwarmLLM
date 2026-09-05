@@ -1219,6 +1219,21 @@ silently break at the wire if duplicated:
   where the release before had served them slowly. **A guard that can see a
   reclaimable tenant must be able to reclaim it, or it is stricter than the
   guard it replaced.**
+  **The reconciliation covers the PROCESSOR too** (2026-09-04, gotcha #462).
+  `device_free_and_total_bytes` answers for `Device::Cpu` from sysinfo's
+  `available_memory` (cached 250 ms — every caller is already off the
+  per-token path), so a CPU worker's budget is reconciled exactly as a card's
+  is. It had a CUDA arm and no processor arm, so `kv_budget_now` returned the
+  load-time figure unchanged and a CPU worker's ceiling stayed the grant the
+  daemon made at spawn, for life: it could not see a second worker start, the
+  machine fill, or **its own weights grow** when repeated local-standby
+  failovers took it from 12 to 29 of a 48-layer model — the process was killed
+  and a reply that had already streamed 238 tokens over ~10 minutes was lost.
+  `available`, never `free`: reclaimable page cache is memory this process can
+  have. **A reconciliation written for one device is not device-independent
+  because its arithmetic is — grep the "cannot say" arm and ask which
+  population lands there.** Here it was every processor-only node.
+
   **The budget is reconciled with the CARD at every decision that takes
   device memory** (2026-09-03): `SplitModel::kv_budget_now(live, cached)` =
   `min(load-time budget, live + cached + free_now − margin)`, `free_now` from

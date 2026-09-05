@@ -125,6 +125,59 @@ a third-party node that cannot be observed from here, and it may simply have bee
 loaded. **That does not weaken the finding**: the point is that the system cannot
 tell the difference either, and re-picks it every time at the same wrong price.
 
+## The RAM headroom clamp has a floor that can never refuse (open, 2026-09-04)
+
+`RamBudget::from_machine` computes
+
+```rust
+live_headroom_mb = (available_mb / 100 * FREE_RAM_HEADROOM_PCT).max(total_mb / 4)
+```
+
+and `allows` then tests `estimate_mb <= live_headroom_mb`. The `total_mb / 4`
+floor means that term can never refuse anything smaller than a quarter of the
+machine — 4 GB on a 16 GB node, 8 GB on 32 GB — **however little memory is
+actually free**. Since that term is the whole anti-swap guard (the other term,
+`cap_mb`, is a configured ceiling and knows nothing about the machine's real
+state), a node under genuine memory pressure admits every ordinary model and
+every incremental segment charge exactly as an idle one does.
+
+The floor is not a mistake; it is inherited. In `b52ad7d0` it clamped the
+**cap**, computed once at startup, and its comment is right for that job:
+"already-loaded models count as unavailable, so allow the budget to reach
+beyond what is free at this instant — it is a steady-state ceiling, not a
+point-in-time reading." When the figure became `live_headroom_mb`, consulted at
+every admission against a per-admission estimate, the question changed from
+"what ceiling should this node carry" to "can the machine absorb this much
+more, now" — and the floor answers the first question, not the second.
+
+Raised by report #007's author as the likely reason nothing was ever refused
+before their worker died. **They are probably right about the floor being inert
+and wrong that it was the cause** — the arithmetic in gotcha #462 shows the
+top-ups they saw would have passed the cap test regardless — so this is a real
+looseness rather than a diagnosed defect.
+
+Not changed, for two reasons worth stating. Removing the floor tightens
+admission on every CPU node in the swarm on the strength of a hypothesis that
+cannot be tested from here, and the failure mode of getting it wrong is
+"refuses models that would have fitted", which is what
+`raising_the_context_no_longer_costs_a_model_its_place_on_the_gpu` and the
+2026-08-21 CPU-guard work were about. And what `available_memory` actually
+reports differs by platform — Linux counts reclaimable page cache, macOS
+compresses and purges — so the floor may be doing real work on exactly the
+machine that reported this.
+
+**What would settle it**: on the reporting node, log `available_mb`,
+`total_mb`, `live_headroom_mb` and `cap_mb` at each admission across a session
+that fills memory, and check whether `0.7 × available` ever drops below
+`total / 4` while the machine is still healthy. If it does not, the floor is
+dead weight and can go; if it does, the floor is load-bearing on macOS and the
+live term needs a platform-aware source instead.
+
+Related: gotcha #462 fixed the binding half of report #007 — the worker's own
+KV ceiling is now reconciled with free system memory at every decision, so a
+filling machine produces a 503 that re-routes rather than an OOM-killed
+process. This entry is the remaining looseness in the *daemon-side* admission.
+
 ## A local admission refusal does not teach the planner (open, 2026-09-04)
 
 Reported live on v0.3.153 in `SwarmLLM_PipelineMemoryAwareness_20260904.md`: a

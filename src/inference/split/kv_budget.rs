@@ -150,8 +150,21 @@ pub(crate) fn device_free_margin_bytes(total_bytes: u64) -> u64 {
 /// which is what lets [`admit_prompt`]'s evict-then-fit arithmetic hold
 /// against it exactly as it does against the load-time budget.
 ///
-/// Never larger than the budget: the card having room does not license the
+/// Never larger than the budget: the device having room does not license the
 /// cache to take more than the loader set aside for it.
+///
+/// **The processor needs this as much as the card does, and did not have it**
+/// (gotcha #462). A CPU worker's budget comes from the daemon at spawn —
+/// "whatever of this node's RAM budget nothing else has claimed" — and nothing
+/// revisited it afterwards, so it could not see a second worker starting, the
+/// rest of the machine growing, or the worker's OWN weights growing when a
+/// failover handed it more layers. Reported from a 16 GB processor-only Mac
+/// mini: one request's repeated local-standby failovers took a worker from 12
+/// to 29 of a 48-layer model while its cache went on filling against the
+/// ceiling it had been given for 12, and the process was killed — losing a
+/// generation that had already streamed 238 tokens over ~10 minutes. With the
+/// reconciliation the same worker refuses (503, re-routed) as the machine
+/// fills, which is the outcome the budget was written to produce.
 pub(crate) fn budget_reconciled_with_device(
     budget_bytes: u64,
     live_bytes: u64,
@@ -165,9 +178,17 @@ pub(crate) fn budget_reconciled_with_device(
     budget_bytes.min(ours_plus_free.saturating_sub(device_free_margin_bytes(total_bytes)))
 }
 
-/// `(free, total)` bytes on the CUDA device `device` lives on, or `None` for
-/// any other device or when the driver cannot say. A driver call taking
-/// microseconds; `cudaMemGetInfo` under cudarc's name.
+/// `(free, total)` bytes of the memory `device` allocates out of, or `None`
+/// when it cannot be read.
+///
+/// CUDA: `cudaMemGetInfo` under cudarc's name, a driver call taking
+/// microseconds. Processor: the machine's own memory, cached briefly (see
+/// [`system_free_and_total_bytes`]).
+///
+/// **The processor arm is not an afterthought.** Without it a CPU worker's
+/// budget was the load-time prediction for ever, which is precisely the
+/// failure `budget_reconciled_with_device` exists to prevent — see its own
+/// doc, and gotcha #462.
 pub(crate) fn device_free_and_total_bytes(device: &candle_core::Device) -> Option<(u64, u64)> {
     #[cfg(feature = "candle-cuda")]
     if let candle_core::Device::Cuda(dev) = device {
@@ -178,8 +199,48 @@ pub(crate) fn device_free_and_total_bytes(device: &candle_core::Device) -> Optio
             .ok()
             .map(|(free, total)| (free as u64, total as u64));
     }
+    if matches!(device, candle_core::Device::Cpu) {
+        return system_free_and_total_bytes();
+    }
     let _ = device;
     None
+}
+
+/// How long a system-memory reading is reused before it is taken again.
+///
+/// `mem_get_info` is a driver call costing microseconds; a system-memory
+/// refresh reads `/proc/meminfo` (or the mach equivalent), which is cheap but
+/// not free. Every caller of the reconciliation is already off the per-token
+/// path — `ensure_room_for_prompt`, `snapshot_positions_that_fit`, and the
+/// per-chunk guard, which itself only runs on a growth-quantum boundary — so
+/// a short window costs nothing and bounds the syscall rate under a prefill
+/// that crosses many quanta.
+const SYSTEM_MEMORY_TTL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// `(available, total)` bytes of system memory, or `None` if unreadable.
+///
+/// `available`, not `free`: reclaimable page cache is memory this process can
+/// have, and reading `free` would make a healthy machine look exhausted.
+fn system_free_and_total_bytes() -> Option<(u64, u64)> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<(std::time::Instant, u64, u64)>> = Mutex::new(None);
+    // A poisoned lock only means some other reader panicked mid-refresh; the
+    // reading is a cache, so recovering it is strictly better than propagating.
+    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, free, total)) = *guard {
+        if at.elapsed() < SYSTEM_MEMORY_TTL {
+            return Some((free, total));
+        }
+    }
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let total = sys.total_memory();
+    let free = sys.available_memory();
+    if total == 0 {
+        return None;
+    }
+    *guard = Some((std::time::Instant::now(), free, total));
+    Some((free, total))
 }
 
 /// Sequence positions this forward will NEWLY reserve, or 0 if it fits inside
@@ -659,6 +720,56 @@ mod tests {
             admit_prompt(now, 0, cached, per_token, 6000),
             PromptAdmission::EvictBytes(_)
         ));
+    }
+
+    /// Gotcha #462: the processor had no live reading, so a CPU worker's KV
+    /// budget was the load-time prediction for the whole life of the worker.
+    /// `budget_reconciled_with_device` was already correct — it was simply
+    /// never given a figure to reconcile against on this device.
+    #[test]
+    fn the_processor_can_now_say_how_much_memory_is_left() {
+        let (free, total) = device_free_and_total_bytes(&candle_core::Device::Cpu)
+            .expect("the machine can report its own memory");
+        assert!(total > 0, "a total of zero means unreadable, not empty");
+        assert!(
+            free <= total,
+            "available ({free}) cannot exceed total ({total})"
+        );
+    }
+
+    /// The reading is cached, so a prefill crossing many growth quanta does
+    /// not read `/proc/meminfo` once per quantum.
+    #[test]
+    fn the_system_memory_reading_is_reused_within_its_window() {
+        let a = system_free_and_total_bytes().expect("readable");
+        let b = system_free_and_total_bytes().expect("readable");
+        assert_eq!(a, b, "two reads inside the TTL must be the same reading");
+    }
+
+    /// The point of the processor arm: a worker whose machine has filled up
+    /// gets a smaller budget than it was handed at load, and so refuses (503,
+    /// re-routed) instead of growing its cache into memory that is not there.
+    #[test]
+    fn a_full_machine_shrinks_the_budget_it_was_given_at_load() {
+        let mb = 1024 * 1024u64;
+        let total = 16384 * mb; // a 16 GB Mac mini
+                                // The daemon granted 7000 MB of cache room at spawn, when the worker
+                                // held 12 of 48 layers. Two failovers later it holds 29, the machine
+                                // is nearly full, and the grant is no longer honourable.
+        let granted = 7000 * mb;
+        let live = 1200 * mb;
+        let roomy = budget_reconciled_with_device(granted, live, 0, 9000 * mb, total);
+        assert_eq!(roomy, granted, "control: a roomy machine changes nothing");
+
+        let tight = budget_reconciled_with_device(granted, live, 0, 400 * mb, total);
+        assert!(
+            tight < granted,
+            "a machine with 400 MB free must not honour a 7000 MB grant"
+        );
+        assert!(
+            tight <= live + 400 * mb,
+            "the cache may not be promised more than it holds plus what is free"
+        );
     }
 
     /// The margin is a share of the card with a floor: small cards keep at
