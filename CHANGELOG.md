@@ -52,13 +52,16 @@ developer box, which is why all of them shipped.
   weights are and how many layers were asked for, and points at running on the
   processor when the weights plainly do not fit — without claiming that as the
   cause when the figures are close, since a load can fail for other reasons.
-- **A node that had checked a model against its source poisoned its own
-  announcements of it.** When we replace a peer's claim about a piece with the
+- **A node that had checked a model against its source intermittently poisoned
+  its own announcements of it.** When we replace a peer's claim about a piece with the
   one we took from the model's origin, that changes what the announcement says
   — but its content stamp was left describing the old text, so every other node
   refused the announcement as inconsistent. The better informed a node was, the
   more of its announcements were thrown away, and the model's pieces then could
-  not be found at all. Seen live on two separate machines for the same model.
+  not be found at all. It came and went rather than sticking, because the next
+  announcement that needed no correction was written correctly again. Seen live
+  on two separate machines for the same model, and a listener put on the network
+  saw one refused within ninety seconds.
 - **The download speed shown for a model coming from a peer was the chunk
   size, not a speed.** A 32 MB piece arriving over 26 seconds was reported as
   33 MB/s rather than 1.3, and because the time remaining is worked out by

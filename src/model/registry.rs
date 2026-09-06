@@ -363,6 +363,14 @@ impl ModelRegistry {
         // a hash of this manifest's content and both the merge and the origin
         // override change that content.
         //
+        // The damage was INTERMITTENT rather than permanent, which is worth
+        // knowing when reading a log: the stale hash is written only on the
+        // registration where a correction actually fires, and the next
+        // registration that needs no correction rewrites it consistently. So a
+        // node flips in and out of gossiping something its peers refuse. A
+        // listener placed on the live swarm saw one model refused repeatedly
+        // while others from the same senders passed.
+        //
         // The override used to happen after the hash was settled, so the stored
         // manifest said one thing and authenticated another — and
         // `manifests_to_gossip` re-broadcasts this very object, so every peer
