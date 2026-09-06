@@ -689,7 +689,12 @@
         var msgEl = target.closest('.chat-msg');
         var contentEl = msgEl ? msgEl.querySelector('.msg-content') : null;
         if (contentEl) {
-          U.copyToClipboard(contentEl.textContent, {
+          // A rendered reply's `textContent` has had its markdown stripped —
+          // headings, bullets and emphasis all gone — so copy the source the
+          // model produced when the renderer kept it.
+          var rendered = msgEl.querySelector('.response-text');
+          var copyText = (rendered && rendered._rawText) || contentEl.textContent;
+          U.copyToClipboard(copyText, {
             btn: target,
             successLabel: I18n.t('actions.copied'),
             resetLabel: I18n.t('actions.copy'),

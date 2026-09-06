@@ -41,7 +41,8 @@ processor-only node.
   renderer for this existed in the codebase but nothing had ever called it, and
   the styles its output asked for did not exist either; both are now real, and
   a reply looks the same when a conversation is reopened as it did while it
-  streamed.
+  streamed. Copying a reply still gives you the markdown the model wrote, not
+  the formatting stripped out of it.
 
 ## [0.3.158-alpha] — 2026-09-05
 

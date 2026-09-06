@@ -430,9 +430,11 @@
           // Rendered the same way it was while streaming. Rendering only the
           // live stream would mean a reply that reformats itself into raw
           // markup the moment the session is reopened.
-          var mdHtml = '<div class="response-text md-body">' +
-            U.renderMarkdown(String(msg.content || '').replace(/^\n+/, '')) + '</div>';
+          var mdSrc = String(msg.content || '').replace(/^\n+/, '');
+          var mdHtml = '<div class="response-text md-body">' + U.renderMarkdown(mdSrc) + '</div>';
           el = U.appendMessageToDOM(msg.role, mdHtml, true, msgOpts);
+          var rendered = el && el.querySelector('.response-text');
+          if (rendered) rendered._rawText = mdSrc;
         } else {
           // A user's own message stays literal: someone who typed **like this**
           // meant those asterisks.
@@ -737,7 +739,9 @@
         if (finalTextNode) {
           finalTextNode._mdQueued = false;
           finalTextNode.classList.add('md-body');
-          finalTextNode.innerHTML = U.renderMarkdown(fullContent.replace(/^\n+/, ''));
+          var finalSrc = fullContent.replace(/^\n+/, '');
+          finalTextNode._rawText = finalSrc;
+          finalTextNode.innerHTML = U.renderMarkdown(finalSrc);
         }
       }
 
@@ -862,7 +866,11 @@
       var run = function() {
         el._mdQueued = false;
         el.classList.add('md-body');
-        el.innerHTML = U.renderMarkdown(el._pendingMd.replace(/^\n+/, ''));
+        var src = el._pendingMd.replace(/^\n+/, '');
+        // Keep the source beside the rendering: Copy hands back what the model
+        // actually wrote, not the markup stripped of its markdown.
+        el._rawText = src;
+        el.innerHTML = U.renderMarkdown(src);
       };
       if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
       else run();
