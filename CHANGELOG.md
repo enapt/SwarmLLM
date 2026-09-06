@@ -2,6 +2,47 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+Six fixes from two reports about the dashboard and the chat tab, both from a
+processor-only node.
+
+### Fixed
+
+- **The memory figure on the dashboard now counts the models.** It was measured
+  from the daemon's own process, and models do not run there — each one is a
+  separate worker process — so the number shown was the daemon's baseline of a
+  few hundred MB while a loaded 14B held gigabytes next door. The reading is now
+  the node plus every model worker, with the two parts named in the tooltip.
+  Nothing in the tree had ever measured a worker's memory.
+- **"Your contribution" no longer reads 0% on a machine with no graphics card.**
+  The bar was worked out inside the display code for the graphics card, in two
+  of its three branches — and the branch it was missing from is the one a
+  processor-only machine takes, so those nodes showed nothing however hard they
+  were working. It is now decided once, for every kind of machine: the card
+  where inference runs on it, otherwise memory.
+- **The update banner no longer covers the controls at the top of the page.**
+  Both the banner and the header are pinned to the top of the window, and the
+  banner won. That is not brief: applying an update waits for work already in
+  progress to finish, up to ten minutes, so on a busy node the buttons stayed
+  hidden for that whole time. The page now makes room for it. The same fix
+  covers the other banner that behaved this way.
+- **The chat tab can stop a reply.** There was no way to interrupt one — the
+  send button was simply disabled until the reply finished, which on a
+  processor-only node can be minutes. Stopping also tells the node to stop, so
+  it gets its processor back rather than finishing an answer nobody is waiting
+  for. Whatever had already arrived is kept.
+- **Scrolling up during a reply no longer fights back.** The view was forced to
+  the bottom on every token, so rereading an earlier message while an answer
+  streamed was not possible. It now follows the reply only while you are
+  already at the bottom.
+- **Replies are formatted instead of showing their markup.** Headings, lists,
+  tables, bold and code blocks arrived as literal `###`, `**` and `-`. A
+  renderer for this existed in the codebase but nothing had ever called it, and
+  the styles its output asked for did not exist either; both are now real, and
+  a reply looks the same when a conversation is reopened as it did while it
+  streamed.
+
 ## [0.3.158-alpha] — 2026-09-05
 
 Three fixes, all from one report about a Qwen3 model that would not answer.

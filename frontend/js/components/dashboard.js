@@ -641,6 +641,10 @@
             var vramEl = document.getElementById('node-vram');
 
             var vramLabel = document.getElementById('vram-label');
+            // The VRAM gauge always shows the card, whether or not inference is
+            // bound to it. What the card is doing is a separate question from
+            // what this node is contributing, which is decided once below.
+            App.dashboard._setGauge('vram-gauge', vramTotal > 0 ? (vramUsed / vramTotal * 100) : 0);
             if (hw.gpu_inference) {
               if (vramLabel) vramLabel.textContent = I18n.t('hw.vram');
               // ALWAYS show live VRAM (hw.gpu_vram_used_mb, read from
@@ -675,23 +679,11 @@
               } else {
                 vramEl.title = I18n.t('hw.vram_live_only_tip', { used: U.formatMB(vramUsed) });
               }
-              var vramPct = vramTotal > 0 ? (vramUsed / vramTotal * 100) : 0;
-              App.dashboard._setGauge('vram-gauge', vramPct);
-              document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
-              document.getElementById('vram-bar').className = U.resourceBarClass(vramPct, 'cyan');
-              App.dashboard._updateContribution(vramPct, 'vram');
             } else {
+              // The card is present but idle — driver baseline only.
               if (vramLabel) vramLabel.textContent = I18n.t('hw.vram_idle');
-              // CPU mode: contribution bar reflects RAM usage by loaded models,
-              // not GPU VRAM (which is idle — driver baseline only).
               vramEl.textContent = U.formatMB(vramUsed) + ' / ' + U.formatMB(vramTotal);
               vramEl.title = I18n.t('hw.vram_idle_tip');
-              var ramForModels = hw.process_rss_mb || 0;
-              var ramPctForBar = hw.total_ram_mb > 0 ? (ramForModels / hw.total_ram_mb * 100) : 0;
-              App.dashboard._setGauge('vram-gauge', vramTotal > 0 ? (vramUsed / vramTotal * 100) : 0);
-              document.getElementById('vram-bar').style.width = ramPctForBar.toFixed(1) + '%';
-              document.getElementById('vram-bar').className = U.resourceBarClass(ramPctForBar, 'cyan');
-              App.dashboard._updateContribution(ramPctForBar, 'ram');
             }
           }
         } else {
@@ -702,8 +694,35 @@
             gpuBadge.removeAttribute('title');
           }
           document.getElementById('node-vram').textContent = '\u2014';
-          document.getElementById('vram-bar').style.width = '0%';
         }
+
+        // ── Your contribution ─────────────────────────────────────────────
+        // ONE decision, taken after the readouts above rather than inside
+        // them. It used to be made in two of the three display branches, and
+        // the branch it was missing from is the one a machine with no
+        // graphics card takes — so a processor-only node, the hardware this
+        // project explicitly supports, showed a flat 0% however hard it was
+        // working, and `_updateContribution` was never called at all
+        // (report #011).
+        //
+        // The bar tracks whichever memory the work actually uses: the card
+        // when inference is bound to it, otherwise everything SwarmLLM has
+        // resident — daemon plus its model workers — against total RAM.
+        var contribPct = 0;
+        var contribKind = 'ram';
+        if (hw.gpu_inference && hw.gpu_vram_mb) {
+          contribKind = 'vram';
+          contribPct = (hw.gpu_vram_used_mb || 0) / hw.gpu_vram_mb * 100;
+        } else if (hw.total_ram_mb > 0) {
+          contribPct = (hw.process_rss_mb || 0) / hw.total_ram_mb * 100;
+        }
+        contribPct = Math.max(0, Math.min(100, contribPct));
+        var contribBar = document.getElementById('vram-bar');
+        if (contribBar) {
+          contribBar.style.width = contribPct.toFixed(1) + '%';
+          contribBar.className = U.resourceBarClass(contribPct, 'cyan');
+        }
+        App.dashboard._updateContribution(contribPct, contribKind);
         document.getElementById('node-cpu').textContent = hw.cpu_name ? hw.cpu_name + ' ' + I18n.t('hw.cores', { cores: hw.cpu_cores }) : I18n.t('hw.unknown_cpu');
 
         if (hw.total_ram_mb) {
@@ -714,9 +733,20 @@
           var ramEl = document.getElementById('ram-used');
           ramEl.textContent = U.formatMB(ramUsed);
           if (processRss > 0) {
-            ramEl.title = U.formatMB(processRss) + '\n\n' +
-              I18n.t(S._gpuInference ? 'hw.ram_tip_gpu' : 'hw.ram_tip_cpu') +
-              '\n\n' + U.formatMB(hw.used_ram_mb || 0) + ' / ' + U.formatMB(hw.total_ram_mb);
+            // Name the two parts. This figure is the daemon PLUS every model
+            // worker; until report #011 it was the daemon alone, so anyone who
+            // remembers the old number needs to see where the rest came from.
+            var ramLines = [U.formatMB(processRss)];
+            if (hw.worker_count) {
+              ramLines.push(I18n.t('hw.ram_split', {
+                count: hw.worker_count,
+                daemon: U.formatMB(hw.daemon_rss_mb || 0),
+                workers: U.formatMB(hw.worker_rss_mb || 0)
+              }));
+            }
+            ramLines.push(I18n.t(S._gpuInference ? 'hw.ram_tip_gpu' : 'hw.ram_tip_cpu'));
+            ramLines.push(U.formatMB(hw.used_ram_mb || 0) + ' / ' + U.formatMB(hw.total_ram_mb));
+            ramEl.title = ramLines.join('\n\n');
           }
           var ramPct = hw.total_ram_mb > 0 ? (ramUsed / hw.total_ram_mb * 100) : 0;
           document.getElementById('ram-bar').style.width = ramPct.toFixed(1) + '%';

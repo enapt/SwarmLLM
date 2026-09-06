@@ -942,6 +942,12 @@
               <button class="btn btn-ghost text-lg" id="image-upload-btn" data-i18n-title="chat.attach_image" data-i18n-aria-label="chat.attach_image" title="Attach image (or paste/drag)" aria-label="Attach image" style="margin-right:4px">&#128247;</button>
               <textarea id="chat-input" placeholder="Type your message... (Enter to send, Shift+Enter for new line)" data-i18n-placeholder="chat.placeholder" rows="1"></textarea>
               <button class="btn btn-primary" id="send-btn" data-i18n="chat.send">Send</button>
+              <!-- Its own button rather than a repurposed Send: `updateChatHeader`
+                   rewrites the send button's contents whenever the session's model
+                   changes, which can happen mid-reply, and a button that is
+                   sometimes Send and sometimes Stop is one an impatient click can
+                   get wrong. -->
+              <button class="btn btn-stop" id="stop-btn" data-i18n="chat.stop" data-i18n-title="chat.stop_tip" title="Stop generating" hidden>Stop</button>
             </div>
             <div style="max-width:740px;margin:4px auto 0">
               <div class="token-counter" id="token-counter" data-i18n-title="chat.word_counter_tip" title="Word count for your current message"></div>

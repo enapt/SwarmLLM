@@ -273,7 +273,9 @@
     if (document.getElementById('update-banner')) return;
     var banner = document.createElement('div');
     banner.id = 'update-banner';
-    banner.className = 'update-banner';
+    // `top-banner` is what `measureTopBanners` counts, so the header is
+    // pushed down instead of covered.
+    banner.className = 'update-banner top-banner';
     var text = I18n.t('update.available', { from: data.current_version, to: data.latest_version });
     banner.innerHTML = '<span>' + U.escapeHtml(text) + '</span>';
 

@@ -3390,8 +3390,73 @@ fn sysinfo_is_never_asked_to_describe_the_whole_machine() {
          `System::new_all()` and `refresh_all()` enumerate every process on the \
          box. Build a bare `System::new()` and refresh only what you read \
          (`refresh_memory`, `refresh_cpu_list`, `refresh_processes` scoped to \
-         one pid) — 182 ms against 0.43 ms when this was last measured.",
+         an explicit pid list) — 182 ms against 0.43 ms when this was last \
+         measured. Note that scoping NARROWLY is not the same as scoping to \
+         our own pid: see `the_node_memory_figure_counts_the_model_workers`.",
         offenders.join("\n  ")
+    );
+}
+
+/// The node's memory figure must count the model workers, not just the daemon.
+///
+/// The weights and the KV cache live in `swarmllm model-worker` subprocesses,
+/// so a figure built from `std::process::id()` alone is not a low estimate of
+/// this node's memory — it is blind to essentially all of it. The dashboard
+/// showed a few hundred MB on a machine whose resident 14B held gigabytes, and
+/// the "Your contribution" bar read 0% while the node was busy serving peers
+/// (report #011).
+///
+/// The pull the other way is real and is why this is pinned: the sibling guard
+/// above forbids a whole-machine scan because one cost 182 ms on a polled
+/// endpoint (gotcha #417), and the cheapest way to obey it is to measure one
+/// pid. Both rules hold at once only by naming an explicit pid LIST — this
+/// daemon plus `worker_pids()`.
+#[test]
+fn the_node_memory_figure_counts_the_model_workers() {
+    let src = std::fs::read_to_string(repo_root().join("src/api/admin.rs"))
+        .expect("cannot read src/api/admin.rs");
+    let body = fn_body(
+        &src,
+        "fn detect_hardware(shared_state: &crate::daemon::SharedState)",
+    )
+    .expect("detect_hardware not found — has it been renamed?");
+    let flat = statements(body)
+        .into_iter()
+        .map(|(_, l)| l)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        flat.contains("worker_pids()"),
+        "detect_hardware no longer asks the pool for its worker pids, so the \
+         memory it reports is the daemon's alone — which excludes the model \
+         weights and the KV cache, i.e. nearly all of it (report #011)."
+    );
+    assert!(
+        flat.contains("worker_rss_mb"),
+        "detect_hardware must report `worker_rss_mb` beside the total: the \
+         dashboard tooltip names the two parts, and a reader who remembers the \
+         old daemon-only figure needs to see where the rest came from."
+    );
+}
+
+/// Self-test for the guard above: it must fail on the shape it forbids.
+#[test]
+fn the_worker_memory_guard_catches_a_daemon_only_measurement() {
+    // The pre-#011 body, verbatim in shape: one pid, no pool involvement.
+    let planted =
+        "fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Value {\n\
+         let pid = sysinfo::Pid::from_u32(std::process::id());\n\
+         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);\n\
+         let process_rss_mb = sys.process(pid).map(|p| p.memory()).unwrap_or(0);\n}\n";
+    let body = fn_body(
+        planted,
+        "fn detect_hardware(shared_state: &crate::daemon::SharedState)",
+    )
+    .expect("the planted function must be findable");
+    assert!(
+        !body.contains("worker_pids()"),
+        "the guard would not have caught the defect it exists for"
     );
 }
 

@@ -465,7 +465,9 @@
       var U = App.utils;
       var banner = document.createElement('div');
       banner.id = 'remote-dashboard-banner';
-      banner.className = 'remote-dashboard-banner';
+      // `top-banner`: see `measureTopBanners`. This one wraps to 60vh, so
+      // it covers far more of the page than the update banner does.
+      banner.className = 'remote-dashboard-banner top-banner';
 
       var text = document.createElement('span');
       // Name the address the DAEMON saw. Behind a subnet router or a container

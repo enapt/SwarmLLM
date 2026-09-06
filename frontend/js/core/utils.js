@@ -959,6 +959,157 @@
   }
 
   // Export utilities
+  // ── Markdown ──────────────────────────────────────────────────────────
+  // A small, deliberately partial renderer: headings, fenced code, tables,
+  // lists, bold/italic/inline code. Every fragment goes through `escapeHtml`
+  // first, so the output is safe to assign to innerHTML.
+  //
+  // It lives here rather than in a component because two surfaces want it.
+  // It was written inside claude-code.js and never called from anywhere — dead
+  // from the day it landed, and its class names had no CSS at all — so the
+  // chat tab rendered every reply as raw markup instead (report #012).
+  function renderMarkdown(text) {
+    var lines = text.split('\n');
+    var html = '';
+    var inTable = false;
+    var inList = false;
+    // Close with the tag we opened. Ordered lists used to be emitted as <ul>,
+    // and the numbers have already been stripped from the text by that point,
+    // so the reader lost them altogether.
+    var listTag = 'ul';
+    var inCode = false;
+    var codeLang = '';
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+
+      // Fenced code blocks
+      if (line.match(/^```/)) {
+        if (inCode) {
+          html += '</code></pre>';
+          inCode = false;
+        } else {
+          if (inTable) { html += '</tbody></table>'; inTable = false; }
+          if (inList) { html += '</' + listTag + '>'; inList = false; }
+          codeLang = line.substring(3).trim();
+          html += '<pre class="md-code"><code' + (codeLang ? ' data-lang="' + escapeHtml(codeLang) + '"' : '') + '>';
+          inCode = true;
+        }
+        continue;
+      }
+      if (inCode) {
+        html += escapeHtml(line) + '\n';
+        continue;
+      }
+
+      // Table rows (| col | col |)
+      if (line.match(/^\|(.+)\|$/)) {
+        // Skip separator rows (| --- | --- |). `|` has to be in the class:
+        // without it this matched only a ONE-column table, so every real
+        // table rendered its separator as a row of literal dashes.
+        if (line.match(/^\|[\s\-:|]+\|$/)) continue;
+        if (inList) { html += '</' + listTag + '>'; inList = false; }
+        var cells = line.split('|').slice(1, -1);
+        if (!inTable) {
+          html += '<table class="md-table"><thead><tr>';
+          cells.forEach(function(c) { html += '<th>' + inlineMarkdown(c.trim()) + '</th>'; });
+          html += '</tr></thead><tbody>';
+          inTable = true;
+        } else {
+          html += '<tr>';
+          cells.forEach(function(c) { html += '<td>' + inlineMarkdown(c.trim()) + '</td>'; });
+          html += '</tr>';
+        }
+        continue;
+      }
+      if (inTable) { html += '</tbody></table>'; inTable = false; }
+
+      // Unordered list items (* item, - item)
+      if (line.match(/^[\s]*[\*\-]\s+/)) {
+        if (inList && listTag !== 'ul') { html += '</' + listTag + '>'; inList = false; }
+        if (!inList) { html += '<ul class="md-list">'; inList = true; listTag = 'ul'; }
+        html += '<li>' + inlineMarkdown(line.replace(/^[\s]*[\*\-]\s+/, '')) + '</li>';
+        continue;
+      }
+      // Ordered list items (1. item)
+      if (line.match(/^[\s]*\d+\.\s+/)) {
+        if (inList && listTag !== 'ol') { html += '</' + listTag + '>'; inList = false; }
+        if (!inList) { html += '<ol class="md-list md-ol">'; inList = true; listTag = 'ol'; }
+        html += '<li>' + inlineMarkdown(line.replace(/^[\s]*\d+\.\s+/, '')) + '</li>';
+        continue;
+      }
+      if (inList) { html += '</' + listTag + '>'; inList = false; }
+
+      // Headers
+      var hMatch = line.match(/^(#{1,3})\s+(.+)/);
+      if (hMatch) {
+        var lvl = hMatch[1].length;
+        html += '<h' + (lvl + 2) + ' class="md-heading">' + inlineMarkdown(hMatch[2]) + '</h' + (lvl + 2) + '>';
+        continue;
+      }
+
+      // Regular line
+      html += (line ? '<p>' + inlineMarkdown(line) + '</p>' : '<br>');
+    }
+    if (inTable) html += '</tbody></table>';
+    if (inList) html += '</' + listTag + '>';
+    if (inCode) html += '</code></pre>';
+    return html;
+  }
+
+  // Inline markdown: bold, italic, inline code.
+  function inlineMarkdown(text) {
+    var s = escapeHtml(text);
+    s = s.replace(/`([^`]+)`/g, '<code class="md-inline-code">$1</code>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    return s;
+  }
+
+  // ── Top banners must not cover the header ─────────────────────────────
+  // A banner pinned to `top: 0` at z-index 10000 renders straight over
+  // `.app-header` (also fixed, `top: 0`, z-index 100), hiding the controls in
+  // `.header-right` for as long as it is up. For the update banner that is not
+  // brief: `POST /api/admin/update/apply` returns immediately and the restart
+  // then waits for in-flight work to drain, up to ten minutes, so on a busy
+  // node the header stays covered for that whole window (report #011).
+  //
+  // The page therefore carries a `--top-banner-height`, and everything pinned
+  // below the banners measures from `--chrome-top`. It is recomputed FROM THE
+  // DOM rather than pushed by whoever created a banner: there are two banner
+  // types living in two different components today, and a third would
+  // otherwise have to remember. A MutationObserver sees them arrive and leave,
+  // a ResizeObserver sees them re-wrap, so no caller has an obligation it can
+  // forget.
+  var _topBannerRO = null;
+  var _topBannerInit = false;
+
+  function measureTopBanners() {
+    var els = document.querySelectorAll('.top-banner');
+    var total = 0;
+    for (var i = 0; i < els.length; i++) {
+      // `isConnected` covers the gap between a banner being detached and the
+      // observer running, so a stale entry can never hold the page down.
+      if (els[i].isConnected) total += els[i].offsetHeight;
+      if (_topBannerRO) _topBannerRO.observe(els[i]);
+    }
+    document.documentElement.style.setProperty('--top-banner-height', total + 'px');
+  }
+
+  function initTopBannerOffset() {
+    if (_topBannerInit || !document.body) return;
+    _topBannerInit = true;
+    if (window.ResizeObserver) {
+      _topBannerRO = new ResizeObserver(function() { measureTopBanners(); });
+    }
+    if (window.MutationObserver) {
+      new MutationObserver(function() { measureTopBanners(); })
+        .observe(document.body, { childList: true });
+    }
+    window.addEventListener('resize', measureTopBanners);
+    measureTopBanners();
+  }
+
   App.utils = {
     clientAddr: clientAddr,
     clientTrust: clientTrust,
@@ -995,10 +1146,18 @@
     readSseStream: readSseStream,
     getApiErrorMessage: getApiErrorMessage,
     peerColor: peerColor,
+    renderMarkdown: renderMarkdown,
+    inlineMarkdown: inlineMarkdown,
+    measureTopBanners: measureTopBanners,
+    initTopBannerOffset: initTopBannerOffset,
     modelApiUrl: function(modelId) {
       var parts = Array.prototype.slice.call(arguments, 1);
       var base = '/api/admin/models/' + encodeURIComponent(modelId);
       return parts.length ? base + '/' + parts.join('/') : base;
     },
   };
+
+  // Scripts sit at the end of <body>, so the body exists here and a banner
+  // shown during startup is covered from the first paint.
+  initTopBannerOffset();
 })();

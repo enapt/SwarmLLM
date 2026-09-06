@@ -287,6 +287,7 @@
 
     // Chat
     on('send-btn', 'click', function() { App.chat.send(); });
+    on('stop-btn', 'click', function() { App.chat.stopGeneration(); });
     on('chat-input', 'keydown', function(e) { App.chat.handleKey(e); });
     // Image upload
     on('image-upload-btn', 'click', function() {

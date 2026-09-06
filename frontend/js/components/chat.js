@@ -426,7 +426,16 @@
           // Legacy: older CC messages with separate toolHtml
           var legacyHtml = '<div class="response-text">' + U.escapeHtml(msg.content) + '</div>' + msg.toolHtml;
           el = U.appendMessageToDOM(msg.role, legacyHtml, true, msgOpts);
+        } else if (msg.role === 'assistant') {
+          // Rendered the same way it was while streaming. Rendering only the
+          // live stream would mean a reply that reformats itself into raw
+          // markup the moment the session is reopened.
+          var mdHtml = '<div class="response-text md-body">' +
+            U.renderMarkdown(String(msg.content || '').replace(/^\n+/, '')) + '</div>';
+          el = U.appendMessageToDOM(msg.role, mdHtml, true, msgOpts);
         } else {
+          // A user's own message stays literal: someone who typed **like this**
+          // meant those asterisks.
           el = U.appendMessageToDOM(msg.role, msg.content, false, msgOpts);
         }
         // Restore response time for assistant messages
@@ -438,7 +447,7 @@
           target.appendChild(timerEl);
         }
       });
-      App.chat.scrollToBottom();
+      App.chat.scrollToBottom(true);
     },
 
     send: async function() {
@@ -500,9 +509,9 @@
       contentEl.innerHTML = '<span class="typing-indicator">' + U.escapeHtml(I18n.t('chat.thinking')) + '</span>';
       if (assistantAvatarEl) assistantAvatarEl.classList.add('avatar-thinking');
 
-      S.isStreaming = true;
-      var _sendBtn = document.getElementById('send-btn');
-      if (_sendBtn) _sendBtn.disabled = true;
+      App.chat._setStreamingUI(true);
+      // Sending re-attaches the view to the end: the reader has just acted.
+      App.chat.scrollToBottom(true);
       var startTime = performance.now();
       if (!session.model) {
         session.model = model;
@@ -561,9 +570,7 @@
           if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
         }
         if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); if (!assistantAvatarEl.classList.contains('avatar-error')) assistantAvatarEl.classList.add('avatar-done'); }
-        S.isStreaming = false;
-        var _sendBtnCC = document.getElementById('send-btn');
-        if (_sendBtnCC) _sendBtnCC.disabled = false;
+        App.chat._setStreamingUI(false);
         return;
       }
 
@@ -587,12 +594,24 @@
       var reasoningContent = '';
       var streamUsage = null;
       var routeInfo = null;
+      var stoppedByUser = false;
+
+      // Passing our own signal also opts this request out of `authFetch`'s
+      // 30s default deadline (it only installs one when the caller supplies
+      // none) — which is correct for a generation request: the daemon serves
+      // these outside its own TimeoutLayer precisely because a long prefill on
+      // a processor legitimately takes minutes, and a client-invented deadline
+      // would throw away a reply the node had finished computing (report #009).
+      var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      App.chat._abort = controller;
+      var aborted = function() { return !!(controller && controller.signal.aborted); };
 
       try {
         var resp = await App.authFetch('/v1/chat/completions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
+          signal: controller ? controller.signal : undefined,
         });
 
         // Capture the route before consuming the body — the headers are gone
@@ -613,9 +632,8 @@
           contentEl.innerHTML = U.escapeHtml(friendlyMsg) + hintHtml + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">' + U.escapeHtml(I18n.t('actions.retry')) + '</button></div>';
           contentEl.classList.add('chat-error');
           if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
-          S.isStreaming = false;
-          var _sb = document.getElementById('send-btn');
-          if (_sb) _sb.disabled = false;
+          App.chat._setStreamingUI(false);
+          App.chat._abort = null;
           return;
         }
 
@@ -652,7 +670,7 @@
                 textNode.className = 'response-text';
                 contentEl.appendChild(textNode);
               }
-              textNode.textContent = fullContent.replace(/^\n+/, '');
+              App.chat._renderReply(textNode, fullContent);
               App.chat.scrollToBottom();
             }
           }
@@ -669,12 +687,17 @@
         // Deliberately ONE retry with no delay — the first attempt has already
         // waited out the load, and looping would turn a genuinely broken model
         // into an invisible request storm.
-        if (!cleared && !fullContent && !reasoningContent) {
+        // `!aborted()` is load-bearing: a reply cancelled before its first
+        // token satisfies every other term here, so without it pressing Stop
+        // silently sent the whole request again — the one outcome a Stop
+        // button must never have.
+        if (!aborted() && !cleared && !fullContent && !reasoningContent) {
           try {
             var retryResp = await App.authFetch('/v1/chat/completions', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(body),
+              signal: controller ? controller.signal : undefined,
             });
             if (retryResp.ok && retryResp.body) {
               // The retry is the request that actually produced the answer, so
@@ -687,17 +710,43 @@
           }
         }
 
-        if (!cleared && !fullContent && !reasoningContent) {
+        if (!aborted() && !cleared && !fullContent && !reasoningContent) {
           contentEl.textContent = I18n.t('chat.no_response');
           contentEl.classList.add('chat-error');
           if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
         }
       } catch (e) {
-        if (!fullContent) {
+        // A cancel arrives here as an AbortError. It is not a failure and must
+        // not be dressed as one — the user asked for it, and any text already
+        // streamed is kept and saved below.
+        var wasAborted = aborted() || (e && e.name === 'AbortError');
+        if (wasAborted) {
+          stoppedByUser = true;
+        } else if (!fullContent) {
           contentEl.textContent = I18n.t('chat.connection_failed');
           contentEl.classList.add('chat-error');
           if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
         }
+      }
+      if (aborted()) stoppedByUser = true;
+
+      // The queued frame would land eventually, but the message is saved and
+      // may be re-rendered from history before it does. Settle it here.
+      if (fullContent) {
+        var finalTextNode = contentEl.querySelector('.response-text');
+        if (finalTextNode) {
+          finalTextNode._mdQueued = false;
+          finalTextNode.classList.add('md-body');
+          finalTextNode.innerHTML = U.renderMarkdown(fullContent.replace(/^\n+/, ''));
+        }
+      }
+
+      // Stopped before a single token arrived: the bubble is still showing the
+      // typing indicator, so say what happened rather than leaving it spinning
+      // for ever.
+      if (stoppedByUser && !cleared && !fullContent && !reasoningContent) {
+        contentEl.textContent = I18n.t('chat.stopped_no_output');
+        contentEl.classList.add('chat-stopped');
       }
 
       // Clear avatar animation on completion — pop if successful
@@ -706,6 +755,9 @@
       var timerEl = document.createElement('div');
       timerEl.className = 'msg-timer';
       timerEl.textContent = I18n.t('chat.response_time', { seconds: elapsed });
+      // Mark a cancelled reply, so a short answer that was cut off is not
+      // mistaken later for one the model chose to end.
+      if (stoppedByUser) timerEl.textContent += ' \u00b7 ' + I18n.t('chat.stopped');
       // Throughput alongside wall-clock. Elapsed time alone cannot be compared
       // between a one-word reply and a long one, so it says little about how
       // the swarm is performing; tokens per second can. Uses the usage figures
@@ -748,9 +800,8 @@
         App.chat.flashSession(session.id);
       }
 
-      S.isStreaming = false;
-      var _sendBtnEnd = document.getElementById('send-btn');
-      if (_sendBtnEnd) _sendBtnEnd.disabled = false;
+      App.chat._setStreamingUI(false);
+      App.chat._abort = null;
     },
 
     updateSessionTokens: function(session) {
@@ -765,9 +816,112 @@
       el.title = I18n.t('chat.session_tokens', { input: U.formatCompact(session.token_usage.input), output: U.formatCompact(session.token_usage.output) });
     },
 
-    scrollToBottom: function() {
+    // The AbortController for the reply currently streaming, or null.
+    _abort: null,
+
+    // ONE owner of "a reply is in flight", because the flag and the two
+    // buttons have to move together and there are four places that end a
+    // reply — the Claude Code branch, the HTTP-error branch, the normal
+    // completion, and a cancel. Each used to set `S.isStreaming` and re-enable
+    // the send button by hand, which is three chances to leave the UI stuck.
+    _setStreamingUI: function(on) {
+      S.isStreaming = !!on;
+      var send = document.getElementById('send-btn');
+      var stop = document.getElementById('stop-btn');
+      if (send) { send.disabled = !!on; send.hidden = !!on; }
+      if (stop) stop.hidden = !on;
+    },
+
+    // Stop the reply that is streaming now.
+    //
+    // Aborting the fetch is not merely a client-side tidy-up: dropping the
+    // response closes the SSE channel, and `sse_tx.closed()` on the server
+    // flips the request's cancel flag, which stops the prefill between layers
+    // and releases the KV cache. So this actually gives the node its cores
+    // back — which is the whole point on a processor-only machine where a
+    // reply can run for minutes.
+    //
+    // Whatever has already been streamed is kept: the user read it, and it is
+    // genuine model output.
+    stopGeneration: function() {
+      if (!App.chat._abort) return;
+      try { App.chat._abort.abort(); } catch (e) {}
+    },
+
+    // Render a reply as markdown into `el`, at most once per animation frame.
+    //
+    // The renderer walks the WHOLE reply each time and a token arrives every
+    // few milliseconds, so rendering per token is quadratic in the length of
+    // the answer — on a long reply that is real work on the main thread, for
+    // frames nobody sees. Coalescing makes it linear in frames instead.
+    _renderReply: function(el, text) {
+      if (!el) return;
+      el._pendingMd = text;
+      if (el._mdQueued) return;
+      el._mdQueued = true;
+      var run = function() {
+        el._mdQueued = false;
+        el.classList.add('md-body');
+        el.innerHTML = U.renderMarkdown(el._pendingMd.replace(/^\n+/, ''));
+      };
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+      else run();
+    },
+
+    // Is the reader at the end of the conversation?
+    //
+    // A few lines of slack rather than an exact match: someone within a line
+    // of the bottom is still following, and browsers report fractional scroll
+    // metrics at non-integer zoom levels, where an exact comparison never
+    // holds.
+    _atBottom: function(container) {
+      if (!container) return true;
+      return (container.scrollHeight - container.scrollTop - container.clientHeight) <= 48;
+    },
+
+    // Track whether the reader is following the reply, from their OWN scrolls.
+    //
+    // Deliberately not measured inside `scrollToBottom`: by the time that runs
+    // the new token is already in the DOM, so the distance to the bottom has
+    // just grown by however much arrived and a reader who IS following looks
+    // like one who is not. A scroll listener sees the intent instead — our own
+    // programmatic scroll lands at the bottom and so re-arms it.
+    _bindScrollTracking: function() {
       var container = document.getElementById('chat-messages');
-      if (container) container.scrollTop = container.scrollHeight;
+      if (!container || container._stickBound) return;
+      container._stickBound = true;
+      container.addEventListener('scroll', function() {
+        S.chatStickToBottom = App.chat._atBottom(container);
+      }, { passive: true });
+    },
+
+    // `force` is for the moments the reader has just acted — sending a message,
+    // switching session — where going to the end is what they asked for.
+    // Everything else follows only while they are already at the bottom;
+    // scrolling up used to be fought back down at the next token, which on a
+    // processor-only node where a reply streams for minutes made the history
+    // unreadable for the whole reply (report #012).
+    scrollToBottom: function(force) {
+      var container = document.getElementById('chat-messages');
+      if (!container) return;
+      App.chat._bindScrollTracking();
+      if (force) S.chatStickToBottom = true;
+      else if (!S.chatStickToBottom) return;
+      // `instant`, overriding the container's `scroll-behavior: smooth`.
+      //
+      // Smooth is animated, and an animation fires scroll events from every
+      // intermediate position — which the tracker above would read as the
+      // reader scrolling away, latching "not following" a few pixels into the
+      // first token's scroll and never following again. Jumping puts the
+      // container at the bottom before any event fires, so the event confirms
+      // following rather than cancelling it. It is also what the reader wants
+      // per token: an animation restarted every few milliseconds never
+      // arrives.
+      if (container.scrollTo) {
+        container.scrollTo({ top: container.scrollHeight, behavior: 'instant' });
+      } else {
+        container.scrollTop = container.scrollHeight;
+      }
     },
 
     saveSessions: function() {

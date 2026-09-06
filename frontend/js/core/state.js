@@ -18,6 +18,9 @@ window.App = {
     _swarmModelSort: 'problems', // initialized below after App is defined, using App.MODEL_SORT_KEY
     _shardView: 'list', // initialized below after App is defined, using App.SHARD_VIEW_KEY
     isStreaming: false,
+    // Whether the chat view should follow new tokens. Flipped by the reader's
+    // own scrolling — see App.chat._bindScrollTracking.
+    chatStickToBottom: true,
     currentModel: '',
     currentSessionId: null,
     sessions: {},

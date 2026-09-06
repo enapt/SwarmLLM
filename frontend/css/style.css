@@ -156,6 +156,14 @@
   --ring: rgba(109,139,255,0.45);
   --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   --header-height: 52px;
+  /* How much vertical space the fixed top banners are taking right now, kept
+     in step with the DOM by `initTopBannerOffset` in core/utils.js. Anything
+     pinned below them measures from `--chrome-top`, never from
+     `--header-height` alone: both banners are `position: fixed; top: 0` at a
+     z-index far above the header, so without this they render straight over
+     the header's controls (report #011). */
+  --top-banner-height: 0px;
+  --chrome-top: calc(var(--header-height) + var(--top-banner-height));
   --sidebar-width: 240px;
   /* Icon sizing scale — use these for any icon/toggle/arrow */
   --icon-xs: 12px;
@@ -304,7 +312,7 @@ a:hover { color: var(--accent-hover); }
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   position: fixed;
-  top: 0;
+  top: var(--top-banner-height);
   left: 0;
   right: 0;
   z-index: 100;
@@ -456,8 +464,8 @@ a:hover { color: var(--accent-hover); }
 /* ---- App Layout ---- */
 .app-layout {
   display: flex;
-  height: calc(100vh - var(--header-height));
-  margin-top: var(--header-height);
+  height: calc(100vh - var(--chrome-top));
+  margin-top: var(--chrome-top);
 }
 
 /* ---- Sidebar (inline on desktop, overlay on mobile) ---- */
@@ -485,7 +493,7 @@ a:hover { color: var(--accent-hover); }
 /* Float mode: fixed overlay used on non-chat tabs */
 .sidebar.sidebar-float {
   position: fixed;
-  top: var(--header-height);
+  top: var(--chrome-top);
   left: 0;
   bottom: 0;
   z-index: 150;
@@ -752,7 +760,6 @@ a:hover { color: var(--accent-hover); }
 .hw-mode-note-icon { flex-shrink: 0; font-size: var(--fs-xl); line-height: 1; margin-top: 1px; }
 .hw-mode-note-body { flex: 1; }
 .hw-mode-note-body strong { color: var(--text-primary); display: block; margin-bottom: 2px; font-size: var(--fs-md); }
-.hw-mode-note[hidden] { display: none; }
 
 /* Header-integrated mode popover: badge + caret + hover/focus flyout */
 .hw-mode-wrap {
@@ -789,7 +796,6 @@ a:hover { color: var(--accent-hover); }
   filter: drop-shadow(0 4px 12px rgba(0,0,0,0.35));
   animation: app-tooltip-in 0.08s ease-out;
 }
-.app-tooltip[hidden] { display: none; }
 .app-tooltip-body {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -1725,7 +1731,7 @@ a:hover { color: var(--accent-hover); }
   /* Sidebar: fixed overlay on mobile */
   .sidebar {
     position: fixed;
-    top: var(--header-height);
+    top: var(--chrome-top);
     left: 0;
     bottom: 0;
     z-index: 150;
@@ -1889,6 +1895,15 @@ a:hover { color: var(--accent-hover); }
 }
 
 /* ---- Buttons ---- */
+/* `hidden` is a UA-stylesheet `display: none`, which ANY author rule that sets
+   `display` beats — so `.btn { display: inline-flex }` made a button carrying
+   the attribute render normally, and the chat Stop control sat next to Send at
+   all times. This had already been worked around per-element twice
+   (`.hw-mode-note`, `.app-tooltip`); one rule covers every future use.
+   `:not([hidden])` selectors are unaffected — they only match when it is
+   absent. */
+[hidden] { display: none !important; }
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -1916,6 +1931,11 @@ a:hover { color: var(--accent-hover); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-lg { height: 40px; padding: 0 24px; font-size: var(--fs-xl); border-radius: var(--radius); }
 .btn-sm { height: 28px; padding: 0 10px; font-size: var(--fs-sm); }
+/* Chat's stop control. `.btn-danger` on its own is NOT a general variant —
+   it is only defined scoped inside the expanded model card — so this carries
+   its own colours rather than silently rendering as a plain grey button. */
+.btn-stop { background: var(--red-dim); border-color: rgba(239,68,68,0.35); color: var(--red-text); font-weight: 600; }
+.btn-stop:hover { background: rgba(239,68,68,0.22); border-color: var(--red-text); }
 .btn-outline { background: transparent; border-color: var(--border); box-shadow: var(--shadow-xs); }
 .btn-outline:hover { background: var(--bg-hover); border-color: var(--border-light); }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-secondary); box-shadow: none; }
@@ -4339,6 +4359,43 @@ textarea.pool-code-input { min-height: 4.5em; }
   margin: 0; background: transparent; border: none; border-top: 1px solid var(--border);
 }
 .response-text { white-space: pre-wrap; word-wrap: break-word; display: block; }
+
+/* ── Rendered markdown ─────────────────────────────────────────────────
+   Output of `U.renderMarkdown`. Models format their answers in markdown by
+   default, and until report #012 the chat tab showed the markup instead of
+   the formatting: the renderer existed but nothing called it, and these
+   classes had no styling anywhere in the tree.
+
+   `.md-body` turns OFF the `pre-wrap` above, because once the text is real
+   markup the line breaks are carried by the elements. Paragraphs then have
+   no margin of their own — a blank source line already becomes a <br>, so
+   giving <p> a margin as well doubles every gap. */
+.response-text.md-body { white-space: normal; }
+.md-body > p { margin: 0; }
+.md-heading { font-size: var(--fs-lg); font-weight: 600; line-height: 1.3; margin: 12px 0 4px; }
+.md-body > .md-heading:first-child { margin-top: 0; }
+.md-list { margin: 4px 0 4px 20px; padding: 0; list-style: disc; }
+.md-list.md-ol { list-style: decimal; }
+.md-list li { margin: 2px 0; }
+.md-inline-code {
+  background: var(--bg-tertiary); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 1px 5px;
+  font-family: var(--font-mono); font-size: 0.92em;
+}
+.md-code {
+  background: var(--bg-tertiary); border: 1px solid var(--border);
+  border-radius: var(--radius-md); padding: 10px 12px; margin: 8px 0;
+  overflow-x: auto;
+}
+.md-code code { font-family: var(--font-mono); font-size: var(--fs-sm); white-space: pre; }
+/* `display: block` so a wide table scrolls inside the bubble rather than
+   stretching it past the message column. */
+.md-table { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; max-width: 100%; }
+.md-table th, .md-table td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; }
+.md-table th { background: var(--bg-tertiary); font-weight: 600; }
+
+/* A reply the reader stopped. Not an error — they asked for it. */
+.chat-stopped { color: var(--text-muted); font-style: italic; }
 /* Multiple response segments get spacing between them */
 .response-text + .response-text { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
 

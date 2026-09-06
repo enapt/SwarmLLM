@@ -1669,23 +1669,49 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
     // of this endpoint's cost (gotcha #417). Every other sysinfo site in the
     // tree already refreshes narrowly; this was the lone outlier.
     //
-    // `refresh_processes` is scoped to our OWN pid because the only per-process
-    // fact wanted is this node's RSS. Widening any of these to a full scan
-    // silently puts the 182 ms back.
+    // `refresh_processes` is scoped to an EXPLICIT pid list — this daemon plus
+    // its model workers — never a full scan. `ProcessesToUpdate::All` is what
+    // cost the 182 ms; naming a handful of pids costs a `/proc` read each.
+    //
+    // The workers have to be in that list because the model weights and the KV
+    // cache are not in this process. Reading only `std::process::id()` reported
+    // a few hundred MB — the daemon's own baseline — while a resident 14B held
+    // gigabytes next door, so the figure was not merely low, it was blind to
+    // the thing it was meant to measure (report #011).
     let pid = sysinfo::Pid::from_u32(std::process::id());
+    let worker_pids: Vec<sysinfo::Pid> = shared_state
+        .model_process_pool
+        .worker_pids()
+        .into_iter()
+        .map(sysinfo::Pid::from_u32)
+        .collect();
+    let mut watched = Vec::with_capacity(worker_pids.len() + 1);
+    watched.push(pid);
+    watched.extend(worker_pids.iter().copied());
+
     let mut sys = System::new();
     sys.refresh_memory();
     sys.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&watched), true);
 
     let total_ram_mb = sys.total_memory() / (1024 * 1024);
     let used_ram_mb = sys.used_memory() / (1024 * 1024);
 
-    // Per-process memory (RSS) — actual memory this node is using
-    let process_rss_mb = sys
-        .process(pid)
-        .map(|p| p.memory() / (1024 * 1024))
-        .unwrap_or(0);
+    let rss_mb_of = |p: sysinfo::Pid| -> u64 {
+        sys.process(p)
+            .map(|pr| pr.memory() / (1024 * 1024))
+            .unwrap_or(0)
+    };
+
+    // A worker that exited between listing the pids and reading them simply
+    // contributes nothing, which is the right answer rather than an error.
+    let daemon_rss_mb = rss_mb_of(pid);
+    let worker_rss_mb: u64 = worker_pids.iter().copied().map(rss_mb_of).sum();
+
+    // What the dashboard shows as "this node's memory": everything SwarmLLM has
+    // resident, wherever it put it. The split is reported alongside so the
+    // tooltip can say which part is the models.
+    let process_rss_mb = daemon_rss_mb.saturating_add(worker_rss_mb);
 
     let cpu_name = sys
         .cpus()
@@ -1765,6 +1791,9 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
         "total_ram_mb": total_ram_mb,
         "used_ram_mb": used_ram_mb,
         "process_rss_mb": process_rss_mb,
+        "daemon_rss_mb": daemon_rss_mb,
+        "worker_rss_mb": worker_rss_mb,
+        "worker_count": worker_pids.len(),
         "available_disk_mb": available_disk_mb,
         "total_disk_mb": total_disk_mb,
         "used_disk_mb": used_disk_mb,

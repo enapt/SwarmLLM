@@ -5107,6 +5107,26 @@ impl ModelProcessPool {
         self.workers.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// The process ids of every worker whose process is still ours to name.
+    ///
+    /// **Why this exists**: the model weights and the KV cache do not live in
+    /// the daemon — they live in these subprocesses — so any measurement of
+    /// "how much memory is this node using" that reads only
+    /// `std::process::id()` is guaranteed to miss all of it. The dashboard did
+    /// exactly that and reported a few hundred MB while a resident 14B held
+    /// gigabytes (report #011).
+    ///
+    /// A worker the reader actor has already seen die is excluded: its process
+    /// is gone, and a PID the OS has since handed to something else would
+    /// otherwise be measured as ours.
+    pub fn worker_pids(&self) -> Vec<u32> {
+        self.workers
+            .iter()
+            .filter(|e| !e.value().dead.load(Ordering::Acquire))
+            .filter_map(|e| e.value().child.as_ref().and_then(|c| c.id()))
+            .collect()
+    }
+
     /// Every worker this node has resident, as `/v1/status` and `swarmllm
     /// status` show it — sorted by model so two readings line up.
     ///
