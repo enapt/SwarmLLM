@@ -4,12 +4,23 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-Ten fixes. Six came from two reports about the dashboard and the chat tab,
+Twelve fixes. Six came from two reports about the dashboard and the chat tab,
 both from a processor-only node; the last two were found by reading the live
 node's own log.
 
 ### Fixed
 
+- **A model the graphics card refuses now runs on the processor instead of not
+  running at all.** A node whose model failed to load logged a warning and
+  carried on serving nothing — a poor trade against running the same model more
+  slowly, and the sharded path has fallen back for many releases. One retry, only
+  when the card was actually asked for, and a refusal that describes the request
+  rather than the device is not retried. Both failures are kept in the message.
+- **Loading a second model no longer fails on the backend rather than the
+  model.** llama.cpp's backend can only be started once per process and nothing
+  released the previous one, so the second model ever loaded — a HuggingFace
+  download after one was already up, or simply the second download — failed with
+  a message about the backend that said nothing about the model.
 - **A model that fails to load now says what the numbers were.** llama.cpp
   reports every load failure with the same six words and nothing else, so a
   corrupt file, an unsupported architecture and weights that simply do not fit
@@ -165,7 +176,7 @@ a browser.
 
 ## [0.3.156-alpha] — 2026-09-05
 
-Ten fixes. Two came from a tester's reports; the other eight were found by
+Twelve fixes. Two came from a tester's reports; the other eight were found by
 checking whether those fixes were actually complete — two of them were not.
 
 ### Fixed

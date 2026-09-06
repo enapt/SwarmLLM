@@ -132,6 +132,16 @@ pub(crate) fn load_failure_message(
     msg
 }
 
+/// What to say when the card refused a model and the processor did too.
+///
+/// Both failures are kept. If the processor also refuses it the card was never
+/// the problem, and the first error — which carries the memory figures — is the
+/// one that explains it; reporting only the second would throw that away and
+/// leave "null result from llama cpp" as the whole story again.
+pub(crate) fn both_devices_refused(first: &SwarmError, second: &SwarmError) -> String {
+    format!("{first} — and the processor refused it too: {second}")
+}
+
 impl ModelExecutor {
     pub fn new() -> Self {
         Self {
@@ -160,19 +170,13 @@ impl ModelExecutor {
         not(feature = "llama"),
         allow(unreachable_code, unused_variables, clippy::needless_return)
     )]
-    pub fn load_model(&mut self, path: &Path, gpu_layers: i32) -> Result<(), SwarmError> {
+    fn load_model_once(&mut self, path: &Path, gpu_layers: i32) -> Result<(), SwarmError> {
         #[cfg_attr(not(feature = "llama"), allow(unused_variables))]
         let n_gpu_layers: u32 = if gpu_layers < 0 {
             999
         } else {
             gpu_layers as u32
         };
-        if !path.exists() {
-            return Err(SwarmError::Inference(format!(
-                "Model file not found: {}",
-                path.display()
-            )));
-        }
 
         // Prefer friendly name from GGUF metadata, fall back to filename stem
         let name = extract_gguf_name(path).unwrap_or_else(|| {
@@ -219,6 +223,20 @@ impl ModelExecutor {
             use llama_cpp_2::llama_backend::LlamaBackend;
             use llama_cpp_2::model::params::LlamaModelParams;
             use llama_cpp_2::model::LlamaModel;
+
+            // Release whatever a previous load left behind, BEFORE initialising.
+            //
+            // `LlamaBackend::init` is a process-wide one-shot: it flips a static
+            // and returns `BackendAlreadyInitialized` on a second call, and only
+            // dropping the backend clears it. This executor is shared state
+            // (`SharedState::executor`), so the second model ever loaded into it
+            // — a HuggingFace download after a `-m` model, or simply the second
+            // download — failed at `init` with a message about the backend that
+            // says nothing about the model. Model first: it was created from
+            // this backend.
+            self.model = None;
+            self.backend = None;
+            self.loaded = false;
 
             // Initialize backend (redirect logs to tracing)
             let backend = LlamaBackend::init()
@@ -301,6 +319,53 @@ impl ModelExecutor {
         );
 
         Ok(())
+    }
+
+    /// Load a GGUF model, falling back to the processor if the card refuses it.
+    ///
+    /// A node that cannot load its model serves nothing at all — the daemon logs
+    /// "running without inference" and carries on as a peer with no answers.
+    /// That is a poor trade against running the same model slowly: the sharded
+    /// path has fallen back to the processor for many releases
+    /// (`admit_to_gpu` → `effective_gpu_layers`), and this path, which is what
+    /// `-m` and a HuggingFace download use, never learned to.
+    ///
+    /// One retry, only when graphics offload was actually asked for, and the
+    /// original failure is kept in the message: if the processor also refuses
+    /// it, the card was not the problem and the first error is the informative
+    /// one.
+    pub fn load_model(&mut self, path: &Path, gpu_layers: i32) -> Result<(), SwarmError> {
+        // Checked once, before either attempt: a missing file is not something
+        // the processor can fix, and retrying it would report it twice.
+        if !path.exists() {
+            return Err(SwarmError::Inference(format!(
+                "Model file not found: {}",
+                path.display()
+            )));
+        }
+        let first = match self.load_model_once(path, gpu_layers) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        // `0` is already the processor, so there is nowhere to fall back to —
+        // and a refusal that describes the BUILD or the REQUEST is reproduced
+        // identically there, so retrying it only reports it twice and loses its
+        // type on the way. Same reasoning as
+        // `pipeline::every_holder_would_refuse`, which is deliberately narrow
+        // for the same reason: a `Validation` describes the ask, anything else
+        // might be about this device.
+        if gpu_layers == 0 || matches!(first, SwarmError::Validation(_)) {
+            return Err(first);
+        }
+        tracing::warn!(
+            path = %path.display(),
+            gpu_layers,
+            error = %first,
+            "Could not load this model onto the graphics card — retrying on the \
+             processor. It will answer, more slowly."
+        );
+        self.load_model_once(path, 0)
+            .map_err(|second| SwarmError::Inference(both_devices_refused(&first, &second)))
     }
 
     /// Check if a model is loaded and ready for inference.
@@ -1135,7 +1200,25 @@ fn extract_gguf_name(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_llama_context, load_failure_message};
+    use super::{both_devices_refused, effective_llama_context, load_failure_message};
+
+    /// Falling back to the processor must not hide why the card refused.
+    #[test]
+    fn both_failures_survive_the_fallback() {
+        let card = SwarmError::Inference(load_failure_message(
+            "null result from llama cpp",
+            99,
+            Some(4800),
+            Some(4900),
+        ));
+        let cpu = SwarmError::Inference("Failed to load model: bad magic".into());
+        let m = both_devices_refused(&card, &cpu);
+        assert!(
+            m.contains("4900") && m.contains("4800"),
+            "keeps the figures: {m}"
+        );
+        assert!(m.contains("bad magic"), "keeps the processor's reason: {m}");
+    }
 
     /// The bare upstream message cannot tell a user why a load failed.
     #[test]

@@ -88,10 +88,25 @@ pub fn measured_gbps() -> Option<f32> {
         None => {
             let v = measure();
             *best = Some(v);
+            #[cfg(test)]
+            COLD_MEASUREMENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             v
         }
     }
 }
+
+/// How many times [`measured_gbps`] has actually measured, rather than
+/// answering from the cache.
+///
+/// Deliberately counts ONLY this function's cold path, not
+/// [`remeasure_keeping_the_best`]: the cold path runs at most once in a
+/// process, so a test can warm the cache and then assert the count never moves
+/// again — which no amount of parallel test traffic can perturb. Counting every
+/// measurement would make that assertion depend on what other tests happened to
+/// be doing.
+#[cfg(test)]
+pub(crate) static COLD_MEASUREMENTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Measure again and keep whichever figure is HIGHER.
 ///
@@ -206,13 +221,21 @@ mod tests {
     /// otherwise be paid on every capability broadcast.
     #[test]
     fn the_measurement_is_taken_once() {
+        // Assert the MECHANISM, not the clock. This used to allow the second
+        // call 50 ms, standing in for "it did not re-measure" — but a real
+        // measurement takes ~250 ms and a descheduled thread on a loaded
+        // machine can lose 50 ms doing nothing at all, so the test failed
+        // during a parallel run while the code was perfectly correct.
+        let _warm = measured_gbps();
+        let before = COLD_MEASUREMENTS.load(std::sync::atomic::Ordering::Relaxed);
+
         let first = measured_gbps();
-        let start = Instant::now();
         let second = measured_gbps();
-        assert_eq!(first, second);
-        assert!(
-            start.elapsed().as_millis() < 50,
-            "second call re-measured; it must come from the cache"
+        assert_eq!(first, second, "the figure must be stable");
+        assert_eq!(
+            COLD_MEASUREMENTS.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "a warm call re-measured; it must come from the cache"
         );
     }
 
