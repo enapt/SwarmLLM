@@ -82,6 +82,56 @@ pub fn effective_llama_context(n_ctx_train: u32) -> u32 {
     effective.min(n_ctx_train as usize) as u32
 }
 
+/// What to say when llama.cpp refuses to load a model.
+///
+/// Upstream returns "null result from llama cpp" for every load failure, so the
+/// message alone cannot distinguish a corrupt file from an unsupported
+/// architecture from the weights not fitting on the card. The numbers that DO
+/// distinguish them are known at the call site — free graphics memory was
+/// enumerated moments earlier and the file's size is a `stat` away — so they
+/// belong in the error rather than only in a log line the reporter may not
+/// think to include.
+///
+/// Deliberately does NOT assert a cause. Free memory read before the load is
+/// evidence, not proof: another process can take it in between, and a model can
+/// fail to load for reasons that have nothing to do with size. It states the
+/// figures and names the most likely explanation when they support it, which is
+/// what lets the person reading decide.
+/// Only called from the `llama`-gated loader, so every default build reports
+/// this as dead and every default build is wrong about it (gotcha #264).
+#[cfg_attr(not(feature = "llama"), allow(dead_code))]
+pub(crate) fn load_failure_message(
+    upstream: &str,
+    n_gpu_layers: u32,
+    free_vram_mb: Option<u64>,
+    weights_mb: Option<u64>,
+) -> String {
+    let mut msg = format!("Failed to load model: {upstream}");
+    match (free_vram_mb, weights_mb) {
+        (Some(free), Some(weights)) => {
+            msg.push_str(&format!(
+                " (asked for {n_gpu_layers} layers on the graphics card; \
+                 {weights} MB of weights against {free} MB free)"
+            ));
+            // The weights are not the whole story — llama.cpp also allocates a
+            // compute buffer — so "does not fit" is claimed only with room to
+            // spare, not on a near miss.
+            if n_gpu_layers > 0 && weights >= free {
+                msg.push_str(
+                    ". The weights alone do not fit in the free graphics memory, \
+                     so this is very likely why. Run with --gpu-layers=0 to use \
+                     the processor, or a smaller quantisation.",
+                );
+            }
+        }
+        (Some(free), None) => {
+            msg.push_str(&format!(" ({free} MB of graphics memory free)"));
+        }
+        _ => {}
+    }
+    msg
+}
+
 impl ModelExecutor {
     pub fn new() -> Self {
         Self {
@@ -196,10 +246,35 @@ impl ModelExecutor {
                 "Backend capabilities"
             );
 
+            // The graphics memory free RIGHT NOW, and the file's size on disk.
+            //
+            // llama.cpp reports a failed load as "null result from llama cpp"
+            // and nothing else. That is the same message whether the file is
+            // corrupt, the architecture is unsupported, or — much the most
+            // common — the weights did not fit on the card. A reporter running
+            // an 8B Q4_K_M on a 6 GB card with every layer offloaded got that
+            // bare sentence and reasonably concluded the architecture was
+            // unsupported; the numbers that would have answered it were
+            // enumerated a few lines above and then thrown away.
+            let free_vram_mb: Option<u64> = devices
+                .iter()
+                .filter(|d| d.memory_total > 0)
+                .map(|d| (d.memory_free / (1024 * 1024)) as u64)
+                .max();
+            let weights_mb = std::fs::metadata(path)
+                .map(|m| m.len() / (1024 * 1024))
+                .ok();
+
             // Load model with GPU layer offloading
             let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
-            let model = LlamaModel::load_from_file(&backend, path, &model_params)
-                .map_err(|e| SwarmError::Inference(format!("Failed to load model: {e}")))?;
+            let model = LlamaModel::load_from_file(&backend, path, &model_params).map_err(|e| {
+                SwarmError::Inference(load_failure_message(
+                    &e.to_string(),
+                    n_gpu_layers,
+                    free_vram_mb,
+                    weights_mb,
+                ))
+            })?;
 
             tracing::info!(n_vocab = model.n_vocab(), "Model loaded into llama.cpp");
 
@@ -1060,7 +1135,39 @@ fn extract_gguf_name(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::effective_llama_context;
+    use super::{effective_llama_context, load_failure_message};
+
+    /// The bare upstream message cannot tell a user why a load failed.
+    #[test]
+    fn a_load_failure_carries_the_numbers_that_explain_it() {
+        // The reported case: an 8B Q4_K_M, every layer offloaded, 6 GB card.
+        let m = load_failure_message("null result from llama cpp", 99, Some(4800), Some(4900));
+        assert!(m.contains("4900"), "must name the weights: {m}");
+        assert!(m.contains("4800"), "must name the free memory: {m}");
+        assert!(
+            m.contains("do not fit"),
+            "when the weights alone exceed free memory, say so: {m}"
+        );
+        assert!(m.contains("--gpu-layers=0"), "must say what to do: {m}");
+
+        // A near miss must NOT claim a cause — llama.cpp also needs a compute
+        // buffer, so fitting on paper is not fitting.
+        let near = load_failure_message("null result from llama cpp", 99, Some(5000), Some(4900));
+        assert!(near.contains("4900") && near.contains("5000"));
+        assert!(
+            !near.contains("do not fit"),
+            "a near miss is not proof of the cause: {near}"
+        );
+
+        // Running on the processor: the card's memory explains nothing.
+        let cpu = load_failure_message("null result from llama cpp", 0, Some(100), Some(4900));
+        assert!(!cpu.contains("do not fit"), "not a GPU load: {cpu}");
+
+        // Nothing known: still returns the upstream text, never panics.
+        let bare = load_failure_message("null result from llama cpp", 99, None, None);
+        assert!(bare.contains("null result from llama cpp"));
+    }
+
     use crate::inference::split::DEFAULT_MAX_SEQ_LEN;
 
     /// The reported failure, as arithmetic. A Qwen3-8B declares 40,960 tokens;

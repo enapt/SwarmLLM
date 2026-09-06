@@ -4,12 +4,21 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-Nine fixes. Six came from two reports about the dashboard and the chat tab,
+Ten fixes. Six came from two reports about the dashboard and the chat tab,
 both from a processor-only node; the last two were found by reading the live
 node's own log.
 
 ### Fixed
 
+- **A model that fails to load now says what the numbers were.** llama.cpp
+  reports every load failure with the same six words and nothing else, so a
+  corrupt file, an unsupported architecture and weights that simply do not fit
+  on the card are indistinguishable. One reporter got that bare sentence for an
+  8B on a 6 GB card and reasonably concluded the architecture was unsupported.
+  The message now carries how much graphics memory was free, how large the
+  weights are and how many layers were asked for, and points at running on the
+  processor when the weights plainly do not fit — without claiming that as the
+  cause when the figures are close, since a load can fail for other reasons.
 - **A node that had checked a model against its source poisoned its own
   announcements of it.** When we replace a peer's claim about a piece with the
   one we took from the model's origin, that changes what the announcement says
