@@ -85,7 +85,6 @@ developer box, which is why all of them shipped.
   memory held on both sides, and less lost when one does. This makes the
   failure rarer rather than impossible, and older nodes are unaffected either
   way.
-
 - **The memory figure on the dashboard now counts the models.** It was measured
   from the daemon's own process, and models do not run there — each one is a
   separate worker process — so the number shown was the daemon's baseline of a

@@ -2399,11 +2399,27 @@ silently break at the wire if duplicated:
   Three things a change here must keep. The merge is **one-directional**: a real
   incoming hash still replaces a real stored one (a genuine re-publish), and only
   unknown is treated as no information — so this cannot be used to pin a stale
-  hash. `manifest_hash` is **recomputed** when anything was recovered, because the
+  hash. `manifest_hash` is **recomputed ONCE, below EVERY correction**, because the
   stored manifest is then a local composite rather than what the publisher sent
   and `load_from_dir` re-derives that hash to validate a saved copy; recomputing
-  also keeps the changed-detection quiet, since the merge is deterministic and an
-  unchanged re-gossip lands on the same bytes. The accept path is the consumer
+  also keeps the changed-detection quiet, since each correction is deterministic
+  and an unchanged re-gossip lands on the same bytes.
+  **This used to say "when anything was recovered", and that narrowness was the
+  bug.** `register_manifest` corrects an incoming manifest TWICE — the merge
+  here, and the `origin_verified` override below it — and only the first
+  recomputed. So a manifest whose shard hash the origin had corrected said one
+  thing and authenticated another, and since `manifests_to_gossip` re-broadcasts
+  that exact object, every peer's `verify_hash_strict` refused it. The failure
+  was inverted: the better informed a node was, the more of its announcements
+  the swarm discarded. It was intermittent rather than permanent — the stale
+  hash is written only on the registration where a correction fires, and the
+  next registration needing none rewrites it consistently — which is why one
+  model is refused over and over in a log while others from the same sender
+  pass. The change-detection MUST read the final value too, or a peer
+  re-gossiping a contradicted manifest every 30 s compares a corrected hash
+  against an uncorrected one and reports a change for ever (gotcha #472).
+  **A hash OF a structure has exactly one compute site: after the last thing
+  that touches the structure.** The accept path is the consumer
   that matters: `classify_p2p_shard_acceptance` (same module) turns "do we have a
   hash?" into a three-way policy rather than a yes/no gate — verify against the
   hash; or, with no hash but a reachable origin, discard the peer's copy and

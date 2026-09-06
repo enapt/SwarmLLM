@@ -2033,7 +2033,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - **No build step**: Vanilla HTML/CSS/JS — no framework, no bundler, no Node.js
 - **Component architecture**: `App` global namespace with component sub-objects (`App.chat`, `App.dashboard`, etc.)
   - `frontend/js/core/state.js` — App namespace, shared mutable state, theme, storage keys
-  - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `formatDlProgress`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`), `extractErrorMessage`, `getApiErrorMessage`
+  - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `formatDlProgress`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`), `extractErrorMessage`, `getApiErrorMessage`, `renderMarkdown`/`inlineMarkdown` (the ONE markdown renderer — chat replies and any future surface; every fragment passes through `escapeHtml`, so its output is safe for innerHTML), and `initTopBannerOffset`, which keeps `--top-banner-height` in step with the DOM so a fixed top banner pushes the header down instead of covering it
   - `frontend/js/core/data.js` — data store with in-flight deduplication, `authFetch` wrapper
   - `frontend/js/core/tooltip.js` — unified popover replacing native `title=` attributes
   - `frontend/js/components/ui.js` — tab switching, banners, mode indicator, sidebar

@@ -218,111 +218,88 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2396 lib (dev,claude-subscription) — re-measured 2026-09-05, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 67 repo-consistency + 1 api_key_side_effects + 33 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .156 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
+All 20 build phases complete. All subsystems wired — no stubs. **2396 lib (dev,claude-subscription) — re-measured 2026-09-06, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 67 repo-consistency + 1 api_key_side_effects + 33 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .159 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
 
-**Next up (after the v0.3.156 release; user: batch fixes, releases are slow —
+**Released and deployed: v0.3.159-alpha (2026-09-06, tag on `a2b554d3`).** Local
+`225e6fe7` (CUDA artifact, downloaded sha256 == published, `ggml_cuda_init` = 1,
+0 ERROR, inference verified, node id kept; rollback
+`~/.local/bin/swarmllm.0.3.158-alpha.bak`) and Proxmox `9684263580c6660f`
+(.deb `0.3.159-alpha-1` over `0.3.158-alpha-1`, hash verified after transfer,
+`active` + `enabled`, no `.dpkg-old`, journal errors "-- No entries --", back in
+each other's peer lists) both on it. Gate: CI **and Cache warm** green on the
+tagged commit, Release + Docker green, 25 assets, not draft, `latest`, sha256
+CUDA + deb, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact**, both
+baselined on .158 first (baseline was also 9/9 and 7/7).
+
+**SIXTEEN fixes. Six from two reports (#011 dashboard memory, #012 chat UX) on a
+processor-only node; the rest from reading the live log, from a report of a model
+that stopped loading, and from BUILDING THE SMALL-MACHINE HARNESS.**
+The ones worth carrying forward:
+
+- **`examples/constrained_node_test.sh` exists now** — a small `max_ram_mb` on an
+  ISOLATED node reproduces locally the whole class of memory fault every field
+  report since .154 came from. It found a defect on its first run (**every worker
+  death cost exactly one user's request** — `get_or_spawn` handed back a dead
+  worker) and **verified #461/#467 and #462**, which had never been confirmed
+  anywhere. ⚠ Isolation is load-bearing: with peers reachable, prompt privacy
+  turns a whole-model request into a two-layer boomerang, the budget never binds
+  and the script proves nothing while appearing to pass (gotcha #476).
+- **A content hash has ONE compute site, after the LAST mutation** (#472).
+  `register_manifest` corrects a manifest twice and only the first recomputed, so
+  a node that had verified a model against its ORIGIN gossiped something every
+  peer refused — inverted severity, and intermittent rather than permanent.
+- **The dashboard's memory figure never counted the model workers** — the only
+  `.memory()` call in the tree read the daemon's own pid, so it reported a few
+  hundred MB beside a resident 14B holding gigabytes.
+- **`hidden` was inert on any element with a `display` rule** (#469), already
+  worked around per-element twice. One global rule now covers it.
+- ⚠ **The screen you skip to reach your test is the one nobody has read**
+  (#477): the first-run wizard told single-computer users that discovery is a
+  local-network affair. I dismissed that modal ~a dozen times before walking it.
+
+
+**Next up (after the v0.3.159 release; user: batch fixes, releases are slow —
 Windows CUDA)**:
 
-(0) **Field-verify .156 — none of its ten fixes has been seen on a real node.**
-`scratchpad/field_verify_0156.md` (this session) drafts the ask; the Mac mini
-that produced #007/#008 is the only place most of it can be confirmed. Three
-things: does the node still wedge after a worker dies (#461/#467 — the tell is
-that the frozen "N MB is already in use" refusal no longer recurs); does a long
-generation still die when peers drop (#464); and **is #462 too strict** — it is
-the one change that can refuse work a node previously completed, and
-`SWARMLLM_KV_RECONCILE=0` is the escape hatch, so a report of "requests now fail
-that used to complete" is a RESULT, not a nuisance. Also still open from before:
-(a) the 8B GPU-delegate avoidance (#460's subject) is UNDIAGNOSED — ask for
-`Not handing this model to peer:` and `This node holds the whole model and runs
-it on its processor: <reason>` (now carries `cheapest_peer_cost_ms`); the
-leading hypothesis is the peer being priced from the shared prior rather than a
-measurement, but that is a HYPOTHESIS and `cbbed678` is what guessing produced
-last time. (b) #452's residual — the arithmetic is MARGINAL on that machine
-(~36 allowed against 36 asked), so ask for its own `max_hostable_layers=` line
-on .156 BEFORE building the obvious fix.
+(0) **Field-verify — the .156→.159 fixes are largely unseen on other people's
+machines.** Two are now verified LOCALLY by `examples/constrained_node_test.sh`
+(#461/#467 dead-worker memory, #462 KV reconciliation), which is what that
+script was built for. The rest still want a real node. The Mac mini that
+produced #007/#008 is the only place most of it can be confirmed; ask for
+`Not handing this model to peer:` and the `cheapest_peer_cost_ms` line for
+#460's undiagnosed 8B GPU-delegate avoidance, and for #452's own
+`max_hostable_layers=` figure before building the obvious fix.
 
-(1) **A constrained-node reproduction.** Every defect in the #452/#454/#455/
-#457/#461-#468 arc came from a 16 GB processor-only machine, and NONE can be
-reproduced on this box (8-core Ryzen, RTX 3070) — which is why they all shipped.
-Admission keys off `resources.max_ram_mb`, not real RAM, so a small configured
-budget + a big model + forced failovers reproduces the whole class locally. This
-is the highest-leverage item on the list: it turns this category from
-field-reported into gate-caught.
-
-(2) **#447 (iii)** — make the priced search the ONE decision-maker when the
+(1) **#447 (iii)** — make the priced search the ONE decision-maker when the
 local node is on its processor (`delegation_target` becomes a filter; the DP
-compares every shape). Halves (i)+(ii) shipped in .153; the live #444
-measurement is still unmeasured.
+compares every shape). Halves (i)+(ii) shipped in .153. **Do not attempt this
+without a way to measure it**: `cbbed678` priced local layers at a penalty and
+sent requests to another continent. The #444 comparison is also still unmeasured
+live (`measure_444.sh`, recreate from `round_log_0903_processor_route.md`).
 
-(3) **#446 first half** — a multi-MB forward over ONE QUIC stream is killed by
-quinn's 1024-gap limit: rank TCP above QUIC for large requests, or
-chunked-over-RR behind a feature bit. The contributor's AWS g5.xlarge is the
-right place to reproduce it.
+(2) **#446 forward path** — an activation is one indivisible message, so it
+needs TCP-ranking or chunked-over-RR. The SHARD half was mitigated in .159
+(32 → 8 MiB, a ~4x reduction in draws, NOT a bound — the gap count is bounded by
+the receive window). **Still open there: a peer retry restarts at
+`chunk_offset: 0` instead of resuming**; the machinery exists but sits in the
+code that caused #424's truncation race. The contributor's AWS g5.xlarge is the
+right place for the forward half.
 
-(4) prefix-keyed remote KV across turns; (5) f16 stored KV on small cards;
-(6) accept/reject at the tail — also the precondition for issue #21's economics;
+(3) prefix-keyed remote KV across turns; (4) f16 stored KV on small cards;
+(5) accept/reject at the tail — also the precondition for issue #21's economics;
 then the #438 structural rung, peer↔peer RTT gossip, ring decode, prefill
-microbatching. Ordered list with pointers in `memory/MEMORY.md` § NEXT UP;
-entries in `docs/FUTURE_WORK.md`. **Parked**: the OpenClaw ClawHub / npm
-publish, which needs the user's credentials.
+microbatching. Ordered list in `memory/MEMORY.md` § NEXT UP; entries in
+`docs/FUTURE_WORK.md`. **Parked**: the OpenClaw ClawHub / npm publish, which
+needs the user's credentials.
 
-Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
-
-**Released and deployed: v0.3.156-alpha (2026-09-05, tag on `764a0562`).** Local
-`225e6fe7` (CUDA asset, downloaded sha256 == published, size == published, ready
-in 1 s, 0 ERROR lines, CUDA initialised, inference verified; rollback
-`~/.local/bin/swarmllm.0.3.155-alpha.bak`, `.bak` files pruned to newest 3) and
-Proxmox `96842635` (.deb `0.3.156-alpha-1` over `0.3.155-alpha-1`, `enabled` +
-`active`, no `.dpkg-old`, journal errors "-- No entries --", back in the peer
-list) both on it, node ids kept. Gate: CI + Cache warm green on the tagged
-commit, Release + Docker green, 25 assets, not draft, `latest` (checked via
-`gh api repos/.../releases/latest` — **`gh release view --json isLatest` is not
-a field**), sha256 CUDA + deb, `ggml_cuda_init` = 1, **smoke 9/9 + shapes 7/7 on
-the DOWNLOADED artifact**, both baselined on .155 first.
-
-**TEN defects — two from a tester's reports (#007/#008), EIGHT found by asking
-whether those fixes were complete.** **#461** a worker that died any way but a
-graceful unload kept its whole RAM/VRAM charge, and that charge is ONE shared
-budget, so the node refused every model until restart; **#462** the processor
-had no arm in #440's `kv_budget_now` reconciliation, so a CPU worker's KV
-ceiling was its spawn-time grant for life — blind to the machine filling up or
-to its OWN weights growing under failover (`SWARMLLM_KV_RECONCILE=0` is the
-field escape hatch — the one change here that can refuse work a node previously
-completed); **#463** a >600 s request was told its already-refunded escrow had
-failed to refund; **#464** the standby search was the THIRD layer-assigning path
-and the only one with no memory check (one 16 GB node was standby for all four
-remote segments); **#465** the ACK fast-fail asked whether the REQUEST had a
-standby, not the segment — #464 made it worse; **#466** my own #461 fix released
-the memory and left the CPU pins on; **#467** **#461 fixed 3 of the NINE places a
-worker leaves the pool — the six missed include `classify_worker_error`'s fatal
-arm, the CUDA-OOM path both reports came from, and the health-tick reap could
-not see them because they had already emptied the map it scans**; **#468** the
-cancel doc named three long waits and there are five (`remote_generate`'s
-first-token wait reaches 600 s; `vision::encode_remote` 120 s).
-Four new repo-consistency guards, each verified by reverting the REAL fix, not
-only by its planted-string self-test.
-⚠ **Grep the OPERATION and count the sites — a report's call-site list is
-symptoms, not scope (#467).** ⚠ **Checking a flag BEFORE a long wait is not
-watching it (#468).** ⚠ A guard insertion landed between `#[test]` and its
-function and silently un-tested an existing guard; `clippy --all-targets -D
-warnings` caught it where `cargo test` only warned, and the test COUNT was
-identical either side — use `cargo test -- --list`.
-⚠ Pushing onto an in-flight CI run cancels it: four intermediate commits show
-`cancelled` and were covered by the head run.
-
-Prior line: v0.3.155-alpha (2026-09-04, tag on `7bb10813`) — eight defects
-(#454-#460) from ONE tester's two-node pool in a single evening.
-Prior line: v0.3.154-alpha (2026-09-04, tag on `4b3a8080`) — #451 an ~8000-token
-ceiling on EVERY distributed prompt (a fixed element cap in `bytes_to_tensor`,
-silent since March), #452 the planner priced the LOCAL node as memory-unbounded,
-#453 a tool-carrying reply got NO streaming (120 deltas → 1).
-Prior line: v0.3.153-alpha (2026-09-04, tag on `8f8edd61`) — the two macOS fixes (#449/#450), #448's storage budget, six future-work closures.
-Older line: v0.3.152-alpha (2026-09-03, tag on `bbecda89`) — the processor route (#444), #440's third half, #445 cancels, #446 ACK deadline; **#447 found live and part still OPEN**.
 ### Earlier rounds — one line each; detail in `memory/round_log_*.md` + CHANGELOG
 
 Read the named round log before re-deriving any of these. Gotcha numbers index
 into `memory/gotchas.md`.
 
+- **v0.3.158** (09-05): three fixes from ONE Qwen3 report — the llama-cpp-2 backend asked for `n_ctx_train()` (the whole TRAINING window) as its context, so an 8B wanted 5.62 GB of KV against ~1.3 GB free; a prompt left on a CLOSED turn is now completed with the family's own opener; a reasoning model's `<think>` scratchpad is no longer returned as the answer. ⚠ **The reporter's headline diagnosis was WRONG** ("qwen3 unsupported" — their grep ran against the release tarball, which ships no source): read the failure POINT before accepting a cause. `round_log_0906_dashboard_chat.md`.
+- **v0.3.157** (09-05): thirteen changes — three from testers in a day (#009 Compare's 45 s abort discarding finished replies; #010 a worker re-loading a model whose share was restated; the priced-delegation report that supplied #447(iii)'s missing measurement), the rest from reading the live log and sweeping the dashboard. Also #406's build filter (a CORRECTNESS hole — nothing compares builds between pipeline segments), per-worker memory accounting, the peer prompt-admission race. ⚠ Two CI watchers mis-declared "settled": treat an unreadable answer as KEEP WAITING.
+- **v0.3.156** (09-05): TEN defects — two from a tester (#007/#008), EIGHT from asking whether those fixes were complete. **#467 is the one to remember: #461 covered 3 of the NINE places a worker leaves the pool, missing the CUDA-OOM path both reports came from.** ⚠ **Grep the OPERATION and count the sites — a report's call-site list is symptoms, not scope.** ⚠ Checking a flag BEFORE a long wait is not watching it (#468). `round_log_0905_dead_worker_memory.md`.
 - **v0.3.154** (09-04): #451 an ~8000-token ceiling on EVERY distributed prompt (a fixed element cap in `bytes_to_tensor` — 32M elements is exactly 8192 positions at hidden 4096, silent since March because local inference never serialises an activation); #452, #453. ⚠ **A cap sized in units of the WORK is a product ceiling nobody chose.** `round_log_0904_tensor_cap.md`.
 - **v0.3.153** (09-04): #449 ALL inference broken on every Mac (worker socket path over `sun_path`'s 104 bytes — a platform limit a single-platform suite cannot see); #450; #448's storage budget (THREE accountants wedged a node for ever). `round_log_0904_tensor_cap.md`.
 - **v0.3.152** (09-03): the processor route (#444, three defects); #440's third half; #445 cancels reach every wait; #446 payload-aware ACK deadline. **#447 found live, part still OPEN.** ⚠ Measure at steady state; test from the API, not the function. `round_log_0903_processor_route.md`.
@@ -331,17 +308,17 @@ into `memory/gotchas.md`.
 - **v0.3.147** (09-02): three failover defects from ONE trace — **#434** a decode step of a remote segment 0 budgeted as a PREFILL (kind decides first), **#435** a standby's ERROR taken as the segment's output (`Tensor bytes too short` blamed on the wrong segment), **#436** a DEPARTED peer now fails its pinned forwards at once (`examples/departed_peer_test.sh`, 503 in 10.4 s). `round_log_0902_failover_paths.md`.
 - **v0.3.145/.146** (09-01): hybrid GPU/CPU layer splitting — a model 20% too big for the card no longer loses it (#431, 5.0 → 12.25 tok/s, monotone); then #432, a worker's decode-thread calibration settled for life by one-layer card-only segments it served for a peer. ⚠ **Check `cpu_placement_reason` before quoting a GPU number (#422).** ⚠ **A calibration that settles once must be keyed by everything that changes the answer.** `round_log_0901_diagnostics_privacy.md`, `perf_baseline_0901_hybrid.md`.
 - **v0.3.144** (09-01): **no Mac had EVER been able to update itself (#430)** — `host_has_avx2()` returns false on non-x86, meaning *no such instruction set*, not *old processor*, so every Apple node was routed to a `-baseline` asset that is never published, and no asset is how that module says "already up to date". ⚠ **The existing guard ASSERTED THE BUG AS CORRECT and was green throughout.** ⚠ **A fix for updating cannot arrive by updating.**
-- **v0.3.143** (09-01): **every node was lying about how fast it is (#428/#429).** Processor efficiency 0.15 against a measured ~0.82 of roofline (**5.2x low**), and the card's 0.30 was HIGHER than the processor's when it should be LOWER — at batch 1 a card reaches 0.37 of roofline, a processor 0.82. Now **0.75/0.35**, measured via `prefill_bench`, **validated on a SECOND machine** (Ryzen 0.818, i5 0.895). Propagation confirmed within the hour: Proxmox 0.88→4.41, Belgium 1.20→5.89, Belgium GPU 20.45→23.86. Also a CPU-only node reported its OWN speed as 0; the unmeasurable fallback would have gone 1.70→8.52 (**a nominal must move with the efficiency it feeds**). ⚠ **My HTTP-derived GPU number was wrong in DIRECTION and published before retraction — that path is not a decode measurement.** ⚠ **CI caught what two local machines did not, and my FIRST fix was insufficient: widening a margin is not removing a threshold.** `round_log_0901_diagnostics_privacy.md`.
+- **v0.3.143** (09-01): **every node was lying about how fast it is (#428/#429).** Processor efficiency 0.15 against a measured ~0.82 of roofline (5.2x low), and the card's 0.30 was HIGHER than the processor's when it should be LOWER. Now 0.75/0.35, validated on a SECOND machine. ⚠ **My HTTP-derived GPU number was wrong in DIRECTION and published before retraction.** ⚠ **CI caught what two local machines did not, and widening a margin is not removing a threshold.** `round_log_0901_diagnostics_privacy.md`.
 - **v0.3.142** (09-01): **the "safe to share" button shared everyone's IP address (#426)** — the dashboard's one-click Copy diagnostics, hinted "No keys or invite codes are included", also copied this machine's addresses AND ten peer-cache multiaddrs, i.e. real users' home IPs; a JS comment claimed it was already redacted. ONE pass over the finished report (`?full=1` opts out), keeping kind + port + peer id + `/p2p-circuit`; **tag salted per report because IPv4 is 2^32**; anchor + loopback exempt. Added `swarmllm diagnostics` + the `-- this machine --` section. ⚠ **A query-string `bool` accepts ONLY `true`/`false` — my own documented `?full=1` 400'd.** `round_log_0901_diagnostics_privacy.md`.
-- **v0.3.141** (08-31): **a model no single node can hold is SERVED** — `qwen2.5-14b` over a 3-4 segment chain, reproduced independently; the greedy fallback had ZERO references to `max_hostable_layers` (⚠ my first fix was too STRICT and was caught pre-ship — parallax routes unbounded rather than refusing, and the fallback now matches); **#425** shards scored on rarity alone scattered holdings, 4 WAN round trips/token instead of 2 → contiguity term, **Petals-informed: an INVARIANT combined WITH rarity, not traded against it** (arXiv 2209.01188); an array-wrapped tool call ignored (**confirmed fixed in the field 09-01**). `parallax: no valid source vertex` is NOT a bug. `round_log_0831_tokenizer_quadratic.md`.
-- **v0.3.139/.140** (08-31): **models the network is asked to host now SPREAD.** #423 — trust was granted only to models in HF's *trending* feed (a DISCOVERY signal used as VERIFICATION), and the gate hid because a node already holding a shard is EXEMPT, so machines finish what they start and never start anything. Now asks the ORIGIN directly, same thresholds. **Confirmed by a tester: stuck at 1/16 reachable for 12 min, then 15/16 and `peers_hosting` 1→4 on updating.** Also: delegation bound 200→1000 ms (a 600 ms GPU peer serves 21-25 tok/s vs our 9-10 CPU); the wishlist could not tell a 0.6B from a 120B and sized MoE 10x small; #424 a retried download truncated away good ranges (unflushed length used as a `set_len` target — a RACE), which cost that tester GB of bandwidth. `round_log_0831_tokenizer_quadratic.md`.
+- **v0.3.141** (08-31): a model no single node can hold is SERVED — the greedy fallback had ZERO references to `max_hostable_layers`. ⚠ My first fix was too STRICT and was caught pre-ship. Also #425: shards scored on rarity alone scattered holdings (4 WAN round trips/token instead of 2) → contiguity term, Petals-informed. `round_log_0831_tokenizer_quadratic.md`.
+- **v0.3.139/.140** (08-31): models the network is asked to host now SPREAD — #423 trust was granted only to models in HF's *trending* feed (a DISCOVERY signal used as VERIFICATION), hidden because a node already holding a shard is EXEMPT. Confirmed by a tester: 1/16 reachable → 15/16 on updating. Also #424, a retried download truncating away good ranges (a RACE). `round_log_0831_tokenizer_quadratic.md`.
 - **v0.3.138** (08-31): two tokenizer faults. **#420** `bpe_encode_word` was naive BPE — fine for a word, and the SentencePiece branch has no pre-tokenizer so it got the WHOLE PROMPT as one "word": 90 KB took **141 s**, daemon CPU **200.25 s → 1.19 s (168x)**, output identical. **#421** every tab and newline went to the model as `<unk>` (chat templates are full of newlines) — found only by checking against HuggingFace `tokenizers`, since the internal tests compare the tokenizer to an older version of ITSELF. **17/17 samples now agree.** ⚠ **The perf bug was the LEAD, not the bug.** `round_log_0831_tokenizer_quadratic.md`.
-- **v0.3.137** (08-31): three faults found by RUNNING the released .136. A peer-held model took 244/210/200/182 s where the LAN holder answers in 0.80 s — it was a candidate every time and lost on ADVERTISED speed, because `record_peer_segment_latency` had only TWO production callers and the speculative path was neither (#418; **proven live 16.87 → 1.36 s**). `/api/admin/stats` took 273 ms, **178 of it KERNEL** — `detect_hardware` enumerated every process TWICE for four numbers (#417, 273 → 6.1 ms). The first-run banner announced a file write the code deliberately does NOT do (#419). ⚠ **FOUR wrong theories killed by measurement before they reached a commit.** `round_log_0830_functional_bench.md`.
+- **v0.3.137** (08-31): three faults found by RUNNING the released .136 — a peer-held model took 244 s where the LAN holder answers in 0.80 s (#418, `record_peer_segment_latency` had only TWO production callers; proven live 16.87 → 1.36 s); `/api/admin/stats` at 273 ms of which 178 was KERNEL (#417); a first-run banner announcing a file write the code does NOT do (#419). ⚠ **FOUR wrong theories killed by measurement before they reached a commit.** `round_log_0830_functional_bench.md`.
 - **v0.3.136** (08-30): **three faults visible ONLY over the network** — clean on every locally-held model, so all three survived release, CI and smoke. Non-English replies REFUSED as lost (#416 — a multi-byte char is several GENERATED tokens but ONE SEND); streamed replies arrived TWICE (#414 — one of five coordinators never sent a terminal finish event); an over-long prompt blamed the network and docked the peer (#415). ⚠ **THREE wrong stories on #416; the second fix was WRITTEN and killed by a paired test — the fix was correct while its justification was wrong.** `round_log_0830_network_path.md`.
-- **v0.3.132-.135** (08-29/30): **the guards were the defect** — five repo-consistency guards tested by PLANTING the violation, **four could not see what they guard** (#413); line scanning cannot see a chain rustfmt WRAPPED. The Models page took 11 s and **9.6 were the KERNEL** (#410 — GGUF headers off an UNBUFFERED `File` at 7 sites; **11.2 s → 0.21 s**). A model you had EVER served could not be deleted (#409); the forward doing the whole PREFILL was budgeted as a DECODE (#407); one NUL byte hid a doc from grep (#408); one dial per ADDRESS not per peer (#405, paired 13→3); a name is not a content identity (#406). ⚠ **Split utime/stime BEFORE theorising. A guard too weak to fire is too weak to be checked. TWO published causal claims were WRONG first.** `round_log_0830_guard_audit.md`, `round_log_0829_*.md`.
-- **v0.3.120-.131** (08-25→28): a corrupt shard PROVED to spread — **only the ORIGIN settles it; peer agreement is not evidence in a network that copies from itself** (#382); **.121 quarantined the GOOD copy (#384) — a repair mechanism is a destruction mechanism**; ACK deadline from ping RTT → RFC 6298 (#386); a KV refusal was a RATCHET (#387); `chars/4` used as `index_pos` — **an estimate of a statistic used as a COORDINATE** (#400, cold-only); ANY libp2p node could become a "peer" (#396) and only `allow_block_list` stopped the dialling (#404); device placement — **the fix was to DELETE the second accountant** (#401/#402). ⚠ **A gate refusing NOTHING is the measurement. Local verification had been a strict SUBSET of CI's** → `examples/release_shapes.sh`. `round_log_0825_overnight_watch.md`, `round_log_0827_*.md`.
-- **v0.3.101-.119** (08-18→24): CPU prefill +20-40% / decode +25-37%; ~750 MB less per model (quantized `token_embd` gather); 25.7x from a memory budget read off the BOOT SNAPSHOT (#281, third time); peer delegation — **privacy changes the SHAPE (boomerang), not the verdict**; stale DHT record outranked a retraction (#364). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement. #334 `cargo audit` ran in CI NOT Release — .102 shipped vulnerable.** `round_log_0824_correctness.md`, `round_log_0822_perf_night.md`.
-- **v0.3.15-.100** (07-23→08-17): the era that produced most of the rules. Credits switched OFF (they WERE enforced); **the whole prompt pipeline was wrong** — Llama-3 tokenised at ~2x, system prompt rendered TWICE (#246-#253); AVX2 COMPILED OUT of releases (3.09x); batching NEVER engaged (2.4x GPU); a failure could not report itself (#300-#305 → `classify_error`); three id derivations, none agreeing → `slugify_model_name` (#310); settings saved, said ok, did nothing (#281 → **`SharedState::cfg()`**); distant peers' replies SCRAMBLED (#282); our API key was sent to strangers — its PREMISE changed (#238). ⚠ **#283 kill by PID. #334 `cargo audit` ran in CI NOT Release — .102 shipped vulnerable. #266 measure the FORWARD, not the isolated call. #267 this box cannot resolve a GPU change below ~25%. #179 before touching connection selection. #163 retraction alone is futile.** `round_log_0817_honesty.md` and siblings.
+- **v0.3.132-.135** (08-29/30): **the guards were the defect** — five repo-consistency guards tested by PLANTING the violation, four could not see what they guard (#413); line scanning cannot see a chain rustfmt WRAPPED. Also #410 GGUF headers off an UNBUFFERED file (11.2 s → 0.21 s). ⚠ **Split utime/stime BEFORE theorising.** `round_log_0830_guard_audit.md`.
+- **v0.3.120-.131** (08-25→28): a corrupt shard PROVED to spread — **only the ORIGIN settles it; peer agreement is not evidence in a network that copies from itself** (#382); .121 then quarantined the GOOD copy (#384) — **a repair mechanism is a destruction mechanism**. Also #386 ACK deadline, #387 a KV refusal that ratcheted, #400 an estimate used as a COORDINATE, #396/#404 any libp2p node could become a peer. `round_log_0825_overnight_watch.md`, `round_log_0827_*.md`.
+- **v0.3.101-.119** (08-18→24): CPU prefill +20-40% / decode +25-37%; ~750 MB less per model; 25.7x from a budget read off the BOOT SNAPSHOT (#281, third time); peer delegation. ⚠ **#367 min-of-N is for benchmarks, NOT live measurement.** `round_log_0824_correctness.md`, `round_log_0822_perf_night.md`.
+- **v0.3.15-.100** (07-23→08-17): the era that produced most of the rules — credits switched OFF, the whole prompt pipeline wrong (#246-#253), AVX2 compiled OUT of releases (3.09x), batching never engaged, a failure that could not report itself (#300-#305), settings that saved and did nothing (#281 → `SharedState::cfg()`). ⚠ #283 kill by PID; #334 `cargo audit` ran in CI NOT Release; #266 measure the FORWARD; #267 this box cannot resolve a GPU change below ~25%. `round_log_0817_honesty.md` and siblings.
 - **R136-R150 and the 20 build phases**: NAT/reachability, SWARM-SPEC cascade, `swarmpool://` v2, cross-pool routing. `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)
