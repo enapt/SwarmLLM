@@ -220,21 +220,54 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2415 lib (dev,claude-subscription) — re-measured 2026-09-06, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 67 repo-consistency + 1 api_key_side_effects + 33 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .159 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.159-alpha (2026-09-06, tag on `a2b554d3`).** Local
+**Released and deployed: v0.3.160-alpha (2026-09-06, tag on `a52f5e8d`).** Local
 `225e6fe7` (CUDA artifact, downloaded sha256 == published, `ggml_cuda_init` = 1,
 0 ERROR, inference verified, node id kept; rollback
-`~/.local/bin/swarmllm.0.3.158-alpha.bak`) and Proxmox `9684263580c6660f`
-(.deb `0.3.159-alpha-1` over `0.3.158-alpha-1`, hash verified after transfer,
+`~/.local/bin/swarmllm.0.3.159-alpha.bak`) and Proxmox `9684263580c6660f`
+(.deb `0.3.160-alpha-1` over `0.3.159-alpha-1`, hash verified after transfer,
 `active` + `enabled`, no `.dpkg-old`, journal errors "-- No entries --", back in
-each other's peer lists) both on it. Gate: CI **and Cache warm** green on the
-tagged commit, Release + Docker green, 25 assets, not draft, `latest`, sha256
-CUDA + deb, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact**, both
-baselined on .158 first (baseline was also 9/9 and 7/7).
+each other's peer lists) both on it. Gate: CI green on the tagged commit, Cache
+warm green on the dependency-changing commit (later commits touch no deps and
+no `cfg`-gated code), Release + Docker green (10/10 jobs), 25 assets, not draft,
+`latest`, sha256 CUDA + deb, **smoke 9/9 + shapes 5 OK / 2 COULD NOT RUN on the
+DOWNLOADED artifact, matching the .159 baseline exactly.**
+⚠ **`release_shapes.sh` on port 8810 reports "node did not start" — that is the
+LIVE node's P2P port** (`8800 + 10`), not a release fault. Use 8819.
 
-**SIXTEEN fixes. Six from two reports (#011 dashboard memory, #012 chat UX) on a
-processor-only node; the rest from reading the live log, from a report of a model
-that stopped loading, and from BUILDING THE SMALL-MACHINE HARNESS.**
-The ones worth carrying forward:
+**TEN fixes plus one correction. Eight from questions parked waiting on a
+reporter's machine that was assumed never to answer, resolved by research and
+by local reproduction instead; four from new reports.** The ones worth carrying:
+
+- **A decision made on a COST must be re-derived when the cost changes**, and
+  nothing in the code will tell you — it still compiles and still looks
+  deliberate. THREE of the ten were this: #479 (a routing veto written when the
+  cost model priced local layers with a constant), #482 (a memory floor written
+  for a startup ceiling, kept when the figure became a per-admission live
+  check), #487 (the hardware panel kept off the live tick at 182 ms, still off
+  it after that became 0.43 ms). **After optimising something by an order of
+  magnitude, grep for what was arranged around its old price.**
+- **#484 was a false privacy assurance**, not a mislabel: the chat banner said
+  "your prompts and outputs never leave this device" from shard INVENTORY, while
+  `local_fast_path_for` deliberately sends the work to a peer. A word naming a
+  fact about FILES must not make a claim about EXECUTION.
+- **#481 is a regression we shipped in .154**: giving the local node a memory
+  bound made it a "capped candidate", and a DP rule says a capped candidate
+  appears at most once — but privacy REQUIRES it at both ends. Privacy routing
+  across peers silently stopped, at 11.8x the cost of the route it declined,
+  with nothing logged because all-local is a valid private route.
+- **#483: a file-scoped guard is a guard against one file.** Widening the
+  existing "don't read capacity from the graphics card alone" scan to all of
+  `src/` found three more sites the report never mentioned.
+- ⚠ **I put ~100 ms of blocking work on the 2 s tick and said it cost under a
+  millisecond**, having read a comment about one PART of `detect_hardware` (the
+  sysinfo refresh) as describing the whole function, which also spawns
+  `nvidia-smi` (90 ms measured). Caught by a subagent that MEASURED. Corrected
+  in its own commit because the wrong claim had already gone to the public feed.
+
+**v0.3.159** (09-06): SIXTEEN fixes — six from two reports on a processor-only
+node, the rest from the live log and from BUILDING THE SMALL-MACHINE HARNESS
+(`examples/constrained_node_test.sh`). Detail below and in
+`memory/round_log_0906_dashboard_chat.md`. The ones worth carrying forward:
 
 - **`examples/constrained_node_test.sh` exists now** — a small `max_ram_mb` on an
   ISOLATED node reproduces locally the whole class of memory fault every field
