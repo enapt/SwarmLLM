@@ -4,12 +4,19 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-Thirteen fixes. Six came from two reports about the dashboard and the chat tab,
+Fourteen fixes. Six came from two reports about the dashboard and the chat tab,
 both from a processor-only node; the last two were found by reading the live
 node's own log.
 
 ### Fixed
 
+- **A refusal about a long conversation no longer looks like your memory setting
+  was ignored.** It reported a figure as "budget" that is only what remains for
+  conversations after the model's weights are paid for, while the refusal from
+  the same subsystem about loading a model uses that word for the whole node.
+  Someone who had set a 4000 MB limit and was told "budget 1822 MB" would
+  reasonably conclude their setting was not taking effect. It now says which
+  memory it means.
 - **A crashed model no longer costs the next person their request.** When a
   model's process died, the request that noticed was refused with "worker is
   dead" — an internal detail nobody can act on — and only the one after it got a
@@ -181,7 +188,7 @@ a browser.
 
 ## [0.3.156-alpha] — 2026-09-05
 
-Thirteen fixes. Two came from a tester's reports; the other eight were found by
+Fourteen fixes. Two came from a tester's reports; the other eight were found by
 checking whether those fixes were actually complete — two of them were not.
 
 ### Fixed

@@ -2530,9 +2530,17 @@ fn ensure_room_for_prompt(
         short_by_mb = mb(short_by),
         "DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device"
     );
+    // "budget" unqualified is the wrong word here, and the sibling refusal in
+    // `auto_manage::vram` proves it: that one says "This node's budget allows
+    // N MB (`resources.max_ram_mb` is N MB)" about the WHOLE node, while this
+    // figure is only what is left for conversations once the weights and
+    // overhead are paid. A reader who has set `max_ram_mb = 4000` and is told
+    // "budget 1822 MB" reasonably concludes their setting is being ignored.
+    // Name which budget this is, and say the weights are already accounted for.
     Err(SwarmError::ServiceUnavailable(format!(
-        "Not enough free memory on this node for a {prompt_tokens}-token prompt ({} MB of KV \
-         cache in use, budget {} MB, short by {} MB). Shorter conversations still work; free \
+        "Not enough free memory on this node for a {prompt_tokens}-token prompt ({} MB of \
+         conversation memory in use, {} MB available for conversations once this model's \
+         weights are accounted for, short by {} MB). Shorter conversations still work; free \
          memory on this node (close other programs, or raise its memory budget) to raise this.",
         mb(live),
         mb(budget),
