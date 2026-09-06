@@ -345,7 +345,13 @@
       if (encBanner) {
         var modelData = s.model ? (App.data.cache.models || []).find(function(m) { return m.id === s.model; }) : null;
         var isDistributed = modelData && modelData.shard_count > 1;
-        var isAllLocal = modelData && modelData.hosted_shards === modelData.shard_count && modelData.shard_count > 0;
+        // Whether this machine will actually ANSWER the request, not whether it
+        // holds the files. Reading inventory here told the user "your prompts
+        // and outputs never leave this device" for replies the router had sent
+        // to a peer (gotcha #484), and because this branch is tested before the
+        // encrypted-pipeline one, a fully-held model never reached the honest
+        // description of what was happening.
+        var isAllLocal = U.modelRunsHere(modelData);
         var canBoomerang = modelData && modelData.has_first_shard && modelData.has_last_shard && isDistributed && !isAllLocal;
         var disableBtn = '<button class="btn btn-xs enc-banner-btn" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + U.escapeHtml(I18n.t('enc.disable')) + '</button>';
         // Marked as recommended, and the cost stated on the control itself.

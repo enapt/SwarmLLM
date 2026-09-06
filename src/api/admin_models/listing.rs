@@ -174,6 +174,25 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "mode": mode,
             "source": source,
             "local": hosted_shards > 0,
+            // Whether a request for this model would ACTUALLY be answered by
+            // this machine, as opposed to this machine merely holding the
+            // files. Those are different facts and the chat privacy banner was
+            // asserting the first from the second (gotcha #484): it read
+            // `hosted_shards == shard_count` and displayed "your prompts and
+            // outputs never leave this device", while `local_fast_path_for`
+            // deliberately stands the local path aside — sending the request to
+            // a peer — whenever this node would run the model on its processor
+            // and has peers to ask.
+            //
+            // Only asked for a model we hold in full, which is the only case
+            // that could make the claim, so a GPU node does not price every
+            // model in its list to answer a question about models it cannot
+            // make the claim for anyway.
+            "runs_here": hosted_shards == shard_count as usize
+                && shard_count > 0
+                && state
+                    .shared_state
+                    .local_fast_path_for(&crate::types::ModelId(id.to_string())),
             "peers_hosting": peers_hosting,
             "shards": shards,
             "trust_level": trust_level,

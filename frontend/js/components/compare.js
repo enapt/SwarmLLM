@@ -50,7 +50,13 @@
 
         App.compare.models = [];
         localModels.forEach(function(m) {
-          App.compare.models.push({ id: m.id, type: 'local' });
+          // The backend already says whether this node holds any of the model
+          // (`local`) or is merely aware of it from the swarm. Labelling every
+          // non-cloud entry "local" told the user a model served entirely by
+          // peers was on their own machine (gotcha #484, second half) —
+          // including entries the backend itself marks `source: "network"`
+          // with zero hosted shards.
+          App.compare.models.push({ id: m.id, type: m.local ? 'local' : 'network' });
         });
         cloudModels.forEach(function(m) {
           var mid = m.id;
@@ -75,7 +81,9 @@
           var ctxLabel = m.context && m.context > 0 ? ' \u00B7 ' + I18n.t('models.context_k_abbr', { n: Math.round(m.context / 1000) }) : '';
           chip.querySelector('input').value = m.id;
           chip.querySelector('.chip-name').textContent = displayName;
-          var typeLabel = m.type === 'local' ? I18n.t('compare.filter_local') : I18n.t('dashboard.chip_cloud');
+          var typeLabel = m.type === 'local'
+            ? I18n.t('compare.filter_local')
+            : (m.type === 'network' ? I18n.t('chat.source_network') : I18n.t('dashboard.chip_cloud'));
           chip.querySelector('.chip-type').textContent = typeLabel + ctxLabel;
           chip.title = m.id + (ctxLabel ? ' (' + I18n.t('compare.context_tokens', { n: m.context }) + ')' : '');
           chip.querySelector('input').addEventListener('change', function() {

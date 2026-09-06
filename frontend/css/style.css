@@ -4485,6 +4485,7 @@ textarea.pool-code-input { min-height: 4.5em; }
 }
 .compare-model-chip.type-local .chip-type { color: var(--green-text); opacity: 0.8; }
 .compare-model-chip.type-cloud .chip-type { color: var(--purple-text); opacity: 0.8; }
+.compare-model-chip.type-network .chip-type { color: var(--cyan); opacity: 0.8; }
 .btn-xs { padding: 1px 8px; font-size: var(--fs-sm); border-radius: var(--radius-lg); border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; }
 .btn-xs:hover { border-color: var(--accent); color: var(--text-primary); }
 .btn-xs.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
