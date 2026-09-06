@@ -2621,6 +2621,22 @@ impl PipelineScheduler {
         let mut segments = Vec::new();
         let mut current_layer = 0u32;
         let local_node_id = self.shared_state.identity.node_id();
+        // **A memory bound is per NODE, not per segment**, and this loop can
+        // return to a candidate it has already used — node A for 0..10, B for
+        // 10..15, A again for 15..20. The cap below was applied fresh each
+        // time, so a node capped at 36 could be handed 35 + 1 (gotcha #485).
+        //
+        // That is exactly the shape the #452 field report showed, and the DP
+        // has guarded the same invariant since it was written ("a capped
+        // candidate may appear at most ONCE"). This is the fallback beneath it,
+        // which runs precisely when the model is awkward enough for the DP to
+        // give up — so the guard was missing exactly where it was needed, the
+        // same way the per-segment cap itself was until 2026-08-31.
+        //
+        // Decide-time accounting, the shape `find_standbys` and
+        // `peer_vram_commitments` already use: what a plan has COMMITTED counts
+        // against what the next segment may ask for.
+        let mut assigned: std::collections::HashMap<NodeId, u32> = std::collections::HashMap::new();
 
         while current_layer < num_layers {
             let is_first_segment = current_layer == 0;
@@ -2677,6 +2693,31 @@ impl PipelineScheduler {
                     options = first_capable;
                 }
                 // If no can_be_first candidates, fall through (best-effort)
+            }
+
+            // Prefer a node that still has room, before any other preference:
+            // one already given everything it can hold should not be picked
+            // again while another candidate could take this layer. Only a
+            // preference — if NOTHING has room left, the options stand and the
+            // segment goes somewhere rather than the request being refused,
+            // which is what the relaxed pass and the holder's own admission
+            // check are for.
+            if respect_capacity {
+                let with_room: Vec<_> = options
+                    .iter()
+                    .filter(|(c, _)| match c.max_hostable_layers {
+                        Some(cap) => {
+                            cap.saturating_sub(assigned.get(&c.node_id).copied().unwrap_or(0)) > 0
+                        }
+                        // Unknown capacity never excludes — the standing
+                        // contract of `max_hostable_layers`.
+                        None => true,
+                    })
+                    .cloned()
+                    .collect();
+                if !with_room.is_empty() {
+                    options = with_room;
+                }
             }
 
             // If this range could reach the end, prefer nodes that can be last.
@@ -2844,7 +2885,31 @@ impl PipelineScheduler {
                     // moves, or the loop cannot terminate.
                     let layer_end = match candidate.max_hostable_layers {
                         Some(cap) if respect_capacity => {
-                            range.1.min(current_layer.saturating_add(cap.max(1)))
+                            // What this node may still take, after everything
+                            // this plan has already given it.
+                            let already = assigned.get(&candidate.node_id).copied().unwrap_or(0);
+                            let remaining = cap.saturating_sub(already);
+                            if remaining == 0 {
+                                // Nothing left, and the filter above already
+                                // preferred anyone who had room — so no node
+                                // can take this layer within its bound.
+                                //
+                                // FAIL rather than hand it over anyway. Giving
+                                // it a layer regardless would not enforce the
+                                // bound, it would only FRAGMENT the overage
+                                // into one-layer segments and still exceed it,
+                                // which is worse than both alternatives. The
+                                // caller answers this by re-running without the
+                                // bound (`greedy_assign`), which is the same
+                                // constrained-then-relaxed shape the DP uses,
+                                // and the holder's own admission check is the
+                                // backstop after that.
+                                return Err(SwarmError::PipelineError(format!(
+                                    "greedy: no node can take layer {current_layer} \
+                                     within the memory it advertises"
+                                )));
+                            }
+                            range.1.min(current_layer.saturating_add(remaining))
                         }
                         _ => range.1,
                     };
@@ -2853,6 +2918,8 @@ impl PipelineScheduler {
                         shard_id: candidate.shard_id.clone(),
                         layer_range: (current_layer, layer_end),
                     });
+                    *assigned.entry(candidate.node_id.clone()).or_insert(0) +=
+                        layer_end.saturating_sub(current_layer);
                     current_layer = layer_end;
                 }
                 None => {

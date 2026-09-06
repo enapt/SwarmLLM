@@ -3667,3 +3667,76 @@ fn the_unknown_prior_alone_outprices_an_unmeasured_peer_against_a_normal_process
          peer={peer_ms} dire={dire_ms}"
     );
 }
+
+/// Gotcha #485. The greedy fallback can return to a candidate it has already
+/// used, and applied the memory cap fresh each time — so a node capped at N
+/// could be handed several segments summing to more than N. That is the shape
+/// the #452 field report showed (one node given 0..35 AND 47..48 of a 48-layer
+/// model), and the invariant the DP has guarded since it was written.
+///
+/// Note what the sibling test above could not see: it asserts on
+/// `segments[0]`, so it checks the per-SEGMENT cap and passes happily while
+/// the per-NODE total is exceeded.
+#[test]
+fn the_greedy_fallback_does_not_hand_one_node_more_than_it_can_hold() {
+    let state = make_shared_state();
+    let scheduler = PipelineScheduler::new(state);
+
+    // Node 1 declares every layer but can hold 12. Node 2 covers only the
+    // middle, so a correct plan uses node 1, then node 2, and would otherwise
+    // come back to node 1 for the tail — the return visit is the whole point.
+    let mut wide = simple_candidate(1, vec![(0, 48)]);
+    wide.max_hostable_layers = Some(12);
+    let mut middle = simple_candidate(2, vec![(12, 30)]);
+    middle.max_hostable_layers = Some(18);
+    // A third node with room for the tail, so a plan that respects every
+    // bound genuinely exists and the test is not asserting a refusal.
+    let mut tail = simple_candidate(3, vec![(24, 48)]);
+    tail.max_hostable_layers = Some(24);
+
+    let segments = scheduler
+        .greedy_assign(48, &[wide, middle, tail], false)
+        .expect("a plan respecting every bound exists");
+
+    let mut per_node: std::collections::HashMap<NodeId, u32> = std::collections::HashMap::new();
+    for seg in &segments {
+        *per_node.entry(seg.node_id.clone()).or_insert(0) += seg.layer_range.1 - seg.layer_range.0;
+    }
+    let wide_total = per_node.get(&NodeId([1u8; 32])).copied().unwrap_or(0);
+    assert!(
+        wide_total <= 12,
+        "node 1 is capped at 12 and was handed {wide_total} layers across \
+         {} segments: {segments:?}",
+        segments.len()
+    );
+    // And the plan is still a plan: every layer covered, contiguously.
+    assert_eq!(segments.first().map(|s| s.layer_range.0), Some(0));
+    assert_eq!(segments.last().map(|s| s.layer_range.1), Some(48));
+}
+
+/// When no assignment fits every bound, the constrained pass must FAIL so the
+/// caller re-runs without the bound — never hand the layer over anyway, which
+/// would fragment the overage into one-layer segments and still exceed it.
+#[test]
+fn an_impossible_bound_falls_through_to_the_relaxed_pass() {
+    let state = make_shared_state();
+    let scheduler = PipelineScheduler::new(state);
+
+    // The only holder of the whole model can hold a third of it, and nobody
+    // else covers anything.
+    let mut only = simple_candidate(1, vec![(0, 48)]);
+    only.max_hostable_layers = Some(16);
+
+    let constrained = scheduler.greedy_assign_inner(48, &[only.clone()], false, true);
+    assert!(
+        constrained.is_err(),
+        "no plan fits, so the constrained pass must say so: {constrained:?}"
+    );
+
+    // …and the public entry point recovers, because a served request beats a
+    // refused one and the holder's own admission is the backstop.
+    let segments = scheduler
+        .greedy_assign(48, &[only], false)
+        .expect("the relaxed pass routes it");
+    assert_eq!(segments.last().map(|s| s.layer_range.1), Some(48));
+}
