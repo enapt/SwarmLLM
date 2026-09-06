@@ -4,12 +4,19 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-Eight fixes. Six came from two reports about the dashboard and the chat tab,
+Nine fixes. Six came from two reports about the dashboard and the chat tab,
 both from a processor-only node; the last two were found by reading the live
 node's own log.
 
 ### Fixed
 
+- **A node that had checked a model against its source poisoned its own
+  announcements of it.** When we replace a peer's claim about a piece with the
+  one we took from the model's origin, that changes what the announcement says
+  — but its content stamp was left describing the old text, so every other node
+  refused the announcement as inconsistent. The better informed a node was, the
+  more of its announcements were thrown away, and the model's pieces then could
+  not be found at all. Seen live on two separate machines for the same model.
 - **The download speed shown for a model coming from a peer was the chunk
   size, not a speed.** A 32 MB piece arriving over 26 seconds was reported as
   33 MB/s rather than 1.3, and because the time remaining is worked out by

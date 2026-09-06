@@ -711,7 +711,7 @@ mod tests {
         assert!(!is_backup_artifact_id("")); // empty is not an artifact
     }
 
-    fn test_manifest() -> ModelManifest {
+    pub(super) fn test_manifest() -> ModelManifest {
         ModelManifest {
             id: ModelId("test-model".into()),
             name: "Test Model".into(),
@@ -824,5 +824,43 @@ mod tests {
             path.to_string_lossy(),
             "/data/models/llama3-70b/shard_005.bin"
         );
+    }
+}
+
+#[cfg(test)]
+mod wire_roundtrip_tests {
+    use super::*;
+
+    /// A manifest that has crossed the wire must still verify.
+    ///
+    /// `compute_hash` folds in `publish_date.to_rfc3339()`, and the gossip path
+    /// is `serde_json`. If that round trip does not preserve the timestamp
+    /// exactly, every manifest a peer sends fails `verify_hash_strict` on
+    /// arrival and the model becomes undiscoverable through gossip — while
+    /// verifying perfectly on the node that built it.
+    #[test]
+    fn a_manifest_still_verifies_after_a_json_round_trip() {
+        let mut m = super::tests::test_manifest();
+        // A timestamp with sub-second precision, which is what `Utc::now()`
+        // produces and therefore what a real publisher stamps.
+        m.publish_date = chrono::DateTime::from_timestamp_nanos(1_788_659_061_123_456_789);
+        m.manifest_hash = m.compute_hash();
+        m.verify_hash_strict().expect("must verify before the wire");
+
+        let wire = serde_json::to_vec(&m).expect("serialize");
+        let back: crate::types::ModelManifest = serde_json::from_slice(&wire).expect("deserialize");
+
+        assert_eq!(
+            back.publish_date, m.publish_date,
+            "the timestamp did not survive the wire"
+        );
+        assert_eq!(
+            hex::encode(back.compute_hash()),
+            hex::encode(m.compute_hash()),
+            "the manifest hashes to something different after a round trip, so a \
+             peer would reject a manifest its publisher considers valid"
+        );
+        back.verify_hash_strict()
+            .expect("a manifest that crossed the wire must still verify");
     }
 }

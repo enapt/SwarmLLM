@@ -288,26 +288,12 @@ impl ModelRegistry {
             None => 0,
         };
         if recovered > 0 {
-            // Recompute so the stored manifest stays self-consistent: it is now
-            // a local composite rather than verbatim what the publisher sent,
-            // and `load_from_dir` re-derives this hash to validate a saved copy.
-            //
-            // Doing it here also keeps the `changed` check below quiet in the
-            // steady state: the merge is deterministic, so an unchanged
-            // re-gossip merges to the same bytes and recomputes to the same
-            // hash. Without the recompute, every re-gossip of a placeholder
-            // manifest would compare unequal and log forever.
-            manifest.manifest_hash = manifest.compute_hash();
             tracing::debug!(
                 model = %manifest.id,
                 recovered,
                 "Kept shard hashes this manifest left blank"
             );
         }
-        let changed = match self.manifests.get(&manifest.id) {
-            Some(prev) => prev.manifest_hash != manifest.manifest_hash,
-            None => true,
-        };
         // Persist an enrichment so a restart does not throw it away.
         //
         // `load_from_db` is what repopulates this registry at boot, BEFORE the
@@ -326,12 +312,14 @@ impl ModelRegistry {
         // says. Applied BEFORE the change-detection below, so adopting a peer's
         // contradicting hash never even registers as a change — otherwise the
         // re-check fires against a reference we have already disproved.
+        let mut overridden = 0usize;
         for shard in manifest.shards.iter_mut() {
             if let Some(known) = self.origin_verified_hash(&ShardId {
                 model_id: manifest.id.clone(),
                 index: shard.index,
             }) {
                 if shard.hash != known {
+                    overridden += 1;
                     // `publisher` is the nearest thing to attribution available
                     // here: `register_manifest` is the funnel EVERY adoption path
                     // goes through (gossip, DB reload, disk scan, acquisition) and
@@ -370,6 +358,37 @@ impl ModelRegistry {
                 }
             }
         }
+
+        // ONE recompute, after EVERY mutation above, because `manifest_hash` is
+        // a hash of this manifest's content and both the merge and the origin
+        // override change that content.
+        //
+        // The override used to happen after the hash was settled, so the stored
+        // manifest said one thing and authenticated another — and
+        // `manifests_to_gossip` re-broadcasts this very object, so every peer
+        // ran `verify_hash_strict` on it and refused it. A node that had done
+        // the careful thing (fetching from the origin and remembering the
+        // bytes) poisoned its own gossip for that model, and the better
+        // informed it was the more of its manifests were rejected. Observed
+        // live on two distinct peers for one model, whose layers then could not
+        // be routed at all. `load_from_dir` re-derives this hash too, so the
+        // inconsistency also survived a restart through the DB.
+        if recovered > 0 || overridden > 0 {
+            manifest.manifest_hash = manifest.compute_hash();
+        }
+
+        // Change detection reads the FINAL hash, below the corrections rather
+        // than above them. In the steady state a peer re-gossips the same
+        // contradicted manifest every 30 s and every correction here is
+        // deterministic, so it settles to the identical hash and this stays
+        // quiet — which is the property the merge's own recompute was added
+        // for, now covering the override as well. Comparing a corrected hash
+        // against an uncorrected one would report a change on every round for
+        // ever.
+        let changed = match self.manifests.get(&manifest.id) {
+            Some(prev) => prev.manifest_hash != manifest.manifest_hash,
+            None => true,
+        };
 
         // Shards WE HOLD whose expected hash just changed. Those bytes were
         // checked against a reference that no longer applies — or, for a hash we
@@ -1410,6 +1429,131 @@ mod tests {
             "a peer's self-certified hash must not displace one taken from the \
              origin — that is how a good shard gets quarantined and replaced \
              with a bad one"
+        );
+    }
+
+    /// A manifest we store must still verify, so the swarm can accept it back.
+    ///
+    /// Overriding a peer's shard hash with one taken from the origin CHANGES the
+    /// manifest's content, and `manifest_hash` is a hash OF that content. Left
+    /// stale, the stored manifest is internally inconsistent — and
+    /// `manifests_to_gossip` re-broadcasts exactly this object, so every peer
+    /// runs `verify_hash_strict` on it and rejects it. A node that had done the
+    /// careful thing (fetching from the origin and remembering what it got)
+    /// therefore poisoned its own gossip for that model, and the better
+    /// informed it was, the more of its manifests were refused. Seen live on
+    /// two distinct peers for the same model, whose parts then could not be
+    /// routed at all.
+    #[test]
+    fn a_manifest_whose_hash_we_corrected_still_verifies() {
+        use crate::model::manifest::ModelManifestExt;
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me.clone());
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 7,
+        };
+        let good = [0x59u8; 32];
+        let bad = [0xabu8; 32];
+        registry.record_origin_verified_hash(sid.clone(), good);
+
+        // What a peer sends: self-consistent, and wrong about shard 7.
+        let mut from_peer = test_manifest("m", "M");
+        from_peer.shards = vec![test_shard(7, bad)];
+        from_peer.manifest_hash = from_peer.compute_hash();
+        from_peer
+            .verify_hash_strict()
+            .expect("the peer's own manifest must be valid before we touch it");
+
+        registry.register_manifest(from_peer);
+
+        let stored = registry.get_manifest(&ModelId("m".into())).unwrap();
+        assert_eq!(stored.shards[0].hash, good, "the origin hash must win");
+        stored.verify_hash_strict().expect(
+            "a manifest we corrected must still hash to its own content — we \
+             re-gossip this object, and a peer will refuse it otherwise",
+        );
+    }
+
+    /// Everything we broadcast must verify on the receiving side.
+    ///
+    /// This is the consumer-facing form of the two tests above: peers run
+    /// `verify_hash_strict` on whatever `manifests_to_gossip` sends, and refuse
+    /// anything that fails. Asserting it here means a future correction applied
+    /// to a stored manifest cannot silently make this node's gossip
+    /// unacceptable — which is exactly what happened when the origin-hash
+    /// override was applied after the hash had been settled.
+    #[test]
+    fn every_manifest_we_gossip_verifies() {
+        use crate::model::manifest::ModelManifestExt;
+        let us = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(us.clone());
+        let sid = ShardId {
+            model_id: ModelId("held-model".into()),
+            index: 0,
+        };
+        // We know better than the peer about shard 0.
+        registry.record_origin_verified_hash(sid.clone(), [0x59u8; 32]);
+
+        let mut from_peer = test_manifest("held-model", "Held");
+        from_peer.shards = vec![test_shard(0, [0xabu8; 32])];
+        from_peer.manifest_hash = from_peer.compute_hash();
+        registry.register_manifest(from_peer);
+        registry.record_shard_holder(sid, us.clone());
+
+        let out = registry.manifests_to_gossip(&us);
+        assert!(!out.is_empty(), "the shard we hold must earn a broadcast");
+        for m in out {
+            m.verify_hash_strict().unwrap_or_else(|e| {
+                panic!(
+                    "we are about to broadcast {} and a peer would reject it: {e}",
+                    m.id
+                )
+            });
+        }
+    }
+
+    /// Re-registering the same contradicted manifest must settle, not churn.
+    ///
+    /// Peers re-gossip their whole manifest set on a timer, so this exact
+    /// object arrives every 30 s for as long as that peer is up. Every
+    /// correction applied above is deterministic, so the second registration
+    /// must reach the identical stored hash — otherwise the change-detection
+    /// reports a change on every round for ever, which is the failure that once
+    /// made a single unchanged line 21% of a real node's log.
+    #[test]
+    fn re_registering_a_corrected_manifest_settles() {
+        use crate::model::manifest::ModelManifestExt;
+        let registry = ModelRegistry::with_local_node(NodeId([1u8; 32]));
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 7,
+        };
+        registry.record_origin_verified_hash(sid, [0x59u8; 32]);
+
+        // ONE manifest, sent twice — `test_manifest` stamps `Utc::now()`, so
+        // building it twice would differ for a reason that has nothing to do
+        // with what is being tested.
+        let mut from_peer = test_manifest("m", "M");
+        from_peer.shards = vec![test_shard(7, [0xabu8; 32])];
+        from_peer.manifest_hash = from_peer.compute_hash();
+        let build = || from_peer.clone();
+
+        registry.register_manifest(build());
+        let first = registry
+            .get_manifest(&ModelId("m".into()))
+            .unwrap()
+            .manifest_hash;
+        registry.register_manifest(build());
+        let second = registry
+            .get_manifest(&ModelId("m".into()))
+            .unwrap()
+            .manifest_hash;
+
+        assert_eq!(
+            hex::encode(first),
+            hex::encode(second),
+            "the same manifest corrected twice must land on the same hash"
         );
     }
 
