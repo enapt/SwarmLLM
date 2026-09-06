@@ -5,8 +5,11 @@ All notable changes to SwarmLLM are documented here.
 ## [Unreleased]
 
 Fourteen fixes. Six came from two reports about the dashboard and the chat tab,
-both from a processor-only node; the last two were found by reading the live
-node's own log.
+both from a processor-only node. The rest were found by reading the live node's
+own log, by looking into a report of a model that stopped loading, and by
+building a small-machine test setup — every memory fault reported from the field
+since the .154 line came from one such machine, and none of them reproduced on a
+developer box, which is why all of them shipped.
 
 ### Fixed
 

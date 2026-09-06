@@ -1738,6 +1738,22 @@ impl ModelProcessPool {
         self.workers.get(model_id).map(|r| r.clone())
     }
 
+    /// The worker for this model, if one is resident AND its process is alive.
+    ///
+    /// The reader task marks a worker dead the moment its socket closes and
+    /// leaves it in the map for whoever notices to retire, so `workers.get`
+    /// can hand back a corpse. That mattered most on the request path, where
+    /// it cost one request per worker death (#475); it matters here too, more
+    /// quietly — asking a dead worker WHERE IT RAN answers about a process
+    /// that no longer exists, when the prediction for the next spawn is
+    /// available and correct.
+    fn live_worker(&self, model_id: &ModelId) -> Option<Arc<WorkerHandle>> {
+        self.workers
+            .get(model_id)
+            .filter(|h| !h.dead.load(Ordering::Acquire))
+            .map(|r| r.clone())
+    }
+
     /// Start the global auto-coalescing batch scheduler task. Must be called
     /// from within a Tokio runtime; no-op if no runtime is available (sync
     /// tests constructing `SharedState` directly). Safe to call more than
@@ -1963,7 +1979,11 @@ impl ModelProcessPool {
     /// With no worker resident there is nothing to contradict the prediction,
     /// and it is exactly right: it is what the next spawn will do.
     pub fn cpu_placement_reason(&self, model_id: &ModelId) -> Option<&'static str> {
-        if let Some(handle) = self.workers.get(model_id) {
+        // A LIVE worker is the fact. A dead one is a stale fact: its process is
+        // gone, so where it used to run says nothing about where this model
+        // runs now — and the prediction below, which describes the next spawn,
+        // is exactly right again.
+        if let Some(handle) = self.live_worker(model_id) {
             return handle.placed_on_cpu_because.map(CpuReason::as_str);
         }
         self.cpu_reason(model_id).map(CpuReason::as_str)
@@ -1997,7 +2017,8 @@ impl ModelProcessPool {
     /// land in system memory — sent to the processor, no card detected, a build
     /// without CUDA — give one answer rather than three.
     pub fn model_uses_gpu_memory(&self, model_id: &ModelId) -> bool {
-        let going_to_cpu = match self.workers.get(model_id) {
+        // Live worker only, for the reason in `cpu_placement_reason`.
+        let going_to_cpu = match self.live_worker(model_id) {
             Some(handle) => handle.placed_on_cpu_because.is_some(),
             None => self.cpu_reason(model_id).is_some(),
         };

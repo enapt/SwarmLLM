@@ -1298,7 +1298,17 @@ silently break at the wire if duplicated:
   configured CPU-only"), and `would_fit_on_gpu`'s already-charged short-circuit,
   which would otherwise have re-created the 2026-08-18 contradiction its own
   comment describes. **A new caller asking about a model that has a worker should
-  ask the worker.**
+  ask the worker — a LIVE one.** `ModelProcessPool::live_worker` is that
+  accessor. The reader task marks a worker dead the instant its socket closes
+  and leaves it in the map for whoever notices to retire, so a bare
+  `workers.get` can hand back a corpse, and a corpse's placement describes a
+  process that no longer exists while the prediction for the next spawn is
+  available and correct. On the request path the same gap cost one request per
+  worker death: `get_or_spawn` returned the dead handle, the caller's own
+  liveness check failed with `worker is dead`, and only the NEXT request — which
+  found the map cleaned — succeeded (gotcha #475). It now retires the corpse and
+  spawns, in both places a resident worker is handed back, since one can die
+  between them.
   `WorkerHandle::gpu_estimate_mb` caches what admission priced the model at,
   because `estimate_gpu_footprint_mb` re-reads `gguf_header.bin` and scans the
   model directory: fine once per spawn, not fine once per request.
