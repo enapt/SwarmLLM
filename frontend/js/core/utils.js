@@ -268,6 +268,21 @@
     return div;
   }
 
+  /// Will a request for this model actually be ANSWERED by this machine?
+  ///
+  /// Holding every shard is not the same fact (gotcha #484). The router
+  /// deliberately stands the local path aside when this node would run the
+  /// model on its processor and has peers to ask, so a fully-held model can be
+  /// answered by a peer — and the privacy banner was reading inventory and
+  /// telling the user "your prompts and outputs never leave this device".
+  ///
+  /// The backend answers this with the same predicate the router uses. An
+  /// older payload has no such field, which reads false — the weaker claim,
+  /// which is the safe direction for an assurance.
+  function modelRunsHere(modelData) {
+    return !!(modelData && modelData.runs_here);
+  }
+
   function createEmptyState() {
     var div = document.createElement('div');
     div.className = 'chat-empty';
@@ -284,22 +299,7 @@
 
     var title = modelName ? I18n.t('chat.title_with_model', { model: escapeHtml(modelName) }) : I18n.t('chat.empty_title');
     var _emIconKey = S.currentModel ? ((item && item.group && _ICON_MAP[item.group]) ? item.group : modelIconKey(S.currentModel)) : null;
-    /// Will a request for this model actually be ANSWERED by this machine?
-  ///
-  /// Holding every shard is not the same fact (gotcha #484). The router
-  /// deliberately stands the local path aside when this node would run the
-  /// model on its processor and has peers to ask, so a fully-held model can be
-  /// answered by a peer — and the privacy banner was reading inventory and
-  /// telling the user "your prompts and outputs never leave this device".
-  ///
-  /// The backend answers this with the same predicate the router uses. An
-  /// older payload has no such field, which reads false — the weaker claim,
-  /// which is the safe direction for an assurance.
-  function modelRunsHere(modelData) {
-    return !!(modelData && modelData.runs_here);
-  }
-
-  var _emIconUrl = _emIconKey ? providerIconUrl(_emIconKey) : null;
+    var _emIconUrl = _emIconKey ? providerIconUrl(_emIconKey) : null;
     var icon = _emIconUrl
       ? '<img src="' + _emIconUrl + '" width="48" height="48" alt="" style="opacity:0.55;border-radius:10px;">'
       : '&#11088;';

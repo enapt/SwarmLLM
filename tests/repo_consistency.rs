@@ -4404,3 +4404,49 @@ fn the_shard_announce_guard_catches_a_planted_literal() {
         "// never write crate::types::ShardAnnounce { .. } here"
     ));
 }
+
+/// The frontend's core modules must actually BUILD their exports.
+///
+/// **v0.3.160 shipped a dashboard that never left "Connecting…"** on every
+/// machine that updated (gotcha #488). A helper was added to the
+/// `App.utils = { … }` export list while its definition sat inside another
+/// function's body, so the name was not in scope when the object literal was
+/// evaluated: `ReferenceError`, `App.utils` never assigned AT ALL, and every
+/// component reading `App.utils.<anything>` died with it — `bindEvents` threw
+/// before finishing, so nothing ever moved the page off its loading skeleton.
+///
+/// **Two checks could not see it, which is why this one evaluates the code.**
+/// `node -c` passes: the file is syntactically perfect. And a source scan that
+/// takes "module scope" to mean a particular indentation passes too — the
+/// misplaced function was indented exactly like a top-level one, and the first
+/// version of this guard was written that way and went GREEN against the
+/// broken file. Only running it finds it.
+///
+/// Skips (loudly) when `node` is absent so an infrastructure change cannot turn
+/// a missing interpreter into a red build; GitHub runners ship one.
+#[test]
+fn the_frontend_core_modules_build_their_exports() {
+    let root = repo_root();
+    let script = root.join("examples/check_frontend_modules.js");
+    assert!(
+        script.exists(),
+        "examples/check_frontend_modules.js is the only check that can catch a \
+         frontend scope error — it must not be deleted"
+    );
+    let out = match std::process::Command::new("node").arg(&script).output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!(
+                "SKIPPED the_frontend_core_modules_build_their_exports: node not runnable ({e})"
+            );
+            return;
+        }
+    };
+    assert!(
+        out.status.success(),
+        "a frontend core module failed to build its exports — the dashboard will \
+         not start:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

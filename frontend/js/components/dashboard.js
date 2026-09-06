@@ -584,7 +584,6 @@
     // sat still until something happened to refetch (report #016).
     _renderHardware: function(hw) {
       if (!hw) return;
-        var hw = data.hardware;
         S._gpuInference = !!hw.gpu_inference;
         if (App.settings && App.settings.renderHwModeNote) {
           App.settings.renderHwModeNote(document.getElementById('hw-mode-note'), S._gpuInference);

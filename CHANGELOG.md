@@ -2,6 +2,27 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.161-alpha] — 2026-09-06
+
+A hotfix for one fault in v0.3.160, reported within the hour.
+
+### Fixed
+
+- **The web dashboard would not load on v0.3.160.** It sat on "Connecting…"
+  indefinitely with every panel on its loading skeleton, on every machine that
+  updated. A helper added to the previous release was written into the list of
+  things the shared utilities module hands out, but its definition ended up
+  inside another function, where the rest of the file cannot see it. That makes
+  the whole utilities object fail to build — not partially, but not at all — and
+  every part of the interface that depends on it stops with it. The rest of the
+  node was unaffected throughout: the command line, chat and peer connectivity
+  all worked normally while the dashboard was dead.
+
+  The check this project had for frontend code only verifies that a file parses,
+  which this one did. There is now a check that actually loads the core modules
+  and fails if one cannot build what it exports; it reproduces the reported error
+  exactly on the broken file.
+
 ## [0.3.160-alpha] — 2026-09-06
 
 Ten fixes, all from following up questions that had been parked waiting on a
