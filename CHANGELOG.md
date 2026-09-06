@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.159-alpha] — 2026-09-06
 
 Sixteen fixes. Six came from two reports about the dashboard and the chat tab,
 both from a processor-only node. The rest were found by reading the live node's
