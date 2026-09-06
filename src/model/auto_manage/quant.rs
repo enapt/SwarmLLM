@@ -228,11 +228,10 @@ fn hosts_any_shard(
 /// models.
 pub fn compute_quant_recommendations(state: &SharedState) -> QuantRecommendations {
     let pool_vram_mb = crate::model::auto_manage::vram::global_pool_vram_mb(state);
-    let local_vram_mb = state
-        .gpu_info
-        .as_ref()
-        .map(|g| g.vram_total_mb)
-        .unwrap_or(0);
+    // The device that would actually run the model, not the card alone — a
+    // processor-only node recommended quantisations sized for the swarm's
+    // replica share while ignoring its own RAM entirely (gotcha #483).
+    let local_vram_mb = crate::model::auto_manage::vram::node_model_budget_mb(state).unwrap_or(0);
 
     // Group manifests by inferred base name. We do this on-the-fly
     // rather than storing a `base_name` on the manifest itself — keeps

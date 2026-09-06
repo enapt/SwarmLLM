@@ -1077,6 +1077,49 @@ pub(super) fn estimate_segment_vram_mb(
 }
 
 /// Compute the VRAM budget from SharedState for passing to `check_and_load_model`.
+/// How large a model this node could host right now, in BYTES, on whichever
+/// device would actually run it — the card when there is a usable one, system
+/// RAM otherwise.
+///
+/// **The memory sibling of [`node_tokens_per_sec_7b`], and it exists for the
+/// same reason** (gotcha #483). Asking `gpu_info` alone and folding the absent
+/// case into zero is not "this node has no room" — it is "this node has no
+/// card", which is a different fact and describes every processor-only machine
+/// this project supports. Model discovery did exactly that: every
+/// `fits_*` flag was gated on `available_vram_bytes > 0`, so on a CPU-only node
+/// nothing ever fitted, and the frontend's "only show what fits" filter — on by
+/// default — hid **every result of every search**, including the "Set this up"
+/// button on the node's own wishlist.
+///
+/// `None` means unknowable and must never be read as zero. A caller that has to
+/// produce a boolean should treat it as "do not exclude", the same contract
+/// `max_hostable_layers` carries.
+pub fn node_model_budget_bytes(shared: &crate::daemon::SharedState) -> Option<u64> {
+    node_model_budget_mb(shared).map(|mb| mb.saturating_mul(1024 * 1024))
+}
+
+/// [`node_model_budget_bytes`] in MB, which is the unit most callers hold.
+pub fn node_model_budget_mb(shared: &crate::daemon::SharedState) -> Option<u64> {
+    // "Has a GPU" must mean "the GPU will actually run the models", not merely
+    // that one is installed — the same distinction `ram_budget_now` draws, and
+    // routed through the canonical placement mapping so it cannot drift from
+    // where models are really loaded.
+    let has_gpu = shared.gpu_info.is_some()
+        && !crate::daemon::shard_loader::force_cpu_for(shared.config.inference.gpu_layers);
+    let mb = if has_gpu {
+        compute_vram_budget(shared)?
+    } else {
+        let budget = ram_budget_now(shared)?;
+        // What a model may take right now: the uncommitted ceiling, and never
+        // more than the machine can absorb without swapping.
+        budget
+            .cap_mb
+            .saturating_sub(shared.model_process_pool.ram_committed_mb())
+            .min(budget.live_headroom_mb)
+    };
+    Some(mb)
+}
+
 pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     let gpu_total = shared
         .gpu_info

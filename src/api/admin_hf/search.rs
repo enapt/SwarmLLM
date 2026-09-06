@@ -84,13 +84,13 @@ pub async fn hf_search(
         tags_by_repo.insert(e.repo_id.clone(), e.task_tags.clone());
     }
 
-    // Available VRAM for fits_vram check (pool VRAM or local GPU)
-    let available_vram_bytes: u64 = state
-        .shared_state
-        .gpu_info
-        .as_ref()
-        .map(|g| g.vram_free_mb * 1024 * 1024)
-        .unwrap_or(0);
+    // How large a model this node could host, on whichever device would run it.
+    // Asking the card alone answered zero on every processor-only machine, so
+    // nothing ever "fitted" and the frontend's fit filter hid every result of
+    // every search (gotcha #483). `None` is unknowable, not zero — see below,
+    // where it deliberately does not exclude.
+    let node_budget_bytes =
+        crate::model::auto_manage::vram::node_model_budget_bytes(&state.shared_state);
 
     // Group results by repo_id with quant variants (preserve HF API order = by downloads)
     let mut repo_order: Vec<String> = Vec::new();
@@ -175,10 +175,13 @@ pub async fn hf_search(
             let est_boomerang_size =
                 est_shard_size * BOOMERANG_SIZE_NUMERATOR / BOOMERANG_SIZE_DENOMINATOR;
 
-            let fits_full = available_vram_bytes > 0 && rec_size < available_vram_bytes;
-            let fits_boomerang =
-                available_vram_bytes > 0 && est_boomerang_size < available_vram_bytes;
-            let fits_shard = available_vram_bytes > 0 && est_shard_size < available_vram_bytes;
+            // Unknown must not exclude: a node whose memory could not be read
+            // is not a node with no room, and reporting "nothing fits" there
+            // empties the browser for a user who cannot tell why.
+            let fits = |size: u64| node_budget_bytes.is_none_or(|budget| size < budget);
+            let fits_full = fits(rec_size);
+            let fits_boomerang = fits(est_boomerang_size);
+            let fits_shard = fits(est_shard_size);
             // True if any participation mode fits
             let fits_vram = fits_full || fits_boomerang || fits_shard;
 

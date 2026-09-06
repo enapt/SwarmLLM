@@ -167,11 +167,13 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
     let local_node_id = state.identity.node_id().clone();
     let local_region: Option<String> = state.config.identity.region.clone();
     let online_node_count = (state.connected_node_ids.len() as u32) + 1;
-    let local_vram_mb = state
-        .gpu_info
-        .as_ref()
-        .map(|g| g.vram_total_mb)
-        .unwrap_or(0);
+    // What this node could host, on whichever device would run it. Asking the
+    // card alone answered 0 on every processor-only machine, so the two
+    // "could we serve this ourselves" branches below could never fire there —
+    // the same defect the model browser had (gotcha #483). `None` stays 0 here
+    // because these branches are additive bonuses: an unknown budget must not
+    // manufacture a claim that we can serve something.
+    let local_vram_mb = crate::model::auto_manage::vram::node_model_budget_mb(state).unwrap_or(0);
     let pool_vram_mb = crate::model::auto_manage::vram::global_pool_vram_mb(state);
 
     // Gather a quick map of which models are pinned by the user — those

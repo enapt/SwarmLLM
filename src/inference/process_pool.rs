@@ -2807,7 +2807,7 @@ impl ModelProcessPool {
     }
 
     /// System RAM already committed to live CPU workers, in MB.
-    fn ram_committed_mb(&self) -> u64 {
+    pub(crate) fn ram_committed_mb(&self) -> u64 {
         self.ram_reserved_mb.iter().map(|e| *e.value()).sum()
     }
 

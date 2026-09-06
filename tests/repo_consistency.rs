@@ -2897,6 +2897,110 @@ fn the_local_nodes_speed_is_not_re_derived_from_the_graphics_card_alone() {
     );
 }
 
+/// No surface may answer "how much room does this node have" from the graphics
+/// card alone.
+///
+/// The sibling guard above covers SPEED in one file. This covers MEMORY across
+/// the repo, because the same mistake reappeared somewhere the file-scoped scan
+/// could not see: `src/api/admin_hf/search.rs` computed
+/// `gpu_info.map(|g| g.vram_free_mb * ...).unwrap_or(0)` and gated every
+/// `fits_*` flag on the result being non-zero — so on a processor-only node
+/// nothing ever fitted, and the model browser's "only show what fits" filter,
+/// on by default, hid **every result of every search** including the node's own
+/// wishlist "Set this up" button (gotcha #483).
+///
+/// `vram::node_model_budget_bytes` is the shared derivation; it asks system RAM
+/// when there is no usable card. Reading a peer's advertised card is still
+/// legitimate — the check is for the specific composition that turns THIS
+/// node's absent card into a zero capacity.
+#[test]
+fn no_surface_reads_this_nodes_capacity_from_the_graphics_card_alone() {
+    // The two places that legitimately own the distinction: the helper itself,
+    // and the RAM budget it delegates to.
+    // `vram.rs` owns the decision. `gossip.rs` is exempt for a different and
+    // better reason: it announces `gpu_vram_available_mb`, a field that MEANS
+    // graphics memory, and it announces RAM separately on the next lines — so
+    // zero there is honest rather than a conflation.
+    const OWNS_THE_DECISION: &[&str] = &[
+        "src/model/auto_manage/vram.rs",
+        "src/pool/manager/gossip.rs",
+    ];
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|x| x != "rs") {
+                continue;
+            }
+            let p = path.to_string_lossy().replace('\\', "/");
+            if OWNS_THE_DECISION.iter().any(|o| p.ends_with(o)) {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (line, stmt) in statements(&src) {
+                let flat: String = stmt.chars().filter(|c| !c.is_whitespace()).collect();
+                if flat.starts_with("//") {
+                    continue;
+                }
+                if flat.contains("gpu_info")
+                    && (flat.contains("vram_free_mb") || flat.contains("vram_total_mb"))
+                    && flat.contains("unwrap_or(0")
+                {
+                    offenders.push(format!("{p}:{line}"));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these sites turn 'this node has no graphics card' into 'this node has no \
+         memory', which is a different fact and describes every processor-only \
+         machine: {offenders:?}. Use vram::node_model_budget_bytes, which asks \
+         system RAM when there is no usable card."
+    );
+}
+
+/// The scan above must be able to see the defect it exists for — planted
+/// verbatim, in the shape `search.rs` actually had (gotcha #413: four of five
+/// guards could not see what they guarded).
+#[test]
+fn the_node_capacity_scan_catches_the_shape_it_was_written_for() {
+    let planted = r#"
+    let available_vram_bytes: u64 = state
+        .shared_state
+        .gpu_info
+        .as_ref()
+        .map(|g| g.vram_free_mb * 1024 * 1024)
+        .unwrap_or(0);
+"#;
+    let mut seen = false;
+    for (_, stmt) in statements(planted) {
+        let flat: String = stmt.chars().filter(|c| !c.is_whitespace()).collect();
+        if flat.contains("gpu_info")
+            && flat.contains("vram_free_mb")
+            && flat.contains("unwrap_or(0")
+        {
+            seen = true;
+        }
+    }
+    assert!(
+        seen,
+        "the scan cannot see a chain rustfmt wrapped across seven lines, which is \
+         exactly how the real one was written"
+    );
+}
+
 /// Both halves of the guard above must actually work.
 #[test]
 fn the_local_speed_guard_catches_the_shape_it_is_written_for() {
