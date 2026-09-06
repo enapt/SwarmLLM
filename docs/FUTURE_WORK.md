@@ -243,12 +243,29 @@ reports differs by platform — Linux counts reclaimable page cache, macOS
 compresses and purges — so the floor may be doing real work on exactly the
 machine that reported this.
 
-**What would settle it**: on the reporting node, log `available_mb`,
-`total_mb`, `live_headroom_mb` and `cap_mb` at each admission across a session
-that fills memory, and check whether `0.7 × available` ever drops below
-`total / 4` while the machine is still healthy. If it does not, the floor is
-dead weight and can go; if it does, the floor is load-bearing on macOS and the
-live term needs a platform-aware source instead.
+**RESOLVED 2026-09-06 — the floor is gone (gotcha #482).** The reporting node
+never answered, so it was settled by research into what the three platforms
+actually mean by "available", which was the crux: if macOS reported a stingier
+figure than Linux, the floor would have been compensating for it on exactly the
+machines that raised this. It does not. In `sysinfo` 0.38.4 Linux reads
+`MemAvailable` from `/proc/meminfo`, Windows takes `ullAvailPhys` (standby +
+free + zero lists), and macOS computes `active + inactive + free` from
+`host_statistics64` — Apple's own `AVAILABLE_NON_COMPRESSED_MEMORY`, the figure
+macOS's memory-pressure state machine itself watches. Purgeable pages are
+already inside active/inactive; only wired and compressed memory are excluded,
+the same principled exclusion Linux makes. No platform needs compensating.
+
+Two further findings made it a decision rather than a judgement call. The
+SHAPE is the anti-pattern independently of the numbers: comparable systems
+express a reserve by SUBTRACTING it from what they hand out (kubelet's
+`memory.available` is capacity minus working set; vLLM subtracts a watermark),
+never by a maximum that inflates a live reading. And the git history confirms
+what this entry already suspected — the floor was written for `b52ad7d0`'s
+startup-computed CAP, and its rationale did not survive the move to a
+per-admission live check.
+
+`SWARMLLM_RAM_HEADROOM_FLOOR=1` restores it, because this is the one change in
+its release that can refuse a model a node previously loaded.
 
 **The instrumentation for that landed 2026-09-05** (behaviour unchanged).
 `admit_to_cpu` now emits `DIAG: admitting model to system RAM` with all four

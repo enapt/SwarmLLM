@@ -456,17 +456,81 @@ pub struct RamBudget {
     /// Memory available right now, MB (0 = unreadable → not judged).
     pub available_mb: u64,
     /// How much a NEW model may take right now without swapping:
-    /// `max(70% of available, total/4)`, or `u64::MAX` when unreadable.
+    /// `FREE_RAM_HEADROOM_PCT` of what is available, or `u64::MAX` when
+    /// unreadable. See [`live_headroom_mb`].
     pub live_headroom_mb: u64,
+}
+
+/// How much a NEW model may take right now without pushing the machine into
+/// swap: `FREE_RAM_HEADROOM_PCT` of what is actually available. `u64::MAX` when
+/// memory is unreadable, which means "not judged" and never "no limit".
+///
+/// **`with_floor` is the behaviour removed on 2026-09-06 (gotcha #482).** The
+/// term used to be `max(70% of available, total_mb / 4)`, and because that is a
+/// floor on a LIVE reading it converted the anti-swap guard into a constant
+/// below about a third of the machine: a 16 GB node believed it had at least
+/// 4 GB of headroom however little was actually free, so a model was admitted
+/// against 2 GB free and the machine swapped. The project's own test for it
+/// said so out loud — `a_binding_floor_admits_more_than_is_actually_free`.
+///
+/// The floor was inherited rather than chosen. In `b52ad7d0` it clamped the
+/// CAP, computed once at startup, and its comment is right for that job:
+/// already-loaded models depress what is free, so a steady-state ceiling should
+/// be allowed to exceed it. When the figure became `live_headroom_mb`, asked at
+/// every admission about incremental absorption, that rationale stopped
+/// applying — the node's own models are charged against `cap_mb` through
+/// `committed_mb`, and their genuine occupancy of RAM is exactly what the live
+/// term should see. The constant did not move with the reasoning.
+///
+/// **Researched rather than assumed, because the worry was platform-specific**
+/// (`docs/FUTURE_WORK.md`): if macOS reported a much stingier "available" than
+/// Linux, the floor might be compensating for it on the very machines that
+/// reported the problem. It does not. In `sysinfo` 0.38.4, Linux reads
+/// `MemAvailable` from `/proc/meminfo`, Windows takes `ullAvailPhys` (standby +
+/// free + zero lists), and macOS computes `active + inactive + free` from
+/// `host_statistics64` — which is Apple's own `AVAILABLE_NON_COMPRESSED_MEMORY`,
+/// the figure macOS's memory-pressure state machine itself watches. Purgeable
+/// pages are already inside active/inactive; only wired and compressed memory
+/// are excluded, the same principled exclusion Linux makes. All three are
+/// comparable live-headroom signals and none needs compensating.
+///
+/// Comparable systems express a reserve by SUBTRACTING it from what they hand
+/// out — kubelet's `memory.available` is capacity minus working set, vLLM
+/// subtracts a watermark — never by taking a maximum that inflates a live
+/// reading. Restore the old shape with `SWARMLLM_RAM_HEADROOM_FLOOR=1` if this
+/// turns out to refuse models that would have fitted.
+pub fn live_headroom_mb(available_mb: u64, total_mb: u64, with_floor: bool) -> u64 {
+    if available_mb == 0 {
+        return u64::MAX;
+    }
+    let live = available_mb / 100 * FREE_RAM_HEADROOM_PCT;
+    if with_floor {
+        live.max(total_mb / 4)
+    } else {
+        live
+    }
+}
+
+/// Is the removed `total/4` headroom floor switched back on?
+///
+/// `SWARMLLM_RAM_HEADROOM_FLOOR=1` restores the pre-2026-09-06 behaviour. This
+/// is the one change in its release that can REFUSE a model a node previously
+/// loaded, and the failure mode of getting it wrong is "refuses models that
+/// would have fitted" — so the old behaviour stays reachable without a
+/// downgrade, the role `SWARMLLM_KV_RECONCILE=0` plays for gotcha #462.
+fn headroom_floor_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("SWARMLLM_RAM_HEADROOM_FLOOR")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
 }
 
 impl RamBudget {
     pub fn from_machine(cap_mb: u64, configured_mb: u64, total_mb: u64, available_mb: u64) -> Self {
-        let live_headroom_mb = if available_mb == 0 {
-            u64::MAX
-        } else {
-            (available_mb / 100 * FREE_RAM_HEADROOM_PCT).max(total_mb / 4)
-        };
+        let live_headroom_mb = live_headroom_mb(available_mb, total_mb, headroom_floor_enabled());
         Self {
             cap_mb,
             configured_mb,
@@ -1952,46 +2016,67 @@ mod footprint_tests {
 mod floor_tests {
     use super::*;
 
-    /// The floor wins exactly when the machine is loaded enough that 70% of
-    /// what is free falls under a quarter of what it has — the condition an
-    /// open item needs measured on a real node.
+    /// Gotcha #482. A nearly-full machine must now actually refuse. The old
+    /// floor admitted 4000 MB against 2048 MB free — the project's own test
+    /// for it was named `a_binding_floor_admits_more_than_is_actually_free`,
+    /// which is the defect stated as an assertion.
     #[test]
-    fn the_floor_is_reported_when_it_is_the_binding_term() {
-        // 16 GB machine with 2 GB free: 70% of 2048 = 1433, floor = 4096.
+    fn a_nearly_full_machine_refuses_a_model_that_would_swap() {
+        // 16 GB machine with 2 GB free: 70% of 2048 = 1433.
         let loaded = RamBudget::from_machine(13107, 0, 16384, 2048);
-        assert_eq!(loaded.live_headroom_mb, 4096);
+        assert_eq!(loaded.live_headroom_mb, 1400); // 2048/100*70, divide truncates first
         assert!(
-            loaded.floor_is_binding(),
-            "a nearly-full machine is exactly where the floor takes over"
+            !loaded.allows(0, 4000),
+            "4000 MB against 2048 MB free is a swap, not an admission"
         );
-
-        // Same machine idle: 70% of 14336 = 10010, well over the floor.
-        let idle = RamBudget::from_machine(13107, 0, 16384, 14336);
-        assert_eq!(idle.live_headroom_mb, 10010); // 14336/100*70 — the divide truncates first
         assert!(
-            !idle.floor_is_binding(),
-            "with memory free the live term decides, as intended"
+            loaded.allows(0, 1300),
+            "what genuinely fits is still admitted"
         );
     }
 
-    /// Unreadable memory is not judged at all, so the floor cannot be "binding"
-    /// there — reporting true would put noise into the very measurement this
-    /// exists to support.
+    /// An idle machine is unaffected — the floor never decided there, so
+    /// removing it changes nothing for the common case.
     #[test]
-    fn unreadable_memory_reports_no_binding_floor() {
+    fn an_idle_machine_is_unchanged() {
+        let idle = RamBudget::from_machine(13107, 0, 16384, 14336);
+        assert_eq!(idle.live_headroom_mb, 10010); // 14336/100*70, divide truncates first
+        assert!(idle.allows(0, 9000));
+    }
+
+    /// Both behaviours, through the pure helper, so the change is visible as a
+    /// change rather than asserted only in its new form.
+    #[test]
+    fn the_floor_is_what_made_the_guard_inert() {
+        let (available, total) = (2048, 16384);
+        assert_eq!(live_headroom_mb(available, total, false), 1400);
+        assert_eq!(
+            live_headroom_mb(available, total, true),
+            4096,
+            "with the floor the guard reports a quarter of the machine as free \
+             when 2 GB is"
+        );
+        assert!(
+            live_headroom_mb(available, total, true) > available,
+            "the floor claimed more headroom than the machine had free at all"
+        );
+    }
+
+    /// Unreadable memory is not judged, and must never read as a zero budget.
+    #[test]
+    fn unreadable_memory_is_not_judged() {
         let unknown = RamBudget::from_machine(13107, 0, 16384, 0);
         assert_eq!(unknown.live_headroom_mb, u64::MAX);
         assert!(!unknown.floor_is_binding());
+        assert!(unknown.allows(0, 13000), "the cap alone decides");
     }
 
-    /// The floor being binding is what makes the guard inert: it admits a model
-    /// far larger than the free memory would allow.
+    /// The reporting stays: `floor_is_binding` now says how loaded a machine
+    /// has to be for the removed floor to have mattered, which is what the
+    /// admission DIAG line carries.
     #[test]
-    fn a_binding_floor_admits_more_than_is_actually_free() {
-        let loaded = RamBudget::from_machine(13107, 0, 16384, 2048);
-        assert!(
-            loaded.allows(0, 4000),
-            "4000 MB is admitted against 2048 MB free — the looseness being measured"
-        );
+    fn the_diagnostic_still_names_the_loaded_case() {
+        assert!(RamBudget::from_machine(13107, 0, 16384, 2048).floor_is_binding());
+        assert!(!RamBudget::from_machine(13107, 0, 16384, 14336).floor_is_binding());
     }
 }
