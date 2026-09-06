@@ -576,44 +576,14 @@
       App.dashboard._loading = false;
     },
 
-    updateFull: function(data) {
-      if (data.version) {
-        var vEl = document.getElementById('app-version');
-        if (vEl) {
-          vEl.textContent = 'v' + data.version;
-          vEl.removeAttribute('hidden');
-        }
-      }
-      if (data.node_id) {
-        var el = document.getElementById('node-id');
-        var short = data.node_id.substring(0, 8);
-        el.textContent = short;
-        el.title = data.node_id;
-        el.dataset.fullId = data.node_id;
-        el.style.cursor = 'pointer';
-        if (!el.dataset.bound) {
-          el.dataset.bound = '1';
-          el.addEventListener('click', function() {
-            var fullId = el.dataset.fullId;
-            var short = el.textContent;
-            U.copyToClipboard(fullId, {
-              btn: el,
-              successLabel: I18n.t('actions.copied'),
-              resetLabel: short,
-              duration: 1200,
-            });
-          });
-        }
-      }
-      if (data.version) document.getElementById('version').textContent = 'v' + data.version;
-      if (data.uptime_seconds !== undefined) document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
-      if (data.tier) {
-        U.setTierBadge('tier-badge', data.tier);
-      }
-
-      App.dashboard.updateStats(data);
-
-      if (data.hardware) {
+    // The hardware panel, rendered from whichever payload carried it.
+    //
+    // Extracted so the 2-second live tick can render it too. It used to
+    // live inside `updateFull`, which only runs on an explicit REST fetch,
+    // so every other figure on the dashboard updated live and this panel
+    // sat still until something happened to refetch (report #016).
+    _renderHardware: function(hw) {
+      if (!hw) return;
         var hw = data.hardware;
         S._gpuInference = !!hw.gpu_inference;
         if (App.settings && App.settings.renderHwModeNote) {
@@ -763,12 +733,57 @@
           diskBar.className = U.resourceBarClass(diskPct, 'accent');
           App.dashboard._setGauge('disk-gauge', diskPct);
         }
+    },
+    updateFull: function(data) {
+      if (data.version) {
+        var vEl = document.getElementById('app-version');
+        if (vEl) {
+          vEl.textContent = 'v' + data.version;
+          vEl.removeAttribute('hidden');
+        }
       }
+      if (data.node_id) {
+        var el = document.getElementById('node-id');
+        var short = data.node_id.substring(0, 8);
+        el.textContent = short;
+        el.title = data.node_id;
+        el.dataset.fullId = data.node_id;
+        el.style.cursor = 'pointer';
+        if (!el.dataset.bound) {
+          el.dataset.bound = '1';
+          el.addEventListener('click', function() {
+            var fullId = el.dataset.fullId;
+            var short = el.textContent;
+            U.copyToClipboard(fullId, {
+              btn: el,
+              successLabel: I18n.t('actions.copied'),
+              resetLabel: short,
+              duration: 1200,
+            });
+          });
+        }
+      }
+      if (data.version) document.getElementById('version').textContent = 'v' + data.version;
+      if (data.uptime_seconds !== undefined) document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
+      if (data.tier) {
+        U.setTierBadge('tier-badge', data.tier);
+      }
+
+      App.dashboard.updateStats(data);
+
+      App.dashboard._renderHardware(data.hardware);
 
       if (data.hosted_shards !== undefined) document.getElementById('hosted-shards').textContent = data.hosted_shards;
     },
 
     updateStats: function(data) {
+      // The live 2-second tick carries the hardware panel now (report #016).
+      // It used to be rendered only by `updateFull`, which runs on an explicit
+      // fetch, so RAM and the graphics gauge sat still while every other figure
+      // on the dashboard moved. The backend kept it off the tick because
+      // measuring it cost 182 ms — that was fixed on 2026-09-06 and is now
+      // 0.43 ms, so the reason no longer applies.
+      if (data && data.hardware) App.dashboard._renderHardware(data.hardware);
       // Node version in the header, next to the logo. Guarded so the every-2s
       // WS tick doesn't rewrite the DOM when the (static) version is unchanged.
       if (data.version) {

@@ -594,8 +594,30 @@ async fn build_stats_message(state: &SharedState) -> String {
         .load(std::sync::atomic::Ordering::Relaxed);
     let allow_lan = state.config.pool.private_mode_allow_lan;
 
+    // The hardware panel — RAM, the graphics gauge, the contribution figures.
+    //
+    // It was reachable only through `/api/admin/stats`, which the dashboard
+    // fetches on specific events and never on a timer, so those figures sat
+    // still while everything around them updated every two seconds
+    // (report #016). The reason they were kept off this tick was cost:
+    // `detect_hardware` refreshed every process on the machine, measured at
+    // 182 ms. That was fixed on 2026-09-06 — it now refreshes four facts and
+    // an explicit pid list, 0.43 ms — so the objection is gone and the
+    // placement can follow it.
+    //
+    // Rides the existing `stats_update`, like `active_request_progress` above
+    // it: there are deliberately only five WS message types.
+    //
+    // Called inline rather than through `spawn_blocking` because this is one
+    // sub-millisecond call every two seconds, shared across every connected
+    // client by the stats cache — less synchronous work than the JSON
+    // construction below it, which this function's own header comment already
+    // accounts for.
+    let hardware = crate::api::admin::detect_hardware(state);
+
     let mut data = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "hardware": hardware,
         "peers": peers_connected,
         "lan_peers": lan_peers,
         "pool_peers": pool_peers,

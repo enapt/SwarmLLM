@@ -1676,7 +1676,7 @@ pub async fn shutdown_node(
 }
 // ---- Hardware detection ----
 
-fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Value {
+pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Value {
     use sysinfo::System;
 
     // Refresh ONLY the four facts read below. `System::new_all()` enumerates

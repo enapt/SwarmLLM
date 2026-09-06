@@ -4,12 +4,27 @@ All notable changes to SwarmLLM are documented here.
 
 ## [0.3.160-alpha] — 2026-09-06
 
-Eight fixes, all from following up questions that had been parked waiting on a
-reply from someone else's machine, plus two new reports. Three of them were
+Ten fixes, all from following up questions that had been parked waiting on a
+reply from someone else's machine, plus four new reports. Three of them were
 found by checking a claim rather than a symptom, and one is a fault this
 project shipped itself six releases ago.
 
 ### Fixed
+
+- **The dashboard's memory and hardware panel updates on its own again.** Every
+  other figure on the dashboard — peers, downloads, activity, capacity —
+  refreshes every two seconds; this one only moved when something happened to
+  reload it, so a machine filling up showed the same numbers indefinitely. It
+  was kept off that update for a good reason: measuring it used to mean
+  inspecting every process on the machine and took 182 ms. That was fixed in the
+  previous release and now takes under a millisecond, so the panel joins
+  everything else.
+- **The "API request log" is now named for what it shows.** It lists calls to
+  one specific API — the stateful Responses API — and not the ordinary chat
+  requests that the built-in chat tab and most API clients make. So it stayed
+  empty for anyone using the node normally, under a title that promised a log of
+  their traffic. It is now called "Responses API jobs", and when empty it says
+  what does and does not appear in it.
 
 - **The chat tab no longer promises that a reply never left your device when it
   did.** The banner read "Running locally — your prompts and outputs never leave
