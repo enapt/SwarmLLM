@@ -3450,3 +3450,85 @@ fn the_local_candidate_is_priced_by_the_device_the_request_would_use() {
         on_card.est_tokens_per_sec
     );
 }
+
+/// The live reproduction of gotcha #478, measured on the release pair
+/// 2026-09-06: a processor-only node holding llama-3.2-1b whole, and an
+/// otherwise perfectly good card 496 ms away.
+///
+/// Under prompt privacy the peer is given the MIDDLE, and a middle is entered
+/// once per token — `vertex_cost` exempts only a remote range covering the
+/// whole model from per-token network, and says so. So the shape actually
+/// assigned pays `2 x 496 ms` per token, against a local processor decoding at
+/// 4.28 tok/s (~234 ms/token). Handing it over is four times slower, and the
+/// measured request took 9.1 s to return a single token.
+///
+/// The gate priced the peer at `(0, num_layers)` — the delegated shape, with
+/// no per-token network at all — while assigning `(1, n-1)`. Same class as
+/// gotcha #434: what was priced was not what was run.
+fn boomerang_pair() -> (Vec<NodeCandidate>, u32) {
+    const N: u32 = 16;
+    let mut local = cost_cand(0xAA, vec![(0, N)], super::ReachTier::Local, 0, 0.0, None);
+    local.node_id = local_id();
+    local.est_tokens_per_sec = 4.279; // measured on the i5-10500T
+    let mut peer = cost_cand(
+        0xBB,
+        vec![(0, N)],
+        super::ReachTier::DirectMeasured,
+        496,
+        0.0,
+        None,
+    );
+    peer.est_tokens_per_sec = 15.206; // the Mac mini, as it advertised itself
+    peer.gpu_vram_available_mb = Some(24_000);
+    (vec![local, peer], N)
+}
+
+#[test]
+fn a_boomerangs_middle_is_priced_as_the_middle_it_will_be_given() {
+    let (cands, n) = boomerang_pair();
+    assert!(
+        super::delegation_target(
+            &cands,
+            &super::DelegationInput {
+                local_node_id: &local_id(),
+                num_layers: n,
+                // What prompt privacy actually hands over: the middle.
+                layers_to_assign: super::delegated_layer_span(n, true),
+                local_serves_on_cpu: true,
+                model_vram_mb: 1_200,
+                local_cpu_tokens_per_sec: 4.279,
+                prompt_tokens: Some(16),
+            }
+        )
+        .is_none(),
+        "a middle segment half a second away is entered once per token; handing \
+         it over must not be priced as though the peer ran the whole model"
+    );
+}
+
+/// The control, and the thing that must not regress: the SAME peer, offered
+/// the whole model, is a genuine improvement and is still taken. Without this
+/// the fix above could be "never delegate", which is the failure
+/// `delegation_target` exists to prevent.
+#[test]
+fn the_same_peer_still_gets_the_whole_model_when_that_is_the_shape() {
+    let (cands, n) = boomerang_pair();
+    assert_eq!(
+        super::delegation_target(
+            &cands,
+            &super::DelegationInput {
+                local_node_id: &local_id(),
+                num_layers: n,
+                layers_to_assign: super::delegated_layer_span(n, false),
+                local_serves_on_cpu: true,
+                model_vram_mb: 1_200,
+                local_cpu_tokens_per_sec: 4.279,
+                prompt_tokens: Some(16),
+            }
+        )
+        .map(|c| c.node_id.clone()),
+        Some(NodeId([0xBB; 32])),
+        "delegating the whole model round-trips once for the request, not once \
+         per token — that peer is still worth handing it to"
+    );
+}

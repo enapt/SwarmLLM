@@ -387,6 +387,52 @@ plan into an error. And when a struct's own field documentation describes a
 generality — "THIS segment, not the whole model" — check what its callers
 actually pass.
 
+## A hand-off is priced as the shape it will be given, not as the whole model
+
+**`inference::scheduler::delegated_shape_cost_ms`** is the one answer to "what
+does this request cost if that peer is given `layers_to_assign` of it". The
+price gate (`costs_more_than_staying_here`), the line that logs the gate's
+verdict, and `privacy_cost_ms` all go through it, so none of them can price a
+peer differently from the others.
+
+**Why the shape is the whole question.** `parallax::vertex_cost` exempts
+exactly one shape from per-token network — a remote candidate covering the
+WHOLE model, entered once for the entire request and decoding remotely. Every
+other remote range is entered once per token and charged
+`2 * latency * ASSUMED_FORWARD_PASSES`; the function's own comment says so.
+So the two shapes a hand-off can take differ by a factor of the token count in
+their network term, and "the whole model" is the cheap one.
+
+Prompt privacy is auto-on whenever this node holds both ends, which makes
+`boomerang_assignment` — peer gets `(1, n-1)` — the COMMON shape, not an edge
+case. The gate priced `(0, num_layers)` regardless. Measured on the release
+pair 2026-09-06 (gotcha #478): a processor-only node holding llama-3.2-1b
+whole handed the middle to a card **496 ms away** and took **9.1 s to return
+one token**, against a local processor decoding that model at 4.28 tok/s.
+
+Three things a change here must keep.
+
+- **The site that decides the shape passes the shape.** `DelegationInput`
+  already carried `layers_to_assign`, documented as "how many layers the peer
+  would ACTUALLY be given ... the middle for a boomerang" — the capacity term
+  read it (gotcha #454) and the price term did not. A shape parameter that only
+  some terms consult is worse than none, because the ones that ignore it look
+  correct in a suite where every test passes the same shape.
+- **A model too short to cut a middle from is priced whole**, because
+  `delegated_layer_span` hands it over whole. The two must agree by
+  construction, which is why both read `BOOMERANG_MIN_LAYERS`.
+- **This must not become "never delegate".** The feature exists because a
+  processor node beside an idle card is the failure being fixed. The same peer
+  offered the WHOLE model is still taken — pinned by
+  `the_same_peer_still_gets_the_whole_model_when_that_is_the_shape`, the
+  control beside
+  `a_boomerangs_middle_is_priced_as_the_middle_it_will_be_given`.
+
+**The general rule**: a cost model parameterised by shape must be handed the
+shape that will actually execute. Same class as gotcha #434 — there a decode
+step was budgeted as a prefill; here a boomerang was budgeted as a delegation.
+Ask of any price whether the thing being priced is the thing about to be done.
+
 ## Delegation asks the same capacity bound routing does, and the retry it promises must exist
 
 Three defects reported from one live node on v0.3.153, all in the path that

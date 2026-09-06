@@ -606,6 +606,7 @@ fn delegation_target<'a>(
             candidates,
             local_node_id,
             num_layers,
+            layers_to_assign,
             prompt_tokens,
         ) {
             // Priced on THIS prompt, by the same cost model the routing search
@@ -656,9 +657,17 @@ fn delegation_target<'a>(
             local_cpu_tokens_per_sec,
             // The two figures the price gate compared, so a reader can check
             // the verdict instead of inferring a mechanism from its absence.
-            peer_cost_ms = prompt_tokens.map(|_| {
-                parallax::vertex_cost(c, (0, num_layers), local_node_id, num_layers, prompt_tokens)
-                    .total()
+            // The shape this peer would actually be given, not the whole
+            // model — or the line contradicts the verdict above it.
+            peer_cost_ms = prompt_tokens.and_then(|_| {
+                delegated_shape_cost_ms(
+                    c,
+                    candidates,
+                    local_node_id,
+                    num_layers,
+                    layers_to_assign,
+                    prompt_tokens,
+                )
             }),
             local_cost_ms = prompt_tokens.and_then(|_| {
                 candidates
@@ -694,6 +703,7 @@ fn costs_more_than_staying_here(
     candidates: &[NodeCandidate],
     local_node_id: &NodeId,
     num_layers: u32,
+    layers_to_assign: u32,
     prompt_tokens: Option<u32>,
 ) -> bool {
     if !price_gate_enabled()
@@ -705,11 +715,77 @@ fn costs_more_than_staying_here(
     let Some(local) = candidates.iter().find(|x| x.node_id == *local_node_id) else {
         return false;
     };
-    let range = (0, num_layers);
-    let peer_ms = parallax::vertex_cost(c, range, local_node_id, num_layers, prompt_tokens).total();
-    let local_ms =
-        parallax::vertex_cost(local, range, local_node_id, num_layers, prompt_tokens).total();
+    let Some(peer_ms) = delegated_shape_cost_ms(
+        c,
+        candidates,
+        local_node_id,
+        num_layers,
+        layers_to_assign,
+        prompt_tokens,
+    ) else {
+        return false;
+    };
+    let local_ms = parallax::vertex_cost(
+        local,
+        (0, num_layers),
+        local_node_id,
+        num_layers,
+        prompt_tokens,
+    )
+    .total();
     peer_ms > local_ms
+}
+
+/// What this request costs if `peer` is given `layers_to_assign` of a
+/// `num_layers` model — priced as the SHAPE that will actually be assigned.
+///
+/// **The whole point is that those are two different prices.**
+/// `parallax::vertex_cost` exempts exactly one shape from per-token network —
+/// a remote candidate covering the WHOLE model, which is entered once for the
+/// entire request and streams its tokens back. Every other remote range is
+/// entered once per token. So a boomerang's middle on a peer `d` away pays
+/// `2 * d` per token where the same peer given the whole model pays it once,
+/// and pricing the second while assigning the first is not a small error: it
+/// is the difference between a round trip and a round trip per token.
+///
+/// Measured on the release pair 2026-09-06 (gotcha #478): a processor-only
+/// node holding llama-3.2-1b whole handed the middle to a card 496 ms away and
+/// took **9.1 s to return a single token**, against a local processor that
+/// decodes at 4.28 tok/s. The gate had priced that peer at `(0, num_layers)`.
+///
+/// Same class as gotcha #434 — the work being budgeted was not the work being
+/// done — and the reason this is one helper rather than an expression at each
+/// site is that the gate, the line that logs its verdict, and
+/// [`privacy_cost_ms`] must not be able to disagree about the same peer.
+///
+/// `None` when the shape cannot be priced: a boomerang needs a local candidate
+/// to hold its two ends.
+fn delegated_shape_cost_ms(
+    peer: &NodeCandidate,
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    num_layers: u32,
+    layers_to_assign: u32,
+    prompt_tokens: Option<u32>,
+) -> Option<f32> {
+    let price = |c: &NodeCandidate, range: (u32, u32)| {
+        parallax::vertex_cost(c, range, local_node_id, num_layers, prompt_tokens).total()
+    };
+    // The whole model, in one message, decoded there. Note this is also the
+    // right answer for a model too short to cut a middle from: then
+    // `delegated_layer_span` hands over everything.
+    if layers_to_assign >= num_layers || num_layers < BOOMERANG_MIN_LAYERS || !shape_price_enabled()
+    {
+        return Some(price(peer, (0, num_layers)));
+    }
+    // The boomerang: embedding here, the middle there, sampling back here —
+    // the shape `boomerang_assignment` builds.
+    let local = candidates.iter().find(|c| c.node_id == *local_node_id)?;
+    Some(
+        price(local, (0, 1))
+            + price(peer, (1, num_layers - 1))
+            + price(local, (num_layers - 1, num_layers)),
+    )
 }
 
 /// Privacy must add at least this long, and at least this multiple of the
@@ -744,14 +820,20 @@ fn privacy_cost_ms(
     if num_layers < 3 || prompt_tokens.is_none_or(|t| t == 0) {
         return None;
     }
-    let local = candidates.iter().find(|c| c.node_id == *local_node_id)?;
-    let price = |c: &NodeCandidate, range: (u32, u32)| {
-        parallax::vertex_cost(c, range, local_node_id, num_layers, prompt_tokens).total()
+    // Both shapes through the one helper, so the figure reported to the user
+    // and the figure the gate decides on cannot drift apart.
+    let shape = |assigned: u32| {
+        delegated_shape_cost_ms(
+            peer,
+            candidates,
+            local_node_id,
+            num_layers,
+            assigned,
+            prompt_tokens,
+        )
     };
-    let whole_on_peer = price(peer, (0, num_layers));
-    let boomerang = price(local, (0, 1))
-        + price(peer, (1, num_layers - 1))
-        + price(local, (num_layers - 1, num_layers));
+    let boomerang = shape(delegated_layer_span(num_layers, true))?;
+    let whole_on_peer = shape(num_layers)?;
     Some(boomerang - whole_on_peer)
 }
 
@@ -771,6 +853,26 @@ fn price_gate_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         !std::env::var("SWARMLLM_DELEGATE_PRICE_GATE")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    })
+}
+
+/// Is a hand-off priced as the shape it will actually be given?
+///
+/// `SWARMLLM_DELEGATE_SHAPE_PRICE=0` restores the pre-2026-09-06 behaviour of
+/// pricing every hand-off as a whole-model delegation, whatever shape is about
+/// to be assigned. That is the defect gotcha #478 records, and the hatch exists
+/// for the same reason `SWARMLLM_DELEGATE_PRICE_GATE=0` does: this change can
+/// DECLINE work a node previously handed away, so if it turns out to be
+/// over-cautious in the field the symptom is a node on its processor beside an
+/// idle peer — and the two behaviours need to be comparable inside one binary
+/// to tell that from the bug it fixes.
+fn shape_price_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("SWARMLLM_DELEGATE_SHAPE_PRICE")
             .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
             .unwrap_or(false)
     })

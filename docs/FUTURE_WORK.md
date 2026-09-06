@@ -10878,9 +10878,32 @@ measured is still tried; the measurement that first request produces is what
 stops the second, and the report showed the same bad peer chosen twice precisely
 because nothing learned.
 
+**The gate was pricing a shape it was not assigning (measured 2026-09-06,
+gotcha #478).** The live measurement this entry asked for finally happened, on
+the release pair, and it did not need a big model or a long prompt to show
+something wrong. A processor-only node holding **llama-3.2-1b whole**, given a
+16-token prompt and asked for one token, handed the model's middle to a Mac
+mini **496 ms away** and took **9.1 s** — against its own processor, which
+decodes that model at 4.28 tok/s.
+
+`parallax::vertex_cost` exempts exactly one shape from per-token network: a
+remote candidate covering the whole model, entered once and decoding remotely.
+Every other remote range is entered per token at `2 * latency *
+ASSUMED_FORWARD_PASSES`. Prompt privacy is auto-on whenever this node holds
+both ends, so the shape actually assigned was the boomerang — the peer given
+`(1, n-1)` — while `costs_more_than_staying_here` priced `(0, num_layers)`, the
+exempt one. `DelegationInput` had carried `layers_to_assign` since the #454
+capacity fix; the price was the one term that never read it.
+
+Fixed by `delegated_shape_cost_ms`, which prices the shape that will be
+assigned and is shared by the gate, the log line reporting its verdict, and
+`privacy_cost_ms` (which had already written the boomerang arithmetic out
+correctly, thirty lines below the gate that ignored it).
+
 **Still open**: making the DP the sole decision-maker for every shape
 (boomerangs across several peers, partial splits) remains the larger change.
-What shipped is the gate agreeing with the search, not being replaced by it.
+What shipped is the gate agreeing with the search about the shape it is
+actually choosing, not being replaced by it.
 
 ## A multi-megabyte forward over ONE QUIC stream can kill the connection (measured 2026-09-03, gotcha #446)
 
