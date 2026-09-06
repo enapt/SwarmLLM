@@ -4,7 +4,7 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-Fourteen fixes. Six came from two reports about the dashboard and the chat tab,
+Fifteen fixes. Six came from two reports about the dashboard and the chat tab,
 both from a processor-only node. The rest were found by reading the live node's
 own log, by looking into a report of a model that stopped loading, and by
 building a small-machine test setup — every memory fault reported from the field
@@ -13,6 +13,13 @@ developer box, which is why all of them shipped.
 
 ### Fixed
 
+- **A model that is not compressed now says why it needs more memory than its
+  file.** An uncompressed model's weights take about twice their size on disk
+  once loaded, so a 1.2 GB file was reported as needing 2.4 GB of weights with
+  nothing to explain the gap — it reads as a mistake in the figure rather than a
+  property of the file. The refusal now says so, and points at the compressed
+  build of the same model, which is the one thing the reader can act on. The
+  figure itself was already right: the loaded model measured 2299 MB here.
 - **A refusal about a long conversation no longer looks like your memory setting
   was ignored.** It reported a figure as "budget" that is only what remains for
   conversations after the model's weights are paid for, while the refusal from
@@ -191,7 +198,7 @@ a browser.
 
 ## [0.3.156-alpha] — 2026-09-05
 
-Fourteen fixes. Two came from a tester's reports; the other eight were found by
+Fifteen fixes. Two came from a tester's reports; the other eight were found by
 checking whether those fixes were actually complete — two of them were not.
 
 ### Fixed

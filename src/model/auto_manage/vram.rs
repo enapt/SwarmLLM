@@ -208,6 +208,16 @@ pub struct ResidentFootprint {
     pub kv_bytes: u64,
     pub rope_bytes: u64,
     pub kv_context: u64,
+    /// This checkpoint is NOT quantized, so its weights cost roughly twice
+    /// their size on disk once loaded.
+    ///
+    /// Carried into the refusal because the weights figure is otherwise
+    /// unaccountable to the person reading it: a 1.2 GB file reported as
+    /// "2404 MB of weights" reads like a bug — measured on this machine, the
+    /// worker's real RSS was 2299 MB, so the estimate is right and only the
+    /// explanation was missing. It also points at the one thing they can
+    /// actually do about it.
+    pub weights_expanded: bool,
 }
 
 impl ResidentFootprint {
@@ -288,6 +298,7 @@ fn resident_footprint(
         .saturating_mul(2);
 
     ResidentFootprint {
+        weights_expanded: i.unquantized_bytes_per_element.is_some(),
         weights_bytes,
         embedding_bytes,
         kv_bytes,
@@ -395,9 +406,20 @@ pub fn describe_cpu_refusal(
             f.kv_context,
         )
     };
+    // An unquantized checkpoint is materialised as dense f32, so its weights
+    // cost about twice their bytes on disk. Say so where the number appears:
+    // without it the figure looks wrong rather than surprising, and the reader
+    // has no way to know that a quantized build of the same model would fit.
+    let weights_note = if f.weights_expanded {
+        " (about twice the file on disk, because this model is not quantised and \
+         is expanded in memory — a quantised build of the same model needs far less)"
+    } else {
+        ""
+    };
     let mut s = format!(
-        "{model} needs about {total_mb} MB of memory: {} MB of weights, {kv_clause}, \
-         {other_mb} MB of embeddings, tables and overhead. This node's budget allows {budget_mb} MB",
+        "{model} needs about {total_mb} MB of memory: {} MB of weights{weights_note}, \
+         {kv_clause}, {other_mb} MB of embeddings, tables and overhead. This node's budget \
+         allows {budget_mb} MB",
         f.weights_bytes / MB,
     );
     if !budget_note.is_empty() {
@@ -1769,6 +1791,40 @@ mod footprint_tests {
         assert!(
             est > weights_only,
             "estimate {est} MB must exceed the raw weights {weights_only} MB"
+        );
+    }
+
+    /// An unquantized model's weights figure must explain itself.
+    ///
+    /// The estimate is right — a 1.2 GB fp16 file measured 2299 MB resident on
+    /// this machine — but "2404 MB of weights" for a 1.2 GB file reads as a bug
+    /// to whoever is looking at it, and the only thing they can do about it
+    /// (fetch a quantised build) is not something the message previously said.
+    #[test]
+    fn an_unquantized_model_says_why_its_weights_are_bigger_than_the_file() {
+        let mut f = ResidentFootprint {
+            weights_bytes: 2404 * 1024 * 1024,
+            embedding_bytes: 517 * 1024 * 1024,
+            kv_bytes: 96 * 1024 * 1024,
+            rope_bytes: 0,
+            kv_context: 4096,
+            weights_expanded: true,
+        };
+        let msg = describe_cpu_refusal("m", &f, 8192, ContextSource::DeclaredOrDefault, 600, "", 0);
+        assert!(msg.contains("2404 MB of weights"), "{msg}");
+        assert!(msg.contains("not quantised"), "must say why: {msg}");
+        assert!(
+            msg.contains("quantised build"),
+            "must say what to do: {msg}"
+        );
+
+        // A quantized checkpoint costs its bytes on disk and needs no excuse.
+        f.weights_expanded = false;
+        let msg = describe_cpu_refusal("m", &f, 8192, ContextSource::DeclaredOrDefault, 600, "", 0);
+        assert!(msg.contains("2404 MB of weights"), "{msg}");
+        assert!(
+            !msg.contains("not quantised"),
+            "a quantised model must not be told it is unquantised: {msg}"
         );
     }
 
