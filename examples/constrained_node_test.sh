@@ -29,6 +29,11 @@ set -u
 BIN="${1:-./target/debug/swarmllm}"
 MODEL=llama-3.2-3b-instruct-q4-k-m
 SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+# A SECOND, smaller model, for the case the field report actually describes: a
+# dead worker refusing a DIFFERENT model. Optional — that check is skipped if
+# it is not on this machine.
+MODEL2=qwen2.5-0.5b-instruct-fp16
+SRC2="$HOME/.local/share/swarmllm/models/$MODEL2"
 PORT=8866
 # Sized from the model: too small to admit it, then comfortably large enough.
 TIGHT_MB=2200
@@ -40,6 +45,7 @@ ROOMY_MB=4000
 BASE=$(mktemp -d); D="$BASE/node"
 mkdir -p "$D/models"
 cp -r "$SRC" "$D/models/"
+[ -d "$SRC2" ] && cp -r "$SRC2" "$D/models/"
 echo "base=$BASE"
 
 write_config() {  # $1 = budget in MB
@@ -80,11 +86,12 @@ stop_node() {
 }
 trap 'stop_node; rm -rf "$BASE"' EXIT
 
-ask() {
+ask() {  # $1 = model id, defaults to the big one
   KEY=$(cat "$D/api_key")
+  M="${1:-$MODEL}"
   timeout 500 curl -s -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
     -X POST "http://localhost:$PORT/v1/chat/completions" \
-    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Say OK\"}],\"max_tokens\":8}"
+    -d "{\"model\":\"$M\",\"messages\":[{\"role\":\"user\",\"content\":\"Say OK\"}],\"max_tokens\":8}"
 }
 
 fails=0
@@ -136,6 +143,46 @@ else
       | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("workers",[])))' 2>/dev/null || echo "?")
   check "one live worker, not two or none (got $N)" "$([ "$N" = "1" ] && echo 1 || echo 0)" \
         "$(curl -s -H "Authorization: Bearer $KEY" "http://localhost:$PORT/v1/status" | head -c 300)"
+fi
+
+# ── 5. a dead worker must not refuse a DIFFERENT model ────────────────────
+# This is the reported symptom — "a dead 14B refuses every model until
+# restart" — and it is a different path from [3]. There, `get_or_spawn` looks
+# the dead worker up under the SAME key and retires it; here nothing looks it
+# up at all, and only the shared budget is consulted, so the release has to
+# have come from the health tick. The budget is one figure for the whole node,
+# which is why one corpse could refuse everything.
+if [ -d "$SRC2" ]; then
+  echo "[5] after a death, a DIFFERENT model still loads"
+  stop_node; write_config $ROOMY_MB; start_node
+  OUT=$(ask "$MODEL")
+  check "the big model loads first" "$(echo "$OUT" | grep -q '"content"' && echo 1 || echo 0)" "$OUT"
+  WPID2=$(for pid in $(pgrep -f 'model-worker' 2>/dev/null); do
+            tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "$D" && echo "$pid"
+          done | head -1)
+  if [ -n "${WPID2:-}" ]; then
+    kill -9 "$WPID2"; sleep 8
+    RELEASES_BEFORE=$(grep -c 'memory budget released' "$D/node.log")
+    OUT=$(ask "$MODEL2")
+    check "the OTHER model is served after that death" \
+          "$(echo "$OUT" | grep -q '"content"' && echo 1 || echo 0)" "$OUT"
+    # Assert the MECHANISM, because the outcome alone is ambiguous: on a
+    # healthy node the same request also succeeds by RECLAIMING a live worker,
+    # and at this budget the two models cannot both be resident anyway (each
+    # charges ~3.1 GB against 4000). What distinguishes a leak is that a
+    # corpse's charge cannot be reclaimed — `free_ram_for_admission` walks the
+    # charge map and skips any entry whose worker is no longer in `workers` —
+    # so if the dead worker's charge were still on the books nothing could
+    # free it and this model would be refused. The release is the thing to
+    # check for.
+    check "the dead worker's charge was released, not merely reclaimed" \
+          "$([ "$(grep -c 'memory budget released' "$D/node.log")" -gt "$RELEASES_BEFORE" ] && echo 1 || echo 0)" \
+          "$(grep 'memory budget released' "$D/node.log" | tail -2)"
+  else
+    echo "  FAIL — no worker to kill for the cross-model case"; fails=$((fails+1))
+  fi
+else
+  echo "[5] SKIPPED — $MODEL2 not on this machine"
 fi
 
 echo
