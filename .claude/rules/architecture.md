@@ -387,6 +387,48 @@ plan into an error. And when a struct's own field documentation describes a
 generality — "THIS segment, not the whole model" — check what its callers
 actually pass.
 
+## An unmeasured candidate is priced pessimistically, never excluded
+
+`priced_from_a_measurement` is one predicate with one meaning — "does the cost
+model have anything real about this candidate" — and both consumers must read
+it the same way. They did not.
+
+`delegation_target` treats unmeasured as PERMISSIVE: the price gate stands
+aside and the peer may still be handed the whole model, because "a peer never
+measured is still tried; the measurement that first request produces is what
+stops the second". `pipeline_may_replace_processor_route` treated the same fact
+as DISQUALIFYING, vetoing any chain containing such a peer — while its own doc
+claimed to hold "the same standard". The multi-hop path was strictly stricter
+than the single-hop one and nothing said why (gotcha #479).
+
+**The prior is the conservatism.** `UNKNOWN_COMPUTE_MS` was raised from 0
+precisely so an unknown competes on a pessimistic footing — "deliberately
+nearer the pessimistic end so an unmeasured node does not outrank a measured
+good one". A veto on top means it can never do the job it was raised to do.
+
+**And the arithmetic says what the veto blocked.** An unpriced peer over `L`
+layers costs `UNKNOWN_COMPUTE_MS * L * ASSUMED_FORWARD_PASSES` (1600·L ms) plus
+`2 * latency * ASSUMED_FORWARD_PASSES`; a local processor at `e` tok/s costs
+`2000·L/e`. The peer wins only below **e = 1.25 tok/s** ignoring network, and
+below **~0.5 tok/s** for a peer 500 ms away. The search therefore reaches for an
+unmeasured peer only when running here would take minutes — the one case where
+trying the unknown is warranted.
+
+What replaced the veto: **the BASELINE must be priced.** Giving up "running it
+here" is the question, so "here" needs a price; with none, stay home — home has
+no network term and no peer to be wrong about. Exploration is bounded by
+machinery that already exists (ACK fast-fail, `find_standbys` sorting local
+FIRST, `is_transient_remote_failure`), which is the abandonability half of
+hedged requests without the cost of running both.
+
+Two things a change here must keep. **No invented desperation threshold** — the
+crossover is derived from the cost model's constants, and a product judgment
+about "how long is too long" is the #451 mistake. And **a routing test must pin
+the local speed** (`with_local_processor_speed`): `mem_bandwidth` under-reads in
+a debug build (~0.85 tok/s against ~5 in release, gotcha #427), which straddles
+the 1.25 crossover, so an unpinned test asserts a property of the machine it
+runs on.
+
 ## A hand-off is priced as the shape it will be given, not as the whole model
 
 **`inference::scheduler::delegated_shape_cost_ms`** is the one answer to "what

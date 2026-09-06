@@ -799,7 +799,15 @@ fn no_tp_group_when_local_node_covers_every_layer() {
     );
     state.connected_node_ids.insert(node_b);
 
-    let scheduler = PipelineScheduler::new(state);
+    // Pinned, not `new`: this test is about tensor-parallel GROUPING, and
+    // `node_b` above carries `capability: None` — an UNPRICED peer. Since
+    // gotcha #479 an unpriced peer competes on the `UNKNOWN_COMPUTE_MS` prior
+    // instead of being vetoed outright, and that prior beats a local node
+    // below ~1.25 tok/s. A debug build measures its own loop rather than the
+    // memory (gotcha #427) and reads ~0.85 tok/s here against ~5 in release,
+    // so without the pin this test would assert a routing verdict that
+    // depends on the build profile.
+    let scheduler = PipelineScheduler::with_local_processor_speed(state, LOCAL_PROCESSOR_TPS);
     let assignment = scheduler
         .assemble_pipeline(&ModelId("tp-full-model".into()), &local_id)
         .unwrap();
@@ -3352,14 +3360,14 @@ fn a_slow_enough_processor_hands_even_a_short_prompt_to_distant_cards() {
     );
 }
 
-/// A peer priced at the shared unknown prior is not evidence of a faster
-/// route: a route this node can price is never given up for one it cannot.
-/// Advertised speed counts as knowing; an all-local chain means the search
-/// agrees with the fast path.
+/// The two remaining grounds for keeping the request here, after gotcha #479
+/// removed the third (a blanket veto on any chain containing an unmeasured
+/// peer). The all-local arm is unchanged; the other is now about the BASELINE
+/// being known rather than the peer.
 #[test]
-fn an_unpriced_peer_cannot_displace_the_processor_route() {
-    let local = local_full_coverage();
-    let mut peer = willing_peer(0xBB, LAYERS);
+fn the_processor_route_is_kept_for_an_all_local_chain_or_an_unpriced_baseline() {
+    let mut local = local_full_coverage();
+    let peer = willing_peer(0xBB, LAYERS);
     assert_eq!(
         peer.est_tokens_per_sec, 0.0,
         "the fixture must start unpriced"
@@ -3369,24 +3377,40 @@ fn an_unpriced_peer_cannot_displace_the_processor_route() {
         shard_id: peer.shard_id.clone(),
         layer_range: (0, LAYERS),
     }];
-    let cands = vec![local.clone(), peer.clone()];
+
+    // Our own speed unknown: nothing to compare, so stay.
     assert!(
-        super::pipeline_may_replace_processor_route(&remote_chain, &cands, &local_id()).is_err(),
-        "an unpriced peer must not take the request"
+        super::pipeline_may_replace_processor_route(
+            &remote_chain,
+            &[local.clone(), peer.clone()],
+            &local_id()
+        )
+        .is_err(),
+        "with no price for running it here there is nothing to give up"
     );
-    peer.est_tokens_per_sec = 20.0;
-    let cands = vec![local.clone(), peer];
+
+    // Our own speed known: the search's verdict stands, even though the peer
+    // is priced at the prior — that prior is what makes it safe.
+    local.est_tokens_per_sec = 0.4;
     assert!(
-        super::pipeline_may_replace_processor_route(&remote_chain, &cands, &local_id()).is_ok(),
-        "an advertised speed is a price"
+        super::pipeline_may_replace_processor_route(
+            &remote_chain,
+            &[local.clone(), peer.clone()],
+            &local_id()
+        )
+        .is_ok(),
+        "an unmeasured peer is priced pessimistically, not excluded"
     );
+
+    // An all-local chain is the fast path by another name, whatever is known.
     let local_chain = vec![PipelineSegment {
         node_id: local.node_id.clone(),
         shard_id: local.shard_id.clone(),
         layer_range: (0, LAYERS),
     }];
     assert!(
-        super::pipeline_may_replace_processor_route(&local_chain, &cands, &local_id()).is_err(),
+        super::pipeline_may_replace_processor_route(&local_chain, &[local, peer], &local_id())
+            .is_err(),
         "an all-local chain is the fast path by another name"
     );
 }
@@ -3530,5 +3554,116 @@ fn the_same_peer_still_gets_the_whole_model_when_that_is_the_shape() {
         Some(NodeId([0xBB; 32])),
         "delegating the whole model round-trips once for the request, not once \
          per token — that peer is still worth handing it to"
+    );
+}
+
+/// A pipeline segment for the route-veto tests.
+fn chain_seg(node_id: NodeId, layer_range: (u32, u32)) -> PipelineSegment {
+    PipelineSegment {
+        node_id,
+        shard_id: crate::types::ShardId {
+            model_id: crate::types::ModelId("m".into()),
+            index: 0,
+        },
+        layer_range,
+    }
+}
+
+/// Gotcha #479. A chain the search priced cheaper is no longer refused merely
+/// for containing a peer we have never measured — `UNKNOWN_COMPUTE_MS` already
+/// prices that peer pessimistically, and refusing the outcome afterwards meant
+/// the prior could never do the job it was raised from 0 to do.
+#[test]
+fn a_chain_with_an_unmeasured_peer_is_allowed_once_our_own_speed_is_known() {
+    let mut local = local_full_coverage();
+    local.est_tokens_per_sec = 0.4; // a processor that would take many minutes
+    let unmeasured = cost_cand(
+        0xBB,
+        vec![(0, LAYERS)],
+        super::ReachTier::DirectMeasured,
+        20,
+        0.0,
+        None,
+    );
+    assert!(
+        !super::priced_from_a_measurement(&unmeasured),
+        "fixture must actually be unpriced, or this test asserts nothing"
+    );
+    let chain = vec![
+        chain_seg(local_id(), (0, 1)),
+        chain_seg(NodeId([0xBB; 32]), (1, LAYERS - 1)),
+        chain_seg(local_id(), (LAYERS - 1, LAYERS)),
+    ];
+    assert!(
+        super::pipeline_may_replace_processor_route(&chain, &[local, unmeasured], &local_id())
+            .is_ok(),
+        "the search already priced this cheaper than a 0.4 tok/s processor; \
+         the prior is the conservatism, not a veto on top of it"
+    );
+}
+
+/// The baseline has to be known, because giving it up is the whole question.
+#[test]
+fn a_chain_is_kept_home_when_our_own_speed_is_not_yet_measured() {
+    let local = local_full_coverage(); // est_tokens_per_sec stays 0.0
+    assert!(
+        !super::priced_from_a_measurement(&local),
+        "fixture must be unpriced locally"
+    );
+    let mut peer = cost_cand(
+        0xBB,
+        vec![(0, LAYERS)],
+        super::ReachTier::DirectMeasured,
+        20,
+        0.0,
+        None,
+    );
+    peer.est_tokens_per_sec = 30.0;
+    let chain = vec![chain_seg(NodeId([0xBB; 32]), (0, LAYERS))];
+    assert!(
+        super::pipeline_may_replace_processor_route(&chain, &[local, peer], &local_id()).is_err(),
+        "with no price for running it here there is nothing to compare against"
+    );
+}
+
+/// The control that makes removing the veto safe: the prior alone keeps an
+/// unmeasured peer from beating an ORDINARY processor, so the search only ever
+/// reaches for one when staying here would be dire. If this ever fails, the
+/// veto was load-bearing after all and the doc on
+/// `pipeline_may_replace_processor_route` is wrong.
+#[test]
+fn the_unknown_prior_alone_outprices_an_unmeasured_peer_against_a_normal_processor() {
+    let range = (0, LAYERS);
+    let unmeasured = cost_cand(
+        0xBB,
+        vec![range],
+        super::ReachTier::DirectMeasured,
+        20,
+        0.0,
+        None,
+    );
+    let mut ordinary_local = local_full_coverage();
+    ordinary_local.est_tokens_per_sec = 5.3; // this development machine, measured
+
+    let peer_ms =
+        super::parallax::vertex_cost(&unmeasured, range, &local_id(), LAYERS, Some(64)).total();
+    let local_ms =
+        super::parallax::vertex_cost(&ordinary_local, range, &local_id(), LAYERS, Some(64)).total();
+    assert!(
+        peer_ms > local_ms,
+        "an unmeasured peer must not outprice an ordinary processor: \
+         peer={peer_ms} local={local_ms}"
+    );
+
+    // ... and the crossover is where the doc says it is: a processor this slow
+    // takes minutes, which is the case the search is now allowed to act on.
+    let mut dire_local = local_full_coverage();
+    dire_local.est_tokens_per_sec = 0.4;
+    let dire_ms =
+        super::parallax::vertex_cost(&dire_local, range, &local_id(), LAYERS, Some(64)).total();
+    assert!(
+        peer_ms < dire_ms,
+        "against a 0.4 tok/s processor the unmeasured peer must finally win: \
+         peer={peer_ms} dire={dire_ms}"
     );
 }

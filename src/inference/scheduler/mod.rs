@@ -931,12 +931,51 @@ fn cheapest_whole_model_peer<'a>(
 /// - **The chain is all local.** The search agrees with the fast path, and the
 ///   fast path's shape — no standby, no tensor-parallel group — is the right
 ///   one for a request nobody else is involved in.
-/// - **A remote segment is priced from nothing.** `UNKNOWN_COMPUTE_MS` is one
-///   shared prior; it does not describe the peer, it stands in for not knowing.
-///   A route this node CAN price would be abandoned for one it cannot, so
-///   "cheaper" is not evidence. Advertised or observed speed both count as
-///   knowing — the same standard `delegation_target` holds a peer to before
-///   handing it a whole model.
+/// - **This node's own speed is not yet measured.** The question is whether to
+///   give up running the model here, so "here" must have a price for the
+///   comparison to mean anything. Home also has no network term and no peer to
+///   be wrong about, so it is the safe answer under no information.
+///
+/// **What used to be here, and why it went** (2026-09-06, gotcha #479). The
+/// second ground was the reverse: a chain containing any peer priced at
+/// `UNKNOWN_COMPUTE_MS` was refused, on the rule "a route this node can price
+/// is never given up for one it cannot". Three things were wrong with it.
+///
+/// It asserted a symmetry with `delegation_target` that does not exist. Both
+/// consult `priced_from_a_measurement`, and they read it oppositely: there an
+/// unmeasured peer makes the price gate STAND ASIDE, so the peer may still be
+/// handed the whole model, on the stated grounds that "a peer never measured is
+/// still tried; the measurement that first request produces is what stops the
+/// second". Here the same fact disqualified. The multi-hop path was strictly
+/// stricter than the single-hop one, and nothing said why.
+///
+/// It also duplicated a conservatism the cost model already applies.
+/// `UNKNOWN_COMPUTE_MS` exists precisely so an unknown candidate can compete on
+/// a pessimistic footing — its own doc says it is "deliberately nearer the
+/// pessimistic end so an unmeasured node does not outrank a measured good one",
+/// and it was raised from 0 for exactly that purpose. Refusing the outcome
+/// afterwards means the prior can never do the job it was raised to do.
+///
+/// And the arithmetic shows what the veto actually blocked. An unpriced peer
+/// taking `L` layers is charged `UNKNOWN_COMPUTE_MS * L * ASSUMED_FORWARD_PASSES`
+/// = 1600·L ms, plus `2 * latency * ASSUMED_FORWARD_PASSES` of network; a local
+/// processor at `e` tokens/sec is charged `2000·L/e`. Ignoring network the peer
+/// wins only below **e = 1.25 tok/s**, and a peer 500 ms away needs the local
+/// node under ~0.5 tok/s before it wins at all. So the search reaches for an
+/// unmeasured peer only when running here would take many minutes — which is
+/// the one case where trying the unknown is warranted, and the only case the
+/// veto had any effect on. The threshold is derived from the cost model rather
+/// than invented, which is why none is written down here.
+///
+/// The exploration is bounded by machinery that already exists rather than by
+/// the veto: the ACK fast-fail abandons a silent peer in 10-90 s,
+/// `find_standbys` sorts the local node FIRST so home is the fallback, and
+/// `is_transient_remote_failure` re-routes. That is the abandonability half of
+/// hedged requests (Dean & Barroso, *The Tail at Scale*) without the cost of
+/// running both — an LLM decode is expensive and stateful, so a genuine
+/// duplicate is not affordable here. The framing is Weitzman's Pandora's Box
+/// (1979): inspecting a box is worth it when the known alternative is bad
+/// enough, and it is safe because you are never forced to keep what you find.
 fn pipeline_may_replace_processor_route(
     chain: &[PipelineSegment],
     candidates: &[NodeCandidate],
@@ -949,17 +988,17 @@ fn pipeline_may_replace_processor_route(
     if remote.is_empty() {
         return Err("no pipeline across peers is priced faster than the processor");
     }
-    let every_remote_priced = remote.iter().all(|seg| {
-        candidates
-            .iter()
-            .find(|c| c.node_id == seg.node_id)
-            .is_some_and(priced_from_a_measurement)
-    });
-    if !every_remote_priced {
-        return Err(
-            "the faster-looking pipeline includes a peer whose speed is unknown, and a route \
-             we can price is not given up for one we cannot",
-        );
+    // The BASELINE must be known, because that is the whole comparison: this
+    // function is asked whether to give up running the model here, and "here"
+    // has to have a price for that to mean anything. A local candidate still
+    // standing at the prior tells us nothing, and staying home is then the
+    // safe answer — home has no network term and no peer to be wrong about.
+    if !candidates
+        .iter()
+        .find(|c| c.node_id == *local_node_id)
+        .is_some_and(priced_from_a_measurement)
+    {
+        return Err("this node's own speed is not yet measured, so there is nothing to compare");
     }
     Ok(())
 }

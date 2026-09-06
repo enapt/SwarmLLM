@@ -10900,6 +10900,22 @@ assigned and is shared by the gate, the log line reporting its verdict, and
 `privacy_cost_ms` (which had already written the boomerang arithmetic out
 correctly, thirty lines below the gate that ignored it).
 
+**The unpriced-peer veto is gone (2026-09-06, gotcha #479).** #460 left open
+whether refusing an unmeasured peer is right when the local route takes twelve
+minutes; that was going to be settled by a log line from the reporting node.
+It was settled by arithmetic instead. `pipeline_may_replace_processor_route`
+refused any chain containing a peer priced at `UNKNOWN_COMPUTE_MS`, while
+`delegation_target` — reading the SAME predicate — lets such a peer be handed
+the whole model. The multi-hop path was stricter than the single-hop one for no
+stated reason, and the veto duplicated a conservatism the prior already applies:
+an unpriced peer over `L` layers costs 1600·L ms plus `2*latency*64`, against
+`2000·L/e` for a local processor at `e` tok/s, so it wins only below 1.25 tok/s
+(under ~0.5 for a peer 500 ms away). The veto's only effect was to block the
+desperate case, which is the one worth trying. Replaced by "the BASELINE must be
+priced", with exploration bounded by the existing ACK fast-fail and local-first
+standby rather than by refusal. No threshold invented — the crossover falls out
+of the cost model's own constants.
+
 **Still open**: making the DP the sole decision-maker for every shape
 (boomerangs across several peers, partial splits) remains the larger change.
 What shipped is the gate agreeing with the search about the shape it is
