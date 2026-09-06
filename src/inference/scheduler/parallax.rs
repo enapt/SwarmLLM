@@ -605,6 +605,22 @@ pub(super) fn route_shortest_path(
     if respect_capacity {
         for v in &vertices {
             let c = &candidates[v.cand_idx];
+            // **The local node is exempt, and prompt privacy is why**
+            // (gotcha #481). Both halves of the argument above are about a
+            // REMOTE node: it pays its network hop twice, and its memory is
+            // known only from what it advertises. This node pays no hop, and
+            // an encrypted route REQUIRES it at both ends — so once #452 gave
+            // the local node a bound it became a capped candidate, and the
+            // default privacy shape stopped being routable. The DP then
+            // returned the all-local chain instead, which is `Ok`, so the
+            // caller's relaxed pass never ran and the request silently took a
+            // route priced 11.8x worse with nothing logged.
+            //
+            // The memory half still applies and is enforced after
+            // reconstruction, where the summed span can actually be measured.
+            if &c.node_id == local_node_id {
+                continue;
+            }
             if c.max_hostable_layers.is_some() && !capped_bit.contains_key(&v.cand_idx) {
                 let next = capped_bit.len() as u32;
                 if next >= 64 {
@@ -699,6 +715,32 @@ pub(super) fn route_shortest_path(
             }
         })
         .collect();
+
+    // The memory half of the rule the local node was exempted from above.
+    // Exempting it from "appears at most once" must not exempt it from "does
+    // not take on more layers than it can hold" — and here, unlike inside the
+    // relaxation, the summed span can simply be measured. Failing means the
+    // caller's relaxed pass runs, which is the same backstop every other
+    // capacity refusal in this function uses.
+    if respect_capacity {
+        if let Some(cap) = candidates
+            .iter()
+            .find(|c| &c.node_id == local_node_id)
+            .and_then(|c| c.max_hostable_layers)
+        {
+            let ours: u32 = segments
+                .iter()
+                .filter(|s| &s.node_id == local_node_id)
+                .map(|s| s.layer_range.1.saturating_sub(s.layer_range.0))
+                .sum();
+            if ours > cap.max(1) {
+                return Err(SwarmError::PipelineError(format!(
+                    "parallax: this node would take {ours} layers across its segments, \
+                     more than the {cap} it can hold"
+                )));
+            }
+        }
+    }
 
     // Sanity: segments must contiguously cover [0, num_layers).
     let mut expect = 0u32;
@@ -1349,6 +1391,131 @@ mod tests {
         assert_eq!(segs[2].node_id, local, "last segment must stay local");
         // The privacy guarantee: the peer never sees layer 0 or the final layer.
         assert!(segs[1].layer_range.0 > 0 && segs[1].layer_range.1 < 28);
+    }
+
+    /// Gotcha #481. The boomerang as PRODUCTION builds it: `gather_candidates`
+    /// emits ONE candidate per node with its ranges merged, so the local node
+    /// is a single entry that has to supply both ends. The sibling test above
+    /// splits it into two entries, which gives them two `cand_idx` values and
+    /// so two different bits — sidestepping the "a capped candidate appears at
+    /// most once" rule entirely.
+    ///
+    /// That rule is right about a REMOTE node (appearing twice means the
+    /// activations leave and come back, paying its hop twice) and wrong about
+    /// this one: the local node pays no hop, and prompt privacy REQUIRES it at
+    /// both ends. Since #452 gave the local node a capacity bound, it became a
+    /// capped candidate — so the constrained pass could no longer route the
+    /// default privacy shape at all, and every such request fell through to the
+    /// relaxed pass, which drops the memory bound for EVERY peer.
+    #[test]
+    fn the_local_node_may_hold_both_ends_of_a_boomerang_while_capped() {
+        let local = NodeId([1u8; 32]);
+        // A slow processor beside a fast card: the shape the boomerang exists
+        // for, and the only one where an all-local chain is NOT the answer.
+        let mut me = cand(1, vec![(0, 28)], 0, 0.0, true, true, 0.5);
+        me.node_id = local.clone();
+        // The bound #452 introduced. Comfortably more than the two layers the
+        // two ends actually need.
+        me.max_hostable_layers = Some(28);
+        let peer = cand(2, vec![(0, 28)], 5, 0.0, true, true, 60.0);
+
+        // THE CONTROL, and it is the whole point: the identical fixture with
+        // the cap removed routes as a boomerang. So the cap — not the cost
+        // model — is what decides, which is exactly the mechanism claim.
+        let mut uncapped = me.clone();
+        uncapped.max_hostable_layers = None;
+        let control = route_shortest_path(
+            28,
+            &[uncapped, peer.clone()],
+            &local,
+            true,
+            true,
+            true,
+            None,
+        )
+        .expect("uncapped, this topology routes as a boomerang");
+        assert_eq!(
+            control.len(),
+            3,
+            "control: an uncapped local node uses the fast peer: {control:?}"
+        );
+
+        let segs = route_shortest_path(28, &[me, peer], &local, true, true, true, None)
+            .expect("the constrained pass must route the shape privacy is on by default for");
+        assert_eq!(segs.len(), 3, "{segs:?}");
+        assert_eq!(segs[0].node_id, local);
+        assert_ne!(segs[1].node_id, local);
+        assert_eq!(segs[2].node_id, local);
+    }
+
+    /// Exempting the local node from "appears at most once" must not exempt it
+    /// from its memory bound — the summed span is checked after
+    /// reconstruction, where it can actually be measured.
+    #[test]
+    fn the_local_nodes_segments_are_still_summed_against_its_bound() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 28)], 0, 0.0, true, true, 0.5);
+        me.node_id = local.clone();
+        let peer = cand(2, vec![(0, 28)], 5, 0.0, true, true, 60.0);
+
+        // Room for both ends: routes.
+        let mut fits = me.clone();
+        fits.max_hostable_layers = Some(2);
+        assert_eq!(
+            route_shortest_path(28, &[fits, peer.clone()], &local, true, true, true, None)
+                .expect("two one-layer ends fit a bound of two")
+                .len(),
+            3
+        );
+
+        // Room for one end only: the constrained pass must refuse rather than
+        // hand this node more than it can hold, leaving the relaxed pass to
+        // decide — the same backstop every other capacity refusal here uses.
+        let mut too_small = me;
+        too_small.max_hostable_layers = Some(1);
+        let routed = route_shortest_path(28, &[too_small, peer], &local, true, true, true, None);
+        match routed {
+            Err(_) => {}
+            Ok(segs) => {
+                let ours: u32 = segs
+                    .iter()
+                    .filter(|s| s.node_id == local)
+                    .map(|s| s.layer_range.1 - s.layer_range.0)
+                    .sum();
+                assert!(
+                    ours <= 1,
+                    "this node took {ours} layers against a bound of 1"
+                );
+            }
+        }
+    }
+
+    /// The half of the rule that must survive: a capped REMOTE peer still may
+    /// not be handed two slices of one chain, which is what
+    /// `a_peer_is_not_handed_more_layers_than_it_says_it_can_hold` was written
+    /// for. Exempting the local node must not exempt anyone else.
+    #[test]
+    fn a_capped_peer_still_may_not_take_two_slices_of_one_chain() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 4)], 0, 0.0, true, false, 8.0);
+        me.node_id = local.clone();
+        // Holds everything, but only has room for a few layers at a time, and
+        // is the ONLY other candidate — so a chain covering 0..28 would have to
+        // use it twice.
+        let mut small = cand(2, vec![(0, 28)], 5, 0.0, true, true, 20.0);
+        small.max_hostable_layers = Some(6);
+
+        let routed = route_shortest_path(28, &[me, small], &local, false, true, true, None);
+        if let Ok(segs) = routed {
+            let slices = segs
+                .iter()
+                .filter(|s| s.node_id == NodeId([2u8; 32]))
+                .count();
+            assert!(
+                slices <= 1,
+                "a capped peer must not carry two slices of one chain: {segs:?}"
+            );
+        }
     }
 
     /// Encryption must still refuse a topology it cannot make private — local

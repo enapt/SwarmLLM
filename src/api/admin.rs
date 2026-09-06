@@ -452,6 +452,23 @@ pub async fn diagnostics(
                 let _ = writeln!(out, "  memory bandwidth: could not be measured");
             }
         }
+
+        // The processor temperature behind any "running hot" warning, so a
+        // reader can check the claim rather than take it. Most machines expose
+        // no sensor we recognise and print nothing; saying "unknown" on every
+        // one of them would be noise, and a machine that IS hot is exactly the
+        // one where this line earns its place.
+        if let Some(t) = crate::inference::thermal::last_temp_c() {
+            let _ = writeln!(
+                out,
+                "  cpu temperature: {t:.1} C{}",
+                if t >= crate::inference::thermal::WARN_ON_C {
+                    " (warning threshold reached)"
+                } else {
+                    ""
+                }
+            );
+        }
     }
 
     // How this node is reachable. An anchor advertising only private
