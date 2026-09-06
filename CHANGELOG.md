@@ -2,6 +2,82 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.160-alpha] — 2026-09-06
+
+Eight fixes, all from following up questions that had been parked waiting on a
+reply from someone else's machine, plus two new reports. Three of them were
+found by checking a claim rather than a symptom, and one is a fault this
+project shipped itself six releases ago.
+
+### Fixed
+
+- **The chat tab no longer promises that a reply never left your device when it
+  did.** The banner read "Running locally — your prompts and outputs never leave
+  this device" whenever this machine held all of a model's files. Holding the
+  files is not the same as answering the request: when a node would run a model
+  on its processor and has other machines available, the router deliberately
+  sends the work to one of them. So the banner was making a privacy promise the
+  software had already decided not to keep. The order of the checks made it
+  worse — this claim was tested before the one describing an encrypted split
+  across machines, so a model held in full could never show an accurate
+  description of what was happening to it. The banner now asks the same question
+  the router asks, answered by the same code, and where the answer is not known
+  it makes the weaker claim rather than the stronger one.
+- **A machine without a graphics card can find models again.** Searching for a
+  model on such a node returned nothing — every model, every search, and the
+  "Set this up" button on the node's own wishlist. No error appeared; the list
+  was simply empty. The check asked how much graphics memory was free and
+  treated a machine with no graphics card as one with none free, so nothing
+  could ever fit and the "only show what fits" filter removed every result.
+  Three further places asked the same question the same way, including the
+  wishlist, which could never conclude that such a node might host a model
+  itself.
+- **A cool machine no longer warns that it is running hot.** A node could tell
+  its owner the machine was overheating during inference and suggest a smaller
+  model, while the processor sat at 38 °C. It read every temperature sensor on
+  the board — the drive, the chipset, the wireless card — and took the highest.
+  On the machine where this was seen, an unused sensor reports 126 °C
+  permanently. It now reads processor sensors only, and says nothing at all on a
+  machine whose sensors it does not recognise. The reading also appears in the
+  diagnostics report, so anyone told their machine is hot can check the number.
+- **Privacy mode no longer forces a slow route.** Keeping the first and last
+  layers of a model on your own machine requires that machine at both ends of
+  the route. Since v0.3.154 a node also carries an estimate of how many layers it
+  can hold, and the router treated any machine with such an estimate as one that
+  may appear only once in a route — so it quietly stopped building private routes
+  across other machines and ran the whole model locally instead. Measured at
+  nearly twelve times the cost of the route it declined, with nothing logged,
+  because running it here is a valid private route and so nothing looked wrong.
+- **A model's middle is no longer sent abroad one token at a time.** A node that
+  holds a model and would run it on its own processor could hand the middle of
+  that model to a distant machine while pricing the hand-off as though that
+  machine were running the whole thing. Those are very different costs: a machine
+  given the whole model is contacted once for the entire request, while a middle
+  section is contacted again for every word generated. Measured: a small model a
+  plain processor answers in about a second was instead sent to a machine 496 ms
+  away and took 9.1 seconds to produce one word.
+- **A machine that can hold part of a model is no longer given all of it.** The
+  simpler of the two route planners could return to a machine it had already
+  used and re-apply that machine's memory limit from scratch each time, so a node
+  that said it could hold twelve layers of a forty-eight-layer model was handed
+  all forty-eight in four pieces — and, being the cheapest option, won every
+  round while machines with room were never asked. This is the fault behind a
+  report from a 16 GB machine that was assigned most of a model it could not
+  hold, refused it, retried, and produced the identical plan before giving up.
+- **A nearly-full machine can refuse a model instead of swapping.** The check
+  deciding whether a node had room believed every machine had at least a quarter
+  of its memory free, whatever was actually free. A 16 GB node would accept a
+  4 GB model with 2 GB left and then swap, which slows every request on that
+  machine rather than the one that should have been declined.
+- **A machine we have never measured is now tried when staying home would take
+  minutes.** The router refused a faster route across other machines if any of
+  them had never been measured, however slow the local alternative was. It also
+  held those machines to a stricter standard than the single-machine hand-off
+  path did, for no stated reason, and doubled a caution the cost model already
+  applies — an unmeasured machine is deliberately priced pessimistically, so it
+  only wins when the local machine would take many minutes, which is exactly when
+  trying it is worth doing.
+
 ## [0.3.159-alpha] — 2026-09-06
 
 Sixteen fixes. Six came from two reports about the dashboard and the chat tab,

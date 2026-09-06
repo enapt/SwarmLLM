@@ -2033,13 +2033,23 @@ impl SharedState {
         if !self.has_complete_split_model(model_id) {
             return false;
         }
-        let would_run_on_processor = self.model_process_pool.serves_on_cpu(model_id);
+        let shedding_load = self.should_offer_work_to_the_swarm();
         let has_peers = !self.connected_node_ids.is_empty();
-        let allowed = local_fast_path_allowed(
-            self.should_offer_work_to_the_swarm(),
-            would_run_on_processor,
-            has_peers,
-        );
+        // Ask the cheap questions first. `serves_on_cpu` prices the model,
+        // which reads its header off disk — fine once per request, not fine
+        // once per model in a listing, and this became a listing consumer when
+        // the chat banner started asking it (gotcha #484). The rule is
+        // `!shedding && !(processor && peers)`, so the expensive term cannot
+        // change the answer when we are shedding or have nobody to ask.
+        //
+        // Same lazy shape the delegation call site in `scheduler` documents,
+        // and for the same reason: Rust evaluates every argument before the
+        // call, so the short-circuit has to be written out.
+        if shedding_load || !has_peers {
+            return local_fast_path_allowed(shedding_load, false, has_peers);
+        }
+        let would_run_on_processor = self.model_process_pool.serves_on_cpu(model_id);
+        let allowed = local_fast_path_allowed(shedding_load, would_run_on_processor, has_peers);
         if !allowed && would_run_on_processor {
             tracing::debug!(
                 model = %model_id,
@@ -4007,5 +4017,35 @@ mod local_fast_path_tests {
         // Shedding load overrides everything.
         assert!(!local_fast_path_allowed(true, false, false));
         assert!(!local_fast_path_allowed(true, false, true));
+    }
+}
+
+#[cfg(test)]
+mod fast_path_laziness_tests {
+    use super::local_fast_path_allowed;
+
+    /// The short-circuit in `local_fast_path_for` must not change any answer.
+    /// `would_run_on_processor` is skipped — passed as `false` — exactly when
+    /// it cannot matter, so the two forms have to agree over the whole truth
+    /// table (gotcha #484: the skip exists because computing that term reads a
+    /// model's header off disk, which a listing cannot afford per model).
+    #[test]
+    fn skipping_the_expensive_term_never_changes_the_answer() {
+        for shedding in [false, true] {
+            for peers in [false, true] {
+                for processor in [false, true] {
+                    let full = local_fast_path_allowed(shedding, processor, peers);
+                    let short_circuited = if shedding || !peers {
+                        local_fast_path_allowed(shedding, false, peers)
+                    } else {
+                        local_fast_path_allowed(shedding, processor, peers)
+                    };
+                    assert_eq!(
+                        full, short_circuited,
+                        "shedding={shedding} peers={peers} processor={processor}"
+                    );
+                }
+            }
+        }
     }
 }
