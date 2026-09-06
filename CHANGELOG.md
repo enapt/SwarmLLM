@@ -4,7 +4,7 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-Fifteen fixes. Six came from two reports about the dashboard and the chat tab,
+Sixteen fixes. Six came from two reports about the dashboard and the chat tab,
 both from a processor-only node. The rest were found by reading the live node's
 own log, by looking into a report of a model that stopped loading, and by
 building a small-machine test setup — every memory fault reported from the field
@@ -13,6 +13,14 @@ developer box, which is why all of them shipped.
 
 ### Fixed
 
+- **Setup no longer tells a new user that finding other machines is a local
+  network thing.** Both the "you're already on the swarm" step and the final
+  summary described discovery as happening on your own network, with no mention
+  of the public swarm the node has in fact just joined over the internet — so
+  someone with a single computer could reasonably read it as needing more
+  machines at home before any of this works. It contradicted the dashboard
+  behind it, which says "Connected to global swarm". Both lines now say both
+  things.
 - **A model that is not compressed now says why it needs more memory than its
   file.** An uncompressed model's weights take about twice their size on disk
   once loaded, so a 1.2 GB file was reported as needing 2.4 GB of weights with
@@ -201,7 +209,7 @@ a browser.
 
 ## [0.3.156-alpha] — 2026-09-05
 
-Fifteen fixes. Two came from a tester's reports; the other eight were found by
+Sixteen fixes. Two came from a tester's reports; the other eight were found by
 checking whether those fixes were actually complete — two of them were not.
 
 ### Fixed
