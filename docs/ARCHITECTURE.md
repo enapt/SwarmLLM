@@ -1909,7 +1909,12 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 
 ### Admin API (CORS-protected, no Bearer auth)
 - `GET/PUT /api/admin/config` — Configuration read/update
-- `GET     /api/admin/stats` — Node statistics + hardware info
+- `GET     /api/admin/stats` — Node statistics + hardware info. The memory
+  figures are `process_rss_mb` (this daemon PLUS every model worker — the
+  weights and KV cache live in the worker subprocesses, so a daemon-only
+  reading is blind to nearly all of it), broken out as `daemon_rss_mb` /
+  `worker_rss_mb` / `worker_count`. The process refresh names an explicit pid
+  list and must never become a whole-machine scan (gotcha #417).
 - `GET     /api/admin/swarm/capacity` — R110: collective capacity snapshot (online_nodes, total_vram_mb, serveable/aspirational/hosted_locally model lists, redundancy)
 - `GET     /api/admin/swarm/capacity-plan` — R113: what-if scenarios + headline_target with concrete `contributors_needed` count
 - `GET     /api/admin/storage/breakdown` — R110: stacked-bar data (total_mb, used_mb, auto_target_mb, free_mb)
