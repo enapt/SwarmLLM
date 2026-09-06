@@ -1001,7 +1001,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
 
     // Hardware detection — sysinfo does blocking filesystem reads (/proc/*)
     let ss = state.shared_state.clone();
-    let hardware = tokio::task::spawn_blocking(move || detect_hardware(&ss))
+    let hardware = tokio::task::spawn_blocking(move || refresh_hardware_snapshot(&ss))
         .await
         .unwrap_or_else(|_| serde_json::json!({}));
 
@@ -1675,6 +1675,71 @@ pub async fn shutdown_node(
     Ok(Json(serde_json::json!({ "status": "shutting_down" })))
 }
 // ---- Hardware detection ----
+
+/// How long a hardware snapshot stays fresh enough for a dashboard gauge.
+///
+/// Longer than the 2 s stats tick on purpose: see [`refresh_hardware_snapshot`].
+const HW_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(6);
+
+type HwCell = std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>;
+
+fn hw_snapshot_cell() -> &'static HwCell {
+    static CELL: std::sync::OnceLock<HwCell> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Is a fresh measurement due?
+pub(crate) fn hardware_snapshot_is_stale() -> bool {
+    match hw_snapshot_cell().lock() {
+        Ok(g) => g
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() >= HW_SNAPSHOT_TTL),
+        // A poisoned lock means a measurement panicked; measuring again is the
+        // right response, not giving up on the panel for the process's life.
+        Err(_) => true,
+    }
+}
+
+/// The last measured hardware snapshot, or `None` before the first one lands.
+///
+/// **Never measures.** This is what the live WebSocket tick sends, and the
+/// whole point is that the tick does no work: `detect_hardware` spawns
+/// `nvidia-smi`, measured at **90 ms** on this machine, and enumerates every
+/// mounted disk. Putting that on a 2-second tick — which is coalesced across
+/// every connected client, so it would run continuously for as long as one
+/// dashboard tab is open anywhere — is a cost the other things folded into
+/// that payload do not have; they are in-memory registry scans.
+///
+/// This corrects a claim made in this project's own v0.3.160 commit history:
+/// `detect_hardware` was described there as costing "well under a
+/// millisecond". That figure is the **sysinfo refresh** alone — the part
+/// gotcha #417 fixed, and what the comment inside `detect_hardware` is about.
+/// The function as a whole is ~100 ms, dominated by the `nvidia-smi`
+/// subprocess. Read a comment against the code it sits next to, not against
+/// the function it sits inside.
+pub(crate) fn cached_hardware_snapshot() -> Option<serde_json::Value> {
+    hw_snapshot_cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|(_, v)| v.clone()))
+}
+
+/// Measure the hardware panel and store it for the tick to send.
+///
+/// **Must be called off the async runtime** — it blocks for ~100 ms. The
+/// WebSocket loop schedules it with `spawn_blocking` when
+/// [`hardware_snapshot_is_stale`] says so; `/api/admin/stats` also refreshes
+/// through here, so an explicit fetch and the live tick cannot show different
+/// numbers a second apart.
+pub(crate) fn refresh_hardware_snapshot(
+    shared_state: &crate::daemon::SharedState,
+) -> serde_json::Value {
+    let v = detect_hardware(shared_state);
+    if let Ok(mut g) = hw_snapshot_cell().lock() {
+        *g = Some((std::time::Instant::now(), v.clone()));
+    }
+    v
+}
 
 pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Value {
     use sysinfo::System;

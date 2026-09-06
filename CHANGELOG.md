@@ -15,10 +15,12 @@ project shipped itself six releases ago.
   other figure on the dashboard — peers, downloads, activity, capacity —
   refreshes every two seconds; this one only moved when something happened to
   reload it, so a machine filling up showed the same numbers indefinitely. It
-  was kept off that update for a good reason: measuring it used to mean
-  inspecting every process on the machine and took 182 ms. That was fixed in the
-  previous release and now takes under a millisecond, so the panel joins
-  everything else.
+  was kept off that update for a good reason: measuring it is expensive — about
+  100 ms, most of it spent asking the graphics driver for its memory usage
+  through a separate program. The panel now rides the same two-second update as
+  everything else, but the measurement behind it is taken on a background thread
+  at most once every six seconds and shared by every open dashboard, so the
+  figures move without the cost being paid on the connection that carries them.
 - **The "API request log" is now named for what it shows.** It lists calls to
   one specific API — the stateful Responses API — and not the ordinary chat
   requests that the built-in chat tab and most API clients make. So it stayed

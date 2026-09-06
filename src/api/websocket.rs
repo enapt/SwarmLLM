@@ -230,6 +230,21 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
         loop {
             tokio::select! {
                 _ = stats_interval.tick() => {
+                    // Keep the hardware panel current without paying for it
+                    // here. One refresh at a time across every connected
+                    // client — each runs this loop, and `nvidia-smi` is a
+                    // subprocess spawn, so an unguarded trigger would start
+                    // one per open dashboard tab.
+                    if crate::api::admin::hardware_snapshot_is_stale()
+                        && !HW_REFRESH_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        let s = push_state.clone();
+                        tokio::task::spawn_blocking(move || {
+                            crate::api::admin::refresh_hardware_snapshot(&s);
+                            HW_REFRESH_IN_FLIGHT
+                                .store(false, std::sync::atomic::Ordering::Release);
+                        });
+                    }
                     let msg = get_or_build_stats_message(&push_state).await;
                     if sender.send(Message::Text((*msg).clone().into())).await.is_err() {
                         break;
@@ -430,6 +445,11 @@ async fn get_or_build_stats_message(state: &SharedState) -> std::sync::Arc<Strin
     msg
 }
 
+/// One hardware measurement in flight at a time, across every connected
+/// client. See the tick arm above.
+static HW_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 async fn build_stats_message(state: &SharedState) -> String {
     // Snapshot the locked values into stack copies and drop the guards BEFORE
     // the DashMap full scans + serde_json construction below. Holding RwLock
@@ -599,21 +619,21 @@ async fn build_stats_message(state: &SharedState) -> String {
     // It was reachable only through `/api/admin/stats`, which the dashboard
     // fetches on specific events and never on a timer, so those figures sat
     // still while everything around them updated every two seconds
-    // (report #016). The reason they were kept off this tick was cost:
-    // `detect_hardware` refreshed every process on the machine, measured at
-    // 182 ms. That was fixed on 2026-09-06 — it now refreshes four facts and
-    // an explicit pid list, 0.43 ms — so the objection is gone and the
-    // placement can follow it.
+    // (report #016).
+    //
+    // **Read from a cache; measured elsewhere.** `detect_hardware` spawns
+    // `nvidia-smi` (measured at 90 ms here) and enumerates every mounted disk,
+    // so it is ~100 ms — NOT the 0.43 ms that the comment inside it quotes,
+    // which is the sysinfo refresh alone (gotcha #417's fix). This payload is
+    // coalesced across every connected client, so measuring here would spend
+    // that continuously for as long as one dashboard tab is open anywhere,
+    // which none of the other things folded in here cost — they are in-memory
+    // registry scans. The tick loop schedules the measurement on a blocking
+    // thread when it goes stale; this just sends whatever landed last.
     //
     // Rides the existing `stats_update`, like `active_request_progress` above
     // it: there are deliberately only five WS message types.
-    //
-    // Called inline rather than through `spawn_blocking` because this is one
-    // sub-millisecond call every two seconds, shared across every connected
-    // client by the stats cache — less synchronous work than the JSON
-    // construction below it, which this function's own header comment already
-    // accounts for.
-    let hardware = crate::api::admin::detect_hardware(state);
+    let hardware = crate::api::admin::cached_hardware_snapshot();
 
     let mut data = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
