@@ -3336,7 +3336,30 @@ impl ModelProcessPool {
         // to the processor and the card has since made room, that is the answer.
         let existing = self.workers.get(model_id).map(|h| h.clone());
         if let Some(handle) = existing {
-            if !self.worker_should_return_to_gpu(model_id, &handle) {
+            // A corpse is not the answer to "give me a worker".
+            //
+            // The reader task marks a worker dead the moment its socket
+            // closes, but leaves it in the map for whoever notices to retire.
+            // This path handed it back regardless, and the caller's own
+            // `dead` check then failed the request with "worker is dead" — so
+            // EVERY worker death cost exactly one user's request, and the
+            // message named an internal component rather than anything they
+            // could act on. Measured on a constrained node: kill the worker,
+            // and attempt 1 fails while attempts 2 and 3 succeed, because the
+            // second request finds the map already cleaned.
+            //
+            // #461/#467 made the worker's MEMORY recover from any kind of
+            // death; this is the same event costing a request instead of
+            // bytes. Retire it and fall through to a fresh spawn, which is
+            // what the next request would have done anyway.
+            if handle.dead.load(Ordering::Acquire) {
+                tracing::info!(
+                    model = %model_id,
+                    "Worker for this model has died — replacing it rather than \
+                     failing the request"
+                );
+                self.retire_dead_worker(model_id).await;
+            } else if !self.worker_should_return_to_gpu(model_id, &handle) {
                 if handle.segment_is_charged(segment) {
                     return Ok(handle);
                 }
@@ -3355,6 +3378,14 @@ impl ModelProcessPool {
         // the budget while we hold it, so the "it fits" the retirement is
         // justified by is still true at the admission below.
         let retire_for_gpu = match self.workers.get(model_id) {
+            // Same again under the lock: a worker can die between the fast
+            // path and here, and returning it would land the caller on its own
+            // `dead` check.
+            Some(handle) if handle.dead.load(Ordering::Acquire) => {
+                drop(handle);
+                self.retire_dead_worker_locked(model_id);
+                false
+            }
             Some(handle) => {
                 if !self.worker_should_return_to_gpu(model_id, &handle) {
                     return Ok(handle.clone());

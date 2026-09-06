@@ -1274,6 +1274,28 @@ records the hash as origin-verified, so no peer's claim can displace it.
 
 ## Benchmarks
 
+### `examples/constrained_node_test.sh` — a SMALL node, reproduced locally
+
+Every memory defect reported from the field since #452 (#454-#457, #461-#468)
+came from one 16 GB processor-only machine, and none of them reproduced on a
+developer box — which is why all of them shipped. Admission keys off
+`resources.max_ram_mb` rather than real RAM, so a small configured budget
+reproduces the class anywhere.
+
+Runs an isolated node (private gossip id, no bootstrap, no mDNS, auto-manage
+off, a COPY of one model) and checks: an over-budget model is refused with its
+arithmetic shown; the same model loads with room; `SIGKILL` on the worker —
+which is what an OS OOM-kill looks like — is survived by the NEXT request; and
+exactly one worker is charged afterwards.
+
+**Isolation is not cosmetic.** With peers reachable, prompt privacy turns a
+whole-model request into a two-layer boomerang, the budget never binds, and the
+script silently proves nothing. It found the "worker is dead" defect on its
+first run, which a by-hand attempt minutes earlier had missed by asking a second
+time.
+
+
+
 Every harness below runs against an ISOLATED node or no daemon at all. None of
 them touch a running node; several used to, and that is where most of the traps
 in this section came from. **The two Python harnesses are the deliberate

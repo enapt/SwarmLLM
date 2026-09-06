@@ -4,12 +4,17 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-Twelve fixes. Six came from two reports about the dashboard and the chat tab,
+Thirteen fixes. Six came from two reports about the dashboard and the chat tab,
 both from a processor-only node; the last two were found by reading the live
 node's own log.
 
 ### Fixed
 
+- **A crashed model no longer costs the next person their request.** When a
+  model's process died, the request that noticed was refused with "worker is
+  dead" — an internal detail nobody can act on — and only the one after it got a
+  working model back. The node now replaces the dead process and answers, which
+  is what the following request would have done anyway.
 - **A model the graphics card refuses now runs on the processor instead of not
   running at all.** A node whose model failed to load logged a warning and
   carried on serving nothing — a poor trade against running the same model more
@@ -176,7 +181,7 @@ a browser.
 
 ## [0.3.156-alpha] — 2026-09-05
 
-Twelve fixes. Two came from a tester's reports; the other eight were found by
+Thirteen fixes. Two came from a tester's reports; the other eight were found by
 checking whether those fixes were actually complete — two of them were not.
 
 ### Fixed
