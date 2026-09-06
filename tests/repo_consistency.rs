@@ -3460,6 +3460,134 @@ fn the_worker_memory_guard_catches_a_daemon_only_measurement() {
     );
 }
 
+/// A download speed is a RATE, so every figure written into
+/// `speed_bytes_per_sec` must be a quantity divided by an elapsed time.
+///
+/// The P2P shard path assigned `chunk_len` — the size of the chunk that had
+/// just arrived — straight into the field. At a 32 MiB chunk taking ~26 s the
+/// dashboard read 33.5 MB/s for a 1.26 MB/s transfer, and because
+/// `admin_models::helpers` derives `eta_secs` by dividing the remaining bytes
+/// by this figure, the time remaining was wrong by the same factor and never
+/// converged. The two HuggingFace writers had always divided properly, which
+/// is exactly why it went unnoticed: only downloads from peers looked wrong.
+///
+/// Assigning a literal `0` is the documented way to say "not downloading" and
+/// is allowed.
+#[test]
+fn a_download_speed_is_a_rate_not_a_size() {
+    let root = repo_root();
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let stmts = statements(&text);
+            for i in 0..stmts.len() {
+                if let Some(bad) = speed_assigned_without_a_division(&stmts, i) {
+                    offenders.push(format!(
+                        "{}:{} — {bad}",
+                        p.strip_prefix(&root).unwrap_or(&p).display(),
+                        stmts[i].0
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a byte count is being reported as a speed:\n  {}\n\
+         `speed_bytes_per_sec` is read by the dashboard AND divided into the \
+         remaining bytes to produce an ETA, so a size here is wrong twice. \
+         Divide the bytes moved by the seconds they took (see \
+         `model::acquisition`'s rolling window for the reference shape), or \
+         assign a literal 0 to mean 'not downloading'.",
+        offenders.join("\n  ")
+    );
+}
+
+/// The right-hand side of a `speed_bytes_per_sec = ...` assignment, when that
+/// value is neither a literal zero nor derived from a division.
+///
+/// `stmts` is the whole file so a bare identifier can be followed back to
+/// where it was computed — `progress.rs` divides into a local and then assigns
+/// it, which is correct and which a check on the assignment alone reads as a
+/// bare size.
+fn speed_assigned_without_a_division(stmts: &[(usize, String)], at: usize) -> Option<String> {
+    let stmt = &stmts[at].1;
+    let idx = stmt.find("speed_bytes_per_sec")?;
+    let rest = stmt[idx + "speed_bytes_per_sec".len()..].trim_start();
+    // Only an assignment; `==`, `>` and a struct-literal `:` are reads.
+    let rhs = rest.strip_prefix('=')?;
+    if rhs.starts_with('=') {
+        return None;
+    }
+    let rhs = rhs.split(';').next()?.trim();
+    if rhs.is_empty() || rhs == "0" || rhs.contains('/') {
+        return None;
+    }
+    // A bare identifier: accept it if it was computed by a division not far
+    // above. Anything else (a field, a call, an arithmetic expression with no
+    // division) is a size being passed off as a rate.
+    if rhs.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        let lo = at.saturating_sub(20);
+        let assigns_by_division = stmts[lo..at].iter().any(|(_, prev)| {
+            let flat: String = prev.chars().filter(|c| !c.is_whitespace()).collect();
+            (flat.contains(&format!("let{rhs}=")) || flat.contains(&format!("{rhs}=")))
+                && prev.contains('/')
+        });
+        if assigns_by_division {
+            return None;
+        }
+    }
+    Some(rhs.to_string())
+}
+
+/// Self-test: the scan must catch the shape it forbids, and pass the two it allows.
+#[test]
+fn the_download_speed_guard_catches_a_size_reported_as_a_rate() {
+    let one = |l: &str| {
+        let v = vec![(1usize, l.to_string())];
+        speed_assigned_without_a_division(&v, 0)
+    };
+    // the defect
+    assert!(one("entry.speed_bytes_per_sec = chunk_len;").is_some());
+    // the allowed forms
+    assert!(one("job.status.speed_bytes_per_sec = 0;").is_none());
+    assert!(one("entry.speed_bytes_per_sec = (chunk_len as f64 / chunk_secs) as u64;").is_none());
+    // reads, not writes
+    assert!(one("if status.speed_bytes_per_sec > 0").is_none());
+    assert!(one("\"speed_bytes_per_sec\": entry.speed_bytes_per_sec,").is_none());
+
+    // a bare identifier computed by a division just above is fine …
+    let ok = vec![
+        (
+            1usize,
+            "let speed = (moved as f64 / dt) as u64;".to_string(),
+        ),
+        (2usize, "entry.speed_bytes_per_sec = speed;".to_string()),
+    ];
+    assert!(speed_assigned_without_a_division(&ok, 1).is_none());
+    // … and the same shape without one is not.
+    let bad = vec![
+        (1usize, "let speed = chunk_len;".to_string()),
+        (2usize, "entry.speed_bytes_per_sec = speed;".to_string()),
+    ];
+    assert!(speed_assigned_without_a_division(&bad, 1).is_some());
+}
+
 /// Resolving an API key must not ANNOUNCE a file write it does not perform.
 ///
 /// `resolve_api_key` deliberately does not touch the data directory — only the

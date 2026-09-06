@@ -345,3 +345,80 @@ pub(super) async fn read_shard_chunk_async(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The serve side clamps to `SHARD_CHUNK_SIZE`, and a requester walks the
+    /// file by the bytes it ACTUALLY received.
+    ///
+    /// Together these are what make the chunk size safe to change in a
+    /// mixed-version swarm: a peer on an older build asks for 32 MiB and is
+    /// served the current maximum, and its `new_offset = offset + chunk_len`
+    /// loop simply takes more turns. Lowering the constant without both halves
+    /// holding would strand every older peer mid-transfer.
+    #[tokio::test]
+    async fn a_chunk_request_is_clamped_and_the_walk_still_covers_the_file() {
+        let dir = std::env::temp_dir().join(format!("swarmllm-chunk-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shard_000.bin");
+
+        // Deterministic contents so a reassembled copy can be compared byte for
+        // byte, and not a multiple of the chunk size — the final short read is
+        // exactly where an off-by-one would hide.
+        let total: usize = (crate::network::protocol::SHARD_CHUNK_SIZE as usize * 2) + 12_345;
+        let original: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &original).unwrap();
+
+        let model_id = crate::types::ModelId("chunk-test".to_string());
+        let mut got: Vec<u8> = Vec::with_capacity(total);
+        let mut offset: u64 = 0;
+        let mut rounds = 0;
+
+        loop {
+            // Ask for far more than the limit, as an older peer would.
+            let resp =
+                read_shard_chunk_async(path.clone(), offset, u64::MAX / 2, model_id.clone(), 0)
+                    .await;
+            let SwarmResponse::ShardData(sr) = resp else {
+                panic!("expected ShardData");
+            };
+            assert!(
+                sr.data.len() as u64 <= crate::network::protocol::SHARD_CHUNK_SIZE,
+                "server served {} bytes, above the {} limit — the clamp is gone, and a peer \
+                 that asked for more would be handed a message the transport may refuse",
+                sr.data.len(),
+                crate::network::protocol::SHARD_CHUNK_SIZE
+            );
+            assert_eq!(
+                sr.total_size, total as u64,
+                "total_size must describe the file"
+            );
+            assert!(
+                !sr.data.is_empty(),
+                "a chunk inside the file must not be empty"
+            );
+
+            got.extend_from_slice(&sr.data);
+            offset += sr.data.len() as u64;
+            rounds += 1;
+            assert!(rounds < 1000, "the walk is not terminating");
+            if offset >= sr.total_size {
+                break;
+            }
+        }
+
+        assert_eq!(got.len(), total, "the walk did not cover the whole file");
+        assert_eq!(
+            got, original,
+            "the reassembled shard differs from the original"
+        );
+        assert!(
+            rounds >= 3,
+            "expected the clamp to force several rounds for a file of {total} bytes, got {rounds}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

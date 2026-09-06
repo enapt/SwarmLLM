@@ -652,6 +652,24 @@ impl NetworkManager {
                         );
                     }
 
+                    // How long this chunk actually took: `shard_last_progress_at`
+                    // is stamped when the request is sent and again on every
+                    // continuation, so the stored value is when the PREVIOUS
+                    // chunk was asked for. Read it before the update below.
+                    //
+                    // This used to assign `chunk_len` straight into a field
+                    // named bytes-per-SECOND — a size reported as a rate. At a
+                    // 32 MiB chunk taking ~26 s the dashboard read 33.5 MB/s
+                    // for a 1.26 MB/s transfer, and `eta_secs` in
+                    // `admin_models::helpers` divides the remaining bytes by
+                    // this figure, so the time remaining was short by the same
+                    // factor and never converged.
+                    let chunk_secs = self
+                        .shard_last_progress_at
+                        .get(&shard_id)
+                        .map(|t| t.elapsed().as_secs_f64())
+                        .unwrap_or(0.0);
+
                     // Update acquisition_progress so the frontend download bar moves
                     if let Some(mut entry) = self
                         .shared_state
@@ -663,9 +681,11 @@ impl NetworkManager {
                         if let Some(sp) = entry.shard_progress.get_mut(&shard_id.index) {
                             sp.downloaded_bytes = sp.downloaded_bytes.saturating_add(chunk_len);
                         }
-                        // Estimate speed from chunk timing
-                        if chunk_len > 0 {
-                            entry.speed_bytes_per_sec = chunk_len; // rough per-chunk estimate
+                        // A rate needs both terms. An immeasurably short gap is
+                        // no measurement, so the previous figure is kept rather
+                        // than replaced by a division that would blow up.
+                        if chunk_len > 0 && chunk_secs > 0.001 {
+                            entry.speed_bytes_per_sec = (chunk_len as f64 / chunk_secs) as u64;
                         }
                     }
 
@@ -701,7 +721,7 @@ impl NetworkManager {
                             let next_req = crate::types::ShardRequest {
                                 shard_id: shard_id.clone(),
                                 chunk_offset: new_offset,
-                                chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE, // 32MB chunks
+                                chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
                             };
                             let req = SwarmRequest::ShardTransfer(next_req);
                             let new_req_id = self

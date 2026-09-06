@@ -10989,6 +10989,30 @@ described as one. (It is independently defensible on other grounds: 32 MiB is he
 memory on both sides, gives no progress reporting within a chunk, and loses 32 MiB of
 transfer per failure.)
 
+**PARTLY ADDRESSED 2026-09-06: `SHARD_CHUNK_SIZE` is now 8 MiB, down from 32.**
+That is the "number of draws" mitigation described above and nothing more — a
+roughly 4x reduction in the chance any one transfer dies, **not** a bound on the
+gap count. It is safe in a mixed-version swarm in both directions and needs no
+feature bit, because the serve side clamps (`chunk_size.min(SHARD_CHUNK_SIZE)`)
+and the requester advances by the bytes it actually received; both halves are
+pinned by `a_chunk_request_is_clamped_and_the_walk_still_covers_the_file`, which
+reassembles a file through the clamped API and byte-compares it. Whether the
+kills actually become rarer is UNMEASURED — it is a probability argument, and
+this node cannot reproduce the failure on demand.
+
+**Still open on this path: a peer retry does not resume.**
+`handle_shard_transfer_retry` sends `chunk_offset: 0`, so a failure late in a
+shard discards every byte already fetched and starts again from the beginning
+with the next peer. The machinery to resume exists and is commented as such
+(`handle_send_shard_request` seeds `shard_download_progress` from the request's
+`chunk_offset` precisely so a non-zero offset does not wipe the partial `.tmp`),
+so this is a matter of passing the recorded offset rather than a literal zero.
+Two things to settle first: whether the replacement peer is serving the SAME
+build (the #406 filter makes that likely but the resume path should not assume
+it — the final BLAKE3 check is the backstop, and a mismatch costs the whole
+shard), and gotcha #424, which was an unflushed-length truncation race in
+exactly this code. Worth doing, worth doing carefully.
+
 **The structural bound on this failure is the receive window**, and it is one line:
 `with_quic_config(|c| c.max_stream_data = ...)`. For the gap count to be unreachable
 the window must hold fewer than 1024 packets — about 1.2 MB. The cost is that a

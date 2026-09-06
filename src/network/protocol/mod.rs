@@ -94,8 +94,39 @@ mod topic_scoping_tests {
 const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 /// Maximum JSON control message size (4 MB).
 const MAX_JSON_MSG_SIZE: usize = 4 * 1024 * 1024;
-/// Shard transfer chunk size (32 MB) — used by acquisition, download, and serve paths.
-pub const SHARD_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
+/// Shard transfer chunk size — used by acquisition, download, and serve paths.
+///
+/// **8 MiB, reduced from 32 MiB (2026-09-06).** Peers were killing connections
+/// with quinn's `too many gaps in stream buffer`, and 14 of the 16 relevant
+/// kills in a three-day log followed a shard request from that same peer
+/// 6.6–26.2 s earlier, clustered tightly at 24–26 s — the signature of a
+/// fixed-size transfer dying at a reproducible point rather than a flaky link.
+/// Six peers, one of them on the LAN.
+///
+/// **What this does NOT do.** It does not bound the gap count. quinn's
+/// `MAX_CHUNKS = 1024` is checked against the DISCONTIGUOUS buffers held
+/// between `bytes_read` and `end`, and that region is bounded by the stream
+/// receive window (libp2p-quic defaults `max_stream_data` to 10 MB, which this
+/// project does not override), not by how large one message is. What it bounds
+/// is the number of DRAWS: failure probability scales with packets sent, so
+/// this is roughly a 4x reduction in the chance any one transfer dies. A
+/// structural fix means shrinking the receive window, which caps a single
+/// stream at `window / RTT` and so trades against WAN throughput — measured
+/// work, deliberately not done here. Do not describe this constant as the
+/// bound.
+///
+/// It is independently worth having: 32 MiB was held in memory on both sides,
+/// gave no progress within a chunk, and a peer retry restarts at offset 0
+/// (`handle_shard_transfer_retry`), so a late failure discarded a whole chunk's
+/// transfer.
+///
+/// **Safe to change in a mixed-version swarm, in both directions.** The
+/// requester's continuation loop advances by the bytes it ACTUALLY received
+/// (`new_offset = offset + chunk_len` in `network::manager::requests`), and the
+/// serve side clamps with `chunk_size.min(SHARD_CHUNK_SIZE)` — so an older peer
+/// asking for 32 MiB is simply served 8, and a newer peer asking an older one
+/// for 8 gets 8. Neither side needs a feature bit.
+pub const SHARD_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 
 /// Maximum activation payload size in layer results (128 MB).
 pub(super) const MAX_ACTIVATION_SIZE: usize = 128 * 1024 * 1024;

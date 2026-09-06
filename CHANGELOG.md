@@ -4,10 +4,27 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-Six fixes from two reports about the dashboard and the chat tab, both from a
-processor-only node.
+Eight fixes. Six came from two reports about the dashboard and the chat tab,
+both from a processor-only node; the last two were found by reading the live
+node's own log.
 
 ### Fixed
+
+- **The download speed shown for a model coming from a peer was the chunk
+  size, not a speed.** A 32 MB piece arriving over 26 seconds was reported as
+  33 MB/s rather than 1.3, and because the time remaining is worked out by
+  dividing what is left by that figure, the estimate was short by the same
+  factor and never caught up. It now measures how long the piece actually took.
+  Downloads from HuggingFace were always correct, which is why only peer
+  downloads looked wrong.
+- **Model pieces now transfer in 8 MB chunks rather than 32 MB.** Peers were
+  dropping connections partway through a transfer, and in a three-day log
+  fourteen of those follow a transfer request from the same peer twenty-odd
+  seconds earlier — six different peers, one of them on the local network.
+  Smaller chunks mean roughly a quarter as many chances for one to die, less
+  memory held on both sides, and less lost when one does. This makes the
+  failure rarer rather than impossible, and older nodes are unaffected either
+  way.
 
 - **The memory figure on the dashboard now counts the models.** It was measured
   from the daemon's own process, and models do not run there — each one is a
