@@ -219,91 +219,52 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2430 lib (dev,claude-subscription) — re-measured 2026-09-07, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 72 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .159 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
+All 20 build phases complete. All subsystems wired — no stubs. **2430 lib (dev,claude-subscription) — re-measured 2026-09-07, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 72 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .163 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.162-alpha (2026-09-07, tag on `17bab090`).** Local
-`225e6fe7f2b5cd74` (CUDA artifact, downloaded sha256 == published and the
-installed binary byte-identical to it, `ggml_cuda_init` = 1 device, 0 ERROR,
-inference verified, node id kept; rollback
-`~/.local/bin/swarmllm.0.3.161-alpha.bak`, backups pruned to newest 3) and
-Proxmox `9684263580c6660f` (.deb `0.3.162-alpha-1` over `0.3.161-alpha-1`, hash
-re-verified after transfer, `active` + `enabled`, no `.dpkg-old`, journal errors
-"-- No entries --", back in each other's peer lists) both on it. Gate: CI green
-on the tagged commit INCLUDING all three feature compile-checks (`flash-attn`,
-`candle-cuda`, `windows-gpu-no-flash`) and macOS tests, Cache warm green on all
-three jobs, Release + Docker green, 25 assets, not draft, `latest`, sha256 CUDA
-+ deb, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact, against a v0.3.161
-baseline taken first that was itself 9/9 and 7/7.**
-⚠ **`release_shapes.sh` is LOAD-SENSITIVE — take the baseline on an idle box.**
-On 2026-09-07 `long system prompt, cold` FAILED once with a `cargo build`
-running, and passed on a re-run with the machine quiet; the same request by
-hand returned a correct 17-token reply. Treat a single shapes failure as a
-re-run candidate, not a signal, and never take a baseline beside a build.
+**Released and deployed: v0.3.163-alpha (2026-09-07).** Tag and deployment
+detail recorded in the post-release commit. Gate: CI green on the tagged commit
+INCLUDING all three feature compile-checks (`flash-attn`, `candle-cuda`,
+`windows-gpu-no-flash`) and macOS tests, Release + Docker green, 25 assets, not
+draft, `latest`, sha256 CUDA + deb, **smoke + shapes on the DOWNLOADED artifact
+against a v0.3.162 baseline taken first.**
+⚠ **Cache warm runs only when the dependency graph changes**, so for a release
+whose last commits are docs it is green on the BUMP commit, not the tag — same
+code, and the cache it writes lands on `main` where the tag build reads it.
+Check the sha it ran on rather than assuming it re-ran.
+⚠ **`release_shapes.sh` is LOAD-SENSITIVE — take the baseline on an IDLE box.**
+`long system prompt, cold` FAILED once beside a `cargo build` and passed on a
+quiet re-run; the same request by hand returned a correct 17-token reply. One
+shapes failure is a re-run candidate, not a signal.
 ⚠ **`release_shapes.sh` on port 8810 reports "node did not start" — that is the
 LIVE node's P2P port** (`8800 + 10`), not a release fault. Use 8819.
 ⚠ **`gh release download` needs `-R <owner>/<repo>` when run outside a git
 directory**, and it fails QUIETLY: a checksum loop that compares two empty
 strings reports MATCH. Guard every artifact check on the file existing and the
-digest being 64 hex characters — the empty-equals-empty false pass happened here.
+digest being 64 hex characters.
 
-**EIGHT fixes, six from eight reports filed in one day by the 16 GB
-processor-only Mac mini tester, two more found while checking those.** The ones
-worth carrying:
+**FOUR fixes from three reports (#025-#027) by one close reader of logs and
+screens.** The ones worth carrying:
 
-- **#017/#018 are ONE knot.** The DP's capacity pass drops the local whole-model
-  vertex once `max_local_hostable_layers` bounds it, so its answer is the
-  cheapest FEASIBLE chain, not one cheaper than home — and a naive
-  `chain_ms < local_ms` would have shipped #018's 503.
-- **Three of the eight reports were WRONG about the CAUSE** (#021B, #023, #020)
-  in ways that changed the fix. **Verify the mechanism, not just the symptom.**
-- **A doc justifying a skipped check by bounding the WORK must be asked what
-  bounds the WAIT** (#021C). ⚠ And `max_local_hostable_layers` counts a resident
-  model's OWN weights against it, so it answers "no" about a model this node is
-  already running — `hosts_whole_model` is asked first. Nearly shipped inverted.
-
-**Next up (after the v0.3.162 release; user: batch fixes, releases are slow —
-Windows CUDA)**:
-
-(0) **Field-verify.** The .156→.160 fixes are largely unseen on other people's
-machines. ⚠ **The Mac mini reporter was assumed never to reply and the three
-questions parked on them were resolved WITHOUT them** — by research (the macOS
-`available_memory` semantics behind #482) and by local reproduction (#452's
-`max_hostable_layers=Some(N)` line, found 2,653 times in this node's own log).
-A Discord reply is drafted at `scratchpad/discord_macmini_reply.md` (UNSENT).
-Genuinely still unverified in the field: #484's banner on a node that actually
-delegates, #483 on a real CPU-only machine, and #481's privacy routing now that
-the DP can build it again.
-
-(1) **#447 (iii)** — make the priced search the ONE decision-maker when the
-local node is on its processor (`delegation_target` becomes a filter; the DP
-compares every shape). Halves (i)+(ii) shipped in .153; #478 (price the shape
-you assign) and #479 (the unpriced veto) landed in .160. **Do not attempt the
-rest without a way to measure it**: `cbbed678` priced local layers at a penalty
-and sent requests to another continent. ⚠ **Any A/B of this gate must first
-assert it FIRED** (`Not handing this model to peer` / `segments=3`): peer
-latency on this swarm swings 407→7397 ms within minutes against a 1000 ms
-bound, so an arm where the gate never ran is not an arm. The #444 comparison is
-STILL unmeasured live; the gemma topology it needed has drifted (WSL holds
-shards 0-1, Proxmox 2-3, neither whole) and ⚠ **a locally-built binary cannot
-run on the Proxmox LXC** (older glibc — `GLIBC_2.39 not found`).
-
-(2) **#446 forward path** — an activation is one indivisible message, so it
-needs TCP-ranking or chunked-over-RR. The SHARD half was mitigated in .159
-(32 → 8 MiB, a ~4x reduction in draws, NOT a bound). **Still open there: a peer
-retry restarts at `chunk_offset: 0` instead of resuming**; the machinery exists
-but sits in the code that caused #424's truncation race. The contributor's AWS
-g5.xlarge is the right place for the forward half.
-
-(3) prefix-keyed remote KV across turns; (4) f16 stored KV on small cards;
-(5) accept/reject at the tail — also the precondition for issue #21's economics;
-then the #438 structural rung, peer↔peer RTT gossip, ring decode, prefill
-microbatching. Ordered list in `memory/MEMORY.md` § NEXT UP; entries in
-`docs/FUTURE_WORK.md`. **Parked**: the OpenClaw ClawHub / npm publish, which
-needs the user's credentials.
+- **#025 was two defects, and the reported one alone does not fix it.** The
+  relaxation dropping OUR bound was the half they saw; the other half is that
+  the local capacity check ran AFTER path reconstruction, so an over-budget
+  chain failed the WHOLE search instead of losing to a feasible one.
+- **The retry they asked for is the retry-storm anti-pattern unless something
+  changed between attempts.** Admission refuses BEFORE allocating, so a blanket
+  retry re-reads identical figures and re-attempts the same load. Kubernetes'
+  queueing hint is the shape: record the loader's verdict, let it outrank both
+  estimates, and the re-plan cannot repeat itself. **Ask of any retry what the
+  second attempt reads that the first did not.**
+- **A stale comment cost every streamed Anthropic reply its prompt count**
+  (#491) — it said the result had not been awaited yet; it had, eight lines up.
+- **A guard must also know when NOT to fire** (#492): rebuilding the chat empty
+  state unconditionally puts it above a live streaming reply.
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`,
 gotcha numbers index `memory/gotchas.md`. **Read the named round log before
 re-deriving any of these.**
+
+- **.162** (09-07): EIGHT fixes from the 16 GB Mac mini tester's eight reports (#017-#024). ⚠ THREE of the eight were WRONG about the CAUSE; #017/#018 are ONE knot and a naive cost comparison would have shipped a 503. `round_log_0907_macmini_eight_reports.md`.
 
 - **.160/.161** (09-06): TEN fixes + a correction, mostly from questions parked on a reporter who was assumed never to answer; #484 a FALSE PRIVACY ASSURANCE, #481 a regression we shipped in .154. .161 was a same-day hotfix — the dashboard would not load AT ALL. `round_log_0906_delegation_shape.md`.
 - **.159** (09-06): 16 fixes — the small-machine harness (`examples/constrained_node_test.sh`), #472 a content hash recomputed mid-corrections, the dashboard memory figure that never counted workers. `round_log_0906_dashboard_chat.md`.
