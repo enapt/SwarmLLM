@@ -221,8 +221,15 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2430 lib (dev,claude-subscription) — re-measured 2026-09-07, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 72 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .163 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.163-alpha (2026-09-07).** Tag and deployment
-detail recorded in the post-release commit. Gate: CI green on the tagged commit
+**Released and deployed: v0.3.163-alpha (2026-09-08, tag on `8e9081d7`).** Local
+`225e6fe7f2b5cd74` (CUDA artifact, downloaded sha256 == published AND the
+installed binary byte-identical to it, `ggml_cuda_init` = 1 device, 0 ERROR,
+inference verified, node id kept; rollback
+`~/.local/bin/swarmllm.0.3.162-alpha.bak`, backups pruned to newest 3) and
+Proxmox `9684263580c6660f` (.deb `0.3.163-alpha-1` over `0.3.162-alpha-1`, hash
+re-verified after transfer, `active` + `enabled`, no `.dpkg-old`, journal errors
+"-- No entries --") both on it, and back in each other's peer lists (147 ms /
+14 ms). Gate: CI green on the tagged commit
 INCLUDING all three feature compile-checks (`flash-attn`, `candle-cuda`,
 `windows-gpu-no-flash`) and macOS tests, Release + Docker green, 25 assets, not
 draft, `latest`, sha256 CUDA + deb, **smoke + shapes on the DOWNLOADED artifact
