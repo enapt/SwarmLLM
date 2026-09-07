@@ -220,51 +220,42 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2423 lib (dev,claude-subscription) — re-measured 2026-09-07, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 70 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .159 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.160-alpha (2026-09-06, tag on `a52f5e8d`).** Local
-`225e6fe7` (CUDA artifact, downloaded sha256 == published, `ggml_cuda_init` = 1,
-0 ERROR, inference verified, node id kept; rollback
-`~/.local/bin/swarmllm.0.3.159-alpha.bak`) and Proxmox `9684263580c6660f`
-(.deb `0.3.160-alpha-1` over `0.3.159-alpha-1`, hash verified after transfer,
-`active` + `enabled`, no `.dpkg-old`, journal errors "-- No entries --", back in
-each other's peer lists) both on it. Gate: CI green on the tagged commit, Cache
-warm green on the dependency-changing commit (later commits touch no deps and
-no `cfg`-gated code), Release + Docker green (10/10 jobs), 25 assets, not draft,
-`latest`, sha256 CUDA + deb, **smoke 9/9 + shapes 5 OK / 2 COULD NOT RUN on the
-DOWNLOADED artifact, matching the .159 baseline exactly.**
+**Released and deployed: v0.3.162-alpha (2026-09-07, tag on `17bab090`).** Local
+`225e6fe7f2b5cd74` (CUDA artifact, downloaded sha256 == published and the
+installed binary byte-identical to it, `ggml_cuda_init` = 1 device, 0 ERROR,
+inference verified, node id kept; rollback
+`~/.local/bin/swarmllm.0.3.161-alpha.bak`, backups pruned to newest 3) and
+Proxmox `9684263580c6660f` (.deb `0.3.162-alpha-1` over `0.3.161-alpha-1`, hash
+re-verified after transfer, `active` + `enabled`, no `.dpkg-old`, journal errors
+"-- No entries --", back in each other's peer lists) both on it. Gate: CI green
+on the tagged commit INCLUDING all three feature compile-checks (`flash-attn`,
+`candle-cuda`, `windows-gpu-no-flash`) and macOS tests, Cache warm green on all
+three jobs, Release + Docker green, 25 assets, not draft, `latest`, sha256 CUDA
++ deb, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact, against a v0.3.161
+baseline taken first that was itself 9/9 and 7/7.**
 ⚠ **`release_shapes.sh` on port 8810 reports "node did not start" — that is the
 LIVE node's P2P port** (`8800 + 10`), not a release fault. Use 8819.
+⚠ **`gh release download` needs `-R <owner>/<repo>` when run outside a git
+directory**, and it fails QUIETLY: a checksum loop that compares two empty
+strings reports MATCH. Guard every artifact check on the file existing and the
+digest being 64 hex characters — the empty-equals-empty false pass happened here.
 
-**TEN fixes plus one correction. Eight from questions parked waiting on a
-reporter's machine that was assumed never to answer, resolved by research and
-by local reproduction instead; four from new reports.** The ones worth carrying:
+**EIGHT fixes, six from eight reports filed in one day by the 16 GB
+processor-only Mac mini tester, two more found while checking those.** The ones
+worth carrying:
 
-- **A decision made on a COST must be re-derived when the cost changes**, and
-  nothing in the code will tell you — it still compiles and still looks
-  deliberate. THREE of the ten were this: #479 (a routing veto written when the
-  cost model priced local layers with a constant), #482 (a memory floor written
-  for a startup ceiling, kept when the figure became a per-admission live
-  check), #487 (the hardware panel kept off the live tick at 182 ms, still off
-  it after that became 0.43 ms). **After optimising something by an order of
-  magnitude, grep for what was arranged around its old price.**
-- **#484 was a false privacy assurance**, not a mislabel: the chat banner said
-  "your prompts and outputs never leave this device" from shard INVENTORY, while
-  `local_fast_path_for` deliberately sends the work to a peer. A word naming a
-  fact about FILES must not make a claim about EXECUTION.
-- **#481 is a regression we shipped in .154**: giving the local node a memory
-  bound made it a "capped candidate", and a DP rule says a capped candidate
-  appears at most once — but privacy REQUIRES it at both ends. Privacy routing
-  across peers silently stopped, at 11.8x the cost of the route it declined,
-  with nothing logged because all-local is a valid private route.
-- **#483: a file-scoped guard is a guard against one file.** Widening the
-  existing "don't read capacity from the graphics card alone" scan to all of
-  `src/` found three more sites the report never mentioned.
-- ⚠ **I put ~100 ms of blocking work on the 2 s tick and said it cost under a
-  millisecond**, having read a comment about one PART of `detect_hardware` (the
-  sysinfo refresh) as describing the whole function, which also spawns
-  `nvidia-smi` (90 ms measured). Caught by a subagent that MEASURED. Corrected
-  in its own commit because the wrong claim had already gone to the public feed.
+- **#017/#018 are ONE knot.** The DP's capacity pass drops the local whole-model
+  vertex once `max_local_hostable_layers` bounds it, so its answer is the
+  cheapest FEASIBLE chain, not one cheaper than home — and a naive
+  `chain_ms < local_ms` would have shipped #018's 503.
+- **Three of the eight reports were WRONG about the CAUSE** (#021B, #023, #020)
+  in ways that changed the fix. **Verify the mechanism, not just the symptom.**
+- **A doc justifying a skipped check by bounding the WORK must be asked what
+  bounds the WAIT** (#021C). ⚠ And `max_local_hostable_layers` counts a resident
+  model's OWN weights against it, so it answers "no" about a model this node is
+  already running — `hosts_whole_model` is asked first. Nearly shipped inverted.
 
-**Next up (after the v0.3.160 release; user: batch fixes, releases are slow —
+**Next up (after the v0.3.162 release; user: batch fixes, releases are slow —
 Windows CUDA)**:
 
 (0) **Field-verify.** The .156→.160 fixes are largely unseen on other people's
@@ -308,6 +299,7 @@ needs the user's credentials.
 gotcha numbers index `memory/gotchas.md`. **Read the named round log before
 re-deriving any of these.**
 
+- **.160/.161** (09-06): TEN fixes + a correction, mostly from questions parked on a reporter who was assumed never to answer; #484 a FALSE PRIVACY ASSURANCE, #481 a regression we shipped in .154. .161 was a same-day hotfix — the dashboard would not load AT ALL. `round_log_0906_delegation_shape.md`.
 - **.159** (09-06): 16 fixes — the small-machine harness (`examples/constrained_node_test.sh`), #472 a content hash recomputed mid-corrections, the dashboard memory figure that never counted workers. `round_log_0906_dashboard_chat.md`.
 - **.158** (09-05): 3 from ONE Qwen3 report — a backend asking for the whole TRAINING window as its context; a prompt left on a CLOSED turn; a `<think>` scratchpad returned as the answer. ⚠ The reporter's headline diagnosis was WRONG (grep against a source-less tarball).
 - **.156/.157** (09-05): 23 defects. **#467 — #461 covered 3 of NINE worker-removal sites, missing the CUDA-OOM path both reports came from.** ⚠ Grep the OPERATION; a report's call-site list is symptoms, not scope. `round_log_0905_dead_worker_memory.md`.
@@ -316,9 +308,7 @@ re-deriving any of these.**
 - **.142-.146** (09-01): hybrid GPU/CPU layer splitting (#431, 5.0 → 12.25 tok/s); **no Mac had EVER been able to update itself (#430)**; **every node was lying about how fast it is (#428/#429)**; **the "safe to share" button shared everyone's IP address (#426)**. `round_log_0901_diagnostics_privacy.md`.
 - **.136-.141** (08-30/31): faults visible ONLY over the network or ONLY on a released binary — #416 multi-byte replies refused as lost, #414 replies arriving twice, #418 244 s vs 0.80 s, #420 naive BPE (141 s), #421 every newline sent as `<unk>`. ⚠ **The perf bug was the LEAD, not the bug**, and a tokenizer compared only against its own past cannot be shown correct. `round_log_0831_tokenizer_quadratic.md` (LAST section first).
 - **.132-.135** (08-29/30): **the guards were the defect** — five tested by PLANTING the violation, four could not see what they guard (#413); #410 GGUF headers off an UNBUFFERED file (11.2 s → 0.21 s). ⚠ Split utime/stime BEFORE theorising. `round_log_0830_guard_audit.md`.
-- **.120-.131** (08-25→28): a corrupt shard PROVED to spread — **only the ORIGIN settles it** (#382); .121 then quarantined the GOOD copy (#384) — **a repair mechanism is a destruction mechanism**. `round_log_0825_overnight_watch.md`.
-- **.101-.119** (08-18→24): CPU prefill +20-40% / decode +25-37%; 25.7x from a budget read off the BOOT SNAPSHOT (#281, third time). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement.**
-- **.15-.100** (07-23→08-17): the era that produced most of the rules — credits switched OFF, the whole prompt pipeline wrong (#246-#253), AVX2 compiled OUT of releases (3.09x), settings that saved and did nothing (#281 → `SharedState::cfg()`).
+- **.15-.131** (07-23→08-28): the era that produced most of the rules. A corrupt shard PROVED to spread and only the ORIGIN settles it (#382), then .121 quarantined the GOOD copy (#384) — **a repair mechanism is a destruction mechanism**; CPU prefill +20-40% / decode +25-37%; 25.7x from a budget read off the BOOT SNAPSHOT (#281, third time, → `SharedState::cfg()`); credits switched OFF; the whole prompt pipeline wrong (#246-#253); AVX2 compiled OUT of releases (3.09x). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement.** `round_log_0825_overnight_watch.md` and siblings.
 - **R136-R150 + the 20 build phases**: NAT/reachability, SWARM-SPEC cascade, `swarmpool://` v2, cross-pool routing. `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)
