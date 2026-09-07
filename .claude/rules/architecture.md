@@ -511,14 +511,23 @@ refused for capacity from being re-offered work — the blacklist fires only for
 missing-shard errors — so the re-plan met the same stale figure and made the
 same mistake.
 
-Three things a change here must keep. **The accessor owns the device choice**:
-two callers were writing the `match &c.gpu` themselves, and a third would have
-had to get it right again. **The graphics branch is untouched** — free VRAM
-already excludes what is resident, which is the property `already_warm` pricing
-depends on; the RAM budget has the same property because it subtracts
-`ram_committed_mb`. And **unknown never excludes**: `None` from a node predating
-the field falls back to `ram_available_mb` and behaves exactly as before, which
-is what keeps a mixed-version swarm routable. The field is additive and
+**The stated budget is tested BEFORE the card, and that ordering is the
+point.** The figure is computed only on the branch where models load into
+system memory, so its presence carries the placement decision rather than
+merely a number. A node that HAS a card and has been told not to use it
+(`inference.gpu_layers = 0`) still gossips that card, because the card is
+really there — so asking about `gpu` first judged it by memory its models would
+never occupy while it loaded every one of them into RAM. That ordering was
+right only while the card was the only thing that answered.
+
+Three further things a change here must keep. **The accessor owns the device
+choice**: two callers were writing the `match &c.gpu` themselves, and a third
+would have had to get it right again. **The graphics branch is otherwise
+untouched** — free VRAM already excludes what is resident, which is the property
+`already_warm` pricing depends on; the RAM budget has the same property because
+it subtracts `ram_committed_mb`. And **unknown never excludes**: a node that has
+stated neither falls back to `ram_available_mb` and behaves exactly as before,
+which is what keeps a mixed-version swarm routable. The field is additive and
 `#[serde(default)]` per the protocol rule; the meaning of the existing field is
 deliberately NOT changed, because the peer list displays it as free memory and
 that reading is legitimate and different.

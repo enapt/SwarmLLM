@@ -601,7 +601,17 @@
             } else {
               gpuBadge.textContent = I18n.t('hw.mode_cpu');
               gpuBadge.className = 'node-mode-badge node-mode-badge-interactive node-mode-cpu';
-              gpuBadge.removeAttribute('title');
+              // The card is here and unused, and "CPU mode" alone does not say
+              // why. When the reason is that this build has no way to drive it,
+              // say so — otherwise the owner is left to conclude their card is
+              // broken or their settings wrong. Same distinction as the "None"
+              // case below (report #019); the difference is only that here we
+              // can see the card.
+              if (hw.gpu_backend_in_build === false) {
+                gpuBadge.title = I18n.t('hw.no_gpu_backend_tip');
+              } else {
+                gpuBadge.removeAttribute('title');
+              }
             }
           }
           if (hw.gpu_vram_mb) {

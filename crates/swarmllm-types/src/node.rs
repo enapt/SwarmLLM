@@ -210,16 +210,32 @@ impl NodeCapability {
     /// the capacity planner — and a third would have had to get the same
     /// two-line match right again.
     ///
-    /// A graphics card answers with its free memory, which already excludes
-    /// whatever is resident on it. A node without one answers with the budget
-    /// its own loader will honour when it has told us one, and only falls back
-    /// to the operating system's free-memory reading when it has not: that
-    /// reading is not a promise the node can keep, and routing on it produced
-    /// segments the receiving node refused on arrival.
+    /// **A stated system-memory budget is how a node says its models load
+    /// there**, and it is therefore tested before the card. That figure is
+    /// computed only on the branch where models go to system memory, so its
+    /// presence carries the placement decision and not merely a number.
+    ///
+    /// Which matters for a node that HAS a card and has been told not to use
+    /// it (`inference.gpu_layers = 0`): it still gossips its `gpu`, because the
+    /// card is really there, so keying on that field alone judged it by memory
+    /// its models would never occupy while it loaded every one of them into
+    /// RAM. Asking about the card first was right only while the card was the
+    /// only thing that answered.
+    ///
+    /// Otherwise a graphics card answers with its free memory, which already
+    /// excludes whatever is resident on it — the property warm-peer pricing
+    /// depends on, and one the RAM budget shares because it nets off what is
+    /// already committed. A node that has told us neither falls back to the
+    /// operating system's free-memory reading, exactly as before this field
+    /// existed: that reading is not a promise the node can keep, and routing
+    /// on it produced segments the receiving node refused on arrival.
     pub fn memory_for_model_layers_mb(&self) -> u64 {
-        match &self.gpu {
-            Some(g) => g.vram_available_mb,
-            None => self.ram_model_budget_mb.unwrap_or(self.ram_available_mb),
+        match self.ram_model_budget_mb {
+            Some(mb) => mb,
+            None => match &self.gpu {
+                Some(g) => g.vram_available_mb,
+                None => self.ram_available_mb,
+            },
         }
     }
 }
@@ -382,13 +398,12 @@ mod version_compat_tests {
         let cap: NodeCapability = serde_json::from_value(v).unwrap();
         assert_eq!(cap.memory_for_model_layers_mb(), 2048);
 
-        // A card answers for itself either way — its free figure already
-        // excludes what is resident on it, which is the property the warm-peer
-        // pricing depends on.
+        // A card answers when the node has stated no system-memory budget —
+        // which is what a node running its models ON the card reports. Its
+        // free figure already excludes what is resident there, the property
+        // warm-peer pricing depends on.
         let mut v = base_fields();
-        let obj = v.as_object_mut().unwrap();
-        obj.insert("ram_model_budget_mb".into(), serde_json::json!(2048u64));
-        obj.insert(
+        v.as_object_mut().unwrap().insert(
             "gpu".into(),
             serde_json::json!({
                 "name": "card",
@@ -398,7 +413,39 @@ mod version_compat_tests {
             }),
         );
         let cap: NodeCapability = serde_json::from_value(v).unwrap();
+        assert!(cap.ram_model_budget_mb.is_none());
         assert_eq!(cap.memory_for_model_layers_mb(), 6000);
+    }
+
+    /// A node that HAS a card and has been told not to use it
+    /// (`inference.gpu_layers = 0`) still gossips that card, because it is
+    /// really there. Its models nonetheless load into system memory, so
+    /// judging it by video memory measured what its models would never
+    /// occupy — and a peer scheduling onto it sized the segment from the
+    /// wrong pool entirely.
+    ///
+    /// Stating the system-memory budget is how such a node says where its
+    /// models go, which is why that field is tested before the card.
+    #[test]
+    fn a_card_the_node_will_not_use_does_not_answer_for_its_memory() {
+        let mut v = base_fields();
+        let obj = v.as_object_mut().unwrap();
+        obj.insert("ram_model_budget_mb".into(), serde_json::json!(2048u64));
+        obj.insert(
+            "gpu".into(),
+            serde_json::json!({
+                "name": "card it will not use",
+                "vram_total_mb": 8192u64,
+                "vram_available_mb": 6000u64,
+                "memory_bandwidth_gbps": 0.0f32,
+            }),
+        );
+        let cap: NodeCapability = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            cap.memory_for_model_layers_mb(),
+            2048,
+            "the models load in RAM, so the RAM budget is what bounds them"
+        );
     }
 
     /// The other direction: OUR announcement reaching a node that predates the

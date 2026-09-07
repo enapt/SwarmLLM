@@ -38,7 +38,11 @@ it honestly can be and documented as far as it cannot.
   figure, so work was sent to machines that then turned it down — one peer
   refused the same request twice within two seconds, each refusal costing a
   round trip before it was known. Older peers are unaffected and are read
-  exactly as before.
+  exactly as before. This also corrects a machine that has a graphics card but
+  has been told not to use it: it still reports the card, because the card is
+  really there, so other machines were sizing work for it against video memory
+  its models would never occupy while every one of them loaded into system
+  memory instead.
 - **A request whose client has gone no longer keeps a machine busy.** When a
   chat window is closed mid-answer, the node stops between words — but a single
   step could wait indefinitely, because it sits in a queue behind whatever else
