@@ -11,7 +11,7 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2415 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2423 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
 > **Recent work (September 2026) — a model that does not quite fit your graphics card no longer loses the card.** Placement used to be all or nothing: a model needing a little more graphics memory than was free ran *entirely* on the processor while the card sat idle beside it. Since v0.3.145 the node splits it — the first layers on the card, the rest on the processor, the count chosen automatically — measured on an RTX 3070 at **1.8× the processor-only speed** for a 7B that no longer fits, against 7–8× when it does (see [Benchmarks](#benchmarks)). The same month: **a model no single node can hold is served** by chaining peers (a 14B across three machines on two continents), every node advertises a *measured* speed instead of a constant that was 5× low, the diagnostics report is safe to paste in public, Apple Silicon nodes can update themselves again — and a machine that vanishes or refuses mid-request now costs the request seconds, not minutes (v0.3.147).
 >
@@ -665,7 +665,7 @@ cargo run -- run
 
 ## Development Transparency
 
-SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2415 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
+SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2423 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
 
 ## License
 

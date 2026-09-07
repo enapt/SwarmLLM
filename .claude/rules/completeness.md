@@ -20,6 +20,24 @@ for f in frontend/js/**/*.js; do node -c "$f"; done                             
 
 Run `/cleanup` after committing changes to: SharedState fields, API endpoints, JS file structure, broadcast channels, WebSocket message formats, error type → HTTP status mappings.
 
+## A count edited after the test run is an untested change
+
+Test counts live in FOUR places — `CLAUDE.md` twice, `README.md` twice — and
+`the_readme_test_counts_agree_with_each_other_and_with_claude_md` fails the
+build when they disagree. The i18n key count lives in `CLAUDE.md` and
+`docs/ARCHITECTURE.md`, with its own guard.
+
+The trap is not "run the tests". It is that the count can only be written down
+AFTER the run that produced it, so the edit that breaks the guard is the one
+edit no run has seen. This has now put main red twice — the second time
+(2026-09-07) after a full green suite, a clean `-D warnings` clippy, and two
+verified null controls, because the number went in afterwards.
+
+**After editing any count, re-run `cargo test --test repo_consistency` before
+`git add`.** It is the cheapest target in the suite. The same applies to any
+figure a guard cross-checks between files: the frontend payload budget, the
+i18n key totals, the MSRV.
+
 ## Error type discipline
 
 **Never choose an error type at a call site.** `crate::error::classify_error`
