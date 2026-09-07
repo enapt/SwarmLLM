@@ -234,6 +234,11 @@ on the tagged commit INCLUDING all three feature compile-checks (`flash-attn`,
 three jobs, Release + Docker green, 25 assets, not draft, `latest`, sha256 CUDA
 + deb, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact, against a v0.3.161
 baseline taken first that was itself 9/9 and 7/7.**
+⚠ **`release_shapes.sh` is LOAD-SENSITIVE — take the baseline on an idle box.**
+On 2026-09-07 `long system prompt, cold` FAILED once with a `cargo build`
+running, and passed on a re-run with the machine quiet; the same request by
+hand returned a correct 17-token reply. Treat a single shapes failure as a
+re-run candidate, not a signal, and never take a baseline beside a build.
 ⚠ **`release_shapes.sh` on port 8810 reports "node did not start" — that is the
 LIVE node's P2P port** (`8800 + 10`), not a release fault. Use 8819.
 ⚠ **`gh release download` needs `-R <owner>/<repo>` when run outside a git
