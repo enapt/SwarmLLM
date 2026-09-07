@@ -165,9 +165,19 @@
         var diskEl = document.getElementById('hw-disk');
         var rec = document.getElementById('hw-recommendation');
 
+        // A card this build cannot drive is not capability this node has.
+        // The badge below is a promise about what will run, and it was made
+        // on detected memory alone — so a build with no graphics backend told
+        // its owner "your GPU can run 7B models locally" while every request
+        // went to the processor. Same mistake as the dashboard's "None"
+        // (report #019), on the first screen anyone sees.
+        var backendCanUseTheGpu = App.setup.hwData.gpu_backend_in_build !== false;
+        var usableVramMb = backendCanUseTheGpu ? vramMb : 0;
         if (gpuName && vramMb > 0) {
           gpuEl.textContent = gpuName;
-          vramEl.textContent = U.formatMB(vramMb) + ' ' + I18n.t('hw.vram');
+          vramEl.textContent = backendCanUseTheGpu
+            ? U.formatMB(vramMb) + ' ' + I18n.t('hw.vram')
+            : I18n.t('hw.no_gpu_backend');
         } else {
           gpuEl.textContent = I18n.t('hw.mode_cpu_only');
           vramEl.textContent = I18n.t('setup.hw_no_gpu_short');
@@ -177,11 +187,11 @@
 
         if (rec) {
           rec.className = 'setup-hw-card-badge';
-          if (vramMb >= 8000) {
+          if (usableVramMb >= 8000) {
             rec.textContent = I18n.t('setup.hw_gpu_7b');
-          } else if (vramMb >= 4000) {
+          } else if (usableVramMb >= 4000) {
             rec.textContent = I18n.t('setup.hw_gpu_small');
-          } else if (vramMb > 0) {
+          } else if (usableVramMb > 0) {
             rec.textContent = I18n.t('setup.hw_limited_vram');
             rec.classList.add('warn');
           } else {

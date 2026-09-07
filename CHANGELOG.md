@@ -60,6 +60,13 @@ it honestly can be and documented as far as it cannot.
   build, and explains why. On machines where the processor and graphics share
   one pool of memory, the panel no longer shows an empty video-memory figure
   beside the system one as though they were two separate resources.
+- **The setup wizard no longer promises a graphics card the build cannot use.**
+  The same mistake as above, on the first screen anyone sees: the wizard judged
+  what your machine could run from the memory on your card alone, so a build
+  with no graphics support told its owner "your GPU can run 7B models locally"
+  while every request went to the processor. It now names the card, says it is
+  unused by this build, and gives the advice that matches what will actually
+  happen. A build that can use the card is unaffected.
 
 ## [0.3.161-alpha] — 2026-09-06
 
