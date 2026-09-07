@@ -131,6 +131,51 @@ pub(super) const ACTIVATION_BYTES_PER_TOKEN: usize =
 /// holders; past it, only whole ranges are emitted.
 pub(super) const MAX_SUBRANGE_VERTICES: usize = 4096;
 
+/// Whose advertised memory the search is held to.
+///
+/// The bound exists because "holds these layers" and "can run these layers"
+/// are different claims, and routing a segment to a node that cannot load it
+/// costs a round trip and a refusal. But the *reliability* of the claim
+/// differs by who is making it, and that is what this distinguishes:
+///
+/// - A PEER's figure is a self-report. It is stale by up to a health tick,
+///   zero on any node older than v0.3.103, and absent for a peer that has
+///   gossiped no capability at all. It may make a route better and must never
+///   make a routable request fail — hence the caller's relaxed pass.
+/// - THIS NODE's figure is not a self-report at all. It comes from our own
+///   loader, computed inside the very scheduling call that consumes it, from
+///   live memory. It is the same estimator `admit_to_cpu` will use to refuse
+///   the load minutes later, so dropping it does not rescue a request — it
+///   only moves the refusal from the planner, where the plan can still change,
+///   to the loader, where it cannot (report #025).
+///
+/// So the relaxation is scoped. [`Nobody`](Self::Nobody) remains as a LAST
+/// resort, for when not even our own bound leaves a route: there the local
+/// loader's itemised refusal is a better answer than "no route", and the
+/// caller says so in its log.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum CapacityBound {
+    /// Every candidate is held to its figure.
+    Everyone,
+    /// Only this node is. A peer's unreliable figure may not fail the request;
+    /// ours is not unreliable.
+    LocalOnly,
+    /// Nobody is. The loader decides, and its refusal names the shortfall.
+    Nobody,
+}
+
+impl CapacityBound {
+    /// Is THIS node held to the layer count its own loader says it can take?
+    fn binds_local(self) -> bool {
+        !matches!(self, Self::Nobody)
+    }
+
+    /// Is a PEER held to the layer count it advertises?
+    fn binds_peers(self) -> bool {
+        matches!(self, Self::Everyone)
+    }
+}
+
 /// Baseline transformer layer count used to scale a whole-model throughput
 /// estimate down to a per-segment contribution. 32 matches Llama-7B and most
 /// 7B Q4 models we benchmark against; arch-aware scaling would replace this
@@ -366,12 +411,10 @@ pub(super) fn route_shortest_path(
     // Allow a candidate's range to be used in part. Off by default: see
     // `config.inference.parallax_partial_ranges` for the measured reason.
     partial_ranges: bool,
-    // Hold each peer to the layer count its advertised free memory can take
-    // (`NodeCandidate::max_hostable_layers`). The caller runs this ON first and
-    // retries with it OFF if no route exists, so a self-reported figure can
-    // never turn a routable request into a failure — see
-    // `assemble_pipeline_for`.
-    respect_capacity: bool,
+    // Whose memory bound (`NodeCandidate::max_hostable_layers`) this pass
+    // honours. The caller starts at `Everyone` and relaxes in steps — see
+    // [`CapacityBound`] and `assemble_pipeline_for`.
+    capacity: CapacityBound,
     // Prompt length, when known. See `vertex_cost`; `None` reproduces the cost
     // model exactly as it stood before prefill was priced.
     prompt_tokens: Option<u32>,
@@ -472,7 +515,12 @@ pub(super) fn route_shortest_path(
         // `None` = we cannot tell what this peer can hold, which must never be
         // read as "nothing" (gotcha #330: every node before v0.3.103 gossiped
         // zero free VRAM).
-        let cap = if respect_capacity {
+        let bound_applies = if &c.node_id == local_node_id {
+            capacity.binds_local()
+        } else {
+            capacity.binds_peers()
+        };
+        let cap = if bound_applies {
             c.max_hostable_layers
         } else {
             None
@@ -602,7 +650,7 @@ pub(super) fn route_shortest_path(
     // past 64 of them the bound is dropped rather than approximated, and the
     // caller's relaxed pass is the backstop either way.
     let mut capped_bit: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
-    if respect_capacity {
+    if capacity.binds_peers() {
         for v in &vertices {
             let c = &candidates[v.cand_idx];
             // **The local node is exempt, and prompt privacy is why**
@@ -639,11 +687,61 @@ pub(super) fn route_shortest_path(
     };
     let mut used_capped = vec![0u64; n];
 
+    // The LOCAL node's memory bound, carried along the best path the same way
+    // the capped-peer mask is.
+    //
+    // This node is the one candidate exempt from "appears at most once" above
+    // (prompt privacy needs it at both ends), so the per-vertex cap cannot
+    // bound what it takes IN TOTAL — three local sub-ranges each inside the cap
+    // can sum to the whole model, and `merge_contiguous` then hands it exactly
+    // that. The total was checked only after reconstruction, where failing
+    // abandons the WHOLE search rather than the one chain that broke the rule;
+    // the caller's relaxed pass then dropped every bound including this one and
+    // returned the very chain just refused, which the loader refused again 50 ms
+    // later with no re-plan behind it (report #025, on a 48-layer model against
+    // a bound of 40).
+    //
+    // Checked here, an over-budget chain is simply never built and the search
+    // returns the cheapest one that fits — which on that machine is the
+    // boomerang across the peer that holds every layer.
+    //
+    // Carried along the single best path, so — exactly like `used_capped` — it
+    // is a sound bound and not a complete search: a cheaper predecessor that
+    // exhausts the budget can hide a costlier one that would have fitted. Both
+    // backstops behind it are unchanged: the exact summed check after
+    // reconstruction, and the caller's next relaxation.
+    let local_cap: Option<u32> = if capacity.binds_local() {
+        candidates
+            .iter()
+            .find(|c| &c.node_id == local_node_id)
+            .and_then(|c| c.max_hostable_layers)
+            // `Some(0)` still moves one layer, so a privacy end can always be
+            // served and the DP terminates — the same floor the summed check
+            // below applies.
+            .map(|k| k.max(1))
+    } else {
+        None
+    };
+    let local_span = |vi: usize| -> u32 {
+        let v = &vertices[vi];
+        if &candidates[v.cand_idx].node_id == local_node_id {
+            v.range.1 - v.range.0
+        } else {
+            0
+        }
+    };
+    let mut local_used = vec![0u32; n];
+
     // Initialize sources.
     for i in 0..n {
         if is_source(&vertices[i]) {
+            let ours = local_span(i);
+            if local_cap.is_some_and(|cap| ours > cap) {
+                continue;
+            }
             best_cost[i] = vertices[i].cost_ms;
             used_capped[i] = bit_of(i);
+            local_used[i] = ours;
         }
     }
 
@@ -668,11 +766,18 @@ pub(super) fn route_shortest_path(
                 // This capped node is already carrying part of the chain.
                 continue;
             }
+            let ours = local_used[v_idx] + local_span(w_idx);
+            if local_cap.is_some_and(|cap| ours > cap) {
+                // Extending here would give this node more layers, across all
+                // its segments, than its own loader will take.
+                continue;
+            }
             let new_cost = best_cost[v_idx] + vertices[w_idx].cost_ms;
             if new_cost < best_cost[w_idx] {
                 best_cost[w_idx] = new_cost;
                 parent[w_idx] = Some(v_idx);
                 used_capped[w_idx] = used_capped[v_idx] | w_bit;
+                local_used[w_idx] = ours;
             }
         }
     }
@@ -722,7 +827,7 @@ pub(super) fn route_shortest_path(
     // relaxation, the summed span can simply be measured. Failing means the
     // caller's relaxed pass runs, which is the same backstop every other
     // capacity refusal in this function uses.
-    if respect_capacity {
+    if capacity.binds_local() {
         if let Some(cap) = candidates
             .iter()
             .find(|c| &c.node_id == local_node_id)
@@ -830,7 +935,7 @@ mod tests {
                 &local,
                 false,
                 false,
-                false,
+                CapacityBound::Nobody,
                 tokens,
             )
             .expect("a route must exist")[0]
@@ -928,7 +1033,7 @@ mod tests {
             &local,
             false,
             true,
-            true,
+            CapacityBound::Everyone,
             None,
         )
         .expect("a route must exist");
@@ -946,7 +1051,7 @@ mod tests {
             &local,
             false,
             true,
-            true,
+            CapacityBound::Everyone,
             None,
         )
         .expect("a route must still exist");
@@ -976,8 +1081,16 @@ mod tests {
         local_head.node_id = local.clone();
 
         // partial_ranges = false, respect_capacity = true
-        let segs = route_shortest_path(32, &[peer, local_head], &local, false, false, true, None)
-            .expect("a route must exist");
+        let segs = route_shortest_path(
+            32,
+            &[peer, local_head],
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("a route must exist");
         for seg in &segs {
             if seg.node_id == NodeId([2u8; 32]) {
                 assert!(
@@ -1001,13 +1114,30 @@ mod tests {
         // Constrained: no route (no split points to cut against, nothing else
         // holds these layers).
         assert!(
-            route_shortest_path(32, &[only_holder.clone()], &local, false, false, true, None)
-                .is_err(),
+            route_shortest_path(
+                32,
+                &[only_holder.clone()],
+                &local,
+                false,
+                false,
+                CapacityBound::Everyone,
+                None
+            )
+            .is_err(),
             "the constrained pass should refuse rather than over-commit the peer"
         );
         // Relaxed: the same call that `assemble_pipeline_for` makes second.
         assert!(
-            route_shortest_path(32, &[only_holder], &local, false, false, false, None).is_ok(),
+            route_shortest_path(
+                32,
+                &[only_holder],
+                &local,
+                false,
+                false,
+                CapacityBound::Nobody,
+                None
+            )
+            .is_ok(),
             "the relaxed pass must still route — a self-reported figure may not \
              make a request unservable"
         );
@@ -1030,7 +1160,7 @@ mod tests {
             &local,
             false,
             true,
-            true,
+            CapacityBound::Everyone,
             None,
         )
         .expect("a route must exist");
@@ -1257,7 +1387,7 @@ mod tests {
             &local,
             false,
             false,
-            true,
+            CapacityBound::Everyone,
             None,
         )
         .expect("a route must exist");
@@ -1290,8 +1420,16 @@ mod tests {
         let mut local_node = cand_with_obs(cand(1, vec![(0, 10)], 0, 0.0, true, false, 0.0), 10.0);
         local_node.node_id = local.clone();
 
-        let segs = route_shortest_path(16, &[remote, local_node], &local, false, true, true, None)
-            .expect("route");
+        let segs = route_shortest_path(
+            16,
+            &[remote, local_node],
+            &local,
+            false,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("route");
         assert_eq!(
             segs.len(),
             1,
@@ -1321,13 +1459,30 @@ mod tests {
 
         let cands = vec![head, tail, peer];
         assert!(
-            route_shortest_path(28, &cands, &local, true, false, true, None).is_err(),
+            route_shortest_path(
+                28,
+                &cands,
+                &local,
+                true,
+                false,
+                CapacityBound::Everyone,
+                None
+            )
+            .is_err(),
             "reproduces the reported failure: no route with ranges indivisible"
         );
 
         // And the fix: let the peer serve part of its range.
-        let segs = route_shortest_path(28, &cands, &local, true, true, true, None)
-            .expect("partial ranges must make the boomerang routable");
+        let segs = route_shortest_path(
+            28,
+            &cands,
+            &local,
+            true,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("partial ranges must make the boomerang routable");
         assert_eq!(
             segs.len(),
             3,
@@ -1352,8 +1507,16 @@ mod tests {
         // Peer holds ONLY the middle — the aligned case.
         let peer = cand(2, vec![(3, 21)], 5, 0.0, false, false, 0.0);
 
-        let segs = route_shortest_path(28, &[head, tail, peer], &local, true, false, true, None)
-            .expect("aligned middle must route with partial ranges OFF");
+        let segs = route_shortest_path(
+            28,
+            &[head, tail, peer],
+            &local,
+            true,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("aligned middle must route with partial ranges OFF");
         assert_eq!(segs.len(), 3, "{segs:?}");
         assert_eq!(segs[0].layer_range, (0, 3));
         assert_eq!(segs[1].layer_range, (3, 21));
@@ -1381,7 +1544,7 @@ mod tests {
             &local,
             true,
             true,
-            true,
+            CapacityBound::Everyone,
             None,
         )
         .expect("must route: this is the topology encryption is designed for");
@@ -1430,7 +1593,7 @@ mod tests {
             &local,
             true,
             true,
-            true,
+            CapacityBound::Everyone,
             None,
         )
         .expect("uncapped, this topology routes as a boomerang");
@@ -1440,8 +1603,16 @@ mod tests {
             "control: an uncapped local node uses the fast peer: {control:?}"
         );
 
-        let segs = route_shortest_path(28, &[me, peer], &local, true, true, true, None)
-            .expect("the constrained pass must route the shape privacy is on by default for");
+        let segs = route_shortest_path(
+            28,
+            &[me, peer],
+            &local,
+            true,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("the constrained pass must route the shape privacy is on by default for");
         assert_eq!(segs.len(), 3, "{segs:?}");
         assert_eq!(segs[0].node_id, local);
         assert_ne!(segs[1].node_id, local);
@@ -1462,9 +1633,17 @@ mod tests {
         let mut fits = me.clone();
         fits.max_hostable_layers = Some(2);
         assert_eq!(
-            route_shortest_path(28, &[fits, peer.clone()], &local, true, true, true, None)
-                .expect("two one-layer ends fit a bound of two")
-                .len(),
+            route_shortest_path(
+                28,
+                &[fits, peer.clone()],
+                &local,
+                true,
+                true,
+                CapacityBound::Everyone,
+                None
+            )
+            .expect("two one-layer ends fit a bound of two")
+            .len(),
             3
         );
 
@@ -1473,7 +1652,15 @@ mod tests {
         // decide — the same backstop every other capacity refusal here uses.
         let mut too_small = me;
         too_small.max_hostable_layers = Some(1);
-        let routed = route_shortest_path(28, &[too_small, peer], &local, true, true, true, None);
+        let routed = route_shortest_path(
+            28,
+            &[too_small, peer],
+            &local,
+            true,
+            true,
+            CapacityBound::Everyone,
+            None,
+        );
         match routed {
             Err(_) => {}
             Ok(segs) => {
@@ -1488,6 +1675,133 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Report #025's machine: a 48-layer model, every shard held here, and a
+    /// bound of 40 from our own loader — with one peer that holds every layer
+    /// and is priced slower.
+    ///
+    /// The relaxation must not drop OUR figure with the peers'. Before this,
+    /// `Nobody` was the second and last pass, so the search answered with the
+    /// all-local chain the pass above it had just refused; the loader then
+    /// refused it again 50 ms later and nothing re-planned. Every request to
+    /// that model failed for as long as the memory picture held.
+    #[test]
+    fn relaxing_the_peers_bound_does_not_relax_this_nodes_own() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 48)], 0, 0.0, true, true, 4.0);
+        me.node_id = local.clone();
+        me.max_hostable_layers = Some(40);
+        // Holds everything and is slower, so the search prefers staying home
+        // whenever it is allowed to.
+        let mut peer = cand(2, vec![(0, 48)], 20, 0.0, true, true, 2.0);
+        peer.max_hostable_layers = Some(8);
+
+        let cands = [me.clone(), peer.clone()];
+        let local_layers = |segs: &[PipelineSegment]| -> u32 {
+            segs.iter()
+                .filter(|s| s.node_id == local)
+                .map(|s| s.layer_range.1 - s.layer_range.0)
+                .sum()
+        };
+
+        // The peers' bound is what makes the first pass fail here: 8 layers is
+        // not enough for the 47 the boomerang's middle needs.
+        let constrained = route_shortest_path(
+            48,
+            &cands,
+            &local,
+            true,
+            true,
+            CapacityBound::Everyone,
+            None,
+        );
+        assert!(
+            constrained.is_err(),
+            "the peer's own figure should refuse this middle: {constrained:?}"
+        );
+
+        // Relaxing the PEER's figure is what the second pass is for — and ours
+        // must survive it.
+        let segs = route_shortest_path(
+            48,
+            &cands,
+            &local,
+            true,
+            true,
+            CapacityBound::LocalOnly,
+            None,
+        )
+        .expect("a boomerang across the peer that holds every layer still routes");
+        assert!(
+            local_layers(&segs) <= 40,
+            "this node took {} of 48 layers against a bound of 40: {segs:?}",
+            local_layers(&segs)
+        );
+        assert!(
+            segs.iter().any(|s| s.node_id != local),
+            "the route must actually leave this node: {segs:?}"
+        );
+
+        // The last resort is unchanged, and it is what keeps a single-node
+        // install answering with the loader's itemised refusal rather than
+        // "no route".
+        let unbounded =
+            route_shortest_path(48, &cands, &local, true, true, CapacityBound::Nobody, None)
+                .expect("the unbounded pass still routes");
+        assert_eq!(
+            local_layers(&unbounded),
+            48,
+            "the unbounded pass is the one that may still plan the whole model here: {unbounded:?}"
+        );
+    }
+
+    /// The mechanism behind that fix, on its own: a chain that would give this
+    /// node more layers than it can hold is now excluded from the search
+    /// instead of aborting it after reconstruction.
+    ///
+    /// Report #025's topology, which is what makes the bad chain representable
+    /// at all: peers whose ranges meet in the middle supply a split point this
+    /// node can cut against, so it can cover the whole model in two slices that
+    /// are each inside its cap and together are not. That is the chain the DP
+    /// picks when it is cheapest, and the summed check after reconstruction
+    /// then failed the WHOLE search — discarding the perfectly good route
+    /// through the peer that holds the tail.
+    #[test]
+    fn an_over_budget_chain_is_excluded_rather_than_failing_the_search() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 48)], 0, 0.0, true, true, 60.0);
+        me.node_id = local.clone();
+        me.max_hostable_layers = Some(40);
+        // Two peers meeting at layer 24, so 24 becomes a split point this node
+        // can cut its own coverage against. Slower than us, so an all-local
+        // chain is what the DP reaches for.
+        let head = cand(2, vec![(0, 24)], 30, 0.0, true, true, 6.0);
+        let tail = cand(3, vec![(24, 48)], 30, 0.0, true, true, 6.0);
+
+        let segs = route_shortest_path(
+            48,
+            &[me, head, tail],
+            &local,
+            true,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("the search must return the cheapest chain that FITS, not give up");
+        let ours: u32 = segs
+            .iter()
+            .filter(|s| s.node_id == local)
+            .map(|s| s.layer_range.1 - s.layer_range.0)
+            .sum();
+        assert!(
+            ours <= 40,
+            "this node took {ours} of 48 layers against a bound of 40: {segs:?}"
+        );
+        assert!(
+            segs.iter().any(|s| s.node_id != local),
+            "a chain that fits must use a peer: {segs:?}"
+        );
     }
 
     /// The half of the rule that must survive: a capped REMOTE peer still may
@@ -1505,7 +1819,15 @@ mod tests {
         let mut small = cand(2, vec![(0, 28)], 5, 0.0, true, true, 20.0);
         small.max_hostable_layers = Some(6);
 
-        let routed = route_shortest_path(28, &[me, small], &local, false, true, true, None);
+        let routed = route_shortest_path(
+            28,
+            &[me, small],
+            &local,
+            false,
+            true,
+            CapacityBound::Everyone,
+            None,
+        );
         if let Ok(segs) = routed {
             let slices = segs
                 .iter()
@@ -1528,7 +1850,16 @@ mod tests {
         head.node_id = local.clone();
         let peer = cand(2, vec![(0, 28)], 5, 0.0, true, true, 0.0);
         assert!(
-            route_shortest_path(28, &[head, peer], &local, true, true, true, None).is_err(),
+            route_shortest_path(
+                28,
+                &[head, peer],
+                &local,
+                true,
+                true,
+                CapacityBound::Everyone,
+                None
+            )
+            .is_err(),
             "must refuse rather than leak the tail to a peer"
         );
     }
@@ -1544,8 +1875,16 @@ mod tests {
         let mut local_fast = cand(1, vec![(0, 10)], 0, 0.0, true, false, 0.0);
         local_fast.node_id = local.clone();
 
-        let segs = route_shortest_path(16, &[remote, local_fast], &local, false, false, true, None)
-            .expect("a route must exist");
+        let segs = route_shortest_path(
+            16,
+            &[remote, local_fast],
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("a route must exist");
         assert_eq!(segs.len(), 1, "default must not split: {segs:?}");
         assert_eq!(segs[0].layer_range, (0, 16));
     }
@@ -1569,7 +1908,7 @@ mod tests {
             &local,
             false,
             true,
-            true,
+            CapacityBound::Everyone,
             None,
         )
         .expect("route");
@@ -1582,8 +1921,16 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let a = cand(1, vec![(0, 12)], 10, 0.0, true, false, 0.0);
         let b = cand(2, vec![(4, 20)], 10, 0.0, false, true, 0.0);
-        let segs =
-            route_shortest_path(20, &[a, b], &local, false, true, true, None).expect("route");
+        let segs = route_shortest_path(
+            20,
+            &[a, b],
+            &local,
+            false,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("route");
         let mut expect = 0;
         for s in &segs {
             assert_eq!(s.layer_range.0, expect, "gap or overlap in {segs:?}");
@@ -1599,7 +1946,16 @@ mod tests {
         let local = NodeId([9u8; 32]);
         // Covers everything but is not allowed to be last.
         let not_last = cand(1, vec![(0, 16)], 1, 0.0, true, false, 0.0);
-        assert!(route_shortest_path(16, &[not_last], &local, false, true, true, None).is_err());
+        assert!(route_shortest_path(
+            16,
+            &[not_last],
+            &local,
+            false,
+            true,
+            CapacityBound::Everyone,
+            None
+        )
+        .is_err());
     }
 
     /// And a source must still be able to be first.
@@ -1607,7 +1963,16 @@ mod tests {
     fn partial_ranges_respect_can_be_first() {
         let local = NodeId([9u8; 32]);
         let not_first = cand(1, vec![(0, 16)], 1, 0.0, false, true, 0.0);
-        assert!(route_shortest_path(16, &[not_first], &local, false, true, true, None).is_err());
+        assert!(route_shortest_path(
+            16,
+            &[not_first],
+            &local,
+            false,
+            true,
+            CapacityBound::Everyone,
+            None
+        )
+        .is_err());
     }
 
     /// Encrypted pipelines require the local node at both ends; partial ranges
@@ -1617,7 +1982,16 @@ mod tests {
         let local = NodeId([9u8; 32]);
         let remote = cand(2, vec![(0, 16)], 1, 0.0, true, true, 0.0);
         assert!(
-            route_shortest_path(16, &[remote], &local, true, true, true, None).is_err(),
+            route_shortest_path(
+                16,
+                &[remote],
+                &local,
+                true,
+                true,
+                CapacityBound::Everyone,
+                None
+            )
+            .is_err(),
             "a remote-only chain must be refused when encrypted_pipeline is on"
         );
     }
@@ -1634,8 +2008,16 @@ mod tests {
             let lo = (i as u32) % 40;
             cands.push(cand(i, vec![(lo, 80)], 5, 0.0, true, true, 0.0));
         }
-        let segs = route_shortest_path(80, &cands, &local, false, true, true, None)
-            .expect("must still route");
+        let segs = route_shortest_path(
+            80,
+            &cands,
+            &local,
+            false,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("must still route");
         let mut expect = 0;
         for s in &segs {
             assert_eq!(s.layer_range.0, expect);
@@ -1653,7 +2035,16 @@ mod tests {
     fn single_node_covers_all() {
         let local = NodeId([1u8; 32]);
         let cands = vec![cand(1, vec![(0, 32)], 0, 0.0, true, true, 0.0)];
-        let segs = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap();
+        let segs = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .unwrap();
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].layer_range, (0, 32));
         assert_eq!(segs[0].node_id, local);
@@ -1668,7 +2059,16 @@ mod tests {
             cand(2, vec![(8, 32)], 200, 0.0, false, true, 0.0),
             cand(3, vec![(8, 32)], 10, 0.0, false, true, 0.0),
         ];
-        let segs = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap();
+        let segs = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .unwrap();
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].node_id, local);
         assert_eq!(segs[1].node_id, NodeId([3u8; 32]));
@@ -1682,7 +2082,16 @@ mod tests {
             cand(1, vec![(0, 32)], 50, 10.0, true, true, 0.0),
             cand(2, vec![(0, 32)], 50, 0.0, true, true, 0.0),
         ];
-        let segs = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap();
+        let segs = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .unwrap();
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].node_id, NodeId([2u8; 32]));
     }
@@ -1695,7 +2104,16 @@ mod tests {
             cand(1, vec![(0, 4), (28, 32)], 0, 0.0, true, true, 0.0),
             cand(2, vec![(4, 28)], 5, 0.0, false, false, 0.0),
         ];
-        let segs = route_shortest_path(32, &cands, &local, true, false, true, None).unwrap();
+        let segs = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            true,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .unwrap();
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[0].node_id, local);
         assert_eq!(segs[0].layer_range, (0, 4));
@@ -1707,7 +2125,16 @@ mod tests {
     fn no_first_capable_errors() {
         let local = NodeId([1u8; 32]);
         let cands = vec![cand(2, vec![(0, 32)], 50, 0.0, false, true, 0.0)];
-        let err = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap_err();
+        let err = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, SwarmError::PipelineError(_)));
     }
 
@@ -1715,7 +2142,16 @@ mod tests {
     fn no_sink_errors() {
         let local = NodeId([1u8; 32]);
         let cands = vec![cand(1, vec![(0, 16)], 0, 0.0, true, false, 0.0)];
-        let err = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap_err();
+        let err = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, SwarmError::PipelineError(_)));
     }
 
@@ -1727,7 +2163,16 @@ mod tests {
             cand(1, vec![(0, 8)], 0, 0.0, true, false, 0.0),
             cand(2, vec![(16, 32)], 10, 0.0, false, true, 0.0),
         ];
-        let err = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap_err();
+        let err = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, SwarmError::PipelineError(_)));
     }
 
@@ -1741,7 +2186,16 @@ mod tests {
         let slow = cand_with_obs(cand(1, vec![(0, 32)], 50, 0.0, true, true, 0.0), 20.0);
         let fast = cand_with_obs(cand(2, vec![(0, 32)], 50, 0.0, true, true, 0.0), 2.0);
         let cands = vec![slow, fast];
-        let segs = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap();
+        let segs = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .unwrap();
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].node_id, NodeId([2u8; 32]));
     }
@@ -1758,7 +2212,16 @@ mod tests {
             cand(3, vec![(16, 32)], 10, 0.0, false, true, 0.0),
             cand(4, vec![(8, 32)], 100, 0.0, false, true, 0.0),
         ];
-        let segs = route_shortest_path(32, &cands, &local, false, false, true, None).unwrap();
+        let segs = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .unwrap();
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[1].node_id, NodeId([2u8; 32]));
         assert_eq!(segs[2].node_id, NodeId([3u8; 32]));
@@ -1793,7 +2256,7 @@ mod tests {
             &local,
             false,
             true,
-            true,
+            CapacityBound::Everyone,
             None,
         )
         .expect("must route");
@@ -1848,8 +2311,16 @@ mod tests {
         b.has_gpu = true;
         let cands = vec![slow_local, a, b];
 
-        let segs = route_shortest_path(32, &cands, &local, true, true, true, Some(14_000))
-            .expect("the boomerang across two cards must be routable");
+        let segs = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            true,
+            true,
+            CapacityBound::Everyone,
+            Some(14_000),
+        )
+        .expect("the boomerang across two cards must be routable");
         let shape: Vec<(bool, (u32, u32))> = segs
             .iter()
             .map(|s| (s.node_id == local, s.layer_range))
@@ -1867,8 +2338,16 @@ mod tests {
 
         // Control: with privacy off nothing forces the ends home, and the two
         // cards take a half each.
-        let segs =
-            route_shortest_path(32, &cands, &local, false, false, true, Some(14_000)).unwrap();
+        let segs = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            Some(14_000),
+        )
+        .unwrap();
         let nodes: Vec<u8> = segs.iter().map(|s| s.node_id.0[0]).collect();
         assert_eq!(nodes, vec![2, 3], "{segs:?}");
     }

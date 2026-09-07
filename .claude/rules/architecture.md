@@ -493,6 +493,67 @@ fact; this is the same trap turned inward — the claim was about the function's
 own caller, and it had been true of nothing since before gotcha #479 edited the
 function without touching it.
 
+## The relaxation is scoped to the figures that are actually unreliable
+
+**`parallax::CapacityBound`** says whose `max_hostable_layers` a routing pass
+honours: `Everyone`, `LocalOnly`, or `Nobody`. `assemble_pipeline_for` walks
+them in that order, and the local layer budget is enforced INSIDE the DP —
+carried along the best path, exactly as the capped-peer bitmask is — as well as
+by the exact summed check after reconstruction.
+
+**Why the bound is scoped at all.** The relaxation exists because a PEER's
+figure is a self-report: stale by up to a health tick, zero on any node older
+than v0.3.103, absent for a peer that has gossiped no capability. Such a figure
+may make a route better and must never make a routable request fail. But
+`respect_capacity` was one boolean over every vertex, and the local node is a
+vertex — so the pass also discarded a figure that is none of those things. Ours
+comes from our own loader, inside the very scheduling call that consumes it,
+from live memory, from the estimator `admit_to_cpu` will use minutes later. So
+dropping it never rescued a request; it moved the refusal from the planner,
+where the plan can still change, to the loader, where it cannot.
+
+Measured on a 16 GB machine (report #025, gotcha #489): `max_hostable_layers=
+Some(40)` logged one line above, the constrained pass refusing 48 layers by
+name, the relaxed pass then returning the identical all-local chain, and
+`admit_to_cpu` refusing it 50 ms later. **Every request to that model failed,
+for as long as the memory picture held.** The v0.3.162 fix (report #018)
+changed which log line explained the failure, not whether it happened, because
+it closed the fast path and this is the search's own second pass.
+
+**Why the DP, and not only the check after it.** The local node is exempt from
+"a capped candidate appears at most once" — prompt privacy needs it at both ends
+(gotcha #481) — so the per-vertex cap cannot bound what it takes in TOTAL:
+several local sub-ranges, each inside the cap, sum to the whole model, and
+`merge_contiguous` hands it exactly that. The summed check ran after path
+reconstruction, where failing abandons the WHOLE search rather than the one
+chain that broke the rule. So a perfectly good boomerang through the peer that
+held every layer was discarded along with it. Checked inside the DP, the bad
+chain is simply never built and the search returns the cheapest one that fits.
+
+Four things a change here must keep.
+
+- **`Nobody` stays, as the LAST resort.** With no route even inside our own
+  memory there is nothing to protect, and the loader's itemised refusal —
+  which names the footprint, the budget and what to raise — is a better answer
+  to a single-node install than "no route". This is why the fix is not simply
+  "respect the local bound always".
+- **The DP bound is a sound bound, not a complete search.** It is carried along
+  the single best path, so a cheaper predecessor that exhausts the budget can
+  hide a costlier one that would have fitted — the same approximation
+  `used_capped` already makes. Both backstops behind it are unchanged: the
+  exact summed check, and the next relaxation.
+- **Every pass says which one it is.** The `LocalOnly` line promises a re-plan
+  and can now keep it: the only refusal it invites is a peer's, and
+  `should_retry_after` retries that. The `Nobody` line promises nothing and
+  says the loader will decide.
+- **`Some(0)` still moves one layer.** Both the DP bound and the summed check
+  apply `cap.max(1)`, so a privacy end can always be served and the search
+  terminates.
+
+**The general rule.** When a flag's name, doc or log line describes one
+population and its parameter reaches all of them, that gap is the bug — and a
+constraint checked after a search kills the search instead of the candidate.
+
 ## A peer advertises the memory it will HONOUR, not the memory it has
 
 **`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much

@@ -984,7 +984,16 @@ fn pipeline_may_replace_processor_route(
         .filter(|s| s.node_id != *local_node_id)
         .collect();
     if remote.is_empty() {
-        return Err("no pipeline across peers is priced faster than the processor");
+        // No comparison was made, and the line must not read as though one was
+        // lost: the search's own cheapest answer is this node, so there is no
+        // pipeline on the other side of the scales. Report #025 quoted the old
+        // wording — "no pipeline across peers is priced faster than the
+        // processor" — beside two identical costs, which is what it looks like
+        // when the "pipeline" being priced IS the local segment.
+        return Err(
+            "the cheapest route the search found is entirely local, so there is no \
+                    pipeline to compare",
+        );
     }
     // Nothing to give up. Running the whole model here is not a route this
     // node can offer, so the chain is not competing with the processor — it is
@@ -1765,42 +1774,65 @@ impl PipelineScheduler {
             // a middle segment nor a remote encrypted end. That produced a
             // hard "No node available" for a perfectly valid boomerang.
             let partial = self.shared_state.config.inference.parallax_partial_ranges || encrypted;
-            // Route twice at most. The first pass holds every peer to the layer
-            // count its advertised free memory can take; the second drops that
-            // bound entirely. A peer's self-reported figure is therefore allowed
-            // to make a route BETTER and never to make a routable request fail —
-            // which matters because the figure is stale by up to a health tick,
-            // is zero on any node older than v0.3.103, and is absent for a peer
-            // that has gossiped no capability at all.
-            let routed = parallax::route_shortest_path(
-                num_layers,
-                &candidates,
-                local_node_id,
-                encrypted,
-                partial,
-                true,
-                prompt_tokens,
-            )
-            .or_else(|first_err| {
-                let relaxed = parallax::route_shortest_path(
+            // Route up to three times, relaxing one bound at a time, because
+            // the two kinds of memory figure in the graph are not equally
+            // trustworthy — see `parallax::CapacityBound`.
+            //
+            // 1. Everyone is held to their figure.
+            // 2. Only WE are. A peer's self-report is stale by up to a health
+            //    tick, zero on any node older than v0.3.103, and absent for a
+            //    peer that has gossiped no capability at all, so it may make a
+            //    route better and must never make a routable request fail.
+            // 3. Nobody is. Last resort: with no route even inside our own
+            //    memory there is nothing to protect, and the loader's itemised
+            //    refusal is a better answer to the user than "no route".
+            //
+            // Step 2 is what stopped the relaxation throwing away OUR bound
+            // along with the peers'. Ours is not a self-report: it was computed
+            // by this same call, from live memory, by the estimator the loader
+            // will use — so dropping it never rescued a request, it only moved
+            // the refusal from here, where the plan can still change, to
+            // `admit_to_cpu`, where it cannot (report #025).
+            let route_with = |capacity| {
+                parallax::route_shortest_path(
                     num_layers,
                     &candidates,
                     local_node_id,
                     encrypted,
                     partial,
-                    false,
+                    capacity,
                     prompt_tokens,
-                );
-                if relaxed.is_ok() {
-                    tracing::info!(
-                        model = %model_id,
-                        constrained_err = %first_err,
-                        "DIAG: no route fits the peers' advertised memory — routing without \
-                         that bound, a holder may refuse and the request will re-plan"
-                    );
-                }
-                relaxed
-            });
+                )
+            };
+            let routed = match route_with(parallax::CapacityBound::Everyone) {
+                Ok(segs) => Ok(segs),
+                Err(peers_err) => match route_with(parallax::CapacityBound::LocalOnly) {
+                    Ok(segs) => {
+                        tracing::info!(
+                            model = %model_id,
+                            constrained_err = %peers_err,
+                            "DIAG: no route fits the peers' advertised memory — routing \
+                             without that bound but still within our own; a peer may refuse \
+                             and the request will re-plan"
+                        );
+                        Ok(segs)
+                    }
+                    Err(local_err) => {
+                        let unbounded = route_with(parallax::CapacityBound::Nobody);
+                        if unbounded.is_ok() {
+                            tracing::info!(
+                                model = %model_id,
+                                constrained_err = %peers_err,
+                                local_err = %local_err,
+                                "DIAG: no route fits this node's own memory either — \
+                                 planning as if nothing were bounded, so the loader decides \
+                                 and its refusal can name the shortfall"
+                            );
+                        }
+                        unbounded
+                    }
+                },
+            };
             match routed {
                 // Both arms log at `info`, deliberately. Nodes run at `info`, so
                 // at `debug` which router actually chose a route was invisible in
