@@ -2,12 +2,17 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.162-alpha] — 2026-09-07
 
-Six fixes from eight reports filed by one tester in a day, on a 16 GB
-processor-only Mac mini. Two of the eight are answered in the project's notes
-rather than in code, with the reasons written down; a third is fixed as far as
-it honestly can be and documented as far as it cannot.
+Eight fixes. Six come from eight reports filed by one tester in a day on a
+16 GB processor-only Mac mini; two more were found while checking those, by
+opening the screens involved rather than by reading the code.
+
+Of her eight reports, two are answered in the project's notes rather than in
+code, with the reasons written down, and a third is fixed as far as it honestly
+can be and documented as far as it cannot. Three of the eight also turned out to
+be wrong about the cause in ways that changed the fix — the mechanism each one
+pointed at was real, but not the one doing the damage.
 
 ### Fixed
 
