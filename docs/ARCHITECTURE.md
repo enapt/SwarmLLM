@@ -664,6 +664,35 @@ assembly.
 8. Identify standby nodes per segment
 9. Send PipelineAssignment → all nodes ACK → begin forwarding
 
+**Capacity-respecting routing (`parallax::route_shortest_path`).** When
+`inference.parallax_routing` is on, the shortest-path DP replaces steps 5-7 and
+is run up to three times, relaxing one memory bound at a time
+(`parallax::CapacityBound`):
+
+| pass | bound honoured | why |
+|---|---|---|
+| `Everyone` | every candidate's `max_hostable_layers` | the normal answer |
+| `LocalOnly` | this node's only | a PEER's figure is a self-report — stale by up to a health tick, zero before v0.3.103, absent without capability gossip — so it may improve a route and must never fail a routable request. **Ours is not a self-report**: it is computed inside the same call from live memory by the estimator the loader will use, so dropping it moves the refusal from the planner (where the plan can change) to the loader (where it cannot) |
+| `Nobody` | none | last resort: with no route even inside our own memory, the loader's itemised refusal beats "no route" for a single-machine install |
+
+The local node's bound is enforced **inside** the DP, carried along the best
+path like the capped-peer bitmask, as well as by the exact summed check after
+reconstruction. It is exempt from "a capped candidate appears at most once"
+(prompt privacy needs it at both ends), so the per-vertex cap cannot bound what
+it takes in total — and a constraint checked only after reconstruction fails the
+whole search rather than the one chain that broke it.
+
+**Re-planning after a local memory refusal.** `SwarmError::LocalMemoryUnavailable`
+is the only local failure the router re-plans without a remote segment having
+been involved. Admission refuses *before* allocating, so a second plan would
+otherwise read identical figures and re-attempt the load that just failed —
+retrying an exhausted resource. `SharedState::note_local_memory_refusal` records
+the loader's verdict against the request and `local_can_hold_every_layer` lets it
+outrank both estimates, so the re-plan cannot give this node the whole model.
+The shape is Kubernetes' queueing hint: requeue on an event that can change the
+answer, never on a timer. If nothing else can serve the model, the original
+itemised shortfall is returned rather than the re-plan's routing error.
+
 ### GPU Capability Floor
 
 CUDA builds compile kernels for **compute capability 8.0** (Ampere: RTX 30-series
@@ -2033,11 +2062,11 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - **No build step**: Vanilla HTML/CSS/JS — no framework, no bundler, no Node.js
 - **Component architecture**: `App` global namespace with component sub-objects (`App.chat`, `App.dashboard`, etc.)
   - `frontend/js/core/state.js` — App namespace, shared mutable state, theme, storage keys
-  - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `formatDlProgress`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`), `extractErrorMessage`, `getApiErrorMessage`, `renderMarkdown`/`inlineMarkdown` (the ONE markdown renderer — chat replies and any future surface; every fragment passes through `escapeHtml`, so its output is safe for innerHTML), and `initTopBannerOffset`, which keeps `--top-banner-height` in step with the DOM so a fixed top banner pushes the header down instead of covering it
+  - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `formatDlProgress`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`), `extractErrorMessage`, `getApiErrorMessage`, `renderMarkdown`/`inlineMarkdown` (the ONE markdown renderer; every fragment passes through `escapeHtml`, so its output is safe for innerHTML) plus `renderReplyInto` (the ONE way a model's reply is rendered — chat and compare both go through it; it coalesces re-renders on rAF while streaming, takes `{flush:true}` for a final render because a backgrounded tab suspends rAF, and keeps the markdown source on `_rawText` so Copy returns what the model wrote), and `initTopBannerOffset`, which keeps `--top-banner-height` in step with the DOM so a fixed top banner pushes the header down instead of covering it
   - `frontend/js/core/data.js` — data store with in-flight deduplication, `authFetch` wrapper
   - `frontend/js/core/tooltip.js` — unified popover replacing native `title=` attributes
   - `frontend/js/components/ui.js` — tab switching, banners, mode indicator, sidebar
-  - `frontend/js/components/chat.js` — sessions, messages, SSE streaming, image upload, layout toggle
+  - `frontend/js/components/chat.js` — sessions, messages, SSE streaming, image upload, layout toggle; owns `refreshEmptyState`, the one answer to "is the empty chat state on screen?" (asked of the DOM, never of the session — a fresh page load has no session, which is exactly when the empty state is stalest)
   - `frontend/js/components/claude-code.js` — Claude Code interactive sessions (subprocess, permission flow, SSE)
   - `frontend/js/components/dashboard.js` — stats, hardware, model cards, peers, shard grid live updates
   - `frontend/js/components/dashboard-shards.js` — pure-function shard HTML builders (progress bar, shard row, matrix, coverage ribbon); exposes `App.dashboardShards`, loaded before `dashboard.js`
@@ -2049,7 +2078,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/components/notifications.js` — unified event handler, toasts, WebSocket, REST polling, provider health
   - `frontend/js/components/identity.js` — network invite code, nickname, leaderboard
   - `frontend/js/components/network-map.js` — regional network map visualization
-  - `frontend/js/components/compare.js` — multi-model comparison tool
+  - `frontend/js/components/compare.js` — multi-model comparison tool; streams `/v1/messages` and re-assembles the SSE into the same non-streaming shape the card renderer and the history entry read
   - `frontend/js/components/responses.js` — `/v1/responses` dashboard panel: retrieve-by-id, status-filtered list, cancel/delete/view per row, 5-second polling refresh while visible
   - `frontend/js/components/pool.js` — device pool management (create, join, members, contribution)
   - `frontend/js/components/swarm-tab.js` — Swarm tab: wishlist + Capacity Plan view (R111)
