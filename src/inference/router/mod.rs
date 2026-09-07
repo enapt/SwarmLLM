@@ -136,6 +136,29 @@ fn segment_ran_out_of_machines(err: &SwarmError) -> bool {
     matches!(err, SwarmError::SegmentFailoverExhausted(_))
 }
 
+/// Did THIS node's own memory refuse to load the model?
+///
+/// Retryable with no remote segment involved, unlike every other local
+/// failure — and the reason is the same one that makes retrying the others
+/// pointless. A dead worker or a failed spawn re-plans to the identical route
+/// and fails identically; retrying an exhausted resource is the amplification
+/// pattern behind most metastable failures (retry storms account for over half
+/// of them), so a blanket retry here would be a regression, not a fix.
+///
+/// What makes this one different is that the re-plan is given a fact it did not
+/// have: `SharedState::note_local_memory_refusal` records the loader's verdict,
+/// and `local_can_hold_every_layer` lets it outrank both estimates. The second
+/// plan therefore CANNOT hand this node the whole model, so the retry never
+/// re-attempts the load that just failed — it is a failover, and it puts no
+/// further load on the memory that ran out.
+///
+/// This is Kubernetes' queueing-hint rule in miniature: an unschedulable pod is
+/// requeued on an event that could change the answer, not on a timer. Ours is
+/// the event.
+fn local_memory_refused_the_load(err: &SwarmError) -> bool {
+    matches!(err, SwarmError::LocalMemoryUnavailable(_))
+}
+
 /// May this failed attempt be run again through a freshly assembled pipeline?
 ///
 /// The single answer, so the four terms can be tested rather than only read.
@@ -162,6 +185,7 @@ fn should_retry_after(
         return false;
     }
     is_transient_remote_failure(err)
+        || local_memory_refused_the_load(err)
         || (used_remote_segment
             && (remote_peer_could_not_serve(err) || segment_ran_out_of_machines(err)))
 }
@@ -1082,6 +1106,17 @@ impl InferenceRouter {
                     error = %output.as_ref().err().unwrap(),
                     "DIAG: inference transient failure — retrying with fresh pipeline"
                 );
+                // Bar this node from taking the whole model on the re-plan.
+                // Without it the second plan is the first plan — admission
+                // refused before allocating anything, so every live figure it
+                // reads is unchanged — and the "retry" re-attempts the load
+                // that just failed. Released with the rest of the per-request
+                // state when the request ends.
+                let local_memory = matches!(&output, Err(e) if local_memory_refused_the_load(e));
+                if local_memory {
+                    shared_state.note_local_memory_refusal(request.id);
+                }
+                let first_error = if local_memory { output.err() } else { None };
                 output = execute_request(
                     shared_state.clone(),
                     network_tx,
@@ -1092,6 +1127,19 @@ impl InferenceRouter {
                     trace.clone(),
                 )
                 .await;
+                // Nowhere else could serve it either. Report the memory
+                // shortfall that actually stopped the request — it names the
+                // model's footprint, the budget and what to raise — rather than
+                // the re-plan's "no route", which is a true statement about a
+                // search the user never asked for and can do nothing with.
+                if let (Some(first), Err(_)) = (first_error, &output) {
+                    tracing::info!(
+                        request_id = %request.id,
+                        "DIAG: re-plan after a local memory refusal found no other route \
+                         — reporting the original shortfall"
+                    );
+                    output = Err(first);
+                }
             }
 
             let elapsed = request_start.elapsed();

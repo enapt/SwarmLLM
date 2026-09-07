@@ -205,6 +205,30 @@ pub enum SwarmError {
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
 
+    /// THIS node's own memory budget refused to load the model.
+    ///
+    /// **Deliberately shares `ServiceUnavailable`'s wire wording and its
+    /// (503, `server_error`) classification.** To a caller this IS "service
+    /// unavailable", and to a peer receiving it flattened to text across the
+    /// network it must behave exactly as it always has:
+    /// `message_means_peer_cannot_serve` still matches the prefix, so a peer
+    /// refusing for memory is still blacklisted and retried as before, and
+    /// `reclassify_flattened_error` deliberately does NOT produce this variant —
+    /// a remote refusal stays `ServiceUnavailable`. Nothing changes for a mixed
+    /// -version swarm in either direction.
+    ///
+    /// The distinction is LOCAL, and exists for exactly one decision:
+    /// [`crate::inference::router`]'s retry re-plans this and re-plans no other
+    /// local `ServiceUnavailable`. Retrying a dead worker or a failed spawn just
+    /// fails twice, which is why that variant's retry is gated on a remote
+    /// segment having been involved. This one is different because the re-plan
+    /// genuinely re-decides: `max_local_hostable_layers` is recomputed from live
+    /// memory on the fresh assembly, so a request committed to this node while
+    /// the budget looked sufficient is planned onto a peer the second time —
+    /// which is the gap report #018 named and report #025 measured.
+    #[error("Service unavailable: {0}")]
+    LocalMemoryUnavailable(String),
+
     /// This build does not implement the thing that was asked for.
     ///
     /// Distinct from `ServiceUnavailable`, which means "not right now" and
@@ -326,7 +350,11 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
             err.to_string(),
             "not_implemented_error",
         ),
-        SwarmError::InsufficientCapacity(_) | SwarmError::ServiceUnavailable(_) => (
+        SwarmError::InsufficientCapacity(_)
+        | SwarmError::ServiceUnavailable(_)
+        // Same answer to a caller as its sibling above, on purpose: the
+        // variant is a routing distinction, not a new thing to tell the user.
+        | SwarmError::LocalMemoryUnavailable(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             err.to_string(),
             "server_error",

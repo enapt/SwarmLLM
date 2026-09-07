@@ -3471,16 +3471,58 @@ fn an_unreadable_local_capacity_still_lets_this_node_run_the_whole_model() {
         "fixture must start unbounded, or this asserts nothing"
     );
     assert!(super::local_can_hold_every_layer(
-        &pool, &model, &local, LAYERS
+        &pool, &model, &local, LAYERS, false
     ));
     local.max_hostable_layers = Some(LAYERS);
     assert!(super::local_can_hold_every_layer(
-        &pool, &model, &local, LAYERS
+        &pool, &model, &local, LAYERS, false
     ));
     local.max_hostable_layers = Some(LAYERS - 1);
     assert!(
-        !super::local_can_hold_every_layer(&pool, &model, &local, LAYERS),
+        !super::local_can_hold_every_layer(&pool, &model, &local, LAYERS, false),
         "one layer short is short"
+    );
+}
+
+/// The loader's verdict outranks both estimates, which is the whole reason the
+/// re-plan produces a different answer.
+///
+/// Admission refuses BEFORE allocating anything, so every live figure the
+/// second plan reads is the one the first plan read: without this the retry
+/// re-derives the identical route and re-attempts the load that just failed —
+/// retrying an exhausted resource, which is the amplification pattern behind
+/// most metastable failures rather than the failover it is meant to be.
+///
+/// It has to beat BOTH arms. `hosts_whole_model` is the one that would
+/// otherwise survive, since a worker holding the model is normally conclusive.
+#[test]
+fn a_refusal_already_recorded_outranks_both_estimates() {
+    let pool = crate::inference::process_pool::ModelProcessPool::new(std::path::PathBuf::from(
+        "/tmp/swarmllm-local-refusal-test",
+    ));
+    let model = ModelId("split-14b".into());
+    let mut local = local_full_coverage();
+
+    // Unbounded — "unknown never excludes" — normally yes.
+    assert!(
+        super::local_can_hold_every_layer(&pool, &model, &local, LAYERS, false),
+        "control: an unbounded local node takes the whole model"
+    );
+    assert!(
+        !super::local_can_hold_every_layer(&pool, &model, &local, LAYERS, true),
+        "the loader has already refused this request; the estimate does not get to overrule it"
+    );
+
+    // And with room to spare by the bound, which is the case that made the
+    // first plan commit to this node in the first place.
+    local.max_hostable_layers = Some(LAYERS + 8);
+    assert!(
+        super::local_can_hold_every_layer(&pool, &model, &local, LAYERS, false),
+        "control: comfortably within the bound"
+    );
+    assert!(
+        !super::local_can_hold_every_layer(&pool, &model, &local, LAYERS, true),
+        "a comfortable estimate is still just an estimate once the load has been refused"
     );
 }
 

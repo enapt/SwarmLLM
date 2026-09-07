@@ -1059,16 +1059,24 @@ struct RoutePrices {
 /// unset budget — is not evidence: unknown never excludes, the long-standing
 /// contract of that field, so the request is planned exactly as it was before
 /// this check existed.
+/// `already_refused` outranks both answers, and is the only fact here that is
+/// not a prediction. The other two are estimates made before the load; this is
+/// the loader's own verdict, after it. A retry exists precisely because the
+/// first plan was wrong about this node, so a second plan that consults only
+/// the same estimates reproduces it — and re-attempts the load that just
+/// failed, which is the retry-on-overload pattern rather than a failover.
 fn local_can_hold_every_layer(
     pool: &crate::inference::process_pool::ModelProcessPool,
     model_id: &ModelId,
     local_cand: &NodeCandidate,
     num_layers: u32,
+    already_refused: bool,
 ) -> bool {
-    pool.hosts_whole_model(model_id, num_layers)
-        || local_cand
-            .max_hostable_layers
-            .is_none_or(|k| k >= num_layers)
+    !already_refused
+        && (pool.hosts_whole_model(model_id, num_layers)
+            || local_cand
+                .max_hostable_layers
+                .is_none_or(|k| k >= num_layers))
 }
 
 /// How many layers a delegated peer actually RUNS, given the shape the caller
@@ -1712,6 +1720,11 @@ impl PipelineScheduler {
         // decision below still needs to know this node holds the model in
         // order to explain itself, and a candidate silently withdrawn cannot
         // say why it went.
+        // The loader's own verdict on an earlier attempt at THIS request, which
+        // is what makes a re-plan re-decide rather than repeat itself.
+        let local_memory_already_refused = self
+            .shared_state
+            .local_memory_refused_for_request(request_id);
         let local_runs_whole_model = local_cand
             .map(|c| {
                 local_can_hold_every_layer(
@@ -1719,6 +1732,7 @@ impl PipelineScheduler {
                     model_id,
                     c,
                     num_layers,
+                    local_memory_already_refused,
                 )
             })
             .unwrap_or(false);

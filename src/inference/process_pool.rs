@@ -3713,7 +3713,13 @@ impl ModelProcessPool {
                         model_id.0, estimated, budget, in_use,
                     ),
                 };
-                return Err(SwarmError::ServiceUnavailable(message));
+                // Its own variant, not `ServiceUnavailable`, and the wire
+                // wording is deliberately identical — see
+                // `SwarmError::LocalMemoryUnavailable`. The distinction is
+                // local: it is the one failure the router re-plans without a
+                // remote segment having been involved, because it is the one
+                // where a re-plan can produce a different answer.
+                return Err(SwarmError::LocalMemoryUnavailable(message));
             }
             self.record_cpu_kv_budget(model_id, Some(segment));
         }

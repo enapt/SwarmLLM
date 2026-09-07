@@ -143,6 +143,12 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
   that gate. Consumed by the P2P accept path (`classify_p2p_shard_acceptance`) and by the
   rescan's no-hash branch. A third condition belongs here, not at a call site.
 - `state.credits.foreign_pool_catalog` — R134. `DashMap<(PoolId, ModelId), received_at_ms>`; capped at 5000 with oldest-first eviction, 2h freshness window. Written by inbound `SwarmMessage::PoolModelAvailability` handler. Read by `GET /api/admin/foreign-pool-catalog` and by `pool::scope::cross_pool_extras` (R134.7) when `pool.allow_cross_pool_inference` AND `private_mode` are both on.
+- `state.local_memory_refusals` — 2026-09-07. `DashSet<Uuid>` on the ROOT
+  SharedState, beside `request_holder_blacklist` and released by
+  `release_request_state` with it. Written ONLY by
+  `note_local_memory_refusal`, read only by
+  `local_memory_refused_for_request`. It is the re-plan's queueing hint — see
+  "A re-plan is warranted by a changed fact, never by a failed attempt".
 - `state.metrics.node_stats` — NOT `state.node_stats`
 - `state.metrics.providers_config` — NOT `state.providers_config`
 - `state.metrics.swarm_capacity` — R110. ArcSwap<SwarmCapacity>; refresh via `crate::daemon::state::refresh_swarm_capacity(state)`. Eagerly refreshed on peer connect (`network/manager/identify.rs`) and disconnect (`network/manager/connections.rs`) so the dashboard banner stays consistent with the peer-list panel under churn — the WS stats-cache 1.5s coalesce alone is too lazy.
@@ -568,6 +574,56 @@ already say a comment describing a mechanism elsewhere is a claim rather than a
 fact; this is the same trap turned inward — the claim was about the function's
 own caller, and it had been true of nothing since before gotcha #479 edited the
 function without touching it.
+
+## A re-plan is warranted by a changed fact, never by a failed attempt
+
+**`SwarmError::LocalMemoryUnavailable`** is what this node's own loader returns
+when its memory budget refuses a model, and it is the one local failure
+`should_retry_after` re-plans with no remote segment involved. Before the retry,
+the router records `SharedState::note_local_memory_refusal(request_id)`;
+`local_can_hold_every_layer` lets that outrank both of its estimates, so the
+second plan **cannot** hand this node the whole model.
+
+**Retrying is the dangerous half, and the recorded fact is what makes it safe.**
+A retry against an exhausted resource is the amplification pattern behind most
+metastable failures — retry storms account for over half of them in the
+published surveys — and admission here refuses *before* allocating anything, so
+every live figure the second plan reads is the figure the first plan read. A
+blanket retry would therefore re-derive the identical route and re-attempt the
+load that just failed: strictly more load on the memory that ran out, and two
+failures where there had been one.
+
+The shape that makes it a failover instead is Kubernetes' scheduler: an
+unschedulable pod is not retried on a timer, it is moved to `UnschedulablePods`
+and requeued when a **queueing hint** says an event has occurred that could
+change the answer. The loader's verdict is our event, and it is the only new
+information in the system — which is why it is recorded rather than re-derived.
+The retry then puts *no* further load on the exhausted budget, because the plan
+it produces cannot include the load that failed.
+
+Four things a change here must keep.
+
+- **The wire wording is deliberately identical to `ServiceUnavailable`'s.** A
+  peer's refusal crosses the network as text, `message_means_peer_cannot_serve`
+  matches that prefix, and `reclassify_flattened_error` deliberately does NOT
+  produce this variant — so a remote refusal is blacklisted and retried exactly
+  as it always was, in both directions of a mixed-version swarm. The variant is
+  a LOCAL routing distinction, not a new thing to tell anyone.
+- **Its `ServiceUnavailable` sibling must NOT gain the same retry.** A dead
+  worker or a failed spawn re-plans to the identical route; that is why its
+  retry is gated on a remote segment having been involved, and the control test
+  asserts it still is.
+- **The original error survives a failed re-plan.** Where nothing else can serve
+  the model, the user gets the itemised shortfall — the footprint, the budget,
+  the setting to raise — not the re-plan's "no route", which is a true statement
+  about a search they never asked for and can do nothing with.
+- **It never docks a peer.** The failure names this machine, so
+  `failure_is_penalty_worthy` exempts it beside its sibling.
+
+Verified live: a node whose budget refused a 3074 MB model against 2200 MB
+answered the request after the re-plan — `assemblies=2`, `segments=1` becoming
+`segments=3`, the middle segment on a peer. And on a node with no peers at all,
+the constrained-node harness confirms the refusal message is unchanged.
 
 ## The relaxation is scoped to the figures that are actually unreliable
 
@@ -1977,9 +2033,10 @@ silently break at the wire if duplicated:
   ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
   and any GPU node whose free VRAM could not be read records `None`, and reading
   that as a zero budget refuses everything.
-- **`SharedState::release_request_state`** (2026-08-09) — clears the three maps a
+- **`SharedState::release_request_state`** (2026-08-09) — clears the maps a
   finished request leaves behind: `active_pipelines`, `active_traces`,
-  `request_holder_blacklist`. They are keyed by request id and share one
+  `request_holder_blacklist`, `peer_vram_commitments` and
+  `local_memory_refusals`. They are keyed by request id and share one
   lifetime. Five call sites removed all three by hand and the invariant was held
   by three adjacent lines plus a comment asserting it — the shape this codebase
   keeps getting caught by. Dropping one is silent and unbounded: `active_traces`

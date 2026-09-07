@@ -413,6 +413,55 @@ fn the_retry_gate_weighs_every_term() {
     }
 }
 
+/// This node's own memory refusal is re-planned with no remote segment
+/// involved — the one local failure that is.
+///
+/// Its `ServiceUnavailable` sibling deliberately is not: a dead worker or a
+/// failed spawn re-plans to the identical route, so retrying it fails twice.
+/// This one is different only because the re-plan is handed a fact it did not
+/// have (`note_local_memory_refusal`), which is what stops it repeating itself.
+#[test]
+fn a_local_memory_refusal_is_replanned_and_its_siblings_are_not() {
+    use crate::error::SwarmError;
+    let out_of_memory = SwarmError::LocalMemoryUnavailable(
+        "qwen2.5-14b needs about 10374 MB of memory but this node's budget allows 8890 MB".into(),
+    );
+    // No remote segment, nothing streamed, client still there: re-plan.
+    assert!(super::should_retry_after(
+        &out_of_memory,
+        false,
+        false,
+        false
+    ));
+
+    // The control that matters. The same 503 shape from a dead worker is NOT
+    // re-planned without a remote segment — retrying our own worker failure
+    // just fails twice, which is why the memory case needed its own variant
+    // rather than a widening of this one.
+    let dead_worker = SwarmError::ServiceUnavailable("worker is dead".into());
+    assert!(!super::should_retry_after(
+        &dead_worker,
+        false,
+        false,
+        false
+    ));
+
+    // And every other term still binds: a client that has gone, and a reply
+    // that has already started, are not re-planned whatever the failure.
+    assert!(!super::should_retry_after(
+        &out_of_memory,
+        false,
+        true,
+        false
+    ));
+    assert!(!super::should_retry_after(
+        &out_of_memory,
+        false,
+        false,
+        true
+    ));
+}
+
 /// A wallet that could not be READ is not a wallet that is EMPTY.
 ///
 /// `credit_balance` is a writer-fair `RwLock`, so `try_read` fails whenever a

@@ -102,6 +102,24 @@ impl super::SharedState {
         self.active_traces.remove(request_id);
         self.request_holder_blacklist.remove(request_id);
         self.peer_vram_commitments.remove(request_id);
+        self.local_memory_refusals.remove(request_id);
+    }
+
+    /// This node's own loader has refused to hold this model for this request.
+    ///
+    /// Recorded by the router before it re-plans, and consulted by the
+    /// scheduler when it asks whether this node can hold every layer. It is the
+    /// one thing that makes the re-plan produce a DIFFERENT answer: the live
+    /// memory figures have not moved (admission refused before allocating
+    /// anything), so without it the second plan is the first plan and the
+    /// retry simply re-attempts the load that just failed.
+    pub fn note_local_memory_refusal(&self, request_id: uuid::Uuid) {
+        self.local_memory_refusals.insert(request_id);
+    }
+
+    /// Has this node's loader already refused this request for memory?
+    pub fn local_memory_refused_for_request(&self, request_id: uuid::Uuid) -> bool {
+        self.local_memory_refusals.contains(&request_id)
     }
 
     /// Record what this request has committed to each peer's graphics memory,

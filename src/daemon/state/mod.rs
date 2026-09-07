@@ -577,6 +577,22 @@ pub struct SharedState {
     /// Scoped to one request so a peer that fails once is not banned globally on
     /// a single data point. Same lifetime as `active_traces`.
     pub request_holder_blacklist: DashMap<uuid::Uuid, std::collections::HashSet<NodeId>>,
+
+    /// Requests whose load THIS node's own memory has already refused.
+    ///
+    /// The re-plan's "queueing hint": Kubernetes' scheduler does not re-run an
+    /// unschedulable pod on a timer, it requeues it when an event occurs that
+    /// could change the answer. Ours is that event — this node has just proved,
+    /// at load time, that it cannot hold this model — and without recording it
+    /// the retry re-derives the identical plan from the identical live figures
+    /// and re-attempts the load that just failed. That is retry-on-overload,
+    /// the amplification pattern behind most metastable failures, rather than
+    /// the failover it is meant to be.
+    ///
+    /// Read by [`crate::inference::scheduler`] when deciding whether this node
+    /// may take the whole model; released by
+    /// [`SharedState::release_request_state`] with every other per-request map.
+    pub local_memory_refusals: dashmap::DashSet<uuid::Uuid>,
     /// Graphics memory this node has COMMITTED to peers by scheduling work onto
     /// them, and which their own gossip has not yet reported as spent.
     /// `request_id -> [(peer, MB)]`, same lifetime as the two maps above.
@@ -1053,6 +1069,7 @@ impl SharedState {
             local_capability: arc_swap::ArcSwapOption::empty(),
             perf_history: perf_history::PerfHistory::load(&db),
             request_holder_blacklist: DashMap::new(),
+            local_memory_refusals: dashmap::DashSet::new(),
             peer_vram_commitments: DashMap::new(),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {

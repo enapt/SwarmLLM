@@ -908,6 +908,10 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         // fault, so nobody is docked.
         SwarmError::ReplyTruncated(_)
         | SwarmError::ServiceUnavailable(_)
+        // This node's OWN memory budget refused the load. It names our machine
+        // and nobody else's, so it can never justify docking a peer — the same
+        // reason its `ServiceUnavailable` sibling sits here.
+        | SwarmError::LocalMemoryUnavailable(_)
         | SwarmError::NotImplemented(_)
         | SwarmError::LocalOnly(_)
         | SwarmError::Internal(_)
@@ -1035,6 +1039,19 @@ mod tests {
     }
 
     /// A peer that accepted a forward and went silent IS attributable to that
+    /// A local memory refusal names THIS machine, so it can never dock a peer —
+    /// even on a request where a peer really did serve a segment.
+    #[test]
+    fn a_local_memory_refusal_never_penalises_a_peer() {
+        let err = SwarmError::LocalMemoryUnavailable(
+            "qwen2.5-14b needs about 10374 MB but this node's budget allows 8890 MB".into(),
+        );
+        assert!(
+            !failure_is_penalty_worthy(&err, true),
+            "a peer must not be charged for THIS node running out of memory"
+        );
+    }
+
     /// peer — the case `failure_is_penalty_worthy`'s own comment names
     /// ("timeouts waiting on a peer") and the one it could never see, because
     /// the timeout site raised the penalty-exempt `PipelineError` instead.

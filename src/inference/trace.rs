@@ -668,6 +668,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::Inference(_) => "Inference",
         E::InferenceTimeout(_) => "InferenceTimeout",
         E::InsufficientCapacity(_) => "InsufficientCapacity",
+        E::LocalMemoryUnavailable(_) => "LocalMemoryUnavailable",
         E::InsufficientCredits { .. } => "InsufficientCredits",
         E::InsufficientDisk { .. } => "InsufficientDisk",
         E::Internal(_) => "Internal",
