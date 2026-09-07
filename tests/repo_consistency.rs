@@ -2507,6 +2507,129 @@ fn credits_stay_dormant() {
     );
 }
 
+/// Nothing outside `chat.js` may decide "is the user looking at the empty chat
+/// state?" from the session.
+///
+/// That question is about the DOM — `#chat-empty` is on screen or it is not —
+/// and the session-shaped proxy for it (`currentSessionId` set, session exists,
+/// `messages.length === 0`) is false in the commonest case there is: the very
+/// first render, before any session has been created. Four separate callers
+/// asked it that way and all four were blind to a fresh page load, so an empty
+/// state built before the first stats arrived stayed on screen: a node with 6
+/// peers and 11 ready models sat on "no models available yet · looking for
+/// other computers" indefinitely (report #027). One of those callers carried a
+/// comment naming that exact failure as the thing it existed to prevent.
+///
+/// `App.chat.refreshEmptyState` is the one answer; it reads the DOM and no-ops
+/// when a conversation is showing. `chat.js` is exempt because `newSession`
+/// legitimately asks a session question — whether to reuse an empty session
+/// rather than make a second one — which is not about what is rendered.
+#[test]
+fn the_chat_empty_state_is_not_refreshed_on_a_session_shaped_guard() {
+    let root = repo_root();
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![root.join("frontend/js")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "js") {
+                continue;
+            }
+            // `chat.js` owns both the refresher and `newSession`.
+            if p.file_name().is_some_and(|n| n == "chat.js") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            // Statement-joined so a guard rustfmt-style-wrapped across lines is
+            // still seen as one condition (the trap of gotcha #413).
+            for (i, stmt) in js_statements(&text) {
+                if stmt.contains("messages.length === 0")
+                    && (stmt.contains("renderMessages") || stmt.contains("createEmptyState"))
+                {
+                    offenders.push(format!(
+                        "{}:{}: {stmt}",
+                        p.strip_prefix(&root).unwrap_or(&p).display(),
+                        i
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the chat empty state is being refreshed on a session-shaped guard, which \
+         cannot see the first render — the case it is most needed for (report \
+         #027). Call `App.chat.refreshEmptyState()`, which asks the DOM.\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The scanner above must actually be able to see the defect it forbids —
+/// including when the condition is spread over several lines, which is how
+/// every real instance of it was written.
+#[test]
+fn the_chat_empty_state_guard_catches_the_defect_it_forbids() {
+    let planted = "if (S.activeTab === 'chat' && S.currentSessionId &&\n    \
+                   S.sessions[S.currentSessionId] &&\n    \
+                   S.sessions[S.currentSessionId].messages.length === 0 &&\n    \
+                   App.chat && App.chat.renderMessages) {\n  App.chat.renderMessages();\n}\n";
+    let hit = js_statements(planted)
+        .into_iter()
+        .any(|(_, s)| s.contains("messages.length === 0") && s.contains("renderMessages"));
+    assert!(
+        hit,
+        "the guard cannot see a multi-line session-shaped refresh — it would pass \
+         over the very code it exists to forbid"
+    );
+    // And the control: the shared refresher must NOT be reported.
+    let ok = "if (S.activeTab === 'chat' && App.chat && App.chat.refreshEmptyState) {\n  \
+              App.chat.refreshEmptyState();\n}\n";
+    assert!(
+        !js_statements(ok)
+            .into_iter()
+            .any(|(_, s)| s.contains("messages.length === 0")),
+        "the guard reports the correct form"
+    );
+}
+
+/// Join a JS source into statements, so a condition rustfmt or a human has
+/// wrapped across lines is scanned as the one thing it is. Returns
+/// (1-based line of the statement's first line, joined text).
+fn js_statements(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut start = 1usize;
+    for (i, raw) in text.lines().enumerate() {
+        let l = raw.trim();
+        if l.starts_with("//") || l.starts_with("*") || l.starts_with("/*") {
+            continue;
+        }
+        if cur.is_empty() {
+            start = i + 1;
+        } else {
+            cur.push(' ');
+        }
+        cur.push_str(l);
+        // A statement ends at a terminator or a block open/close.
+        if l.ends_with(';') || l.ends_with('{') || l.ends_with('}') {
+            out.push((start, std::mem::take(&mut cur)));
+        }
+    }
+    if !cur.is_empty() {
+        out.push((start, cur));
+    }
+    out
+}
+
 /// Every `var(--x)` written without a fallback must name a property something
 /// actually defines.
 ///

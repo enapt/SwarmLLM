@@ -124,9 +124,10 @@
         U.updateChatAvailability(hasAny);
         if (App.chat && App.chat.updateChatHeader) App.chat.updateChatHeader();
         if (App.chat && App.chat.renderSessionList) App.chat.renderSessionList();
-        if (App.chat && App.chat.renderMessages && S.currentSessionId && S.sessions[S.currentSessionId] && S.sessions[S.currentSessionId].messages.length === 0) {
-          App.chat.renderMessages();
-        }
+        // The empty state names the picked model and offers the swarm
+        // catalogue, so a changed model list changes it. Asked of the DOM,
+        // not of the session — see `App.chat.refreshEmptyState`.
+        if (App.chat && App.chat.refreshEmptyState) App.chat.refreshEmptyState();
       } catch (e) {
         App.ui.showBanner('error', I18n.t('errors.server_unreachable'));
       }
@@ -249,11 +250,15 @@
         } else {
           s.model = modelId;
           App.chat.saveSessions();
-          App.chat.renderMessages();
           App.chat.updateChatHeader();
           App.chat.renderSessionList();
         }
       }
+      // The empty state names the model that was picked, so picking one
+      // changes it — including before any session exists, which is precisely
+      // what the guard above cannot see. Fourth site of the same question
+      // (report #027); it no-ops when a conversation is on screen.
+      if (App.chat && App.chat.refreshEmptyState) App.chat.refreshEmptyState();
     },
 
     closeDropdown: function() {

@@ -397,6 +397,30 @@
       }
     },
 
+    // Rebuild the empty chat state in place, when that is what is on screen.
+    //
+    // **"Is the user looking at the empty chat state?" is a question about the
+    // DOM, not about the session.** Three callers asked it the session way —
+    // `currentSessionId` set, session exists, `messages.length === 0` — and all
+    // three therefore excluded the commonest case there is: the very first
+    // render, before any session exists. Opening the app on Chat gave a
+    // once-rendered state built from a stats cache that was still empty, and
+    // nothing ever replaced it: a node with 6 peers and 11 ready models sat on
+    // "no models yet · looking for other computers" indefinitely (report #027).
+    // The R141 comment describes exactly that failure as the thing it fixes,
+    // and its guard could not see it.
+    //
+    // A hidden `#chat-empty` means a conversation is on screen —
+    // `appendMessageToDOM` hides it rather than removing it — so there is
+    // nothing to refresh and it must NOT be rebuilt, or a fresh visible one
+    // would appear above a live reply.
+    refreshEmptyState: function() {
+      var existing = document.getElementById('chat-empty');
+      if (!existing || !existing.parentNode) return;
+      if (existing.style.display === 'none') return;
+      existing.parentNode.replaceChild(U.createEmptyState(), existing);
+    },
+
     renderMessages: function() {
       var container = document.getElementById('chat-messages');
       if (!container) return;

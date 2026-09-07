@@ -501,12 +501,13 @@
           // (Available / Aspirational / Candidate chips) appears the
           // moment fresh stats arrive — without this the empty state
           // is frozen with whatever was cached at first render.
-          // Cheap: only fires when the user is sitting on an empty
-          // session that already shows the catalog wrapper.
-          if (S.activeTab === 'chat' && S.currentSessionId && S.sessions[S.currentSessionId] &&
-              S.sessions[S.currentSessionId].messages.length === 0 &&
-              App.chat && App.chat.renderMessages) {
-            App.chat.renderMessages();
+          //
+          // The guard used to be session-shaped and so could not see the
+          // first render, which is the case the line above describes
+          // (report #027). `refreshEmptyState` asks the DOM instead, and
+          // no-ops when a conversation is on screen. Still cheap.
+          if (S.activeTab === 'chat' && App.chat && App.chat.refreshEmptyState) {
+            App.chat.refreshEmptyState();
           }
         } else if (msg.type === 'update_available') {
           showUpdateBanner(msg.data);

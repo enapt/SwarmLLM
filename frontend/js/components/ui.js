@@ -58,6 +58,12 @@
         }
       }
       if (tab === 'chat') {
+        // Every other tab refreshes something on entry; chat refreshed
+        // nothing, so an empty state built at page load — before the first
+        // stats had arrived — was still on screen minutes later however much
+        // the swarm had since told us (report #027). No-ops when a
+        // conversation is showing.
+        if (App.chat.refreshEmptyState) App.chat.refreshEmptyState();
         App.chat.scrollToBottom();
         document.getElementById('chat-input').focus();
       }

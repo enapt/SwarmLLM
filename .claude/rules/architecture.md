@@ -198,6 +198,44 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
+## "Is the empty chat state showing?" is a question about the DOM
+
+**`App.chat.refreshEmptyState()`** rebuilds `#chat-empty` in place when that is
+what is on screen, and no-ops otherwise. Every caller that needs the empty state
+to reflect changed data goes through it: the `stats_update` tick, the model list
+loading, a model being picked, and entering the Chat tab.
+
+**Why.** The empty state is a live view — it names the picked model and renders
+the swarm catalogue out of `App.data.cache.stats` — but it is built once, from a
+cache that is still empty at first render. Four separate callers refreshed it,
+and all four asked whether to by the SESSION: `currentSessionId` set, the
+session exists, `messages.length === 0`. That proxy is false in the commonest
+case there is — the very first render, before any session has been created — so
+opening the app on Chat gave a state frozen at page load. Measured on a node
+with 6 peers, 11 ready models and 4h50m of uptime: "no models available yet ·
+looking for other computers", indefinitely (report #027). One of those callers
+carried a comment naming that precise failure as the thing it existed to
+prevent.
+
+Three things a change here must keep.
+
+- **A hidden `#chat-empty` means a conversation is on screen.**
+  `appendMessageToDOM` hides it rather than removing it, so rebuilding it
+  unconditionally puts a fresh, visible "type a message below to start" above a
+  live reply — verified by running the unguarded version against a streaming
+  conversation.
+- **`chat.js` may still ask a session question.** `newSession` asks whether to
+  reuse an empty session rather than create a second one, which is not about
+  what is rendered. That is why the guard exempts the file rather than the
+  pattern.
+- **Entering the tab refreshes.** Every other tab reloads something on entry and
+  chat reloaded nothing, so the WS tick was the only repair path and it only ran
+  while the tab was already open.
+
+`the_chat_empty_state_is_not_refreshed_on_a_session_shaped_guard` in
+`tests/repo_consistency.rs` fails the build on a fifth occurrence, with a
+self-test that plants the multi-line form all four real ones were written in.
+
 ## Every surface that shows a model's reply renders it the same way
 
 **`utils.renderReplyInto(el, text, opts)`** is the one place a reply becomes
