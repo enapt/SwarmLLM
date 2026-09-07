@@ -974,6 +974,37 @@
   }
 
   // Export utilities
+  // Render a reply into `el` as markdown, coalescing re-renders.
+  //
+  // The one place a model's reply becomes rendered HTML, so every surface
+  // showing one is formatted the same way and keeps the same source beside it
+  // for Copy. It lived on `App.chat` and the Compare tab therefore did not have
+  // it: comparisons showed literal asterisks, dashes and pipes, on the one
+  // screen built for judging replies side by side (report #026).
+  //
+  // Coalesced on rAF because a streaming reply would otherwise re-render the
+  // whole document on every token. `flush` skips that for a final render: a
+  // backgrounded tab suspends rAF, so a reply that finished while the user was
+  // elsewhere must not be left holding its last frame (gotcha #471).
+  function renderReplyInto(el, text, opts) {
+    if (!el) return;
+    el._pendingMd = text;
+    var run = function() {
+      el._mdQueued = false;
+      el.classList.add('md-body');
+      var src = el._pendingMd.replace(/^\n+/, '');
+      // Keep the source beside the rendering: Copy hands back what the model
+      // actually wrote, not the markup stripped of its markdown.
+      el._rawText = src;
+      el.innerHTML = renderMarkdown(src);
+    };
+    if (opts && opts.flush) { el._mdQueued = false; run(); return; }
+    if (el._mdQueued) return;
+    el._mdQueued = true;
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+    else run();
+  }
+
   // ── Markdown ──────────────────────────────────────────────────────────
   // A small, deliberately partial renderer: headings, fenced code, tables,
   // lists, bold/italic/inline code. Every fragment goes through `escapeHtml`
@@ -1163,6 +1194,7 @@
     getApiErrorMessage: getApiErrorMessage,
     peerColor: peerColor,
     renderMarkdown: renderMarkdown,
+    renderReplyInto: renderReplyInto,
     inlineMarkdown: inlineMarkdown,
     measureTopBanners: measureTopBanners,
     initTopBannerOffset: initTopBannerOffset,

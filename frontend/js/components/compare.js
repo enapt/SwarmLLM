@@ -171,7 +171,14 @@
           max_tokens: maxTokens,
           temperature: temperature,
           messages: [{ role: 'user', content: prompt.trim() }],
-          stream: false,
+          // Streamed, like the chat tab, and for a reason specific to THIS
+          // screen: a comparison exists to tell models apart, and the one
+          // running on a processor-only peer — exactly the one a user is here
+          // to find — is the one that shows nothing for 30-60s. Without a
+          // partial reply that is indistinguishable from a stall, so the
+          // screen built for judging replies was the screen that showed the
+          // least while they were produced (report #026).
+          stream: true,
         };
         if (system.trim()) body.system = system.trim();
 
@@ -198,23 +205,91 @@
         // daemon itself permits (`remote_generate`'s 600 s first-token
         // deadline), so it can only fire once the node has already given up.
         var timeoutId = setTimeout(function() { controller.abort(); }, COMPARE_BACKSTOP_MS);
+
+        // The stream is re-assembled into the same non-streaming shape the
+        // card renderer and the history entry already read — which is what the
+        // official SDKs' `.accumulate()` does, and what `renderHistory` was
+        // already building by hand. One result shape, whichever way the text
+        // arrived.
+        var text = '';
+        // `null`, not 0. The Anthropic surface omits `input_tokens` rather
+        // than sending a confident zero when it does not know it — which is
+        // the case on the router path, i.e. exactly a peer-served model — and
+        // the card must not turn that silence into a figure.
+        var usage = { input_tokens: null, output_tokens: 0 };
+        var streamError = null;
+        var streamBody = null;
+        var onEvent = function(evt) {
+          if (!evt || !evt.type) return;
+          if (evt.type === 'content_block_delta') {
+            var d = evt.delta || {};
+            // `input_json_delta` is a tool call's arguments. Compare sends no
+            // tools, but ignoring anything that is not text keeps a model that
+            // emits one from writing raw JSON into the card.
+            if (d.type !== 'text_delta' || !d.text) return;
+            text += d.text;
+            if (!streamBody) streamBody = App.compare._beginStreaming(modelId);
+            if (streamBody) U.renderReplyInto(streamBody, text);
+            return;
+          }
+          if (evt.type === 'message_delta' && evt.usage) {
+            if (typeof evt.usage.output_tokens === 'number') usage.output_tokens = evt.usage.output_tokens;
+            if (typeof evt.usage.input_tokens === 'number') usage.input_tokens = evt.usage.input_tokens;
+            return;
+          }
+          // The Anthropic surface's own failure frame. It is terminal, so the
+          // reason must be kept rather than left to look like an empty reply.
+          if (evt.type === 'error' && evt.error) streamError = evt.error.message || I18n.t('compare.status_error');
+        };
+
         return App.authFetch('/v1/messages', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
           signal: controller.signal,
         }).then(function(resp) {
-          clearTimeout(timeoutId);
-          var elapsed = Math.round(performance.now() - start);
-          return resp.json().then(function(data) {
-            return { model: modelId, data: data, ok: resp.ok, latency_ms: elapsed };
+          // A request refused before the stream opens answers with the ordinary
+          // JSON error envelope, not SSE.
+          if (!resp.ok || !resp.body) {
+            return resp.json().catch(function() { return {}; }).then(function(data) {
+              clearTimeout(timeoutId);
+              return {
+                model: modelId, data: data, ok: false,
+                latency_ms: Math.round(performance.now() - start),
+              };
+            });
+          }
+          return U.readSseStream(resp.body.getReader(), onEvent).then(function() {
+            clearTimeout(timeoutId);
+            var elapsed = Math.round(performance.now() - start);
+            if (streamError) {
+              return { model: modelId, error: streamError, ok: false, latency_ms: elapsed };
+            }
+            return {
+              model: modelId,
+              ok: true,
+              latency_ms: elapsed,
+              data: { content: [{ type: 'text', text: text }], usage: usage },
+            };
           });
         }).catch(function(err) {
           clearTimeout(timeoutId);
+          // Whatever already streamed is the model's real answer so far and is
+          // kept — the same rule the chat tab applies to a stopped reply. Only
+          // when nothing arrived at all is this reported as a failure.
+          var elapsed = Math.round(performance.now() - start);
+          if (text) {
+            return {
+              model: modelId,
+              ok: true,
+              latency_ms: elapsed,
+              data: { content: [{ type: 'text', text: text }], usage: usage },
+            };
+          }
           // NOT "this model failed": the daemon may well still be working, and
           // on the reported case it had already produced a complete reply.
           var msg = err.name === 'AbortError' ? I18n.t('compare.no_reply_yet') : err.message;
-          return { model: modelId, error: msg, ok: false, latency_ms: Math.round(performance.now() - start) };
+          return { model: modelId, error: msg, ok: false, latency_ms: elapsed };
         });
       });
 
@@ -248,11 +323,15 @@
               if (!r.error && r.ok) {
                 (r.data.content || []).forEach(function(b) { if (b.type === 'text') content += b.text; });
               }
+              // `null` survives into the stored entry so a restored card says
+              // the same thing the live one did — an unreported prompt count
+              // must not become a zero on the way through localStorage.
+              var ru = (r.ok && r.data && r.data.usage) || {};
               return {
                 model: r.model, ok: r.ok, error: r.error || null,
                 latency_ms: r.latency_ms, content: content,
-                input_tokens: r.ok ? ((r.data.usage || {}).input_tokens || 0) : 0,
-                output_tokens: r.ok ? ((r.data.usage || {}).output_tokens || 0) : 0,
+                input_tokens: typeof ru.input_tokens === 'number' ? ru.input_tokens : null,
+                output_tokens: ru.output_tokens || 0,
               };
             }),
           });
@@ -315,6 +394,31 @@
       if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">' + I18n.t('compare.restored', { ago: U.timeAgo(item.timestamp) }) + '</span>'; }
     },
 
+    // Swap a card from "waiting" to "streaming" on its first token, and hand
+    // back the element the reply is rendered into.
+    //
+    // The elapsed counter moves into the status slot rather than being lost
+    // with the placeholder: a card that is producing text still wants to say
+    // how long it has been at it, which is the number this screen is for.
+    _beginStreaming: function(modelId) {
+      var card = document.getElementById('compare-card-' + U.safeId(modelId));
+      if (!card) return null;
+      var bodyEl = card.querySelector('.compare-card-body');
+      if (!bodyEl) return null;
+      // Carry the placeholder's own start time across, rather than restarting
+      // the count from the first token — the ticker reads `Date.now()`, and
+      // the number the reader wants is how long this card has been running.
+      var existing = bodyEl.querySelector('.compare-elapsed');
+      var since = (existing && existing.getAttribute('data-since')) || String(Date.now());
+      var statusEl = card.querySelector('.compare-card-status');
+      if (statusEl) {
+        statusEl.innerHTML = '<span class="compare-elapsed" data-since="' + U.escapeHtml(since) + '">0s</span>';
+      }
+      bodyEl.innerHTML = '';
+      bodyEl.classList.remove('error');
+      return bodyEl;
+    },
+
     renderCard: function(result) {
       var cardId = 'compare-card-' + U.safeId(result.model);
       var card = document.getElementById(cardId);
@@ -322,7 +426,7 @@
 
       var content = '';
       var isError = false;
-      var inputTokens = 0;
+      var inputTokens = null;
       var outputTokens = 0;
 
       if (result.error) {
@@ -340,8 +444,9 @@
           if (b.type === 'text' && b.text) content += b.text;
         });
         if (!content) content = I18n.t('compare.empty_response');
-        inputTokens = (result.data.usage || {}).input_tokens || 0;
-        outputTokens = (result.data.usage || {}).output_tokens || 0;
+        var u = result.data.usage || {};
+        inputTokens = typeof u.input_tokens === 'number' ? u.input_tokens : null;
+        outputTokens = u.output_tokens || 0;
       }
 
       var cardContentId = 'compare-content-' + U.safeId(result.model);
@@ -368,13 +473,36 @@
 
       var bodyEl = card.querySelector('.compare-card-body');
       bodyEl.id = cardContentId;
-      bodyEl.textContent = content;
-      if (isError) bodyEl.classList.add('error');
+      if (isError) {
+        // An error is a message from this node, not a model's reply: it is not
+        // markdown and must not be rendered as any.
+        bodyEl.classList.remove('md-body');
+        bodyEl.textContent = content;
+        bodyEl._rawText = content;
+        bodyEl.classList.add('error');
+      } else {
+        // `flush` because this is the final render: a tab in the background
+        // suspends rAF, so a comparison that finished while the user was
+        // elsewhere would otherwise sit on its last streamed frame
+        // (gotcha #471).
+        bodyEl.classList.remove('error');
+        U.renderReplyInto(bodyEl, content, { flush: true });
+      }
 
       if (!isError) {
         var footerEl = card.querySelector('.compare-card-footer');
         footerEl.removeAttribute('hidden');
-        footerEl.querySelector('.ccf-in').textContent = I18n.t('compare.label_in') + inputTokens;
+        var inEl = footerEl.querySelector('.ccf-in');
+        // Shown only when the surface actually told us. A peer-served reply
+        // streams without a prompt count (the router arm returns before the
+        // final result carrying it), and "in 0" would be a claim rather than
+        // a gap.
+        if (inputTokens === null) {
+          inEl.hidden = true;
+        } else {
+          inEl.hidden = false;
+          inEl.textContent = I18n.t('compare.label_in') + inputTokens;
+        }
         footerEl.querySelector('.ccf-out').textContent = I18n.t('compare.label_out') + outputTokens;
         footerEl.querySelector('.ccf-latency').textContent = result.latency_ms + 'ms';
         if (outputTokens > 0) {

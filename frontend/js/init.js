@@ -663,7 +663,11 @@
       if (copyCompare) {
         var el = document.getElementById(copyCompare);
         if (el) {
-          U.copyToClipboard(el.textContent, {
+          // `_rawText` is what the model actually wrote. Once the reply is
+          // rendered as markdown, `textContent` is that text with its markup
+          // stripped out — so Copy would hand back something the model never
+          // said. Same rule the chat tab's copy already follows.
+          U.copyToClipboard(el._rawText || el.textContent, {
             btn: target,
             successLabel: I18n.t('actions.copied'),
             resetLabel: I18n.t('actions.copy'),

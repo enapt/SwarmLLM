@@ -742,13 +742,9 @@
       // may be re-rendered from history before it does. Settle it here.
       if (fullContent) {
         var finalTextNode = contentEl.querySelector('.response-text');
-        if (finalTextNode) {
-          finalTextNode._mdQueued = false;
-          finalTextNode.classList.add('md-body');
-          var finalSrc = fullContent.replace(/^\n+/, '');
-          finalTextNode._rawText = finalSrc;
-          finalTextNode.innerHTML = U.renderMarkdown(finalSrc);
-        }
+        // `flush` is this settle-now step, expressed through the shared
+        // renderer rather than open-coded beside it.
+        if (finalTextNode) U.renderReplyInto(finalTextNode, fullContent, { flush: true });
       }
 
       // Stopped before a single token arrived: the bubble is still showing the
@@ -864,22 +860,11 @@
     // few milliseconds, so rendering per token is quadratic in the length of
     // the answer — on a long reply that is real work on the main thread, for
     // frames nobody sees. Coalescing makes it linear in frames instead.
-    _renderReply: function(el, text) {
-      if (!el) return;
-      el._pendingMd = text;
-      if (el._mdQueued) return;
-      el._mdQueued = true;
-      var run = function() {
-        el._mdQueued = false;
-        el.classList.add('md-body');
-        var src = el._pendingMd.replace(/^\n+/, '');
-        // Keep the source beside the rendering: Copy hands back what the model
-        // actually wrote, not the markup stripped of its markdown.
-        el._rawText = src;
-        el.innerHTML = U.renderMarkdown(src);
-      };
-      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
-      else run();
+    // Thin wrapper over the shared renderer, kept as the name this file's own
+    // call sites use. The body moved to `U.renderReplyInto` when the Compare
+    // tab needed the same treatment (report #026).
+    _renderReply: function(el, text, opts) {
+      U.renderReplyInto(el, text, opts);
     },
 
     // Is the reader at the end of the conversation?

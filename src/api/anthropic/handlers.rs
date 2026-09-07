@@ -396,13 +396,8 @@ pub(super) async fn anthropic_stream(
         // Get authoritative token count from the result when available
         let result = result_rx.await;
         if got_finish {
-            let (output_tokens, matched_from_result) = match &result {
-                Ok(Ok(output)) => (
-                    output.completion_tokens,
-                    output.matched_stop_sequence.clone(),
-                ),
-                _ => (streamed_token_count, None),
-            };
+            let (output_tokens, matched_from_result, prompt_tokens) =
+                stream_usage_from_result(&result, streamed_token_count);
             // Stream event takes precedence; result.matched_stop_sequence is
             // the authoritative fallback when the token stream didn't carry
             // it (e.g. distributed pipeline with no stop-string plumbing).
@@ -422,9 +417,18 @@ pub(super) async fn anthropic_stream(
                 matched,
                 output_tokens,
                 text_block,
-                // Streamed token events carry no prompt count; the router's
-                // final output does, but this arm returns before awaiting it.
-                None,
+                // The router's final output carries it, and `result_rx` has
+                // already been awaited a few lines above — `output_tokens`
+                // comes from the same place. The comment that used to sit here
+                // said this arm "returns before awaiting it", which stopped
+                // being true when the await moved up and was never revisited:
+                // a claim about a mechanism, kept as if it were a fact. So
+                // every streamed Anthropic reply served by the router — which
+                // is every reply on a node whose model is peer-served, and on
+                // any processor-only node with peers — reported no prompt
+                // usage at all, while its non-streaming sibling reported it
+                // correctly. Same defect the split path had until 2026-08-10.
+                prompt_tokens,
             )
             .await;
         } else {
@@ -754,6 +758,35 @@ pub(super) async fn anthropic_split_stream(
     });
 
     Ok(build_anthropic_sse_response(sse_rx, progress_handle))
+}
+
+/// What the router's final result contributes to a streamed reply's epilogue:
+/// the authoritative completion count, the stop sequence it matched, and the
+/// prompt count.
+///
+/// Extracted so the third of those can be tested. It was hardcoded `None`
+/// under a comment claiming this arm "returns before awaiting" the result —
+/// which had stopped being true when the await moved above it, and nothing
+/// re-read the comment against the code. The completion count beside it comes
+/// from the same `result`, which is what makes the claim checkable at a
+/// glance once the three are read in one place.
+fn stream_usage_from_result(
+    result: &Result<
+        Result<crate::inference::router::InferenceOutput, crate::error::SwarmError>,
+        tokio::sync::oneshot::error::RecvError,
+    >,
+    streamed_token_count: u32,
+) -> (u32, Option<String>, Option<u32>) {
+    match result {
+        Ok(Ok(output)) => (
+            output.completion_tokens,
+            output.matched_stop_sequence.clone(),
+            Some(output.prompt_tokens),
+        ),
+        // No result to read: the streamed count is all we have, and a prompt
+        // count we do not know stays unknown rather than becoming a zero.
+        _ => (streamed_token_count, None, None),
+    }
 }
 
 /// Translate an Anthropic Messages API request to OpenAI chat completions
@@ -1347,6 +1380,65 @@ async fn stream_openai_to_anthropic(
 mod tests {
     use super::super::types::{AnthropicMessage, SystemContent};
     use super::*;
+
+    fn output_with(
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    ) -> crate::inference::router::InferenceOutput {
+        crate::inference::router::InferenceOutput {
+            request_id: uuid::Uuid::nil(),
+            content: "hi".into(),
+            prompt_tokens,
+            completion_tokens,
+            finish_reason: "stop".into(),
+            session_id: None,
+            token_logprobs: Vec::new(),
+            matched_stop_sequence: None,
+            trace: None,
+        }
+    }
+
+    /// A streamed reply reports the same prompt count its non-streaming
+    /// sibling does.
+    ///
+    /// This arm hardcoded `None`, so every reply the router served — every
+    /// reply on a node whose model is peer-served, and on any processor-only
+    /// node with peers — streamed with no prompt usage at all, while the same
+    /// request without `stream` reported it correctly. Found because the
+    /// Compare tab started streaming and its "In:" figure disappeared
+    /// (report #026).
+    #[test]
+    fn a_streamed_reply_reports_the_prompt_count_the_router_measured() {
+        let result = Ok(Ok(output_with(41, 16)));
+        let (out, _matched, prompt) = stream_usage_from_result(&result, 99);
+        assert_eq!(
+            prompt,
+            Some(41),
+            "the router's prompt count must reach the epilogue"
+        );
+        assert_eq!(
+            out, 16,
+            "the completion count still comes from the result, not the streamed tally"
+        );
+    }
+
+    /// And an unknown count stays unknown. The Anthropic encoder omits
+    /// `input_tokens` rather than sending a zero precisely so a client summing
+    /// usage is never handed a confident wrong figure; substituting 0 here
+    /// would defeat that one layer down.
+    #[tokio::test]
+    async fn a_prompt_count_that_was_never_measured_is_not_reported_as_zero() {
+        // The real shape: a sender dropped before it answered.
+        let (tx, rx) = tokio::sync::oneshot::channel::<
+            Result<crate::inference::router::InferenceOutput, crate::error::SwarmError>,
+        >();
+        drop(tx);
+        let result = rx.await;
+        let (out, matched, prompt) = stream_usage_from_result(&result, 7);
+        assert_eq!(prompt, None);
+        assert_eq!(matched, None);
+        assert_eq!(out, 7, "with no result, the streamed tally is all there is");
+    }
 
     fn base_req() -> MessagesRequest {
         MessagesRequest {
