@@ -799,6 +799,40 @@ fn ensure_model_loaded(
         );
     }
 
+    // The reverse of the case above, which this cannot fix and must not hide.
+    // A range CONTAINED IN one already resident is a miss on the exact key, so
+    // the layers it shares with the resident copy are about to be read from
+    // disk and held a second time — 19 of 48 layers in the reported case,
+    // roughly 3.4 GB of a 14B on a machine with 16 GB (report #021).
+    //
+    // Serving it from the resident superset is not available: the layer loop
+    // walks all of `self.layers` with no offset, and `is_first`/`is_last` are
+    // baked in at load time from which components were loaded, so a resident
+    // whole-model instance would run 48 layers and apply the output head to a
+    // middle segment's hidden states. Dropping the superset instead is worse —
+    // it is very likely serving other conversations whose KV entries are keyed
+    // by its range, and they would silently read an empty cache.
+    //
+    // So this is reported rather than repaired. It is real memory, the charge
+    // the daemon makes for it is accurate, and until now the only evidence was
+    // two "Model loaded" lines a minute apart that looked like a retry.
+    if let Some((rs, re)) = models
+        .keys()
+        .find(|(ls, le, tr, ts)| {
+            *tr == tp_rank && *ts == tp_size && *ls <= layer_start && *le >= layer_end
+        })
+        .map(|(ls, le, _, _)| (*ls, *le))
+    {
+        tracing::warn!(
+            model = %model_id,
+            loading = format!("[{layer_start}..{layer_end})"),
+            already_resident = format!("[{rs}..{re})"),
+            duplicated_layers = layer_end.saturating_sub(layer_start),
+            "model-worker: loading a layer range this worker already covers — its \
+             layers will be held twice until one of the two is released"
+        );
+    }
+
     let model_dir = crate::model::shard::model_dir(data_dir, &model_id.0);
     use crate::model::manifest::ModelManifestExt;
     let manifest = crate::types::ModelManifest::load_from_dir(&model_dir)?;

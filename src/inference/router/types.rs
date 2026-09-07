@@ -218,3 +218,155 @@ pub enum RouterCommand {
         prompt: String,
     },
 }
+
+/// Hand a finished request's result to whoever is waiting for it, and — when
+/// nobody is — say truthfully which of the two reasons applies.
+///
+/// A `oneshot` send fails whenever the receiver has been dropped, and that
+/// covers two situations a log reader needs to tell apart:
+///
+/// - **The client went away.** For every non-streaming caller
+///   (`api::submit_to_router`, and so ordinary chat, the Anthropic surface,
+///   MCP, the Responses background task and the fan-out tools) the future
+///   holding `result_rx` IS the client's connection, so a drop there really is
+///   a disconnect and worth a warning.
+/// - **Nobody needed it.** A streaming caller that has already delivered every
+///   token and its `finish_reason` reads `result_rx` only to answer
+///   `stream_options.include_usage`. With usage off — the default, and what
+///   most OpenAI-compatible clients send — the SSE bridge simply returns, and
+///   the receiver is gone by design. Every side effect the result carries
+///   (`finalize_request`, `release_request_state`, the active-count decrement
+///   and the queue wake) has already run at all three call sites, so nothing
+///   is lost.
+///
+/// The old message asserted the first cause for both, and a successful stream
+/// was therefore indistinguishable in the log from a client dropping the
+/// connection mid-answer. Measured on the live node, 2 of 28 router-path
+/// streams tripped it — it is a race between the SSE bridge returning and this
+/// send, so it is intermittent, which is worse than constant: a reader cannot
+/// even learn to discount it.
+///
+/// `InferenceRequest::cancel` is the discriminator and costs nothing — it is
+/// already on the request at every send site, and the SSE loop sets it ONLY on
+/// a genuine disconnect (`sse_tx.closed()`). So a cancelled request keeps the
+/// warning; an uncancelled one is the ordinary case and logs at debug.
+pub(super) fn deliver_result(
+    request: &InferenceRequest,
+    result_tx: InferenceResultTx,
+    output: Result<InferenceOutput, SwarmError>,
+    path: &'static str,
+) {
+    if result_tx.send(output).is_ok() {
+        return;
+    }
+    if request.is_cancelled() {
+        tracing::warn!(
+            request_id = %request.id,
+            path,
+            "DIAG: result_tx receiver dropped after the client disconnected — \
+             the answer was computed and had nowhere to go"
+        );
+    } else {
+        tracing::debug!(
+            request_id = %request.id,
+            path,
+            "DIAG: result_tx receiver dropped without a cancellation — the caller \
+             had everything it asked for (a stream that did not request usage \
+             stats does not read this channel)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod deliver_result_tests {
+    use super::*;
+    use crate::types::ModelId;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+
+    /// Records the LEVEL of every event emitted, which is the whole assertion:
+    /// the message is chosen from the cancel flag, and a reader distinguishes
+    /// the two cases by severity.
+    #[derive(Clone)]
+    struct Levels(Arc<Mutex<Vec<tracing::Level>>>);
+
+    impl tracing::subscriber::Subscriber for Levels {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            self.0.lock().unwrap().push(*e.metadata().level());
+        }
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
+    }
+
+    fn request(cancelled: bool) -> InferenceRequest {
+        let mut r = InferenceRequest::local(
+            ModelId("m".into()),
+            Vec::new(),
+            Default::default(),
+            false,
+            None,
+            None,
+        );
+        if cancelled {
+            r.cancel = Some(Arc::new(AtomicBool::new(true)));
+        }
+        r
+    }
+
+    fn levels_when(cancelled: bool, take_the_result: bool) -> Vec<tracing::Level> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sub = Levels(seen.clone());
+        let req = request(cancelled);
+        let (tx, rx) = oneshot::channel();
+        // The receiver is held for the whole send when the caller is still
+        // waiting, and gone before it when nobody is — which is the only
+        // difference the helper can see.
+        let held = if take_the_result {
+            Some(rx)
+        } else {
+            drop(rx);
+            None
+        };
+        tracing::subscriber::with_default(sub, || {
+            deliver_result(&req, tx, Err(SwarmError::NoModelLoaded), "test");
+        });
+        drop(held);
+        let out = seen.lock().unwrap().clone();
+        out
+    }
+
+    /// A stream that delivered every token and simply did not ask for usage
+    /// stats drops the receiver by design. Warning about it says the client
+    /// disconnected, which it did not — and a reader watching a healthy node
+    /// sees a failure on every ordinary request.
+    #[test]
+    fn a_result_nobody_asked_for_is_not_reported_as_a_disconnect() {
+        let levels = levels_when(false, false);
+        assert_eq!(levels, vec![tracing::Level::DEBUG], "{levels:?}");
+    }
+
+    /// The control: the case the warning was written for still warns. Without
+    /// the cancel flag being consulted, this and the test above are the same
+    /// line at the same level, which is exactly the defect.
+    #[test]
+    fn a_result_that_had_nowhere_to_go_because_the_client_left_still_warns() {
+        let levels = levels_when(true, false);
+        assert_eq!(levels, vec![tracing::Level::WARN], "{levels:?}");
+    }
+
+    /// The common path stays silent — nothing is logged when the result is
+    /// delivered, whatever the cancel flag says.
+    #[test]
+    fn a_delivered_result_logs_nothing() {
+        assert!(levels_when(false, true).is_empty());
+        assert!(levels_when(true, true).is_empty());
+    }
+}

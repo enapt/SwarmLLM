@@ -656,13 +656,35 @@
             }
           }
         } else {
-          gpuEl.textContent = I18n.t('hw.none');
+          // No card was DETECTED — which is two different facts, and saying
+          // the wrong one misinforms the person who can least check it. With
+          // no GPU backend compiled into this build there is nothing that
+          // could have detected a card, so "None" would be a claim about
+          // hardware made by a binary that never looked. The Mac artifact
+          // ships neither backend, so every Apple machine read "None / CPU
+          // only" while its GPU sat there, real and simply unaddressed
+          // (report #019).
+          var backendCanSeeAGpu = hw.gpu_backend_in_build !== false;
+          gpuEl.textContent = backendCanSeeAGpu
+            ? I18n.t('hw.none')
+            : I18n.t('hw.no_gpu_backend');
+          gpuEl.title = backendCanSeeAGpu ? '' : I18n.t('hw.no_gpu_backend_tip');
           if (gpuBadge) {
             gpuBadge.textContent = I18n.t('hw.mode_cpu_only');
             gpuBadge.className = 'node-mode-badge node-mode-badge-interactive node-mode-cpu';
             gpuBadge.removeAttribute('title');
           }
-          document.getElementById('node-vram').textContent = '\u2014';
+          // On unified memory there is no second pool to report. An em dash
+          // reads as "unknown"; the truth is that the figure in the other
+          // card already covers this one.
+          var vramCell = document.getElementById('node-vram');
+          if (hw.unified_memory) {
+            vramCell.textContent = I18n.t('hw.unified_memory');
+            vramCell.title = I18n.t('hw.unified_memory_tip');
+          } else {
+            vramCell.textContent = '\u2014';
+            vramCell.title = '';
+          }
         }
 
         // ── Your contribution ─────────────────────────────────────────────

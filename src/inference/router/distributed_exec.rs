@@ -16,7 +16,7 @@ use crate::inference::scheduler::PipelineScheduler;
 use crate::types::{InferenceRequest, NetworkCommand, PipelineAssignment};
 
 use super::spot_check::spot_check_distributed_result;
-use super::types::{InferenceOutput, QueuedRequest, StreamingTokenTx};
+use super::types::{deliver_result, InferenceOutput, QueuedRequest, StreamingTokenTx};
 
 const MODEL_LOAD_WAIT_SECS: u64 = 60;
 
@@ -294,12 +294,7 @@ pub(super) async fn execute_distributed_batch(
                 // new Submit arrives).
                 active_count.fetch_sub(1, Ordering::Relaxed);
                 queue_notify.notify_one();
-                if result_tx.send(output).is_err() {
-                    tracing::warn!(
-                        request_id = %request.id,
-                        "DIAG: distributed batch result_tx receiver dropped"
-                    );
-                }
+                deliver_result(&request, result_tx, output, "distributed_batch");
                 true // task completed normally, already decremented
             }),
         ));

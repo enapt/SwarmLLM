@@ -2,6 +2,65 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+Six fixes from eight reports filed by one tester in a day, on a 16 GB
+processor-only Mac mini. Two of the eight are answered in the project's notes
+rather than in code, with the reasons written down; a third is fixed as far as
+it honestly can be and documented as far as it cannot.
+
+### Fixed
+
+- **A machine that cannot hold a whole model is no longer given all of it.**
+  A node that had downloaded every part of a model was handed the entire thing
+  to run, on the strength of holding the files — which is a fact about disk
+  space, not about memory. Nothing checked whether it would fit until the
+  moment of loading, and a refusal there is final: the request fails, and the
+  other machines on the network that had offered to run the same model are
+  never asked. Reported with a 14B model needing about 10 GB on a machine with
+  9 GB free at that moment. Such a node now falls through to the ordinary
+  planner, which already knows how to give it the layers it can hold and send
+  the rest to a peer.
+- **The check that decides whether to send a model to other machines now
+  actually compares the two costs.** It was named for that comparison, its log
+  line announced it ("a pipeline across peers' cards is priced faster"), and it
+  never made it — it only checked that the route touched another machine and
+  that this one's own speed was known. Observed live sending a request to a
+  chain priced at three and a half times the cost of simply running it here.
+  The two figures were already being calculated for the log; they are now what
+  the decision is made on. Where running it here is not possible at all, the
+  log says that instead of claiming the alternative was faster.
+- **A machine now tells the network how much memory it will really give a
+  model, not how much is free.** These are very different numbers: a node sizes
+  itself a safe budget so that loading a model cannot push the machine into
+  swapping, and on a default install that budget is about half of what the
+  operating system reports as free. Peers were planning against the larger
+  figure, so work was sent to machines that then turned it down — one peer
+  refused the same request twice within two seconds, each refusal costing a
+  round trip before it was known. Older peers are unaffected and are read
+  exactly as before.
+- **A request whose client has gone no longer keeps a machine busy.** When a
+  chat window is closed mid-answer, the node stops between words — but a single
+  step could wait indefinitely, because it sits in a queue behind whatever else
+  that machine is doing, such as loading another model. Reported as a request
+  that ran for four and a half minutes after its client had disconnected,
+  holding memory nobody was waiting on, and stopped only when the tester killed
+  the process by hand.
+- **Ordinary streaming replies no longer log a warning saying the client
+  disconnected.** A successful reply that did not ask for token-usage statistics
+  could log "client disconnected before result" after delivering every word.
+  Whether it appeared at all came down to timing, which made it worse rather
+  than better: the same healthy request logged an alarming line some of the time
+  and nothing the rest of the time, and a real disconnect was indistinguishable
+  from it. The node now knows the difference and says which happened.
+- **"No graphics card" is no longer said by builds that never looked.** On
+  Apple Silicon the release contains no graphics support at all, so the panel
+  reported "None — CPU only", which reads as a statement about the machine when
+  it is a statement about the software. It now says the card is not used by this
+  build, and explains why. On machines where the processor and graphics share
+  one pool of memory, the panel no longer shows an empty video-memory figure
+  beside the system one as though they were two separate resources.
+
 ## [0.3.161-alpha] — 2026-09-06
 
 A hotfix for one fault in v0.3.160, reported within the hour.

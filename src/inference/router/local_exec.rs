@@ -9,7 +9,7 @@ use crate::error::SwarmError;
 use crate::inference::chat_template;
 
 use super::distributed_exec::finalize_request;
-use super::types::{InferenceOutput, QueuedRequest, StreamingTokenEvent};
+use super::types::{deliver_result, InferenceOutput, QueuedRequest, StreamingTokenEvent};
 
 /// RAII guard that decrements active_count for any unprocessed batch items on drop.
 /// Ensures active_count is always decremented even if batch processing panics mid-loop.
@@ -221,12 +221,7 @@ pub(super) async fn execute_local_batch(
         finalize_request(&shared_state, &request, &output, None).await;
         shared_state.release_request_state(&request.id);
         cleanup.complete_one();
-        if result_tx.send(output).is_err() {
-            tracing::warn!(
-                request_id = %request.id,
-                "DIAG: batch result_tx receiver dropped"
-            );
-        }
+        deliver_result(&request, result_tx, output, "local_batch");
     }
 
     tracing::debug!(batch_size, "Local batch complete");

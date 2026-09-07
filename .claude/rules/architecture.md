@@ -429,6 +429,100 @@ a debug build (~0.85 tok/s against ~5 in release, gotcha #427), which straddles
 the 1.25 crossover, so an unpinned test asserts a property of the machine it
 runs on.
 
+## A gate named for a comparison must make it, and against a route that exists
+
+Two reports from one machine, one knot (2026-09-07, reports #017/#018).
+
+**`pipeline_may_replace_processor_route` now takes `RoutePrices`** — the local
+figure, the chain figure, and whether running the whole model here is a route
+this node's memory can actually offer. It refuses a chain priced at or above
+the local processor, and the caller logs the reason the gate returned rather
+than a fixed sentence.
+
+**What it replaced.** The function checked two things, neither a price: is the
+chain remote, and is our own speed measured. `local_ms` and `chain_ms` were
+computed at the call site *only to be logged* — the comment said so, meaning
+checked by a person afterwards. Live: a two-segment chain priced **22117 ms**
+took a request from a processor priced **6313 ms**, under a log line reading
+"a pipeline across peers' cards is priced faster" directly above its own
+contradicting numbers.
+
+**Why the DP does not already answer this, which is the part worth keeping.**
+`route_shortest_path` minimises, so the omission looked safe and its own doc
+asserted the search "has come back cheaper than running here". But the
+capacity-respecting pass DROPS any vertex a candidate cannot hold, including
+the local node's whole-model vertex once `max_local_hostable_layers` bounds it
+(gotcha #452). What the search returns is therefore the cheapest **feasible**
+chain, which is a different claim from "cheaper than staying home" — and the
+two diverge exactly on the machine that provoked both reports.
+
+**So the comparison is only sound where the local route is real.**
+`local_ms` prices the whole model as one local segment; on a node whose loader
+will refuse that, it prices something that cannot run — gotcha #478's error
+again, one function along. `local_route_is_available` is the discriminator: when
+it is false there is no baseline to give up, the chain wins at any price, and
+the log says *that* instead of claiming it is faster. Adding the comparison
+without this flag would have sent report #018's request home to a 503.
+
+**And the fast path asks the same question.** A node was chosen for the whole
+model on `available_ranges` alone — a fact about STORAGE — and
+`local_can_hold_every_layer` is now asked beside it. Holding every shard is not
+holding every layer in memory: a 14B priced at 10374 MB against 9240 MB of live
+headroom was committed to the node before anything checked, and `admit_to_cpu`
+has **no re-plan behind it** — it fails the spawn, the caller returns 503, and
+no retry follows because `should_retry_after` sees `used_remote_segment == 0`
+for a local-only assignment. Two peers had offered to serve that model. A node
+that cannot hold everything now falls through to the priced search, which has
+known how to give it only what it can hold since #452.
+
+Four things a change here must keep. **Unknown never excludes** — a `None`
+capacity is an unreadable footprint or an unset budget, not evidence, and plans
+the request exactly as before. **Coverage and capacity stay separate
+variables**: the decision below still needs to know this node holds the model in
+order to explain itself, and a candidate silently withdrawn cannot say why it
+went. **The all-local arm is tested first**, since a chain with no remote
+segment is the fast path by another name whatever the prices say. And **every
+refusal keeps its control**: a genuinely cheaper chain must still displace the
+processor, or this becomes "never delegate" — the failure #444 exists to
+prevent.
+
+**The general rule.** When a function's name, its log line, or its doc asserts a
+comparison, check that something performs it. Two of this project's rules
+already say a comment describing a mechanism elsewhere is a claim rather than a
+fact; this is the same trap turned inward — the claim was about the function's
+own caller, and it had been true of nothing since before gotcha #479 edited the
+function without touching it.
+
+## A peer advertises the memory it will HONOUR, not the memory it has
+
+**`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much
+memory can this peer give a model's layers"**, and `ram_model_budget_mb` is the
+figure a node without a graphics card puts behind it.
+
+**Why.** `ram_available_mb` is `sysinfo`'s raw reading with no margin. The same
+node's own admission sizes a swap-safe budget from total RAM and contribution
+level — `total × 0.8 × (0.5/0.8)`, so **4096 MB on an 8 GB machine at the
+default level**, about half what it advertises. The scheduler routed on the
+first number and the peer enforced the second, so segments were offered and
+refused on arrival: measured, one peer refused 46 layers and then 28 layers
+1.7 s later, each costing a round trip before the refusal was known, inside a
+request whose first token took 154 s (report #022). Nothing bars a peer that
+refused for capacity from being re-offered work — the blacklist fires only for
+missing-shard errors — so the re-plan met the same stale figure and made the
+same mistake.
+
+Three things a change here must keep. **The accessor owns the device choice**:
+two callers were writing the `match &c.gpu` themselves, and a third would have
+had to get it right again. **The graphics branch is untouched** — free VRAM
+already excludes what is resident, which is the property `already_warm` pricing
+depends on; the RAM budget has the same property because it subtracts
+`ram_committed_mb`. And **unknown never excludes**: `None` from a node predating
+the field falls back to `ram_available_mb` and behaves exactly as before, which
+is what keeps a mixed-version swarm routable. The field is additive and
+`#[serde(default)]` per the protocol rule; the meaning of the existing field is
+deliberately NOT changed, because the peer list displays it as free memory and
+that reading is legitimate and different.
+
 ## A hand-off is priced as the shape it will be given, not as the whole model
 
 **`inference::scheduler::delegated_shape_cost_ms`** is the one answer to "what

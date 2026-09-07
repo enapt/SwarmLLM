@@ -160,10 +160,7 @@ fn max_hostable_layers(
     // A GPU node is judged on its card; a node with no card, on its RAM. This
     // mirrors `allocate_offline`, which asks the same question for capacity
     // planning — the worker subprocess can host layers in either.
-    let free_mb = match &cap.gpu {
-        Some(g) => g.vram_available_mb,
-        None => cap.ram_available_mb,
-    };
+    let free_mb = cap.memory_for_model_layers_mb();
     if free_mb == 0 {
         // Not "no room": no information. See the doc comment.
         return None;
@@ -980,13 +977,20 @@ fn pipeline_may_replace_processor_route(
     chain: &[PipelineSegment],
     candidates: &[NodeCandidate],
     local_node_id: &NodeId,
-) -> Result<(), &'static str> {
+    prices: RoutePrices,
+) -> Result<&'static str, &'static str> {
     let remote: Vec<&PipelineSegment> = chain
         .iter()
         .filter(|s| s.node_id != *local_node_id)
         .collect();
     if remote.is_empty() {
         return Err("no pipeline across peers is priced faster than the processor");
+    }
+    // Nothing to give up. Running the whole model here is not a route this
+    // node can offer, so the chain is not competing with the processor — it is
+    // the only way the request gets answered at all, whatever it costs.
+    if !prices.local_route_is_available {
+        return Ok("this node cannot hold every layer by itself, so a pipeline is the only route");
     }
     // The BASELINE must be known, because that is the whole comparison: this
     // function is asked whether to give up running the model here, and "here"
@@ -1000,7 +1004,62 @@ fn pipeline_may_replace_processor_route(
     {
         return Err("this node's own speed is not yet measured, so there is nothing to compare");
     }
-    Ok(())
+    // And the comparison the whole function is named for. Both figures come
+    // from the same cost model — `chain_cost_ms` sums `vertex_cost` over the
+    // chain the search actually produced, and the local figure prices the one
+    // segment the fast path would build — so they are commensurable, and both
+    // are priced as the SHAPE that would run (gotcha #478).
+    if prices.chain_ms >= prices.local_ms {
+        return Err("the pipeline is priced no cheaper than running it here");
+    }
+    Ok("a pipeline across peers' cards is priced faster, so the request goes there")
+}
+
+/// The two prices this node is choosing between, and whether the local one
+/// describes a route that could actually run.
+///
+/// `local_route_is_available` is not a formality. `local_ms` prices the whole
+/// model as ONE local segment, which is what the fast path would build — but a
+/// node whose loader will refuse that many layers cannot run it at any price,
+/// and the capacity-respecting pass of `route_shortest_path` drops the
+/// "stay fully local" vertex from the graph entirely when that is so. Without
+/// this flag the comparison would keep sending a request home to a route that
+/// only exists on paper, and the refusal arrives at load time as a 503 with no
+/// re-plan behind it (report #018). Same class as gotcha #478: price the shape
+/// that will actually be run.
+#[derive(Clone, Copy, Debug)]
+struct RoutePrices {
+    local_ms: f32,
+    chain_ms: f32,
+    local_route_is_available: bool,
+}
+
+/// Can this node hold every layer of the model at once?
+///
+/// Two ways to answer yes, and the first is the one that stops this check
+/// becoming a regression. A worker ALREADY holding the whole model has
+/// demonstrably got the memory — it is holding those weights right now — while
+/// `max_hostable_layers` is a prediction about a fresh spawn, weighed against
+/// everything already committed INCLUDING that same resident model. Asked
+/// about a model this node is currently running, the bound answers with the
+/// room left beside it, which is close to none. Gotcha #329's distinction on
+/// the local node: "is it loaded?" and "would it fit?" are different
+/// questions, and the peer side has drawn it since #447 via `already_warm`.
+///
+/// Otherwise the bound decides, and `None` — an unreadable footprint or an
+/// unset budget — is not evidence: unknown never excludes, the long-standing
+/// contract of that field, so the request is planned exactly as it was before
+/// this check existed.
+fn local_can_hold_every_layer(
+    pool: &crate::inference::process_pool::ModelProcessPool,
+    model_id: &ModelId,
+    local_cand: &NodeCandidate,
+    num_layers: u32,
+) -> bool {
+    pool.hosts_whole_model(model_id, num_layers)
+        || local_cand
+            .max_hostable_layers
+            .is_none_or(|k| k >= num_layers)
 }
 
 /// How many layers a delegated peer actually RUNS, given the shape the caller
@@ -1626,7 +1685,47 @@ impl PipelineScheduler {
                     .iter()
                     .any(|r| r.0 == 0 && r.1 >= num_layers)
         });
-        if let Some(local_cand) = local_cand.filter(|_| !pipeline_may_beat_local) {
+        // Holding every shard is a fact about STORAGE. Whether the model fits
+        // in memory right now is a different question, and this is the last
+        // point at which the answer can still change the plan: past here the
+        // node is committed to the whole model, and the loader's own refusal
+        // (`admit_to_cpu`) has no re-plan behind it — it fails the spawn and
+        // the caller surfaces a 503, with peers that had offered to serve the
+        // model sitting unused (report #018). Measured on a 16 GB machine: a
+        // 14B priced at 10374 MB against 9240 MB of live headroom, refused
+        // outright. So a node that cannot hold every layer falls through to
+        // the priced search below, which knows how to give it the layers it
+        // CAN hold and route the rest — the same bound every peer has been
+        // held to since gotcha #452, finally asked of the local node on the
+        // path that skips the search.
+        //
+        // Kept separate from `local_cand` rather than filtered into it: the
+        // decision below still needs to know this node holds the model in
+        // order to explain itself, and a candidate silently withdrawn cannot
+        // say why it went.
+        let local_runs_whole_model = local_cand
+            .map(|c| {
+                local_can_hold_every_layer(
+                    &self.shared_state.model_process_pool,
+                    model_id,
+                    c,
+                    num_layers,
+                )
+            })
+            .unwrap_or(false);
+        if local_cand.is_some() && !local_runs_whole_model {
+            tracing::info!(
+                model = %model_id,
+                num_layers,
+                max_hostable_layers = ?local_cand.and_then(|c| c.max_hostable_layers),
+                candidates = candidates.len(),
+                "This node holds every shard but has not the memory to run them all at \
+                 once — planning a route that gives it only what it can hold"
+            );
+        }
+        if let Some(local_cand) =
+            local_cand.filter(|_| !pipeline_may_beat_local && local_runs_whole_model)
+        {
             // Why this node kept the request, in the same line that says it
             // did. Reaching here with peers in the list means the priced search
             // was not allowed to compete — this node is not on its processor,
@@ -1717,8 +1816,10 @@ impl PipelineScheduler {
                     // The search ran against a local node that holds every
                     // layer and would run the model on its processor. Its
                     // answer displaces the fast path only on a chain that is
-                    // genuinely remote AND priced from real figures; the log
-                    // carries both costs so the choice can be checked.
+                    // genuinely remote, priced from real figures, and priced
+                    // CHEAPER than staying here — or when staying here is not
+                    // a route this node's memory can offer at all. Both costs
+                    // go in the log beside the decision they produced.
                     if let (true, Some(local_cand)) = (pipeline_may_beat_local, local_cand) {
                         let local_ms = parallax::vertex_cost(
                             local_cand,
@@ -1735,20 +1836,26 @@ impl PipelineScheduler {
                             num_layers,
                             prompt_tokens,
                         );
+                        let prices = RoutePrices {
+                            local_ms,
+                            chain_ms,
+                            local_route_is_available: local_runs_whole_model,
+                        };
                         match pipeline_may_replace_processor_route(
                             &segs,
                             &candidates,
                             local_node_id,
+                            prices,
                         ) {
-                            Ok(()) => tracing::info!(
+                            Ok(reason) => tracing::info!(
                                 model = %model_id,
                                 segments = segs.len(),
                                 local_processor_cost_ms = local_ms,
                                 pipeline_cost_ms = chain_ms,
+                                local_route_available = prices.local_route_is_available,
                                 prompt_tokens = ?prompt_tokens,
                                 "This node holds the whole model but would run it on its \
-                                 processor; a pipeline across peers' cards is priced faster, \
-                                 so the request goes there"
+                                 processor; {reason}"
                             ),
                             Err(reason) => {
                                 // Name the option a reader will ask about. The
@@ -3142,10 +3249,7 @@ impl PipelineScheduler {
             let available_mb = peer
                 .capability
                 .as_ref()
-                .map(|c| match &c.gpu {
-                    Some(g) => g.vram_available_mb,
-                    None => c.ram_available_mb,
-                })
+                .map(|c| c.memory_for_model_layers_mb())
                 .unwrap_or(0);
             let available_bytes = available_mb.saturating_mul(1_048_576);
             let layer_capacity = available_bytes.checked_div(bytes_per_layer).unwrap_or(0) as u32;

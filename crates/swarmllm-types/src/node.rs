@@ -106,6 +106,25 @@ pub struct NodeCapability {
     pub cpu: Option<CpuInfo>,
     pub ram_total_mb: u64,
     pub ram_available_mb: u64,
+    /// How much system memory this node will actually let a model take right
+    /// now — its own admission ceiling, not the operating system's free-memory
+    /// reading.
+    ///
+    /// The two differ by a lot and always in the same direction. A node sizes
+    /// a swap-safe budget from its total RAM and its contribution level, so an
+    /// 8 GB machine at the default level admits about 4 GB; `ram_available_mb`
+    /// is `sysinfo`'s raw figure with no margin at all. A scheduler routing on
+    /// the raw number offers segments that the receiving node's own gate then
+    /// refuses — measured, twice against one peer inside two seconds, at 46
+    /// then 28 layers, each costing a round trip before the refusal was known
+    /// (report #022).
+    ///
+    /// `None` from a node predating the field, and `None` on a node whose
+    /// models go to a graphics card (`vram_available_mb` answers for those).
+    /// Unknown never excludes: a reader falls back to `ram_available_mb` and
+    /// behaves exactly as it did before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_model_budget_mb: Option<u64>,
     pub disk_available_mb: u64,
     pub bandwidth_mbps: f32,
     pub hosted_shards: Vec<ShardId>,
@@ -180,6 +199,29 @@ pub struct NodeCapability {
     /// no label, per the additive-evolution rule.
     #[serde(default)]
     pub anchor_mode: bool,
+}
+
+impl NodeCapability {
+    /// How much memory this node can give a model's layers right now, on
+    /// whichever device it would load them on.
+    ///
+    /// The single answer, because two callers were choosing the device
+    /// themselves — the routing bound (`scheduler::max_hostable_layers`) and
+    /// the capacity planner — and a third would have had to get the same
+    /// two-line match right again.
+    ///
+    /// A graphics card answers with its free memory, which already excludes
+    /// whatever is resident on it. A node without one answers with the budget
+    /// its own loader will honour when it has told us one, and only falls back
+    /// to the operating system's free-memory reading when it has not: that
+    /// reading is not a promise the node can keep, and routing on it produced
+    /// segments the receiving node refused on arrival.
+    pub fn memory_for_model_layers_mb(&self) -> u64 {
+        match &self.gpu {
+            Some(g) => g.vram_available_mb,
+            None => self.ram_model_budget_mb.unwrap_or(self.ram_available_mb),
+        }
+    }
 }
 
 /// One entry in `NodeCapability::observed_latencies`: the sender observed
@@ -316,6 +358,77 @@ mod version_compat_tests {
             "uptime_seconds": 100u64,
             "version": "0.3.16-alpha"
         })
+    }
+
+    /// A node that predates `ram_model_budget_mb` states no budget, and a
+    /// reader must fall back to the raw free-memory figure — behaving exactly
+    /// as it did before the field existed. Unknown never excludes.
+    #[test]
+    fn a_peer_that_states_no_memory_budget_is_read_as_it_always_was() {
+        let cap: NodeCapability = serde_json::from_value(base_fields()).unwrap();
+        assert!(cap.ram_model_budget_mb.is_none());
+        assert_eq!(
+            cap.memory_for_model_layers_mb(),
+            4096,
+            "with no budget stated, the raw figure is all there is"
+        );
+
+        // And when one IS stated it is what routing weighs, because it is the
+        // only one of the two the node will actually honour.
+        let mut v = base_fields();
+        v.as_object_mut()
+            .unwrap()
+            .insert("ram_model_budget_mb".into(), serde_json::json!(2048u64));
+        let cap: NodeCapability = serde_json::from_value(v).unwrap();
+        assert_eq!(cap.memory_for_model_layers_mb(), 2048);
+
+        // A card answers for itself either way — its free figure already
+        // excludes what is resident on it, which is the property the warm-peer
+        // pricing depends on.
+        let mut v = base_fields();
+        let obj = v.as_object_mut().unwrap();
+        obj.insert("ram_model_budget_mb".into(), serde_json::json!(2048u64));
+        obj.insert(
+            "gpu".into(),
+            serde_json::json!({
+                "name": "card",
+                "vram_total_mb": 8192u64,
+                "vram_available_mb": 6000u64,
+                "memory_bandwidth_gbps": 0.0f32,
+            }),
+        );
+        let cap: NodeCapability = serde_json::from_value(v).unwrap();
+        assert_eq!(cap.memory_for_model_layers_mb(), 6000);
+    }
+
+    /// The other direction: OUR announcement reaching a node that predates the
+    /// field. Reproduced against a struct with the pre-change shape, because
+    /// "serde ignores unknown fields" is cheap to check and expensive to be
+    /// wrong about — a mixed-version swarm is the normal state during a
+    /// rollout, and a deserialisation failure here would be silent.
+    #[test]
+    fn our_announcement_still_decodes_on_a_node_that_predates_the_budget_field() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct OldCapability {
+            node_id: NodeId,
+            ram_total_mb: u64,
+            ram_available_mb: u64,
+            disk_available_mb: u64,
+            version: String,
+        }
+
+        let mut v = base_fields();
+        v.as_object_mut()
+            .unwrap()
+            .insert("ram_model_budget_mb".into(), serde_json::json!(2048u64));
+        let json = serde_json::to_string(&v).unwrap();
+        let old: OldCapability =
+            serde_json::from_str(&json).expect("an older node must still decode our announcement");
+        assert_eq!(
+            old.ram_available_mb, 4096,
+            "and reads the field it does know, unchanged"
+        );
     }
 
     #[test]

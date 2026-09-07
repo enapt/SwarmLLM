@@ -642,6 +642,7 @@ fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
         gpu: None,
         ram_total_mb: 16_384,
         ram_available_mb: 16_384,
+        ram_model_budget_mb: None,
         disk_available_mb: 100_000,
         bandwidth_mbps: 100.0,
         hosted_shards: vec![],
@@ -2907,6 +2908,7 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
         cpu: None,
         ram_total_mb: 0,
         ram_available_mb: 0,
+        ram_model_budget_mb: None,
         disk_available_mb: 0,
         bandwidth_mbps: 0.0,
         hosted_shards: vec![],
@@ -3360,6 +3362,128 @@ fn a_slow_enough_processor_hands_even_a_short_prompt_to_distant_cards() {
     );
 }
 
+/// Prices under which the comparison added for report #017 stands aside, so a
+/// test about one of the OTHER grounds is not silently decided by it.
+fn chain_is_cheaper() -> super::RoutePrices {
+    super::RoutePrices {
+        local_ms: 1000.0,
+        chain_ms: 100.0,
+        local_route_is_available: true,
+    }
+}
+
+/// The gate is named for a comparison it did not make. It approved a chain
+/// priced at 3.5x the local processor on a live node — 22117 ms against
+/// 6313 ms — and logged "a pipeline across peers' cards is priced faster"
+/// over its own numbers (report #017).
+///
+/// The DP does minimise, so this is not merely a redundant second opinion:
+/// its capacity-respecting pass DROPS the "stay fully local" vertex when this
+/// node cannot hold every layer, so what it returns is the cheapest FEASIBLE
+/// chain, which is not the same claim.
+#[test]
+fn a_pipeline_priced_dearer_than_the_processor_does_not_take_the_request() {
+    let mut local = local_full_coverage();
+    local.est_tokens_per_sec = 20.0;
+    let peer = willing_peer(0xBB, LAYERS);
+    let remote_chain = vec![PipelineSegment {
+        node_id: peer.node_id.clone(),
+        shard_id: peer.shard_id.clone(),
+        layer_range: (0, LAYERS),
+    }];
+    let dearer = super::RoutePrices {
+        local_ms: 6313.48,
+        chain_ms: 22117.55,
+        local_route_is_available: true,
+    };
+    assert!(
+        super::pipeline_may_replace_processor_route(
+            &remote_chain,
+            &[local.clone(), peer.clone()],
+            &local_id(),
+            dearer
+        )
+        .is_err(),
+        "the observed live figures: a chain at 3.5x the processor is not faster"
+    );
+
+    // The control, on the identical fixture: the same chain priced cheaper is
+    // still taken, so this refuses on the PRICE and not on the shape.
+    assert!(
+        super::pipeline_may_replace_processor_route(
+            &remote_chain,
+            &[local, peer],
+            &local_id(),
+            chain_is_cheaper()
+        )
+        .is_ok(),
+        "a genuinely cheaper chain must still displace the processor"
+    );
+}
+
+/// ...and the case that makes the comparison safe to add. A node whose loader
+/// will refuse the whole model has no local route to keep, so the chain wins
+/// at any price — it is not competing with the processor, it is the only way
+/// the request is answered at all. Without this, adding the comparison would
+/// have sent report #018's request home to a 503.
+#[test]
+fn a_node_that_cannot_hold_every_layer_gives_the_chain_the_request_at_any_price() {
+    let mut local = local_full_coverage();
+    local.est_tokens_per_sec = 20.0;
+    let peer = willing_peer(0xBB, LAYERS);
+    let remote_chain = vec![PipelineSegment {
+        node_id: peer.node_id.clone(),
+        shard_id: peer.shard_id.clone(),
+        layer_range: (0, LAYERS),
+    }];
+    let dearer_but_the_only_route = super::RoutePrices {
+        local_ms: 6313.48,
+        chain_ms: 22117.55,
+        local_route_is_available: false,
+    };
+    assert!(
+        super::pipeline_may_replace_processor_route(
+            &remote_chain,
+            &[local, peer],
+            &local_id(),
+            dearer_but_the_only_route
+        )
+        .is_ok(),
+        "there is no local route to give up, so the price of one is not a reason to stay"
+    );
+}
+
+/// Unknown never excludes, on the local node as on every peer: an unreadable
+/// footprint or an unset budget must leave the plan exactly as it was.
+///
+/// The pool here holds no worker, so every answer comes from the bound —
+/// which is the arm this test is about. The resident-worker arm is
+/// `a_model_this_node_is_already_running_is_not_judged_too_big_for_it`.
+#[test]
+fn an_unreadable_local_capacity_still_lets_this_node_run_the_whole_model() {
+    let pool = crate::inference::process_pool::ModelProcessPool::new(std::path::PathBuf::from(
+        "/tmp/swarmllm-local-capacity-test",
+    ));
+    let model = ModelId("split-14b".into());
+    let mut local = local_full_coverage();
+    assert!(
+        local.max_hostable_layers.is_none(),
+        "fixture must start unbounded, or this asserts nothing"
+    );
+    assert!(super::local_can_hold_every_layer(
+        &pool, &model, &local, LAYERS
+    ));
+    local.max_hostable_layers = Some(LAYERS);
+    assert!(super::local_can_hold_every_layer(
+        &pool, &model, &local, LAYERS
+    ));
+    local.max_hostable_layers = Some(LAYERS - 1);
+    assert!(
+        !super::local_can_hold_every_layer(&pool, &model, &local, LAYERS),
+        "one layer short is short"
+    );
+}
+
 /// The two remaining grounds for keeping the request here, after gotcha #479
 /// removed the third (a blanket veto on any chain containing an unmeasured
 /// peer). The all-local arm is unchanged; the other is now about the BASELINE
@@ -3383,7 +3507,8 @@ fn the_processor_route_is_kept_for_an_all_local_chain_or_an_unpriced_baseline() 
         super::pipeline_may_replace_processor_route(
             &remote_chain,
             &[local.clone(), peer.clone()],
-            &local_id()
+            &local_id(),
+            chain_is_cheaper()
         )
         .is_err(),
         "with no price for running it here there is nothing to give up"
@@ -3396,7 +3521,8 @@ fn the_processor_route_is_kept_for_an_all_local_chain_or_an_unpriced_baseline() 
         super::pipeline_may_replace_processor_route(
             &remote_chain,
             &[local.clone(), peer.clone()],
-            &local_id()
+            &local_id(),
+            chain_is_cheaper()
         )
         .is_ok(),
         "an unmeasured peer is priced pessimistically, not excluded"
@@ -3409,8 +3535,13 @@ fn the_processor_route_is_kept_for_an_all_local_chain_or_an_unpriced_baseline() 
         layer_range: (0, LAYERS),
     }];
     assert!(
-        super::pipeline_may_replace_processor_route(&local_chain, &[local, peer], &local_id())
-            .is_err(),
+        super::pipeline_may_replace_processor_route(
+            &local_chain,
+            &[local, peer],
+            &local_id(),
+            chain_is_cheaper()
+        )
+        .is_err(),
         "an all-local chain is the fast path by another name"
     );
 }
@@ -3595,8 +3726,13 @@ fn a_chain_with_an_unmeasured_peer_is_allowed_once_our_own_speed_is_known() {
         chain_seg(local_id(), (LAYERS - 1, LAYERS)),
     ];
     assert!(
-        super::pipeline_may_replace_processor_route(&chain, &[local, unmeasured], &local_id())
-            .is_ok(),
+        super::pipeline_may_replace_processor_route(
+            &chain,
+            &[local, unmeasured],
+            &local_id(),
+            chain_is_cheaper()
+        )
+        .is_ok(),
         "the search already priced this cheaper than a 0.4 tok/s processor; \
          the prior is the conservatism, not a veto on top of it"
     );
@@ -3621,7 +3757,13 @@ fn a_chain_is_kept_home_when_our_own_speed_is_not_yet_measured() {
     peer.est_tokens_per_sec = 30.0;
     let chain = vec![chain_seg(NodeId([0xBB; 32]), (0, LAYERS))];
     assert!(
-        super::pipeline_may_replace_processor_route(&chain, &[local, peer], &local_id()).is_err(),
+        super::pipeline_may_replace_processor_route(
+            &chain,
+            &[local, peer],
+            &local_id(),
+            chain_is_cheaper()
+        )
+        .is_err(),
         "with no price for running it here there is nothing to compare against"
     );
 }

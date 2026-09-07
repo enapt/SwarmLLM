@@ -975,6 +975,7 @@ mod tests {
             cpu: None,
             ram_total_mb: 0,
             ram_available_mb: 0,
+            ram_model_budget_mb: None,
             disk_available_mb: 0,
             bandwidth_mbps: 0.0,
             hosted_shards: vec![],

@@ -26,7 +26,7 @@ use crate::types::{InferenceRequest, NetworkCommand, SwarmMessage};
 
 use batch::execute_batch;
 use distributed_exec::{execute_request, finalize_request};
-use types::QueuedRequest;
+use types::{deliver_result, QueuedRequest};
 
 pub use types::{
     InferenceOutput, InferenceResultTx, RouterCommand, StreamingTokenEvent, StreamingTokenTx,
@@ -1295,12 +1295,7 @@ impl InferenceRouter {
             active_count.fetch_sub(1, Ordering::Relaxed);
             queue_notify.notify_one();
 
-            if result_tx.send(output).is_err() {
-                tracing::warn!(
-                    request_id = %request.id,
-                    "DIAG: result_tx receiver dropped — client disconnected before result"
-                );
-            }
+            deliver_result(&request, result_tx, output, "dispatch_single");
         });
     }
 }

@@ -321,6 +321,7 @@ mod tests {
                     gpu: None,
                     ram_total_mb: 16_384,
                     ram_available_mb: 16_384,
+                    ram_model_budget_mb: None,
                     disk_available_mb: 100_000,
                     bandwidth_mbps: 100.0,
                     hosted_shards: vec![],

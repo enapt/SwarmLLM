@@ -1099,13 +1099,30 @@ pub fn node_model_budget_bytes(shared: &crate::daemon::SharedState) -> Option<u6
 }
 
 /// [`node_model_budget_bytes`] in MB, which is the unit most callers hold.
+/// Will this node's models be loaded onto a graphics card?
+///
+/// "Has a GPU" must mean "the GPU will actually run the models", not merely
+/// that one is installed — the same distinction `ram_budget_now` draws, and
+/// routed through the canonical placement mapping so it cannot drift from
+/// where models are really loaded.
+pub fn models_go_to_the_card(shared: &crate::daemon::SharedState) -> bool {
+    shared.gpu_info.is_some()
+        && !crate::daemon::shard_loader::force_cpu_for(shared.config.inference.gpu_layers)
+}
+
+/// The system-memory budget alone, and `None` on a node whose models go to a
+/// card — where free VRAM is the figure that answers, and is reported on its
+/// own. Consumed by the capability broadcast, which must not advertise a
+/// graphics budget in a field named for system memory.
+pub fn node_ram_model_budget_mb(shared: &crate::daemon::SharedState) -> Option<u64> {
+    if models_go_to_the_card(shared) {
+        return None;
+    }
+    node_model_budget_mb(shared)
+}
+
 pub fn node_model_budget_mb(shared: &crate::daemon::SharedState) -> Option<u64> {
-    // "Has a GPU" must mean "the GPU will actually run the models", not merely
-    // that one is installed — the same distinction `ram_budget_now` draws, and
-    // routed through the canonical placement mapping so it cannot drift from
-    // where models are really loaded.
-    let has_gpu = shared.gpu_info.is_some()
-        && !crate::daemon::shard_loader::force_cpu_for(shared.config.inference.gpu_layers);
+    let has_gpu = models_go_to_the_card(shared);
     let mb = if has_gpu {
         compute_vram_budget(shared)?
     } else {

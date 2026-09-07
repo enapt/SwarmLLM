@@ -3107,6 +3107,28 @@ impl ModelProcessPool {
     /// `None` means unknowable — no budget, or geometry that could not be read
     /// — and never "no room", the same reading `max_hostable_layers` gives an
     /// unreadable peer.
+    /// Is a live worker already holding this whole model?
+    ///
+    /// A fact, not a prediction — the same distinction `live_worker` exists
+    /// for. It matters because [`Self::max_local_hostable_layers`] weighs a
+    /// SPAWN against what is already committed, and a resident model's own
+    /// weights are part of that: ask the bound about a model this node is
+    /// currently running and it answers with the room left BESIDE it, which
+    /// is close to none. Reading that as "cannot hold it" would push a node
+    /// off the model it is happily serving.
+    ///
+    /// This is gotcha #329's distinction on the local node — "is it loaded?"
+    /// and "would it fit?" are different questions — and the peer side has
+    /// drawn it since #447 through `already_warm`.
+    pub fn hosts_whole_model(&self, model_id: &ModelId, num_layers: u32) -> bool {
+        self.live_worker(model_id).is_some_and(|h| {
+            h.charged_segments
+                .lock()
+                .map(|v| v.iter().any(|&(s, e)| s == 0 && e >= num_layers))
+                .unwrap_or(false)
+        })
+    }
+
     pub fn max_local_hostable_layers(&self, model_id: &ModelId, on_gpu: bool) -> Option<u32> {
         let (fixed_mb, per_layer_mb) = self.segment_cost_curve(model_id, on_gpu)?;
         // What is free after everything already charged, on whichever budget
@@ -4189,11 +4211,17 @@ impl ModelProcessPool {
     /// worker's answer watches the request's cancel flag and ends — telling the
     /// worker to stop — the moment it flips (`inference::cancel`).
     ///
-    /// Only the wait is watched. The send is never interrupted, because a
-    /// `Forward` frame written half-way would corrupt the worker's stream for
-    /// every request after it; and a forward the batch scheduler takes (a
-    /// decode step, one token's work) is not watched either — the per-token
-    /// loop above it already reads the flag between steps.
+    /// Only the wait is watched — both of them. The send is never interrupted,
+    /// because a `Forward` frame written half-way would corrupt the worker's
+    /// stream for every request after it.
+    ///
+    /// The batch-scheduled wait used to be left unwatched on the grounds that
+    /// it carries "a decode step, one token's work", with the per-token loop
+    /// above reading the flag between steps. That reasoned about the WORK and
+    /// the cost is the WAIT: the batch is answered by a worker that handles
+    /// its messages in order, so one token's work can sit behind another
+    /// request's prompt pass or a model load, with no timeout under it
+    /// (report #021).
     ///
     /// `None` is a forward with no request of ours behind it — a segment served
     /// for a remote coordinator, whose cancel arrives over the network as
@@ -4218,11 +4246,31 @@ impl ModelProcessPool {
                     .await
                     .is_ok()
                 {
-                    return resp_rx.await.unwrap_or_else(|_| {
-                        Err(SwarmError::Internal(
-                            "batch scheduler dropped response".into(),
-                        ))
-                    });
+                    // Watched, for the same reason the direct path is. The
+                    // WORK behind this wait is one token, but the WAIT is not
+                    // bounded by it: the batch is collected, dispatched over
+                    // one IPC message and answered by a worker that handles
+                    // its messages in order, so a batch can sit behind another
+                    // request's prompt pass or a multi-gigabyte model load
+                    // with nothing to time it out. Measured on a 16 GB machine
+                    // (report #021): a client disconnected at 15:59:39 and its
+                    // request went on holding a worker slot until 16:04:23,
+                    // ending only when the tester killed the process by hand —
+                    // 4m42s of `execute_ms` inside a single forward.
+                    //
+                    // The per-token loop above does check the flag between
+                    // tokens, and its own comment says the longest a cancel can
+                    // sit unobserved is one `forward_through_segments`. This is
+                    // that one call, and it was the only unwatched wait left on
+                    // the path.
+                    let wait = async {
+                        resp_rx.await.unwrap_or_else(|_| {
+                            Err(SwarmError::Internal(
+                                "batch scheduler dropped response".into(),
+                            ))
+                        })
+                    };
+                    return crate::inference::cancel::unless_cancelled(wait, cancel.as_ref()).await;
                 }
                 // If the scheduler channel is closed, fall through to direct.
                 return Err(SwarmError::Internal(
@@ -5304,6 +5352,85 @@ impl ModelProcessPool {
 mod tests {
     use super::*;
 
+    /// A decode step the batch scheduler will accept: past the prompt pass,
+    /// no vision, LoRA, speculation, tensor parallelism or KV truncation.
+    #[cfg(test)]
+    fn schedulable_decode_forward() -> crate::types::LayerForward {
+        crate::types::LayerForward {
+            request_id: uuid::Uuid::new_v4(),
+            sequence_num: 1,
+            index_pos: 12,
+            activations: vec![0u8; 8],
+            format: crate::types::TensorFormat::FP16,
+            model_id: ModelId("m".into()),
+            layer_range: (0, 4),
+            tp_meta: None,
+            vision_embeddings: None,
+            chain: Vec::new(),
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+            chunk_meta: None,
+            sampling: None,
+        }
+    }
+
+    /// A request whose client has gone must not sit in the batch scheduler's
+    /// queue for as long as the worker happens to be busy.
+    ///
+    /// The wait carries one token's WORK, which is why it was left unwatched.
+    /// It is not bounded by that: the worker answers its messages in order, so
+    /// a decode step queues behind whatever it is already doing — another
+    /// request's prompt pass, or a multi-gigabyte model load. Measured on a
+    /// 16 GB machine (report #021), a request whose client disconnected at
+    /// 15:59:39 held its worker slot until 16:04:23 and ended only because the
+    /// tester killed the process.
+    ///
+    /// The stalled worker is modelled by a scheduler channel nobody drains —
+    /// exactly the state a busy worker puts this wait in.
+    #[tokio::test]
+    async fn a_cancelled_request_stops_waiting_on_a_stalled_batch_scheduler() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-batch-cancel"));
+        pool.continuous_batching
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (tx, _held) = mpsc::channel(4);
+        assert!(pool.batch_scheduler.set(tx).is_ok());
+
+        let forward = schedulable_decode_forward();
+        assert!(
+            forward_is_schedulable(&forward),
+            "the fixture must reach the batch scheduler, or this asserts nothing"
+        );
+
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        });
+
+        // Generous against the poll interval, and far below the 4m42s the
+        // report measured: without the fix nothing here ever completes and
+        // the test times out instead of returning.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            pool.forward_for_request(forward, Some(cancel)),
+        )
+        .await
+        .expect("the wait must end when the request is abandoned, not hang");
+
+        let err = outcome.expect_err("an abandoned request does not produce a result");
+        assert!(
+            crate::inference::cancel::is_request_abandoned(&err),
+            "expected the abandoned marker, got: {err}"
+        );
+    }
+
     /// The reported macOS failure, as arithmetic (2026-09-03, Mac mini M4).
     ///
     /// macOS hands every user a private per-boot temp directory; the tester
@@ -5573,6 +5700,53 @@ mod tests {
         h.charged_mb.store(mb, Ordering::Release);
         p.workers.insert(m.clone(), h.clone());
         h
+    }
+
+    /// The regression the whole-model capacity check would otherwise have been.
+    ///
+    /// `max_local_hostable_layers` weighs a SPAWN against what is already
+    /// committed, and a resident model's own weights are part of that — so
+    /// asked about a model this node is currently running, it reports the room
+    /// left BESIDE it, which is close to none. A caller reading that as "this
+    /// node cannot hold the model" would take a node off the model it is
+    /// happily serving, on the strength of the memory that model is using.
+    #[tokio::test]
+    async fn a_model_this_node_is_already_running_is_not_judged_too_big_for_it() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-hosts-whole"));
+        let model = ModelId("resident-14b".into());
+        pool.set_ram_budget_mb(8192);
+
+        assert!(
+            !pool.hosts_whole_model(&model, 48),
+            "nothing is loaded yet, so the answer is no"
+        );
+
+        let handle = admit_and_insert_cpu_worker(&pool, &model, 6000, false).await;
+        handle.record_charged_segment((0, 48), 0);
+        assert!(
+            pool.hosts_whole_model(&model, 48),
+            "a live worker charged for the whole range is holding it"
+        );
+
+        // The control that shows this is not simply "a worker exists": a
+        // worker holding only the tail cannot answer for the whole model.
+        let partial = ModelId("tail-only".into());
+        let tail = admit_and_insert_cpu_worker(&pool, &partial, 500, false).await;
+        tail.record_charged_segment((29, 48), 0);
+        assert!(
+            !pool.hosts_whole_model(&partial, 48),
+            "holding [29..48) is not holding the model"
+        );
+
+        // And a worker whose process has died holds nothing, whatever it was
+        // charged for — the same reason `live_worker` filters on `dead`.
+        let gone = ModelId("dead-one".into());
+        let corpse = admit_and_insert_cpu_worker(&pool, &gone, 500, true).await;
+        corpse.record_charged_segment((0, 48), 0);
+        assert!(
+            !pool.hosts_whole_model(&gone, 48),
+            "a dead worker is not holding anything"
+        );
     }
 
     /// `placed_on_cpu_because: None` means the worker was holding the card.

@@ -2,6 +2,203 @@
 
 Captures items deliberately deferred from the model-management redesign and from prior sweeps. Each entry has enough context that a future implementer (or a future me) can pick it up without re-deriving the rationale.
 
+## Peer ranking uses ping, and a big payload under loss is not ping (open, 2026-09-07)
+
+Measured and reported by the contributor on issue #21, with a published harness
+(`github.com/NidhalxMRR/netem-lab-swarmllm` — rootless veth namespaces, `tc
+netem`, self-testing). This is the first outside measurement of our routing
+inputs, and it is a good one.
+
+At an 8 KB payload, ranking peers by `latency_ms` matches ranking them by actual
+transfer time exactly. At **513 KB — our speculative-verify round size — it does
+not**: a peer at 60 ms ping with 3% loss was **2.9x slower in wall clock** than a
+peer at 80 ms ping with no loss, 3 trials of 3. He is explicit that this does not
+contradict the documented sort invariant; the point is narrower and correct —
+`latency_ms` is a weak proxy for transfer time once the payload is large enough
+for loss and retransmission to dominate.
+
+He also reports, from his own provider testing, two hosts in the same city with
+the same GPU differing 1.2 tok/s against 11-17 tok/s on 200-400 ms vs 80-100 ms
+RTT. Same lesson from the other direction.
+
+**Why this is worth acting on.** It is the same defect class as report #022 and
+gotcha #446: a number we rank on describes something other than the cost we
+actually pay. #022 was memory (a peer advertising twice what it will honour);
+this is bandwidth (a ping that cannot see loss). And the routing rules already
+made this move once, for latency: `ack_srtt_ms` was preferred over the health
+ping precisely because the ping is taken idle and cannot see the queueing a real
+forward meets.
+
+**The shape of the fix, if picked up.** A loss or retransmit term beside
+`latency_ms` in the ranking key, and — following `ack_srtt_ms` — measured from
+traffic we actually send rather than probed. The observation is already
+available: `PeerSpeed` carries `delivery_intact_ratio`, an EMA of intact
+deliveries, and nothing in `vertex_cost` reads it. Bound it the way
+`ACK_SRTT_ROUTING_CAP_MS` bounds its input, and keep "unknown never excludes".
+
+**Do not size this from the ping.** The thing being corrected is precisely that
+the ping does not contain the information; a term derived from it would inherit
+the blindness. And note the payload threshold matters — at decode-step sizes the
+existing ranking is measurably correct, so a term that fires at 8 KB would be
+making a correct decision worse.
+
+**Two things from the same thread worth recording.** He accepted both
+corrections from our reply and edited the issue body; and he could NOT reproduce
+the Mac mini's memory incident on a 16 GB CPU box (v0.3.161, suite green), which
+narrows that class to the Mac's own configuration rather than to the 16 GB
+profile in general.
+
+## A layer range contained in a resident one is loaded twice (open, 2026-09-07)
+
+Reported as #021 and confirmed. `ensure_model_loaded` keys the worker's models
+map on the exact `(start, end, tp_rank, tp_size)`, and `subsumed_segment_keys`
+handles only the direction report #010 was about — an incoming range that
+SUBSUMES resident ones. The reverse misses: resident `[0..48)`, incoming
+`[29..48)` loads a second copy of layers 29-47. Measured in the field at 19 of
+48 layers, ~3.4 GB of a 14B on a 16 GB machine, one minute apart, contributing
+to ~8 GB of swap.
+
+**Both obvious repairs were investigated and rejected on evidence.**
+
+*Serve the sub-range from the resident superset.* The layer loop walks all of
+`self.layers` with no offset (executor.rs:605-606), and `is_first`/`is_last` are
+not per-forward flags — they are `tok_embeddings.is_some()` / `output.is_some()`,
+baked in at load time from `compute_first_last`. The reported case is
+tail-aligned, so `is_last` agrees by luck; containment is general, and a middle
+sub-range served this way would apply the final norm and output head to hidden
+states meant to continue to another node. Making it general needs an offset
+threaded through ~6 forward entry points, `is_first`/`is_last` decoupled from
+component presence, and `kv_bytes_per_token` derived per forward instead of read
+from a fixed field — all of which unpicks the assumption that a `SplitModel`'s
+range statically describes its behaviour, which KV keying and the daemon's
+`charged_segments` both lean on.
+
+*Drop the superset and load the subset.* Worse. A resident whole-model instance
+is very likely serving other conversations, whose `KvCacheEntry`s are keyed by
+its `kv_model_key`; dropping it orphans them, and the next decode step reads an
+empty cache while `index_pos` says otherwise — silent corruption, not an error.
+Nothing here does the drain-before-kill that `unload_model` does.
+
+*Skip the charge for a covered range* — proposed by the original #010 report and
+correctly refused then, for the same reason now: the worker really does load a
+second copy, so the charge is accurate. Under-counting real memory on a machine
+already swapping is the wrong side of the double-count.
+
+**What shipped instead**: the worker now WARNS when it loads a range contained in
+one it already holds, naming both ranges and the duplicated layer count. Until
+now the only evidence was two "Model loaded" lines a minute apart, which reads
+like a retry.
+
+**What reduces its incidence, already shipped**: report #018's fix. A node that
+cannot hold every layer no longer takes the whole model through the fast path,
+so it is assigned the range it can hold INSTEAD of the whole model rather than in
+addition to it, and `max_local_hostable_layers` nets off what is already
+committed.
+
+If this is picked up, the offset-threading route is the real fix and the entry
+point is `SplitModel::forward_inner_impl`; budget for the `is_first`/`is_last`
+decoupling being the risky part, and pin it with a test that serves a genuine
+MIDDLE sub-range from a whole-model instance, not a tail — the tail passes by
+accident.
+
+## A conversation's later turns do not seek out the peer holding its prefix (open, 2026-09-07)
+
+Reported from the field (#023): consecutive turns of one chat against
+qwen2.5-14b landed on three different peer chains in a row, so each turn paid
+near-full prefill despite the prefix cache working correctly.
+
+**The report's headline is wrong in a useful way.** It says nothing in routing is
+session-aware. There IS a mechanism: `dispatch_single` (router/mod.rs:855-945)
+asks `KvCacheManager::get_previous_pipeline` for a request carrying a
+`session_id` and reuses the ENTIRE previous `PipelineAssignment` verbatim,
+skipping `assemble_pipeline_for` altogether. It already gets right the thing the
+report reasons its way to — affinity has to be whole-chain, because each peer
+holds the prefix for its own layer range only.
+
+**Why it does not fire.** `session_id` is a SwarmLLM extension on
+`ChatCompletionRequest` (api/openai/types.rs:52), not part of the OpenAI schema,
+so an ordinary OpenAI-format client never sends one. The built-in chat tab is
+the case that does. So the mechanism is unreachable for exactly the clients most
+likely to hold a long conversation.
+
+**And when it does fire it degrades all-or-nothing.** `all_connected`
+(distributed_exec.rs:618-620) requires EVERY node of the previous chain to still
+be connected; one flaky peer discards the whole affinity and the next turn is
+planned from scratch with no preference at all.
+
+Two separable pieces of work, in order of value:
+
+1. **Make the affinity reachable.** Either derive a session key when the client
+   does not supply one — the obvious candidate is a hash of the conversation
+   prefix, which is what actually determines whether a cached prefix helps — or
+   document `session_id` loudly enough that clients set it. The first is
+   strictly better: it keys on the thing that makes the optimisation valid
+   rather than on a client remembering to opt in. It must not key on anything
+   that would collide between users.
+2. **Degrade gracefully instead of discarding.** Thread the previous chain into
+   `gather_candidates` as a preference and let `vertex_cost` subtract a small
+   affinity term for a candidate whose (node, range) matches. Bounded well under
+   a typical compute/network delta so it can never outrank a genuinely better
+   peer, and applied only to candidates that already passed the liveness and
+   capacity filters, so a stale preference can never pin a request to a dead or
+   full peer.
+
+**Do not build a new cost term before doing (1)** — the mechanism that exists is
+strictly stronger than a tie-break when it applies, and measuring a tie-break
+while the stronger path never engages would attribute its win to the wrong
+thing.
+
+**Not to be confused with the LOCAL case, which was measured and works**: a
+~4200-token system prompt costs 11.94 s cold and 0.12 s on an identical repeat,
+including across turns. This is distributed-only.
+
+## Replica counts do not react to holders being unusable (open, 2026-09-07)
+
+Reported as #024: `geo_target_replicas` (auto_manage/scoring.rs) and
+`recommended_replica_target` (auto_manage/wishlist.rs) take pool size and demand
+only, never how often a shard's existing holders actually fail to serve. On a
+6-7 node swarm the log2 floor already spends ~3 of 7 slots on redundancy, so
+losing one holder to a refusal is a third of it.
+
+Accurate as a description, and deliberately NOT implemented, for a reason worth
+recording: **the failures that provoked the report were a pricing bug, not a
+redundancy gap.** The peers in #022 held the shard, were reachable, and would
+have served a correctly-sized ask — the coordinator offered them segments priced
+off a raw free-RAM figure their own admission halves. Feeding those refusals
+into a replica count would spend bandwidth duplicating a shard whose only
+problem was that the request was mis-sized, and since the mismatch was systemic
+across every default-contribution node it would have fired on every holder at
+once, with no natural stopping point.
+
+Preconditions before revisiting: #022's fix in the field, and a failure class
+that separates "holder unreachable / has no worker" from "holder refused on
+capacity" — the code already distinguishes these
+(`remote_error_means_missing_shard` vs `message_means_peer_cannot_serve`).
+Smallest defensible version then is a decayed per-(shard, holder-set) counter of
+the FIRST class only, with hysteresis, never a continuous multiplier.
+
+## GPU on Apple Silicon: no backend is compiled, on either path (open, 2026-09-07)
+
+From #019. The macOS aarch64 release is built with `features: ""`
+(.github/workflows/release.yml:184-190) — not even `llama` — so llama-cpp-2 is
+absent from the Mac binary entirely, and the candle split path (which is what
+actually runs inference here) resolves its device through
+`Device::cuda_if_available` with `candle-cuda` not compiled in, i.e. always
+`Device::Cpu` (inference/split/loader/mod.rs:244-247).
+
+So there are two distinct gaps and the smaller one is the tempting one. Adding
+`llama-cpp-2/metal` would populate `gpu_info` and fix the DISPLAY, while leaving
+every inference on the processor — the worst outcome, since the dashboard would
+then promise a card that never runs anything. Real Metal support means wiring
+`candle-core/metal` through an analog of the `candle-cuda` feature and taking
+the split executor's kernels with it; candle already vendors the feature
+(vendor/candle/candle-core/Cargo.toml:48-52), and
+`inference/split/token_embedding.rs` already notes Metal lacks the row-gather
+path, so the work is real but scoped.
+
+The mislabel this produced is fixed separately (a build fact was being stated as
+a hardware fact); this entry is only about making the hardware usable.
+
 ## Routing never learns a peer is slow on the speculative path (single-token half FIXED 2026-08-30; batch half open)
 
 **Measured, reproducible, and costing about 250x on the case below.** The half

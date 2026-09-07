@@ -687,6 +687,16 @@ impl HealthMonitor {
             cpu: local_cpu_info(),
             ram_total_mb,
             ram_available_mb,
+            // What a model may ACTUALLY take here, which is the figure a peer
+            // scheduling work onto this node needs — `ram_available_mb` is the
+            // operating system's reading and is roughly twice it on a default
+            // install, so a peer routing on that offers segments this node's
+            // own admission then refuses (report #022). `None` on a node whose
+            // models go to a graphics card: `gpu.vram_available_mb` answers for
+            // those, and it already excludes what is resident.
+            ram_model_budget_mb: crate::model::auto_manage::vram::node_ram_model_budget_mb(
+                &self.shared_state,
+            ),
             disk_available_mb,
             bandwidth_mbps: 0.0,
             hosted_shards: hosted_shards.clone(),

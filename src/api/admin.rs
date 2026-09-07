@@ -1835,6 +1835,20 @@ pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serd
     let gpu_inference = shared_state.gpu_info.is_some();
     let inference_backend = shared_state.gpu_info.as_ref().map(|g| g.backend.clone());
 
+    // Could this BUILD drive a graphics card at all, on this platform?
+    //
+    // Distinct from whether one was DETECTED, and the dashboard needs both:
+    // with no detection path compiled in, "no GPU" is a statement about the
+    // binary and not about the machine. A Mac reports no card because the
+    // macOS artifact ships neither backend — the hardware is real and simply
+    // unaddressed — and rendering that as "None / CPU only" tells its owner
+    // they have no graphics card (report #019).
+    let gpu_backend_in_build = cfg!(feature = "candle-cuda") || cfg!(feature = "llama-vulkan");
+    // Whether the processor and the graphics card draw on ONE pool of memory.
+    // Where they do, a RAM figure beside a separate VRAM figure describes
+    // hardware that does not exist, so the panel presents one number.
+    let unified_memory = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+
     // One derivation of "how fast is this machine", shared with the capability
     // gossip in `health::monitor` — see `node_memory_bandwidth_gbps` for why
     // this endpoint used to answer `null` on a processor-only node while every
@@ -1863,6 +1877,9 @@ pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serd
         "gpu_vram_used_mb": gpu_vram_used_mb,
         "gpu_inference": gpu_inference,
         "inference_backend": inference_backend,
+        "gpu_backend_in_build": gpu_backend_in_build,
+        "unified_memory": unified_memory,
+        "os": std::env::consts::OS,
         // `inference_backend` is a property of the BUILD. These are the models
         // that are NOT on the GPU right now despite it — pinned there by a GPU
         // OOM. Without this the API reported "CUDA" while everything ran on the
