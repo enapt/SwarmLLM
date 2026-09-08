@@ -61,7 +61,7 @@ fi
 # (gotcha #283).
 stop_by_port() {
     for p in $(pgrep -x swarmllm 2>/dev/null); do
-        if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -qE -- "(--port|-p) $1( |$)"; then
+        if cat "/proc/$p/cmdline" 2>/dev/null | tr '\0' ' ' | grep -qE -- "(--port|-p) $1( |$)"; then
             kill "$p" 2>/dev/null || true
         fi
     done
@@ -120,4 +120,4 @@ echo "Waiting 20s for mDNS discovery + shard announcements..."
 sleep 20
 echo
 echo "Coordinator: port $BASE_PORT  api_key=$(cat ${PREFIX}_0/api_key 2>/dev/null)"
-echo "Stop with: for i in \$(seq 0 $HOLDERS); do for p in \$(pgrep -x swarmllm); do tr '\\0' ' ' < /proc/\$p/cmdline | grep -q -- \"-p \$((${BASE_PORT}+i))\" && kill \$p; done; done"
+echo "Stop with: for i in \$(seq 0 $HOLDERS); do for p in \$(pgrep -x swarmllm); do cat /proc/\$p/cmdline 2>/dev/null | tr '\\0' ' ' | grep -q -- \"-p \$((${BASE_PORT}+i))\" && kill \$p; done; done"

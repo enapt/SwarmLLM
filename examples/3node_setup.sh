@@ -24,7 +24,7 @@ BENCH_PORT_C="${BENCH_PORT_C:-8892}"
 stop_bench_node() {
     local port="$1"
     for p in $(pgrep -x swarmllm 2>/dev/null; pgrep -f '[s]warmllm-[a-z0-9_.-]* run' 2>/dev/null); do
-        if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -qE -- "(--port|-p) $port( |$)"; then
+        if cat "/proc/$p/cmdline" 2>/dev/null | tr '\0' ' ' | grep -qE -- "(--port|-p) $port( |$)"; then
             kill "$p" 2>/dev/null || true
         fi
     done
@@ -80,5 +80,5 @@ done
 
 echo
 echo "Done. To stop these nodes only: for p in $BENCH_PORT_A $BENCH_PORT_B $BENCH_PORT_C; do
-  for pid in \$(pgrep -x swarmllm); do tr '\\0' ' ' < /proc/\$pid/cmdline | grep -q -- \"-p \$p\" && kill \$pid; done
+  for pid in \$(pgrep -x swarmllm); do cat /proc/\$pid/cmdline 2>/dev/null | tr '\\0' ' ' | grep -q -- \"-p \$p\" && kill \$pid; done
 done"

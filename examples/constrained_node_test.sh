@@ -80,7 +80,7 @@ start_node() {
 
 stop_node() {
   for pid in $(pgrep -f swarmllm 2>/dev/null); do
-    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "$D" && kill "$pid" 2>/dev/null
+    cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ' | grep -q "$D" && kill "$pid" 2>/dev/null
   done
   sleep 3
 }
@@ -126,7 +126,7 @@ check "answers"                           "$(echo "$OUT" | grep -q '"content"' &
 
 echo "[3] SIGKILL the worker (what an OS OOM-kill looks like)"
 WPID=$(for pid in $(pgrep -f 'model-worker' 2>/dev/null); do
-         tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "$D" && echo "$pid"
+         cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ' | grep -q "$D" && echo "$pid"
        done | head -1)
 if [ -z "${WPID:-}" ]; then
   echo "  FAIL — no worker subprocess found to kill"; fails=$((fails+1))
@@ -158,7 +158,7 @@ if [ -d "$SRC2" ]; then
   OUT=$(ask "$MODEL")
   check "the big model loads first" "$(echo "$OUT" | grep -q '"content"' && echo 1 || echo 0)" "$OUT"
   WPID2=$(for pid in $(pgrep -f 'model-worker' 2>/dev/null); do
-            tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "$D" && echo "$pid"
+            cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ' | grep -q "$D" && echo "$pid"
           done | head -1)
   if [ -n "${WPID2:-}" ]; then
     kill -9 "$WPID2"; sleep 8
