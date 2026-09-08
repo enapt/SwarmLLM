@@ -2,6 +2,170 @@
 
 Captures items deliberately deferred from the model-management redesign and from prior sweeps. Each entry has enough context that a future implementer (or a future me) can pick it up without re-deriving the rationale.
 
+## Open bugs — triage index (2026-09-08)
+
+**This file is 13k lines and mixes live defects with deferred design work and measured
+dead ends. This index is the list of things that are WRONG and still open.** Perf
+opportunities, rejected experiments and completed plans are below and deliberately not
+here. Entries are re-verified against the code on the date shown — a stale "open"
+entry is worse than no entry, and this pass found three (a quarter of the list).
+
+Priority is user-visible impact x how many users x whether it fails silently.
+
+### P1 — a whole platform, or every request of a kind
+
+| # | Bug | Why it ranks here |
+|---|---|---|
+| 1 | GPU on Apple Silicon: no backend is compiled, on either path | **Every Mac runs on CPU.** Large user population, no workaround, and the machine looks healthy while doing it |
+| 2 | Peer ranking uses ping, and a big payload under loss is not ping | Found from OUTSIDE by a contributor's netem lab (issue #21). The loss half shipped as #495 in v0.3.164; **the goodput half is open** and nothing measures per-peer throughput |
+
+### P2 — wrong behaviour, narrower or needing a decision first
+
+| # | Bug | Why it ranks here |
+|---|---|---|
+| 3 | The routing cost model's network term overestimates a boomerang | **NEW 2026-09-08.** Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. Biases the whole swarm toward keeping work local |
+| 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
+| 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
+| 6 | A worker's memory reservation over-counts after it drops a superseded range | Verified still open 2026-09-08: `model_worker.rs:792` does `models.remove(&stale)` with no charge release, so the worker frees memory and keeps paying for it — refuses models that would fit |
+| 7 | `cheapest_peer_cost_ms` names a peer the search structurally cannot use | **NEW 2026-09-08.** Actively misleads diagnosis; the field exists (gotcha #460) to prevent exactly the reasoning it now causes |
+
+### P3 — correctness-adjacent, or blocked on a measurement
+
+| # | Bug | Why it ranks here |
+|---|---|---|
+| 8 | The RAM headroom clamp has a floor that can never refuse | Instrumented in `501c8ec8`; needs one `floor_is_binding` reading from a healthy small machine to decide keep-or-remove |
+| 9 | A CPU-only node advertises its graphics card's speed | **NEW 2026-09-08.** Gossiped, so peers rank it by a speed it will not deliver. Not yet confirmed unintended |
+| 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
+| 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | Needs a debug occupancy trace; harness in `memory/round_log_0902_perf_commits.md` |
+
+### P4 — test and infrastructure
+
+| # | Bug | Why it ranks here |
+|---|---|---|
+| 12 | `r134_receiver_applies_diff_and_advances_generation` is load-sensitive | Fails beside a build, 3/3 idle. **Check runner load before blaming a change** |
+| 13 | `Could not decrypt forward` from one peer | **Dormant.** All 24 occurrences were one peer on one day (2026-08-31); none since, and every one failed over correctly. Kept because it may recur |
+
+### Closed in this pass (were listed open, verified fixed in code 2026-09-08)
+
+- A layer range contained in a resident one is loaded twice — `subsumed_segment_keys`
+- A local admission refusal does not teach the planner — `LocalMemoryUnavailable` (v0.3.163)
+- The Compare tab waits without progress or a stop — Compare streams (v0.3.163)
+
+### Not bugs, and deliberately not ranked
+
+`Auto-enabled prompt privacy can cost 6x on a long prompt` is DECIDED and communicated,
+not a defect. The GPU-swap costing, prefix-keyed remote KV, f16 stored KV, ring decode
+and prefill microbatching are throughput work; they live under their own headings below.
+
+
+## The routing cost model's network term overestimates a boomerang (open, 2026-09-08)
+
+**Found by the #447(iii) field A/B, which is the first time the two routes were
+measured against each other on real hardware.**
+
+`parallax::vertex_cost` charges a remote segment that does NOT cover the whole model
+`2 * latency * ASSUMED_FORWARD_PASSES`, with `ASSUMED_FORWARD_PASSES = 64`
+(`src/inference/scheduler/parallax.rs:93`). For a privacy boomerang whose middle sits
+on a peer ~550 ms away that is `2 x 550 x 64 = ~70 s` of network, against ~13 s for
+running the whole model on the local processor — so the model predicts local wins by
+roughly 5x.
+
+**Measured, it is a tie.** meta-llama-3.1-8b, 150-token reply (139 tokens), warm, same
+prompt, same swarm, both arms the installed CUDA release binaries with
+`SWARMLLM_INFERENCE_GPU_LAYERS=0`:
+
+| build | route | throughput |
+|---|---|---|
+| v0.3.163 | `LOCAL:[0,1] \| macmini:[1,31] \| LOCAL:[31,32]` | 4.53 / 4.56 tok/s |
+| v0.3.164 | `LOCAL:[0,32]` | 3.87 / 4.52 tok/s |
+
+The boomerang's remote compute advantage (peer 15.2 tok/s advertised against ~5.4
+local) almost exactly cancelled its real network cost. If the network term were
+right, the .163 arm should have been several times slower. It was not.
+
+**Why this matters more than one tie**: since v0.3.164 the priced search — not the
+hand-off gate — decides whether to delegate, so this constant now drives every
+delegation decision instead of merely colouring one. An overestimate biases the whole
+swarm toward keeping work local, which is the opposite of what pipeline parallelism is
+for.
+
+**Before changing the constant, find out which half is wrong.** Two candidates, and
+they want different fixes: (a) 64 forward passes is simply the wrong count for a
+typical reply — it is a fixed guess where `max_tokens` is often known at scheduling
+time; (b) `2 * latency` per token overstates a real forward, because the measured
+per-token cost is well below the ping-derived round trip (pipelining, or `latency_ms`
+not being the right quantity — the same complaint as the goodput entry above).
+`ack_srtt_ms` already exists and is measured on real forwards; pricing from it rather
+than from the health ping is the obvious first experiment.
+
+**Do not simply lower the constant until this is understood** — it was raised
+deliberately, and the reverted `cbbed678` is the standing warning about tuning a
+routing constant on one topology's numbers.
+
+Harness: `SWARMLLM_INFERENCE_GPU_LAYERS=0` on both arms (the `SWARMLLM_` prefix is not
+optional), `GET /api/admin/models/:id/pipeline-plan` for the route, matched uptime
+>= 15 min, holder map asserted identical. Full method + the harness trap in
+`memory/round_log_0908_ab_447iii.md`.
+
+## `cheapest_peer_cost_ms` names a peer the search structurally cannot use (open, 2026-09-08)
+
+`scheduler::cheapest_whole_model_peer` filters candidates on exactly two things — not
+the local node, and `available_ranges` covering every layer. It applies **no capacity
+check and no shape check**, then prices with `parallax::vertex_cost`, i.e. the same
+function the search uses. So the figure is comparable and the candidate frequently is
+not.
+
+Observed live 2026-09-08 on the 8B decision:
+
+```
+cheapest_peer=bf7b32634b65626e cheapest_peer_cost_ms=3801.9
+local_processor_cost_ms=12929.0
+```
+
+That peer advertised `max_hostable_layers=Some(30)` for a **32-layer** model, and the
+model has prompt privacy on, so it could not have taken the whole model under any
+circumstances. Two independent disqualifications, neither visible in the line.
+
+**The cost is diagnostic, and it has already been paid.** This field was added
+(gotcha #460) precisely so that a reader would stop inventing mechanisms to explain a
+local decision, after "three reports in one day" did exactly that. Reading this line
+during the A/B, I concluded the router had left 3.4x on the table and spent real time
+on it before checking the candidate's capacity. **The fix for #460 reproduced #460's
+own failure one level down: it names the cheaper option without the fact that
+disqualifies it.**
+
+Either filter the candidate on the bound the search will apply, or — better, since
+"there was a cheaper peer and here is why it was unusable" is the genuinely useful
+sentence — report the disqualifier beside the price (`max_hostable_layers`, and
+whether privacy forbids the shape). A test should plant an over-capacity peer and
+assert the line does not present it as an unqualified missed opportunity.
+
+## A CPU-only node advertises its graphics card's speed (open, 2026-09-08)
+
+With `inference.gpu_layers = 0` the daemon logs the correct warning
+(`running CPU-only despite the detected GPU`) and the scheduler correctly prices the
+LOCAL candidate at processor speed — measured 4.95 tok/s, `has_gpu=false` in the
+candidate DIAG. But two figures on the stats surface do not follow:
+
+- `hardware.gpu_inference` stays `true`
+- `hardware.est_tokens_per_sec_7b` stays the GPU-derived figure (35.6 tok/s against
+  the 4.95 the scheduler itself uses), and `memory_bandwidth_gbps` stays 448 — the
+  card's bandwidth, not the machine's RAM
+
+`est_tokens_per_sec` is gossiped, so **peers rank this node by a speed it will not
+deliver**, and `delegation_target`'s `DELEGATE_MIN_CPU_SPEEDUP` comparison on the far
+side is made against it. This is the same class as the memory field, which was fixed
+deliberately: `NodeCapability::memory_for_model_layers_mb` tests the stated RAM budget
+BEFORE the card for exactly this reason ("A node that HAS a card and has been told not
+to use it still gossips that card, because the card is really there"). The speed field
+appears never to have had the equivalent.
+
+**Not confirmed as unintended** — `gpu_inference` may legitimately mean "this build
+and machine can do GPU inference". The speed figure is harder to defend. Check both
+against what a peer's scheduler does with them before changing either; the fix, if
+one is wanted, belongs where the capability is built (`health/monitor.rs`) and must be
+additive per the protocol rule.
+
 ## Peer ranking uses ping, and a big payload under loss is not ping (open, 2026-09-07)
 
 Measured and reported by the contributor on issue #21, with a published harness
@@ -48,7 +212,15 @@ the Mac mini's memory incident on a 16 GB CPU box (v0.3.161, suite green), which
 narrows that class to the Mac's own configuration rather than to the 16 GB
 profile in general.
 
-## A layer range contained in a resident one is loaded twice (open, 2026-09-07)
+## A layer range contained in a resident one is loaded twice (FIXED 2026-09-05)
+
+**FIXED** — `model_worker::subsumed_segment_keys` drops strictly-subsumed ranges
+BEFORE the new one loads, so the process holds `max(old, new)` rather than their sum.
+Verified 2026-09-08: `src/inference/model_worker.rs:591` (helper), `:792` (drop site),
+`:2341` (tests). **The residual is a separate entry** — the charge is not released
+when the range is dropped; see "A worker's memory reservation over-counts after it
+drops a superseded range", which is still open.
+
 
 Reported as #021 and confirmed. `ensure_model_loaded` keys the worker's models
 map on the exact `(start, end, tp_rank, tp_size)`, and `subsumed_segment_keys`
@@ -484,7 +656,15 @@ KV ceiling is now reconciled with free system memory at every decision, so a
 filling machine produces a 503 that re-routes rather than an OOM-killed
 process. This entry is the remaining looseness in the *daemon-side* admission.
 
-## A local admission refusal does not teach the planner (open, 2026-09-04)
+## A local admission refusal does not teach the planner (FIXED 2026-09-08, v0.3.163)
+
+**FIXED in v0.3.163** — `SwarmError::LocalMemoryUnavailable` plus
+`SharedState::note_local_memory_refusal` / `local_memory_refused_for_request`; the
+re-plan reads the loader's verdict so it cannot hand this node the whole model twice.
+Shaped as Kubernetes' queueing hint rather than a blanket retry, which would have been
+the retry-on-overload anti-pattern. Rule: `.claude/rules/architecture.md` § "A re-plan
+is warranted by a changed fact, never by a failed attempt". Verified 2026-09-08.
+
 
 Reported live on v0.3.153 in `SwarmLLM_PipelineMemoryAwareness_20260904.md`: a
 processor-only Mac mini holding every shard was assigned 36 of a 14B's 48
@@ -514,7 +694,14 @@ learning ratchet on a hypothesis about how the shipped fix behaves is the
 mistake `.claude/rules/diagnosis.md` rule 1 exists to prevent. Ask for that one
 line first.
 
-## The Compare tab still waits without showing progress or letting you stop (open, 2026-09-05)
+## The Compare tab still waits without showing progress or letting you stop (FIXED 2026-09-08, v0.3.163)
+
+**FIXED in v0.3.163** — Compare streams (`stream: true`,
+`frontend/js/components/compare.js:181`) and re-assembles deltas into the same
+result shape the non-streaming path produced, and every reply now renders through the
+one shared `utils.renderReplyInto`. Rule: `.claude/rules/architecture.md` § "Every
+surface that shows a model's reply renders it the same way". Verified 2026-09-08.
+
 
 Report #009's fixed 45 s client abort is gone — it was discarding replies the
 daemon had completed — and pending cards now tick an elapsed count so a slow

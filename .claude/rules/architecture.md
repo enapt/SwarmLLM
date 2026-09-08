@@ -526,6 +526,29 @@ belt-and-braces on a plan that has to survive pricing anyway, and the gate could
 in principle be reduced to the trust filter alone. Left standing because they
 are the only thing deciding the fallback on a node where the search cannot run.
 
+**Field-verified 2026-09-08, and the measurement moved the open question.** A proper
+A/B — both arms the installed CUDA release binaries, same data dir and swarm,
+`SWARMLLM_INFERENCE_GPU_LAYERS=0` on both, matched uptime, holder map asserted
+identical — changed the plan on **5/5 models**. Two distinct behaviours, both as
+designed: on privacy-on models .163's gate CONSTRUCTS a boomerang unconditionally while
+.164 prices it and keeps the request local; on the privacy-off model `delegation_target`
+sorts by LATENCY and takes the first survivor, so .163 took the NEAREST peer (15.2 tok/s
+@ 551 ms) where the priced search took the genuinely cheaper one (23.9 tok/s @ 606 ms).
+That second case is the change doing precisely what it was written for.
+
+**But the throughput did not follow, and that is now the live risk in this design.**
+meta-llama-3.1-8b, 150-token reply, warm: .163's boomerang 4.53-4.56 tok/s against
+.164's all-local 3.87-4.52 — a tie, where `vertex_cost` prices the boomerang's middle at
+`2 * latency * ASSUMED_FORWARD_PASSES` = ~70 s of network against ~13 s local and so
+predicts local by ~5x. **Handing the decision to the search made that constant
+load-bearing**: it no longer merely colours a plan the gate had already chosen, it
+decides every delegation. An overestimate here biases the whole swarm toward keeping
+work local, which is the opposite of what pipeline parallelism is for. Do NOT tune the
+constant before establishing which half is wrong — the forward-pass count, or the
+per-token `2 * latency` — and note `ack_srtt_ms` is already measured on real forwards
+where `latency_ms` is a ping. See `docs/FUTURE_WORK.md` § "The routing cost model's
+network term overestimates a boomerang".
+
 ## A peer that will read the plaintext prompt clears a trust bar, whichever path chose it
 
 `scheduler::trusted_with_the_plaintext_prompt` is the one bar, read by

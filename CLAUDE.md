@@ -251,17 +251,21 @@ Three fixes:
   slower on 513 KB, 3/3 trials). Nothing internal could have caught it — suite
   green, lint clean, mechanism correct at every line, with nothing to read.
 
-⚠ **The field A/B of the routing change was CONFOUNDED and is RETRACTED** (gotcha
-#496): the two arms were different BUILDS — installed CUDA release vs a
-default-feature local build with **no CUDA**, which flips `serves_on_cpu` on its
-own. Two further errors in the same attempt were the convergence window (a
-96-second arm compared against a 15-minute one). **#447(iii) is therefore NOT
-field-verified**; it is verified single-node (smoke 9/9, shapes 7/7,
-constrained-node 11/11) and by unit tests with null controls.
-**Now doable properly**: both `~/.local/bin/swarmllm` (.164) and its `.163.bak`
-are CUDA builds, so an A/B differs only by the three commits — use
-`SWARMLLM_INFERENCE_GPU_LAYERS=0` (**the prefix is not optional**) and
-`GET /api/admin/models/:id/pipeline-plan`, at matched uptime ≥15 min.
+**The field A/B was RUN properly on 2026-09-08 and #447(iii) is FIELD-VERIFIED as
+firing — its performance benefit is NOT.** Both arms were the installed CUDA release
+binaries (`~/.local/bin/swarmllm` and `.163.bak`), same data dir and swarm,
+`SWARMLLM_INFERENCE_GPU_LAYERS=0` on both (asserted from the daemon's own
+`running CPU-only` line, never assumed), matched uptime, holder map asserted identical.
+**5/5 models changed plan**: .163's gate constructs a boomerang unconditionally, .164
+prices it and stays local; on the privacy-off model .163 took the NEAREST peer and .164
+the genuinely cheaper one. **But measured 8B throughput is a tie — ~4.5 tok/s both
+ways — where the cost model predicts local should win ~5x**, which is now its own
+FUTURE_WORK entry (`ASSUMED_FORWARD_PASSES`). The earlier attempt was confounded by
+two different BUILDS (gotcha #496); that is what the identity assertion above exists to
+prevent. ⚠ **A rearm must assert WHICH BUILD is running, not that something answers** —
+the first switch of this A/B silently failed (the old node held the DB lock, and the
+readiness probe found *it*) and reported "ready 1s". Method + findings:
+`memory/round_log_0908_ab_447iii.md`.
 
 **Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
