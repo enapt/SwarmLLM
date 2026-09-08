@@ -34,13 +34,14 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 8 | The RAM headroom clamp has a floor that can never refuse | Instrumented in `501c8ec8`; needs one `floor_is_binding` reading from a healthy small machine to decide keep-or-remove |
 | 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | Needs a debug occupancy trace; harness in `memory/round_log_0902_perf_commits.md` |
+| 17 | A long generation with no segment redundancy is lost entirely | **NEW 2026-09-08 (report #028).** The trigger is fixed; the two residuals are that no standby can be assembled from several nodes, and that already-generated tokens are discarded rather than returned |
 
 ### P4 — test and infrastructure
 
 | # | Bug | Why it ranks here |
 |---|---|---|
 | 12 | `r134_receiver_applies_diff_and_advances_generation` is load-sensitive | **Not reproduced in 48 runs (2026-09-08)**, incl. 8 full-suite runs at load 15.95; the `try_recv` hypothesis is disproved (the send is awaited inline). Kept only as "check runner load before blaming a change" |
-| 13 | `Could not decrypt forward` from one peer | **Dormant.** All 24 occurrences were one peer on one day (2026-08-31); none since, and every one failed over correctly. Kept because it may recur |
+| 13 | `Could not decrypt forward` from one peer | **NOT dormant — recurred on v0.3.164 (report #028) and the cause is now identified**: a disconnect destroyed the session key, and the two ends do not drop together. Fixed by retiring rather than destroying |
 
 ### Closed in this pass (were listed open, verified fixed in code 2026-09-08)
 
@@ -232,6 +233,45 @@ a peer, and exactly where this project keeps finding defects. **Check a reachabi
 claim against the code before ranking it**; "cold-start" and "the measurement failed"
 suggest very different priorities and only one of them was true.
 
+
+## A long generation with no segment redundancy is lost entirely (open, 2026-09-08)
+
+Report #028. A 4m43s distributed request on `qwen2.5-14b-instruct-q4-k-m` — already
+streaming, `decode_ms=270003` — died with `SegmentFailoverExhausted` when its tail peer's
+connection dropped and the retry reached the same node with `Could not decrypt forward`.
+
+**The trigger is fixed** (see `.claude/rules/architecture.md` § "A disconnect retires a
+session key"): the serving node destroyed its key on a brief drop while the coordinator
+kept sealing with it, so the forward in flight could not be read. That asymmetry is gone.
+
+**Two things the report raises that are NOT fixed, and should not be conflated with it.**
+
+**1. `total_standbys=0` for the whole plan.** `find_standbys` needs one candidate holding
+the segment's ENTIRE range (`r.0 <= start && r.1 >= end`), and nothing in that swarm
+covered layers 41-48 of that model. This is a fact about what the swarm was holding, not a
+bug in the search — no plan had redundancy available to choose. Two directions, neither
+free:
+
+- Let a standby be assembled from SEVERAL nodes covering the range between them.
+  `failover_segment` replaces one segment with one node, so this is a real change to the
+  failover shape, not a filter tweak.
+- Prefer a route that HAS standby coverage when one exists, at some cost in the primary
+  route's price. That needs the cost model to be trustworthy first, which is item 3.
+
+Note v0.3.165's `standby_may_take` moves the other way: it NARROWS eligibility (trust, and
+prompt privacy for the end segments). It could not have applied here — the plan's ends were
+remote, so privacy was off — but a future change in this area should weigh both.
+
+**2. The generated tokens are lost.** 270 seconds of decode had already happened. On a
+streamed request the client has that text and the stream then errors; on a non-streaming
+one it is lost entirely. Returning what was generated with a truncation `finish_reason`
+would be strictly better than an error, and is independent of everything above.
+`should_retry_after` deliberately does NOT retry once text has reached the client (a retry
+restarts generation from the prompt), so salvage — not retry — is the right shape here.
+
+**Do not treat the churn as the cause.** The report notes 11 connection-closed events for
+9 peers in the preceding 10 minutes, well above that day's baseline. That is what made the
+drop likely; it is not what made the drop fatal.
 
 ## Per-peer goodput: shipped, not yet field-verified (2026-09-08)
 

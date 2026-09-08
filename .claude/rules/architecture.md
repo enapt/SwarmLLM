@@ -971,6 +971,55 @@ exists because the window is five minutes and the app-limited rule governs only
 what happens across rotations — the first version of its test passed with the
 rule disabled.
 
+## A disconnect retires a session key; it must not destroy it
+
+`SessionManager::remove_session` moves the live key into `retired` — openable,
+never sealable, for `PREVIOUS_KEY_GRACE`, carrying its own replay window — and
+`open` falls back to it after the current and superseded keys, including when
+there is no session at all.
+
+**Why.** The removal exists to force a fresh handshake and stop epoch desync,
+and that part is right. Destroying the key with it is not: a forward sealed
+moments before the drop then cannot be read, and the `previous` slot that exists
+for exactly this problem goes with the entry.
+
+**The two ends do not drop together, and that asymmetry is the bug.**
+`handle_connection_closed` keeps the session when the peer is
+`in_active_pipeline` — but that reads `active_pipelines`, which is the
+COORDINATOR's map and holds nothing for work a node is SERVING for someone else
+(gotcha #194). So on a brief drop the server clears its session while the
+coordinator keeps sealing with the old key, and every forward in flight fails to
+decrypt. The serving side has no equivalent signal to consult: between decode
+tokens it has no inbound forward outstanding at all, so "is work in flight" is
+false precisely when the request is alive.
+
+Measured on v0.3.164 (report #028): a 4m43s generation, already streaming, died
+outright when its tail peer's connection dropped and the retry reached the same
+node with `Could not decrypt forward`. The identical signature was recorded five
+weeks and ninety-five versions earlier and closed as a rotation race on one
+peer; it is the same shape seen from the other side — a key one end threw away.
+
+Four things a change here must keep.
+
+- **Retired keys OPEN, never SEAL.** That is what keeps this from reintroducing
+  the nonce reuse the removal exists to prevent, and it is pinned by
+  `a_retired_key_cannot_be_used_to_seal`.
+- **The reconnect still handshakes afresh.** `retired` is a separate map, so it
+  does not satisfy `establish_session`'s idempotence guard.
+- **Its own replay window travels with it**, so this is a second authenticated
+  check rather than a relaxed one — WireGuard's per-keypair counter, the same
+  detail that made the previous-key grace safe when it was added.
+- **The window is bounded and swept.** `evict_stale` drops retired keys past the
+  grace period; holding one longer widens the window in which an old key opens
+  anything, for no benefit.
+
+**A test here must use an EPHEMERAL session.** `establish_session` derives from
+long-term identity keys, so a reconnect re-derives the identical key and a
+static-key test passes with the fix reverted — which is how the first version of
+`a_forward_in_flight_survives_the_peer_reconnecting` was written, and a null
+control caught it. Forward secrecy means the real link is ephemeral and a
+reconnect genuinely changes the key.
+
 ## A peer advertises the memory it will HONOUR, not the memory it has
 
 **`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much

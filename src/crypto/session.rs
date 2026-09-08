@@ -244,6 +244,35 @@ pub struct SessionManager {
     pending_ephemeral: DashMap<NodeId, PendingEphemeral>,
     /// Our ephemeral public keys for pending exchanges (used in key derivation).
     pending_ephemeral_pub: DashMap<NodeId, [u8; 32]>,
+    /// Keys retired because the PEER DISCONNECTED, kept openable — never
+    /// sealable — for [`PREVIOUS_KEY_GRACE`].
+    ///
+    /// **Why a disconnect must not destroy the key.** `remove_session` deletes
+    /// the whole `CachedSession`, including the `previous` slot that exists for
+    /// exactly this problem, so after a reconnect the node has no way to open a
+    /// message sealed moments earlier under the old key. And the two ends do
+    /// not drop together: `handle_connection_closed` keeps the session when the
+    /// peer is `in_active_pipeline`, but that reads `active_pipelines`, which is
+    /// the COORDINATOR's map and holds nothing for work a node is SERVING for
+    /// someone else (gotcha #194). So on a brief drop the server clears its
+    /// session while the coordinator keeps sealing with the old key, and every
+    /// forward already in flight fails to decrypt.
+    ///
+    /// Observed live on v0.3.164 (report #028): a 4m43s generation, already
+    /// streaming, died outright when its tail peer's connection dropped and the
+    /// retry reached the same node with `Could not decrypt forward`. The same
+    /// signature was recorded five weeks and ninety-five versions earlier and
+    /// attributed to a rotation race, which is the same shape from the other
+    /// side: a key one end has thrown away.
+    ///
+    /// Safety is unchanged where it matters. A retired key can only OPEN, never
+    /// seal, so it cannot cause nonce reuse; it keeps its own replay window, so
+    /// this is a second authenticated check rather than a relaxed one; and the
+    /// reconnect still performs a fresh handshake, because this map is separate
+    /// from `sessions` and so does not satisfy `establish_session`'s
+    /// idempotence guard. WireGuard keeps a previous keypair for the same
+    /// reason and with the same per-keypair counter.
+    retired: DashMap<NodeId, PreviousKey>,
 }
 
 impl SessionManager {
@@ -254,6 +283,7 @@ impl SessionManager {
         Self {
             local_secret: secret,
             local_public: public,
+            retired: DashMap::new(),
             sessions: DashMap::new(),
             pending_ephemeral: DashMap::new(),
             pending_ephemeral_pub: DashMap::new(),
@@ -449,7 +479,24 @@ impl SessionManager {
     /// Called when all connections to the peer are closed (remaining=0).
     /// Forces a fresh ECDH handshake on reconnection, preventing epoch desync.
     pub fn remove_session(&self, peer: &NodeId) {
-        let had_session = self.sessions.remove(peer).is_some();
+        // Retire rather than destroy. The session still goes — the peer must
+        // re-handshake, which is what this call is FOR — but its key is kept
+        // openable for `PREVIOUS_KEY_GRACE` so a forward already in flight,
+        // sealed moments ago under it, can still be read. See `retired`.
+        let removed = self.sessions.remove(peer);
+        let had_session = removed.is_some();
+        if let Some((_, session)) = removed {
+            self.retired.insert(
+                peer.clone(),
+                PreviousKey {
+                    cipher_key: session.cipher_key,
+                    // Its own accumulated window comes with it, so a replay
+                    // under the retired key is still caught.
+                    replay_window: session.replay_window,
+                    retired_at: Instant::now(),
+                },
+            );
+        }
         // Always clean pending ephemeral state — a peer may disconnect mid-handshake
         // before a session is established, orphaning these entries until evict_stale.
         self.pending_ephemeral.remove(peer);
@@ -518,15 +565,19 @@ impl SessionManager {
         if sealed.len() < 12 {
             return Err(SwarmError::DecryptionFailed);
         }
-        let session = self
-            .sessions
-            .get(peer)
-            .ok_or_else(|| SwarmError::NoSession(peer.clone()))?;
-
         // Extract nonce counter for replay pre-check (read-only — state updated after decrypt).
         let mut nonce_counter_bytes = [0u8; 8];
         nonce_counter_bytes.copy_from_slice(&sealed[4..12]);
         let recv_nonce = u64::from_le_bytes(nonce_counter_bytes);
+
+        let Some(session) = self.sessions.get(peer) else {
+            // No live session — but a message sealed just before the peer
+            // dropped can still be in flight, and refusing it here is what
+            // killed a 4m43s generation (report #028).
+            return self
+                .open_with_retired(peer, sealed, aad, recv_nonce)
+                .ok_or_else(|| SwarmError::NoSession(peer.clone()));
+        };
 
         if let Some(plaintext) = try_open_with(
             &session.cipher_key,
@@ -571,16 +622,52 @@ impl SessionManager {
             }
         }
 
+        // A session re-established after a disconnect has a brand-new key and
+        // no `previous`, so the key the sender is still using lives here.
+        if let Some(plaintext) = self.open_with_retired(peer, sealed, aad, recv_nonce) {
+            return Ok(plaintext);
+        }
+
         tracing::error!(
             peer = %peer,
             recv_nonce,
             aad_len = aad.len(),
             sealed_len = sealed.len(),
             had_previous = session.previous.is_some(),
-            "DIAG: open() decryption FAILED under both current and superseded keys \
+            had_retired = self.retired.contains_key(peer),
+            "DIAG: open() decryption FAILED under the current, superseded and retired keys \
              — likely AAD mismatch or an unrelated key"
         );
         Err(SwarmError::DecryptionFailed)
+    }
+
+    /// Try a key retired by a disconnect. Decrypt-only, within the grace
+    /// window, against that key's own replay window.
+    fn open_with_retired(
+        &self,
+        peer: &NodeId,
+        sealed: &[u8],
+        aad: &[u8],
+        recv_nonce: u64,
+    ) -> Option<Vec<u8>> {
+        let retired = self.retired.get(peer)?;
+        if retired.retired_at.elapsed() > PREVIOUS_KEY_GRACE {
+            return None;
+        }
+        let plaintext = try_open_with(
+            &retired.cipher_key,
+            &retired.replay_window,
+            sealed,
+            aad,
+            recv_nonce,
+        )?;
+        tracing::debug!(
+            peer = %peer,
+            recv_nonce,
+            retired_secs = retired.retired_at.elapsed().as_secs(),
+            "Opened with a key retired at disconnect — the sender had not yet noticed"
+        );
+        Some(plaintext)
     }
 
     /// Evict sessions older than `max_age` and pending ephemeral exchanges older than 60s.
@@ -593,6 +680,11 @@ impl SessionManager {
             }
             keep
         });
+        // Retired keys outlive their usefulness at the grace window; holding
+        // one longer would widen the window in which an old key still opens
+        // anything, for no benefit.
+        self.retired
+            .retain(|_, k| k.retired_at.elapsed() <= PREVIOUS_KEY_GRACE);
         // SEC: Purge pending ephemeral exchanges that were never completed.
         let ephemeral_ttl = std::time::Duration::from_secs(PENDING_EPHEMERAL_TTL_SECS);
         let before = self.pending_ephemeral.len();
@@ -1220,5 +1312,133 @@ mod tests {
         assert!(sm_b.open(&node_a, &sealed1, aad).is_err());
         assert!(sm_b.open(&node_a, &sealed2, aad).is_err());
         assert!(sm_b.open(&node_a, &sealed3, aad).is_err());
+    }
+}
+
+#[cfg(test)]
+mod disconnect_retirement_tests {
+    use super::*;
+
+    fn pair() -> (SessionManager, SessionManager, NodeId, NodeId) {
+        let a = SessionManager::from_ed25519_key(&[7u8; 32]);
+        let b = SessionManager::from_ed25519_key(&[9u8; 32]);
+        let na = NodeId([1u8; 32]);
+        let nb = NodeId([2u8; 32]);
+        assert!(a.establish_session(&nb, b.local_public));
+        assert!(b.establish_session(&na, a.local_public));
+        (a, b, na, nb)
+    }
+
+    /// **The defect report #028 exposed.** A forward is sealed, the peer's
+    /// connection drops and comes back, and the message already in flight then
+    /// cannot be read — because `remove_session` destroyed the key along with
+    /// the `previous` slot that exists for exactly this.
+    ///
+    /// Measured live on v0.3.164: a 4m43s generation, already streaming, lost
+    /// outright when its tail peer reconnected and answered `Could not decrypt
+    /// forward`.
+    #[test]
+    fn a_forward_in_flight_survives_the_peer_reconnecting() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+
+        // **The pair MUST be on an ephemeral session, not the static one.**
+        // `establish_session` derives from long-term identity keys, so a
+        // reconnect re-derives the IDENTICAL key and the message opens whether
+        // or not anything was retired — the first version of this test passed
+        // with the fix reverted for exactly that reason. Forward secrecy means
+        // the real link is ephemeral, and a reconnect genuinely changes the key.
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub);
+        assert!(a.complete_ephemeral_session(&nb, &b_pub));
+        let sealed = a.seal(&nb, b"activations", aad).unwrap();
+
+        // B's connection drops. Its guard cannot see that it is mid-request:
+        // `active_pipelines` is the coordinator's map and holds nothing for
+        // work B is serving for A (gotcha #194).
+        b.remove_session(&na);
+        // ...and it comes back, handshaking afresh — a DIFFERENT key.
+        assert!(b.establish_session(&na, a.local_public));
+        assert!(
+            b.seal(&na, b"probe", aad).is_ok(),
+            "control: B really did install a usable new session"
+        );
+
+        let opened = b
+            .open(&na, &sealed, aad)
+            .expect("a message sealed moments before the drop must still open");
+        assert_eq!(opened, b"activations");
+    }
+
+    /// The same, with no reconnect yet — the message arrives while the session
+    /// is simply gone. `NoSession` was returned before anything was tried.
+    #[test]
+    fn a_forward_arriving_after_the_drop_still_opens() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+        let sealed = a.seal(&nb, b"activations", aad).unwrap();
+        b.remove_session(&na);
+        assert_eq!(b.open(&na, &sealed, aad).unwrap(), b"activations");
+    }
+
+    /// **A retired key opens; it never seals.** That is what keeps this from
+    /// reintroducing nonce reuse — the whole reason the disconnect clears the
+    /// session in the first place.
+    #[test]
+    fn a_retired_key_cannot_be_used_to_seal() {
+        let (_a, b, na, _nb) = pair();
+        b.remove_session(&na);
+        assert!(
+            b.seal(&na, b"x", b"aad").is_err(),
+            "the peer must re-handshake before this node sends to it again"
+        );
+        assert!(!b.has_session(&na), "and the session really is gone");
+    }
+
+    /// It carries its own replay window, so this is a second authenticated
+    /// check rather than a relaxed one.
+    #[test]
+    fn a_replay_under_the_retired_key_is_still_caught() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+        let sealed = a.seal(&nb, b"once", aad).unwrap();
+        b.remove_session(&na);
+        assert!(b.open(&na, &sealed, aad).is_ok());
+        assert!(
+            b.open(&na, &sealed, aad).is_err(),
+            "the same nonce twice is a replay whichever key opened it"
+        );
+    }
+
+    /// The window is bounded: past the grace period the key is gone, and the
+    /// sweep drops it so it cannot linger.
+    #[test]
+    fn a_retired_key_expires_and_is_swept() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+        let sealed = a.seal(&nb, b"late", aad).unwrap();
+        b.remove_session(&na);
+        if let Some(mut k) = b.retired.get_mut(&na) {
+            k.retired_at = Instant::now() - (PREVIOUS_KEY_GRACE + Duration::from_secs(1));
+        }
+        assert!(
+            b.open(&na, &sealed, aad).is_err(),
+            "past the grace window a retired key must not open anything"
+        );
+        b.evict_stale(Duration::from_secs(3600));
+        assert!(!b.retired.contains_key(&na), "and the sweep removes it");
+    }
+
+    /// A message from an unrelated key is still refused — the fallback widens
+    /// which keys are tried, not what counts as authentic.
+    #[test]
+    fn an_unrelated_key_is_still_refused_after_a_disconnect() {
+        let (_a, b, na, _nb) = pair();
+        let c = SessionManager::from_ed25519_key(&[11u8; 32]);
+        let nb2 = NodeId([3u8; 32]);
+        assert!(c.establish_session(&nb2, b.local_public));
+        let forged = c.seal(&nb2, b"nope", b"header").unwrap();
+        b.remove_session(&na);
+        assert!(b.open(&na, &forged, b"header").is_err());
     }
 }
