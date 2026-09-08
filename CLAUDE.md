@@ -221,6 +221,21 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2439 lib (dev,claude-subscription) — re-measured 2026-09-08, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 72 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .163 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
 
+**Unreleased on `main` (heading for v0.3.164-alpha):** the whole-model hand-off
+stopped being a decision — it proposes, and the priced search chooses (#447 iii,
+closing the #447/#478/#479 pattern of two decision-makers for one decision); the
+prompt-trust bar now applies to whoever takes the segment that reads the prompt,
+not only to the hand-off; and the loss term `vertex_cost` prices chains with had
+**no input at all on the chain path** (#495) — `record_peer_delivery` was called
+only from the whole-model fast path, so a peer serving segments was priced for
+ever as though its link were perfect. That last one came from a contributor's
+netem measurements on issue #21.
+⚠ **The field A/B of the routing change was CONFOUNDED and is retracted** — the
+two arms were different BUILDS (installed CUDA release vs a default-feature
+local build with no CUDA), which flips `serves_on_cpu` on its own. gotcha #496.
+Verified single-node instead: smoke 9/9, shapes 7/7, constrained-node 11/11, and
+CI green on all three feature compile-checks.
+
 **Released and deployed: v0.3.163-alpha (2026-09-08, tag on `8e9081d7`).** Local
 `225e6fe7f2b5cd74` (CUDA artifact, downloaded sha256 == published AND the
 installed binary byte-identical to it, `ggml_cuda_init` = 1 device, 0 ERROR,
