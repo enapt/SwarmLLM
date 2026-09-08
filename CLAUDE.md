@@ -219,60 +219,88 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2476 lib (dev,claude-subscription) — re-measured 2026-09-08, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 74 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .164 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
+All 20 build phases complete. All subsystems wired — no stubs. **2476 lib (dev,claude-subscription) — re-measured 2026-09-08, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 74 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.164-alpha (2026-09-08, tag on `f8ba2935`).**
+**Released and deployed: v0.3.165-alpha (2026-09-08, tag on `3b55bcd4`).**
 Both nodes verified: local `225e6fe7f2b5cd74` (CUDA artifact — published sha256
 matched AND the installed binary byte-identical to the download, `ggml_cuda_init`
-= 1 device, 0 ERROR, node id kept, inference confirmed; rollback
-`~/.local/bin/swarmllm.0.3.163-alpha.bak`, backups pruned to newest 3) and
-Proxmox `9684263580c6660f` (.deb `0.3.164-alpha-1` over `0.3.163-alpha-1`, hash
+present, 0 ERROR, node id kept, inference confirmed; rollback
+`~/.local/bin/swarmllm.0.3.164-alpha.bak`, backups pruned to newest 3) and
+Proxmox `9684263580c6660f` (.deb `0.3.165-alpha-1` over `0.3.164-alpha-1`, hash
 re-verified AFTER transfer, `active` + `enabled`, no `.dpkg-old`, journal errors
-"-- No entries --"). Back in each other's peer lists at 129 ms. Gate fully
-clean: CI green on all 13 jobs INCLUDING the three feature compile-checks
-(flash-attn, candle-cuda, windows-gpu-no-flash) and macOS, Cache warm green,
-Docker green, 25 assets, not draft, `latest`, **smoke 9/9 + shapes 7/7 on the
-DOWNLOADED artifact against a .163 baseline taken first that scored the same**.
+"-- No entries --"). Back in each other's peer lists at 2 ms. Gate fully clean:
+CI green on all 13 jobs INCLUDING the three feature compile-checks (flash-attn,
+candle-cuda, windows-gpu-no-flash) and macOS, **Cache warm green on the bump
+commit itself** (the version bump edits `Cargo.lock`, so it re-ran), Docker
+green, 25 assets, not draft, `latest`, **smoke 9/9 + shapes 7/7 on the
+DOWNLOADED artifact against a .164 baseline taken FIRST that scored the same**.
 
-Three fixes:
-- **#447 (iii)** — the whole-model hand-off stopped being a decision. It
-  proposes; the priced search chooses. Closes the #447/#478/#479 pattern —
-  three fixes in two releases, all of them one gate missing something the
-  search already knew, i.e. two decision-makers for one decision.
-- **The prompt-trust bar** now applies to whoever takes the segment that reads
-  the plaintext prompt, not only to the hand-off. `trust_score` had been
-  consulted in exactly ONE place in the whole scheduler, and it was the gate the
-  search runs instead of.
-- **#495** — the loss term `vertex_cost` prices chains with had **no input at
-  all on the chain path**: `record_peer_delivery` was called only from the
-  whole-model fast path, so a peer serving segments was priced for ever as
-  though its link were perfect. Found from OUTSIDE, by a contributor's rootless
-  netem lab on issue #21 (60 ms + 3% loss sorts ahead of 81 ms + 0% and is 2.9x
-  slower on 513 KB, 3/3 trials). Nothing internal could have caught it — suite
-  green, lint clean, mechanism correct at every line, with nothing to read.
+**The round a code review of the previous release started.** `/code-review` on
+the .164 fixes returned 15 findings; 9 of the top ones were confirmed against
+the code before anything was changed, and the headline was uncomfortable —
+**#495, shipped the day before, could not observe the failures it was written
+for**, for two independent reasons that neither the suite nor the field could
+distinguish from a healthy swarm (`expected_attempts_multiplier` reads 1.0 both
+for a reliable peer and for one nothing is recording).
 
-**The field A/B was RUN properly on 2026-09-08 and #447(iii) is FIELD-VERIFIED as
-firing — its performance benefit is NOT.** Both arms were the installed CUDA release
-binaries (`~/.local/bin/swarmllm` and `.163.bak`), same data dir and swarm,
-`SWARMLLM_INFERENCE_GPU_LAYERS=0` on both (asserted from the daemon's own
-`running CPU-only` line, never assumed), matched uptime, holder map asserted identical.
-**5/5 models changed plan**: .163's gate constructs a boomerang unconditionally, .164
-prices it and stays local; on the privacy-off model .163 took the NEAREST peer and .164
-the genuinely cheaper one. **But measured 8B throughput is a tie — ~4.5 tok/s both
-ways — where the cost model predicts local should win ~5x**, which is now its own
-FUTURE_WORK entry (`ASSUMED_FORWARD_PASSES`). The earlier attempt was confounded by
-two different BUILDS (gotcha #496); that is what the identity assertion above exists to
-prevent. ⚠ **A rearm must assert WHICH BUILD is running, not that something answers** —
-the first switch of this A/B silently failed (the old node held the DB lock, and the
-readiness probe found *it*) and reported "ready 1s". Method + findings:
-`memory/round_log_0908_ab_447iii.md`.
+- **A transport failure was recorded as a perfect delivery.** The ACK fast-fail
+  sweep, a departed peer and a closed stream all end a forward by resolving the
+  waiter with a `LayerResult::error` THIS NODE built, which arrives in the same
+  arm as a peer's own refusal. With the ACK deadline well inside the segment
+  budget, that was the ordinary way a dead link was seen. Fixed structurally:
+  `#[serde(skip)] locally_constructed` — the wire format answers "did this come
+  from the peer", so no call site can forget.
+- **The sample cadence buried what was left**: once per segment per token on the
+  chain path against once per reply on the fast path, into one EMA at α=0.3.
+  Now the prompt pass plus every failure.
+- **The prompt-trust bar was on two of the three paths that assign layer 0**,
+  and *the bar failing the search is itself a route into the path with no bar* —
+  so tightening it made the exposure MORE likely on that shape. Also found while
+  fixing it, and not in the review: `find_standbys` took no `encrypted_pipeline`
+  at all, so a remote node could stand by for the prompt or the sampled tokens.
+- **Per-peer goodput** (`GoodputEstimator` + `VertexCost::transfer_ms`), the open
+  half of issue #21, researched from BBR's bottleneck-bandwidth estimator first:
+  a windowed MAX not an average, an app-limited sample may raise but never
+  establish or lower, and the round trip comes out before dividing. **Not yet
+  field-verified against netem** — the reporter has that lab and has been asked.
+- Four smaller: `cheapest_peer` now names the fact that disqualifies it (#460's
+  fix reproducing #460 one level down); a worker's memory charge follows the
+  ranges it drops; a node told to stay off its card stops advertising the card's
+  speed (35.6 tok/s broadcast against 4.95 measured); and `NoComparison` now
+  compares instead of discarding a chain already priced cheaper.
+- **The routing cost model is now instrumented rather than tuned**: every priced
+  route logs `predicted_ms` and `assumed_forward_passes` beside `total_ms` and
+  `tokens`. Nothing acts on either; `ASSUMED_FORWARD_PASSES` needs field data.
+
+⚠ **Two claims corrected in place this round, both mine.** `NoComparison` is not
+a cold-start window — `measured_gbps` measures on first call, so reaching it
+means the bandwidth measurement FAILED (a memory-starved machine). And the
+`r134` flake's `try_recv` hypothesis is disproved (the send is awaited inline);
+not reproduced in 48 runs including 8 full-suite runs at load 15.95, and
+deliberately not "fixed".
+
+⚠ **Null controls earned their keep three times.** One found a real defect in the
+goodput estimator (a small forward could ESTABLISH a wrongly-low figure two
+window rotations on — worse than unknown). Twice a control did NOT fire, which
+is a finding about the guard: one guard matched its own comment, another matched
+a binding on the line above. **Plant the violation in the form it would really
+appear** (gotchas #502, #503).
 
 **Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
 whose last commits are docs it is green on the BUMP commit, not the tag — same
 code, and the cache it writes lands on `main` where the tag build reads it.
 Check the sha it ran on rather than assuming it re-ran. (A version bump edits
-`Cargo.lock`, so it does re-run for that commit.)
+`Cargo.lock`, so it does re-run for that commit — confirmed again at .165.)
+⚠ **`release_shapes.sh`'s `greedy check has a live control` is PROBABILISTIC.**
+It sends one prompt twice at DEFAULT sampling and needs the two to DIFFER; on a
+24-token reply they coincide often enough to report COULD NOT RUN — 2 of 5 runs
+on one binary at the .165 release. It alternated convincingly against .164
+(OK, CNR, CNR, OK) and that was pure chance: a manual replay of the exact
+sequence passed, then three further runs passed. **Do not attribute it to a
+release on four samples.** And `text()` returns `''` on an ERROR response, so
+two FAILED requests compare equal and get that same misleading wording — read
+the node log before believing it.
 ⚠ **`release_shapes.sh` is LOAD-SENSITIVE — take the baseline on an IDLE box.**
 `long system prompt, cold` FAILED once beside a `cargo build` and passed on a
 quiet re-run. One shapes failure is a re-run candidate, not a signal.
@@ -286,27 +314,11 @@ digest being 64 hex characters.
 rather than failing. Check that node from the WSL side, or over `systemctl` and
 `journalctl`.
 
-**v0.3.163 (2026-09-08) — FOUR fixes from three reports (#025-#027) by one close
-reader of logs and screens.** The ones worth carrying:
-
-- **#025 was two defects, and the reported one alone does not fix it.** The
-  relaxation dropping OUR bound was the half they saw; the other half is that
-  the local capacity check ran AFTER path reconstruction, so an over-budget
-  chain failed the WHOLE search instead of losing to a feasible one.
-- **The retry they asked for is the retry-storm anti-pattern unless something
-  changed between attempts.** Admission refuses BEFORE allocating, so a blanket
-  retry re-reads identical figures and re-attempts the same load. Kubernetes'
-  queueing hint is the shape: record the loader's verdict, let it outrank both
-  estimates, and the re-plan cannot repeat itself. **Ask of any retry what the
-  second attempt reads that the first did not.**
-- **A stale comment cost every streamed Anthropic reply its prompt count**
-  (#491) — it said the result had not been awaited yet; it had, eight lines up.
-- **A guard must also know when NOT to fire** (#492): rebuilding the chat empty
-  state unconditionally puts it above a live streaming reply.
-
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`,
 gotcha numbers index `memory/gotchas.md`. **Read the named round log before
 re-deriving any of these.**
+
+- **.164** (09-08): the STABILITY round — #447(iii) (the gate proposes, the search chooses), the prompt-trust bar, and #495 (the loss term had NO input on the chain path, found from OUTSIDE by a contributor's netem lab). ⚠ The .164 field A/B was CONFOUNDED by two different BUILDS (#496). `round_log_0908_stability_round.md`.
 
 - **.162** (09-07): EIGHT fixes from the 16 GB Mac mini tester's eight reports (#017-#024). ⚠ THREE of the eight were WRONG about the CAUSE; #017/#018 are ONE knot and a naive cost comparison would have shipped a 503. `round_log_0907_macmini_eight_reports.md`.
 
