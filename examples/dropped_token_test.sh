@@ -36,7 +36,7 @@ CFG
 done
 PIDS=""
 FOREIGN=""
-cleanup() { for p in $PIDS; do kill -9 $p 2>/dev/null; done; for p in /proc/[0-9]*; do cat $p/cmdline 2>/dev/null | tr '\0' ' ' | grep -q "model-worker.*$BASE" && kill -9 $(basename $p) 2>/dev/null; done; }
+cleanup() { for p in $PIDS; do kill -9 $p 2>/dev/null; done; for p in /proc/[0-9]*; do tr '\0' ' ' 2>/dev/null < $p/cmdline | grep -q "model-worker.*$BASE" && kill -9 $(basename $p) 2>/dev/null; done; }
 trap cleanup EXIT
 
 start_server() {

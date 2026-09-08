@@ -18,8 +18,6 @@ Priority is user-visible impact x how many users x whether it fails silently.
 |---|---|---|
 | 1 | GPU on Apple Silicon: no backend is compiled, on either path | **Every Mac runs on CPU.** Large user population, no workaround, and the machine looks healthy while doing it |
 | 2 | Peer ranking uses ping, and a big payload under loss is not ping | Found from OUTSIDE by a contributor's netem lab (issue #21). The loss half shipped as #495 in v0.3.164; **the goodput half is open** and nothing measures per-peer throughput |
-| 14 | The v0.3.164 reliability term does not observe the failures it was written for | **NEW 2026-09-08.** #495 shipped inert: transport failures are recorded as intact deliveries, and per-token sampling buries what is left. Every chain request, silently |
-| 15 | The prompt-trust bar is one of three paths, and failing the search routes around it | **NEW 2026-09-08.** `greedy_assign_inner` and `find_standbys` apply no trust check, and the bar failing the search is itself a route into the path that has no bar |
 
 ### P2 — wrong behaviour, narrower or needing a decision first
 
@@ -53,6 +51,10 @@ Priority is user-visible impact x how many users x whether it fails silently.
 - A layer range contained in a resident one is loaded twice — `subsumed_segment_keys`
 - A local admission refusal does not teach the planner — `LocalMemoryUnavailable` (v0.3.163)
 - The Compare tab waits without progress or a stop — Compare streams (v0.3.163)
+- The v0.3.164 reliability term does not observe the failures it was written for —
+  `LayerResult::locally_constructed` plus a prompt-pass sample cadence, same day
+- The prompt-trust bar is one of three paths — `source_ok`, greedy narrowing,
+  `standby_may_take`, and a stand-down decided on the route, same day
 
 ### Not bugs, and deliberately not ranked
 
@@ -61,7 +63,7 @@ not a defect. The GPU-swap costing, prefix-keyed remote KV, f16 stored KV, ring 
 and prefill microbatching are throughput work; they live under their own headings below.
 
 
-## The v0.3.164 reliability term does not observe the failures it was written for (2026-09-08)
+## The v0.3.164 reliability term does not observe the failures it was written for (FIXED 2026-09-08)
 
 Found by a code review of the v0.3.164 fixes, and confirmed by inspection of every
 delivery path. **#495 shipped a term that is structurally unable to see a lossy link**,
@@ -137,7 +139,7 @@ That is the same instrument measured twice, and the ACK estimator already declin
 transfer-dominated samples (`ACK_OBSERVE_MAX_BYTES`) for the reason that they measure the
 payload rather than the peer.
 
-## The prompt-trust bar is one of three paths, and failing the search routes around it (2026-09-08)
+## The prompt-trust bar is one of three paths, and failing the search routes around it (FIXED 2026-09-08)
 
 `trusted_with_the_plaintext_prompt` shipped in v0.3.164 as "the one bar" a peer clears
 before it is handed the segment that reads the plaintext prompt. It had two consumers,
@@ -172,6 +174,20 @@ desynchronises the others — now one `source_ok(v, apply_trust)`), and the stan
 `warn!` was an unrate-limited multi-line string literal with no continuation, so it
 emitted two runs of fourteen spaces into every operator log, up to three times per
 assembly (once per `CapacityBound` relaxation pass) for as long as the condition held.
+
+### Found while fixing it, and not in the review: standbys ignored prompt privacy
+
+`find_standbys` took no `encrypted_pipeline` parameter at all. Prompt privacy is a
+STRUCTURAL guarantee — the first segment (which reads the plaintext prompt) and the last
+(which samples the tokens) stay on this node — and a standby is handed the segment's
+input on failover. So a remote node could be named standby for either end, and one
+failure of the local segment would have sent it exactly what the boomerang exists to
+keep local. The guarantee held until the first failover, which is the moment least
+likely to be noticed.
+
+Fixed with the trust bar (`standby_may_take`). Refusing means such a segment may have no
+standby at all; that is the trade the user asked for by turning privacy on, and
+`segments_without_standby` reports it honestly.
 
 ## A `NoComparison` verdict discards a chain the search already priced (open, 2026-09-08)
 

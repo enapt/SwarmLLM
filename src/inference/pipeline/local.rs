@@ -441,13 +441,12 @@ impl PipelineExecutor {
     /// ends with `inference::cancel::request_abandoned` the moment it flips,
     /// instead of running out the segment deadline for an answer nobody will
     /// read. The caller then owes the peer a `CancelInference`.
-    // Eight primitives that name one wait; a struct would rename them at the
-    // five call sites without saying anything new.
-    #[allow(clippy::too_many_arguments)]
     /// `state` is required rather than optional because this is the ONE place a
     /// remote segment's outcome is observed, and the reliability figure it
     /// feeds is worthless if a call site can decline to report. See the
     /// recording arms below.
+    // Eight primitives that name one wait; a struct would rename them at the
+    // five call sites without saying anything new.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn wait_for_result(
         state: &SharedState,
