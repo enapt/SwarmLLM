@@ -2764,6 +2764,14 @@ impl PipelineScheduler {
                 has_gpu = c.has_gpu,
                 max_hostable_layers = ?c.max_hostable_layers,
                 expected_attempts = c.expected_attempts,
+                // The COUNT beside the multiplier, because the multiplier
+                // alone cannot distinguish "this peer is reliable" from
+                // "nothing is recording for this peer" — both read 1.0. That
+                // ambiguity is what hid the segment path recording nothing at
+                // all until a contributor measured it from outside (#495), and
+                // an accessor that exists to resolve it is no use while it is
+                // reachable only from unit tests.
+                delivery_samples = self.shared_state.peer_delivery_samples(&c.node_id),
                 load = c.load,
                 prompt_tokens = ?prompt_tokens,
                 // Priced over the WHOLE model, so candidates are comparable to

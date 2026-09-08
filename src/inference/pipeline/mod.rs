@@ -1165,9 +1165,19 @@ mod tests {
                 };
                 let node = peers[&target_peer_bytes].clone();
                 sent.push((node.clone(), forward.activations.clone()));
-                let base = LayerResult::error(forward.request_id, "");
+                // These stand in for what a PEER sent, so they must look like
+                // it: `LayerResult::error` marks a result this process
+                // manufactured, and a harness that left that set would be
+                // simulating our own ACK sweep rather than the peer replying.
+                let base = LayerResult {
+                    locally_constructed: false,
+                    ..LayerResult::error(forward.request_id, "")
+                };
                 let result = match reply(&node) {
-                    PeerReply::Error(m) => LayerResult::error(forward.request_id, m),
+                    PeerReply::Error(m) => LayerResult {
+                        locally_constructed: false,
+                        ..LayerResult::error(forward.request_id, m)
+                    },
                     PeerReply::Activations(a) => LayerResult {
                         activations: a,
                         finish_reason: None,
@@ -2133,6 +2143,7 @@ mod peer_error_recovery_tests {
             spec_logits: Vec::new(),
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
+            locally_constructed: false,
         }
     }
 

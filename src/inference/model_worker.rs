@@ -1672,6 +1672,7 @@ async fn handle_forward(
                     spec_logits,
                     matched_stop_sequence: None,
                     token_logprobs: Vec::new(),
+                    locally_constructed: false,
                 });
             }
 
@@ -1776,6 +1777,7 @@ async fn handle_forward(
                     spec_logits: Vec::new(),
                     matched_stop_sequence: None,
                     token_logprobs,
+                    locally_constructed: false,
                 })
             } else {
                 let activation_bytes = if activation_compression {
@@ -1792,6 +1794,7 @@ async fn handle_forward(
                     spec_logits: Vec::new(),
                     matched_stop_sequence: None,
                     token_logprobs: Vec::new(),
+                    locally_constructed: false,
                 })
             }
         });

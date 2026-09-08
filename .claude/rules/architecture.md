@@ -793,6 +793,68 @@ Four things a change here must keep.
 population and its parameter reaches all of them, that gap is the bug — and a
 constraint checked after a search kills the search instead of the candidate.
 
+## A result the peer sent and a result we made up are not the same delivery
+
+`LayerResult::locally_constructed` is the discriminator, and `#[serde(skip)]`
+plus an explicit `false` in the binary decoder is the whole mechanism: the field
+cannot survive either codec, so **anything that arrived over the network reads
+false by construction**. `pipeline::local::wait_for_result` reads it to choose
+between `SegmentOutcome::Returned` and `SegmentOutcome::AbandonedLocally`.
+
+**Why it is needed.** Three paths end a forward by handing the waiter a
+manufactured `LayerResult::error` rather than letting the wait expire — the ACK
+fast-fail sweep (`fail_tensor_forward`), a peer whose connection closed and whose
+re-dial failed (`fail_layer_results_awaiting`), and a closed pipeline stream. All
+three complete the oneshot, so they land in the same `Ok(Ok(result))` arm as a
+peer's own refusal, and the arm scored every one of them as an intact delivery.
+Since the ACK deadline is 10-90 s inside a segment budget that runs to 300 s,
+that was the NORMAL way a dead link was observed: the peer-reliability term
+shipped in v0.3.164 credited a peer whose link had died with a perfect delivery,
+and the only thing that could ever score against a peer was the local compute
+deadline expiring — a slow processor, not a lossy link.
+
+**Not a string match.** The reason is a `String` and matching on it is the #295
+trap; the wire format answers the question directly and cannot be reworded.
+
+Three things a change here must keep.
+
+- **A peer's refusal is still an intact delivery.** Out of memory or a missing
+  shard is a perfect delivery of a "no", and the distinction is compute against
+  transport — the one `failure_is_penalty_worthy` draws. Pricing a refusal as a
+  lossy link steers traffic away from a peer whose network is fine. Pinned by
+  `a_returned_segment_is_recorded_as_an_intact_delivery`, the control beside
+  `a_forward_this_node_abandoned_is_not_credited_to_the_peer`.
+- **A serving-side constructor may set it freely.** `LayerResult::error` sets it
+  unconditionally because the wire strips it: a refusal built on the serving node
+  reaches the coordinator as false. That is what makes the rule hold with no
+  per-call-site decision to forget — the failure mode this codebase keeps
+  hitting.
+- **A test harness standing in for a peer must clear it.** Otherwise it simulates
+  our own ACK sweep rather than the peer replying.
+
+**The intact sample is taken on the prompt pass only; a failure is always
+taken.** `note_segment_delivery` owns that rule. Two reasons. The path runs once
+per segment PER TOKEN while the whole-model fast path (`remote_generate`) records
+once per reply, and both feed one EMA at `ALPHA = 0.3` — `1 - 0.7^n` passes 0.99
+by fifteen samples, so a 150-token reply over three segments (450 samples) buried
+the single failure that ended the request and left the multiplier inert on the
+path it was added for. And it is real cost on the per-token forward path: a
+DashMap exclusive shard lock plus a `NodeId` clone per segment per token.
+
+**`peer_delivery_samples` is logged beside `expected_attempts`**, because the
+multiplier reads 1.0 both for a reliable peer and for one nothing is recording
+for — the ambiguity that hid all of this, and the reason an accessor added to
+resolve it is worthless while only tests can reach it.
+
+**What this still cannot see, and must not be stretched to cover.** Loss on a
+healthy TCP path shows up as retransmission LATENCY, not delivery failure — the
+forward completes, slowly. So this term catches links that break, not links that
+are merely bad, and it is not the fix for the netem case in issue #21. That needs
+per-peer goodput (`docs/FUTURE_WORK.md`). Do not weight samples by payload size
+as a substitute: the ACK estimator already declines transfer-dominated samples
+(`ACK_OBSERVE_MAX_BYTES`) precisely because they measure the payload rather than
+the peer.
+
 ## A peer advertises the memory it will HONOUR, not the memory it has
 
 **`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much

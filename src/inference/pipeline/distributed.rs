@@ -833,6 +833,7 @@ impl PipelineExecutor {
                         spec_logits: Vec::new(),
                         matched_stop_sequence: None,
                         token_logprobs: Vec::new(),
+                        locally_constructed: false,
                     });
                 } else {
                     // Intermediate segment: strip the 0x00 tag and continue

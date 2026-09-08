@@ -4435,6 +4435,7 @@ impl ModelProcessPool {
                                 spec_logits,
                                 matched_stop_sequence: r.matched_stop_sequence,
                                 token_logprobs: r.logprobs.unwrap_or_default(),
+                                locally_constructed: false,
                             });
                         }
                         WorkerMsg::Error {
@@ -4611,6 +4612,7 @@ impl ModelProcessPool {
                             spec_logits,
                             matched_stop_sequence: r.matched_stop_sequence,
                             token_logprobs: r.logprobs.unwrap_or_default(),
+                            locally_constructed: false,
                         });
                         break;
                     }

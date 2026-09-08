@@ -1187,6 +1187,7 @@ mod tests {
             spec_logits: Vec::new(),
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
+            locally_constructed: false,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1211,6 +1212,7 @@ mod tests {
             spec_logits: Vec::new(),
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
+            locally_constructed: false,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1229,6 +1231,7 @@ mod tests {
             spec_logits: Vec::new(),
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
+            locally_constructed: false,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1486,6 +1489,7 @@ mod tests {
             ],
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
+            locally_constructed: false,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1506,6 +1510,7 @@ mod tests {
             spec_logits: Vec::new(),
             matched_stop_sequence: Some("\n\nHuman:".to_string()),
             token_logprobs: Vec::new(),
+            locally_constructed: false,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1535,6 +1540,7 @@ mod tests {
             spec_logits: Vec::new(),
             matched_stop_sequence: None,
             token_logprobs: entries.clone(),
+            locally_constructed: false,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1566,6 +1572,7 @@ mod tests {
                 logprob: -1.0,
                 top_logprobs: Vec::new(),
             }],
+            locally_constructed: false,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();

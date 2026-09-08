@@ -593,6 +593,31 @@ pub struct LayerResult {
     /// `logprobs=false` in the originating request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub token_logprobs: Vec<TokenLogProbEntry>,
+    /// Did THIS process build this result, as opposed to receiving it from the
+    /// peer the forward went to?
+    ///
+    /// `#[serde(skip)]` is the whole mechanism, not an optimisation: the field
+    /// cannot survive a trip through either codec, so anything that arrived
+    /// over the network reads `false` by construction. That is the exact
+    /// question a caller needs answered and it is answered by the wire format
+    /// itself, rather than by matching on the reason string — which is the
+    /// `reclassify_flattened_error` trap (gotcha #295) and would break the
+    /// moment someone reworded a message.
+    ///
+    /// **Why anyone asks.** Three paths abandon a forward by handing the
+    /// waiter a manufactured `LayerResult::error` rather than letting the wait
+    /// expire — the ACK fast-fail sweep, a departed peer, and a closed
+    /// pipeline stream. Those are transport failures. A serving node that
+    /// refuses on its own account (out of memory, a missing shard) sends an
+    /// error result that looks identical, and is a *perfect* delivery. Without
+    /// this field `pipeline::local::wait_for_result` could not tell them apart
+    /// and scored every one of them as intact, which left the peer-reliability
+    /// term shipped in v0.3.164 unable to observe the failures it exists for.
+    ///
+    /// The binary decoder sets it `false` explicitly for the same reason serde
+    /// skips it; see `network::protocol::decode_layer_result`.
+    #[serde(skip)]
+    pub locally_constructed: bool,
 }
 
 /// A single token's log-probability info for distributed inference responses.
@@ -627,6 +652,14 @@ impl LayerResult {
             spec_logits: Vec::new(),
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
+            // Every caller of this constructor is building a result rather
+            // than receiving one. On the serving side that is a refusal about
+            // to be serialised, and the flag is stripped in transit — so it
+            // reaches the coordinator as `false` and is correctly credited as
+            // a delivery. On the coordinator side the result never leaves the
+            // process, and `true` is what stops a manufactured failure being
+            // read as the peer having answered.
+            locally_constructed: true,
         }
     }
 }

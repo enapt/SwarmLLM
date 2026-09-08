@@ -373,6 +373,11 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         spec_logits,
         matched_stop_sequence,
         token_logprobs,
+        // Off the wire, so by definition not manufactured here. Serde skips
+        // the field for the JSON codec; this is the same statement for the
+        // binary one, and the two must agree or the answer would depend on
+        // which codec carried the result.
+        locally_constructed: false,
     })
 }
 

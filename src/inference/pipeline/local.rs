@@ -178,6 +178,25 @@ impl SegmentBudget {
     pub(super) fn is_prefill(&self) -> bool {
         self.prefill
     }
+
+    /// A budget with an explicit deadline, for tests that need the wait to
+    /// actually expire.
+    ///
+    /// `for_forward` clamps to `SEGMENT_TIMEOUT_MIN_SECS` (30 s), so no
+    /// combination of measured latencies can produce a short one — which is why
+    /// the timeout arm of `wait_for_result` had no end-to-end coverage, and why
+    /// the helper that claimed to provide it ("a tiny measured latency, so a
+    /// timeout can be provoked without sleeping") could not have worked. The
+    /// production invariant is unchanged: outside tests a budget still comes
+    /// only from `for_forward`.
+    #[cfg(test)]
+    pub(super) fn with_deadline_for_test(duration: Duration, prefill: bool) -> Self {
+        Self {
+            duration,
+            basis: "test",
+            prefill,
+        }
+    }
 }
 
 impl PipelineExecutor {
@@ -478,14 +497,30 @@ impl PipelineExecutor {
                     finish = ?result.finish_reason,
                     "DIAG: segment result received"
                 );
-                // It came back. A peer REFUSING (out of memory, missing shard)
-                // arrives here too, carrying its reason in `finish_reason`, and
-                // that is still an intact delivery — the distinction is
-                // compute against transport, the same one
-                // `failure_is_penalty_worthy` draws. Pricing a refusal as a
-                // lossy link would steer traffic away from a peer whose network
-                // is fine.
-                note_segment_delivery(state, is_remote, node_id, SegmentOutcome::Returned);
+                // Something arrived — but not necessarily from the peer.
+                //
+                // A peer REFUSING (out of memory, a missing shard) lands here
+                // carrying its reason in `finish_reason`, and that IS an intact
+                // delivery: the distinction is compute against transport, the
+                // same one `failure_is_penalty_worthy` draws, and pricing a
+                // refusal as a lossy link would steer traffic away from a peer
+                // whose network is fine.
+                //
+                // What also lands here is a result THIS NODE manufactured to
+                // end the wait — the ACK fast-fail sweep, a departed peer, a
+                // closed pipeline stream. Those are the transport failures the
+                // reliability figure exists for, and they are the common case:
+                // the ACK deadline is 10-90 s inside a segment budget that runs
+                // to 300 s, so a peer whose link is dead is abandoned here long
+                // before the timeout arm below can fire. `locally_constructed`
+                // is the structural discriminator — it cannot survive either
+                // codec, so anything the peer actually sent reads false.
+                let outcome = if result.locally_constructed {
+                    SegmentOutcome::AbandonedLocally
+                } else {
+                    SegmentOutcome::Returned
+                };
+                note_segment_delivery(state, is_remote, node_id, outcome, budget.is_prefill());
                 Ok(result)
             }
             Ok(Err(_)) => {
@@ -497,13 +532,25 @@ impl PipelineExecutor {
                     elapsed_ms = elapsed.as_millis() as u64,
                     "DIAG: response channel DROPPED — sender gone before result"
                 );
-                // Deliberately NOT recorded. This node's own machinery drops
-                // the sender — a failover resolving elsewhere, a cancelled
-                // request, the stale-forward sweep — so the peer may have done
-                // nothing wrong, and charging it for our bookkeeping is exactly
-                // the mis-attribution `failure_is_penalty_worthy` exists to
-                // avoid.
-                note_segment_delivery(state, is_remote, node_id, SegmentOutcome::SenderDropped);
+                // Reported, and classified as saying NOTHING — the
+                // suppression is `segment_delivery_verdict`'s `SenderDropped =>
+                // None`, not an absence of a call here. (It read "deliberately
+                // NOT recorded" directly above the call that records it, which
+                // is precisely the misdirection that would defeat an audit of
+                // where deliveries are observed.)
+                //
+                // This node's own machinery drops the sender — a failover
+                // resolving elsewhere, a cancelled request, the stale-forward
+                // sweep — so the peer may have done nothing wrong, and charging
+                // it for our bookkeeping is the mis-attribution
+                // `failure_is_penalty_worthy` exists to avoid.
+                note_segment_delivery(
+                    state,
+                    is_remote,
+                    node_id,
+                    SegmentOutcome::SenderDropped,
+                    budget.is_prefill(),
+                );
                 Err(SwarmError::PipelineError("Response channel dropped".into()))
             }
             Err(_) => {
@@ -520,7 +567,13 @@ impl PipelineExecutor {
                 // sized for it. That is the delivery failure the reliability
                 // figure is FOR, and `segment_timeout_error` already classifies
                 // it as penalty-worthy for the same reason.
-                note_segment_delivery(state, is_remote, node_id, SegmentOutcome::TimedOut);
+                note_segment_delivery(
+                    state,
+                    is_remote,
+                    node_id,
+                    SegmentOutcome::TimedOut,
+                    budget.is_prefill(),
+                );
                 Err(segment_timeout_error(timeout.as_secs(), num_layers))
             }
         }
@@ -534,20 +587,51 @@ fn note_segment_delivery(
     is_remote: bool,
     node_id: &crate::types::NodeId,
     outcome: SegmentOutcome,
+    is_prefill: bool,
 ) {
     if !is_remote {
         return;
     }
-    if let Some(intact) = segment_delivery_verdict(outcome) {
-        state.record_peer_delivery(node_id, intact);
+    let Some(intact) = segment_delivery_verdict(outcome) else {
+        return;
+    };
+    // An INTACT sample is taken only on the forward that actually tests the
+    // link — the prompt pass. A failure is always taken, whenever it happens.
+    //
+    // Two reasons, and the first is why the figure was inert as shipped. This
+    // runs once per segment PER TOKEN, while the whole-model fast path
+    // (`remote_generate`) records once per reply; both feed one EMA at
+    // `ALPHA = 0.3`, where `1 - 0.7^n` passes 0.99 by fifteen samples. A
+    // 150-token reply over three segments is 450 of them, so a peer that fails
+    // once per request after streaming a hundred tokens was priced at ~1.0 and
+    // the multiplier stayed inert on exactly the path it was added for. Taking
+    // the prompt pass gives one sample per request per peer, which is the same
+    // event the fast path counts.
+    //
+    // The second is cost: this is the per-token forward path, and an
+    // unconditional `record_peer_delivery` is a DashMap exclusive shard lock
+    // plus a `NodeId` clone per segment per token, contended across concurrent
+    // requests to the same peer.
+    //
+    // Nothing is lost by it. The prompt pass is the largest forward a request
+    // makes and the one whose delivery says most about the link, and a failure
+    // at any point is still recorded in full.
+    if intact && !is_prefill {
+        return;
     }
+    state.record_peer_delivery(node_id, intact);
 }
 
 /// How a remote segment forward ended, as far as the PEER'S LINK is concerned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SegmentOutcome {
-    /// A `LayerResult` came back — including one carrying a refusal.
+    /// A `LayerResult` came back FROM THE PEER — including one carrying a
+    /// refusal, which is still a delivery.
     Returned,
+    /// A `LayerResult` came back, but this node manufactured it to end the
+    /// wait: the ACK fast-fail sweep, a peer whose connection closed and whose
+    /// re-dial failed, or a closed pipeline stream. The peer sent nothing.
+    AbandonedLocally,
     /// The deadline expired with nothing.
     TimedOut,
     /// Our own sender was dropped before a result arrived.
@@ -566,8 +650,15 @@ pub(super) enum SegmentOutcome {
 ///   compute against transport, the one `failure_is_penalty_worthy` draws.
 ///   Pricing a refusal as a lossy link steers traffic away from a peer whose
 ///   network is fine.
-/// - `TimedOut` is the delivery failure the figure exists for — the peer took
-///   the forward and went quiet.
+/// - `AbandonedLocally` is a delivery failure and is the COMMON one. The three
+///   paths that abandon a forward hand the waiter a manufactured
+///   `LayerResult::error` rather than letting it expire, so before this outcome
+///   existed they were all scored `Returned` — a peer whose link had died was
+///   credited with a perfect delivery, and the reliability term could observe
+///   almost nothing. `locally_constructed` is what tells the two apart.
+/// - `TimedOut` is the same failure reached the slow way — the peer took the
+///   forward and went quiet with nothing abandoning it on our side. Rarer than
+///   it looks: the ACK deadline is well inside the segment budget.
 /// - `SenderDropped` says NOTHING about the peer. This node's own machinery
 ///   drops the sender: a failover resolving elsewhere, a cancelled request, the
 ///   stale-forward sweep. Charging the peer for our bookkeeping is precisely
@@ -575,7 +666,7 @@ pub(super) enum SegmentOutcome {
 pub(super) fn segment_delivery_verdict(outcome: SegmentOutcome) -> Option<bool> {
     match outcome {
         SegmentOutcome::Returned => Some(true),
-        SegmentOutcome::TimedOut => Some(false),
+        SegmentOutcome::AbandonedLocally | SegmentOutcome::TimedOut => Some(false),
         SegmentOutcome::SenderDropped => None,
     }
 }
@@ -634,19 +725,64 @@ mod segment_budget_tests {
         state
     }
 
-    /// A tiny measured latency, so the deadline is milliseconds and a timeout
-    /// can be provoked without sleeping.
-    fn instant_budget(state: &Arc<SharedState>, node: &NodeId, model: &ModelId) -> SegmentBudget {
-        state.record_peer_segment_latency(node, model, WorkKind::Decode, 1, 1, 8);
+    /// A budget for a forward that resolves immediately. The deadline is
+    /// floored at 30 s by `for_forward`, which is fine for every arm except a
+    /// real expiry — see [`SegmentBudget::with_deadline_for_test`].
+    fn budget(
+        state: &Arc<SharedState>,
+        node: &NodeId,
+        model: &ModelId,
+        kind: WorkKind,
+    ) -> SegmentBudget {
+        state.record_peer_segment_latency(node, model, kind, 1, 1, 8);
         SegmentBudget::for_forward(
             state,
             node,
             model,
-            WorkKind::Decode,
+            kind,
             1,
             8,
-            ActivationUnits::HiddenStates,
+            match kind {
+                WorkKind::Prefill => ActivationUnits::PromptBytes,
+                _ => ActivationUnits::HiddenStates,
+            },
         )
+    }
+
+    /// What a peer actually sent, as opposed to something this node built.
+    /// `locally_constructed` cannot survive either codec, so a result off the
+    /// wire always reads false — this reproduces that shape in-process.
+    fn as_if_from_the_peer(mut r: LayerResult) -> LayerResult {
+        r.locally_constructed = false;
+        r
+    }
+
+    async fn wait_on(
+        state: &Arc<SharedState>,
+        node: &NodeId,
+        budget: SegmentBudget,
+        result: Option<LayerResult>,
+    ) -> Result<LayerResult, SwarmError> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<LayerResult>();
+        match result {
+            Some(r) => tx.send(r).unwrap(),
+            // Held open so the deadline is what ends the wait, not a dropped
+            // sender — those are different outcomes and only one of them is
+            // the peer's fault.
+            None => std::mem::forget(tx),
+        }
+        PipelineExecutor::wait_for_result(
+            state,
+            rx,
+            uuid::Uuid::new_v4(),
+            0,
+            node,
+            1,
+            8,
+            budget,
+            None,
+        )
+        .await
     }
 
     /// The defect this pins: `record_peer_delivery` was called ONLY from
@@ -668,26 +804,21 @@ mod segment_budget_tests {
         let state = test_state();
         let node = NodeId([7u8; 32]);
         let model = ModelId("m".into());
-        let budget = instant_budget(&state, &node, &model);
+        let budget = budget(&state, &node, &model, WorkKind::Prefill);
         assert_eq!(
             state.peer_delivery_samples(&node),
             0,
             "nothing recorded yet"
         );
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<LayerResult>();
-        tx.send(LayerResult::error(uuid::Uuid::new_v4(), "out of memory"))
-            .unwrap();
-        PipelineExecutor::wait_for_result(
+        wait_on(
             &state,
-            rx,
-            uuid::Uuid::new_v4(),
-            0,
             &node,
-            1,
-            8,
             budget,
-            None,
+            Some(as_if_from_the_peer(LayerResult::error(
+                uuid::Uuid::new_v4(),
+                "out of memory",
+            ))),
         )
         .await
         .expect("a result that arrived is delivered, whatever it says");
@@ -702,6 +833,111 @@ mod segment_budget_tests {
             1.0,
             "and a peer that ANSWERED — even to refuse — is not a lossy link"
         );
+    }
+
+    /// The half that made the figure inert in v0.3.164.
+    ///
+    /// The ACK fast-fail sweep, a departed peer and a closed pipeline stream
+    /// all end the wait by handing it a manufactured `LayerResult::error`
+    /// rather than letting the deadline expire. Those arrive in the SAME arm as
+    /// a peer's own refusal, so they were all scored as intact deliveries — and
+    /// since the ACK deadline (10-90 s) sits well inside the segment budget
+    /// (300 s), that was the normal way a dead link was observed. The peer was
+    /// credited with a perfect delivery every time.
+    #[tokio::test]
+    async fn a_forward_this_node_abandoned_is_not_credited_to_the_peer() {
+        let state = test_state();
+        let node = NodeId([8u8; 32]);
+        let model = ModelId("m".into());
+        let budget = budget(&state, &node, &model, WorkKind::Prefill);
+
+        // Exactly what `fail_tensor_forward` puts on the waiter.
+        let abandoned = LayerResult::error(uuid::Uuid::new_v4(), "peer never acknowledged");
+        assert!(
+            abandoned.locally_constructed,
+            "the discriminator must be set by the constructor those paths use"
+        );
+        let _ = wait_on(&state, &node, budget, Some(abandoned)).await;
+
+        assert_eq!(state.peer_delivery_samples(&node), 1);
+        assert!(
+            state.peer_expected_attempts(&node) > 1.0,
+            "a forward we gave up on must cost the peer, or the term cannot see \
+             the failure it exists for"
+        );
+    }
+
+    /// The cadence rule. An intact sample is taken on the prompt pass only:
+    /// this runs once per segment per token, while the whole-model fast path
+    /// records once per reply, and at `ALPHA = 0.3` a hundred decode samples
+    /// bury the one failure that ended the request.
+    #[tokio::test]
+    async fn an_intact_decode_forward_adds_no_sample() {
+        let state = test_state();
+        let node = NodeId([9u8; 32]);
+        let model = ModelId("m".into());
+        let budget = budget(&state, &node, &model, WorkKind::Decode);
+        assert!(!budget.is_prefill(), "control: this is a decode forward");
+
+        wait_on(
+            &state,
+            &node,
+            budget,
+            Some(as_if_from_the_peer(LayerResult::error(
+                uuid::Uuid::new_v4(),
+                "fine",
+            ))),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            state.peer_delivery_samples(&node),
+            0,
+            "a good decode step is not a fresh statement about the link"
+        );
+    }
+
+    /// ...and the control in the other direction: a FAILURE is always recorded,
+    /// whenever it happens. Suppressing those would be the bug this rule exists
+    /// to avoid rather than a cheaper version of it.
+    #[tokio::test]
+    async fn a_failed_decode_forward_is_still_recorded() {
+        let state = test_state();
+        let node = NodeId([10u8; 32]);
+        let model = ModelId("m".into());
+        let budget = budget(&state, &node, &model, WorkKind::Decode);
+
+        let _ = wait_on(
+            &state,
+            &node,
+            budget,
+            Some(LayerResult::error(uuid::Uuid::new_v4(), "stream closed")),
+        )
+        .await;
+
+        assert_eq!(state.peer_delivery_samples(&node), 1);
+        assert!(state.peer_expected_attempts(&node) > 1.0);
+    }
+
+    /// The timeout arm, end to end. It had no coverage at all: `for_forward`
+    /// floors every budget at `SEGMENT_TIMEOUT_MIN_SECS` (30 s), so the helper
+    /// that claimed to provoke a timeout "without sleeping" could not have.
+    #[tokio::test]
+    async fn a_deadline_that_expires_counts_against_the_peer() {
+        let state = test_state();
+        let node = NodeId([11u8; 32]);
+        let budget = SegmentBudget::with_deadline_for_test(Duration::from_millis(20), true);
+
+        let err = wait_on(&state, &node, budget, None)
+            .await
+            .expect_err("nothing was ever sent");
+        assert!(
+            matches!(err, SwarmError::PeerUnresponsive(_)),
+            "a peer that took the forward and went quiet, not our bug: {err:?}"
+        );
+        assert_eq!(state.peer_delivery_samples(&node), 1);
+        assert!(state.peer_expected_attempts(&node) > 1.0);
     }
 
     /// Every verdict in one place, so the timeout arm is pinned without a test
@@ -731,9 +967,9 @@ mod segment_budget_tests {
     #[tokio::test]
     async fn a_dropped_response_channel_is_not_charged_to_the_peer() {
         let state = test_state();
-        let node = NodeId([8u8; 32]);
+        let node = NodeId([12u8; 32]);
         let model = ModelId("m".into());
-        let budget = instant_budget(&state, &node, &model);
+        let budget = budget(&state, &node, &model, WorkKind::Prefill);
 
         let (tx, rx) = tokio::sync::oneshot::channel::<LayerResult>();
         drop(tx);
