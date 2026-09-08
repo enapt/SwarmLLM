@@ -3397,13 +3397,13 @@ fn a_pipeline_priced_dearer_than_the_processor_does_not_take_the_request() {
         local_route_is_available: true,
     };
     assert!(
-        super::pipeline_may_replace_processor_route(
+        !super::pipeline_may_replace_processor_route(
             &remote_chain,
             &[local.clone(), peer.clone()],
             &local_id(),
             dearer
         )
-        .is_err(),
+        .takes_the_pipeline(),
         "the observed live figures: a chain at 3.5x the processor is not faster"
     );
 
@@ -3416,7 +3416,7 @@ fn a_pipeline_priced_dearer_than_the_processor_does_not_take_the_request() {
             &local_id(),
             chain_is_cheaper()
         )
-        .is_ok(),
+        .takes_the_pipeline(),
         "a genuinely cheaper chain must still displace the processor"
     );
 }
@@ -3448,7 +3448,7 @@ fn a_node_that_cannot_hold_every_layer_gives_the_chain_the_request_at_any_price(
             &local_id(),
             dearer_but_the_only_route
         )
-        .is_ok(),
+        .takes_the_pipeline(),
         "there is no local route to give up, so the price of one is not a reason to stay"
     );
 }
@@ -3546,13 +3546,13 @@ fn the_processor_route_is_kept_for_an_all_local_chain_or_an_unpriced_baseline() 
 
     // Our own speed unknown: nothing to compare, so stay.
     assert!(
-        super::pipeline_may_replace_processor_route(
+        !super::pipeline_may_replace_processor_route(
             &remote_chain,
             &[local.clone(), peer.clone()],
             &local_id(),
             chain_is_cheaper()
         )
-        .is_err(),
+        .takes_the_pipeline(),
         "with no price for running it here there is nothing to give up"
     );
 
@@ -3566,7 +3566,7 @@ fn the_processor_route_is_kept_for_an_all_local_chain_or_an_unpriced_baseline() 
             &local_id(),
             chain_is_cheaper()
         )
-        .is_ok(),
+        .takes_the_pipeline(),
         "an unmeasured peer is priced pessimistically, not excluded"
     );
 
@@ -3577,13 +3577,13 @@ fn the_processor_route_is_kept_for_an_all_local_chain_or_an_unpriced_baseline() 
         layer_range: (0, LAYERS),
     }];
     assert!(
-        super::pipeline_may_replace_processor_route(
+        !super::pipeline_may_replace_processor_route(
             &local_chain,
             &[local, peer],
             &local_id(),
             chain_is_cheaper()
         )
-        .is_err(),
+        .takes_the_pipeline(),
         "an all-local chain is the fast path by another name"
     );
 }
@@ -3774,7 +3774,7 @@ fn a_chain_with_an_unmeasured_peer_is_allowed_once_our_own_speed_is_known() {
             &local_id(),
             chain_is_cheaper()
         )
-        .is_ok(),
+        .takes_the_pipeline(),
         "the search already priced this cheaper than a 0.4 tok/s processor; \
          the prior is the conservatism, not a veto on top of it"
     );
@@ -3799,13 +3799,13 @@ fn a_chain_is_kept_home_when_our_own_speed_is_not_yet_measured() {
     peer.est_tokens_per_sec = 30.0;
     let chain = vec![chain_seg(NodeId([0xBB; 32]), (0, LAYERS))];
     assert!(
-        super::pipeline_may_replace_processor_route(
+        !super::pipeline_may_replace_processor_route(
             &chain,
             &[local, peer],
             &local_id(),
             chain_is_cheaper()
         )
-        .is_err(),
+        .takes_the_pipeline(),
         "with no price for running it here there is nothing to compare against"
     );
 }
@@ -3923,4 +3923,149 @@ fn an_impossible_bound_falls_through_to_the_relaxed_pass() {
         .greedy_assign(48, &[only], false)
         .expect("the relaxed pass routes it");
     assert_eq!(segments.last().map(|s| s.layer_range.1), Some(48));
+}
+
+/// The whole-model hand-off gate used to RETURN, so the priced search never
+/// ran — and the one case where the gate is confidently wrong was the one case
+/// nothing checked it. That is #447 (a card 500 ms away chosen over the LAN
+/// cards it could not see), #478 (a shape priced as one it was not assigning)
+/// and #479 (a veto on a term the search does not use): three fixes in two
+/// releases, each teaching the gate one more thing the search already knew.
+///
+/// Here the far peer holds every layer and is genuinely faster than this
+/// node's processor, so the gate accepts it — correctly, on its own terms. It
+/// is still the wrong answer, because two cards 5 ms away can split the model
+/// between them. The search must get to say so.
+#[test]
+fn a_whole_model_peer_no_longer_ends_the_search_before_it_runs() {
+    let (state, local, b, c) = processor_holder_beside_two_gpu_halves(5, 20.0);
+    let far = NodeId([0xD1; 32]);
+    let model = ModelId("split-14b".into());
+    for i in 0..2 {
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: model.clone(),
+                index: i,
+            },
+            far.clone(),
+        );
+    }
+    // Faster than this node's processor (8.0), so the gate's own speed test
+    // passes — and 400 ms away, which is what the gate cannot price and the
+    // search can.
+    state
+        .peer_registry
+        .insert(far.clone(), gpu_holder_info(&far, 400, 14.0));
+    state.connected_node_ids.insert(far.clone());
+
+    let scheduler = PipelineScheduler::with_delegation_footprint(state, LOCAL_PROCESSOR_TPS, 8_000);
+    let assignment = scheduler
+        .assemble_pipeline_for(&model, &local, uuid::Uuid::new_v4(), Some(14_000))
+        .unwrap();
+    let nodes: Vec<NodeId> = assignment
+        .segments
+        .iter()
+        .map(|s| s.node_id.clone())
+        .collect();
+    assert!(
+        !nodes.contains(&far),
+        "the search must be allowed to pass over the peer the gate accepted; got {:?}",
+        assignment.segments
+    );
+    assert!(
+        nodes.contains(&b) && nodes.contains(&c),
+        "the two nearby cards are the cheaper route; got {:?}",
+        assignment.segments
+    );
+}
+
+/// The control, and the one that matters most: this must not become "never
+/// delegate". The same gate, the same fixture shape — but now the whole-model
+/// peer is the near one and the halves are far, so the hand-off IS the cheapest
+/// route and the search must choose it.
+///
+/// Privacy is auto-on because this node holds both ends, so the shape is the
+/// boomerang: the peer takes the middle and never sees the prompt.
+#[test]
+fn the_whole_model_peer_is_still_chosen_when_it_is_genuinely_cheapest() {
+    let (state, local, _b, _c) = processor_holder_beside_two_gpu_halves(600, 9.0);
+    let near = NodeId([0xD1; 32]);
+    let model = ModelId("split-14b".into());
+    for i in 0..2 {
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: model.clone(),
+                index: i,
+            },
+            near.clone(),
+        );
+    }
+    state
+        .peer_registry
+        .insert(near.clone(), gpu_holder_info(&near, 3, 40.0));
+    state.connected_node_ids.insert(near.clone());
+
+    let scheduler = PipelineScheduler::with_delegation_footprint(state, LOCAL_PROCESSOR_TPS, 8_000);
+    let assignment = scheduler
+        .assemble_pipeline_for(&model, &local, uuid::Uuid::new_v4(), Some(14_000))
+        .unwrap();
+    let nodes: Vec<NodeId> = assignment
+        .segments
+        .iter()
+        .map(|s| s.node_id.clone())
+        .collect();
+    assert!(
+        nodes.contains(&near),
+        "a peer that really is the cheapest route must still get the work; got {:?}",
+        assignment.segments
+    );
+}
+
+/// `StayHere` and `NoComparison` were one `Err` while the only thing the caller
+/// did with either was keep the request local. The hand-off is a fallback now,
+/// and the two must part company: a search that PRICED this node and preferred
+/// it has overruled the gate, while a search that could not price it has said
+/// nothing at all and must not discard the peer the gate accepted.
+#[test]
+fn a_search_that_priced_nothing_leaves_the_hand_off_standing() {
+    let mut local = local_full_coverage();
+    let peer = willing_peer(0xBB, LAYERS);
+    let remote_chain = vec![PipelineSegment {
+        node_id: peer.node_id.clone(),
+        shard_id: peer.shard_id.clone(),
+        layer_range: (0, LAYERS),
+    }];
+
+    // No measured local speed: nothing was compared.
+    local.est_tokens_per_sec = 0.0;
+    let verdict = super::pipeline_may_replace_processor_route(
+        &remote_chain,
+        &[local.clone(), peer.clone()],
+        &local_id(),
+        chain_is_cheaper(),
+    );
+    assert!(!verdict.takes_the_pipeline());
+    assert!(
+        verdict.leaves_room_for_a_hand_off(),
+        "with no baseline the search has not overruled anything: {verdict:?}"
+    );
+
+    // Measured, and the chain is dearer: a real comparison, and this node won
+    // it. The gate does not get a second vote.
+    local.est_tokens_per_sec = 0.4;
+    let verdict = super::pipeline_may_replace_processor_route(
+        &remote_chain,
+        &[local, peer],
+        &local_id(),
+        super::RoutePrices {
+            local_ms: 100.0,
+            chain_ms: 900.0,
+            local_route_is_available: true,
+        },
+    );
+    assert!(!verdict.takes_the_pipeline());
+    assert!(
+        !verdict.leaves_room_for_a_hand_off(),
+        "the search compared the two and preferred this node: {verdict:?}"
+    );
 }

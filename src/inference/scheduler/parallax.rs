@@ -577,6 +577,34 @@ pub(super) fn route_shortest_path(
         ));
     }
 
+    // The source segment starts at layer 0, so it is the one handed the prompt
+    // itself. Under `encrypted_pipeline` that is this node by construction and
+    // the question does not arise; otherwise a peer taking it reads the prompt
+    // in the clear, and `super::trusted_with_the_plaintext_prompt` is the same
+    // bar the whole-model hand-off has always applied before showing a peer
+    // one. The search applied none, so a chain it built could put a docked
+    // peer on layer 0 — invisible, because the only trust check in the
+    // scheduler sat in the gate this search runs INSTEAD of.
+    //
+    // Relaxed when it would leave no source at all, in the shape
+    // `CapacityBound` already uses for the memory figures: a bar that makes a
+    // routable request fail outright is worse than the exposure it prevents,
+    // and the caller can still see the peer in the candidate log. Enforcement
+    // is decided once here rather than inside the closure, so the answer
+    // cannot depend on which vertex is asked first.
+    let prompt_trust_is_enforceable = vertices.iter().any(|v| {
+        let c = &candidates[v.cand_idx];
+        v.range.0 == 0
+            && c.can_be_first
+            && (!encrypted_pipeline || &c.node_id == local_node_id)
+            && super::trusted_with_the_plaintext_prompt(c, local_node_id)
+    });
+    if !prompt_trust_is_enforceable {
+        tracing::warn!(
+            "parallax: no sufficiently trusted node holds layer 0, so the prompt-trust              bar is stood down for this route rather than failing a request that can              otherwise be served"
+        );
+    }
+
     // Source filter: start==0. Must have can_be_first. Encrypted: must be local.
     let is_source = |v: &Vertex| -> bool {
         if v.range.0 != 0 {
@@ -587,6 +615,11 @@ pub(super) fn route_shortest_path(
             return false;
         }
         if encrypted_pipeline && &c.node_id != local_node_id {
+            return false;
+        }
+        if prompt_trust_is_enforceable
+            && !super::trusted_with_the_plaintext_prompt(c, local_node_id)
+        {
             return false;
         }
         true
@@ -2350,5 +2383,116 @@ mod tests {
         .unwrap();
         let nodes: Vec<u8> = segs.iter().map(|s| s.node_id.0[0]).collect();
         assert_eq!(nodes, vec![2, 3], "{segs:?}");
+    }
+
+    /// The source segment reads the prompt in the clear, and a peer this node
+    /// has docked below the default must not be the one to read it.
+    ///
+    /// The bar has existed since the whole-model hand-off was written, and was
+    /// applied ONLY there — so any chain the search built could put a docked
+    /// peer on layer 0 with nothing consulted. That was invisible while the
+    /// hand-off returned before the search; it is the search that decides now.
+    ///
+    /// The docked peer here is deliberately the CHEAPER of the two — nearer,
+    /// and faster — so a route that still picks it is picking it on price, and
+    /// this test can only pass because of the trust bar.
+    #[test]
+    fn a_docked_peer_is_not_handed_the_segment_that_reads_the_prompt() {
+        let local = NodeId([1u8; 32]);
+        let mut tail = cand(1, vec![(10, 28)], 0, 0.0, false, true, 20.0);
+        tail.node_id = local.clone();
+        // Near, fast — and docked.
+        let mut docked = cand(2, vec![(0, 10)], 1, 0.0, true, false, 40.0);
+        docked.trust_score = 0.4;
+        // Far, slower, trusted.
+        let mut trusted = cand(3, vec![(0, 10)], 90, 0.0, true, false, 8.0);
+        trusted.trust_score = crate::credit::trust::DEFAULT_TRUST;
+
+        let segs = route_shortest_path(
+            28,
+            &[tail.clone(), docked.clone(), trusted.clone()],
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            Some(4096),
+        )
+        .expect("a trusted holder of layer 0 exists, so this must route");
+        assert_eq!(
+            segs[0].node_id.0[0], 3,
+            "the prompt must go to the trusted holder, not the cheaper docked one: {segs:?}"
+        );
+
+        // The control, on the identical fixture: restore the docked peer to the
+        // default and the cheaper route is taken again. Without this the test
+        // above would also pass if the near peer were unroutable for some
+        // reason that has nothing to do with trust.
+        docked.trust_score = crate::credit::trust::DEFAULT_TRUST;
+        let segs = route_shortest_path(
+            28,
+            &[tail, docked, trusted],
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            Some(4096),
+        )
+        .expect("must still route");
+        assert_eq!(
+            segs[0].node_id.0[0], 2,
+            "at default trust the cheaper peer wins on price: {segs:?}"
+        );
+    }
+
+    /// A bar that makes a servable request fail outright is worse than the
+    /// exposure it prevents, so it stands down when it would leave no source at
+    /// all — the same shape `CapacityBound` uses for the memory figures.
+    #[test]
+    fn the_prompt_trust_bar_stands_down_rather_than_failing_a_routable_request() {
+        let local = NodeId([1u8; 32]);
+        let mut tail = cand(1, vec![(10, 28)], 0, 0.0, false, true, 20.0);
+        tail.node_id = local.clone();
+        // The ONLY holder of layer 0, and docked.
+        let mut docked = cand(2, vec![(0, 10)], 5, 0.0, true, false, 40.0);
+        docked.trust_score = 0.1;
+
+        let segs = route_shortest_path(
+            28,
+            &[tail, docked],
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            Some(4096),
+        )
+        .expect("with no trusted alternative the request must still be served");
+        assert_eq!(segs[0].node_id.0[0], 2, "{segs:?}");
+    }
+
+    /// Under prompt privacy the source is this node by construction, so the
+    /// trust bar has nothing to say and must not narrow the peers that can take
+    /// the MIDDLE — they see encrypted activations, never the prompt.
+    #[test]
+    fn the_prompt_trust_bar_does_not_apply_to_a_middle_segment() {
+        let local = NodeId([1u8; 32]);
+        let mut head = cand(1, vec![(0, 3)], 0, 0.0, true, false, 20.0);
+        head.node_id = local.clone();
+        let mut tail = cand(1, vec![(21, 28)], 0, 0.0, false, true, 20.0);
+        tail.node_id = local.clone();
+        let mut middle = cand(2, vec![(3, 21)], 5, 0.0, false, false, 40.0);
+        middle.trust_score = 0.1;
+
+        let segs = route_shortest_path(
+            28,
+            &[head, tail, middle],
+            &local,
+            true,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("a docked peer may still run encrypted middle layers");
+        assert_eq!(segs.len(), 3, "{segs:?}");
+        assert_eq!(segs[1].node_id.0[0], 2, "{segs:?}");
     }
 }

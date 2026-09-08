@@ -11130,10 +11130,52 @@ priced", with exploration bounded by the existing ACK fast-fail and local-first
 standby rather than by refusal. No threshold invented — the crossover falls out
 of the cost model's own constants.
 
-**Still open**: making the DP the sole decision-maker for every shape
-(boomerangs across several peers, partial splits) remains the larger change.
-What shipped is the gate agreeing with the search about the shape it is
-actually choosing, not being replaced by it.
+**The gate stopped being a decision (2026-09-08).** `assemble_pipeline_for` no
+longer returns the hand-off: when the priced search will run, the plan is held
+in `hand_off` and the search chooses, with the plan taken only where the search
+declined to price anything at all. That is what this entry asked for — "the gate
+should become a filter and the search the decision" — and it is what closes the
+pattern the three fixes above form: #447, #478 and #479 were each the gate
+missing one thing the search already knew, and each was fixed by teaching the
+gate that one thing. There were two decision-makers for one decision.
+
+Both preconditions had landed by then and neither existed when the gate was
+written: the local candidate is priced at PROCESSOR speed (#444), and the search
+can cut a boomerang out of a whole-model peer (v0.3.163's split points at 1 and
+n-1). The "constructed rather than searched" note on `boomerang_assignment` was
+verified on 2026-08-18 against a cost model that no longer exists.
+
+Pinned by `a_whole_model_peer_no_longer_ends_the_search_before_it_runs`, whose
+null control reproduces this entry's own topology exactly — restore the early
+return and a peer 400 ms away takes the middle while two cards 5 ms away sit
+idle. `PipelineScheduler::with_delegation_footprint` is what lets a test fire
+the gate at all: `estimated_gpu_mb` reads a real `gguf_header.bin`, so every
+assembly test written before this one exercised the path with the gate switched
+off.
+
+The same pass closed a gap the change would otherwise have opened. `trust_score`
+was consulted in exactly ONE place in the scheduler — the gate — so a chain the
+search built could hand layer 0, which reads the prompt in the clear, to a
+docked peer. `trusted_with_the_plaintext_prompt` is now shared by both, applied
+to the source segment, and stands down rather than failing a request no trusted
+peer can serve.
+
+**The privacy-cost message went quiet on the search's routes, deliberately.**
+`report_privacy_cost` prices keeping the ends here against giving ONE named peer
+the whole model, so with the hand-off now a proposal rather than a decision,
+emitting it would put a figure on a route the user never gets. It fires only
+where that plan is taken. Reporting what privacy costs on the route the search
+actually chose is a different figure — the cheapest privacy-respecting chain
+against the cheapest chain overall, both of which the search already prices —
+and is worth adding; nothing computes it today, so the message is simply absent
+on those routes rather than wrong.
+
+**Still open**: `DELEGATE_MAX_LATENCY_MS` and `DELEGATE_MIN_CPU_SPEEDUP` are now
+belt-and-braces on a plan that must survive pricing anyway. They still decide
+the fallback on a node where the search cannot run (parallax routing off, or a
+single candidate), which is why they stand. And **none of this is field-verified
+yet** — the shapes it changes need a processor-bound node with both a
+whole-model peer and a cheaper multi-peer chain in view.
 
 ## A multi-megabyte forward over ONE QUIC stream can kill the connection (measured 2026-09-03, gotcha #446)
 

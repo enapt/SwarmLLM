@@ -469,6 +469,90 @@ plan into an error. And when a struct's own field documentation describes a
 generality — "THIS segment, not the whole model" — check what its callers
 actually pass.
 
+## The hand-off gate proposes; the priced search decides
+
+`assemble_pipeline_for` no longer RETURNS the whole-model hand-off. When the
+priced search is going to run — this node on its processor, `parallax_routing`
+on, more than one candidate — the gate's plan is held in `hand_off` and the
+search chooses; the plan is taken only where the search declined to price
+anything (`ProcessorRouteVerdict::NoComparison`, or the search failing to route
+at all), and never where it made a real comparison and this node won.
+
+**Why.** A gate that returns before the search means the one case where the gate
+is confidently wrong is the one case nothing checks it. Every routing defect of
+the last three releases was an instance, each fixed by teaching the gate one
+more thing the search already knew: **#447** chose a card 500 ms away over the
+LAN cards it structurally could not see (they hold halves, so they are not
+delegation candidates at all); **#478** priced `(0, num_layers)` while assigning
+a boomerang's middle; **#479** vetoed a chain on a term the search does not use.
+Three fixes in two releases converging on one structural fact — there were two
+decision-makers for one decision, which is the shape `graphics memory has ONE
+owner` and `the storage budget has ONE accountant` already name elsewhere in
+this file.
+
+**The search only recently became able to subsume it, and both preconditions
+postdate the reasoning it replaced.** `gather_candidates` has priced the local
+candidate at PROCESSOR speed since #444 (2026-09-03); `route_shortest_path` has
+added split points at 1 and n−1 when this node holds every layer since v0.3.163.
+The note on `boomerang_assignment` — "constructed rather than searched ...
+nothing in its cost model knows the local node is about to fall back to its
+CPU", verified 2026-08-18 — was true of a cost model that no longer exists. **A
+comment recording a verification records the date it was true.**
+
+Four things a change here must keep.
+
+- **This must not become "never delegate".** The same peer offered the model is
+  still taken when it really is the cheapest route — pinned by
+  `the_whole_model_peer_is_still_chosen_when_it_is_genuinely_cheapest`, the
+  control beside `a_whole_model_peer_no_longer_ends_the_search_before_it_runs`.
+  The feature exists because a processor node beside an idle card is the failure
+  being fixed (#442/#444).
+- **`StayHere` and `NoComparison` are different answers.** They were one `Err`
+  while the only thing the caller did with either was keep the request local.
+  With the hand-off as a fallback they part company: a search that priced this
+  node and preferred it has overruled the gate; a search that could not price it
+  has said nothing, and discarding the peer would strand a node whose own speed
+  is merely not yet measured. Do not collapse them back.
+- **The gate is still the whole decision where the search cannot run** — parallax
+  routing off, or nothing else to compare against. `search_will_decide` is
+  computed BEFORE the gate, because it decides what the gate's answer is FOR.
+- **`delegation_target` keeps the one judgement the search does not make**:
+  trust. Its latency and speed terms are performance heuristics the search
+  prices properly; its capacity term is `max_hostable_layers`, which the search
+  also honours.
+
+**Still open**: `DELEGATE_MAX_LATENCY_MS` and `DELEGATE_MIN_CPU_SPEEDUP` are now
+belt-and-braces on a plan that has to survive pricing anyway, and the gate could
+in principle be reduced to the trust filter alone. Left standing because they
+are the only thing deciding the fallback on a node where the search cannot run.
+
+## A peer that will read the plaintext prompt clears a trust bar, whichever path chose it
+
+`scheduler::trusted_with_the_plaintext_prompt` is the one bar, read by
+`delegation_target` and by `route_shortest_path`'s source filter — the segment
+starting at layer 0 is the one the prompt arrives at in the clear.
+
+**Why it is shared.** `trust_score` was consulted in exactly one place in the
+whole scheduler: the hand-off gate, whose own comment called it "not trusted
+enough to be shown the prompt". The search applied nothing, so any chain it
+built could put a docked peer on layer 0. That was invisible while the gate
+returned first — and making the search the decision-maker (above) would have
+retired the only trust check there was.
+
+Three things a change here must keep.
+
+- **It stands down rather than failing a routable request**, in the same shape
+  `CapacityBound` uses for the memory figures: enforcement is decided once,
+  before the DP, by asking whether any trusted source exists at all. A bar that
+  refuses to serve is worse than the exposure it prevents, and the decision must
+  not depend on which vertex is asked first.
+- **It does not apply to a middle segment.** Under `encrypted_pipeline` the
+  source is this node by construction, and a peer running middle layers sees
+  encrypted activations, never the prompt — so narrowing who may take the middle
+  would cost the boomerang its whole point.
+- **It is about CONFIDENTIALITY, not speed or reach.** `DELEGATE_MAX_LATENCY_MS`
+  and the reach tier stay in the gate; the search prices those itself.
+
 ## An unmeasured candidate is priced pessimistically, never excluded
 
 `priced_from_a_measurement` is one predicate with one meaning — "does the cost

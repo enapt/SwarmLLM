@@ -24,6 +24,10 @@ pub struct PipelineScheduler {
     /// bandwidth is not a test of routing.
     #[cfg(test)]
     local_processor_tokens_per_sec: Option<f32>,
+    /// A model footprint in MB, so a test can make the whole-model hand-off
+    /// gate run at all — see [`Self::with_delegation_footprint`].
+    #[cfg(test)]
+    delegation_footprint_mb: Option<u64>,
 }
 
 /// A candidate node for layer ranges, with scoring metadata.
@@ -528,6 +532,26 @@ pub(crate) struct DelegationInput<'a> {
     pub prompt_tokens: Option<u32>,
 }
 
+/// May this candidate be handed a segment that reads the plaintext prompt?
+///
+/// The one bar, shared by the hand-off gate and by the routing search's source
+/// filter, because they are asking the same question about the same peer. It
+/// lived only in [`delegation_target`] until 2026-09-08, so a chain the search
+/// built could put a docked peer on layer 0 — the segment the prompt arrives
+/// at in the clear — with nothing consulted at all. The gate that DID check was
+/// the one the search bypasses whenever it runs, so making the search the
+/// decision-maker (below) would have retired the only trust check there was.
+///
+/// The local node always passes: there is no such thing as showing ourselves
+/// the prompt.
+///
+/// Note this is about CONFIDENTIALITY, not speed or reachability.
+/// `DELEGATE_MAX_LATENCY_MS` and the reach tier are performance terms and stay
+/// where they are — the search prices those itself.
+fn trusted_with_the_plaintext_prompt(c: &NodeCandidate, local_node_id: &NodeId) -> bool {
+    &c.node_id == local_node_id || c.trust_score >= DELEGATE_MIN_TRUST
+}
+
 fn delegation_target<'a>(
     candidates: &'a [NodeCandidate],
     input: &DelegationInput<'_>,
@@ -572,7 +596,7 @@ fn delegation_target<'a>(
             "not directly reachable with a measured latency"
         } else if c.latency_ms > DELEGATE_MAX_LATENCY_MS {
             "too far away"
-        } else if c.trust_score < DELEGATE_MIN_TRUST {
+        } else if !trusted_with_the_plaintext_prompt(c, local_node_id) {
             "not trusted enough to be shown the prompt"
         } else if c
             .max_hostable_layers
@@ -978,7 +1002,7 @@ fn pipeline_may_replace_processor_route(
     candidates: &[NodeCandidate],
     local_node_id: &NodeId,
     prices: RoutePrices,
-) -> Result<&'static str, &'static str> {
+) -> ProcessorRouteVerdict {
     let remote: Vec<&PipelineSegment> = chain
         .iter()
         .filter(|s| s.node_id != *local_node_id)
@@ -990,7 +1014,7 @@ fn pipeline_may_replace_processor_route(
         // wording — "no pipeline across peers is priced faster than the
         // processor" — beside two identical costs, which is what it looks like
         // when the "pipeline" being priced IS the local segment.
-        return Err(
+        return ProcessorRouteVerdict::StayHere(
             "the cheapest route the search found is entirely local, so there is no \
                     pipeline to compare",
         );
@@ -999,7 +1023,9 @@ fn pipeline_may_replace_processor_route(
     // node can offer, so the chain is not competing with the processor — it is
     // the only way the request gets answered at all, whatever it costs.
     if !prices.local_route_is_available {
-        return Ok("this node cannot hold every layer by itself, so a pipeline is the only route");
+        return ProcessorRouteVerdict::TakeThePipeline(
+            "this node cannot hold every layer by itself, so a pipeline is the only route",
+        );
     }
     // The BASELINE must be known, because that is the whole comparison: this
     // function is asked whether to give up running the model here, and "here"
@@ -1011,7 +1037,9 @@ fn pipeline_may_replace_processor_route(
         .find(|c| c.node_id == *local_node_id)
         .is_some_and(priced_from_a_measurement)
     {
-        return Err("this node's own speed is not yet measured, so there is nothing to compare");
+        return ProcessorRouteVerdict::NoComparison(
+            "this node's own speed is not yet measured, so there is nothing to compare",
+        );
     }
     // And the comparison the whole function is named for. Both figures come
     // from the same cost model — `chain_cost_ms` sums `vertex_cost` over the
@@ -1019,9 +1047,59 @@ fn pipeline_may_replace_processor_route(
     // segment the fast path would build — so they are commensurable, and both
     // are priced as the SHAPE that would run (gotcha #478).
     if prices.chain_ms >= prices.local_ms {
-        return Err("the pipeline is priced no cheaper than running it here");
+        return ProcessorRouteVerdict::StayHere(
+            "the pipeline is priced no cheaper than running it here",
+        );
     }
-    Ok("a pipeline across peers' cards is priced faster, so the request goes there")
+    ProcessorRouteVerdict::TakeThePipeline(
+        "a pipeline across peers' cards is priced faster, so the request goes there",
+    )
+}
+
+/// What the processor-versus-pipeline comparison concluded.
+///
+/// Three outcomes, not two, and the third is the point. `StayHere` means a real
+/// comparison was made and this node won it; `NoComparison` means none could be
+/// made, because there is no priced baseline to give up. They used to be the
+/// same `Err`, which was fine while the only thing the caller did with either
+/// was keep the request local.
+///
+/// It stopped being fine when the whole-model hand-off became a fallback rather
+/// than an early return (2026-09-08). A gate that has found a peer must defer to
+/// a search that actually priced one against the other — but must NOT be
+/// discarded by a search that declined to price anything at all, or a node whose
+/// own speed is not yet measured would sit on its processor beside the peer the
+/// gate had already accepted. That is a regression the old two-way answer could
+/// not express.
+#[derive(Clone, Copy, Debug)]
+enum ProcessorRouteVerdict {
+    /// The chain wins on price, or is the only route this node can offer.
+    TakeThePipeline(&'static str),
+    /// The comparison was made and running it here won.
+    StayHere(&'static str),
+    /// No comparison was possible. A plan made WITHOUT the search — the
+    /// whole-model hand-off — is still admissible here, because nothing has
+    /// been weighed against it.
+    NoComparison(&'static str),
+}
+
+impl ProcessorRouteVerdict {
+    fn takes_the_pipeline(self) -> bool {
+        matches!(self, Self::TakeThePipeline(_))
+    }
+
+    /// Only when nothing was actually compared. A verdict of `StayHere` is the
+    /// search's own answer and must not be second-guessed by the gate it
+    /// replaced — that would be the two decision-makers all over again.
+    fn leaves_room_for_a_hand_off(self) -> bool {
+        matches!(self, Self::NoComparison(_))
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::TakeThePipeline(r) | Self::StayHere(r) | Self::NoComparison(r) => r,
+        }
+    }
 }
 
 /// The two prices this node is choosing between, and whether the local one
@@ -1103,15 +1181,25 @@ const BOOMERANG_MIN_LAYERS: u32 = 3;
 /// Build the boomerang: embedding here, the middle layers on `peer`, sampling
 /// back here.
 ///
-/// **Constructed rather than searched, for the same reason the whole-model
-/// hand-off is.** Asked to route this, the general search legitimately answers
-/// "run all of it locally": that satisfies the encrypted constraint (first and
-/// last segments are local) at zero network cost, and nothing in its cost model
-/// knows the local node is about to fall back to its CPU. Verified on two nodes
-/// on 2026-08-18 — skipping the local fast path alone produced
-/// `segments=1 node=<local> layer_start=0 layer_end=28`, which is not a
-/// boomerang. Teaching the search that local compute is expensive here is what
-/// the reverted `cbbed678` did, and it distorted every other route.
+/// **The search can build this shape too, and normally does.** This builder is
+/// now the FALLBACK — used when the priced search is unavailable, or when it
+/// declined to price anything at all — not the primary path.
+///
+/// It used to be the only way to get a boomerang, and the reasoning was sound
+/// at the time: asked to route one, the general search answered "run all of it
+/// locally", because that satisfies the encrypted constraint at zero network
+/// cost and nothing in its cost model knew this node was about to fall back to
+/// its processor. Verified on two nodes on 2026-08-18. Both halves of that have
+/// since changed — `gather_candidates` prices the local candidate at PROCESSOR
+/// speed when the request would run there (#444, 2026-09-03), and
+/// `route_shortest_path` adds split points at 1 and n-1 when this node holds
+/// every layer (v0.3.163) — so the answer it gives today is the boomerang, at a
+/// price, against every other shape.
+///
+/// Note what has NOT changed: teaching the search that local compute is
+/// expensive with a CONSTANT is what the reverted `cbbed678` did, and it
+/// distorted every other route. The local figure is measured, which is the
+/// whole difference.
 ///
 /// The split is deliberately lopsided: one layer at each end, everything else on
 /// the peer. The local segments exist to satisfy privacy — the first does the
@@ -1336,6 +1424,8 @@ impl PipelineScheduler {
             shared_state,
             #[cfg(test)]
             local_processor_tokens_per_sec: None,
+            #[cfg(test)]
+            delegation_footprint_mb: None,
         }
     }
 
@@ -1349,6 +1439,42 @@ impl PipelineScheduler {
         Self {
             shared_state,
             local_processor_tokens_per_sec: Some(tokens_per_sec),
+            delegation_footprint_mb: None,
+        }
+    }
+
+    /// As above, plus a model footprint, so the whole-model hand-off gate can
+    /// actually run.
+    ///
+    /// `estimated_gpu_mb` reads `gguf_header.bin` off disk and no synthetic
+    /// GGUF is committed, so in a unit test it answers `None` — and
+    /// `delegation_target` returns on a zero footprint before it looks at a
+    /// single candidate. Every assembly test written before this one therefore
+    /// exercised the path with the gate switched off, which is fine when the
+    /// fixture has no whole-model peer and useless for asserting what happens
+    /// when it does.
+    #[cfg(test)]
+    pub(super) fn with_delegation_footprint(
+        shared_state: Arc<SharedState>,
+        tokens_per_sec: f32,
+        model_vram_mb: u64,
+    ) -> Self {
+        Self {
+            shared_state,
+            local_processor_tokens_per_sec: Some(tokens_per_sec),
+            delegation_footprint_mb: Some(model_vram_mb),
+        }
+    }
+
+    /// The pinned model footprint, when a test set one; `None` in production.
+    fn pinned_delegation_footprint_mb(&self) -> Option<u64> {
+        #[cfg(test)]
+        {
+            self.delegation_footprint_mb
+        }
+        #[cfg(not(test))]
+        {
+            None
         }
     }
 
@@ -1514,10 +1640,37 @@ impl PipelineScheduler {
                     .any(|r| r.0 == 0 && r.1 >= num_layers)
         });
         // Set below when this node holds every layer but would run the model on
-        // its processor and no single peer could take the whole of it: then the
-        // routing search is allowed to compete with the local fast path, on the
-        // strength of the local candidate now being priced at processor speed.
+        // its processor: then the routing search is allowed to compete with the
+        // local fast path, on the strength of the local candidate now being
+        // priced at processor speed.
         let mut pipeline_may_beat_local = false;
+        // The whole-model hand-off, held rather than returned.
+        //
+        // Until 2026-09-08 a gate that found a peer RETURNED, so the priced
+        // search never ran — which meant the one case where the gate is
+        // confidently wrong was the one case nothing checked it. Every routing
+        // defect of the last three releases was an instance: #447 chose a card
+        // 500 ms away over a LAN card the gate could not see, #478 priced a
+        // shape it was not assigning, #479 vetoed on a term the search does not
+        // use. Each was fixed by teaching the gate one more thing the search
+        // already knew.
+        //
+        // The search subsumes it now, and only recently: `gather_candidates`
+        // has priced the local candidate at PROCESSOR speed since #444
+        // (2026-09-03), and `route_shortest_path` has been able to cut a
+        // boomerang out of a whole-model peer since the split points at 1 and
+        // n-1 landed in v0.3.163. Both are preconditions, and both postdate the
+        // "constructed rather than searched" note on `boomerang_assignment`,
+        // which was verified on 2026-08-18 against a cost model that genuinely
+        // could not see this node's fallback to its processor.
+        //
+        // So the gate keeps the one judgement the search does not make — trust,
+        // now shared as `trusted_with_the_plaintext_prompt` — and its plan
+        // survives as the fallback for when the search declines to price
+        // anything at all. It is NOT consulted when the search made a real
+        // comparison and this node won it: that would be two decision-makers
+        // again, which is the whole thing being retired.
+        let mut hand_off: Option<PipelineAssignment> = None;
         if local_covers_everything {
             let pool = &self.shared_state.model_process_pool;
             // Ask the cheap question first and only price the model if the
@@ -1538,6 +1691,15 @@ impl PipelineScheduler {
             // node holding every shard ran the model itself with GPU peers
             // idle beside it.
             let local_is_degraded = local_on_processor();
+            // Decided BEFORE the gate runs, because it decides what the gate's
+            // answer is FOR: a plan to take, or a fallback to hold. Same three
+            // terms as before — only the priced search may make this call, so
+            // with parallax routing off, or nothing else to compare against,
+            // the gate is still the whole decision.
+            let search_will_decide = local_is_degraded
+                && self.shared_state.config.inference.parallax_routing
+                && candidates.len() > 1;
+            pipeline_may_beat_local = search_will_decide;
             let delegate_to = if local_is_degraded {
                 delegation_target(
                     &candidates,
@@ -1549,7 +1711,9 @@ impl PipelineScheduler {
                         // only, when the two ends stay here.
                         layers_to_assign: delegated_layer_span(num_layers, encrypted),
                         local_serves_on_cpu: true,
-                        model_vram_mb: pool.estimated_gpu_mb(model_id).unwrap_or(0),
+                        model_vram_mb: self
+                            .pinned_delegation_footprint_mb()
+                            .unwrap_or_else(|| pool.estimated_gpu_mb(model_id).unwrap_or(0)),
                         // OUR processor speed, not our graphics card's: this
                         // only runs when the model does not fit the card, so
                         // the processor is what the request would actually get
@@ -1585,14 +1749,24 @@ impl PipelineScheduler {
                     // turned it off; the one system that does downgrade
                     // silently, Firefox's DoH fallback, is criticised for
                     // exactly that silence.
-                    self.report_privacy_cost(
-                        model_id,
-                        peer,
-                        &candidates,
-                        local_node_id,
-                        num_layers,
-                        prompt_tokens,
-                    );
+                    // Only when this plan is the one being TAKEN. The figure it
+                    // reports is the cost of keeping the ends here rather than
+                    // giving THIS peer the whole model, so announcing it beside
+                    // a plan the search is about to price against several other
+                    // routes would put a number on a route the user never gets.
+                    // A privacy cost for whatever the search does choose is a
+                    // different figure and is not computed anywhere yet —
+                    // `docs/FUTURE_WORK.md`.
+                    if !search_will_decide {
+                        self.report_privacy_cost(
+                            model_id,
+                            peer,
+                            &candidates,
+                            local_node_id,
+                            num_layers,
+                            prompt_tokens,
+                        );
+                    }
                     // Boomerang. Skipping the local fast path is the whole
                     // change: the distributed assembly below already forces the
                     // first and last segments onto this node and already
@@ -1623,17 +1797,25 @@ impl PipelineScheduler {
                             // (gotcha #454).
                             peer_free_vram_mb = ?peer.gpu_vram_available_mb,
                             peer_max_hostable_layers = ?peer.max_hostable_layers,
+                            search_will_decide,
                             "This model does not fit our GPU. Prompt privacy is on, so the \
                              first and last layers stay here and a nearby peer runs the \
                              middle — it sees encrypted activations, never the prompt"
                         );
-                        return Ok(PipelineAssignment {
+                        let assignment = PipelineAssignment {
                             request_id,
                             segments,
                             standbys: vec![],
                             tp_groups: vec![],
                             supports_speculative: true,
-                        });
+                        };
+                        if !search_will_decide {
+                            return Ok(assignment);
+                        }
+                        // The search can build this same shape now, and prices
+                        // it against every other. Held in case it declines to
+                        // price anything at all.
+                        hand_off = Some(assignment);
                     }
                 } else {
                     tracing::info!(
@@ -1642,10 +1824,11 @@ impl PipelineScheduler {
                         peer_latency_ms = peer.latency_ms,
                         peer_free_vram_mb = ?peer.gpu_vram_available_mb,
                         peer_max_hostable_layers = ?peer.max_hostable_layers,
+                        search_will_decide,
                         "This model does not fit our GPU, so a nearby peer runs the whole \
                          of it instead of falling back to our CPU"
                     );
-                    return Ok(PipelineAssignment {
+                    let assignment = PipelineAssignment {
                         request_id,
                         segments: vec![PipelineSegment {
                             node_id: peer.node_id.clone(),
@@ -1667,29 +1850,27 @@ impl PipelineScheduler {
                         standbys: vec![],
                         tp_groups: vec![],
                         supports_speculative: true,
-                    });
+                    };
+                    if !search_will_decide {
+                        return Ok(assignment);
+                    }
+                    hand_off = Some(assignment);
                 }
             }
-            // No single peer could take the whole model — but the request
-            // would still run on this node's processor, and a PIPELINE over
-            // several peers' cards may be faster than that (gotcha #444; the
+            // Whether or not a single peer could take the whole model, the
+            // request would run on this node's processor — and a PIPELINE over
+            // several peers' cards may be faster than either (gotcha #444; the
             // tester's case in #442: a 14B no one card holds, on a
             // processor-only node that had just finished acquiring it, where
             // the day before a three-segment pipeline across two GPU nodes
-            // answered in seconds). Let the search below compete with the
-            // fast path. It can, now, because the local candidate is priced
-            // at the processor's measured speed rather than the card's — the
-            // honest input the reverted `cbbed678` lacked when it priced local
-            // layers at a constant 10,000 and sent a request abroad past a
-            // peer 5 ms away. The search still charges every remote hop per
-            // token, so a short prompt with only distant cards on offer stays
-            // here; a long prompt on a processor does not.
-            //
-            // Only the priced search may make this call: greedy has no cost
-            // to compare, so with parallax routing off the fast path stands.
-            pipeline_may_beat_local = local_is_degraded
-                && self.shared_state.config.inference.parallax_routing
-                && candidates.len() > 1;
+            // answered in seconds). The search below competes with the fast
+            // path AND with the hand-off above. It can, now, because the local
+            // candidate is priced at the processor's measured speed rather than
+            // the card's — the honest input the reverted `cbbed678` lacked when
+            // it priced local layers at a constant 10,000 and sent a request
+            // abroad past a peer 5 ms away. The search still charges every
+            // remote hop per token, so a short prompt with only distant cards on
+            // offer stays here; a long prompt on a processor does not.
         }
 
         // Fast path: if the local node has full layer coverage (0..num_layers),
@@ -1887,13 +2068,15 @@ impl PipelineScheduler {
                             chain_ms,
                             local_route_is_available: local_runs_whole_model,
                         };
-                        match pipeline_may_replace_processor_route(
+                        let verdict = pipeline_may_replace_processor_route(
                             &segs,
                             &candidates,
                             local_node_id,
                             prices,
-                        ) {
-                            Ok(reason) => tracing::info!(
+                        );
+                        let reason = verdict.reason();
+                        if verdict.takes_the_pipeline() {
+                            tracing::info!(
                                 model = %model_id,
                                 segments = segs.len(),
                                 local_processor_cost_ms = local_ms,
@@ -1902,36 +2085,61 @@ impl PipelineScheduler {
                                 prompt_tokens = ?prompt_tokens,
                                 "This node holds the whole model but would run it on its \
                                  processor; {reason}"
-                            ),
-                            Err(reason) => {
-                                // Name the option a reader will ask about. The
-                                // candidate list already carries a cost per
-                                // node, so without this the log shows a peer
-                                // priced 55x cheaper and a decision that never
-                                // mentions it.
-                                let passed_over = cheapest_whole_model_peer(
-                                    &candidates,
-                                    local_node_id,
-                                    num_layers,
-                                    prompt_tokens,
-                                );
+                            );
+                        } else {
+                            // Name the option a reader will ask about. The
+                            // candidate list already carries a cost per
+                            // node, so without this the log shows a peer
+                            // priced 55x cheaper and a decision that never
+                            // mentions it.
+                            let passed_over = cheapest_whole_model_peer(
+                                &candidates,
+                                local_node_id,
+                                num_layers,
+                                prompt_tokens,
+                            );
+                            // The search declined to price anything — it had no
+                            // baseline for this node — so it has not overruled
+                            // the hand-off gate, and the peer the gate accepted
+                            // is still the best answer anyone has. Taking the
+                            // processor here would strand a node whose own
+                            // speed is merely not yet measured.
+                            //
+                            // A verdict of `StayHere` deliberately does NOT
+                            // reach this: there the search DID compare the two
+                            // and this node won, and re-running the gate over
+                            // its answer is the second decision-maker all over
+                            // again.
+                            if let Some(assignment) =
+                                hand_off.filter(|_| verdict.leaves_room_for_a_hand_off())
+                            {
                                 tracing::info!(
                                     model = %model_id,
                                     local_processor_cost_ms = local_ms,
                                     pipeline_cost_ms = chain_ms,
-                                    cheapest_peer = ?passed_over.map(|(c, _)| c.node_id.to_string()),
-                                    cheapest_peer_cost_ms = ?passed_over.map(|(_, ms)| ms),
                                     prompt_tokens = ?prompt_tokens,
-                                    "This node holds the whole model and runs it on its \
-                                     processor: {reason}"
+                                    "This node holds the whole model and would run it on \
+                                     its processor: {reason} — handing it to the peer the \
+                                     gate accepted instead"
                                 );
-                                return Ok(Self::local_only_assignment(
-                                    request_id,
-                                    local_node_id,
-                                    local_cand,
-                                    num_layers,
-                                ));
+                                return Ok(assignment);
                             }
+                            tracing::info!(
+                                model = %model_id,
+                                local_processor_cost_ms = local_ms,
+                                pipeline_cost_ms = chain_ms,
+                                cheapest_peer = ?passed_over.map(|(c, _)| c.node_id.to_string()),
+                                cheapest_peer_cost_ms = ?passed_over.map(|(_, ms)| ms),
+                                prompt_tokens = ?prompt_tokens,
+                                "This node holds the whole model and runs it on its \
+                                 processor: {reason}"
+                            );
+                            return Ok(Self::local_only_assignment(
+                                request_id,
+                                local_node_id,
+                                local_cand,
+                                num_layers,
+                            ));
                         }
                     }
                     segs
@@ -1939,7 +2147,10 @@ impl PipelineScheduler {
                 Err(e) => {
                     // A local node holding every layer needs no fallback route:
                     // greedy has no cost to compare against the processor, so
-                    // the fast path it would have taken is the answer.
+                    // the fast path it would have taken is the answer — unless
+                    // the hand-off gate found a peer, in which case the search
+                    // failing to route is precisely the case that plan was held
+                    // for. Nothing has been priced against it.
                     if let (true, Some(local_cand)) = (pipeline_may_beat_local, local_cand) {
                         let passed_over = cheapest_whole_model_peer(
                             &candidates,
@@ -1947,6 +2158,16 @@ impl PipelineScheduler {
                             num_layers,
                             prompt_tokens,
                         );
+                        if let Some(assignment) = hand_off {
+                            tracing::info!(
+                                model = %model_id,
+                                err = %e,
+                                "DIAG: parallax routing unavailable — handing the model to \
+                                 the peer the gate accepted rather than running it on this \
+                                 node's processor"
+                            );
+                            return Ok(assignment);
+                        }
                         tracing::info!(
                             model = %model_id,
                             err = %e,
