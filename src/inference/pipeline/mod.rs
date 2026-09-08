@@ -413,6 +413,7 @@ pub(super) async fn forward_verify_through_segments(
             );
             let seg_start = std::time::Instant::now();
             let result = PipelineExecutor::wait_for_result(
+                shared_state,
                 rx,
                 request_id,
                 idx,

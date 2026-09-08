@@ -11177,6 +11177,65 @@ single candidate), which is why they stand. And **none of this is field-verified
 yet** — the shapes it changes need a processor-bound node with both a
 whole-model peer and a cheaper multi-peer chain in view.
 
+## A peer's link is ranked by a proxy that cannot see loss or bandwidth (measured by a contributor, 2026-09-07, issue #21)
+
+**What was measured.** A rootless netem harness (veth across two unprivileged
+netns, self-tested — the author found and fixed three bugs in their own harness
+before reporting) swept eight link profiles, timing a real 8 KB activation and a
+513 KB verify round against what `peer_registry.latency_ms` sees:
+
+| profile | ping | 8 KB | 513 KB |
+|---|---|---|---|
+| lan | 1.2 ms | 0.003 s | 0.018 s |
+| metro | 20.4 ms | 0.042 s | 0.240 s |
+| **lossy-quic** (60 ms, 3% loss) | **60.3 ms** | 0.129 s | **2.738 s** |
+| **runpod-tx** (80 ms, 0% loss) | **81.1 ms** | 0.166 s | **0.959 s** |
+| wan-typical (100 ms, 0.1%) | 100.1 ms | 0.210 s | 1.193 s |
+| thin-uplink (100 ms, 10 mbit) | 101.4 ms | 0.216 s | 1.587 s |
+| vast-proxy (300 ms, 0.5%) | 295.9 ms | 0.630 s | 4.559 s |
+| wan-bad (800 ms, 2%) | 822.5 ms | 1.722 s | 30.093 s |
+
+**At 8 KB the ping ordering and the transfer ordering agree exactly; at 513 KB
+they do not.** `lossy-quic` has the lower ping (60 vs 81 ms) so it sorts first,
+and is 2.9x slower on a 513 KB round trip — 3 flips in 3 trials at 513 KB, 0 in
+3 at 8 KB. Two more from the same table: `thin-uplink` costs +33% at 513 KB and
++3% at 8 KB, so a rate limit is invisible to the proxy by construction; and
+`wan-bad` is 7.5x `runpod-tx` by ping but **31x** by transfer, so the proxy does
+not merely misrank, it understates, and the understatement grows with payload.
+
+The reporter is careful about what this does and does not contradict: the sort
+is faithful, `candidates` really does arrive ordered by latency, and the
+invariant in `delegation_target`'s doc holds. The near peer never loses the
+sort — it loses the race.
+
+**Half of it was a mechanism with no input, and that half is FIXED
+(2026-09-08).** `parallax::vertex_cost` already multiplies every cost term by
+`expected_attempts`, deliberately, so a lossy peer is priced up. Its input is
+`PeerSpeed::observe_delivery`, and the only caller was `remote_generate` — the
+whole-model fast path. A peer serving pipeline SEGMENTS produced no samples,
+`intact_delivery_ratio` stayed `None`, and the multiplier sat at 1.0 for ever:
+**inert on exactly the path that routes chains.** Now recorded at the single
+choke point `pipeline::local::wait_for_result`, with the attribution the
+codebase already draws elsewhere — a result that arrives is intact even when it
+carries a refusal (compute, not transport); a deadline that expires is the
+delivery failure; a sender WE dropped says nothing about the peer. Gotcha #451's
+shape again: unknown-means-skip is worthless until something fills the input.
+
+**The other half is open, and is the reporter's actual finding.** Loss that
+does not reach a timeout still costs 2.9x on a large payload, and nothing
+measures per-peer GOODPUT. `ack_srtt_ms` is the closest thing and deliberately
+ignores large forwards — `ACK_OBSERVE_MAX_BYTES` is 256 KiB, on the sound
+argument that a transfer-dominated sample measures the payload rather than the
+peer. That argument is right about the RTT estimator and leaves the throughput
+question unanswered. What is wanted is a bytes-per-second estimate per peer,
+observed on the forwards already being sent, kept separately from the RTT so
+neither corrupts the other — then `vertex_cost`'s network term becomes
+`latency + bytes / goodput` instead of latency alone. This is the same gap as
+"#446: a multi-megabyte forward over ONE QUIC stream", from the ranking side
+rather than the transport side, and the two should be designed together.
+
+Harness and raw data: https://github.com/NidhalxMRR/netem-lab-swarmllm
+
 ## A multi-megabyte forward over ONE QUIC stream can kill the connection (measured 2026-09-03, gotcha #446)
 
 **What was seen.** On the live pair — Proxmox (processor) coordinating,

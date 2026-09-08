@@ -184,6 +184,7 @@ impl PipelineExecutor {
                 super::local::ActivationUnits::PromptBytes,
             );
             let prefill_result = Self::wait_for_result(
+                &self.shared_state,
                 rx,
                 request_id,
                 0,
@@ -637,6 +638,7 @@ pub(super) async fn send_verify_batch(
         super::local::ActivationUnits::PromptBytes,
     );
     let result: LayerResult = PipelineExecutor::wait_for_result(
+        shared_state,
         rx,
         request_id,
         0,

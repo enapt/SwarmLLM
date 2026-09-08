@@ -2094,12 +2094,46 @@ impl SharedState {
     ///
     /// Called for every finished remote generation, truncated or not — a
     /// reliability figure built only from successes measures nothing.
+    ///
+    /// **And for every remote SEGMENT forward** (2026-09-08), via the single
+    /// choke point `pipeline::local::PipelineExecutor::wait_for_result`. For a
+    /// long time it was called only from `remote_generate` — the whole-model
+    /// fast path — so a peer that served pipeline segments produced no samples
+    /// at all, `intact_delivery_ratio` stayed `None`, and the `expected_attempts`
+    /// multiplier in `scheduler::parallax::vertex_cost` was **inert on exactly
+    /// the path it was written for**: routing a chain across peers.
+    ///
+    /// Surfaced by measurement rather than by reading the code. A contributor's
+    /// rootless-netem harness (issue #21, 2026-09-07) showed a peer at 60 ms
+    /// ping with 3% loss sorting AHEAD of one at 81 ms with none, while being
+    /// 2.9x slower on a 513 KB round trip — 3 flips in 3 trials at 513 KB, 0 in
+    /// 3 at 8 KB. Loss is the input a health-check ping structurally cannot
+    /// see, and this is the term that can express it.
+    ///
+    /// Same shape as gotcha #451: a mechanism whose input is "unknown → do not
+    /// apply" is worthless until something FILLS that input on the path the
+    /// mechanism exists for.
     pub fn record_peer_delivery(&self, node_id: &crate::types::NodeId, intact: bool) {
         self.metrics
             .peer_speed
             .entry(node_id.clone())
             .or_default()
             .observe_delivery(intact);
+    }
+
+    /// How many delivery outcomes we have recorded for this peer.
+    ///
+    /// `expected_attempts_multiplier` reads 1.0 both for a peer with no samples
+    /// and for one whose samples are all intact, so the count is the only way
+    /// to tell "nothing is recording" from "recording, and the peer is fine" —
+    /// which is exactly the distinction that hid the missing segment-path
+    /// recording for as long as it did.
+    pub fn peer_delivery_samples(&self, node_id: &crate::types::NodeId) -> u32 {
+        self.metrics
+            .peer_speed
+            .get(node_id)
+            .map(|s| s.delivery_samples())
+            .unwrap_or(0)
     }
 
     /// Does this peer understand a chained pipeline forward?

@@ -1209,6 +1209,7 @@ impl PipelineExecutor {
                     },
                 );
                 let result = Self::wait_for_result(
+                    &self.shared_state,
                     rx,
                     request_id,
                     idx,
@@ -1893,6 +1894,7 @@ impl PipelineExecutor {
                 },
             );
             let result = Self::wait_for_result(
+                &self.shared_state,
                 rx,
                 request_id,
                 failed_idx,

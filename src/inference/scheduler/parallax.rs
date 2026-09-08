@@ -599,7 +599,15 @@ pub(super) fn route_shortest_path(
             && (!encrypted_pipeline || &c.node_id == local_node_id)
             && super::trusted_with_the_plaintext_prompt(c, local_node_id)
     });
-    if !prompt_trust_is_enforceable {
+    // Only when there IS a source to stand down FOR. With no layer-0 holder at
+    // all the route fails below on `no valid source vertex`, and blaming trust
+    // for it would send a reader looking for a docked peer that does not exist.
+    if !prompt_trust_is_enforceable
+        && vertices.iter().any(|v| {
+            let c = &candidates[v.cand_idx];
+            v.range.0 == 0 && c.can_be_first && (!encrypted_pipeline || &c.node_id == local_node_id)
+        })
+    {
         tracing::warn!(
             "parallax: no sufficiently trusted node holds layer 0, so the prompt-trust              bar is stood down for this route rather than failing a request that can              otherwise be served"
         );
