@@ -32,7 +32,6 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | # | Bug | Why it ranks here |
 |---|---|---|
 | 8 | The RAM headroom clamp has a floor that can never refuse | Instrumented in `501c8ec8`; needs one `floor_is_binding` reading from a healthy small machine to decide keep-or-remove |
-| 9 | A CPU-only node advertises its graphics card's speed | **NEW 2026-09-08.** Gossiped, so peers rank it by a speed it will not deliver. Not yet confirmed unintended |
 | 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | Needs a debug occupancy trace; harness in `memory/round_log_0902_perf_commits.md` |
 | 16 | A `NoComparison` verdict discards a chain the search already priced | **NEW 2026-09-08.** Cold-start only, and needs a design decision rather than a patch — the gate's plan should enter the search as a candidate, not be compared against it a second time |
@@ -57,6 +56,8 @@ Priority is user-visible impact x how many users x whether it fails silently.
   the disqualifier (`PassedOverPeer::unusable_because`) rather than hiding the peer
 - A worker's memory reservation over-counts after it drops a superseded range —
   `release_subsumed_segments`, with the tensor-parallel gap recorded rather than papered over
+- A CPU-only node advertises its graphics card's speed — the SPEED half, keyed on
+  `models_go_to_the_card` with a drift guard; `gpu_inference` deliberately left alone
 
 ### Not bugs, and deliberately not ranked
 
@@ -359,7 +360,7 @@ sentence — report the disqualifier beside the price (`max_hostable_layers`, an
 whether privacy forbids the shape). A test should plant an over-capacity peer and
 assert the line does not present it as an unqualified missed opportunity.
 
-## A CPU-only node advertises its graphics card's speed (open, 2026-09-08)
+## A CPU-only node advertises its graphics card's speed (SPEED FIXED 2026-09-08; `gpu_inference` left alone)
 
 With `inference.gpu_layers = 0` the daemon logs the correct warning
 (`running CPU-only despite the detected GPU`) and the scheduler correctly prices the
@@ -384,6 +385,28 @@ and machine can do GPU inference". The speed figure is harder to defend. Check b
 against what a peer's scheduler does with them before changing either; the fix, if
 one is wanted, belongs where the capability is built (`health/monitor.rs`) and must be
 additive per the protocol rule.
+
+### Resolved 2026-09-08 — the speed only
+
+`est_tokens_per_sec_7b` is now keyed on `models_go_to_the_card`, the same predicate
+`ram_model_budget_mb` has used since #022, so the two figures a peer ranks this node by
+cannot disagree about where its models run. No protocol change: the field's meaning is
+unchanged, only which branch computes it.
+
+**`gpu`, `gpu_inference` and the card's `memory_bandwidth_gbps` are deliberately
+untouched.** The card is really present, the flag is defensible as a statement about the
+build and machine, and the memory field draws the line in exactly the same place. What
+made the speed different is that it is the number another node's `delegation_target`
+compares against — a seven-fold overstatement (35.6 against 4.95 measured) of the one
+figure that decides whether work is handed over.
+
+`the_advertised_speed_and_memory_agree_about_where_models_run` in
+`tests/repo_consistency.rs` fails the build if they drift apart again, because the
+failure mode is the two fields diverging and no single-field test can see that. Its
+self-test took three attempts and each failure was real: the guard first matched the
+word in its own comment, then matched the predicate computed on the line above without
+the expression consulting it. **A guard must be shown to fail on the defect's real
+shape, not on a tidied version of it.**
 
 ## Peer ranking uses ping, and a big payload under loss is not ping (open, 2026-09-07)
 

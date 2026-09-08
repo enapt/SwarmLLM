@@ -4573,3 +4573,87 @@ fn the_frontend_core_modules_build_their_exports() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// **Both figures a peer ranks this node by must agree about where its models
+/// run.** `ram_model_budget_mb` has keyed on `models_go_to_the_card` since
+/// report #022 — a node that HAS a card and has been told not to use it still
+/// gossips that card, because the card is really there, while its models load
+/// into system memory. `est_tokens_per_sec_7b` never had the equivalent, so
+/// such a node advertised its card's throughput: measured 35.6 tok/s broadcast
+/// against the 4.95 its own scheduler was pricing the local candidate at.
+///
+/// That figure is GOSSIPED and `delegation_target` on the far side compares
+/// against it, so the overstatement decides whether other machines hand it work.
+/// The guard is here rather than as a unit test because the failure is the two
+/// fields DRIFTING APART, which no single-field test can see.
+#[test]
+fn the_advertised_speed_and_memory_agree_about_where_models_run() {
+    let src = std::fs::read_to_string("src/health/monitor.rs").expect("monitor.rs");
+    let window = capability_speed_window(&src).expect(
+        "the capability broadcast must still assign est_tokens_per_sec_7b — if this \
+         moved, move the guard with it",
+    );
+    // Either inlined, or via a binding whose name says what it is — both are
+    // the expression consulting the answer, which is the thing being pinned.
+    assert!(
+        window.contains("models_go_to_the_card") || window.contains("models_on_card"),
+        "est_tokens_per_sec_7b must be keyed on where models actually run, the same \
+         predicate ram_model_budget_mb uses, or a node told to stay off its card \
+         advertises the card's speed to every peer.\n---\n{window}\n---"
+    );
+}
+
+/// The window helper the guard above depends on: from the assignment to the end
+/// of the expression that produces it, **with comment lines removed**.
+///
+/// The comments are not incidental. The first cut of this kept them, and the
+/// prose above the assignment explains the rule by name — so the guard matched
+/// its own documentation and passed with the code reverted. Caught by the null
+/// control below, which is the second time in one session a guard has been
+/// found passing for the wrong reason (gotcha #413, and #502).
+fn capability_speed_window(src: &str) -> Option<String> {
+    // The ASSIGNMENT EXPRESSION ONLY. Backing up to catch a predicate bound
+    // just above it was the second wrong version: the binding line itself
+    // mentions the predicate, so deleting its USE left the guard still
+    // matching. What has to be proved is that the expression consults the
+    // answer, not that the answer was computed nearby.
+    let at = src.find("let est_tokens_per_sec_7b")?;
+    let rest = &src[at..];
+    let end = rest.find("\n\n").unwrap_or(rest.len());
+    Some(
+        rest[..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// The guard is only worth having if it can see the defect it exists for
+/// (gotcha #413): a version keyed on the card's mere presence must fail it.
+#[test]
+fn the_advertised_speed_guard_catches_the_card_presence_form() {
+    // The defect's REAL shape: prose that names the rule sitting above code that
+    // does not apply it. Anything less than this is not the thing to plant —
+    // the first version of the window matched the comment and passed.
+    // The defect's REAL shape, and both ways an earlier version of this guard
+    // was fooled: a comment that names the rule, AND the predicate computed on
+    // the line above without the expression ever consulting it.
+    let planted = "fn build() {\n\n    // Keyed on models_go_to_the_card, the same predicate the memory field uses.\n    let models_on_card = vram::models_go_to_the_card(&s);\n    let est_tokens_per_sec_7b = gpu_info\n        .as_ref()\n        .map(|g| estimate(g.memory_bandwidth_gbps, true))\n        .unwrap_or_else(|| estimate(ram_gbps(), false));\n\n}\n";
+    let window = capability_speed_window(planted).expect("the planted form is found");
+    assert!(
+        !window.contains("models_go_to_the_card") && !window.contains("models_on_card"),
+        "the scanner must report the pre-fix form as failing even when a comment \
+         names the rule and the predicate is computed beside it, or it proves \
+         nothing:\n---\n{window}\n---"
+    );
+
+    // ...and the real file's form passes, so the window is not simply always empty.
+    let real = std::fs::read_to_string("src/health/monitor.rs").expect("monitor.rs");
+    let real_window = capability_speed_window(&real).expect("found");
+    assert!(
+        real_window.contains("models_go_to_the_card") || real_window.contains("models_on_card"),
+        "and the real file's form passes, so the window is not simply always \
+         empty:\n---\n{real_window}\n---"
+    );
+}

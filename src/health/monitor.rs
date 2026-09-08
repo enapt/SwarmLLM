@@ -606,8 +606,36 @@ impl HealthMonitor {
                 (0, 0, 0)
             });
 
+        // **Keyed on where models will actually run, not on whether a card
+        // exists.** This is the exact ordering `ram_model_budget_mb` above uses
+        // and for the same reason: a node that HAS a card and has been told not
+        // to use it (`inference.gpu_layers = 0`) still gossips that card,
+        // because the card is really there — but its models load into system
+        // memory, and generating a token is bandwidth-bound on whichever memory
+        // holds the weights.
+        //
+        // The memory field was given this ordering deliberately; the speed field
+        // never had the equivalent, so such a node advertised its card's
+        // throughput. Measured on this machine: 35.6 tok/s broadcast against the
+        // 4.95 its own scheduler was pricing the local candidate at. That figure
+        // is GOSSIPED, so peers rank the node by a speed it will not deliver,
+        // and `delegation_target`'s `DELEGATE_MIN_CPU_SPEEDUP` on the far side
+        // is compared against it — a seven-fold overstatement of the one number
+        // that decides whether work is handed over.
+        //
+        // `models_go_to_the_card` is the single existing answer to the question,
+        // so this field and the memory field cannot come to disagree about the
+        // same machine.
+        //
+        // Deliberately NOT touched here: `gpu`, which keeps reporting the card
+        // and its bandwidth. The card is really present, `gpu_inference` is
+        // defensible as "this build and machine can do GPU inference", and the
+        // memory field draws the line the same way.
+        let models_on_card =
+            crate::model::auto_manage::vram::models_go_to_the_card(&self.shared_state);
         let est_tokens_per_sec_7b = gpu_info
             .as_ref()
+            .filter(|_| models_on_card)
             .map(|g| {
                 crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(
                     g.memory_bandwidth_gbps,
@@ -615,8 +643,10 @@ impl HealthMonitor {
                 )
             })
             .unwrap_or_else(|| {
-                // CPU-only: measure what this machine's memory actually
-                // delivers, because generating a token is bandwidth-bound.
+                // Models run on the processor here — either there is no card,
+                // or there is one and it is not being used. Measure what this
+                // machine's memory actually delivers, because generating a
+                // token is bandwidth-bound.
                 //
                 // This was a flat 50 GB/s for every machine, so every CPU node
                 // in the swarm advertised the identical 1.70 tokens/s whether it
