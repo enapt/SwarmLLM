@@ -3062,19 +3062,22 @@ fn the_cheapest_peer_that_was_passed_over_can_be_named() {
     let partial = willing_peer(0xDD, LAYERS / 2);
 
     let cands = vec![local, far, near, partial];
-    let (peer, cost) =
-        super::cheapest_whole_model_peer(&cands, &local_id(), LAYERS, Some(4_000)).expect("a peer");
+    let p = super::cheapest_whole_model_peer(&cands, &local_id(), LAYERS, Some(4_000), false)
+        .expect("a peer");
     assert_eq!(
-        peer.node_id,
+        p.candidate.node_id,
         NodeId([0xBB; 32]),
         "the nearest, fastest whole-model holder is the one a reader will ask about"
     );
-    assert!(cost > 0.0);
+    assert!(p.cost_ms > 0.0);
+    assert_eq!(p.unusable_because, None, "and it really was usable");
 
     // The local node is never its own alternative, and a node holding only part
     // of the model is not one either.
     let alone = vec![local_full_coverage(), willing_peer(0xDD, LAYERS / 2)];
-    assert!(super::cheapest_whole_model_peer(&alone, &local_id(), LAYERS, Some(4_000)).is_none());
+    assert!(
+        super::cheapest_whole_model_peer(&alone, &local_id(), LAYERS, Some(4_000), false).is_none()
+    );
 }
 
 /// Two requests scheduled inside one 30-second gossip window must not both be
@@ -4288,4 +4291,77 @@ fn under_prompt_privacy_no_remote_node_stands_by_for_an_end() {
         standbys.iter().any(|s| s.layer_range == (1, 27)),
         "the middle segment sees only encrypted activations and keeps its standby"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The passed-over-peer line names the fact that disqualifies its subject.
+// ---------------------------------------------------------------------------
+
+/// **#460's own fix reproduced #460 one level down.** The field exists so a
+/// reader stops inventing mechanisms to explain a local decision; naming a
+/// cheaper peer without the fact that rules it out invites exactly that.
+///
+/// Observed live on an 8B decision: `cheapest_peer_cost_ms=3801.9` against a
+/// local 12929.0, where that peer advertised `max_hostable_layers=Some(30)` for
+/// a 32-layer model. Reading the line, I believed the router had left 3.4x on
+/// the table and spent real time on it.
+#[test]
+fn a_peer_that_cannot_hold_the_model_is_reported_as_unusable() {
+    let mut small = simple_candidate(0x51, vec![(0, 32)]);
+    small.max_hostable_layers = Some(30);
+    let cands = [small];
+    let p = super::cheapest_whole_model_peer(&cands, &local_id(), 32, Some(100), false)
+        .expect("it is still named — hiding it would just move the mystery");
+    assert_eq!(p.unusable_because, Some("cannot hold every layer at once"));
+}
+
+/// Prompt privacy disqualifies the whole-model SHAPE, whoever the peer is —
+/// which is why it is reported as a property of the request rather than of the
+/// candidate.
+#[test]
+fn under_prompt_privacy_no_peer_is_a_missed_whole_model_opportunity() {
+    let cands = [simple_candidate(0x52, vec![(0, 32)])];
+    let p = super::cheapest_whole_model_peer(&cands, &local_id(), 32, Some(100), true).unwrap();
+    assert_eq!(
+        p.unusable_because,
+        Some("prompt privacy keeps the first and last layers on this node")
+    );
+}
+
+/// A peer barred from seeing the prompt is not a missed opportunity either —
+/// the same bar `delegation_target` and the search apply.
+#[test]
+fn a_docked_peer_is_reported_as_unusable_rather_than_as_a_bargain() {
+    let cands = [docked(0x53, vec![(0, 32)])];
+    let p = super::cheapest_whole_model_peer(&cands, &local_id(), 32, Some(100), false).unwrap();
+    assert_eq!(
+        p.unusable_because,
+        Some("not trusted to be shown the plaintext prompt")
+    );
+}
+
+/// The control, and the whole point: a genuinely usable cheaper peer must still
+/// be reported as one, or this becomes a way to explain away every decision.
+#[test]
+fn a_genuinely_usable_cheaper_peer_is_still_named_without_excuse() {
+    let cands = [simple_candidate(0x54, vec![(0, 32)])];
+    let p = super::cheapest_whole_model_peer(&cands, &local_id(), 32, Some(100), false).unwrap();
+    assert_eq!(p.unusable_because, None);
+    assert!(p.cost_ms > 0.0);
+}
+
+/// A usable peer outranks an unusable one however they are priced — the line is
+/// about the option that was really there, not the cheapest number on the page.
+#[test]
+fn a_usable_peer_outranks_a_cheaper_unusable_one() {
+    let mut cheap_but_capped = simple_candidate(0x55, vec![(0, 32)]);
+    cheap_but_capped.max_hostable_layers = Some(8);
+    cheap_but_capped.latency_ms = 1;
+    let mut usable = simple_candidate(0x56, vec![(0, 32)]);
+    usable.latency_ms = 300;
+
+    let cands = [cheap_but_capped, usable];
+    let p = super::cheapest_whole_model_peer(&cands, &local_id(), 32, Some(100), false).unwrap();
+    assert_eq!(p.candidate.node_id, NodeId([0x56; 32]));
+    assert_eq!(p.unusable_because, None);
 }

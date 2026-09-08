@@ -27,7 +27,6 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
 | 6 | A worker's memory reservation over-counts after it drops a superseded range | Verified still open 2026-09-08: `model_worker.rs:792` does `models.remove(&stale)` with no charge release, so the worker frees memory and keeps paying for it — refuses models that would fit |
-| 7 | `cheapest_peer_cost_ms` names a peer the search structurally cannot use | **NEW 2026-09-08.** Actively misleads diagnosis; the field exists (gotcha #460) to prevent exactly the reasoning it now causes |
 
 ### P3 — correctness-adjacent, or blocked on a measurement
 
@@ -55,6 +54,8 @@ Priority is user-visible impact x how many users x whether it fails silently.
   `LayerResult::locally_constructed` plus a prompt-pass sample cadence, same day
 - The prompt-trust bar is one of three paths — `source_ok`, greedy narrowing,
   `standby_may_take`, and a stand-down decided on the route, same day
+- `cheapest_peer_cost_ms` names a peer the search cannot use — the line now carries
+  the disqualifier (`PassedOverPeer::unusable_because`) rather than hiding the peer
 
 ### Not bugs, and deliberately not ranked
 
@@ -302,7 +303,7 @@ optional), `GET /api/admin/models/:id/pipeline-plan` for the route, matched upti
 >= 15 min, holder map asserted identical. Full method + the harness trap in
 `memory/round_log_0908_ab_447iii.md`.
 
-## `cheapest_peer_cost_ms` names a peer the search structurally cannot use (open, 2026-09-08)
+## `cheapest_peer_cost_ms` names a peer the search structurally cannot use (FIXED 2026-09-08)
 
 `scheduler::cheapest_whole_model_peer` filters candidates on exactly two things — not
 the local node, and `available_ranges` covering every layer. It applies **no capacity

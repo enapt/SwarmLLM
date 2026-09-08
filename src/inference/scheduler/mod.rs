@@ -965,12 +965,67 @@ fn priced_from_a_measurement(c: &NodeCandidate) -> bool {
 /// it was not used" — twice with the reporter reasonably inferring a penalty
 /// that does not exist. The reason was always logged; the thing it was a reason
 /// ABOUT was not.
+/// The cheaper option a local decision passed over, and — if the search could
+/// never have taken it — why not.
+struct PassedOverPeer<'a> {
+    candidate: &'a NodeCandidate,
+    cost_ms: f32,
+    /// `None` means it really was usable and really was cheaper. Anything else
+    /// is the fact that disqualifies it, which is the half that was missing.
+    unusable_because: Option<&'static str>,
+}
+
+/// Why the search could not have handed this peer the WHOLE model, if it could
+/// not.
+///
+/// Checked in the order a reader will care about: a property of the request
+/// first, then of the peer's memory, then of its standing.
+fn whole_model_disqualifier(
+    c: &NodeCandidate,
+    local_node_id: &NodeId,
+    num_layers: u32,
+    encrypted_pipeline: bool,
+) -> Option<&'static str> {
+    if encrypted_pipeline {
+        // Not about this peer at all: prompt privacy keeps layer 0 and the
+        // final layer here, so the whole-model shape does not exist for this
+        // request whoever the peer is.
+        return Some("prompt privacy keeps the first and last layers on this node");
+    }
+    if c.max_hostable_layers.is_some_and(|cap| cap < num_layers) {
+        return Some("cannot hold every layer at once");
+    }
+    if !trusted_with_the_plaintext_prompt(c, local_node_id) {
+        return Some("not trusted to be shown the plaintext prompt");
+    }
+    None
+}
+
+/// The cheapest peer holding every layer, priced by the same function the
+/// search uses — reported beside any local decision so a reader is not left
+/// inventing a mechanism to explain it (gotcha #460).
+///
+/// **It reports the disqualifier rather than hiding the peer.** The first cut
+/// of this filtered on coverage alone and applied no capacity or shape check,
+/// so it named a candidate the search could not possibly have used: observed
+/// live on an 8B decision, `cheapest_peer_cost_ms=3801.9` against a local
+/// 12929.0, where that peer advertised `max_hostable_layers=Some(30)` for a
+/// 32-layer model AND the request had prompt privacy on. Two independent
+/// disqualifications, neither visible in the line — and reading it, I spent
+/// real time believing the router had left 3.4x on the table.
+///
+/// That is #460's own failure one level down: the field exists to stop a
+/// competent reader inventing a mechanism, and naming a cheaper option without
+/// the fact that rules it out invites exactly that. "There was a cheaper peer
+/// and here is why it was unusable" is the sentence worth printing; silently
+/// dropping it would just move the mystery.
 fn cheapest_whole_model_peer<'a>(
     candidates: &'a [NodeCandidate],
     local_node_id: &NodeId,
     num_layers: u32,
     prompt_tokens: Option<u32>,
-) -> Option<(&'a NodeCandidate, f32)> {
+    encrypted_pipeline: bool,
+) -> Option<PassedOverPeer<'a>> {
     candidates
         .iter()
         .filter(|c| {
@@ -979,14 +1034,35 @@ fn cheapest_whole_model_peer<'a>(
                     .iter()
                     .any(|r| r.0 == 0 && r.1 >= num_layers)
         })
-        .map(|c| {
-            (
+        .map(|c| PassedOverPeer {
+            candidate: c,
+            cost_ms: parallax::vertex_cost(
                 c,
-                parallax::vertex_cost(c, (0, num_layers), local_node_id, num_layers, prompt_tokens)
-                    .total(),
+                (0, num_layers),
+                local_node_id,
+                num_layers,
+                prompt_tokens,
             )
+            .total(),
+            unusable_because: whole_model_disqualifier(
+                c,
+                local_node_id,
+                num_layers,
+                encrypted_pipeline,
+            ),
         })
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        // A usable peer outranks an unusable one however they are priced: the
+        // point of the line is the option that was really there.
+        .min_by(|a, b| {
+            a.unusable_because
+                .is_some()
+                .cmp(&b.unusable_because.is_some())
+                .then(
+                    a.cost_ms
+                        .partial_cmp(&b.cost_ms)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+        })
 }
 
 /// May the chain the search produced replace this node's own processor route?
@@ -1983,14 +2059,20 @@ impl PipelineScheduler {
             // was not allowed to compete — this node is not on its processor,
             // or parallax routing is off, or nothing else was a candidate — and
             // that is the question a slow local answer provokes.
-            let passed_over =
-                cheapest_whole_model_peer(&candidates, local_node_id, num_layers, prompt_tokens);
+            let passed_over = cheapest_whole_model_peer(
+                &candidates,
+                local_node_id,
+                num_layers,
+                prompt_tokens,
+                encrypted,
+            );
             tracing::info!(
                 model = %model_id,
                 num_layers,
                 candidates = candidates.len(),
-                cheapest_peer = ?passed_over.map(|(c, _)| c.node_id.to_string()),
-                cheapest_peer_cost_ms = ?passed_over.map(|(_, ms)| ms),
+                cheapest_peer = ?passed_over.as_ref().map(|p| p.candidate.node_id.to_string()),
+                cheapest_peer_cost_ms = ?passed_over.as_ref().map(|p| p.cost_ms),
+                cheapest_peer_unusable_because = ?passed_over.as_ref().and_then(|p| p.unusable_because),
                 local_runs_on_processor = pipeline_may_beat_local,
                 parallax_routing = self.shared_state.config.inference.parallax_routing,
                 "Local node has full layer coverage — single local segment"
@@ -2145,6 +2227,7 @@ impl PipelineScheduler {
                                 local_node_id,
                                 num_layers,
                                 prompt_tokens,
+                                encrypted,
                             );
                             // The search declined to price anything — it had no
                             // baseline for this node — so it has not overruled
@@ -2176,8 +2259,9 @@ impl PipelineScheduler {
                                 model = %model_id,
                                 local_processor_cost_ms = local_ms,
                                 pipeline_cost_ms = chain_ms,
-                                cheapest_peer = ?passed_over.map(|(c, _)| c.node_id.to_string()),
-                                cheapest_peer_cost_ms = ?passed_over.map(|(_, ms)| ms),
+                                cheapest_peer = ?passed_over.as_ref().map(|p| p.candidate.node_id.to_string()),
+                                cheapest_peer_cost_ms = ?passed_over.as_ref().map(|p| p.cost_ms),
+                                cheapest_peer_unusable_because = ?passed_over.as_ref().and_then(|p| p.unusable_because),
                                 prompt_tokens = ?prompt_tokens,
                                 "This node holds the whole model and runs it on its \
                                  processor: {reason}"
@@ -2205,6 +2289,7 @@ impl PipelineScheduler {
                             local_node_id,
                             num_layers,
                             prompt_tokens,
+                            encrypted,
                         );
                         if let Some(assignment) = hand_off {
                             tracing::info!(
@@ -2219,8 +2304,9 @@ impl PipelineScheduler {
                         tracing::info!(
                             model = %model_id,
                             err = %e,
-                            cheapest_peer = ?passed_over.map(|(c, _)| c.node_id.to_string()),
-                            cheapest_peer_cost_ms = ?passed_over.map(|(_, ms)| ms),
+                            cheapest_peer = ?passed_over.as_ref().map(|p| p.candidate.node_id.to_string()),
+                            cheapest_peer_cost_ms = ?passed_over.as_ref().map(|p| p.cost_ms),
+                            cheapest_peer_unusable_because = ?passed_over.as_ref().and_then(|p| p.unusable_because),
                             "DIAG: parallax routing unavailable — this node holds the whole \
                              model, so it runs here"
                         );
