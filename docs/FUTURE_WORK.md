@@ -34,13 +34,12 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 8 | The RAM headroom clamp has a floor that can never refuse | Instrumented in `501c8ec8`; needs one `floor_is_binding` reading from a healthy small machine to decide keep-or-remove |
 | 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | Needs a debug occupancy trace; harness in `memory/round_log_0902_perf_commits.md` |
-| 16 | A `NoComparison` verdict discards a chain the search already priced | **NEW 2026-09-08.** Cold-start only, and needs a design decision rather than a patch — the gate's plan should enter the search as a candidate, not be compared against it a second time |
 
 ### P4 — test and infrastructure
 
 | # | Bug | Why it ranks here |
 |---|---|---|
-| 12 | `r134_receiver_applies_diff_and_advances_generation` is load-sensitive | Fails beside a build, 3/3 idle. **Check runner load before blaming a change** |
+| 12 | `r134_receiver_applies_diff_and_advances_generation` is load-sensitive | **Not reproduced in 48 runs (2026-09-08)**, incl. 8 full-suite runs at load 15.95; the `try_recv` hypothesis is disproved (the send is awaited inline). Kept only as "check runner load before blaming a change" |
 | 13 | `Could not decrypt forward` from one peer | **Dormant.** All 24 occurrences were one peer on one day (2026-08-31); none since, and every one failed over correctly. Kept because it may recur |
 
 ### Closed in this pass (were listed open, verified fixed in code 2026-09-08)
@@ -58,6 +57,8 @@ Priority is user-visible impact x how many users x whether it fails silently.
   `release_subsumed_segments`, with the tensor-parallel gap recorded rather than papered over
 - A CPU-only node advertises its graphics card's speed — the SPEED half, keyed on
   `models_go_to_the_card` with a drift guard; `gpu_inference` deliberately left alone
+- A `NoComparison` verdict discards a chain the search already priced — the two are
+  compared; its "cold-start only" reachability claim was wrong and is corrected in place
 
 ### Not bugs, and deliberately not ranked
 
@@ -192,7 +193,7 @@ Fixed with the trust bar (`standby_may_take`). Refusing means such a segment may
 standby at all; that is the trade the user asked for by turning privacy on, and
 `segments_without_standby` reports it honestly.
 
-## A `NoComparison` verdict discards a chain the search already priced (open, 2026-09-08)
+## A `NoComparison` verdict discards a chain the search already priced (FIXED 2026-09-08)
 
 When `pipeline_may_replace_processor_route` returns `NoComparison` — this node's own
 speed is not yet measured, so there is no local baseline to give up —
@@ -209,13 +210,27 @@ peer accepted by the gate wins over a two-segment chain across LAN cards that th
 had already priced cheaper. That is the #447 shape — the gate deciding where nothing
 checks it — surviving in the one branch the v0.3.164 fix left it.
 
-Left open rather than fixed because it needs a decision, not a patch: comparing
-`chain_ms` against the hand-off's `vertex_cost` reintroduces a second comparison in the
-caller, and the cleaner shape is probably for the gate's plan to enter the search as an
-ordinary candidate route so there is only ever one comparison. Note also that the window
-is bounded by whenever the first bandwidth measurement lands, so this is a cold-start
-defect — which is the class `#400` is a reminder to test for deliberately, because a
-retry is warm.
+**Fixed by making the comparison** (`chain_cost_ms` over the hand-off's own segments
+against the chain's). The worry that this reintroduces "a second decision-maker" does not
+apply: both options are priced by the SAME function, in ONE place, and neither needs a
+local baseline — which is precisely why the verdict's inability to price this node does
+not prevent the comparison. Unknown still never excludes: with no hand-off to price, the
+gate's plan stands exactly as before.
+
+**The reachability claim in the first version of this entry was WRONG, and it is worth
+recording why.** It said "cold-start only ... bounded by whenever the first bandwidth
+measurement lands", inherited from the review that found it. Checked against the code:
+`mem_bandwidth::measured_gbps` measures **on its first call**, not on a health tick, and
+a card's figure is a table lookup — so the local candidate is priced from the very first
+request and there is no boot window at all. `NoComparison` requires
+`est_tokens_per_sec == 0.0`, which means the bandwidth measurement itself FAILED: a
+machine too short of memory to allocate its 256 MB buffer.
+
+That makes it rarer than stated and more interesting than stated — the population is
+memory-starved small machines, which are exactly the ones that most need work handed to
+a peer, and exactly where this project keeps finding defects. **Check a reachability
+claim against the code before ranking it**; "cold-start" and "the measurement failed"
+suggest very different priorities and only one of them was true.
 
 
 ## Per-peer goodput: shipped, not yet field-verified (2026-09-08)
@@ -799,7 +814,7 @@ Verified by reverting `release_reserved` to the old whole-key removal:
 rest of the pool suite stays green — they assert the release happens at all,
 which both forms do.
 
-## `r134_receiver_applies_diff_and_advances_generation` is load-sensitive (open, 2026-09-05)
+## `r134_receiver_applies_diff_and_advances_generation` is load-sensitive (open, not reproduced 2026-09-08)
 
 Failed once inside a full-suite run that was sharing the box with a
 `clippy --all-targets` build, and passed 3/3 on an idle box immediately
@@ -807,11 +822,28 @@ afterwards, plus in isolation. It builds two complete `SharedState` instances
 with their own temp databases and drains channels with `try_recv`, which is the
 shape that goes wrong when the machine is busy rather than when the code is.
 
-Not investigated further because nothing depended on it, but worth knowing
-before anyone attributes a red CI run to their own change: check whether the
-runner was loaded, and re-run it alone. If it recurs, the `try_recv` drain is
-where to look — a broadcast that has not been delivered yet reads identically
-to one that was never sent.
+**Investigated 2026-09-08. The `try_recv` hypothesis above is WRONG, and the
+flake did not reproduce.**
+
+`gossip_pool_state` sends with `self.network_tx.send(..).await` — awaited
+inline, no `spawn` (`pool/manager/gossip.rs`). So by the time the call the test
+awaits has returned, the message is already in the channel, and `try_recv`
+cannot race with it. "A broadcast that has not been delivered yet" is not a
+state this test can observe, which rules out the one lead the entry offered.
+
+Not reproduced in **48 executions**: 40 runs of the test alone, plus 8 full-suite
+runs (2476 tests in parallel) at a load average reaching 15.95 on 16 cores —
+i.e. under heavier contention than the original clippy-sharing run.
+
+Deliberately NOT "fixed". With no established cause, changing the drain to a
+timeout-based receive would be a speculative edit to a test that passes — it
+would mask nothing real and add wall time to every run. The single observed
+failure has no captured message, and without one there is nothing to chase.
+
+The practical advice is unchanged and is the reason to keep this entry at all:
+**check whether the runner was loaded before attributing a red run to your own
+change.** If it recurs, capture the failure message — that, not another
+hypothesis, is what would move this.
 
 ## The RAM headroom clamp has a floor that can never refuse (open, 2026-09-04)
 

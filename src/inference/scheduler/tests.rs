@@ -4365,3 +4365,124 @@ fn a_usable_peer_outranks_a_cheaper_unusable_one() {
     assert_eq!(p.candidate.node_id, NodeId([0x56; 32]));
     assert_eq!(p.unusable_because, None);
 }
+
+/// **`NoComparison` used to discard a chain the search had already priced.**
+/// The verdict says only that this NODE could not be priced — the chain and the
+/// gate's hand-off are both priced by the same cost model and are comparable to
+/// each other without any local baseline. Taking the hand-off regardless is
+/// #447's shape (the gate deciding where nothing checks it) surviving in the one
+/// branch that fix left standing.
+///
+/// Reachability, corrected against the code rather than assumed: this is not a
+/// fresh-boot window. `measured_gbps` measures on its FIRST CALL, and a card's
+/// figure is a table lookup, so the local candidate is priced from the very
+/// first request. The verdict needs `est_tokens_per_sec == 0.0`, i.e. the
+/// bandwidth measurement itself failed — a machine too short of memory to
+/// allocate its buffer, which is exactly the population that most needs work
+/// handed to a peer.
+#[test]
+fn a_cheaper_priced_chain_is_not_discarded_for_an_unpriced_nodes_hand_off() {
+    // Two cheap LAN cards each holding half, against one distant whole-model
+    // peer the gate would accept. The chain is cheaper; the hand-off must lose.
+    let mut near_a = simple_candidate(0x61, vec![(0, 16)]);
+    near_a.latency_ms = 2;
+    near_a.can_be_last = false;
+    let mut near_b = simple_candidate(0x62, vec![(16, 32)]);
+    near_b.latency_ms = 2;
+    near_b.can_be_first = false;
+    let mut far_whole = simple_candidate(0x63, vec![(0, 32)]);
+    far_whole.latency_ms = 400;
+    far_whole.est_tokens_per_sec = 1.0;
+
+    let cands = vec![near_a, near_b, far_whole];
+    let chain = super::parallax::route_shortest_path(
+        32,
+        &cands,
+        &local_id(),
+        false,
+        false,
+        super::parallax::CapacityBound::Everyone,
+        Some(2_000),
+    )
+    .expect("the two-card chain routes");
+    let chain_ms = super::parallax::chain_cost_ms(&chain, &cands, &local_id(), 32, Some(2_000));
+
+    // What the hand-off would be: the whole model on the distant peer.
+    let hand_off = vec![PipelineSegment {
+        node_id: NodeId([0x63; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        },
+        layer_range: (0, 32),
+    }];
+    let hand_off_ms =
+        super::parallax::chain_cost_ms(&hand_off, &cands, &local_id(), 32, Some(2_000));
+
+    assert!(
+        chain_ms < hand_off_ms,
+        "the premise: the search's chain really is the cheaper option \
+         (chain={chain_ms} hand_off={hand_off_ms})"
+    );
+    assert!(
+        !hand_off_ms.lt(&chain_ms),
+        "so the guard `hand_off_ms < chain_ms` must refuse it — which is what \
+         keeps the priced chain"
+    );
+}
+
+/// The control, and the reason `NoComparison` exists at all: where the gate's
+/// peer really is cheaper than anything the search assembled, it must still
+/// win. Discarding it would strand a node whose own speed is merely unmeasured.
+#[test]
+fn a_genuinely_cheaper_hand_off_still_wins_when_this_node_is_unpriced() {
+    let mut slow_far_a = simple_candidate(0x71, vec![(0, 16)]);
+    slow_far_a.latency_ms = 400;
+    slow_far_a.est_tokens_per_sec = 1.0;
+    slow_far_a.can_be_last = false;
+    let mut slow_far_b = simple_candidate(0x72, vec![(16, 32)]);
+    slow_far_b.latency_ms = 400;
+    slow_far_b.est_tokens_per_sec = 1.0;
+    slow_far_b.can_be_first = false;
+    let mut near_whole = simple_candidate(0x73, vec![(0, 32)]);
+    near_whole.latency_ms = 2;
+    near_whole.est_tokens_per_sec = 60.0;
+
+    let cands = vec![slow_far_a, slow_far_b, near_whole.clone()];
+    let chain = vec![
+        PipelineSegment {
+            node_id: NodeId([0x71; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("test".into()),
+                index: 0,
+            },
+            layer_range: (0, 16),
+        },
+        PipelineSegment {
+            node_id: NodeId([0x72; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("test".into()),
+                index: 0,
+            },
+            layer_range: (16, 32),
+        },
+    ];
+    let hand_off = vec![PipelineSegment {
+        node_id: NodeId([0x73; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        },
+        layer_range: (0, 32),
+    }];
+
+    let chain_ms = super::parallax::chain_cost_ms(&chain, &cands, &local_id(), 32, Some(2_000));
+    let hand_off_ms =
+        super::parallax::chain_cost_ms(&hand_off, &cands, &local_id(), 32, Some(2_000));
+    assert!(
+        hand_off_ms < chain_ms,
+        "a whole-model delegation pays its network ONCE, so it should beat a \
+         two-hop chain of equally distant peers (hand_off={hand_off_ms} \
+         chain={chain_ms})"
+    );
+}

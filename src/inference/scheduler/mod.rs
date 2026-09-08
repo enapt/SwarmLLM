@@ -2241,17 +2241,50 @@ impl PipelineScheduler {
                             // and this node won, and re-running the gate over
                             // its answer is the second decision-maker all over
                             // again.
-                            if let Some(assignment) =
-                                hand_off.filter(|_| verdict.leaves_room_for_a_hand_off())
-                            {
+                            // The search declined to price this NODE, but the
+                            // chain it built and the gate's hand-off are both
+                            // priced by the same cost model and are directly
+                            // comparable to each other — neither needs a local
+                            // baseline. Taking the hand-off unconditionally
+                            // discarded a chain already known to be cheaper,
+                            // which is #447's shape (the gate deciding where
+                            // nothing checks it) surviving in the one branch
+                            // that fix left it.
+                            //
+                            // Reachability, corrected: this is NOT a fresh-boot
+                            // window. `measured_gbps` measures on its first
+                            // call rather than on a health tick, and a card's
+                            // figure is a table lookup, so the local candidate
+                            // is priced from the first request. The verdict
+                            // needs `est_tokens_per_sec == 0.0`, which means the
+                            // bandwidth measurement itself FAILED — a machine
+                            // too short of memory to allocate its buffer.
+                            // Rare, and exactly the population that most needs
+                            // the work handed to a peer.
+                            let hand_off_ms = hand_off.as_ref().map(|a| {
+                                parallax::chain_cost_ms(
+                                    &a.segments,
+                                    &candidates,
+                                    local_node_id,
+                                    num_layers,
+                                    prompt_tokens,
+                                )
+                            });
+                            if let Some(assignment) = hand_off.filter(|_| {
+                                verdict.leaves_room_for_a_hand_off()
+                                    // Unknown never excludes: with nothing to
+                                    // compare, the gate's plan stands as before.
+                                    && hand_off_ms.is_none_or(|h| h < chain_ms)
+                            }) {
                                 tracing::info!(
                                     model = %model_id,
                                     local_processor_cost_ms = local_ms,
                                     pipeline_cost_ms = chain_ms,
+                                    hand_off_cost_ms = ?hand_off_ms,
                                     prompt_tokens = ?prompt_tokens,
                                     "This node holds the whole model and would run it on \
                                      its processor: {reason} — handing it to the peer the \
-                                     gate accepted instead"
+                                     gate accepted, which prices cheaper than the chain"
                                 );
                                 return Ok(assignment);
                             }
