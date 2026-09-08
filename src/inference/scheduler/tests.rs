@@ -2680,7 +2680,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
     ];
 
     let scheduler = PipelineScheduler::new(make_shared_state());
-    let standbys = scheduler.find_standbys(&segments, &candidates, Some(100), 48);
+    let standbys = scheduler.find_standbys(&segments, &candidates, Some(100), 48, false);
 
     let taken = standbys.iter().filter(|s| s.node_id == small).count();
     assert_eq!(
@@ -2764,7 +2764,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
     ];
 
     let scheduler = PipelineScheduler::new(make_shared_state());
-    let standbys = scheduler.find_standbys(&segments, &candidates, Some(100), 48);
+    let standbys = scheduler.find_standbys(&segments, &candidates, Some(100), 48, false);
     assert_eq!(
         standbys.iter().filter(|s| s.node_id == big).count(),
         4,
@@ -2844,7 +2844,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
     }];
 
     let scheduler = PipelineScheduler::new(make_shared_state());
-    let standbys = scheduler.find_standbys(&segments, &candidates, Some(6000), 32);
+    let standbys = scheduler.find_standbys(&segments, &candidates, Some(6000), 32, false);
     assert_eq!(standbys.len(), 1, "expected one standby");
     assert_eq!(
         standbys[0].node_id, far_fast,
@@ -4067,5 +4067,194 @@ fn a_search_that_priced_nothing_leaves_the_hand_off_standing() {
     assert!(
         !verdict.leaves_room_for_a_hand_off(),
         "the search compared the two and preferred this node: {verdict:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The prompt-trust bar: one bar, every path that can assign layer 0, and a
+// stand-down that is a statement about the ROUTE.
+// ---------------------------------------------------------------------------
+
+fn docked(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
+    let mut c = simple_candidate(byte, ranges);
+    c.trust_score = super::DELEGATE_MIN_TRUST - 0.01;
+    c
+}
+
+/// **The stand-down used to ask whether a trusted source VERTEX existed**,
+/// which is a different question and gets this shape wrong: a trusted peer
+/// holding only the first four layers makes the bar "enforceable", the docked
+/// peer holding the model whole is dropped from the sources, and with nothing
+/// covering the rest the search fails a request it previously served.
+///
+/// Its own comment promised the opposite — that it would stand down rather than
+/// fail a routable request. Deciding on the route keeps that promise.
+#[test]
+fn the_trust_bar_stands_down_on_the_route_not_on_a_vertex() {
+    let local = local_id();
+    // Trusted, but a prefix that leads nowhere.
+    let mut prefix = simple_candidate(0xB1, vec![(0, 4)]);
+    prefix.can_be_last = false;
+    // Docked, and the only node that can actually carry the model.
+    let whole = docked(0xB2, vec![(0, 28)]);
+
+    let segs = super::parallax::route_shortest_path(
+        28,
+        &[prefix, whole],
+        &local,
+        false,
+        false,
+        super::parallax::CapacityBound::Everyone,
+        None,
+    )
+    .expect("a docked peer is better than no answer when nothing else can route");
+
+    assert_eq!(segs[0].node_id, NodeId([0xB2; 32]));
+    assert_eq!(segs.last().unwrap().layer_range.1, 28);
+}
+
+/// The control, and the reason the bar exists at all: where a trusted route
+/// DOES reach the sink, the docked peer must not be handed layer 0 — even when
+/// it is the cheaper option, which is exactly when this matters.
+#[test]
+fn a_trusted_route_is_preferred_over_a_cheaper_docked_one() {
+    let local = local_id();
+    let mut cheap_but_docked = docked(0xC1, vec![(0, 28)]);
+    cheap_but_docked.latency_ms = 1;
+    let mut trusted = simple_candidate(0xC2, vec![(0, 28)]);
+    trusted.latency_ms = 200;
+
+    let segs = super::parallax::route_shortest_path(
+        28,
+        &[cheap_but_docked, trusted],
+        &local,
+        false,
+        false,
+        super::parallax::CapacityBound::Everyone,
+        None,
+    )
+    .expect("a trusted route exists");
+
+    assert_eq!(
+        segs[0].node_id,
+        NodeId([0xC2; 32]),
+        "the segment that reads the plaintext prompt goes to the trusted node, \
+         even though the docked one is priced cheaper"
+    );
+}
+
+/// **The greedy fallback applied no trust check at all**, and it is reached
+/// whenever `parallax_routing` is off or the search returns `Err`. The sharp
+/// part is that the bar itself can CAUSE that `Err` by removing the only
+/// layer-0 source — so tightening the search increased how often the unguarded
+/// path was taken, and the docked peer got layer 0 anyway by a longer road.
+#[test]
+fn the_greedy_fallback_applies_the_prompt_trust_bar() {
+    let scheduler = PipelineScheduler::new(make_shared_state());
+    let mut cheap_but_docked = docked(0xD1, vec![(0, 28)]);
+    cheap_but_docked.load = 0.0;
+    let mut trusted = simple_candidate(0xD2, vec![(0, 28)]);
+    trusted.load = 0.5;
+
+    let segs = scheduler
+        .greedy_assign(28, &[cheap_but_docked, trusted], false)
+        .expect("a valid assignment exists");
+
+    assert_eq!(
+        segs[0].node_id,
+        NodeId([0xD2; 32]),
+        "greedy must clear the same bar the search does for layer 0"
+    );
+}
+
+/// ...and it must still ANSWER when every layer-0 holder is docked. A
+/// confidentiality bar that makes a routable request fail outright is worse
+/// than the exposure it prevents, which is why every one of these narrows only
+/// when something survives.
+#[test]
+fn greedy_still_answers_when_every_layer_zero_holder_is_docked() {
+    let scheduler = PipelineScheduler::new(make_shared_state());
+    let segs = scheduler
+        .greedy_assign(28, &[docked(0xD3, vec![(0, 28)])], false)
+        .expect("a docked peer is better than refusing the request");
+    assert_eq!(segs[0].node_id, NodeId([0xD3; 32]));
+}
+
+/// **A standby is handed the segment's input on failover, so it needs every
+/// check the primary needed.** `find_standbys` filtered on coverage and room
+/// only, so a peer barred from being the layer-0 primary was named its standby
+/// — and the guarantee held until the first failure, which is the moment least
+/// likely to be noticed.
+#[test]
+fn a_standby_for_layer_zero_clears_the_prompt_trust_bar() {
+    let scheduler = PipelineScheduler::new(make_shared_state());
+    let segments = vec![PipelineSegment {
+        node_id: NodeId([0xE1; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        layer_range: (0, 28),
+    }];
+    let candidates = vec![
+        simple_candidate(0xE1, vec![(0, 28)]),
+        docked(0xE2, vec![(0, 28)]),
+    ];
+
+    let standbys = scheduler.find_standbys(&segments, &candidates, Some(100), 28, false);
+    assert!(
+        !standbys.iter().any(|s| s.node_id == NodeId([0xE2; 32])),
+        "being second in line is not a reason to be shown the prompt"
+    );
+}
+
+/// **Prompt privacy is structural: the ends stay here.** `find_standbys` took
+/// no `encrypted_pipeline` parameter at all, so a remote node could be named
+/// standby for the first segment (which reads the plaintext prompt) or the last
+/// (which samples the tokens). One failover would have sent it exactly what the
+/// boomerang exists to keep local.
+///
+/// Refusing means those segments may have NO standby. That is the trade the
+/// user asked for when they turned privacy on, and `segments_without_standby`
+/// reports it honestly.
+#[test]
+fn under_prompt_privacy_no_remote_node_stands_by_for_an_end() {
+    let scheduler = PipelineScheduler::new(make_shared_state());
+    let local = local_id();
+    let seg = |id: NodeId, r: (u32, u32)| PipelineSegment {
+        node_id: id,
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        layer_range: r,
+    };
+    let segments = vec![
+        seg(local.clone(), (0, 1)),
+        seg(NodeId([0xF2; 32]), (1, 27)),
+        seg(local.clone(), (27, 28)),
+    ];
+    // A remote node that holds everything and would otherwise be an ideal
+    // standby for all three.
+    let candidates = vec![
+        simple_candidate(0xF3, vec![(0, 28)]),
+        simple_candidate(0xF2, vec![(0, 28)]),
+    ];
+
+    let standbys = scheduler.find_standbys(&segments, &candidates, Some(100), 28, true);
+
+    for s in &standbys {
+        let ends = s.layer_range.0 == 0 || s.layer_range.1 >= 28;
+        assert!(
+            !ends || s.node_id == local,
+            "a remote node stood by for an end of an encrypted pipeline: {:?}",
+            s.layer_range
+        );
+    }
+    // Control: the MIDDLE segment is still backed up, or this would just be
+    // "privacy disables failover".
+    assert!(
+        standbys.iter().any(|s| s.layer_range == (1, 27)),
+        "the middle segment sees only encrypted activations and keeps its standby"
     );
 }

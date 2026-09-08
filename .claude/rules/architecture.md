@@ -549,32 +549,79 @@ per-token `2 * latency` — and note `ack_srtt_ms` is already measured on real f
 where `latency_ms` is a ping. See `docs/FUTURE_WORK.md` § "The routing cost model's
 network term overestimates a boomerang".
 
-## A peer that will read the plaintext prompt clears a trust bar, whichever path chose it
+## A peer that will read the plaintext prompt clears a trust bar, on every path that can assign it
 
-`scheduler::trusted_with_the_plaintext_prompt` is the one bar, read by
-`delegation_target` and by `route_shortest_path`'s source filter — the segment
-starting at layer 0 is the one the prompt arrives at in the clear.
+`scheduler::trusted_with_the_plaintext_prompt` is the one bar. **Three paths can
+put a node on layer 0, and it is read by all three**: `delegation_target` (the
+hand-off), `route_shortest_path`'s source filter, and `greedy_assign_inner`'s
+first-segment narrowing. `standby_may_take` applies it to the fourth place the
+assignment can happen — a standby, which is handed the segment's input on
+failover.
 
 **Why it is shared.** `trust_score` was consulted in exactly one place in the
 whole scheduler: the hand-off gate, whose own comment called it "not trusted
 enough to be shown the prompt". The search applied nothing, so any chain it
 built could put a docked peer on layer 0. That was invisible while the gate
-returned first — and making the search the decision-maker (above) would have
-retired the only trust check there was.
+returned first — and making the search the decision-maker would have retired the
+only trust check there was.
 
-Three things a change here must keep.
+**The bar shipped on two of the three paths, and the gap composed badly.**
+`greedy_assign_inner` is reached whenever `parallax_routing` is off OR
+`route_shortest_path` returns `Err` — and **the bar itself can cause that
+`Err`**, by removing the only layer-0 source. So tightening the search increased
+how often the unguarded path ran, and on that shape the docked peer took layer 0
+anyway by a longer road. A confidentiality check has to be asked at every site
+that can make the assignment; asking it at some of them can be worse than asking
+it at none.
 
-- **It stands down rather than failing a routable request**, in the same shape
-  `CapacityBound` uses for the memory figures: enforcement is decided once,
-  before the DP, by asking whether any trusted source exists at all. A bar that
-  refuses to serve is worse than the exposure it prevents, and the decision must
-  not depend on which vertex is asked first.
+**The stand-down is a statement about the ROUTE, not about a vertex.**
+`route_shortest_path` runs its pass seeded from trusted sources, and only if that
+reaches no sink does it re-run seeded from all of them. The old form asked
+whether a trusted source VERTEX existed, which gets this shape wrong: a trusted
+peer holding only `(0, 4)` makes the bar "enforceable", the docked peer holding
+the model whole is dropped, and with nothing covering the rest the search fails a
+request it previously served — the exact opposite of what the comment beside it
+promised. The second pass costs nothing in the common case, because it runs only
+when the first found nothing, which is when the request was about to fail anyway.
+
+**Prompt privacy is structural, and a standby is part of the structure.**
+`find_standbys` took no `encrypted_pipeline` parameter at all, so a remote node
+could stand by for the first segment (which reads the plaintext prompt) or the
+last (which samples the tokens) — and one failover would have sent it exactly
+what the boomerang exists to keep local. The guarantee held until the first
+failure. Refusing means such a segment may have NO standby; that is the trade the
+user asked for, and `segments_without_standby` reports it honestly.
+
+Four things a change here must keep.
+
+- **Every narrowing stands down rather than failing a routable request**, in the
+  shape `CapacityBound` uses for the memory figures. A bar that refuses to serve
+  is worse than the exposure it prevents. Pinned in both directions:
+  `greedy_still_answers_when_every_layer_zero_holder_is_docked` and
+  `the_trust_bar_stands_down_on_the_route_not_on_a_vertex`, against the controls
+  `a_trusted_route_is_preferred_over_a_cheaper_docked_one` and
+  `the_greedy_fallback_applies_the_prompt_trust_bar` — which use a docked peer
+  priced CHEAPER, since that is when the bar actually has to bite.
+- **One predicate, parameterised.** The source test was written out three times
+  with subtle differences, so a clause added to one would silently desynchronise
+  the others and the bar would stand down believing in an alternative the filter
+  rejects. It is now `source_ok(v, apply_trust)`.
 - **It does not apply to a middle segment.** Under `encrypted_pipeline` the
   source is this node by construction, and a peer running middle layers sees
   encrypted activations, never the prompt — so narrowing who may take the middle
   would cost the boomerang its whole point.
 - **It is about CONFIDENTIALITY, not speed or reach.** `DELEGATE_MAX_LATENCY_MS`
   and the reach tier stay in the gate; the search prices those itself.
+
+**And the warning that reports a stand-down is rate-limited and names its
+subject.** The condition is persistent — a docked peer stays the only layer-0
+holder until someone's trust or holdings change — and `assemble_pipeline_for`
+runs the search up to three times per assembly as it relaxes `CapacityBound`,
+with the dashboard's route preview calling it too. Unrate-limited that is three
+WARN lines per request for ever, with nothing that could ever silence it
+(`PROMPT_TRUST_WARN_EVERY`). It now carries the peers it let through and their
+trust scores, because "no sufficiently trusted node holds layer 0" with no
+structured fields gives an operator nothing to look up and no machine to act on.
 
 ## An unmeasured candidate is priced pessimistically, never excluded
 

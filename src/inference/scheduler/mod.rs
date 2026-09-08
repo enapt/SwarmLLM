@@ -548,6 +548,47 @@ pub(crate) struct DelegationInput<'a> {
 /// Note this is about CONFIDENTIALITY, not speed or reachability.
 /// `DELEGATE_MAX_LATENCY_MS` and the reach tier are performance terms and stay
 /// where they are — the search prices those itself.
+/// May this candidate stand by for that segment — as a matter of who is allowed
+/// to see what, not of capacity or coverage?
+///
+/// Two guarantees, both of which a standby inherits from the primary because
+/// failover hands it the same input.
+///
+/// **Under `encrypted_pipeline`, the ends stay here.** The first segment is
+/// handed the plaintext prompt and the last one samples the tokens, which is
+/// the entire content of that guarantee — it is structural (the ends never
+/// leave) rather than cryptographic. `find_standbys` had no idea whether
+/// privacy was on: it took no such parameter, so a remote node could be named
+/// standby for either end, and one failover of the local segment would have
+/// sent the prompt or the sampled output to it. The guarantee held only until
+/// the first failure.
+///
+/// Refusing here means such a segment may have NO standby, and that is the
+/// correct trade rather than a regression: the request failing is what the user
+/// asked for when they turned prompt privacy on, and
+/// `segments_without_standby` reports the gap honestly.
+///
+/// **Otherwise, a layer-0 standby clears the prompt-trust bar**, for exactly
+/// the reason the primary does — it is the segment the prompt arrives at in the
+/// clear. Being second in line is not a reason to be shown it.
+fn standby_may_take(
+    c: &NodeCandidate,
+    segment: &PipelineSegment,
+    local_node_id: &NodeId,
+    num_layers: u32,
+    encrypted_pipeline: bool,
+) -> bool {
+    let is_first = segment.layer_range.0 == 0;
+    let is_last = segment.layer_range.1 >= num_layers;
+    if encrypted_pipeline && (is_first || is_last) {
+        return &c.node_id == local_node_id;
+    }
+    if is_first {
+        return trusted_with_the_plaintext_prompt(c, local_node_id);
+    }
+    true
+}
+
 fn trusted_with_the_plaintext_prompt(c: &NodeCandidate, local_node_id: &NodeId) -> bool {
     &c.node_id == local_node_id || c.trust_score >= DELEGATE_MIN_TRUST
 }
@@ -2220,7 +2261,8 @@ impl PipelineScheduler {
         }
 
         // Identify standby nodes for each segment
-        let standbys = self.find_standbys(&segments, &candidates, prompt_tokens, num_layers);
+        let standbys =
+            self.find_standbys(&segments, &candidates, prompt_tokens, num_layers, encrypted);
 
         // Detect tensor-parallel opportunities: LAN peers sharing the same layer range.
         // Opt-in only (`inference.tensor_parallel`, default false) — per-layer
@@ -3075,6 +3117,33 @@ impl PipelineScheduler {
                     options = first_capable;
                 }
                 // If no can_be_first candidates, fall through (best-effort)
+
+                // The prompt-trust bar. Layer 0 is where the prompt arrives in
+                // the clear, and `trusted_with_the_plaintext_prompt` is the
+                // same bar `route_shortest_path` puts on its source vertex and
+                // `delegation_target` puts on a hand-off.
+                //
+                // It was applied on neither of the paths that reach here — a
+                // node with `parallax_routing` off, or one whose search
+                // returned `Err`. That second case is the sharp one: the bar
+                // itself can CAUSE that `Err` by removing the only layer-0
+                // source, so tightening the search increased how often the
+                // unguarded path was taken and the docked peer got layer 0
+                // anyway, by a longer road.
+                //
+                // Narrow-if-non-empty, the same shape as `with_room` below and
+                // as the search's own stand-down: a confidentiality bar that
+                // makes a routable request fail outright is worse than the
+                // exposure it prevents, and greedy is the best-effort fallback
+                // beneath a search that has already given up.
+                let trusted: Vec<_> = options
+                    .iter()
+                    .filter(|(c, _)| trusted_with_the_plaintext_prompt(c, local_node_id))
+                    .cloned()
+                    .collect();
+                if !trusted.is_empty() {
+                    options = trusted;
+                }
             }
 
             // Prefer a node that still has room, before any other preference:
@@ -3552,6 +3621,11 @@ impl PipelineScheduler {
         candidates: &[NodeCandidate],
         prompt_tokens: Option<u32>,
         num_layers: u32,
+        // The privacy shape of the plan these standbys back up. A standby is a
+        // node that will be handed the segment's input on failover, so it needs
+        // every check the primary needed — this parameter was simply absent,
+        // and with it the two guarantees below.
+        encrypted_pipeline: bool,
     ) -> Vec<PipelineSegment> {
         let mut standbys = Vec::new();
 
@@ -3581,6 +3655,13 @@ impl PipelineScheduler {
                             c.max_hostable_layers,
                             committed.get(&c.node_id).copied().unwrap_or(0),
                             segment_layers,
+                        )
+                        && standby_may_take(
+                            c,
+                            segment,
+                            local_node_id,
+                            num_layers,
+                            encrypted_pipeline,
                         )
                 })
                 .collect();

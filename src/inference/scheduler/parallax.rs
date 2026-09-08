@@ -403,6 +403,51 @@ pub(super) fn chain_cost_ms(
 /// Returns segments covering [0, num_layers) in order, or the SwarmError from
 /// an empty search space if the DAG has no source/sink path. Callers should
 /// fall back to the greedy assigner on error.
+/// How often the prompt-trust stand-down may be logged, per process.
+///
+/// The condition is persistent — a docked peer is the only layer-0 holder
+/// until someone's trust score or holdings change — and `assemble_pipeline_for`
+/// runs the search up to three times per assembly as it relaxes
+/// [`CapacityBound`], with the dashboard's route preview calling it too. So the
+/// unrate-limited form emitted three WARN lines per request, for ever, with no
+/// state change that could ever silence it. That is the shape
+/// `manifest::note_manifest_rejection` exists for: **anything that repeats on a
+/// timer will be repeated at you for ever, so the first question about such a
+/// line is what silences it.**
+const PROMPT_TRUST_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Say — at most occasionally, and with enough detail to act on — that the
+/// prompt-trust bar had to be stood down because no trusted node could reach a
+/// sink.
+///
+/// The old line carried no structured fields at all: no peer, no trust score,
+/// no model. An operator reading "no sufficiently trusted node holds layer 0"
+/// has nothing to look up and no way to tell which machine to raise trust for.
+fn note_prompt_trust_stood_down(untrusted_layer0_holders: &[(String, f32)], num_layers: u32) {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    {
+        let mut last = match LAST.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if last.is_some_and(|t| t.elapsed() < PROMPT_TRUST_WARN_EVERY) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+
+    tracing::warn!(
+        num_layers,
+        min_trust = super::DELEGATE_MIN_TRUST,
+        untrusted_layer0_holders = ?untrusted_layer0_holders,
+        "no sufficiently trusted node can route from layer 0, so the prompt-trust \
+         bar is stood down for this route rather than failing a request that can \
+         otherwise be served — the peers listed will see the prompt in the clear"
+    );
+}
+
 pub(super) fn route_shortest_path(
     num_layers: u32,
     candidates: &[NodeCandidate],
@@ -586,35 +631,12 @@ pub(super) fn route_shortest_path(
     // peer on layer 0 — invisible, because the only trust check in the
     // scheduler sat in the gate this search runs INSTEAD of.
     //
-    // Relaxed when it would leave no source at all, in the shape
-    // `CapacityBound` already uses for the memory figures: a bar that makes a
-    // routable request fail outright is worse than the exposure it prevents,
-    // and the caller can still see the peer in the candidate log. Enforcement
-    // is decided once here rather than inside the closure, so the answer
-    // cannot depend on which vertex is asked first.
-    let prompt_trust_is_enforceable = vertices.iter().any(|v| {
-        let c = &candidates[v.cand_idx];
-        v.range.0 == 0
-            && c.can_be_first
-            && (!encrypted_pipeline || &c.node_id == local_node_id)
-            && super::trusted_with_the_plaintext_prompt(c, local_node_id)
-    });
-    // Only when there IS a source to stand down FOR. With no layer-0 holder at
-    // all the route fails below on `no valid source vertex`, and blaming trust
-    // for it would send a reader looking for a docked peer that does not exist.
-    if !prompt_trust_is_enforceable
-        && vertices.iter().any(|v| {
-            let c = &candidates[v.cand_idx];
-            v.range.0 == 0 && c.can_be_first && (!encrypted_pipeline || &c.node_id == local_node_id)
-        })
-    {
-        tracing::warn!(
-            "parallax: no sufficiently trusted node holds layer 0, so the prompt-trust              bar is stood down for this route rather than failing a request that can              otherwise be served"
-        );
-    }
-
-    // Source filter: start==0. Must have can_be_first. Encrypted: must be local.
-    let is_source = |v: &Vertex| -> bool {
+    // ONE predicate, parameterised. It was written out three times — the
+    // enforceability test, the warning's guard, and the filter itself — with
+    // subtle differences between them, so a clause added to one would silently
+    // desynchronise the others and the bar would stand down believing in an
+    // alternative the filter rejects.
+    let source_ok = |v: &Vertex, apply_trust: bool| -> bool {
         if v.range.0 != 0 {
             return false;
         }
@@ -625,9 +647,7 @@ pub(super) fn route_shortest_path(
         if encrypted_pipeline && &c.node_id != local_node_id {
             return false;
         }
-        if prompt_trust_is_enforceable
-            && !super::trusted_with_the_plaintext_prompt(c, local_node_id)
-        {
+        if apply_trust && !super::trusted_with_the_plaintext_prompt(c, local_node_id) {
             return false;
         }
         true
@@ -648,7 +668,11 @@ pub(super) fn route_shortest_path(
         true
     };
 
-    if !vertices.iter().any(is_source) {
+    // Asked WITHOUT trust: this error is about the shape of the graph, and
+    // blaming trust for a model no one holds layer 0 of would send a reader
+    // looking for a docked peer that does not exist. Whether the bar can be
+    // honoured is decided below, on the route rather than on a vertex.
+    if !vertices.iter().any(|v| source_ok(v, false)) {
         return Err(SwarmError::PipelineError(
             "parallax: no valid source vertex (starts at layer 0, can_be_first)".into(),
         ));
@@ -674,8 +698,6 @@ pub(super) fn route_shortest_path(
     // DP: best_cost[v] = min total cost reaching vertex v as a sink of some source.
     // parent[v] = predecessor vertex for path reconstruction.
     let n = vertices.len();
-    let mut best_cost = vec![f32::INFINITY; n];
-    let mut parent: Vec<Option<usize>> = vec![None; n];
 
     // A memory bound is per NODE, not per segment. Capping each vertex alone is
     // not enough: the DP will happily give a capped peer two sub-ranges that
@@ -726,7 +748,6 @@ pub(super) fn route_shortest_path(
             .map(|b| 1u64 << b)
             .unwrap_or(0)
     };
-    let mut used_capped = vec![0u64; n];
 
     // The LOCAL node's memory bound, carried along the best path the same way
     // the capped-peer mask is.
@@ -771,72 +792,124 @@ pub(super) fn route_shortest_path(
             0
         }
     };
-    let mut local_used = vec![0u32; n];
+    // One pass of the search, seeded from the sources `apply_trust` allows.
+    // Everything else — the forward relaxation, both memory bounds, the sink
+    // choice — is identical, because trust is a statement about who may take
+    // layer 0 and nothing else.
+    //
+    // Returns the winning sink and the parent chain that reaches it, or `None`
+    // when no source it was allowed to start from can reach any sink.
+    let run_pass = |apply_trust: bool| -> Option<(Vec<Option<usize>>, usize, f32)> {
+        let mut best_cost = vec![f32::INFINITY; n];
+        let mut parent: Vec<Option<usize>> = vec![None; n];
+        let mut used_capped = vec![0u64; n];
+        let mut local_used = vec![0u32; n];
 
-    // Initialize sources.
-    for i in 0..n {
-        if is_source(&vertices[i]) {
-            let ours = local_span(i);
-            if local_cap.is_some_and(|cap| ours > cap) {
+        // Initialize sources.
+        for i in 0..n {
+            if source_ok(&vertices[i], apply_trust) {
+                let ours = local_span(i);
+                if local_cap.is_some_and(|cap| ours > cap) {
+                    continue;
+                }
+                best_cost[i] = vertices[i].cost_ms;
+                used_capped[i] = bit_of(i);
+                local_used[i] = ours;
+            }
+        }
+
+        // Forward DP.
+        for &v_idx in &order {
+            if !best_cost[v_idx].is_finite() {
                 continue;
             }
-            best_cost[i] = vertices[i].cost_ms;
-            used_capped[i] = bit_of(i);
-            local_used[i] = ours;
+            let v_end = vertices[v_idx].range.1;
+            if v_end >= num_layers {
+                continue; // nothing to extend
+            }
+            // Find successors: vertices whose start equals v_end.
+            // Scan is O(n); with many candidates we could bucket by start_layer but
+            // vertex counts stay small (bounded by peer_count * ranges_per_peer).
+            for &w_idx in &order {
+                if vertices[w_idx].range.0 != v_end {
+                    continue;
+                }
+                let w_bit = bit_of(w_idx);
+                if w_bit != 0 && used_capped[v_idx] & w_bit != 0 {
+                    // This capped node is already carrying part of the chain.
+                    continue;
+                }
+                let ours = local_used[v_idx] + local_span(w_idx);
+                if local_cap.is_some_and(|cap| ours > cap) {
+                    // Extending here would give this node more layers, across all
+                    // its segments, than its own loader will take.
+                    continue;
+                }
+                let new_cost = best_cost[v_idx] + vertices[w_idx].cost_ms;
+                if new_cost < best_cost[w_idx] {
+                    best_cost[w_idx] = new_cost;
+                    parent[w_idx] = Some(v_idx);
+                    used_capped[w_idx] = used_capped[v_idx] | w_bit;
+                    local_used[w_idx] = ours;
+                }
+            }
         }
-    }
 
-    // Forward DP.
-    for &v_idx in &order {
-        if !best_cost[v_idx].is_finite() {
-            continue;
-        }
-        let v_end = vertices[v_idx].range.1;
-        if v_end >= num_layers {
-            continue; // nothing to extend
-        }
-        // Find successors: vertices whose start equals v_end.
-        // Scan is O(n); with many candidates we could bucket by start_layer but
-        // vertex counts stay small (bounded by peer_count * ranges_per_peer).
-        for &w_idx in &order {
-            if vertices[w_idx].range.0 != v_end {
-                continue;
-            }
-            let w_bit = bit_of(w_idx);
-            if w_bit != 0 && used_capped[v_idx] & w_bit != 0 {
-                // This capped node is already carrying part of the chain.
-                continue;
-            }
-            let ours = local_used[v_idx] + local_span(w_idx);
-            if local_cap.is_some_and(|cap| ours > cap) {
-                // Extending here would give this node more layers, across all
-                // its segments, than its own loader will take.
-                continue;
-            }
-            let new_cost = best_cost[v_idx] + vertices[w_idx].cost_ms;
-            if new_cost < best_cost[w_idx] {
-                best_cost[w_idx] = new_cost;
-                parent[w_idx] = Some(v_idx);
-                used_capped[w_idx] = used_capped[v_idx] | w_bit;
-                local_used[w_idx] = ours;
-            }
-        }
-    }
+        // Pick the best sink.
+        let best_sink = (0..n).filter(|&i| is_sink(&vertices[i])).min_by(|&a, &b| {
+            best_cost[a]
+                .partial_cmp(&best_cost[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-    // Pick the best sink.
-    let best_sink = (0..n).filter(|&i| is_sink(&vertices[i])).min_by(|&a, &b| {
-        best_cost[a]
-            .partial_cmp(&best_cost[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let sink_idx = match best_sink {
-        Some(i) if best_cost[i].is_finite() => i,
-        _ => {
-            return Err(SwarmError::PipelineError(
-                "parallax: no reachable source→sink path".into(),
-            ));
+        match best_sink {
+            Some(i) if best_cost[i].is_finite() => Some((parent, i, best_cost[i])),
+            _ => None,
         }
+    };
+
+    // The bar is enforced when a TRUSTED source can actually reach a sink, and
+    // stood down only when none can.
+    //
+    // It used to ask whether a trusted source VERTEX existed, which is a
+    // different question and answers it wrongly in the shape that matters: a
+    // trusted peer holding only (0, 4) makes the bar "enforceable", the docked
+    // peer holding the model whole is then dropped from the sources, and if
+    // nothing covers the rest the search fails a request it previously served.
+    // The comment promised the opposite — that it would stand down rather than
+    // fail a routable request — and for that shape it did not.
+    //
+    // Standing down on the ROUTE costs a second pass only when the first found
+    // nothing, which is exactly when the request was about to fail anyway.
+    let (parent, sink_idx, _cost) = match run_pass(true) {
+        Some(found) => found,
+        None => match run_pass(false) {
+            Some(found) => {
+                // Named at the call site because `Vertex` is local to this
+                // function — and the peers about to be shown the prompt are the
+                // whole point of the message.
+                let mut untrusted: Vec<(String, f32)> = vertices
+                    .iter()
+                    .filter(|v| v.range.0 == 0)
+                    .map(|v| &candidates[v.cand_idx])
+                    .filter(|c| c.can_be_first && &c.node_id != local_node_id)
+                    .filter(|c| !super::trusted_with_the_plaintext_prompt(c, local_node_id))
+                    .map(|c| (c.node_id.to_string(), c.trust_score))
+                    .collect();
+                untrusted.sort_by(|a, b| b.1.total_cmp(&a.1));
+                untrusted.dedup_by(|a, b| a.0 == b.0);
+                untrusted.truncate(4);
+                note_prompt_trust_stood_down(&untrusted, num_layers);
+                found
+            }
+            // Neither pass routed, so trust was never the obstacle and must not
+            // be named as one.
+            None => {
+                return Err(SwarmError::PipelineError(
+                    "parallax: no reachable source→sink path".into(),
+                ));
+            }
+        },
     };
 
     // Reconstruct path.
