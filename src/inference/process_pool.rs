@@ -424,7 +424,12 @@ struct WorkerHandle {
     /// they must die with it. Keyed by model they outlived their worker, and a
     /// replacement asked for a range its predecessor had paid for would be
     /// waved through without being weighed.
-    charged_segments: std::sync::Mutex<Vec<(u32, u32)>>,
+    /// Ranges this worker has been charged for, and what each one cost.
+    ///
+    /// The cost is recorded per range so a range that is later SUBSUMED can be
+    /// released for exactly what it was charged — see
+    /// [`WorkerHandle::release_subsumed_segments`].
+    charged_segments: std::sync::Mutex<Vec<((u32, u32), u64)>>,
     /// Is this worker's memory charged against the system-RAM budget?
     ///
     /// Decided ONCE at spawn by `charges_ram` and recorded, because a later
@@ -926,18 +931,65 @@ impl WorkerHandle {
     fn segment_is_charged(&self, segment: (u32, u32)) -> bool {
         self.charged_segments
             .lock()
-            .map(|v| v.contains(&segment))
+            .map(|v| v.iter().any(|(r, _)| *r == segment))
             .unwrap_or(false)
+    }
+
+    /// Drop the charges for every range this one strictly contains, returning
+    /// what they were charged.
+    ///
+    /// **Mirrors what the worker is about to do to its own map.**
+    /// `model_worker::subsumed_segment_keys` removes a loaded range the
+    /// incoming one already covers — [16..48) plus [0..16) becoming [0..48) is
+    /// a miss on its exact key, so without that the whole model is read from
+    /// disk again beside the copy already resident. The worker frees the
+    /// memory; the daemon went on charging for it, so a worker that had
+    /// consolidated its ranges kept paying for the ones it had dropped and
+    /// refused later models that would have fitted.
+    ///
+    /// **Strict containment only**, the same rule the worker applies: a partial
+    /// overlap is two ranges that each still need their own layers.
+    ///
+    /// **Known gap, and it is pre-existing rather than introduced here.** The
+    /// worker keys its map by `(start, end, tp_rank, tp_size)` and drops only
+    /// within one tensor-parallel shape, while the daemon's charges carry no
+    /// rank at all — `record_charged_segment` is idempotent on the range, so a
+    /// range serving several ranks is charged once for all of them. Under
+    /// tensor parallelism this therefore releases a charge the worker may only
+    /// partly have dropped. That is a smaller error than the one being fixed
+    /// and in the same direction as the daemon's existing single-charge
+    /// simplification; giving the daemon a rank-aware model is the real fix and
+    /// is recorded in `docs/FUTURE_WORK.md`.
+    fn release_subsumed_segments(&self, incoming: (u32, u32)) -> u64 {
+        let Ok(mut v) = self.charged_segments.lock() else {
+            return 0;
+        };
+        let mut freed = 0u64;
+        v.retain(|&(r, mb)| {
+            let subsumed = r.0 >= incoming.0 && r.1 <= incoming.1 && r != incoming;
+            if subsumed {
+                freed = freed.saturating_add(mb);
+            }
+            !subsumed
+        });
+        // Saturating, always: an under-run wraps the budget to 18 exabytes and
+        // admits everything for ever (the rule `release_reserved` already
+        // follows).
+        self.charged_mb.fetch_sub(
+            freed.min(self.charged_mb.load(Ordering::Acquire)),
+            Ordering::AcqRel,
+        );
+        freed
     }
 
     /// Record that this worker has been charged for `segment`, and add `mb` to
     /// what it owes. Idempotent on the range.
     fn record_charged_segment(&self, segment: (u32, u32), mb: u64) {
         if let Ok(mut v) = self.charged_segments.lock() {
-            if v.contains(&segment) {
+            if v.iter().any(|(r, _)| *r == segment) {
                 return;
             }
-            v.push(segment);
+            v.push((segment, mb));
         }
         self.charged_mb.fetch_add(mb, Ordering::AcqRel);
     }
@@ -3042,10 +3094,25 @@ impl ModelProcessPool {
             )));
         }
         handle.record_charged_segment(segment, delta_mb);
+        // The worker drops the ranges this one covers before loading it, so the
+        // charge follows. Done AFTER admission, never before: admission is
+        // deliberately weighed against everything still charged, and if it
+        // refuses, the forward is never sent and the worker never drops
+        // anything — releasing first would free a charge for memory the worker
+        // still holds.
+        let released_mb = handle.release_subsumed_segments(segment);
+        if released_mb > 0 {
+            if on_gpu {
+                self.release_vram_charge(model_id, released_mb);
+            } else if handle.charged_against_ram {
+                self.release_ram_charge(model_id, released_mb);
+            }
+        }
         tracing::info!(
             model = %model_id,
             layers = format!("[{}..{})", segment.0, segment.1),
             delta_mb,
+            released_mb,
             on_gpu,
             "Charging an additional segment to a live worker"
         );
@@ -3124,7 +3191,7 @@ impl ModelProcessPool {
         self.live_worker(model_id).is_some_and(|h| {
             h.charged_segments
                 .lock()
-                .map(|v| v.iter().any(|&(s, e)| s == 0 && e >= num_layers))
+                .map(|v| v.iter().any(|&((s, e), _)| s == 0 && e >= num_layers))
                 .unwrap_or(false)
         })
     }
@@ -5708,6 +5775,81 @@ mod tests {
         h.charged_mb.store(mb, Ordering::Release);
         p.workers.insert(m.clone(), h.clone());
         h
+    }
+
+    /// **A worker that consolidates its ranges kept paying for the ones it
+    /// dropped.** The worker's map is keyed by the exact range, so a plan
+    /// restating coverage it already has — [16..48) plus [0..16) becoming
+    /// [0..48) — misses, and it drops the two covered ranges before loading the
+    /// new one so the process holds `max(old, new)` rather than their sum. The
+    /// daemon went on charging for all three, and since the charge is what
+    /// admission weighs, the node then refused later models that would have
+    /// fitted.
+    ///
+    /// The release happens AFTER admission, never before: admission is
+    /// deliberately weighed against everything still charged, and a refusal
+    /// means the forward is never sent and the worker never drops anything.
+    #[tokio::test]
+    async fn a_range_that_subsumes_charged_ones_releases_what_they_cost() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-subsume"));
+        let model = ModelId("consolidating".into());
+        pool.set_ram_budget_mb(100_000);
+        let h = admit_and_insert_cpu_worker(&pool, &model, 0, false).await;
+
+        h.record_charged_segment((16, 48), 320);
+        h.record_charged_segment((0, 16), 160);
+        assert_eq!(h.charged_mb.load(Ordering::Acquire), 480);
+
+        // The consolidating range arrives and is charged in its own right...
+        h.record_charged_segment((0, 48), 480);
+        assert_eq!(h.charged_mb.load(Ordering::Acquire), 960, "charged first");
+
+        // ...and only then do the ranges it covers go.
+        let freed = h.release_subsumed_segments((0, 48));
+        assert_eq!(freed, 480, "exactly what those two ranges were charged");
+        assert_eq!(
+            h.charged_mb.load(Ordering::Acquire),
+            480,
+            "what remains is the consolidated range alone"
+        );
+        assert!(
+            h.segment_is_charged((0, 48)) && !h.segment_is_charged((0, 16)),
+            "and the covered ranges are gone from the record, not just the total"
+        );
+    }
+
+    /// Strict containment only — the same rule the worker applies. A partial
+    /// overlap is two ranges that each still need their own layers, and
+    /// releasing either would under-count real memory.
+    #[tokio::test]
+    async fn a_partly_overlapping_range_releases_nothing() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-overlap"));
+        let model = ModelId("overlapping".into());
+        pool.set_ram_budget_mb(100_000);
+        let h = admit_and_insert_cpu_worker(&pool, &model, 0, false).await;
+
+        h.record_charged_segment((16, 48), 320);
+        assert_eq!(h.release_subsumed_segments((0, 20)), 0);
+        assert_eq!(h.charged_mb.load(Ordering::Acquire), 320);
+        assert!(h.segment_is_charged((16, 48)));
+    }
+
+    /// The release can never wrap the budget. An under-run on a `u64` is 18
+    /// exabytes of free memory and admits everything for ever — the failure
+    /// `release_reserved` already saturates against.
+    #[tokio::test]
+    async fn releasing_more_than_is_charged_cannot_wrap() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-wrap"));
+        let model = ModelId("wrapping".into());
+        pool.set_ram_budget_mb(100_000);
+        let h = admit_and_insert_cpu_worker(&pool, &model, 0, false).await;
+
+        h.record_charged_segment((8, 16), 100);
+        // A figure larger than the handle's own total, as a partial release
+        // followed by a stale one could produce.
+        h.charged_mb.store(50, Ordering::Release);
+        h.release_subsumed_segments((0, 48));
+        assert_eq!(h.charged_mb.load(Ordering::Acquire), 0);
     }
 
     /// The regression the whole-model capacity check would otherwise have been.

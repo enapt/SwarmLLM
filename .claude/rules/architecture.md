@@ -2099,6 +2099,32 @@ silently break at the wire if duplicated:
   that was already swapping. The accounting was the part working correctly. Ask
   which side of a double-count is the lie before removing either.
 
+  **What WAS missing is the release, the mirror image of that** (2026-09-08).
+  The worker drops the covered ranges and frees their memory; the daemon went on
+  charging for them, because `charged_segments` recorded which ranges existed and
+  nothing ever removed one. A worker that had consolidated its coverage kept
+  paying for what it had dropped — and since the charge is what admission weighs,
+  the node then refused later models that would have fitted.
+  `WorkerHandle::release_subsumed_segments` mirrors `subsumed_segment_keys` on the
+  daemon side, which is why `charged_segments` now records what each range COST
+  rather than just which ranges exist.
+  Three things a change must keep. **The release happens AFTER admission**, never
+  before: admission is deliberately weighed against everything still charged, and
+  a refusal means the forward is never sent and the worker never drops anything,
+  so releasing first would free a charge for memory still held. **Strict
+  containment only**, the worker's own rule — a partial overlap is two ranges that
+  each still need their layers. And **the subtraction saturates**, because an
+  under-run on a `u64` budget is 18 exabytes of free memory and admits everything
+  for ever.
+  **Known gap, pre-existing rather than introduced**: the worker keys its map by
+  `(start, end, tp_rank, tp_size)` and drops within one tensor-parallel shape,
+  while the daemon's charges carry no rank — `record_charged_segment` is
+  idempotent on the range, so a range serving several ranks is charged once for
+  all of them. Under tensor parallelism the release can free a charge the worker
+  only partly dropped. Smaller than the error being fixed and in the same
+  direction as the daemon's existing simplification; a rank-aware daemon model is
+  the real fix (`docs/FUTURE_WORK.md`).
+
   **A worker's charge is released by SUBTRACTING what THAT worker owed**
   (2026-09-05). `WorkerHandle::charged_mb` records the spawn's admission charge
   plus every range `charge_additional_segment` adds; `charged_segments` records

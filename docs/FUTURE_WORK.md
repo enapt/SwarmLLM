@@ -26,7 +26,6 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 3 | The routing cost model's network term overestimates a boomerang | **NEW 2026-09-08.** Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. Biases the whole swarm toward keeping work local |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
-| 6 | A worker's memory reservation over-counts after it drops a superseded range | Verified still open 2026-09-08: `model_worker.rs:792` does `models.remove(&stale)` with no charge release, so the worker frees memory and keeps paying for it — refuses models that would fit |
 
 ### P3 — correctness-adjacent, or blocked on a measurement
 
@@ -56,6 +55,8 @@ Priority is user-visible impact x how many users x whether it fails silently.
   `standby_may_take`, and a stand-down decided on the route, same day
 - `cheapest_peer_cost_ms` names a peer the search cannot use — the line now carries
   the disqualifier (`PassedOverPeer::unusable_because`) rather than hiding the peer
+- A worker's memory reservation over-counts after it drops a superseded range —
+  `release_subsumed_segments`, with the tensor-parallel gap recorded rather than papered over
 
 ### Not bugs, and deliberately not ranked
 
