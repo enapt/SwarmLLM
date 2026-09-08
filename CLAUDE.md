@@ -219,53 +219,71 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2439 lib (dev,claude-subscription) — re-measured 2026-09-08, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 72 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .163 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p) plus the `paste` unmaintained warning.
+All 20 build phases complete. All subsystems wired — no stubs. **2439 lib (dev,claude-subscription) — re-measured 2026-09-08, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 72 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .164 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Unreleased on `main` (heading for v0.3.164-alpha):** the whole-model hand-off
-stopped being a decision — it proposes, and the priced search chooses (#447 iii,
-closing the #447/#478/#479 pattern of two decision-makers for one decision); the
-prompt-trust bar now applies to whoever takes the segment that reads the prompt,
-not only to the hand-off; and the loss term `vertex_cost` prices chains with had
-**no input at all on the chain path** (#495) — `record_peer_delivery` was called
-only from the whole-model fast path, so a peer serving segments was priced for
-ever as though its link were perfect. That last one came from a contributor's
-netem measurements on issue #21.
-⚠ **The field A/B of the routing change was CONFOUNDED and is retracted** — the
-two arms were different BUILDS (installed CUDA release vs a default-feature
-local build with no CUDA), which flips `serves_on_cpu` on its own. gotcha #496.
-Verified single-node instead: smoke 9/9, shapes 7/7, constrained-node 11/11, and
-CI green on all three feature compile-checks.
+**Released and deployed: v0.3.164-alpha (2026-09-08, tag on `f8ba2935`).**
+Both nodes verified: local `225e6fe7f2b5cd74` (CUDA artifact — published sha256
+matched AND the installed binary byte-identical to the download, `ggml_cuda_init`
+= 1 device, 0 ERROR, node id kept, inference confirmed; rollback
+`~/.local/bin/swarmllm.0.3.163-alpha.bak`, backups pruned to newest 3) and
+Proxmox `9684263580c6660f` (.deb `0.3.164-alpha-1` over `0.3.163-alpha-1`, hash
+re-verified AFTER transfer, `active` + `enabled`, no `.dpkg-old`, journal errors
+"-- No entries --"). Back in each other's peer lists at 129 ms. Gate fully
+clean: CI green on all 13 jobs INCLUDING the three feature compile-checks
+(flash-attn, candle-cuda, windows-gpu-no-flash) and macOS, Cache warm green,
+Docker green, 25 assets, not draft, `latest`, **smoke 9/9 + shapes 7/7 on the
+DOWNLOADED artifact against a .163 baseline taken first that scored the same**.
 
-**Released and deployed: v0.3.163-alpha (2026-09-08, tag on `8e9081d7`).** Local
-`225e6fe7f2b5cd74` (CUDA artifact, downloaded sha256 == published AND the
-installed binary byte-identical to it, `ggml_cuda_init` = 1 device, 0 ERROR,
-inference verified, node id kept; rollback
-`~/.local/bin/swarmllm.0.3.162-alpha.bak`, backups pruned to newest 3) and
-Proxmox `9684263580c6660f` (.deb `0.3.163-alpha-1` over `0.3.162-alpha-1`, hash
-re-verified after transfer, `active` + `enabled`, no `.dpkg-old`, journal errors
-"-- No entries --") both on it, and back in each other's peer lists (147 ms /
-14 ms). Gate: CI green on the tagged commit
-INCLUDING all three feature compile-checks (`flash-attn`, `candle-cuda`,
-`windows-gpu-no-flash`) and macOS tests, Release + Docker green, 25 assets, not
-draft, `latest`, sha256 CUDA + deb, **smoke + shapes on the DOWNLOADED artifact
-against a v0.3.162 baseline taken first.**
+Three fixes:
+- **#447 (iii)** — the whole-model hand-off stopped being a decision. It
+  proposes; the priced search chooses. Closes the #447/#478/#479 pattern —
+  three fixes in two releases, all of them one gate missing something the
+  search already knew, i.e. two decision-makers for one decision.
+- **The prompt-trust bar** now applies to whoever takes the segment that reads
+  the plaintext prompt, not only to the hand-off. `trust_score` had been
+  consulted in exactly ONE place in the whole scheduler, and it was the gate the
+  search runs instead of.
+- **#495** — the loss term `vertex_cost` prices chains with had **no input at
+  all on the chain path**: `record_peer_delivery` was called only from the
+  whole-model fast path, so a peer serving segments was priced for ever as
+  though its link were perfect. Found from OUTSIDE, by a contributor's rootless
+  netem lab on issue #21 (60 ms + 3% loss sorts ahead of 81 ms + 0% and is 2.9x
+  slower on 513 KB, 3/3 trials). Nothing internal could have caught it — suite
+  green, lint clean, mechanism correct at every line, with nothing to read.
+
+⚠ **The field A/B of the routing change was CONFOUNDED and is RETRACTED** (gotcha
+#496): the two arms were different BUILDS — installed CUDA release vs a
+default-feature local build with **no CUDA**, which flips `serves_on_cpu` on its
+own. Two further errors in the same attempt were the convergence window (a
+96-second arm compared against a 15-minute one). **#447(iii) is therefore NOT
+field-verified**; it is verified single-node (smoke 9/9, shapes 7/7,
+constrained-node 11/11) and by unit tests with null controls.
+**Now doable properly**: both `~/.local/bin/swarmllm` (.164) and its `.163.bak`
+are CUDA builds, so an A/B differs only by the three commits — use
+`SWARMLLM_INFERENCE_GPU_LAYERS=0` (**the prefix is not optional**) and
+`GET /api/admin/models/:id/pipeline-plan`, at matched uptime ≥15 min.
+
+**Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
 whose last commits are docs it is green on the BUMP commit, not the tag — same
 code, and the cache it writes lands on `main` where the tag build reads it.
-Check the sha it ran on rather than assuming it re-ran.
+Check the sha it ran on rather than assuming it re-ran. (A version bump edits
+`Cargo.lock`, so it does re-run for that commit.)
 ⚠ **`release_shapes.sh` is LOAD-SENSITIVE — take the baseline on an IDLE box.**
 `long system prompt, cold` FAILED once beside a `cargo build` and passed on a
-quiet re-run; the same request by hand returned a correct 17-token reply. One
-shapes failure is a re-run candidate, not a signal.
+quiet re-run. One shapes failure is a re-run candidate, not a signal.
 ⚠ **`release_shapes.sh` on port 8810 reports "node did not start" — that is the
 LIVE node's P2P port** (`8800 + 10`), not a release fault. Use 8819.
 ⚠ **`gh release download` needs `-R <owner>/<repo>` when run outside a git
 directory**, and it fails QUIETLY: a checksum loop that compares two empty
 strings reports MATCH. Guard every artifact check on the file existing and the
 digest being 64 hex characters.
+⚠ **The Proxmox LXC has no `curl`** — a remote health/peer check using it hangs
+rather than failing. Check that node from the WSL side, or over `systemctl` and
+`journalctl`.
 
-**FOUR fixes from three reports (#025-#027) by one close reader of logs and
-screens.** The ones worth carrying:
+**v0.3.163 (2026-09-08) — FOUR fixes from three reports (#025-#027) by one close
+reader of logs and screens.** The ones worth carrying:
 
 - **#025 was two defects, and the reported one alone does not fix it.** The
   relaxation dropping OUR bound was the half they saw; the other half is that
