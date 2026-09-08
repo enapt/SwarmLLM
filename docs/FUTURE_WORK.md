@@ -18,6 +18,8 @@ Priority is user-visible impact x how many users x whether it fails silently.
 |---|---|---|
 | 1 | GPU on Apple Silicon: no backend is compiled, on either path | **Every Mac runs on CPU.** Large user population, no workaround, and the machine looks healthy while doing it |
 | 2 | Peer ranking uses ping, and a big payload under loss is not ping | Found from OUTSIDE by a contributor's netem lab (issue #21). The loss half shipped as #495 in v0.3.164; **the goodput half is open** and nothing measures per-peer throughput |
+| 14 | The v0.3.164 reliability term does not observe the failures it was written for | **NEW 2026-09-08.** #495 shipped inert: transport failures are recorded as intact deliveries, and per-token sampling buries what is left. Every chain request, silently |
+| 15 | The prompt-trust bar is one of three paths, and failing the search routes around it | **NEW 2026-09-08.** `greedy_assign_inner` and `find_standbys` apply no trust check, and the bar failing the search is itself a route into the path that has no bar |
 
 ### P2 — wrong behaviour, narrower or needing a decision first
 
@@ -37,6 +39,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 9 | A CPU-only node advertises its graphics card's speed | **NEW 2026-09-08.** Gossiped, so peers rank it by a speed it will not deliver. Not yet confirmed unintended |
 | 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | Needs a debug occupancy trace; harness in `memory/round_log_0902_perf_commits.md` |
+| 16 | A `NoComparison` verdict discards a chain the search already priced | **NEW 2026-09-08.** Cold-start only, and needs a design decision rather than a patch — the gate's plan should enter the search as a candidate, not be compared against it a second time |
 
 ### P4 — test and infrastructure
 
@@ -56,6 +59,144 @@ Priority is user-visible impact x how many users x whether it fails silently.
 `Auto-enabled prompt privacy can cost 6x on a long prompt` is DECIDED and communicated,
 not a defect. The GPU-swap costing, prefix-keyed remote KV, f16 stored KV, ring decode
 and prefill microbatching are throughput work; they live under their own headings below.
+
+
+## The v0.3.164 reliability term does not observe the failures it was written for (2026-09-08)
+
+Found by a code review of the v0.3.164 fixes, and confirmed by inspection of every
+delivery path. **#495 shipped a term that is structurally unable to see a lossy link**,
+for two independent reasons. The mechanism is correct at every line; nothing in the
+suite or the field could have distinguished it from a healthy peer, because
+`expected_attempts_multiplier` reads 1.0 both for a peer with no samples and for one
+whose samples are all intact — which is the same trap `peer_delivery_samples` was added
+to expose and then was never surfaced anywhere.
+
+### Half one — a transport failure is recorded as an intact delivery
+
+`pipeline::local::wait_for_result` classifies on the shape of the `Result`, and all
+three transport-failure paths deliver a *synthesised* `LayerResult::error` through the
+waiter's oneshot rather than leaving the wait to expire:
+
+- `network/manager/mod.rs::fail_tensor_forward` — the ACK fast-fail sweep and outbound
+  send failures
+- `daemon/state/mod.rs::fail_layer_results_awaiting` — the peer's connection closed and
+  a re-dial failed
+- `network/pipeline_stream.rs` — the persistent stream reader terminated
+
+Each calls `resolve_pending_layer_result`, so the wait completes with `Ok(Ok(result))`
+and records `SegmentOutcome::Returned` → `intact = true`. The `Err(_)` arm — the only
+one that records a failure — fires only when the *whole* `SegmentBudget` expires with
+nothing at all arriving, and the ACK deadline (10-90 s, RTT-scaled) is far inside that
+budget (300 s). So on a swarm where peers advertise `FORWARD_ACK`, the peer whose link
+is dead is normally scored **1.0**, and the only thing that can score against a peer is
+the local compute deadline expiring — a slow processor, not a lossy link.
+
+The arm's comment reasons correctly about a peer's own *refusal* (out of memory, a
+missing shard) being an intact delivery — the compute-versus-transport distinction
+`failure_is_penalty_worthy` draws. What it misses is that a locally synthesised error is
+indistinguishable from one, because both are `LayerResult::error` carrying a string.
+
+**The fix is structural rather than a string match.** `LayerResult` gains
+`#[serde(skip)] locally_constructed`, set by `LayerResult::error`. Serde strips it in
+transit, so *anything that arrived from the network reads false* — which is exactly the
+question being asked, answered by the wire format itself rather than by a prose marker
+(the #295 trap). A serving node's refusal is serialised and reaches the coordinator as
+false → intact; a failure this node manufactured never crossed the wire and reads true →
+not a statement the peer can be credited for.
+
+### Half two — the sample cadence buries the signal
+
+`ALPHA = 0.3`, and the two writers of one EMA count different events:
+`remote_generate` records once per whole reply, while the segment path — as shipped —
+recorded once per segment **per token**. A 150-token reply over a 3-segment chain is 450
+samples. Starting from zero, `1 - 0.7^n` passes 0.99 by n=15, so a peer that fails once
+per request after streaming a hundred tokens is priced at ~1.0 and
+`expected_attempts_multiplier` stays inert.
+
+It is also real hot-path cost on the path this project treats as latency-critical: a
+DashMap `entry()` exclusive shard lock plus a `NodeId` clone per segment per token,
+contended across concurrent requests to the same peer.
+
+**The sample is now taken on the forward that actually tests the link** — the prompt
+pass — plus every failure whenever it happens. That is one intact sample per request per
+peer (commensurate with `remote_generate`), no DashMap write at all on the decode steps
+that dominate, and no loss of a failure signal.
+
+### What is still open, and is the harder half
+
+A 3% packet loss on a healthy TCP path shows up as **retransmission latency, not
+delivery failure** — the forward still completes, just slowly. So even a correctly
+attributed delivery ratio is the wrong instrument for the netem case that produced #495;
+it catches links that break, not links that are merely bad. The instrument for that is
+per-peer goodput, already tracked as P1 item 2 (`Peer ranking uses ping, and a big
+payload under loss is not ping`). The delivery term remains worth having for the failures
+it *can* see; it should not be mistaken for the loss fix.
+
+**Do not "improve" this by weighting samples by payload size before goodput exists.**
+That is the same instrument measured twice, and the ACK estimator already declines
+transfer-dominated samples (`ACK_OBSERVE_MAX_BYTES`) for the reason that they measure the
+payload rather than the peer.
+
+## The prompt-trust bar is one of three paths, and failing the search routes around it (2026-09-08)
+
+`trusted_with_the_plaintext_prompt` shipped in v0.3.164 as "the one bar" a peer clears
+before it is handed the segment that reads the plaintext prompt. It had two consumers,
+and there are three paths that can put a peer on layer 0.
+
+- **`greedy_assign_inner` applies no trust check at all.** It filters the first segment
+  on `encrypted_pipeline` and `can_be_first` only. It is reached whenever
+  `parallax_routing` is off, or whenever `route_shortest_path` returns `Err` and this
+  node cannot run the model itself — the log line is `parallax routing unavailable —
+  falling back to greedy`.
+- **`find_standbys` applies no trust check either.** It filters on coverage and
+  `standby_has_room`. So a peer barred from being the layer-0 *primary* can be named its
+  standby and is handed the same `PromptBytes` activation on the first failover — the
+  moment least likely to be noticed.
+- **The stand-down tests the wrong thing.** `prompt_trust_is_enforceable` asks whether a
+  trusted source *vertex* exists, not whether a trusted source leads to a complete path
+  to the sink. A trusted peer holding only `(0, 4)` makes the bar enforceable; the docked
+  peer holding `(0, 28)` whole is then removed by `is_source`; and if nothing else covers
+  `(4, 28)` the search returns `Err` for a request it previously served. The comment two
+  lines above promises the opposite ("stands down rather than failing a request that can
+  otherwise be served").
+
+The three compose badly, and that is the part worth remembering: **the bar failing the
+search is itself a route into the path that has no bar.** Tightening it increased how
+often the unguarded path was taken, so on that shape the docked peer got layer 0 anyway,
+by a longer road. A confidentiality check must be asked at every site that can make the
+assignment, and its stand-down must be a statement about the route, not about a vertex.
+
+Two smaller things in the same code, both fixed with it: the source predicate was written
+out three times with subtle differences (so a fourth clause added to one silently
+desynchronises the others — now one `source_ok(v, apply_trust)`), and the stand-down
+`warn!` was an unrate-limited multi-line string literal with no continuation, so it
+emitted two runs of fourteen spaces into every operator log, up to three times per
+assembly (once per `CapacityBound` relaxation pass) for as long as the condition held.
+
+## A `NoComparison` verdict discards a chain the search already priced (open, 2026-09-08)
+
+When `pipeline_may_replace_processor_route` returns `NoComparison` — this node's own
+speed is not yet measured, so there is no local baseline to give up —
+`assemble_pipeline_for` returns the hand-off gate's single-peer plan and discards `segs`,
+the chain the search built.
+
+That is deliberate as far as the local baseline goes, and the reasoning in
+`ProcessorRouteVerdict`'s doc is sound: a search that declined to price anything has not
+overruled the gate. But **the chain and the hand-off are both priced by the same cost
+model and are comparable to each other without any local figure** — `chain_ms` is in
+scope and is logged on that very line. So in the window where the local node stands at
+the prior (a fresh boot, before `mem_bandwidth::measured_gbps` lands), a far whole-model
+peer accepted by the gate wins over a two-segment chain across LAN cards that the search
+had already priced cheaper. That is the #447 shape — the gate deciding where nothing
+checks it — surviving in the one branch the v0.3.164 fix left it.
+
+Left open rather than fixed because it needs a decision, not a patch: comparing
+`chain_ms` against the hand-off's `vertex_cost` reintroduces a second comparison in the
+caller, and the cleaner shape is probably for the gate's plan to enter the search as an
+ordinary candidate route so there is only ever one comparison. Note also that the window
+is bounded by whenever the first bandwidth measurement lands, so this is a cold-start
+defect — which is the class `#400` is a reminder to test for deliberately, because a
+retry is warm.
 
 
 ## The routing cost model's network term overestimates a boomerang (open, 2026-09-08)
