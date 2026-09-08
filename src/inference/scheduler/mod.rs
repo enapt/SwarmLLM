@@ -2353,6 +2353,34 @@ impl PipelineScheduler {
             }
         }
 
+        // What the cost model expects this route to cost, recorded on the
+        // request's trace so the completion line can print it beside what it
+        // actually cost.
+        //
+        // **The routing model has never been checked against an outcome.** It is
+        // a stack of estimates — `ASSUMED_FORWARD_PASSES`, `UNKNOWN_COMPUTE_MS`,
+        // the prefill speedups — and the field A/B for #447(iii) measured a
+        // topology it said should be ~5x apart running at a dead heat, with no
+        // way to tell which term was wrong. One number per request, over real
+        // traffic, is what makes that answerable.
+        //
+        // Priced for whatever chain was chosen, including a greedy one: the
+        // question is whether the model describes what happens, not whether the
+        // model chose it. A no-op when the request has no live trace, which is
+        // how the dashboard's route preview is excluded — it assembles a route
+        // for a request that will never run.
+        self.shared_state.note_predicted_route_cost(
+            request_id,
+            parallax::chain_cost_ms(
+                &segments,
+                &candidates,
+                local_node_id,
+                num_layers,
+                prompt_tokens,
+            ) as u32,
+            parallax::ASSUMED_FORWARD_PASSES as u32,
+        );
+
         // Identify standby nodes for each segment
         let standbys =
             self.find_standbys(&segments, &candidates, prompt_tokens, num_layers, encrypted);

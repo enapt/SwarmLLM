@@ -31,8 +31,23 @@ DIAG: request complete request_id=1ddd2912-… route=distributed segments=2
   model=llama-3.2-1b-instruct-q8-0 nodes=0718d8b9,96842635 regions=TH,TH
   queue_ms=3 sched_ms=1 ttft_ms=180 decode_ms=1420 total_ms=1604
   prompt_tokens=22 tokens=48 tok_per_sec=33.8 tpot_ms=30.2
+  predicted_ms=1890 assumed_forward_passes=64
   seg0_ms=520 seg1_ms=900 activation_bytes=39188 outcome=ok
 ```
+
+`predicted_ms` is what the scheduler's cost model expected this route to cost,
+and it appears only when a route was actually priced (a purely local
+single-segment request has no chain to price). **It is not a target and nothing
+acts on it** — it is there so the model can be checked against outcomes, which
+had never been done: the field A/B for the v0.3.164 routing change measured a
+topology the model said should be ~5x apart running at a dead heat, with no way
+to tell whether the error was the assumed forward-pass count or the per-token
+network term.
+
+To check the count specifically, compare `tokens` against
+`assumed_forward_passes` on the same line — the assumption is recorded rather
+than looked up, so an old log still says what the constant was when it ran.
+**Do not tune anything from a single request**; see `docs/FUTURE_WORK.md`.
 
 This answers most questions on its own:
 
@@ -40,6 +55,7 @@ This answers most questions on its own:
 |---|---|
 | `queue_ms` large | node is saturated — tier caps in `router/mod.rs`, or `max_concurrent_requests` |
 | `sched_ms` large | scheduler struggling to find holders — check `-- peer serving performance --` |
+| `predicted_ms` far from `total_ms` | the routing cost model is wrong about this shape — see below |
 | `assemblies=2` present | the request FAILED once and retried. Whatever else the line says, start here: the first attempt's cause is in the log just above |
 | `ttft_ms` large, `decode_ms` small | prefill or a cold model load, not the network |
 | `decode_ms` large, `tpot_ms` high | per-token cost — find the slow hop via `segN_ms` |
@@ -453,7 +469,7 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 23. **Segment result** → `DIAG: segment result received` with `elapsed_ms` (pipeline/local.rs)
 24. **Pipeline complete** → `DIAG: forward_through_segments completed` with `pipeline_ms` (pipeline/distributed.rs)
 25. **Execute complete** → `DIAG: execute_request completed successfully` with `schedule_ms`, `execute_ms`, `total_ms` (router/distributed_exec.rs)
-26. **Completion** → `DIAG: request complete` — the single summary line described at the top of this guide, carrying route, nodes, regions, per-phase timings, per-segment timings, tok/s and outcome (`daemon/state/relay.rs::publish_request_trace`, called from router/mod.rs)
+26. **Completion** → `DIAG: request complete` — the single summary line described at the top of this guide, carrying route, nodes, regions, per-phase timings, per-segment timings, tok/s, the cost model's own prediction and outcome (`daemon/state/relay.rs::publish_request_trace`, called from router/mod.rs)
 
 All 26 points are built from one `RequestTrace` (`inference/trace.rs`), which is
 also what feeds the response headers, the diagnostics ring and the Prometheus

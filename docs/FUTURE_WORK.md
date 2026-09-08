@@ -23,7 +23,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Why it ranks here |
 |---|---|---|
-| 3 | The routing cost model's network term overestimates a boomerang | **NEW 2026-09-08.** Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. Biases the whole swarm toward keeping work local |
+| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. **Now instrumented** (2026-09-08): every priced route logs `predicted_ms` and `assumed_forward_passes` beside `total_ms` and `tokens`. Needs field data, not tuning |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
 
@@ -256,6 +256,28 @@ one to compensate for the other — establish which is wrong first, with the for
 instrumentation item 3 asks for.
 
 ## The routing cost model's network term overestimates a boomerang (open, 2026-09-08)
+
+### Instrumented 2026-09-08 — read the logs before touching the constant
+
+Every request that took a priced route now logs `predicted_ms` beside `total_ms`, and
+`assumed_forward_passes` beside `tokens`, on the existing `DIAG: request complete` line.
+Recorded once per request in `assemble_pipeline_for` for whatever chain was chosen —
+including a greedy one, since the question is whether the model describes what happens,
+not whether it chose it. The dashboard's route preview is excluded because it has no
+live trace.
+
+**The half of this entry's hypothesis about `latency_ms` being a ping is already
+false**: `get_peer_metrics` has preferred `ack_srtt_ms` — measured on real forwards —
+since it was added, so the network term does not use a ping when anything better exists.
+That leaves the forward-pass count and the per-token structure as the live candidates.
+
+What to collect before changing anything: `predicted_ms / total_ms` across a range of
+reply lengths and topologies, and `tokens / assumed_forward_passes` on the same lines.
+If the ratio tracks reply length, the count is the error and it should scale with
+something real rather than being a constant. If it does not, the per-token network term
+is the error and `2 * latency` is the thing to examine. **A single request settles
+neither.**
+
 
 **Found by the #447(iii) field A/B, which is the first time the two routes were
 measured against each other on real hardware.**

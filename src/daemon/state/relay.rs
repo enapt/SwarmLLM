@@ -372,6 +372,24 @@ impl super::SharedState {
         }
     }
 
+    /// Record what the scheduler's cost model expected this route to cost, so
+    /// the completion line can print it beside what it actually cost.
+    ///
+    /// Same shape as `record_segment_timing` above: a no-op when the request
+    /// has no live trace, which is the case for the dashboard's route preview —
+    /// it calls `assemble_pipeline_for` for a request that will never run, and
+    /// must not leave a prediction behind for one that does.
+    pub fn note_predicted_route_cost(
+        &self,
+        request_id: uuid::Uuid,
+        predicted_ms: u32,
+        assumed_forward_passes: u32,
+    ) {
+        if let Some(t) = self.active_traces.get(&request_id) {
+            t.note_predicted_cost(predicted_ms, assumed_forward_passes);
+        }
+    }
+
     /// Snapshot of recent request traces, oldest first.
     pub fn recent_traces_snapshot(&self) -> Vec<crate::inference::trace::TraceSnapshot> {
         self.recent_traces

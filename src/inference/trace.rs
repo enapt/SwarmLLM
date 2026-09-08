@@ -138,6 +138,10 @@ struct TraceInner {
     sched_ms_total: u64,
     /// How many times a pipeline was assembled. >1 means the request retried.
     assemblies: u32,
+    /// What the scheduler's cost model predicted this route would cost, in ms,
+    /// and the per-request forward-pass count that prediction assumed.
+    predicted_ms: Option<u32>,
+    assumed_forward_passes: Option<u32>,
     route: Route,
     segments: Vec<SegmentTrace>,
     prompt_tokens: u32,
@@ -299,6 +303,18 @@ impl RequestTrace {
     ///
     /// Route and segments are OVERWRITTEN, not accumulated: the last assembly is
     /// the one that actually served.
+    /// Record what the cost model expected this route to cost.
+    ///
+    /// Separate from [`Self::mark_assembled`] rather than a parameter on it:
+    /// only the parallax path has a priced figure at all, and threading an
+    /// `Option` through the greedy path and a dozen test call sites would say
+    /// nothing at any of them.
+    pub fn note_predicted_cost(&self, ms: u32, assumed_forward_passes: u32) {
+        let mut g = self.lock();
+        g.predicted_ms = Some(ms);
+        g.assumed_forward_passes = Some(assumed_forward_passes);
+    }
+
     pub fn mark_assembled(&self, route: Route, segments: Vec<SegmentTrace>, sched_ms: u64) {
         let mut g = self.lock();
         g.sched_ms_total += sched_ms;
@@ -389,6 +405,8 @@ impl RequestTrace {
                 .map(|t| t.duration_since(self.t_admitted).as_millis() as u64),
             sched_ms: (g.assemblies > 0).then_some(g.sched_ms_total),
             assemblies: g.assemblies,
+            predicted_ms: g.predicted_ms,
+            assumed_forward_passes: g.assumed_forward_passes,
             ttft_ms,
             decode_ms,
             tpot_ms,
@@ -413,6 +431,25 @@ pub struct TraceSnapshot {
     pub queue_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sched_ms: Option<u64>,
+    /// What the scheduler's cost model predicted, beside what it actually cost.
+    ///
+    /// The routing model is a stack of estimates that has never been checked
+    /// against an outcome on a live request. `ASSUMED_FORWARD_PASSES` is the
+    /// sharpest example: since v0.3.164 it decides every delegation, and the
+    /// field A/B for that change measured a topology the model said should be
+    /// ~5x apart running at a dead heat — with no way to tell whether the error
+    /// is the forward-pass count or the per-token network term.
+    ///
+    /// This does not answer that. It makes it answerable from ordinary logs:
+    /// `predicted_ms` against `total_ms` on the same line, over real traffic,
+    /// with `tokens` right there to check the count against
+    /// `assumed_forward_passes`. See `docs/FUTURE_WORK.md` — and do NOT tune the
+    /// constant from a single request.
+    pub predicted_ms: Option<u32>,
+    /// The forward-pass count that prediction assumed, carried so the line is
+    /// self-describing: reading a log a month from now, the constant may have
+    /// moved.
+    pub assumed_forward_passes: Option<u32>,
     /// Pipeline assemblies performed. >1 means the request was retried, which is
     /// worth seeing next to the timings — a slow request that retried is a
     /// different problem from one that was simply slow.
@@ -503,6 +540,16 @@ impl TraceSnapshot {
             " total_ms={} prompt_tokens={} tokens={}",
             self.total_ms, self.prompt_tokens, self.completion_tokens
         );
+        // What the cost model expected, beside what it cost, and the token
+        // assumption beside the tokens actually produced. Both only where a
+        // route was priced — on a local single-segment request there is no
+        // prediction and the comparison would be noise.
+        if let Some(p) = self.predicted_ms {
+            let _ = write!(s, " predicted_ms={p}");
+            if let Some(a) = self.assumed_forward_passes {
+                let _ = write!(s, " assumed_forward_passes={a}");
+            }
+        }
         if let Some(t) = self.tok_per_sec {
             let _ = write!(s, " tok_per_sec={t:.1}");
         }
@@ -1053,5 +1100,53 @@ mod tests {
         let line = t.snapshot().log_line();
         assert!(line.contains("outcome=error"), "{line}");
         assert!(line.contains("error_type=PipelineError"), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod predicted_cost_tests {
+    use super::*;
+
+    /// **The routing model has never been checked against an outcome.** It is a
+    /// stack of estimates, and the field A/B for #447(iii) measured a topology
+    /// it said should be ~5x apart running at a dead heat — with no way to tell
+    /// whether the error was the forward-pass count or the per-token network
+    /// term. One number per request, on the line that already carries what the
+    /// request actually cost, is what makes that answerable from ordinary logs.
+    #[test]
+    fn a_priced_route_reports_what_it_expected_beside_what_it_cost() {
+        let t = RequestTrace::new(uuid::Uuid::nil(), "llama-3.2-3b", "chat");
+        t.mark_dequeued();
+        t.note_predicted_cost(4200, 64);
+        let line = t.snapshot().log_line();
+        assert!(line.contains("predicted_ms=4200"), "{line}");
+        assert!(line.contains("assumed_forward_passes=64"), "{line}");
+        assert!(
+            line.contains("total_ms="),
+            "the comparison is only useful beside the actual: {line}"
+        );
+    }
+
+    /// A request nothing priced says nothing, rather than reporting a zero that
+    /// a reader would take for a prediction. Local single-segment work has no
+    /// chain to price, and the dashboard's route preview must not leave a
+    /// prediction behind for a request that will never run.
+    #[test]
+    fn an_unpriced_route_reports_no_prediction() {
+        let t = RequestTrace::new(uuid::Uuid::nil(), "llama-3.2-3b", "chat");
+        t.mark_dequeued();
+        let snap = t.snapshot();
+        assert_eq!(snap.predicted_ms, None);
+        assert!(!snap.log_line().contains("predicted_ms"));
+    }
+
+    /// The assumption is carried rather than looked up, so a line read months
+    /// later still says what the constant was when the request ran.
+    #[test]
+    fn the_assumption_is_recorded_not_re_derived_at_read_time() {
+        let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        t.mark_dequeued();
+        t.note_predicted_cost(100, 7);
+        assert!(t.snapshot().log_line().contains("assumed_forward_passes=7"));
     }
 }
