@@ -325,6 +325,31 @@ pub struct PeerInfo {
     /// present. Local only, never gossiped: it describes OUR path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack_srtt_ms: Option<u32>,
+    /// Measured throughput to this peer in bytes per second — a windowed
+    /// MAXIMUM over completed tensor forwards, not an average.
+    ///
+    /// The companion to `ack_srtt_ms` and deliberately the other half of the
+    /// same split: the round-trip figure is taken only from SMALL forwards
+    /// (where the time is the peer's) and this one is driven by LARGE ones
+    /// (where the time is the payload's). A sample is dominated by one or the
+    /// other and cannot measure both.
+    ///
+    /// It exists because loss on a healthy TCP path is absorbed by
+    /// retransmission and so appears as a slower transfer, never as a failed
+    /// forward — which is why the delivery-ratio term cannot see it, and why a
+    /// peer at 60 ms with 3% loss out-sorted one at 81 ms with none while being
+    /// 2.9x slower on a 513 KB payload (issue #21). It also captures a rate
+    /// limit, which no small-message probe can detect.
+    ///
+    /// Local only, never gossiped: like `ack_srtt_ms` it describes OUR path to
+    /// that peer, which is not a property of the peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goodput_bytes_per_sec: Option<u64>,
+    /// How many forwards have moved the goodput filter. Carried beside the
+    /// estimate so "nothing is measuring" is distinguishable from "measured,
+    /// and the path is fine" — the ambiguity that hid #495 being inert.
+    #[serde(default)]
+    pub goodput_samples: u32,
     /// Active inference request count reported by this peer's last health ping/pong.
     #[serde(default)]
     pub active_request_count: u32,

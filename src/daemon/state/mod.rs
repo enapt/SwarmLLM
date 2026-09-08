@@ -3252,6 +3252,8 @@ mod shard_peer_scope_tests {
                 first_seen: 0,
                 verified_transaction_count: 0,
                 is_lan_peer,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
             },
         );
     }
@@ -3539,6 +3541,8 @@ mod connected_peer_resolution_tests {
                 first_seen: 0,
                 verified_transaction_count: 0,
                 is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
             },
         );
 

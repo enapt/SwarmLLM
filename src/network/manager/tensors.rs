@@ -1100,6 +1100,177 @@ pub(super) const ACK_ASSUMED_TRANSFER_BYTES_PER_SEC: u64 = 1 << 20;
 /// above them and well below any prompt pass worth the name.
 pub(super) const ACK_OBSERVE_MAX_BYTES: usize = 256 * 1024;
 
+/// Below this a forward tells us nothing reliable about the peer's THROUGHPUT,
+/// only about its latency — the mirror of [`ACK_OBSERVE_MAX_BYTES`], and
+/// deliberately the same number. The RTT estimator takes the small forwards and
+/// the goodput estimator takes the large ones, because a sample is either
+/// dominated by the round trip or by the payload and cannot measure both.
+///
+/// Following BBR, a sample below this is *app-limited* rather than discarded:
+/// it may RAISE the estimate but never lower it (see [`GoodputEstimator`]).
+pub(super) const GOODPUT_SAMPLE_MIN_BYTES: usize = ACK_OBSERVE_MAX_BYTES;
+
+/// How long one half of the goodput max-filter window lasts.
+///
+/// The reported estimate is the max over the current half-window and the
+/// previous one, so an observation influences routing for between
+/// `GOODPUT_WINDOW_HALF` and `2 * GOODPUT_WINDOW_HALF`. Matches
+/// `peer_speed::RANKING_STALE_AFTER` in spirit and for the same stated reason:
+/// a path that was bad ten minutes ago may be fine now, and a figure that never
+/// decays is a ratchet.
+const GOODPUT_WINDOW_HALF: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A transfer shorter than this leaves nothing to divide by once the round trip
+/// is taken out — the result would be an artefact of clock granularity.
+const GOODPUT_MIN_TRANSFER_MS: f64 = 5.0;
+
+/// What throughput this node actually gets to a peer, in bytes per second.
+///
+/// **This is the instrument the delivery-ratio term (#495) is not.** Loss on a
+/// healthy TCP path is absorbed by retransmission, so it shows up as a transfer
+/// taking longer rather than as a forward failing: the peer in issue #21 at
+/// 60 ms with 3% loss sorted AHEAD of one at 81 ms with none, while being 2.9x
+/// slower on a 513 KB round trip. Nothing measured throughput, so nothing could
+/// see it. It also subsumes a rate limit, which no small-message probe can
+/// detect at all.
+///
+/// **Shaped after BBR's bottleneck-bandwidth estimator**, which solves the same
+/// problem — deriving a path's capacity from the transfers an application
+/// happens to make — and whose two central rules are the ones that are easy to
+/// get wrong:
+///
+/// - **A windowed MAX, not an average.** Bandwidth is a ceiling, so the best
+///   observation is the least contaminated one; samples come in low for reasons
+///   that say nothing about capacity (a busy peer, a queue, our own scheduling).
+///   BBR: samples "are often below the typical bottleneck bandwidth available to
+///   the flow, due to noise". This is the same argument
+///   `mem_bandwidth::remeasure_keeping_the_best` already makes about the local
+///   machine, and it is the OPPOSITE of the RFC 6298 smoothing `AckRttEstimator`
+///   uses — latency wants an average, capacity wants a maximum.
+/// - **App-limited samples may raise the estimate, never lower it.** BBR: "the
+///   estimator discards application-limited samples, since by definition they
+///   reflect application limits. However, the estimator does use
+///   application-limited samples if the measured delivery rate happens to be
+///   larger than the current estimate." A small forward that nonetheless shows
+///   high throughput is real evidence of capacity — you cannot go faster than
+///   the pipe — while a small forward showing low throughput proves nothing.
+///   Most of our forwards are 2 KB decode steps, so without this rule the
+///   estimate would be a measurement of the decode loop.
+///
+/// **The round trip is subtracted before dividing.** An acknowledgement is sent
+/// when the WHOLE message has arrived (gotcha #446), so the observed time is
+/// propagation plus transfer. `vertex_cost` adds a latency term of its own, so
+/// leaving the round trip in here would charge it twice — and would understate
+/// throughput worst on exactly the distant peers this is meant to rank.
+///
+/// Local to this node and NEVER gossiped, for the reason `ack_srtt_ms` is not:
+/// it describes OUR path to that peer, which is not a fact about the peer.
+#[derive(Clone, Debug, Default)]
+pub(super) struct GoodputEstimator {
+    /// Max filter as two half-windows: the current one and the one before it.
+    /// Reporting the max of both gives a sliding window without keeping every
+    /// sample — the cheap form of the same idea as Linux's `win_minmax`.
+    windows: [Option<f64>; 2],
+    window_started: Option<std::time::Instant>,
+    samples: u32,
+}
+
+impl GoodputEstimator {
+    /// Fold in one completed forward.
+    ///
+    /// `srtt_ms` is this peer's smoothed round trip when known; passing `None`
+    /// makes the estimate conservative (the round trip stays in the divisor)
+    /// rather than wrong.
+    pub(super) fn observe(
+        &mut self,
+        bytes: usize,
+        elapsed: std::time::Duration,
+        srtt_ms: Option<f64>,
+    ) {
+        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+        let transfer_ms = elapsed_ms - srtt_ms.unwrap_or(0.0);
+        if transfer_ms < GOODPUT_MIN_TRANSFER_MS || bytes == 0 {
+            return;
+        }
+        let rate = bytes as f64 / (transfer_ms / 1000.0);
+        self.rotate_if_due();
+        if bytes < GOODPUT_SAMPLE_MIN_BYTES {
+            // App-limited. BBR uses such a sample only when it EXCEEDS the
+            // current estimate — and with no current estimate there is nothing
+            // to exceed, so it is discarded rather than allowed to establish
+            // one.
+            //
+            // That second half is load-bearing and was missing: the max filter
+            // stops a small sample lowering anything WITHIN a window, so the
+            // rule looks redundant until the window rotates. A long
+            // conversation is one prefill and then thousands of decode steps,
+            // and two rotations later the large sample has aged out — at which
+            // point a 2 KB forward would have established the figure at the
+            // speed of the decode loop. A wrongly-low estimate is far worse
+            // than none: unknown charges no transfer at all, while a low one
+            // charges an enormous one and would route around a healthy peer.
+            //
+            // Caught by a null control — the first version of this rule was
+            // never reached by its own test.
+            if !self.estimate().is_some_and(|e| rate > e) {
+                return;
+            }
+        }
+        let current = self.windows[0];
+        self.windows[0] = Some(current.map_or(rate, |c| c.max(rate)));
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    fn rotate_if_due(&mut self) {
+        match self.window_started {
+            None => self.window_started = Some(std::time::Instant::now()),
+            Some(started) if started.elapsed() >= GOODPUT_WINDOW_HALF => {
+                self.windows[1] = self.windows[0];
+                self.windows[0] = None;
+                self.window_started = Some(std::time::Instant::now());
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Bytes per second, or `None` when nothing usable has been observed.
+    ///
+    /// Deliberately does NOT rotate: a reader must not be able to age the
+    /// filter, or the estimate would depend on how often routing happened to
+    /// ask. Staleness is handled by the writer rotating on the next sample and
+    /// by the caller treating `None` as unknown.
+    pub(super) fn estimate(&self) -> Option<f64> {
+        match (self.windows[0], self.windows[1]) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        }
+    }
+
+    /// Advance the max filter by one half-window, as time would.
+    ///
+    /// The window is five minutes, so without this a test could only reach the
+    /// behaviour that DEPENDS on rotation — which is the only behaviour the
+    /// app-limited rule actually governs — by waiting. Found by a null control:
+    /// the first version of `a_small_forward_cannot_lower_the_estimate` passed
+    /// with the rule disabled, because within one window the max filter already
+    /// prevents a low sample from lowering anything. The rule earns its place
+    /// across rotations, and the test now goes there.
+    #[cfg(test)]
+    pub(super) fn rotate_for_test(&mut self) {
+        self.windows[1] = self.windows[0];
+        self.windows[0] = None;
+        self.window_started = Some(std::time::Instant::now());
+    }
+
+    /// How many samples have moved the filter. Reported beside the estimate for
+    /// the reason `peer_delivery_samples` is (#498): an unknown figure and a
+    /// healthy one must be distinguishable from outside the process.
+    pub(super) fn samples(&self) -> u32 {
+        self.samples
+    }
+}
+
 /// The receipt-ACK deadline for a forward carrying `activation_bytes`: the
 /// round-trip-derived `base_secs` plus the time the payload itself takes at
 /// [`ACK_ASSUMED_TRANSFER_BYTES_PER_SEC`], never past the request-response
@@ -1338,5 +1509,160 @@ mod payload_deadline_tests {
         let cap = super::super::MAX_TENSOR_FORWARD_SECS;
         assert_eq!(ack_deadline_with_payload(90, usize::MAX), cap);
         assert_eq!(ack_deadline_with_payload(cap, 1), cap);
+    }
+}
+
+#[cfg(test)]
+mod goodput_tests {
+    use super::*;
+    use std::time::Duration;
+
+    const BIG: usize = GOODPUT_SAMPLE_MIN_BYTES * 2; // 512 KiB, a real prefill hop
+    const SMALL: usize = 2 * 1024; // a decode step
+
+    /// Nothing observed is UNKNOWN, never zero — the standing contract of every
+    /// routing input here, and what keeps a mixed swarm routable.
+    #[test]
+    fn an_unobserved_peer_has_no_estimate() {
+        assert_eq!(GoodputEstimator::default().estimate(), None);
+        assert_eq!(GoodputEstimator::default().samples(), 0);
+    }
+
+    /// 512 KiB in 500 ms of transfer is ~1 MiB/s.
+    #[test]
+    fn a_large_forward_yields_a_rate() {
+        let mut g = GoodputEstimator::default();
+        g.observe(BIG, Duration::from_millis(500), Some(0.0));
+        let r = g.estimate().expect("a large forward is a capacity sample");
+        assert!(
+            (r - (BIG as f64 * 2.0)).abs() < 1.0,
+            "expected ~{} B/s, got {r}",
+            BIG * 2
+        );
+        assert_eq!(g.samples(), 1);
+    }
+
+    /// **The round trip is subtracted before dividing.** An acknowledgement is
+    /// sent once the whole message has ARRIVED, so the observed time is
+    /// propagation plus transfer, and `vertex_cost` charges latency separately
+    /// — leaving it in would both double-charge it and understate throughput
+    /// worst on exactly the distant peers this exists to rank.
+    #[test]
+    fn the_round_trip_is_not_counted_as_transfer_time() {
+        let near = {
+            let mut g = GoodputEstimator::default();
+            g.observe(BIG, Duration::from_millis(500), Some(0.0));
+            g.estimate().unwrap()
+        };
+        let far = {
+            let mut g = GoodputEstimator::default();
+            // Same transfer, 400 ms further away.
+            g.observe(BIG, Duration::from_millis(900), Some(400.0));
+            g.estimate().unwrap()
+        };
+        assert!(
+            (near - far).abs() < 1.0,
+            "two identical transfers must measure the same throughput however \
+             far away the peer is: near={near} far={far}"
+        );
+    }
+
+    /// BBR's rule, and the one that matters most here: **an app-limited sample
+    /// may raise the estimate but never lower it.** Most of our forwards are
+    /// 2 KB decode steps, so without this the figure would be a measurement of
+    /// the decode loop rather than of the path.
+    #[test]
+    fn a_small_forward_cannot_lower_the_estimate() {
+        let mut g = GoodputEstimator::default();
+        g.observe(BIG, Duration::from_millis(500), Some(0.0));
+        let before = g.estimate().unwrap();
+        // A decode step: 2 KB in 100 ms reads as ~20 KB/s, far below the truth.
+        g.observe(SMALL, Duration::from_millis(100), Some(0.0));
+        assert_eq!(
+            g.estimate().unwrap(),
+            before,
+            "a forward too small to fill the pipe measures the application, not \
+             the path"
+        );
+
+        // **The case the rule actually governs**, which within a single window
+        // the max filter would have covered on its own. A long conversation is
+        // one prefill and then thousands of decode steps: two rotations later,
+        // nothing but small samples remain, and without the rule the estimate
+        // would have become a measurement of the decode loop.
+        for _ in 0..2 {
+            g.rotate_for_test();
+            for _ in 0..50 {
+                g.observe(SMALL, Duration::from_millis(100), Some(0.0));
+            }
+        }
+        // Either the measurement still stands or it has aged out to unknown.
+        // Never the decode-step rate: unknown charges no transfer, a wrongly
+        // low figure charges a huge one.
+        assert!(
+            g.estimate().is_none_or(|e| e >= before),
+            "a hundred decode steps across two windows must not talk the path \
+             down: {:?} vs {before}",
+            g.estimate()
+        );
+    }
+
+    /// ...and the other half of the same rule, which is why app-limited samples
+    /// are not simply discarded: you cannot transfer faster than the pipe
+    /// allows, so a small forward showing HIGH throughput is real evidence.
+    #[test]
+    fn a_small_forward_may_still_raise_the_estimate() {
+        let mut g = GoodputEstimator::default();
+        g.observe(BIG, Duration::from_millis(5000), Some(0.0)); // ~100 KB/s
+        let before = g.estimate().unwrap();
+        g.observe(SMALL * 64, Duration::from_millis(10), Some(0.0)); // ~12.8 MB/s
+        assert!(
+            g.estimate().unwrap() > before,
+            "capacity is a ceiling: a sample above the current estimate is \
+             evidence whatever its size"
+        );
+    }
+
+    /// **A max, not an average.** Samples come in low for reasons that say
+    /// nothing about capacity — a busy peer, a queue, our own scheduling — so
+    /// the best observation is the least contaminated one. This is the same
+    /// argument `mem_bandwidth::remeasure_keeping_the_best` makes locally, and
+    /// the opposite of the RFC 6298 smoothing `AckRttEstimator` uses: latency
+    /// wants an average, capacity wants a maximum.
+    #[test]
+    fn the_filter_keeps_the_best_observation_not_the_mean() {
+        let mut g = GoodputEstimator::default();
+        g.observe(BIG, Duration::from_millis(500), Some(0.0)); // fast
+        let fast = g.estimate().unwrap();
+        for _ in 0..10 {
+            g.observe(BIG, Duration::from_millis(5000), Some(0.0)); // slow
+        }
+        assert_eq!(
+            g.estimate().unwrap(),
+            fast,
+            "ten contended samples must not talk down one clean one"
+        );
+    }
+
+    /// A transfer with nothing left to divide by once the round trip is out is
+    /// an artefact of clock granularity, not a measurement.
+    #[test]
+    fn a_transfer_shorter_than_its_round_trip_is_not_a_sample() {
+        let mut g = GoodputEstimator::default();
+        g.observe(BIG, Duration::from_millis(100), Some(99.0));
+        assert_eq!(g.estimate(), None);
+        assert_eq!(g.samples(), 0);
+    }
+
+    /// Reading must not age the filter, or the estimate would depend on how
+    /// often routing happened to ask.
+    #[test]
+    fn reading_the_estimate_does_not_rotate_the_window() {
+        let mut g = GoodputEstimator::default();
+        g.observe(BIG, Duration::from_millis(500), Some(0.0));
+        let a = g.estimate();
+        for _ in 0..5 {
+            assert_eq!(g.estimate(), a);
+        }
     }
 }

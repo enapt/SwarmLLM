@@ -636,6 +636,8 @@ impl NetworkManager {
                     first_seen: now_ts,
                     verified_transaction_count: 0,
                     is_lan_peer: false,
+                    goodput_bytes_per_sec: None,
+                    goodput_samples: 0,
                 },
             );
         }

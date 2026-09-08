@@ -977,6 +977,8 @@ mod tests {
                 first_seen: 0,
                 verified_transaction_count: 0,
                 is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
             },
         );
     }
@@ -1150,6 +1152,8 @@ mod tests {
                 first_seen: 0,
                 verified_transaction_count: 0,
                 is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
             },
         );
         assert!(!state.peer_reachable_via_relay(&target));

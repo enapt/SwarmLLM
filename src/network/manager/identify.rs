@@ -288,6 +288,8 @@ impl NetworkManager {
             first_seen,
             verified_transaction_count: vtc,
             is_lan_peer: is_lan,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
         };
         // Insert peer_registry BEFORE peer_to_node to prevent TOCTOU race
         // where dispatch can resolve NodeId from peer_to_node but peer_registry

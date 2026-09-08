@@ -215,9 +215,10 @@ impl NetworkManager {
                         // megabytes acknowledges when it has ARRIVED, and that
                         // sample would price the peer as slow for every decode
                         // step after it (`tensors::ACK_OBSERVE_MAX_BYTES`).
+                        let elapsed = sent_at.elapsed();
                         if activation_bytes <= super::tensors::ACK_OBSERVE_MAX_BYTES {
                             let est = self.ack_rtt.entry(peer).or_default();
-                            est.observe(sent_at.elapsed().as_secs_f64() * 1000.0);
+                            est.observe(elapsed.as_secs_f64() * 1000.0);
                             // Hand the smoothed figure to routing. The health ping
                             // it otherwise reads cannot see queueing on a busy peer;
                             // this was measured on the forward that just completed.
@@ -232,6 +233,28 @@ impl NetworkManager {
                                     self.shared_state.peer_registry.get_mut(&node_id)
                                 {
                                     info.ack_srtt_ms = srtt;
+                                }
+                            }
+                        }
+                        // Throughput, from the same completed forward. This one
+                        // takes EVERY forward: the large ones are the real
+                        // capacity samples, and a small one is app-limited —
+                        // able to raise the estimate but never to lower it, per
+                        // BBR. The round trip we just measured is subtracted
+                        // before dividing, because an acknowledgement is sent
+                        // once the whole message has ARRIVED and `vertex_cost`
+                        // charges latency separately.
+                        {
+                            let srtt_ms = self.ack_rtt.get(&peer).and_then(|e| e.srtt_ms());
+                            let gp = self.peer_goodput.entry(peer).or_default();
+                            gp.observe(activation_bytes, elapsed, srtt_ms);
+                            let (estimate, samples) = (gp.estimate(), gp.samples());
+                            if let Some(node_id) = self.peer_to_node.get(&peer).map(|r| r.clone()) {
+                                if let Some(mut info) =
+                                    self.shared_state.peer_registry.get_mut(&node_id)
+                                {
+                                    info.goodput_bytes_per_sec = estimate.map(|r| r as u64);
+                                    info.goodput_samples = samples;
                                 }
                             }
                         }

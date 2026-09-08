@@ -44,11 +44,20 @@ pub(super) struct VertexCost {
     /// Reading the prompt: one pass over `prompt_tokens`, linear in them.
     /// Zero when the caller did not say how long the prompt is.
     pub(super) prefill_ms: f32,
+    /// Moving the prompt pass's activations to this peer, at the throughput we
+    /// have actually measured to it. Zero when unmeasured, and zero for a
+    /// segment that receives the prompt rather than hidden states.
+    ///
+    /// **Charged ONCE, not per forward pass.** The big payload crosses on the
+    /// prompt pass; every decode step after it carries one position. That is
+    /// why this is its own term instead of joining `network_ms`, which is
+    /// multiplied by `ASSUMED_FORWARD_PASSES`.
+    pub(super) transfer_ms: f32,
 }
 
 impl VertexCost {
     pub(super) fn total(self) -> f32 {
-        self.network_ms + self.compute_ms + self.load_ms + self.prefill_ms
+        self.network_ms + self.compute_ms + self.load_ms + self.prefill_ms + self.transfer_ms
     }
 }
 
@@ -355,6 +364,42 @@ pub(super) fn vertex_cost(
     // about where not to send work. Removing the mis-attribution removed the
     // avoidance with it, so the avoidance is now stated deliberately, in the
     // one term that can express it honestly.
+    // Moving the prompt pass's activations, at the throughput we have MEASURED
+    // to this peer rather than at a ping.
+    //
+    // The gap this closes is the one a contributor's netem lab found from
+    // outside (issue #21): a peer at 60 ms with 3% loss sorted ahead of one at
+    // 81 ms with none, while being 2.9x slower on a 513 KB round trip. Loss is
+    // absorbed by TCP retransmission, so it never appears as a failed forward —
+    // only as a slower one — which is why the delivery-ratio term cannot see
+    // it and why nothing here could until throughput was measured at all.
+    //
+    // Three things this deliberately does NOT do.
+    //
+    // - **It does not apply to a segment that starts at layer 0.** That one
+    //   receives the PROMPT (`ActivationUnits::PromptBytes`, a few bytes per
+    //   token); hidden states are what the segments after it receive, and they
+    //   are three orders of magnitude larger. Charging a transfer that does not
+    //   happen would penalise exactly the split the search should be free to
+    //   choose.
+    // - **It charges the inbound direction only.** The return payload varies by
+    //   shape (a mid-chain segment returns hidden states, the last returns
+    //   tokens) and `2 * latency_ms` already carries the round trip. A
+    //   conservative, clearly-stated term beats a speculative one on a cost
+    //   model whose calibration is itself an open question
+    //   (`ASSUMED_FORWARD_PASSES`, see docs/FUTURE_WORK.md).
+    // - **Unknown throughput charges nothing**, so a peer we have never sent a
+    //   large forward to is priced exactly as it was before this term existed.
+    //   The standing contract of every routing input here, and what keeps a
+    //   mixed-version swarm routable.
+    let transfer_ms = match (prompt_tokens, c.goodput_bytes_per_sec) {
+        (Some(tokens), Some(bps)) if tokens > 0 && bps > 0 && entered_per_token && range.0 != 0 => {
+            let bytes = tokens as f64 * ACTIVATION_BYTES_PER_TOKEN as f64;
+            (bytes / bps as f64 * 1000.0) as f32
+        }
+        _ => 0.0,
+    };
+
     let attempts = if c.expected_attempts.is_finite() && c.expected_attempts >= 1.0 {
         c.expected_attempts
     } else {
@@ -365,6 +410,8 @@ pub(super) fn vertex_cost(
         compute_ms: compute_ms * attempts,
         load_ms: load_ms * attempts,
         prefill_ms: prefill_ms * attempts,
+        // Scaled like the rest: a lost reply wastes the bytes already moved.
+        transfer_ms: transfer_ms * attempts,
     }
 }
 
@@ -1017,6 +1064,7 @@ mod tests {
             max_hostable_layers: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
+            goodput_bytes_per_sec: None,
         }
     }
 
@@ -2575,5 +2623,117 @@ mod tests {
         .expect("a docked peer may still run encrypted middle layers");
         assert_eq!(segs.len(), 3, "{segs:?}");
         assert_eq!(segs[1].node_id.0[0], 2, "{segs:?}");
+    }
+}
+
+#[cfg(test)]
+mod transfer_cost_tests {
+    use super::*;
+    use crate::types::{ModelId, NodeId, ShardId};
+
+    const LOCAL: [u8; 32] = [0xAA; 32];
+    const LAYERS: u32 = 32;
+    const PROMPT: u32 = 8000;
+
+    fn peer(goodput: Option<u64>) -> NodeCandidate {
+        NodeCandidate {
+            node_id: NodeId([0xBB; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            },
+            available_ranges: vec![(0, LAYERS)],
+            reach: crate::inference::scheduler::ReachTier::DirectMeasured,
+            latency_ms: 60,
+            load: 0.0,
+            trust_score: 1.0,
+            can_be_first: true,
+            can_be_last: true,
+            region_score: 1.0,
+            est_tokens_per_sec: 20.0,
+            observed_latency_ms_per_layer: None,
+            observed_delegated_ms_per_layer: None,
+            observed_prefill_ms_per_layer_byte: None,
+            expected_attempts: 1.0,
+            goodput_bytes_per_sec: goodput,
+            is_pool_member: false,
+            gpu_vram_available_mb: None,
+            max_hostable_layers: None,
+            has_gpu: true,
+        }
+    }
+
+    /// A mid-chain segment: it receives HIDDEN STATES, which is the payload
+    /// worth pricing.
+    fn mid(c: &NodeCandidate, prompt: Option<u32>) -> VertexCost {
+        vertex_cost(c, (8, 24), &NodeId(LOCAL), LAYERS, prompt)
+    }
+
+    /// **The gap issue #21 measured.** Two peers identical on every term the
+    /// model already had — same ping, same load, same hardware class — and one
+    /// of them delivers a third of the throughput. Before this, nothing in the
+    /// cost model could tell them apart.
+    #[test]
+    fn a_slower_path_is_priced_higher_at_the_same_ping() {
+        let fast = mid(&peer(Some(30 * 1024 * 1024)), Some(PROMPT));
+        let slow = mid(&peer(Some(10 * 1024 * 1024)), Some(PROMPT));
+        assert!(
+            slow.transfer_ms > fast.transfer_ms * 2.5,
+            "a third of the throughput must cost about three times the transfer: \
+             fast={} slow={}",
+            fast.transfer_ms,
+            slow.transfer_ms
+        );
+        assert!(slow.total() > fast.total());
+    }
+
+    /// **Unknown charges nothing.** A peer we have never sent a large forward
+    /// to is priced exactly as it was before this term existed — the standing
+    /// contract of every routing input here, and what keeps a mixed-version
+    /// swarm routable during a rollout.
+    #[test]
+    fn an_unmeasured_path_is_priced_exactly_as_before() {
+        let unknown = mid(&peer(None), Some(PROMPT));
+        assert_eq!(unknown.transfer_ms, 0.0);
+    }
+
+    /// A segment starting at layer 0 receives the PROMPT, not hidden states —
+    /// a few bytes per token against thousands. Charging it a transfer that
+    /// does not happen would penalise exactly the split the search should be
+    /// free to choose.
+    #[test]
+    fn the_first_segment_is_not_charged_for_hidden_states_it_never_receives() {
+        let c = peer(Some(10 * 1024 * 1024));
+        let first = vertex_cost(&c, (0, 16), &NodeId(LOCAL), LAYERS, Some(PROMPT));
+        assert_eq!(first.transfer_ms, 0.0);
+    }
+
+    /// Nor is a whole-model delegation: the coordinator sends it the prompt
+    /// once and it decodes remotely. `entered_per_token` is the same predicate
+    /// the per-token network term uses, so the two cannot disagree about which
+    /// shape is being priced.
+    #[test]
+    fn a_delegated_whole_model_is_not_charged_a_hidden_state_transfer() {
+        let c = peer(Some(10 * 1024 * 1024));
+        let whole = vertex_cost(&c, (0, LAYERS), &NodeId(LOCAL), LAYERS, Some(PROMPT));
+        assert_eq!(whole.transfer_ms, 0.0);
+    }
+
+    /// No prompt length means no prompt pass to price — the same `None`
+    /// behaviour `prefill_ms` already has, so an offline allocation or a test
+    /// without a prompt prices requests exactly as it always did.
+    #[test]
+    fn an_unknown_prompt_length_charges_no_transfer() {
+        let c = peer(Some(10 * 1024 * 1024));
+        assert_eq!(mid(&c, None).transfer_ms, 0.0);
+    }
+
+    /// It scales with the prompt, because that is what decides the payload.
+    #[test]
+    fn the_transfer_grows_with_the_prompt() {
+        let c = peer(Some(10 * 1024 * 1024));
+        let short = mid(&c, Some(100)).transfer_ms;
+        let long = mid(&c, Some(10_000)).transfer_ms;
+        assert!(long > short * 50.0, "short={short} long={long}");
     }
 }

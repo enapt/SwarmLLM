@@ -76,6 +76,13 @@ struct NodeCandidate {
     /// A property of the path, not the hardware — see
     /// `PeerSpeed::delivery_intact_ratio`.
     expected_attempts: f32,
+    /// Throughput this node has actually achieved to that peer, bytes/sec, or
+    /// `None` when no forward large enough to measure it has completed.
+    ///
+    /// A property of OUR path to the peer, like `ack_srtt_ms` and for the same
+    /// reason — never gossiped. Read by `parallax::vertex_cost`'s `transfer_ms`
+    /// term; unknown charges nothing.
+    goodput_bytes_per_sec: Option<u64>,
     /// True if this node is in our device pool (preferred for routing — free, trusted, low latency).
     is_pool_member: bool,
     /// Free GPU memory this node last advertised, in MB. `None` when it has no
@@ -2741,6 +2748,17 @@ impl PipelineScheduler {
                 })
             };
             candidates.push(NodeCandidate {
+                // Measured on real forwards to this peer, like `ack_srtt_ms`
+                // one line below — and `None` for the local node, which sends
+                // nothing over a network to itself.
+                goodput_bytes_per_sec: if is_local {
+                    None
+                } else {
+                    self.shared_state
+                        .peer_registry
+                        .get(&node_id)
+                        .and_then(|p| p.goodput_bytes_per_sec)
+                },
                 node_id,
                 shard_id: first_shard_id,
                 available_ranges: ranges,
@@ -2814,6 +2832,17 @@ impl PipelineScheduler {
                 // an accessor that exists to resolve it is no use while it is
                 // reachable only from unit tests.
                 delivery_samples = self.shared_state.peer_delivery_samples(&c.node_id),
+                // What we have measured this path to actually deliver, and how
+                // many forwards said so. Both, for the same reason the delivery
+                // count is here: an unmeasured path and a fast one are
+                // indistinguishable from the estimate alone.
+                goodput_bytes_per_sec = ?c.goodput_bytes_per_sec,
+                goodput_samples = self
+                    .shared_state
+                    .peer_registry
+                    .get(&c.node_id)
+                    .map(|p| p.goodput_samples)
+                    .unwrap_or(0),
                 load = c.load,
                 prompt_tokens = ?prompt_tokens,
                 // Priced over the WHOLE model, so candidates are comparable to

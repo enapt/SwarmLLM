@@ -156,6 +156,8 @@ fn assemble_multi_node_pipeline() {
             first_seen: 0,
             verified_transaction_count: 0,
             is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
         },
     );
     state.connected_node_ids.insert(node_b.clone());
@@ -174,6 +176,8 @@ fn assemble_multi_node_pipeline() {
             first_seen: 0,
             verified_transaction_count: 0,
             is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
         },
     );
     state.connected_node_ids.insert(node_c.clone());
@@ -213,6 +217,8 @@ fn a_measured_ack_latency_outranks_the_health_ping_when_choosing_a_holder() {
                 first_seen: 0,
                 verified_transaction_count: 0,
                 is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
             },
         )
     }
@@ -348,6 +354,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         max_hostable_layers: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
+        goodput_bytes_per_sec: None,
     }
 }
 
@@ -458,6 +465,7 @@ fn greedy_assign_multi_range_candidate() {
             max_hostable_layers: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
+            goodput_bytes_per_sec: None,
         },
         NodeCandidate {
             node_id: NodeId([2u8; 32]),
@@ -482,6 +490,7 @@ fn greedy_assign_multi_range_candidate() {
             max_hostable_layers: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
+            goodput_bytes_per_sec: None,
         },
     ];
 
@@ -548,6 +557,8 @@ fn prefers_lower_load_node() {
             first_seen: 0,
             verified_transaction_count: 0,
             is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
         },
     );
     state.connected_node_ids.insert(node_a.clone());
@@ -566,6 +577,8 @@ fn prefers_lower_load_node() {
             first_seen: 0,
             verified_transaction_count: 0,
             is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
         },
     );
     state.connected_node_ids.insert(node_b.clone());
@@ -741,6 +754,8 @@ fn setup_tp_split_topology(
                 first_seen: 0,
                 verified_transaction_count: 0,
                 is_lan_peer: is_lan,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
             },
         );
         state.connected_node_ids.insert(node);
@@ -796,6 +811,8 @@ fn no_tp_group_when_local_node_covers_every_layer() {
             first_seen: 0,
             verified_transaction_count: 0,
             is_lan_peer: true,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
         },
     );
     state.connected_node_ids.insert(node_b);
@@ -987,6 +1004,8 @@ fn encrypted_pipeline_forces_local_first_and_last() {
             first_seen: 0,
             verified_transaction_count: 0,
             is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
         },
     );
     state.connected_node_ids.insert(node_b.clone());
@@ -1068,6 +1087,8 @@ fn encrypted_pipeline_fails_without_first_shard() {
             first_seen: 0,
             verified_transaction_count: 0,
             is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
         },
     );
     state.connected_node_ids.insert(node_b.clone());
@@ -1142,6 +1163,8 @@ fn parallax_flag_picks_low_latency_peer_end_to_end() {
             first_seen: 0,
             verified_transaction_count: 0,
             is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
         },
     );
     state.connected_node_ids.insert(slow.clone());
@@ -1160,6 +1183,8 @@ fn parallax_flag_picks_low_latency_peer_end_to_end() {
             first_seen: 0,
             verified_transaction_count: 0,
             is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
         },
     );
     state.connected_node_ids.insert(fast.clone());
@@ -1420,6 +1445,7 @@ fn cost_cand(
         max_hostable_layers: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
+        goodput_bytes_per_sec: None,
     }
 }
 
@@ -2653,6 +2679,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         max_hostable_layers: cap,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
+        goodput_bytes_per_sec: None,
     };
 
     // Four remote primaries of 12 layers each; `small` is the only other
@@ -2740,6 +2767,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         max_hostable_layers: cap,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
+        goodput_bytes_per_sec: None,
     };
     let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
         node_id: NodeId([byte; 32]),
@@ -2827,6 +2855,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         max_hostable_layers: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: gpu,
+        goodput_bytes_per_sec: None,
     };
 
     // The primary, plus two possible standbys: one very close and very slow,
@@ -3177,6 +3206,8 @@ fn gpu_holder_info(node: &NodeId, latency_ms: u32, tokens_per_sec: f32) -> PeerI
         first_seen: 0,
         verified_transaction_count: 0,
         is_lan_peer: false,
+        goodput_bytes_per_sec: None,
+        goodput_samples: 0,
     }
 }
 

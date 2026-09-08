@@ -384,6 +384,11 @@ pub struct NetworkManager {
     /// its variance, instead of a ping RTT that says nothing about how loaded
     /// the peer's event loop is. See `tensors::AckRttEstimator`.
     ack_rtt: HashMap<libp2p::PeerId, tensors::AckRttEstimator>,
+    /// What throughput we actually get to each peer. Sibling of `ack_rtt` and
+    /// held the same way — in the manager rather than in `SharedState` — so the
+    /// per-forward update costs no lock, and only the resulting figure is
+    /// published to `peer_registry` for routing to read.
+    peer_goodput: HashMap<libp2p::PeerId, tensors::GoodputEstimator>,
     /// For forwards THIS node sent onward as a chain hop: the coordinator the
     /// run must answer, by request id. When such a forward fails here — no
     /// receipt ACK, OutboundFailure — the error is reported to THAT node, not
@@ -746,6 +751,7 @@ impl NetworkManager {
             last_relay_attempt: None,
             pending_tensor_outbound: HashMap::new(),
             ack_rtt: HashMap::new(),
+            peer_goodput: HashMap::new(),
             hop_reply_to: HashMap::new(),
             pending_tensor_result_outbound: HashMap::new(),
             pending_rr_observability: HashMap::new(),

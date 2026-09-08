@@ -902,6 +902,75 @@ as a substitute: the ACK estimator already declines transfer-dominated samples
 (`ACK_OBSERVE_MAX_BYTES`) precisely because they measure the payload rather than
 the peer.
 
+## Latency wants an average; capacity wants a maximum
+
+`AckRttEstimator` (RFC 6298 smoothing) and `GoodputEstimator` (a windowed max)
+are the two halves of "how good is our path to this peer", and they are
+deliberately opposite in every respect. **`ACK_OBSERVE_MAX_BYTES` and
+`GOODPUT_SAMPLE_MIN_BYTES` are the same number**: the round-trip figure is taken
+only from SMALL forwards, where the time is the peer's, and throughput only from
+LARGE ones, where the time is the payload's. A sample is dominated by one or the
+other and cannot measure both.
+
+**Why goodput exists at all.** Loss on a healthy TCP path is absorbed by
+retransmission, so it appears as a transfer taking longer and NEVER as a forward
+failing. That is why the delivery-ratio term (#495) structurally cannot see it,
+and why a peer at 60 ms with 3% loss out-sorted one at 81 ms with none while
+being 2.9x slower on a 513 KB payload — measured from outside, in a contributor's
+netem lab (issue #21). It also captures a rate limit, which no small-message
+probe can detect.
+
+**Shaped after BBR's bottleneck-bandwidth estimator**, which solves the same
+problem — deriving a path's capacity from whatever transfers an application
+happens to make. Three rules taken from it, each of which is easy to get wrong
+and two of which were:
+
+- **A windowed MAX, not an average.** Samples come in low for reasons that say
+  nothing about capacity. This is the same argument
+  `mem_bandwidth::remeasure_keeping_the_best` already makes locally, and the
+  exact opposite of what latency wants.
+- **An app-limited sample may RAISE the estimate but never establish or lower
+  one.** BBR uses such a sample only when it exceeds the current estimate; with
+  no current estimate there is nothing to exceed, so it is discarded. Both
+  halves matter and the second was missing at first: the max filter already
+  stops a small sample lowering anything WITHIN a window, so the rule looks
+  redundant until the window rotates — and a long conversation is one prefill
+  then thousands of decode steps, so two rotations later a 2 KB forward would
+  have established the figure at the speed of the decode loop. **A wrongly-low
+  estimate is far worse than none**, because unknown charges no transfer while a
+  low one charges an enormous one and routes around a healthy peer.
+- **The round trip is subtracted before dividing.** An acknowledgement is sent
+  once the whole message has ARRIVED (gotcha #446), so the observed time is
+  propagation plus transfer, and `vertex_cost` charges latency separately.
+  Leaving it in would double-charge it and would understate throughput worst on
+  exactly the distant peers this exists to rank.
+
+**How it is consumed.** `VertexCost::transfer_ms`, a term of its own — NOT folded
+into `network_ms`, which is multiplied by `ASSUMED_FORWARD_PASSES`. The large
+payload crosses once, on the prompt pass; every decode step after it carries one
+position. It applies only to a segment that is entered per token AND does not
+start at layer 0, because a first segment receives the PROMPT
+(`ActivationUnits::PromptBytes`) rather than hidden states — three orders of
+magnitude smaller — and charging a transfer that does not happen would penalise
+exactly the split the search should be free to choose. Only the inbound
+direction is charged: the return payload varies by shape, `2 * latency_ms`
+already carries the round trip, and a conservative stated term beats a
+speculative one on a cost model whose own calibration is an open question
+(`ASSUMED_FORWARD_PASSES`, `docs/FUTURE_WORK.md`).
+
+**Unknown charges nothing**, so a peer never sent a large forward is priced
+exactly as before this existed — the standing contract of every routing input
+here. Local and NEVER gossiped, like `ack_srtt_ms`: it describes OUR path to that
+peer, which is not a fact about the peer. And `goodput_samples` is published and
+logged beside the estimate for the reason `peer_delivery_samples` is: an
+unmeasured path and a fast one are indistinguishable from the figure alone, and
+that ambiguity is what hid #495 being inert.
+
+**A test for a max filter must cross a window boundary.** `rotate_for_test`
+exists because the window is five minutes and the app-limited rule governs only
+what happens across rotations — the first version of its test passed with the
+rule disabled.
+
 ## A peer advertises the memory it will HONOUR, not the memory it has
 
 **`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much

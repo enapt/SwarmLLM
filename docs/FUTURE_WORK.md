@@ -17,7 +17,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | # | Bug | Why it ranks here |
 |---|---|---|
 | 1 | GPU on Apple Silicon: no backend is compiled, on either path | **Every Mac runs on CPU.** Large user population, no workaround, and the machine looks healthy while doing it |
-| 2 | Peer ranking uses ping, and a big payload under loss is not ping | Found from OUTSIDE by a contributor's netem lab (issue #21). The loss half shipped as #495 in v0.3.164; **the goodput half is open** and nothing measures per-peer throughput |
+| 2 | Peer ranking uses ping, and a big payload under loss is not ping | Found from OUTSIDE by a contributor's netem lab (issue #21). **Both halves now shipped**: the loss half as #495 (v0.3.164, made to actually fire 2026-09-08) and the goodput half as `GoodputEstimator` + `VertexCost::transfer_ms`. **Open: it has not been field-verified against netem**, and the reporter has the harness |
 
 ### P2 — wrong behaviour, narrower or needing a decision first
 
@@ -214,6 +214,44 @@ is bounded by whenever the first bandwidth measurement lands, so this is a cold-
 defect — which is the class `#400` is a reminder to test for deliberately, because a
 retry is warm.
 
+
+## Per-peer goodput: shipped, not yet field-verified (2026-09-08)
+
+`GoodputEstimator` (BBR-shaped windowed max, in `network/manager/tensors.rs`) now
+measures what each path actually delivers, and `VertexCost::transfer_ms` charges the
+prompt pass's activation transfer at that rate. Design and the three BBR rules it
+follows are in `.claude/rules/architecture.md` § "Latency wants an average; capacity
+wants a maximum".
+
+**What is verified**: the estimator's arithmetic and every rule in it, by unit test with
+null controls on both the app-limited rule and the transfer term. One of those controls
+found a real defect — a small forward could ESTABLISH a wrongly-low estimate two window
+rotations after the last large one, which is worse than unknown.
+
+**What is NOT verified, and is the next step**: that this actually reorders peers under
+real loss. The claim to test is issue #21's own measurement — a peer at 60 ms with 3%
+loss against one at 81 ms with none, on a 513 KB payload — which should now sort the
+other way round. The reporter built the rootless netem harness that produced it and
+offered it; that is the cheapest possible verification and it needs their lab, not ours.
+
+**Two things deliberately left conservative**, both of which should be revisited only
+with a measurement in hand:
+
+- **Only the inbound direction is charged.** A mid-chain segment returns hidden states
+  too, so the true cost is nearer 2x. Left alone because the return payload varies by
+  shape and `2 * latency_ms` already carries the round trip — and because layering a
+  speculative factor onto a cost model whose calibration is itself open (item 3) is how
+  a model becomes unfalsifiable.
+- **`ACTIVATION_BYTES_PER_TOKEN` is a constant at a typical hidden width**, not this
+  model's geometry. `gguf_meta_for` has `embedding_length` and could give the exact
+  figure; the constant is already shared with `peer_speed`'s measured coefficient, so
+  changing it means changing both together or the units stop matching.
+
+**A caution for whoever tunes this next.** `transfer_ms` and item 3's
+`ASSUMED_FORWARD_PASSES` now both act on the same decision, and the field A/B for
+#447(iii) already showed the network term overestimating a boomerang by ~5x. Do not tune
+one to compensate for the other — establish which is wrong first, with the forward-count
+instrumentation item 3 asks for.
 
 ## The routing cost model's network term overestimates a boomerang (open, 2026-09-08)
 

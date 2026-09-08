@@ -347,6 +347,8 @@ mod tests {
                 first_seen: 0,
                 verified_transaction_count: 0,
                 is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
             },
         );
         // Scheduler liveness oracle (R142.9): allocate_offline now filters by
