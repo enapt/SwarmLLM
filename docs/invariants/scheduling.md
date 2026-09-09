@@ -1153,10 +1153,9 @@ for the caller's mistake. Gotcha #415.
 possibly answer differently — and never replace a reason you were given with one
 you invented.
 
-## **`ModelProcessPool::serves_on_cpu` is the whole-model delegation
+## `ModelProcessPool::serves_on_cpu` is the whole-model delegation precondition
 
-**`ModelProcessPool::serves_on_cpu` is the whole-model delegation
-precondition** (2026-09-02, gotcha #442) — "would this request run on our
+(2026-09-02, gotcha #442) — "would this request run on our
 processor": no usable card, told to use the processor, a build without
 CUDA, or a card the model does not fit. It replaced
 `is_cpu_bound_for_lack_of_vram` alone, whose doc read a node with NO card
@@ -1165,10 +1164,9 @@ the model itself with GPU peers idle on the same pool. Peer-side gates in
 `delegation_target` are unchanged. The case it could not reach — a model no
 single peer's card holds — is the priced comparison below.
 
-## **A node holding every layer that would run the model on its processor lets
+## A node holding every layer that would run the model on its processor lets the priced search compete with its fast path
 
-**A node holding every layer that would run the model on its processor lets
-the priced search compete with its fast path** (2026-09-03, gotcha #444).
+(2026-09-03, gotcha #444).
 `assemble_pipeline_for` answers `serves_on_cpu` ONCE (a lazy `OnceCell`,
 since it prices the model against the graphics budget and reads the header
 for a model with no worker) and threads it into `gather_candidates`, which

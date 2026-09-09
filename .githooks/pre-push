@@ -38,8 +38,14 @@ echo "Pre-push: checking swarmllm-types..."
 # Report the line that carries the count, not the doc-test line that follows
 # it — `tail -3` printed "0 passed" while 36 tests had just gone green,
 # which reads exactly like a guard that is doing nothing.
-cargo test --locked -p swarmllm-types --quiet 2>&1 | grep -E "^test result|^error" | head -2
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+# Captured rather than piped straight into `grep | head`: `head` closing the
+# pipe SIGPIPEs cargo, which turns a passing run into PIPESTATUS[0]=141 the
+# moment the crate grows a third result line. The status comes from the
+# command, the trimming from the captured text.
+TYPES_OUT=$(cargo test --locked -p swarmllm-types --quiet 2>&1)
+TYPES_RC=$?
+printf '%s\n' "$TYPES_OUT" | grep -E "^test result|^error" | head -2
+if [ "$TYPES_RC" -ne 0 ]; then
     echo "ERROR: swarmllm-types tests failed. CI runs these as a separate step."
     exit 1
 fi
@@ -49,6 +55,21 @@ cargo clippy --all-targets -- -D warnings 2>&1
 if [ $? -ne 0 ]; then
     echo ""
     echo "ERROR: cargo clippy failed. Fix warnings before pushing."
+    exit 1
+fi
+
+# The counts stated in CLAUDE.md and README.md are cross-checked by
+# `tests/repo_consistency.rs`, and that guard has put main red twice — not
+# because the tests were not run, but because the count is written down AFTER
+# the run that produced it, so the edit that breaks it is the one edit no run
+# has seen (`.claude/rules/completeness.md`). Clippy above already compiled the
+# test targets, so this is a link and a run.
+echo "Pre-push: checking repo consistency..."
+REPO_OUT=$(cargo test --locked --test repo_consistency --quiet 2>&1)
+if [ $? -ne 0 ]; then
+    printf '%s\n' "$REPO_OUT" | tail -30
+    echo ""
+    echo "ERROR: repo_consistency failed. A documented count or cross-reference is out of step."
     exit 1
 fi
 

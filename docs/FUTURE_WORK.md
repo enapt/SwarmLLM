@@ -10,7 +10,7 @@ opportunities, rejected experiments and completed plans are below and deliberate
 here. Entries are re-verified against the code on the date shown — a stale "open"
 entry is worse than no entry, and this pass found three (a quarter of the list).
 
-**A 2026-09-09 audit of the whole file found three more**, all the same shape: a
+**A 2026-09-09 audit of the whole file found four more**, all the same shape: a
 body section frozen at an earlier, unfixed date while the index was updated
 around it. Each now carries a "Superseded — read this first" banner rather than
 being deleted, since the original reasoning is worth keeping. **Read an entry's
@@ -681,7 +681,7 @@ shape, not on a tidied version of it.**
 > if picked up" below describes work that exists. The current status — shipped,
 > **not yet field-verified against netem** — is the section
 > "Per-peer goodput: shipped, not yet field-verified (2026-09-08)" earlier in
-> this file, and the rule is `docs/invariants/network.md` § "Latency wants an
+> this file, and the rule is `docs/invariants/scheduling.md` § "Latency wants an
 > average; capacity wants a maximum". What follows is the original write-up.
 
 Measured and reported by the contributor on issue #21, with a published harness

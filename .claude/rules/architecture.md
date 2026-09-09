@@ -530,7 +530,7 @@ the vendored request-response layer recorded NO address for inbound connections
 connection was "direct", and — being the newest with nothing pending — it won
 every send: two LAN nodes 0.7 ms apart measured 60-800 ms to each other and
 forwarded every tensor through the anchor in Europe (gotcha #356, 2026-08-21;
-#179 had fixed the classifier but inbound never had an address to classify).
+gotcha #179 had fixed the classifier but inbound never had an address to classify).
 
 Rules that follow: the vendored inbound handler records the send-back address
 (`vendor/libp2p-request-response/src/lib.rs`, SwarmLLM patch); the manager's
@@ -1127,21 +1127,20 @@ them is this codebase's most-repeated defect — see “One invariant, N paths�
 
 - **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`.
 - **`inference::decode_attn::gqa_decode_attention_cpu`** — single-position attention straight over the KV cache in its stored `[b, kvh, S, d]` layout, one rayon task per (batch, kv head).
-- **`inference::fast_math`** — eight-lane AVX2 `expf` (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by `vectorised_exp_tracks_libm` over [-80, 80]) and the…
+- **`inference::fast_math`** — eight-lane AVX2 `expf` (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by `vectorised_exp_tracks_libm` over [-80, 80]) and the fused `silu_mul` CustomOp2. A new elementwise pass that calls `f32::exp` in a loop routes through here instead.
 - **`inference::cpu_pools::in_phase_pool`** — binds a forward pass to the CPU thread pool that suits its phase, at ONE choke point: `SplitModel::forward_inner_impl` and `forward_batch`.
 - **`inference::layers::new_kv_cache`** — the only way to construct a KV cache.
 - **`inference::split::kv_cache::LayerKv`** — one layer's KV cache: the f32 BHSD cache every path reads, plus an optional f16 BSHD mirror for the CUDA flash kernel.
-- **`inference::split::kv_cache::SeqCache` / `KvPair` + `LayerKv::truncate`** — the KV cache buffer is this project's own, not candle's, for ONE reason: candle's `Cache` keeps its length private, so the only way to keep…
+- **`inference::split::kv_cache::SeqCache` / `KvPair` + `LayerKv::truncate`** — the KV cache buffer is this project's own, not candle's, for ONE reason: candle's `Cache` keeps its length private, so the only way to keep the first `n` positions was snapshot + `reset()` + `append()` — two full copies per layer on every rejected speculative draft. **Never re-introduce a copy on the rollback path.**
 - **`inference::attn_softmax::scaled_masked_softmax`** — the single expression of attention's tail: scale, optional Gemma-2 logit soft-cap, additive mask, softmax.
-- **`inference::layers::standard_attention` grouped GQA decode** — (c4cc3b16, 2026-08-16) — for `q_len == 1` with `n_kv_head < n_head`, standard attention no longer expands the KV cache with `repeat_kv`;
-- **`inference::layers::cuda_decode_prefers_standard`** — on CUDA: MHA decode takes standard, GQA decode takes flash **at every context length**;
-- **`inference::layers::cuda_decode_prefers_standard` (superseded note, 2026-08-07)** — the measured CUDA attention routing rule, extracted so it is testable without a GPU.
+- **`inference::layers::standard_attention` grouped GQA decode** — (c4cc3b16, 2026-08-16) for `q_len == 1` with `n_kv_head < n_head`, standard attention no longer expands the KV cache with `repeat_kv`; it reshapes the query heads into matmul rows against the UNEXPANDED cache.
+- **`inference::layers::cuda_decode_prefers_standard`** — on CUDA, `q_len == 1` takes standard for EVERY head geometry, prefill always flash. The GQA exclusion was retired on 2026-08-23 once `grouped_gqa_decode_attention` deleted the `repeat_kv` cost it existed to route around; `SWARMLLM_GQA_DECODE_FLASH=1` restores the old rule for an A/B inside one binary.
 - **`inference::mem_bandwidth::measured_gbps`** — what this machine's memory actually delivers, measured once and cached.
-- **`inference::cancel::unless_cancelled` — every wait that can run for minutes watches the request's cancel flag** — .
-- **A prompt pass asks between layers whether its request was cancelled** — .
+- **`inference::cancel::unless_cancelled` — every wait that can run for minutes watches the request's cancel flag** — `InferenceRequest::cancel` is the ONE cancellation signal — set by `CancelOnDisconnect`, by both SSE surfaces on `sse_tx.closed()`, and by `/cancel`; read around every WAIT, never around a send.
+- **A prompt pass asks between layers whether its request was cancelled** — `KvCacheStore::set_cancel_oracle` is probed once per layer by `forward_inner_impl`, which returns `CANCELLED_MID_FORWARD`; `forward_was_cancelled` is the one reader of that message.
 - **`inference::split::token_embedding::rows_on_demand_eligible`** — the single answer to "is this model's `token_embd.weight` held quantized with its rows dequantized on lookup, or dequantized whole at load?".
 - **`inference::split::read_gguf_header`** — the single way to parse a GGUF header off a PATH, and the buffering is the entire reason it exists.
-- **`inference::split::GgufTensorMeta::tied_output_location`** — the single definition of "is this model weight-tied", i.e.
+- **`inference::split::GgufTensorMeta::tied_output_location`** — the single definition of "is this model weight-tied", i.e. does it reuse `token_embd.weight` as the LM head instead of shipping an `output.weight`. Both sidecar writers and the reader go through it.
 
 ### Worker memory: graphics, RAM and the KV cache → `docs/invariants/memory.md`
 
@@ -1151,44 +1150,44 @@ them is this codebase's most-repeated defect — see “One invariant, N paths�
 - **`model::auto_manage::vram::ADMISSION_KV_CONTEXT`** — the context length admission charges KV cache for, on either device, whatever the user configured.
 - **`ModelProcessPool::free_vram_for_admission` + `plan_vram_reclaim`** — reclaim graphics memory from models nothing is using rather than demoting the requested one to the processor.
 - **`should_return_to_gpu` + `ModelProcessPool::worker_should_return_to_gpu`** — the single answer to "is this resident worker still in the right place?", asked on the request path in `get_or_spawn` rather than on a timer.
-- **Graphics memory has ONE owner: `ModelProcessPool`** — .
-- **`model::auto_manage::storage_budget` is the ONE answer to "how much shard storage may this node hold?", and `held_shard_bytes` the one answer to "how much does it hold?"** — .
-- **`model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves** — .
-- **An admitted prompt is RECORDED, not just decided** — .
-- **`inference::split::kv_budget::admit_prompt` + `PrefixCache::release`** — ONE decision for a whole prompt, before prefill, charging live caches PLUS the prefix cache's snapshots (the same device memory, previously…
+- **Graphics memory has ONE owner: `ModelProcessPool`** — it admits (`admit_to_gpu`), charges (`vram_reserved_mb`) and reclaims (`free_vram_for_admission`, `try_idle_vram_unload`). Nothing else may take memory away from a loaded model.
+- **`model::auto_manage::storage_budget` is the ONE answer to "how much shard storage may this node hold?", and `held_shard_bytes` the one answer to "how much does it hold?"** — `storage_budget_now(&state)` gives both, live; the download pass, prune's disk pressure, the settings storage bar, the pool page and the diagnostics report all read it instead of re-deriving one.
+- **`model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves** — NOT `model_trust.last_request_at`, which nothing in the current code writes — a stale persisted value once unloaded a model five seconds after it answered.
+- **An admitted prompt is RECORDED, not just decided** — `KvCacheStore::record_prompt_admission` / `outstanding_admission_bytes`; `ensure_room_for_prompt` adds the outstanding total to the live figure before `admit_prompt`, and records its own claim once admitted.
+- **`inference::split::kv_budget::admit_prompt` + `PrefixCache::release`** — ONE decision for a whole prompt, before prefill, charging live caches PLUS the prefix cache's snapshots (the same device memory, previously charged nowhere): fit → evict cached prompts, oldest hit first → refuse with a 503 at token 0. **A budget must see every tenant of the memory it bounds.**
 - **`inference::split::kv_budget`** — the KV memory budget and the admission check against it.
 - **`inference::process_pool::worker_socket_path`** — the worker IPC socket path, and the ONLY place it is built.
 
 ### Network protocol, peers and the model registry → `docs/invariants/network.md`
 
 - **`inference::pipeline::remote_generate::StreamReassembler`** — the single place a remote reply's token stream is put back in order.
-- **A hole in a peer-served reply is FILLED, not waited out** — .
+- **A hole in a peer-served reply is FILLED, not waited out** — `RetainedReplies` keeps each fast-path reply this node streams, and `SwarmMessage::ResendTokens` is answered from it — only to the peer the reply was for.
 - **`NodeCapability.cpu`** — a processor described the way a graphics card always has been.
-- **`PeerInfo::ack_srtt_ms` is what routing prices a peer by** — .
+- **`PeerInfo::ack_srtt_ms` is what routing prices a peer by** — written on every acknowledged tensor forward from `AckRttEstimator::srtt_ms`, capped at `ACK_SRTT_ROUTING_CAP_MS` (10 s) because the estimator DOUBLES on a miss.
 - **`mem_bandwidth::remeasure_keeping_the_best`** — the memory-bandwidth figure a processor-only node advertises may RISE over its run and never fall.
-- **A peer's advertised version may bring the update check FORWARD and may do nothing else** — .
-- **`update::SelfUpdateBlocker` — "this node cannot update itself" carries WHY** — .
+- **A peer's advertised version may bring the update check FORWARD and may do nothing else** — `update::PeerVersionWatch` on `state.events.peer_versions` wakes `UpdateChecker` through `state.events.update_nudge` (a `Notify`, not a third broadcast channel); it never decides the outcome.
+- **`update::SelfUpdateBlocker` — "this node cannot update itself" carries WHY** — `UpdateChecker::self_update_blocker` returns the reason; `key()` is the stable string the dashboard translates across 21 locales, `advice()` the English one the daemon log and `swarmllm update` print.
 - **`ModelRegistry::manifests_to_gossip`** — the single answer to "which manifests should this node re-broadcast?": ones it published **and ones it holds a shard of**.
 - **`model::manifest::merge_known_shard_hashes`** — the rule that a shard hash may go from unknown to known but never back.
 - **`types::slugify_model_name`** — the single derivation of a model id from a human display name.
 - **`model::huggingface::is_trusted_publisher`** — canonical curator-allowlist check for an HF `repo_id`.
-- **`SharedState::resolve_connected_peer_id_bytes`** — the resolver to use for any message that `network::manager::relay::is_relay_eligible` refuses, i.e.
-- **`ModelRegistry::describes_a_different_build`** — is this manifest the same FILE as ours, or another build wearing the same name? A model id comes from a display name (`slugify_model_name`),…
-- **`model::manifest::is_backup_artifact_id`** — canonical check for a model id that is a copied-folder backup (`<model>.FULLBACKUP`, `<model>.old`, `<model>~`, `… copy`) rather than a real…
+- **`SharedState::resolve_connected_peer_id_bytes`** — the resolver to use for any message that `network::manager::relay::is_relay_eligible` refuses, i.e. everything except `RemoteGenerateRequest` / `StreamingToken` / `CancelInference`. For those, "reachable" means "connected".
+- **`ModelRegistry::describes_a_different_build`** — is this manifest the same FILE as ours, or another build wearing the same name? A model id comes from a display name (`slugify_model_name`), so every independent GGUF build collapses into one identity. Compares SHAPE, never hashes, and is gated on `has_origin_knowledge`.
+- **`model::manifest::is_backup_artifact_id`** — canonical check for a model id that is a copied-folder backup (`<model>.FULLBACKUP`, `<model>.old`, `<model>~`, `… copy`) rather than a real model identity. Netted at `ModelRegistry::register_manifest`, the one point every adoption path funnels through.
 
 ### Scheduling, routing and failover → `docs/invariants/scheduling.md`
 
 - **`ModelProcessPool::serves_on_cpu` is the whole-model delegation precondition** — "would this request run on our processor": no usable card, told to use the processor, a build without CUDA, or a card the model does not fit.
-- **A node holding every layer that would run the model on its processor lets the priced search compete with its fast path** — .
-- **A peer's capacity for a prompt is weights PLUS that prompt's KV cache** — .
+- **A node holding every layer that would run the model on its processor lets the priced search compete with its fast path** — `assemble_pipeline_for` answers `serves_on_cpu` ONCE (a lazy `OnceCell`) and threads it into `gather_candidates`, which PRICES the local candidate rather than excluding it.
+- **A peer's capacity for a prompt is weights PLUS that prompt's KV cache** — `scheduler::max_hostable_layers` takes `prompt_kv_bytes_per_layer` — the same arithmetic the worker charges at admission, f16 mirror included.
 - **`inference::scheduler::delegation_target`** — the single decision to hand a WHOLE model to a peer rather than run it on this node's CPU.
 - **`inference::router::distributed_exec::failure_is_penalty_worthy`** — gates `penalty_serve_failure` on (a) the assignment actually having had a remote segment and (b) the error not being locally attributable.
 
 ### SharedState, live config and credits → `docs/invariants/state-and-config.md`
 
-- **`SharedState::release_request_state`** — clears the maps a finished request leaves behind: `active_pipelines`, `active_traces`, `request_holder_blacklist`, `peer_vram_commitments`…
-- **Credits are DORMANT — nothing may publish or act on a balance** — .
+- **`SharedState::release_request_state`** — clears the maps a finished request leaves behind: `active_pipelines`, `active_traces`, `request_holder_blacklist`, `peer_vram_commitments` and `local_memory_refusals` — keyed by request id, sharing one lifetime. Deliberately does NOT touch `active_count` or `queue_notify`.
+- **Credits are DORMANT — nothing may publish or act on a balance** — `MIN_BALANCE_FOR_INFERENCE = 0` and `calculate_tier` returns `DORMANT_TIER` whatever it is given, so no balance affects who is served or how fast, and the leaderboard neither ranks by credits nor publishes them.
 - **`SharedState::cfg()`** — the live config, and the single answer to "what is this setting **now**".
 - **`SharedState::record_peer_serve`** — the single answer to "this node did inference work for a peer", counting it AND billing for it.
-- **`config::InferenceConfig::claims_shard`** — the single answer to "does this node claim shard N?", i.e.
-- **`SharedState::local_fast_path_for` is the single answer to "may this request take the local split fast path?"** — .
+- **`config::InferenceConfig::claims_shard`** — the single answer to "does this node claim shard N?", i.e. how `inference.shard_range` is read. **Never read `shard_range` directly.**
+- **`SharedState::local_fast_path_for` is the single answer to "may this request take the local split fast path?"** — both API surfaces used to compose it themselves (`has_complete_split_model && !should_offer_work_to_the_swarm`), and the fast path skips the router — which is where `delegation_target` lives.

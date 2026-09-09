@@ -508,10 +508,9 @@ pass as no information, not zero. A new consumer of the figure reads
 `measured_gbps()` as before; a new measurement of any hardware ceiling should
 be shaped the same way.
 
-## **A peer's advertised version may bring the update check FORWARD and may do
+## A peer's advertised version may bring the update check FORWARD and may do nothing else
 
-**A peer's advertised version may bring the update check FORWARD and may do
-nothing else** (2026-09-03 evening). `update::PeerVersionWatch` on
+(2026-09-03 evening). `update::PeerVersionWatch` on
 `state.events.peer_versions`, fed by the capability-gossip handler through
 `EventBus::note_peer_version`; `state.events.update_nudge` (a `Notify`, not a
 third broadcast channel — one listener, no payload) wakes `UpdateChecker::run`,
@@ -578,8 +577,8 @@ already had. That matters because `network/manager/requests.rs` verifies a
 completed P2P transfer ONLY when the manifest carries a non-zero hash: lose the
 hash and the bytes are taken on trust, recorded as held, and re-served to other
 peers unchecked. Measured on the live node — five shards fetched against a
-manifest carrying placeholders for exactly those five, one corrupt (gotcha
-#381).
+manifest carrying placeholders for exactly those five, one corrupt
+(gotcha #381).
 Three things a change here must keep. The merge is **one-directional**: a real
 incoming hash still replaces a real stored one (a genuine re-publish), and only
 unknown is treated as no information — so this cannot be used to pin a stale
@@ -677,7 +676,7 @@ surfacing in the diff.
 
 ## `SharedState::resolve_connected_peer_id_bytes`
 
-the resolver to use for
+The resolver to use for
 any message that `network::manager::relay::is_relay_eligible` refuses, i.e.
 everything except `RemoteGenerateRequest` / `StreamingToken` /
 `CancelInference`. For those direct-only messages "reachable" means

@@ -18,7 +18,12 @@ exec > "$LOG_FILE" 2>&1 || exit 0
 # opened. If a check here needs to REACH anyone it has to exit 2, which also
 # blocks stopping; that trade has not been made deliberately, so this stays a
 # log and says so.
-ls -t "$LOG_DIR"/session_*.log 2>/dev/null | tail -n +31 | xargs -r rm -f
+# A read loop rather than `xargs -r`: `-r` is GNU-only (a macOS contributor
+# gets "illegal option"), and xargs would word-split a path containing a
+# space, which $PROJECT_DIR can have.
+ls -t "$LOG_DIR"/session_*.log 2>/dev/null | tail -n +31 | while IFS= read -r stale; do
+    [ -n "$stale" ] && rm -f "$stale"
+done
 
 echo "=== SwarmLLM Session Summary ==="
 echo "Timestamp: $(date -Iseconds)"

@@ -182,10 +182,9 @@ something about this machine's network must persist its evidence the same way;
 an observation whose lifetime is shorter than the fact's cannot support the
 claim.
 
-## **`SharedState::model_is_in_use` is the answer to "may I delete this model's
+## `SharedState::model_is_in_use` is the answer to "may I delete this model's files?"
 
-**`SharedState::model_is_in_use` is the answer to "may I delete this model's
-files?"** — NOT `active_pipelines` on its own. That is the COORDINATOR's map of
+— NOT `active_pipelines` on its own. That is the COORDINATOR's map of
 DISTRIBUTED assignments (gotcha #194) and holds nothing for peer-served work or
 for a reply the local model is producing through the split fast path, which
 bypasses the router entirely. Deleting during a local reply therefore returned
@@ -358,10 +357,9 @@ someone can forget. Verified on two machines: the restriction held for 10
 minutes against the 4m47s it previously took to lose it, and a genuine
 two-segment pipeline then answered correctly across both.
 
-## **`SharedState::local_fast_path_for` is the single answer to "may this
+## `SharedState::local_fast_path_for` is the single answer to "may this request take the local split fast path?"
 
-**`SharedState::local_fast_path_for` is the single answer to "may this
-request take the local split fast path?"** (2026-09-03, gotcha #443). Both
+(2026-09-03, gotcha #443). Both
 API surfaces used to compose it themselves (`has_complete_split_model &&
 !should_offer_work_to_the_swarm`), and the fast path skips the router —
 which is where `delegation_target` lives. On a node whose card is too

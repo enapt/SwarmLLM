@@ -3370,6 +3370,67 @@ fn every_dial_goes_through_the_foreign_peer_gate() {
     );
 }
 
+/// Files this repo authors as TEXT, and therefore expects to be greppable.
+/// Extension-based rather than content-sniffing on purpose: a content sniff
+/// would call a NUL-carrying file "binary" and skip exactly the file the scan
+/// exists to catch. Pinned by `the_nul_scan_looks_at_the_files_it_claims_to`.
+fn is_text_source_extension(p: &std::path::Path) -> bool {
+    p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+        matches!(
+            x,
+            "md" | "rs"
+                | "js"
+                | "css"
+                | "html"
+                | "json"
+                | "toml"
+                | "sh"
+                | "py"
+                | "yml"
+                | "yaml"
+                | "txt"
+        )
+    })
+}
+
+/// The scan above must look at the file types the defect it exists for actually
+/// landed in — a scan that cannot reach a file reports success exactly like a
+/// clean tree (`.claude/rules/architecture.md` § "A source-scanning guard is
+/// only as good as the spellings it knows"). Markdown alone is what let
+/// gotcha #513 through in a `.rs` file.
+#[test]
+fn the_nul_scan_looks_at_the_files_it_claims_to() {
+    use std::path::Path;
+    for name in [
+        "docs/DIAGNOSTICS.md",
+        "src/inference/split/kv_cache.rs",
+        "frontend/js/core/utils.js",
+        "frontend/css/main.css",
+        "frontend/index.html",
+        "frontend/i18n/en.json",
+        "Cargo.toml",
+        ".githooks/pre-push.sh",
+        "python/client.py",
+        ".github/workflows/ci.yml",
+    ] {
+        assert!(
+            is_text_source_extension(Path::new(name)),
+            "{name} is a text file this repo writes and must be scanned for NUL bytes"
+        );
+    }
+    // Binary assets are not text and must not be flagged.
+    for name in [
+        "frontend/fonts/IBMPlexSans.woff2",
+        "docs/img/diagram.png",
+        "model.gguf",
+    ] {
+        assert!(
+            !is_text_source_extension(Path::new(name)),
+            "{name} is a binary asset and must not be scanned as text"
+        );
+    }
+}
+
 /// Documentation must be greppable, which means no NUL bytes.
 ///
 /// A single NUL makes `file` report "data", makes GNU grep print
@@ -3389,6 +3450,14 @@ fn every_dial_goes_through_the_foreign_peer_gate() {
 /// Deliberately covers every tracked doc, not just the one that broke: nothing
 /// about the mistake was specific to that file, and the Rust-side checks kept
 /// passing throughout because a NUL is valid UTF-8.
+///
+/// **Widened from markdown to every text source on 2026-09-09.** Eleven days
+/// after this guard shipped, the same defect landed in
+/// `src/inference/split/kv_cache.rs` — one NUL inside a comment, which hid that
+/// whole file from every repo-wide search until it was found by accident
+/// (gotcha #513). The guard could not see it because it filtered on `.md`.
+/// Nothing about a NUL is specific to markdown: it is a property of TEXT, so
+/// the scan is scoped by "is this a text file we wrote", not by one extension.
 #[test]
 fn documentation_contains_no_nul_bytes() {
     let root = repo_root();
@@ -3414,7 +3483,7 @@ fn documentation_contains_no_nul_bytes() {
                 }
                 continue;
             }
-            if !p.extension().is_some_and(|x| x == "md") {
+            if !is_text_source_extension(&p) {
                 continue;
             }
             let Ok(bytes) = std::fs::read(&p) else {
@@ -3432,7 +3501,7 @@ fn documentation_contains_no_nul_bytes() {
 
     assert!(
         offenders.is_empty(),
-        "markdown files contain NUL bytes, which makes grep skip them silently:\n  {}\n\
+        "these text files contain NUL bytes, which makes grep skip them silently:\n  {}\n\
          Write the two-character escape (\\0) rather than a literal NUL.",
         offenders.join("\n  ")
     );
@@ -4783,21 +4852,56 @@ fn the_mid_reply_failover_guard_catches_a_body_that_searches_first() {
 /// SwarmLLM patch to connection selection, the thing gotcha #356 exists about.
 ///
 /// Counted from the source rather than by running it, so this stays a cheap
-/// repo-consistency check: `--lib` runs exactly the `#[test]` functions in
-/// `src/`, and the crate has no `#[cfg(test)]`-gated helpers that would make
-/// the two diverge.
+/// repo-consistency check. Three things the count has to get right, all of
+/// which a bare `text.matches("#[test]")` over `read_dir` gets wrong — the
+/// "spellings it knows" rule applies to this guard as much as to the ones it
+/// sits beside:
+///
+/// * **Async tests spell it differently.** `json.rs` and `cbor.rs` already use
+///   `#[tokio::test]`, so a literal `#[test]` search undercounts the moment an
+///   async test lands in `lib.rs`, and the guard then fails on correct docs.
+/// * **`src/` has subdirectories.** `src/handler/protocol.rs` is invisible to a
+///   non-recursive `read_dir`.
+/// * **`--lib` builds with DEFAULT features.** `cbor` and `json` are opt-in and
+///   their modules are `#[cfg(feature = ...)]`-gated in `lib.rs`, so their tests
+///   are compiled by neither CI nor the pre-push hook. Counting them would make
+///   the guard demand a number nobody can observe.
 #[test]
 fn the_vendored_request_response_test_count_is_stated_once_and_correctly() {
     let root = repo_root();
     let src = root.join("vendor/libp2p-request-response/src");
+    let lib_rs = std::fs::read_to_string(src.join("lib.rs")).expect("vendored lib.rs");
+    let gated = feature_gated_modules(&lib_rs);
+    assert!(
+        !gated.is_empty(),
+        "expected `cbor`/`json` to be feature-gated in the vendored lib.rs — if that \
+         changed, this guard's default-feature assumption needs re-checking"
+    );
+
     let mut actual = 0usize;
-    for entry in std::fs::read_dir(&src).expect("vendored crate src/ must exist") {
-        let path = entry.expect("read_dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("vendored crate src/ must exist") {
+            let path = entry.expect("read_dir entry").path();
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            // A gated module contributes neither `src/<name>.rs` nor `src/<name>/`.
+            if dir == src && gated.contains(&stem) {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read vendored source");
+            actual += count_test_attributes(&text);
         }
-        let text = std::fs::read_to_string(&path).expect("read vendored source");
-        actual += text.matches("#[test]").count();
     }
     assert!(
         actual > 0,
@@ -4841,4 +4945,94 @@ fn the_vendored_request_response_test_count_is_stated_once_and_correctly() {
              claims found: {claims:?}"
         );
     }
+}
+
+/// Every attribute that makes `cargo test --lib` run a function: `#[test]` and
+/// the runtime-qualified forms (`#[tokio::test]`, `#[async_std::test]`, …).
+/// Pinned by `the_vendored_test_counter_sees_every_spelling_of_a_test`.
+fn count_test_attributes(src: &str) -> usize {
+    let mut n = 0;
+    for line in src.lines() {
+        let l = line.trim();
+        if !l.starts_with("#[") || !l.ends_with("test]") {
+            continue;
+        }
+        let inner = &l[2..l.len() - 1];
+        // `test` itself, or `<path>::test` — but not `#[cfg(test)]`, which does
+        // not end in `test]`, nor `#[should_panic]`-style unrelated attributes.
+        if inner == "test" || inner.ends_with("::test") {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Module names `lib.rs` declares behind a `#[cfg(feature = "…")]`. Their tests
+/// are not compiled by a default-feature `--lib` run, so they must not be
+/// counted. Pinned by `the_vendored_test_counter_sees_every_spelling_of_a_test`.
+fn feature_gated_modules(lib_rs: &str) -> Vec<String> {
+    let lines: Vec<&str> = lib_rs.lines().collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !line.trim_start().starts_with("#[cfg(feature") {
+            continue;
+        }
+        let Some(next) = lines.get(i + 1) else {
+            continue;
+        };
+        let decl = next.trim();
+        let Some(rest) = decl
+            .strip_prefix("pub mod ")
+            .or_else(|| decl.strip_prefix("mod "))
+        else {
+            continue;
+        };
+        if let Some(name) = rest.split([';', ' ', '{']).next() {
+            if !name.is_empty() {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The guard above must fire on the shapes it forbids, planted in the form they
+/// would really appear — a scan that finds nothing is indistinguishable from a
+/// scan that CANNOT find anything (`.claude/rules/architecture.md` § "A
+/// source-scanning guard is only as good as the spellings it knows").
+#[test]
+fn the_vendored_test_counter_sees_every_spelling_of_a_test() {
+    // The plain form, indented as it really is inside `mod tests`.
+    assert_eq!(count_test_attributes("    #[test]\n    fn a() {}\n"), 1);
+    // The async form that `json.rs` and `cbor.rs` already use, and which the
+    // first version of this guard could not see at all.
+    assert_eq!(
+        count_test_attributes("    #[tokio::test]\n    async fn a() {}\n"),
+        1
+    );
+    assert_eq!(
+        count_test_attributes("    #[async_std::test]\n    async fn a() {}\n"),
+        1
+    );
+    // Things that are NOT a test function must not be counted.
+    assert_eq!(count_test_attributes("#[cfg(test)]\nmod tests {}\n"), 0);
+    assert_eq!(count_test_attributes("#[should_panic]\nfn a() {}\n"), 0);
+    assert_eq!(
+        count_test_attributes("// #[test] in a comment is still one\n"),
+        0
+    );
+    // Mixed, the way a real file reads.
+    assert_eq!(
+        count_test_attributes("#[cfg(test)]\nmod t {\n    #[test]\n    fn a() {}\n    #[tokio::test]\n    async fn b() {}\n}\n"),
+        2
+    );
+
+    // Feature-gated modules are excluded, in the exact shape the vendored
+    // lib.rs writes them.
+    let gated = feature_gated_modules(
+        "#[cfg(feature = \"cbor\")]\npub mod cbor;\nmod codec;\nmod handler;\n#[cfg(feature = \"json\")]\npub mod json;\n",
+    );
+    assert_eq!(gated, vec!["cbor".to_string(), "json".to_string()]);
+    // An ungated module is not excluded.
+    assert!(feature_gated_modules("mod codec;\npub mod handler;\n").is_empty());
 }

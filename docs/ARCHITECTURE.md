@@ -740,7 +740,7 @@ measured:
 | | prefill (`q_len > 1`) | decode (`q_len == 1`) |
 |---|---|---|
 | CPU | standard | standard (GQA takes the grouped no-copy path inside it) |
-| CUDA | flash | flash if GQA, standard if MHA |
+| CUDA | flash | standard, for every head geometry |
 
 **CPU decode is standard for every shape** (since c4cc3b16, 2026-08-16).
 `standard_attention` used to materialize the `repeat_kv` expansion every token —
@@ -753,13 +753,17 @@ grouped path beats both the old expanded path (3-9x) and the fused kernel
 (2-20x, kv 1024-8192); end to end it is **1.41x decode** on llama-3.2-3b
 (4.71 → 6.63 tok/s), validated by a 4-hour soak.
 
-**CUDA keeps flash for GQA decode.** Its measurement predates the grouped path
-and rested on the same `repeat_kv` premise, so the routing is a re-measure
-candidate (`docs/FUTURE_WORK.md`) — but GPUs already route GQA decode to a fused
-kernel, and this box cannot resolve small GPU deltas (gotcha #267). The MHA side
-is not in question: flash unconditionally would still cost up to **25x per
-attention call** on MHA decode — candle-flash-attn has no split-KV kernel, so a
-single query row cannot fill the card.
+**CUDA decode is standard for every shape too** (since 2026-08-23). The GQA
+exclusion rested on the same `repeat_kv` premise the CPU rule did, and it
+outlived that premise by a week: once `grouped_gqa_decode_attention` removed the
+expansion, a re-measurement on the same RTX 3070 found standard winning at every
+context length with the gap WIDENING (2.5x at kv=512 up to 14x at kv=8192, min
+of 20). The isolated table overstates it — its flash arm runs without the f16 KV
+mirror production always has — so end to end this is ~6% at 4120 KV and
+unresolvable at ~900 (gotcha #266). `SWARMLLM_GQA_DECODE_FLASH=1` restores the
+old rule for an A/B inside one binary. The MHA side was never in question: flash
+would still cost up to **25x per attention call** on MHA decode — candle-flash-attn
+has no split-KV kernel, so a single query row cannot fill the card.
 
 **There is no context-length crossover, and re-introducing one needs a
 forward-pass measurement.** A `k_len >= 1024` threshold shipped on 2026-08-07,
@@ -2406,7 +2410,7 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 
 ### Open
 
-- **Split-KV (FlashDecoding) kernels for CUDA decode** — `candle-flash-attn` 0.10.1 ships none, so a single-token decode launches a grid of only `(1 × n_head × batch)` blocks and cannot fill the card. Measured on an RTX 3070: flash is **4x-25x slower than `standard_attention` for MHA decode** at every KV length, which is why `cuda_decode_prefers_standard` routes MHA decode away from it. (Short-context GQA decode was also routed away until 2026-08-08, when a forward-pass measurement showed flash winning at every length.) With split-KV, MHA decode could take the fused path too. Upstream flash-attention has the kernels (`flash_fwd_splitkv_*`); adding them to `vendor/candle-flash-attn` is the highest-value follow-on in this area. Full measurement table in `docs/FUTURE_WORK.md`.
+- **Split-KV (FlashDecoding) kernels for CUDA decode** — `candle-flash-attn` 0.10.1 ships none, so a single-token decode launches a grid of only `(1 × n_head × batch)` blocks and cannot fill the card. Measured on an RTX 3070: flash is **4x-25x slower than `standard_attention` for MHA decode** at every KV length, which is why `cuda_decode_prefers_standard` routes MHA decode away from it. (GQA decode was routed to flash between 2026-08-08 and 2026-08-23; a re-measurement after `grouped_gqa_decode_attention` removed the `repeat_kv` cost put every `q_len == 1` decode back on standard, whatever the head geometry.) With split-KV, MHA decode could take the fused path too. Upstream flash-attention has the kernels (`flash_fwd_splitkv_*`); adding them to `vendor/candle-flash-attn` is the highest-value follow-on in this area. Full measurement table in `docs/FUTURE_WORK.md`.
 
 - **Binary signature on auto-update (audit_2026-04-29 C1)** — `src/update.rs` verifies the SHA256 sidecar fetched from the same GitHub release as the binary; a compromised maintainer account/CI token can publish a matching pair. Real fix: generate an offline signing keypair, embed the public key at compile time, publish a detached signature as a third release asset, and verify it before applying the rename. Deferred until a key-custody decision is made — see `memory/signing_options.md` for the three concrete options (raw Ed25519, minisign, or Sigstore/Cosign keyless), recommended approach (minisign), and step-by-step rollout plan. Until landed, defence-in-depth fixes keep the blast radius local: `update/check` + `update/apply` are loopback-only (`2e1c5b1`), `apply_update` re-checks `latest_version > running_version` at apply time (post-`cb2c688`), `info.downloaded` only flips true when the staging path is on the same filesystem as the binary, and auto-update is opt-in via `config.updates.auto_update` (default `Disabled`).
 

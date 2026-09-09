@@ -456,7 +456,14 @@ and with it gone the same benchmark reports the opposite at every length
 reproducing the old verdict on the reverted code. 1.41x end-to-end CPU decode
 on llama-3.2-3b; 4h-soak-validated (`soak_0816_cpu_speedup.md`).
 
-## `inference::layers::cuda_decode_prefers_standard`
+## `inference::layers::cuda_decode_prefers_standard` (superseded note, 2026-08-08)
+
+> **Superseded — read this first.** The GQA half of this note was overturned
+> on 2026-08-23 and the code no longer implements it: `q_len == 1` now takes
+> standard for EVERY head geometry. The live rule, with the re-measured
+> table, is "Attention kernel choice and the query-length cliff (2026-08-23)"
+> at the top of this file. What follows is the original write-up, kept
+> because the MHA half and the forward-versus-per-call lesson still stand.
 
 (2026-08-08) — on CUDA:
 MHA decode takes standard, GQA decode takes flash **at every context length**;
@@ -472,13 +479,13 @@ not a per-call one.** A 1024-token threshold shipped on 2026-08-07 from timing
 the attention call in isolation; measured end to end the next day it was wrong
 at every length (1.13x at kv~272, 1.42x at ~528, 1.61x at ~912 in flash's
 favour). Isolated, `repeat_kv`'s allocation and bandwidth cost is amortised
-against warm buffers and no competing traffic. **Third occurrence of gotcha
-#255.** Controls that make the change attributable: at 2048 KV both arms were
+against warm buffers and no competing traffic. **Third occurrence of
+gotcha #255.** Controls that make the change attributable: at 2048 KV both arms were
 identical (both already flash) and MHA identical to the decimal.
 
 ## `inference::layers::cuda_decode_prefers_standard` (superseded note, 2026-08-07)
 
-the
+(2026-08-07) — the
 measured CUDA attention routing rule, extracted so it is testable without
 a GPU. **The right kernel is opposite for prefill and decode, and it turns
 on GQA** — the same lesson as the CPU crossover above it (gotcha #255) on
@@ -508,10 +515,9 @@ thread-per-core, so it ranks machines the way running a model does. Costs 254 ms
 once, on the health-monitor task rather than the startup path.
 **Adding a device class means giving it a real measurement, not a constant.**
 
-## **`inference::cancel::unless_cancelled` — every wait that can run for minutes
+## `inference::cancel::unless_cancelled` — every wait that can run for minutes watches the request's cancel flag
 
-**`inference::cancel::unless_cancelled` — every wait that can run for minutes
-watches the request's cancel flag** (2026-09-03, gotcha #445). The flag
+(2026-09-03, gotcha #445). The flag
 (`InferenceRequest::cancel`) is the ONE cancellation signal: set by
 `CancelOnDisconnect` (non-streaming), by both SSE surfaces on
 `sse_tx.closed()` (they used to only drop `token_rx`, which the pipeline
@@ -624,7 +630,7 @@ is a fixed amount of work, not contention; go and find the count.
 
 ## `inference::split::GgufTensorMeta::tied_output_location`
 
-the single
+The single
 definition of "is this model weight-tied", i.e. does it reuse
 `token_embd.weight` as the LM head instead of shipping an `output.weight`.
 Consumed by BOTH sidecar writers (`daemon::manifest::extract_tied_output_weight`,

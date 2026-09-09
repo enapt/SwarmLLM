@@ -408,11 +408,9 @@ worse failure than the race. It reports what it stranded. Retirement only ever
 targets idle models, so the common path returns without sleeping at all, and a
 test pins that so no unload pays for a race that is not happening.
 
-## **`model::auto_manage::storage_budget` is the ONE answer to "how much shard
+## `model::auto_manage::storage_budget` is the ONE answer to "how much shard storage may this node hold?", and `held_shard_bytes` the one answer to "how much does it hold?"
 
-**`model::auto_manage::storage_budget` is the ONE answer to "how much shard
-storage may this node hold?", and `held_shard_bytes` the one answer to "how
-much does it hold?"** (2026-09-03, gotcha #448). `storage_budget_now(&state)`
+(2026-09-03, gotcha #448). `storage_budget_now(&state)`
 gives both for this node, live. Consumers: the download pass
 (`scoring::remaining_budget`, whose refusal logs every figure and the rule
 that produced it), prune's disk pressure (`prune::compute_resource_pressure`),
@@ -450,11 +448,9 @@ binding the live-config guard cannot see (#281's shape); and the quarantine
 sweep named only `.quarantine`, so `.mismatched` files (2026-07-27) were
 never reclaimed — `QUARANTINE_EXTENSIONS` now lists both.
 
-## **`model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER
+## `model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves
 
-**`model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER
-BOUND on "idle since", and the worker's own `last_used` is the signal that
-moves** (2026-09-02, gotcha #437). The idle unload used to trust
+(2026-09-02, gotcha #437). The idle unload used to trust
 `model_trust.last_request_at`, which NOTHING in the current code writes; a
 two-day-old persisted value outranked a worker loaded 215 s earlier and the
 model was unloaded five seconds after answering, so every request after that

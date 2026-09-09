@@ -3,8 +3,10 @@
 /target-docker/
 # Vendored crates are standalone workspaces and build into their own target/.
 # The anchored rule above never covered them, so 1.1 GB of debug objects was
-# committed by `git add -A` and shipped in every clone.
-vendor/*/target/
+# committed by `git add -A` and shipped in every clone. `**` rather than `*`
+# because a nested workspace member excluded from its parent builds one level
+# deeper, which a single-level rule would miss the same way.
+vendor/**/target/
 **/*.rs.bk
 *.orig
 
