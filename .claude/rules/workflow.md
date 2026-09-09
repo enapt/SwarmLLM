@@ -41,6 +41,14 @@ Write for that audience without dumbing anything down:
 
 ## Memory Management Around Compaction
 
-The PreCompact hook blocks compaction if anything is uncommitted or `cargo check` fails. Before ~70% context usage, proactively update `memory/MEMORY.md` with anything worth carrying forward.
+The PreCompact hook blocks compaction while anything is uncommitted, and names the
+files. Commit, and compaction proceeds. (It no longer runs `cargo check`: that
+arm could not fail and only added ~30s to every compaction. And the hook itself
+was missing between 2026-04-08 and 2026-09-09 — deleted by an unrelated commit
+while this line went on promising it, so treat a documented safety net as a
+claim to verify rather than a fact.)
+
+Before ~70% context usage, proactively update `memory/MEMORY.md` with anything
+worth carrying forward.
 
 After compaction, before doing anything else: read `memory/MEMORY.md`, then `git log --oneline -10` and `git diff HEAD~3 --stat`. Don't re-do committed work.

@@ -84,10 +84,10 @@
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
-        "if": "Edit(*.rs)|Write(*.rs)",
         "hooks": [
           {
             "type": "command",
+            "if": "Edit(*.rs)|Write(*.rs)",
             "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/post-edit-lint.sh",
             "timeout": 120
           }

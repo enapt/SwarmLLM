@@ -12,6 +12,14 @@ LOG_FILE="$LOG_DIR/session_${TIMESTAMP}.log"
 
 exec > "$LOG_FILE" 2>&1 || exit 0
 
+# Keep the newest 30. Nothing reads these — the Stop hook's stdout goes to the
+# debug log, not to the model — so they are a local trail, not a guard. They
+# had reached 2,908 files and 12 MB, 507 of them carrying warnings nobody ever
+# opened. If a check here needs to REACH anyone it has to exit 2, which also
+# blocks stopping; that trade has not been made deliberately, so this stays a
+# log and says so.
+ls -t "$LOG_DIR"/session_*.log 2>/dev/null | tail -n +31 | xargs -r rm -f
+
 echo "=== SwarmLLM Session Summary ==="
 echo "Timestamp: $(date -Iseconds)"
 echo ""

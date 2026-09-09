@@ -219,7 +219,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 - `.claude/rules/diagnosis.md` — **read before blaming any change for any symptom, and before implementing anything non-trivial.** Rule 0: look up how the failure mode is solved elsewhere first — WireGuard's per-keypair replay counter and vLLM's Head-Room Admission each changed an implementation the same day. Then: baseline before blaming, verify the mechanism fired, check the test fails without the fix.
 - `.claude/agents/root-cause.md` — `Task(root-cause)` establishes CAUSED / NOT-CAUSED / UNDETERMINED for a suspected cause, and never proposes a fix. Use it before reverting or attributing, especially when the suspect is your own recent change.
 - `.claude/sweep-log.jsonl` — per-finding history of every `/sweep` round (status: fixed / wontfix / deferred). Grep before re-reporting potential issues.
-- `SwarmLLM_Technical_Specification.docx` — High-level technical specification with architecture rationale
+- `SwarmLLM_Technical_Specification.docx` — high-level technical specification with architecture rationale. **Gitignored and not present in a clone** — it is a local reference only, so do not treat a link to it as something a contributor can follow.
 
 ## Status
 
