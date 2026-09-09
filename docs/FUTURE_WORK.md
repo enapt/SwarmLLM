@@ -26,6 +26,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. Instrumented 2026-09-08; **the instrument could not see a hand-off until 2026-09-09** — zero samples in ten hours of live traffic. Needs field data, not tuning |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
+| 18 | A mid-decode failover silently loses the failed segment's KV context | **NEW 2026-09-09.** A standby holds none of the failed node's cache and nothing rebuilds it, so the replacement computes its layers with `kv_offset = 0` — attending to the current token alone. Fails no check, logs nothing. **Decides what item 17 is worth**: more standbys means more requests taking this path |
 
 ### P3 — correctness-adjacent, or blocked on a measurement
 
@@ -245,6 +246,76 @@ a peer, and exactly where this project keeps finding defects. **Check a reachabi
 claim against the code before ranking it**; "cold-start" and "the measurement failed"
 suggest very different priorities and only one of them was true.
 
+
+## A mid-decode failover silently loses the failed segment's KV context (open, 2026-09-09)
+
+Found while scoping item 17 (give a segment a standby assembled from several
+nodes). **It inverts that item's premise and should be settled first.**
+
+### What happens
+
+`failover_segment` replaces the failed node with a standby and re-sends **the
+current step's forward only** — `FailoverInput` carries `activations`,
+`index_pos`, `sequence_num`, and nothing else. The standby has no KV cache for
+this request, and nothing in the failover path rebuilds one:
+
+- `split::executor` derives `kv_offset` from the CACHE, not from `index_pos`
+  (`layer_kv_caches.iter().find_map(..).map(|c| c.current_seq_len()).unwrap_or(0)`),
+  so an empty cache reads 0. The comment at `model_worker::reconcile_hydrated_prefix`
+  states this outright: *"`forward_inner_impl` reads `kv_offset` from the
+  **cache**, not from `index_pos`"*.
+- `model_worker`'s decode arm applies **no check** that `index_pos` agrees with
+  the cache length, so the forward is accepted and appended to an empty cache.
+- `hydrate_request_from_bytes` exists but is keyed to a PROMPT PREFIX, not to
+  another node's mid-decode state. Nothing on the failover path calls it.
+
+So the replacement segment runs its layers attending to the current token alone.
+The earlier segments keep their caches and still supply meaningful hidden
+states, so the request **completes** — with the failed segment's layers
+context-free from the failover point on. No error, no warning, no test.
+
+### Why it decides item 17
+
+**Failover is correct at the prompt pass and lossy after it.** At
+`sequence_num == 0` the standby receives the whole prompt and builds its own
+cache — the case standbys were designed for, and the case every existing
+failover test exercises. Report #028's failure was at 4m43s, mid-decode, and
+item 17 proposes making more of those recoverable. Recovering them into a
+silently degraded reply is not obviously better than the honest failure, and it
+is arguably worse than the salvage shipped the same day (`a331373e`), which
+returns what was actually generated and says the reply is unfinished.
+
+### What it would take to fix properly
+
+Rebuilding the standby's cache needs that segment's INPUT for every prior
+position. The coordinator has that only for segment 0 (the prompt plus the
+generated tokens); a middle segment's input is the previous segment's output per
+position, which nothing retains. Retaining it is O(positions × hidden) per
+segment per request. Re-driving the whole pipeline from the prompt is the
+existing re-plan, deliberately suppressed once text has reached the client
+because the reader would watch the answer restart.
+
+Three shapes, none free, in increasing order of cost:
+
+1. **Retain nothing and refuse.** Mid-decode, with no cache to inherit, end the
+   request and return the salvage. Cheapest and honest; loses replies a degraded
+   continuation would have finished.
+2. **Retain the boundary activations for segments that have a standby.** Bounded
+   by choosing which segments to protect. Makes failover genuinely correct where
+   it is armed, and is the only shape that makes item 17 worth building.
+3. **Say it and continue.** Keep today's behaviour, but log it and mark the reply
+   — the reader at least learns the tail may be unreliable.
+
+### Confidence, and what is NOT established
+
+The mechanism rests on three independent reads of the code — `kv_offset` taken
+from the cache, no `index_pos`/cache agreement check, no hydration on the
+failover path — plus a pre-existing comment stating the first. **It has not been
+measured end to end.** Forcing a mid-decode failover needs a peer killed partway
+through a long distributed reply, and the observable is reply QUALITY, which is
+precisely the thing that degrades silently. Before acting on shape 1 or 2,
+reproduce it: kill a tail peer mid-reply on a real chain and read what follows
+the failover line in the output.
 
 ## A long generation with no segment redundancy is lost entirely (open, 2026-09-08)
 
