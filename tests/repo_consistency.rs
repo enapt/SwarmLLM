@@ -4769,3 +4769,76 @@ fn the_mid_reply_failover_guard_catches_a_body_that_searches_first() {
 "#;
     assert!(failover_checks_state_before_searching(good));
 }
+
+/// `CLAUDE.md` states the vendored request-response crate's test count in TWO
+/// places, and on 2026-09-09 they disagreed: the repository tree said 9, the
+/// Testing section said 11, and the truth was 11.
+///
+/// That figure has no mechanical guard while the lib and integration counts do,
+/// so it drifted silently for however long — and it is not a cosmetic number.
+/// A workspace-root `cargo test` does NOT compile this crate; it is run as its
+/// own step (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`)
+/// by CI and by the pre-push hook. A reader who believes there are 9 tests has
+/// a wrong idea of what that separate step is protecting — which is the
+/// SwarmLLM patch to connection selection, the thing gotcha #356 exists about.
+///
+/// Counted from the source rather than by running it, so this stays a cheap
+/// repo-consistency check: `--lib` runs exactly the `#[test]` functions in
+/// `src/`, and the crate has no `#[cfg(test)]`-gated helpers that would make
+/// the two diverge.
+#[test]
+fn the_vendored_request_response_test_count_is_stated_once_and_correctly() {
+    let root = repo_root();
+    let src = root.join("vendor/libp2p-request-response/src");
+    let mut actual = 0usize;
+    for entry in std::fs::read_dir(&src).expect("vendored crate src/ must exist") {
+        let path = entry.expect("read_dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read vendored source");
+        actual += text.matches("#[test]").count();
+    }
+    assert!(
+        actual > 0,
+        "found no #[test] in vendor/libp2p-request-response/src — the crate or this \
+         guard's assumptions have changed"
+    );
+
+    let claude = std::fs::read_to_string(root.join("CLAUDE.md")).expect("CLAUDE.md");
+    let claims: Vec<usize> = [
+        // tree line: "libp2p-request-response/ (<n> tests, `--lib`)"
+        claude
+            .split("libp2p-request-response/ (")
+            .nth(1)
+            .and_then(|s| s.split(" tests").next())
+            .and_then(|n| n.trim().parse().ok()),
+        // Testing section: "<n> in the vendored request-response patch"
+        claude
+            .split(" in the vendored request-response patch")
+            .next()
+            .and_then(|s| {
+                let tail: String = s.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+                tail.chars().rev().collect::<String>().parse().ok()
+            }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    assert_eq!(
+        claims.len(),
+        2,
+        "CLAUDE.md must state the vendored test count in both the repository tree \
+         (`libp2p-request-response/ (<n> tests, ...`) and the Testing section \
+         (`<n> in the vendored request-response patch`). Found: {claims:?}"
+    );
+    for claimed in &claims {
+        assert_eq!(
+            *claimed, actual,
+            "CLAUDE.md claims {claimed} tests in the vendored request-response patch; \
+             the crate has {actual}. Both occurrences must match the source. All \
+             claims found: {claims:?}"
+        );
+    }
+}
