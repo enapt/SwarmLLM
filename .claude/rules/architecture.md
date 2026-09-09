@@ -1,5 +1,14 @@
 # Architecture Rules
 
+Invariants this codebase has paid to learn. Each heading is the rule; the text
+under it is what to do. **The evidence — what the rule replaced, what it was
+measured at, and what a change must keep — lives in `docs/invariants/`,** one
+file per topic, linked from each rule.
+
+Read the linked file before changing the code a rule names. What is here is
+enough to know a rule exists and applies; it is deliberately not enough to
+judge an exception to it.
+
 ## SharedState Sub-Structs
 
 SharedState is organized into 4 sub-structs. Always use the correct accessor:
@@ -16,132 +25,12 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.models.quant_recommendations` — R133. `ArcSwap<QuantRecommendations>`; refreshed via `crate::model::auto_manage::quant::refresh_quant_recommendations(state)` on every auto-manage tick AND on every WS stats build. Read by `GET /api/admin/quant-recommendations` and the swarm-tab tips tile.
 - `state.models.shard_download_backoff` — external report 2026-07-23. `DashMap<ShardId, ShardDownloadBackoff { fail_count, retry_after: Instant }>`. Exponential per-shard download cooldown (30→60→120→240→300s cap, via the pure `shard_backoff_delay_secs`). Recorded via `record_shard_download_failure` at every terminal *transient* download-failure site (HF `download_shard` error + GGUF-probe failure in `model/auto_manage/download.rs`, P2P give-up-with-no-HF-source in `network/manager/shard_transfer.rs`, and stall-reconciliation in `health/monitor.rs::cleanup_acquisition_progress`). Checked by `shard_in_backoff` in `scoring.rs::gather_candidates` (skips the shard while cooling down). Cleared via `clear_shard_download_backoff` on success (HF success arm + P2P completion in `requests.rs`). Distinct from `shard_p2p_failed`, which only *forces* the HF path without throttling re-selection — the two solve different problems and a new failure site should touch whichever it needs. Do NOT record backoff on the P2P→HF fallback branch: that path wants an *immediate* HF retry. Entries self-evict from `shard_in_backoff` once idle past `SHARD_BACKOFF_FORGET_SECS` (1h), so the map stays bounded without a dedicated sweep.
 - `state.models.removed_by_user` — 2026-08-21 (gotcha #360). `DashMap<ShardId, bool>`, persisted in DB tree `removed_shards`, loaded in `SharedState::new` like `locked_shards`. A shard the USER deleted (`delete_shard`, `delete_model` — every manifest shard) is an instruction, not a gap: `gather_candidates` skips it unless `in_configured_range || pinned_to_us`; an explicit request clears it (`hf_download_shards` for the named shards, `download_shard`, `pool_add_pin` naming this node). Helpers live in `daemon/state/removed_shards.rs` (`mark_shard_removed_by_user`, `shard_removed_by_user`, `clear_shard_removed_by_user`, `clear_removed_by_user_for_model`); the shard listing emits `removed_by_user` (only when not local) and the dashboard shows a "Removed" badge. Never write the map or the tree directly.
-- `state.models.shards_needing_repair` — 2026-08-25 (gotchas #381/#382). `DashSet<ShardId>`
-  of shards whose bytes were found WRONG and which need a fresh, verified copy. Written
-  ONLY by `SharedState::mark_shard_for_repair`; drained by
-  `AutoShardManager::complete_pending_shard_fetches`; cleared by
-  `clear_shard_repair` on a landed copy.
-  **Why it exists**: three places can catch a bad shard — the P2P accept path, the
-  background verification sweep, the auto-manage rescan — and all three removed the file
-  and stopped. "Removed" was implemented three times and "and get a good one" nowhere, so
-  repair happened only as a side effect of auto-manage noticing the gap: a node with
-  auto-manage OFF kept a permanently incomplete model, and every rescan re-hashed the same
-  bad file to reach the same conclusion. A new site that detects a bad shard calls the
-  helper; it must not open-code the removal.
-  **Deliberately NOT `shard_p2p_failed`**, which forces the HuggingFace path. Having
-  DETECTED the corruption means we hold the real hash, so a peer copy is checked against
-  it — and if that one is bad too the accept path quarantines it and docks the sender,
-  which is the behaviour wanted. Repair therefore runs from peers OR the origin.
-  **It runs outside the `auto_manage.enabled` gate** for the same reason
-  `try_idle_vram_unload` does: a shard this node already held is not a new acquisition
-  decision. And it refuses a shard in `removed_by_user` — a deletion is an instruction,
-  not a gap.
-- `state.models.shards_pending_verification` — 2026-08-25. `DashSet<ShardId>` of shards
-  THIS NODE HOLDS whose expected hash just changed. Written by the registry's
-  manifest-update hook (`set_persist_hook`, which now carries
-  `(manifest, persist, recheck_shards)`); drained by
-  `AutoShardManager::verify_pending_shards`, which re-hashes and, on mismatch,
-  drops the holder claim and calls `mark_shard_for_repair`.
-  **This is how a node learns from the SWARM that what it is serving is wrong.**
-  The only other re-check of an already-held shard is the one-shot startup sweep,
-  which runs ~2 s after boot against whatever the DB held — i.e. BEFORE a corrected
-  hash can arrive by gossip — and the rescan explicitly skips shards already
-  registered. So a node holding a corrupt shard could not discover the fact from its
-  peers at all; it took a further restart, after the persist hook had written the
-  corrected hash to the DB. Measured on the live swarm (gotcha #382).
-  Three things to keep: only shards we ACTUALLY HOLD are queued (re-hashing one we do
-  not have is hundreds of MB of I/O for no answer — pinned by
-  `a_held_shard_is_rechecked_when_its_expected_hash_changes`); a shard with a download
-  in flight is skipped, since re-hashing a partly-written file is a false alarm; and
-  the drain runs OUTSIDE the `auto_manage.enabled` gate, because serving neighbours
-  bad bytes is not a disk-management preference.
-- **`ModelRegistry::origin_verified`** (2026-08-25) — a shard hash derived from bytes
-  THIS node fetched from the model's origin, which outranks any gossiped claim. Applied
-  in `register_manifest` BEFORE change-detection, so a claim the origin has already
-  disproved does not even provoke a re-check. Persisted (`ORIGIN_VERIFIED_TREE`) and
-  loaded FIRST in `load_from_db`, or a restart hands the argument back to gossip.
-  Recorded by `SharedState::record_origin_downloaded_shard` from BOTH origin-download
-  paths — the auto-manage downloader and the admin "download this part" handler; the
-  second recorded nothing until it was added, which is the same one-invariant-N-paths
-  trap as everything else in this file.
-  **Why**: manifest registration is last-writer-wins, and a real hash replaces a real
-  hash (deliberately, for re-publishes). A peer that had self-certified a corrupt shard
-  gossiped its wrong hash, our node adopted it over one verified against the origin, and
-  v0.3.121's new re-check then faithfully **quarantined the GOOD copy** and refetched
-  against the same wrong reference — an unbounded ~500 MB loop, observed live within an
-  hour of shipping (gotcha #384).
-  **Deliberately local and NEVER gossiped**: provenance that travels the network is just
-  another assertion, and forgeable. A node trusts only what IT fetched.
-  **The general rule this encodes**: a repair mechanism is a destruction mechanism
-  pointed at whatever it believes is wrong. Before adding one, ask what happens when the
-  REFERENCE is the thing that is wrong.
-
-- **`network::manager::tensors::AckRttEstimator`** (2026-08-25) — how long a peer gets to
-  acknowledge a tensor forward before the pipeline gives up on it. **RFC 6298**, the same
-  algorithm TCP uses to decide a packet is lost: `deadline = SRTT + 4*RTTVAR`, alpha=1/8,
-  beta=1/4, clamped to `RR_ACK_TIMEOUT_SECS`..`RR_ACK_TIMEOUT_MAX_SECS`, over the
-  observed send→ACK latency of THAT peer.
-  **The variance term is the point.** The rule it replaces scaled a ping RTT, and a ping
-  cannot see queueing delay on a loaded node — the ACK is emitted by the network event
-  loop, so it is late exactly when that loop is busy. Measured: a peer at ~500 ms RTT (so
-  the 10 s floor) failed EVERY distributed request for about an hour, then served the
-  same request in 6.1 s once it settled. Its ACKs were arriving late, not missing —
-  proved by running a node at `-v` and seeing `kind="ack"` from six peers including that
-  one (gotcha #386).
-  **`observe_timeout` (RFC 6298 §5.5) is not optional.** The estimator only ever sees
-  acknowledgements that ARRIVE, and an abandoned forward is one whose ACK we stopped
-  waiting for — so a peer needing longer than the current deadline can never produce the
-  sample that would widen it. Without backing off on a miss the whole scheme is INERT
-  exactly where it is needed. Bounded by the same ceiling; a peer that recovers returns
-  to the floor.
-  **The fast-fail also requires a standby** (`request_has_standby`). It is justified by
-  the failover it enables — the premise of hedged requests in Dean & Barroso's *The Tail
-  at Scale*, which send a second copy to a DIFFERENT replica. With none, abandoning
-  cannot buy a failover and can only turn a slow success into a 503: measured, a reply
-  arrived 1.6 s after we gave up and was discarded. Absence of the pipeline entry counts
-  as "yes", so paths this check cannot see (a chain hop) keep the old behaviour.
-  **The standby gate is for a peer that is CONNECTED but silent.** A peer whose
-  connection closed AND whose re-dial failed is a different fact: no result can
-  arrive over a connection that does not exist, and the serving side abandons
-  inbound forwards on the close, so there is no slow success left to protect.
-  That case bypasses the gate deliberately — `schedule_redial_retry` →
-  `fail_forwards_awaiting_departed_peer` → `SharedState::
-  fail_layer_results_awaiting`, which fails only waiters PINNED to the departed
-  node via `resolve_pending_layer_result` (2026-09-02, gotcha #436). A new
-  fast-fail must decide which of the two facts it has: silence gets the gate,
-  proven departure does not.
-  **The deadline includes the payload** (2026-09-03, gotcha #446):
-  `tensors::ack_deadline_with_payload(base, activation_bytes)` adds
-  `bytes / ACK_ASSUMED_TRANSFER_BYTES_PER_SEC` (1 MiB/s, rounded down so a
-  decode step adds nothing), capped at the protocol timeout. An
-  acknowledgement is sent when the WHOLE message has arrived; the RTT-only
-  deadline gave a 20 MB prompt pass to a peer 625 ms away the same 10 s floor
-  as a 2 KB decode step and failed it in flight. **And the estimator only sees
-  small forwards** (`ACK_OBSERVE_MAX_BYTES`, 256 KiB): a transfer-dominated
-  sample measures the payload, not the peer, and routing reads the estimator.
-
-- **A KV-budget refusal MUST release what the request already took** (2026-08-25) —
-  `executor.rs` calls `kv_cache_store.clear_request` before returning the
-  `ServiceUnavailable`. A chunked prefill claims a quantum per boundary, so a request
-  refused at chunk N has already allocated N-1; leaving them made a refusal a RATCHET —
-  the request failed, its cache survived the 10-minute session TTL, and the next attempt
-  started from a higher floor. Measured in exact 1152 MB steps: 1152 → 2304 → 3456
-  against a 1166 MB budget, card at 97%, decode 29 → 1.0 tok/s (gotcha #387).
-  Safe because the request is over: an error is being returned, no later forward reuses
-  the cache, and a retry rebuilds it from the prompt.
-  **Generalise it**: a resource check that refuses but does not release is worse than no
-  check under repetition, because the failed attempts are exactly the ones that
-  accumulate. Ask of any admission check what happens to what the refused request took.
-
-- **`SharedState::can_fetch_shard_from_origin`** — 2026-08-25 — the single answer to
-  "will an origin fetch actually HAPPEN?", which is NOT "does an origin exist". Every
-  caller about to discard local bytes in favour of an origin copy asks this first:
-  **never throw away data you cannot replace.** Two conditions, found one at a time and
-  each after concluding the other was the only one — a recorded `hf_source`, AND not
-  offline mode (`trigger_download` skips the HuggingFace branch entirely when set, by
-  design). Auto-manage being off is deliberately NOT one, since the drain runs outside
-  that gate. Consumed by the P2P accept path (`classify_p2p_shard_acceptance`) and by the
-  rescan's no-hash branch. A third condition belongs here, not at a call site.
+- `state.models.shards_needing_repair` — see `docs/invariants/state-and-config.md`
+- `state.models.shards_pending_verification` — see `docs/invariants/state-and-config.md`
+- `ModelRegistry::origin_verified` — see `docs/invariants/state-and-config.md`
+- `network::manager::tensors::AckRttEstimator` — see `docs/invariants/state-and-config.md`
+- A KV-budget refusal MUST release what the request already took — see `docs/invariants/state-and-config.md`
+- `SharedState::can_fetch_shard_from_origin` — see `docs/invariants/state-and-config.md`
 - `state.credits.foreign_pool_catalog` — R134. `DashMap<(PoolId, ModelId), received_at_ms>`; capped at 5000 with oldest-first eviction, 2h freshness window. Written by inbound `SwarmMessage::PoolModelAvailability` handler. Read by `GET /api/admin/foreign-pool-catalog` and by `pool::scope::cross_pool_extras` (R134.7) when `pool.allow_cross_pool_inference` AND `private_mode` are both on.
 - `state.local_memory_refusals` — 2026-09-07. `DashSet<Uuid>` on the ROOT
   SharedState, beside `request_holder_blacklist` and released by
@@ -158,51 +47,16 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.pending_activation_chunks` — R139 Tier 4K. `DashMap<Uuid, ChunkAssemblyState>` on the ROOT SharedState (cross-cuts the RR-decrypt path in `network/manager/tensors.rs` and the persistent-stream reader in `network/pipeline_stream.rs`). Receiver-side assembly for STREAM-chunked activation forwards. Entry-locked insert via `state.try_assemble_chunked_forward(forward, sender_peer_bytes)`. Periodic stale-entry sweep wired to the HealthMonitor tick via `state.sweep_stale_chunk_assemblies(ttl_secs)`. Chunk-meta is bound into AAD via `build_layer_forward_aad`, so reorder/truncation/cross-transfer-substitution fail Poly1305 before reaching the assembly.
 - `state.listen_multiaddrs` — R140. `arc_swap::ArcSwap<Vec<String>>` on the ROOT SharedState (cross-cuts NetworkManager-writes and PoolManager-reads). Live snapshot of the swarm's reachable addresses, each terminated with `/p2p/<local_peer_id>`. Written by `NetworkManager::refresh_listen_multiaddrs()` (events.rs) on `NewListenAddr` / `ExpiredListenAddr` / `ListenerClosed` / `ExternalAddrConfirmed` / UPnP `NewExternalAddr` / `ExpiredExternalAddr`, plus once at startup after `listen_on()` (and after the `network.external_addresses` config override is added). **R143: the snapshot is the UNION of `swarm.listeners()` (bound sockets — private LAN on a NAT'd node) AND `swarm.external_addresses()` (UPnP-mapped / AutoNAT-confirmed / relay-circuit / manually-declared public addrs).** Without the union a NAT'd node's invite code silently shipped a LAN-only address. Built via the extracted, unit-tested `build_reachable_multiaddr_list(candidates, peer_id)` + `ensure_p2p_suffix` helpers; filtered through `addr_is_remotely_reachable` — keeps LAN + Tailscale CGN (100.64.0.0/10) + public, drops loopback / unspecified / link-local / IMDS. Read by `PoolManager::handle_generate_invite_code` when minting v2 `swarmpool://` codes; empty list → `SwarmError::ServiceUnavailable`. When the list has entries but NONE pass the stricter `pool::invite::any_internet_reachable` (public IP / DNS / relay-circuit — excludes LAN + CGN), invite generation still succeeds but emits a `pool`/`invite_lan_only` warning ActivityEvent so the user isn't handed a LAN-only code that dies over the internet.
 - `config.api.dashboard_trust_lan` — read via `SharedState::cfg()` (see below), never re-derived with `addr.ip().is_loopback()`. `api::dashboard_trust::classify` is the single answer to "may this request be handed the API key automatically?"; the sibling `dashboard_trust_overlay` is read the same way. Was a private `AtomicBool` mirror until 2026-08-09, folded into the live config when that became general.
-- `state.observed_inbound_connection` — `AtomicBool` on the ROOT SharedState,
-  **persisted, and written only via `SharedState::record_inbound_connection_observed`**.
-  Set by `handle_connection_established` for a non-loopback connection where we
-  are the LISTENER. **The only direct evidence that inbound reaches this node**:
-  outbound succeeds from behind almost anything, so a node with peers, a real
-  LAN address and clean logs can still be silently dropping every inbound packet
-  and look perfectly healthy from the inside. Read by the WSL2 firewall check in
-  `health::monitor`. Any future "are we reachable" question should use this
-  rather than inferring from peer count — having peers proves only that WE
-  dialled successfully.
-  **It is seeded from the database at startup, and the persistence is the load-
-  bearing part.** The fact being recorded is a property of the machine's
-  network, and restarting the daemon does not reconfigure a firewall — so an
-  in-memory-only observation made the check re-decide that question every start
-  from whatever happened in the next few minutes. A reachable node routinely
-  sees nothing in that window: it dials every peer it already knows in the first
-  seconds of starting (10 connections inside 2 seconds, measured), so it is the
-  dialer on every link and may never be dialled back at all. The result
-  was a node telling its owner to run Administrator PowerShell firewall commands
-  it did not need. Measured 2026-08-18 on this development machine: inbound TCP
-  open and verified by hand from a peer on the same subnet, 181 inbound
-  connections across the log's history, **zero in a 9-hour run**, and a run that
-  warned at 06:47 contradicted by its own inbound connection at 07:41. Three of
-  the four most recent runs warned; all three were wrong (gotcha #335).
-  **There is no length of silence that proves unreachability**, so the grace
-  period is a noise control, not the fix, and the message reports what was
-  observed rather than naming a cause. A new check that wants to conclude
-  something about this machine's network must persist its evidence the same way;
-  an observation whose lifetime is shorter than the fact's cannot support the
-  claim.
-- **`SharedState::model_is_in_use` is the answer to "may I delete this model's
-  files?"** — NOT `active_pipelines` on its own. That is the COORDINATOR's map of
-  DISTRIBUTED assignments (gotcha #194) and holds nothing for peer-served work or
-  for a reply the local model is producing through the split fast path, which
-  bypasses the router entirely. Deleting during a local reply therefore returned
-  `200 files_removed: 8` and killed the worker mid-stream (measured 2026-08-05) —
-  the exact outcome the guard below exists to prevent, on the most common
-  single-node path. The helper asks `active_traces` first, because every
-  in-flight request registers one for progress reporting whichever path serves
-  it; `serving_models` and `active_pipelines` remain as belt-and-braces. Both
-  `delete_model` and `delete_shard` go through it.
+- `state.observed_inbound_connection` — see `docs/invariants/state-and-config.md`
+- `SharedState::model_is_in_use` is the answer to "may I delete this… — see `docs/invariants/state-and-config.md`
 - **`api::dashboard_trust::classify` is the single answer to "may this request be handed the API key automatically?"** Do NOT re-derive it with `addr.ip().is_loopback()`. That predicate means "the last TCP hop began inside this daemon's network namespace", which is simultaneously broader than intended (a same-host reverse proxy such as `tailscale serve` satisfies it on behalf of a fully remote client) and narrower (a container publish, a NAT, or a Tailscale subnet router never satisfies it — not even from the host's own `localhost` — because subnet routers SNAT by default). Same-origin checks belong on `Origin` vs the request's own `Host` (`websocket.rs::ws_origin_allowed`), never on a hardcoded loopback allowlist: that mistake independently cost every non-loopback dashboard its live WebSocket updates. See gotcha #195.
 - `state.relay_proven_features` — `DashMap<NodeId, RelayProvenFeatures { features: u64, proven_at: Instant }>` on the ROOT SharedState (`daemon/state/relay.rs`). Records relay features a peer has *demonstrably* used by relaying a message addressed to us: `handle_relayed_tensor` records `features::TENSOR_RELAY`, `handle_relayed_envelope` records `features::RELAY` (via `record_relay_proven_features`, which ORs bits + refreshes `proven_at`). The relay send path's feature gates (`target_supports_{relay,tensor_relay}` in `network/manager/relay.rs`) consult `relay_feature_proven(peer, bit)` FIRST, before the gossiped `NodeCapability.features`. **This is the cold-start return-path fix**: a serving node reaches a coordinator known only via `ensure_relayed_origin_known` (whose `peer_registry` entry has `capability: None`, because the capability-gossip handler at `daemon/dispatch/mod.rs` is update-only and can't populate a not-yet-existing entry). Without the proof, the return relay of a computed `LayerResult` was refused until a capability-gossip round landed (≤30s), dropping the first result. Freshness = `RELAY_ROUTE_TTL_SECS` (re-proven on every inbound relayed message, so an active session never goes stale); swept alongside `relay_routes` in `sweep_stale_relay_state`. New relay send paths that gate on a peer's relay capability MUST consult this proof, not just the gossiped capability.
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
+
+When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
+
+→ `docs/invariants/state-and-config.md`
 
 ## "Is the empty chat state showing?" is a question about the DOM
 
@@ -211,36 +65,7 @@ what is on screen, and no-ops otherwise. Every caller that needs the empty state
 to reflect changed data goes through it: the `stats_update` tick, the model list
 loading, a model being picked, and entering the Chat tab.
 
-**Why.** The empty state is a live view — it names the picked model and renders
-the swarm catalogue out of `App.data.cache.stats` — but it is built once, from a
-cache that is still empty at first render. Four separate callers refreshed it,
-and all four asked whether to by the SESSION: `currentSessionId` set, the
-session exists, `messages.length === 0`. That proxy is false in the commonest
-case there is — the very first render, before any session has been created — so
-opening the app on Chat gave a state frozen at page load. Measured on a node
-with 6 peers, 11 ready models and 4h50m of uptime: "no models available yet ·
-looking for other computers", indefinitely (report #027). One of those callers
-carried a comment naming that precise failure as the thing it existed to
-prevent.
-
-Three things a change here must keep.
-
-- **A hidden `#chat-empty` means a conversation is on screen.**
-  `appendMessageToDOM` hides it rather than removing it, so rebuilding it
-  unconditionally puts a fresh, visible "type a message below to start" above a
-  live reply — verified by running the unguarded version against a streaming
-  conversation.
-- **`chat.js` may still ask a session question.** `newSession` asks whether to
-  reuse an empty session rather than create a second one, which is not about
-  what is rendered. That is why the guard exempts the file rather than the
-  pattern.
-- **Entering the tab refreshes.** Every other tab reloads something on entry and
-  chat reloaded nothing, so the WS tick was the only repair path and it only ran
-  while the tab was already open.
-
-`the_chat_empty_state_is_not_refreshed_on_a_session_shaped_guard` in
-`tests/repo_consistency.rs` fails the build on a fifth occurrence, with a
-self-test that plants the multi-line form all four real ones were written in.
+→ `docs/invariants/frontend.md`
 
 ## Every surface that shows a model's reply renders it the same way
 
@@ -250,35 +75,7 @@ rendered HTML: it adds `md-body`, runs `renderMarkdown`, and keeps the source on
 markup stripped of its markdown. `chat.js::_renderReply` is now a thin wrapper
 over it.
 
-**Why.** It lived on `App.chat`, so the Compare tab did not have it and wrote
-replies with `.textContent`: bold, lists, code blocks and tables all arrived as
-literal asterisks, dashes and pipes — on the one screen built for judging
-replies side by side (report #026). The same tab also forced `stream: false`
-and sat on a spinner until the whole reply landed, so the model running on a
-processor-only peer, exactly the one a comparison exists to identify, was the
-one that showed nothing for 30-60 s and could not be told apart from a stall.
-Both were omissions rather than decisions: no comment weighed either, and the
-long comment above the request is about the backstop timeout, which has nothing
-to do with whether the reply streams while it is produced.
-
-Four things a change here must keep.
-
-- **A stream is re-assembled into the shape the renderer already reads.**
-  Compare accumulates `content_block_delta` text and `message_delta` usage into
-  the same `{content:[{type:'text',text}],usage}` object the non-streaming reply
-  produced — what the official SDKs' `.accumulate()` does, and what
-  `renderHistory` was already building by hand. One result shape, whichever way
-  the text arrived.
-- **`flush` for a final render.** The rAF coalescing that keeps a streaming
-  reply from re-rendering the document per token is suspended in a backgrounded
-  tab (gotcha #471), so a reply that finished while the user was elsewhere would
-  sit on its last frame.
-- **An error is not markdown.** It is a message from this node, so it stays
-  `textContent` with `.error` and never goes through the renderer.
-- **An unknown token count is not zero.** The Anthropic encoder omits
-  `input_tokens` rather than sending a confident zero; the card omits the chip
-  for the same reason, and `null` survives into the stored history entry so a
-  restored card says what the live one said.
+→ `docs/invariants/frontend.md`
 
 ## A reasoning model's scratchpad is not the reply
 
@@ -287,36 +84,7 @@ in `finalize_reply_text` (the non-streaming choke point), and
 `tool_parse::StreamingToolText` withholds the same block while streaming — the
 buffer both encoders already share, so all four API paths inherit it.
 
-**Why both.** A reply's content must not depend on whether the caller asked for
-`stream`; a fork on a presentation flag is a fork in policy. Fixing only the
-finaliser would mean the same question answered by a reasoning model returns the
-scratchpad when streamed and the answer when not.
-
-**Why it is removed at all.** Qwen3, QwQ and DeepSeek-R1 write their working out
-first and the answer after it. Every serving stack separates the two — vLLM
-extracts it with a `--reasoning-parser` into `reasoning_content`, llama.cpp
-defaults Qwen3.5 to non-thinking so it is never produced — and we did neither,
-so someone asking "Say OK" got several hundred tokens of deliberation with the
-answer at the end. Same class as gotcha #169: content that is not the reply
-reaching the user as the reply.
-
-Four things a change here must keep:
-
-- **Only at the START, and only CLOSED.** A `<think>` later in the text is the
-  model writing about thinking. An unterminated one means the reply was cut off
-  mid-reasoning, so the whole thing is scratchpad — the non-streaming path
-  leaves it rather than returning an empty message the caller cannot tell from a
-  real blank answer, and the streaming path releases it through `pending_all`.
-- **The streaming side waits for the answer to START.** The blank line between
-  scratchpad and answer arrives in a LATER token than `</think>`, so deciding on
-  first sight of the closer emits it and the reply opens with a stray newline.
-- **The silence is covered.** `sse::progress_ticker` is already merged into both
-  encoders precisely so a slow reply does not look dead — which is what makes
-  withholding during reasoning safe rather than a hang.
-- **The reasoning is DISCARDED, not surfaced.** Exposing it wants a field on
-  both surfaces (`reasoning_content` on OpenAI, a thinking block on Anthropic)
-  and is worth doing; returning it glued to the answer is not a smaller version
-  of that, it is the bug.
+→ `docs/invariants/api-surfaces.md`
 
 ## A prompt that closed someone else's turn is finished for the model
 
@@ -325,39 +93,7 @@ Four things a change here must keep:
 appends the family's own generation prompt when the rendered prompt ends on a
 turn-CLOSING marker.
 
-**What it replaced.** The condition was already DETECTED there, named precisely,
-logged at WARN, and then sent anyway. Its comment justified that as "being wrong
-about this must never cost someone an answer", which is the right instinct about
-warning-versus-erroring and skips the third option: the outcome is not in doubt.
-A model shown a finished conversation ends its turn at once — one token,
-`finish_reason: "stop"` — so proceeding costs the answer just as surely, while
-explaining it.
-
-**The evidence is positive, which is what makes repair safe.** The prompt ENDS
-with one of the six `TURN_ENDING_MARKERS`; that is the presence of a closer, not
-the absence of a recognised opener, so a correct-but-unusual prompt cannot be
-mistaken for a broken one.
-
-**Four of the six name one family; two do not.** `<|im_end|>`, `<|eot_id|>`,
-`<|end|>` and `<end_of_turn>` each map to exactly one opener, and appending it
-produces the same string that family's own template would have. `</s>` is
-Llama-2, Mistral AND vicuna, and `<|endoftext|>` spans unrelated vocabularies —
-those keep the warning and nothing else, because a confidently wrong opener is
-worse than a diagnosable prompt. Reaching ChatML for a non-ChatML model is the
-failure that put stray `<|im_end|>` in Llama-3 replies for several releases
-(gotcha #169); this must never become "fall back to ChatML".
-
-Reported against a Qwen3-8B (2026-09-05). This renderer DECLINES that template —
-it uses `namespace()`, a reversed slice `messages[::-1]`, `loop.index0`, the
-`tojson` filter and string methods, and is deliberately a subset of Jinja — so
-every request rendered a prompt ending on `<|im_end|>`. Pinned by
-`a_prompt_left_on_a_closed_turn_gets_the_models_turn_opened`, with the official
-template kept as a fixture.
-
-**A test that fixtures a turn-closing prompt must now close on `</s>`**, or the
-repair fixes it and the test asserts nothing — which is what
-`both_prompt_entry_points_go_through_the_same_renderer` caught about itself, via
-the guard it already carried.
+→ `docs/invariants/api-surfaces.md`
 
 ## A tool-carrying reply streams the part that cannot be a tool call
 
@@ -366,53 +102,7 @@ reply so far is certainly ordinary content", and **`tool_parse::StreamingToolTex
 is the buffer all four API paths share — OpenAI streaming and not, Anthropic
 streaming and not.
 
-**What it replaced.** A local model can only express a tool call as text, so
-`parse_tool_calls` needs the whole reply to recognise one, and both streaming
-encoders therefore appended every token to a `String` and flushed once at the
-end. Measured on llama-3.2-3b, identical prompt: **120 content deltas without
-`tools`, 1 with them.** Every agentic client sends `tools`, so every agentic
-client got a single lump after a generation that can run for minutes — which is
-indistinguishable from a hang and is what a client timeout actually fires on.
-Reported as OpenClaw "takes ages and times out".
-
-**Why the obvious guard is wrong, and what makes this one right.** "If it does
-not start with `{`, stream freely" fails because `parse_tool_calls`
-deliberately finds a call EMBEDDED after prose, and the non-streaming path used
-to DISCARD that prose. Streaming it first would have made the two surfaces
-disagree about the same reply.
-
-The resolution is not a cleverer guard, it is **matching the reference
-implementation**: vLLM streams text before the marker as content, and its
-non-streaming path keeps that text too (`content = model_output[:start]`, null
-only when empty). `content` and `tool_calls` coexist in one OpenAI message, and
-in Anthropic a text block precedes the `tool_use` blocks. So the non-streaming
-paths now keep the preamble as well, and the surfaces agree by being the shape
-clients already expect. Discarding it was throwing away text the model
-produced.
-
-Four things a change here must keep:
-
-- **A bare `{` is a marker.** `try_generic` and `try_llama3` accept an object
-  with no marker at all, so an unadorned brace begins a possible call. The bare
-  word `tool_call` deliberately is NOT one — every parser keying on it also
-  needs an object, so the brace is reached first, and leaving it out lets prose
-  that merely mentions tool calls keep streaming.
-- **Hold back a suffix that could be half a marker.** A marker arrives a token
-  at a time, so `<tool` must not go out. `partial_marker_overlap` withholds
-  exactly the ambiguous tail and no more; vLLM calls the same thing
-  `partial_tag_overlap`. Never emit a cut that lands inside a character.
-- **The emitter owns BOTH outcomes.** `emit_openai_tool_calls` /
-  `emit_anthropic_tool_blocks` take the buffer by `&mut` and flush either the
-  remaining prose (call found) or the whole remainder (no call). Splitting that
-  across the caller is how one of them gets forgotten — the shape this codebase
-  keeps being caught by.
-- **Nothing emitted twice, nothing lost.** `emitted + pending == text` is the
-  invariant every caller depends on, pinned by
-  `nothing_is_ever_emitted_twice_or_lost` over six reply shapes.
-
-Verified end to end against the released binary as the control, same model and
-prompt: 1 delta → 99 (OpenAI), 1 → 55 (Anthropic), tool calls still emitted and
-no marker character leaked.
+→ `docs/invariants/api-surfaces.md`
 
 ## The component that will refuse must be asked while the plan can still change
 
@@ -420,54 +110,7 @@ Two halves of one rule, both learned from a 16 GB processor-only Mac mini that
 was assigned 36 of a 48-layer 14B, refused them at load, retried, and produced
 the identical plan (gotcha #452).
 
-**`ModelProcessPool::max_local_hostable_layers` is the scheduler's bound on the
-LOCAL node**, built from the same estimator and the same budgets the loader will
-use. Every peer already carried a `max_hostable_layers` from its advertised free
-memory; the local node carried `None`, on the reasoning that *"our own loader's
-admission check is the authority on what we can fit"*. That is right about WHO
-decides and wrong about WHEN — admission runs at load time, after the plan is
-committed and too late to reshape it. The one candidate with the best
-information about its own memory was the only one priced as unbounded. `None`
-still means unknowable, never "no room".
-
-**`process_pool::segment_shape` prices what the worker will actually map.**
-`VramFootprintInputs` has always documented `segment_layers` as "Layers in THIS
-segment, not the whole model" and `quantized_weight_bytes` as "the shard bytes
-this worker will map" — and its only caller passed `block_count` and every shard
-on disk, with `is_first: true`, whatever the spawn was about to load. On a node
-holding every shard, which is the node most likely to be handed a fraction of a
-big model, that priced a 36-of-48 segment as all 48 and a privacy boomerang's
-two end layers as the entire model: such a node could never serve ANY part of a
-model it could not hold whole, which is the case pipeline parallelism exists
-for.
-
-Three things a change here must keep.
-
-- **One worker can hold several segments.** Its `models` map is keyed by
-  `(layer_start, layer_end, tp_rank, tp_size)`, so `charged_segments` records
-  what has been paid for and `charge_additional_segment` weighs a range the
-  first time it is asked for. `add_reserved` ACCUMULATES; the overwrite it
-  replaced was correct only while a spawn charged the whole model regardless.
-  **The spawn path records its own segment** — the fast path is the common path,
-  and without that record every later forward for the same range re-charges it.
-- **Nothing restates the estimator's arithmetic.** `segment_cost_curve` gets
-  `(fixed_mb, per_layer_mb)` by pricing a one-layer and a two-layer segment
-  through the estimator itself and differencing them, so the planner's bound,
-  the incremental charge and the loader cannot drift. The estimate is affine in
-  the layer count, which is why two points determine it.
-- **A refused additional range is a 503**, the answer that fails over. It
-  deliberately does not reclaim memory first: a first segment is worth evicting
-  an idle model for, a second range on a worker already serving is not
-  obviously, and reclaiming would re-enter `unload_model` under the spawn lock.
-
-`Some(0)` from the bound still moves one layer (`cap.max(1)` in
-`route_shortest_path`), so a privacy end can always be served and the loop
-terminates.
-
-**The general rule**: asking the gate after the decision only converts a bad
-plan into an error. And when a struct's own field documentation describes a
-generality — "THIS segment, not the whole model" — check what its callers
-actually pass.
+→ `docs/invariants/scheduling.md`
 
 ## The hand-off gate proposes; the priced search decides
 
@@ -478,76 +121,7 @@ search chooses; the plan is taken only where the search declined to price
 anything (`ProcessorRouteVerdict::NoComparison`, or the search failing to route
 at all), and never where it made a real comparison and this node won.
 
-**Why.** A gate that returns before the search means the one case where the gate
-is confidently wrong is the one case nothing checks it. Every routing defect of
-the last three releases was an instance, each fixed by teaching the gate one
-more thing the search already knew: **#447** chose a card 500 ms away over the
-LAN cards it structurally could not see (they hold halves, so they are not
-delegation candidates at all); **#478** priced `(0, num_layers)` while assigning
-a boomerang's middle; **#479** vetoed a chain on a term the search does not use.
-Three fixes in two releases converging on one structural fact — there were two
-decision-makers for one decision, which is the shape `graphics memory has ONE
-owner` and `the storage budget has ONE accountant` already name elsewhere in
-this file.
-
-**The search only recently became able to subsume it, and both preconditions
-postdate the reasoning it replaced.** `gather_candidates` has priced the local
-candidate at PROCESSOR speed since #444 (2026-09-03); `route_shortest_path` has
-added split points at 1 and n−1 when this node holds every layer since v0.3.163.
-The note on `boomerang_assignment` — "constructed rather than searched ...
-nothing in its cost model knows the local node is about to fall back to its
-CPU", verified 2026-08-18 — was true of a cost model that no longer exists. **A
-comment recording a verification records the date it was true.**
-
-Four things a change here must keep.
-
-- **This must not become "never delegate".** The same peer offered the model is
-  still taken when it really is the cheapest route — pinned by
-  `the_whole_model_peer_is_still_chosen_when_it_is_genuinely_cheapest`, the
-  control beside `a_whole_model_peer_no_longer_ends_the_search_before_it_runs`.
-  The feature exists because a processor node beside an idle card is the failure
-  being fixed (#442/#444).
-- **`StayHere` and `NoComparison` are different answers.** They were one `Err`
-  while the only thing the caller did with either was keep the request local.
-  With the hand-off as a fallback they part company: a search that priced this
-  node and preferred it has overruled the gate; a search that could not price it
-  has said nothing, and discarding the peer would strand a node whose own speed
-  is merely not yet measured. Do not collapse them back.
-- **The gate is still the whole decision where the search cannot run** — parallax
-  routing off, or nothing else to compare against. `search_will_decide` is
-  computed BEFORE the gate, because it decides what the gate's answer is FOR.
-- **`delegation_target` keeps the one judgement the search does not make**:
-  trust. Its latency and speed terms are performance heuristics the search
-  prices properly; its capacity term is `max_hostable_layers`, which the search
-  also honours.
-
-**Still open**: `DELEGATE_MAX_LATENCY_MS` and `DELEGATE_MIN_CPU_SPEEDUP` are now
-belt-and-braces on a plan that has to survive pricing anyway, and the gate could
-in principle be reduced to the trust filter alone. Left standing because they
-are the only thing deciding the fallback on a node where the search cannot run.
-
-**Field-verified 2026-09-08, and the measurement moved the open question.** A proper
-A/B — both arms the installed CUDA release binaries, same data dir and swarm,
-`SWARMLLM_INFERENCE_GPU_LAYERS=0` on both, matched uptime, holder map asserted
-identical — changed the plan on **5/5 models**. Two distinct behaviours, both as
-designed: on privacy-on models .163's gate CONSTRUCTS a boomerang unconditionally while
-.164 prices it and keeps the request local; on the privacy-off model `delegation_target`
-sorts by LATENCY and takes the first survivor, so .163 took the NEAREST peer (15.2 tok/s
-@ 551 ms) where the priced search took the genuinely cheaper one (23.9 tok/s @ 606 ms).
-That second case is the change doing precisely what it was written for.
-
-**But the throughput did not follow, and that is now the live risk in this design.**
-meta-llama-3.1-8b, 150-token reply, warm: .163's boomerang 4.53-4.56 tok/s against
-.164's all-local 3.87-4.52 — a tie, where `vertex_cost` prices the boomerang's middle at
-`2 * latency * ASSUMED_FORWARD_PASSES` = ~70 s of network against ~13 s local and so
-predicts local by ~5x. **Handing the decision to the search made that constant
-load-bearing**: it no longer merely colours a plan the gate had already chosen, it
-decides every delegation. An overestimate here biases the whole swarm toward keeping
-work local, which is the opposite of what pipeline parallelism is for. Do NOT tune the
-constant before establishing which half is wrong — the forward-pass count, or the
-per-token `2 * latency` — and note `ack_srtt_ms` is already measured on real forwards
-where `latency_ms` is a ping. See `docs/FUTURE_WORK.md` § "The routing cost model's
-network term overestimates a boomerang".
+→ `docs/invariants/scheduling.md`
 
 ## A peer that will read the plaintext prompt clears a trust bar, on every path that can assign it
 
@@ -558,70 +132,7 @@ first-segment narrowing. `standby_may_take` applies it to the fourth place the
 assignment can happen — a standby, which is handed the segment's input on
 failover.
 
-**Why it is shared.** `trust_score` was consulted in exactly one place in the
-whole scheduler: the hand-off gate, whose own comment called it "not trusted
-enough to be shown the prompt". The search applied nothing, so any chain it
-built could put a docked peer on layer 0. That was invisible while the gate
-returned first — and making the search the decision-maker would have retired the
-only trust check there was.
-
-**The bar shipped on two of the three paths, and the gap composed badly.**
-`greedy_assign_inner` is reached whenever `parallax_routing` is off OR
-`route_shortest_path` returns `Err` — and **the bar itself can cause that
-`Err`**, by removing the only layer-0 source. So tightening the search increased
-how often the unguarded path ran, and on that shape the docked peer took layer 0
-anyway by a longer road. A confidentiality check has to be asked at every site
-that can make the assignment; asking it at some of them can be worse than asking
-it at none.
-
-**The stand-down is a statement about the ROUTE, not about a vertex.**
-`route_shortest_path` runs its pass seeded from trusted sources, and only if that
-reaches no sink does it re-run seeded from all of them. The old form asked
-whether a trusted source VERTEX existed, which gets this shape wrong: a trusted
-peer holding only `(0, 4)` makes the bar "enforceable", the docked peer holding
-the model whole is dropped, and with nothing covering the rest the search fails a
-request it previously served — the exact opposite of what the comment beside it
-promised. The second pass costs nothing in the common case, because it runs only
-when the first found nothing, which is when the request was about to fail anyway.
-
-**Prompt privacy is structural, and a standby is part of the structure.**
-`find_standbys` took no `encrypted_pipeline` parameter at all, so a remote node
-could stand by for the first segment (which reads the plaintext prompt) or the
-last (which samples the tokens) — and one failover would have sent it exactly
-what the boomerang exists to keep local. The guarantee held until the first
-failure. Refusing means such a segment may have NO standby; that is the trade the
-user asked for, and `segments_without_standby` reports it honestly.
-
-Four things a change here must keep.
-
-- **Every narrowing stands down rather than failing a routable request**, in the
-  shape `CapacityBound` uses for the memory figures. A bar that refuses to serve
-  is worse than the exposure it prevents. Pinned in both directions:
-  `greedy_still_answers_when_every_layer_zero_holder_is_docked` and
-  `the_trust_bar_stands_down_on_the_route_not_on_a_vertex`, against the controls
-  `a_trusted_route_is_preferred_over_a_cheaper_docked_one` and
-  `the_greedy_fallback_applies_the_prompt_trust_bar` — which use a docked peer
-  priced CHEAPER, since that is when the bar actually has to bite.
-- **One predicate, parameterised.** The source test was written out three times
-  with subtle differences, so a clause added to one would silently desynchronise
-  the others and the bar would stand down believing in an alternative the filter
-  rejects. It is now `source_ok(v, apply_trust)`.
-- **It does not apply to a middle segment.** Under `encrypted_pipeline` the
-  source is this node by construction, and a peer running middle layers sees
-  encrypted activations, never the prompt — so narrowing who may take the middle
-  would cost the boomerang its whole point.
-- **It is about CONFIDENTIALITY, not speed or reach.** `DELEGATE_MAX_LATENCY_MS`
-  and the reach tier stay in the gate; the search prices those itself.
-
-**And the warning that reports a stand-down is rate-limited and names its
-subject.** The condition is persistent — a docked peer stays the only layer-0
-holder until someone's trust or holdings change — and `assemble_pipeline_for`
-runs the search up to three times per assembly as it relaxes `CapacityBound`,
-with the dashboard's route preview calling it too. Unrate-limited that is three
-WARN lines per request for ever, with nothing that could ever silence it
-(`PROMPT_TRUST_WARN_EVERY`). It now carries the peers it let through and their
-trust scores, because "no sufficiently trusted node holds layer 0" with no
-structured fields gives an operator nothing to look up and no machine to act on.
+→ `docs/invariants/scheduling.md`
 
 ## An unmeasured candidate is priced pessimistically, never excluded
 
@@ -629,41 +140,7 @@ structured fields gives an operator nothing to look up and no machine to act on.
 model have anything real about this candidate" — and both consumers must read
 it the same way. They did not.
 
-`delegation_target` treats unmeasured as PERMISSIVE: the price gate stands
-aside and the peer may still be handed the whole model, because "a peer never
-measured is still tried; the measurement that first request produces is what
-stops the second". `pipeline_may_replace_processor_route` treated the same fact
-as DISQUALIFYING, vetoing any chain containing such a peer — while its own doc
-claimed to hold "the same standard". The multi-hop path was strictly stricter
-than the single-hop one and nothing said why (gotcha #479).
-
-**The prior is the conservatism.** `UNKNOWN_COMPUTE_MS` was raised from 0
-precisely so an unknown competes on a pessimistic footing — "deliberately
-nearer the pessimistic end so an unmeasured node does not outrank a measured
-good one". A veto on top means it can never do the job it was raised to do.
-
-**And the arithmetic says what the veto blocked.** An unpriced peer over `L`
-layers costs `UNKNOWN_COMPUTE_MS * L * ASSUMED_FORWARD_PASSES` (1600·L ms) plus
-`2 * latency * ASSUMED_FORWARD_PASSES`; a local processor at `e` tok/s costs
-`2000·L/e`. The peer wins only below **e = 1.25 tok/s** ignoring network, and
-below **~0.5 tok/s** for a peer 500 ms away. The search therefore reaches for an
-unmeasured peer only when running here would take minutes — the one case where
-trying the unknown is warranted.
-
-What replaced the veto: **the BASELINE must be priced.** Giving up "running it
-here" is the question, so "here" needs a price; with none, stay home — home has
-no network term and no peer to be wrong about. Exploration is bounded by
-machinery that already exists (ACK fast-fail, `find_standbys` sorting local
-FIRST, `is_transient_remote_failure`), which is the abandonability half of
-hedged requests without the cost of running both.
-
-Two things a change here must keep. **No invented desperation threshold** — the
-crossover is derived from the cost model's constants, and a product judgment
-about "how long is too long" is the #451 mistake. And **a routing test must pin
-the local speed** (`with_local_processor_speed`): `mem_bandwidth` under-reads in
-a debug build (~0.85 tok/s against ~5 in release, gotcha #427), which straddles
-the 1.25 crossover, so an unpinned test asserts a property of the machine it
-runs on.
+→ `docs/invariants/scheduling.md`
 
 ## A gate named for a comparison must make it, and against a route that exists
 
@@ -675,59 +152,7 @@ this node's memory can actually offer. It refuses a chain priced at or above
 the local processor, and the caller logs the reason the gate returned rather
 than a fixed sentence.
 
-**What it replaced.** The function checked two things, neither a price: is the
-chain remote, and is our own speed measured. `local_ms` and `chain_ms` were
-computed at the call site *only to be logged* — the comment said so, meaning
-checked by a person afterwards. Live: a two-segment chain priced **22117 ms**
-took a request from a processor priced **6313 ms**, under a log line reading
-"a pipeline across peers' cards is priced faster" directly above its own
-contradicting numbers.
-
-**Why the DP does not already answer this, which is the part worth keeping.**
-`route_shortest_path` minimises, so the omission looked safe and its own doc
-asserted the search "has come back cheaper than running here". But the
-capacity-respecting pass DROPS any vertex a candidate cannot hold, including
-the local node's whole-model vertex once `max_local_hostable_layers` bounds it
-(gotcha #452). What the search returns is therefore the cheapest **feasible**
-chain, which is a different claim from "cheaper than staying home" — and the
-two diverge exactly on the machine that provoked both reports.
-
-**So the comparison is only sound where the local route is real.**
-`local_ms` prices the whole model as one local segment; on a node whose loader
-will refuse that, it prices something that cannot run — gotcha #478's error
-again, one function along. `local_route_is_available` is the discriminator: when
-it is false there is no baseline to give up, the chain wins at any price, and
-the log says *that* instead of claiming it is faster. Adding the comparison
-without this flag would have sent report #018's request home to a 503.
-
-**And the fast path asks the same question.** A node was chosen for the whole
-model on `available_ranges` alone — a fact about STORAGE — and
-`local_can_hold_every_layer` is now asked beside it. Holding every shard is not
-holding every layer in memory: a 14B priced at 10374 MB against 9240 MB of live
-headroom was committed to the node before anything checked, and `admit_to_cpu`
-has **no re-plan behind it** — it fails the spawn, the caller returns 503, and
-no retry follows because `should_retry_after` sees `used_remote_segment == 0`
-for a local-only assignment. Two peers had offered to serve that model. A node
-that cannot hold everything now falls through to the priced search, which has
-known how to give it only what it can hold since #452.
-
-Four things a change here must keep. **Unknown never excludes** — a `None`
-capacity is an unreadable footprint or an unset budget, not evidence, and plans
-the request exactly as before. **Coverage and capacity stay separate
-variables**: the decision below still needs to know this node holds the model in
-order to explain itself, and a candidate silently withdrawn cannot say why it
-went. **The all-local arm is tested first**, since a chain with no remote
-segment is the fast path by another name whatever the prices say. And **every
-refusal keeps its control**: a genuinely cheaper chain must still displace the
-processor, or this becomes "never delegate" — the failure #444 exists to
-prevent.
-
-**The general rule.** When a function's name, its log line, or its doc asserts a
-comparison, check that something performs it. Two of this project's rules
-already say a comment describing a mechanism elsewhere is a claim rather than a
-fact; this is the same trap turned inward — the claim was about the function's
-own caller, and it had been true of nothing since before gotcha #479 edited the
-function without touching it.
+→ `docs/invariants/scheduling.md`
 
 ## A re-plan is warranted by a changed fact, never by a failed attempt
 
@@ -738,46 +163,7 @@ the router records `SharedState::note_local_memory_refusal(request_id)`;
 `local_can_hold_every_layer` lets that outrank both of its estimates, so the
 second plan **cannot** hand this node the whole model.
 
-**Retrying is the dangerous half, and the recorded fact is what makes it safe.**
-A retry against an exhausted resource is the amplification pattern behind most
-metastable failures — retry storms account for over half of them in the
-published surveys — and admission here refuses *before* allocating anything, so
-every live figure the second plan reads is the figure the first plan read. A
-blanket retry would therefore re-derive the identical route and re-attempt the
-load that just failed: strictly more load on the memory that ran out, and two
-failures where there had been one.
-
-The shape that makes it a failover instead is Kubernetes' scheduler: an
-unschedulable pod is not retried on a timer, it is moved to `UnschedulablePods`
-and requeued when a **queueing hint** says an event has occurred that could
-change the answer. The loader's verdict is our event, and it is the only new
-information in the system — which is why it is recorded rather than re-derived.
-The retry then puts *no* further load on the exhausted budget, because the plan
-it produces cannot include the load that failed.
-
-Four things a change here must keep.
-
-- **The wire wording is deliberately identical to `ServiceUnavailable`'s.** A
-  peer's refusal crosses the network as text, `message_means_peer_cannot_serve`
-  matches that prefix, and `reclassify_flattened_error` deliberately does NOT
-  produce this variant — so a remote refusal is blacklisted and retried exactly
-  as it always was, in both directions of a mixed-version swarm. The variant is
-  a LOCAL routing distinction, not a new thing to tell anyone.
-- **Its `ServiceUnavailable` sibling must NOT gain the same retry.** A dead
-  worker or a failed spawn re-plans to the identical route; that is why its
-  retry is gated on a remote segment having been involved, and the control test
-  asserts it still is.
-- **The original error survives a failed re-plan.** Where nothing else can serve
-  the model, the user gets the itemised shortfall — the footprint, the budget,
-  the setting to raise — not the re-plan's "no route", which is a true statement
-  about a search they never asked for and can do nothing with.
-- **It never docks a peer.** The failure names this machine, so
-  `failure_is_penalty_worthy` exempts it beside its sibling.
-
-Verified live: a node whose budget refused a 3074 MB model against 2200 MB
-answered the request after the re-plan — `assemblies=2`, `segments=1` becoming
-`segments=3`, the middle segment on a peer. And on a node with no peers at all,
-the constrained-node harness confirms the refusal message is unchanged.
+→ `docs/invariants/scheduling.md`
 
 ## The relaxation is scoped to the figures that are actually unreliable
 
@@ -787,58 +173,7 @@ them in that order, and the local layer budget is enforced INSIDE the DP —
 carried along the best path, exactly as the capped-peer bitmask is — as well as
 by the exact summed check after reconstruction.
 
-**Why the bound is scoped at all.** The relaxation exists because a PEER's
-figure is a self-report: stale by up to a health tick, zero on any node older
-than v0.3.103, absent for a peer that has gossiped no capability. Such a figure
-may make a route better and must never make a routable request fail. But
-`respect_capacity` was one boolean over every vertex, and the local node is a
-vertex — so the pass also discarded a figure that is none of those things. Ours
-comes from our own loader, inside the very scheduling call that consumes it,
-from live memory, from the estimator `admit_to_cpu` will use minutes later. So
-dropping it never rescued a request; it moved the refusal from the planner,
-where the plan can still change, to the loader, where it cannot.
-
-Measured on a 16 GB machine (report #025, gotcha #489): `max_hostable_layers=
-Some(40)` logged one line above, the constrained pass refusing 48 layers by
-name, the relaxed pass then returning the identical all-local chain, and
-`admit_to_cpu` refusing it 50 ms later. **Every request to that model failed,
-for as long as the memory picture held.** The v0.3.162 fix (report #018)
-changed which log line explained the failure, not whether it happened, because
-it closed the fast path and this is the search's own second pass.
-
-**Why the DP, and not only the check after it.** The local node is exempt from
-"a capped candidate appears at most once" — prompt privacy needs it at both ends
-(gotcha #481) — so the per-vertex cap cannot bound what it takes in TOTAL:
-several local sub-ranges, each inside the cap, sum to the whole model, and
-`merge_contiguous` hands it exactly that. The summed check ran after path
-reconstruction, where failing abandons the WHOLE search rather than the one
-chain that broke the rule. So a perfectly good boomerang through the peer that
-held every layer was discarded along with it. Checked inside the DP, the bad
-chain is simply never built and the search returns the cheapest one that fits.
-
-Four things a change here must keep.
-
-- **`Nobody` stays, as the LAST resort.** With no route even inside our own
-  memory there is nothing to protect, and the loader's itemised refusal —
-  which names the footprint, the budget and what to raise — is a better answer
-  to a single-node install than "no route". This is why the fix is not simply
-  "respect the local bound always".
-- **The DP bound is a sound bound, not a complete search.** It is carried along
-  the single best path, so a cheaper predecessor that exhausts the budget can
-  hide a costlier one that would have fitted — the same approximation
-  `used_capped` already makes. Both backstops behind it are unchanged: the
-  exact summed check, and the next relaxation.
-- **Every pass says which one it is.** The `LocalOnly` line promises a re-plan
-  and can now keep it: the only refusal it invites is a peer's, and
-  `should_retry_after` retries that. The `Nobody` line promises nothing and
-  says the loader will decide.
-- **`Some(0)` still moves one layer.** Both the DP bound and the summed check
-  apply `cap.max(1)`, so a privacy end can always be served and the search
-  terminates.
-
-**The general rule.** When a flag's name, doc or log line describes one
-population and its parameter reaches all of them, that gap is the bug — and a
-constraint checked after a search kills the search instead of the candidate.
+→ `docs/invariants/scheduling.md`
 
 ## A result the peer sent and a result we made up are not the same delivery
 
@@ -848,59 +183,7 @@ cannot survive either codec, so **anything that arrived over the network reads
 false by construction**. `pipeline::local::wait_for_result` reads it to choose
 between `SegmentOutcome::Returned` and `SegmentOutcome::AbandonedLocally`.
 
-**Why it is needed.** Three paths end a forward by handing the waiter a
-manufactured `LayerResult::error` rather than letting the wait expire — the ACK
-fast-fail sweep (`fail_tensor_forward`), a peer whose connection closed and whose
-re-dial failed (`fail_layer_results_awaiting`), and a closed pipeline stream. All
-three complete the oneshot, so they land in the same `Ok(Ok(result))` arm as a
-peer's own refusal, and the arm scored every one of them as an intact delivery.
-Since the ACK deadline is 10-90 s inside a segment budget that runs to 300 s,
-that was the NORMAL way a dead link was observed: the peer-reliability term
-shipped in v0.3.164 credited a peer whose link had died with a perfect delivery,
-and the only thing that could ever score against a peer was the local compute
-deadline expiring — a slow processor, not a lossy link.
-
-**Not a string match.** The reason is a `String` and matching on it is the #295
-trap; the wire format answers the question directly and cannot be reworded.
-
-Three things a change here must keep.
-
-- **A peer's refusal is still an intact delivery.** Out of memory or a missing
-  shard is a perfect delivery of a "no", and the distinction is compute against
-  transport — the one `failure_is_penalty_worthy` draws. Pricing a refusal as a
-  lossy link steers traffic away from a peer whose network is fine. Pinned by
-  `a_returned_segment_is_recorded_as_an_intact_delivery`, the control beside
-  `a_forward_this_node_abandoned_is_not_credited_to_the_peer`.
-- **A serving-side constructor may set it freely.** `LayerResult::error` sets it
-  unconditionally because the wire strips it: a refusal built on the serving node
-  reaches the coordinator as false. That is what makes the rule hold with no
-  per-call-site decision to forget — the failure mode this codebase keeps
-  hitting.
-- **A test harness standing in for a peer must clear it.** Otherwise it simulates
-  our own ACK sweep rather than the peer replying.
-
-**The intact sample is taken on the prompt pass only; a failure is always
-taken.** `note_segment_delivery` owns that rule. Two reasons. The path runs once
-per segment PER TOKEN while the whole-model fast path (`remote_generate`) records
-once per reply, and both feed one EMA at `ALPHA = 0.3` — `1 - 0.7^n` passes 0.99
-by fifteen samples, so a 150-token reply over three segments (450 samples) buried
-the single failure that ended the request and left the multiplier inert on the
-path it was added for. And it is real cost on the per-token forward path: a
-DashMap exclusive shard lock plus a `NodeId` clone per segment per token.
-
-**`peer_delivery_samples` is logged beside `expected_attempts`**, because the
-multiplier reads 1.0 both for a reliable peer and for one nothing is recording
-for — the ambiguity that hid all of this, and the reason an accessor added to
-resolve it is worthless while only tests can reach it.
-
-**What this still cannot see, and must not be stretched to cover.** Loss on a
-healthy TCP path shows up as retransmission LATENCY, not delivery failure — the
-forward completes, slowly. So this term catches links that break, not links that
-are merely bad, and it is not the fix for the netem case in issue #21. That needs
-per-peer goodput (`docs/FUTURE_WORK.md`). Do not weight samples by payload size
-as a substitute: the ACK estimator already declines transfer-dominated samples
-(`ACK_OBSERVE_MAX_BYTES`) precisely because they measure the payload rather than
-the peer.
+→ `docs/invariants/scheduling.md`
 
 ## Latency wants an average; capacity wants a maximum
 
@@ -912,64 +195,7 @@ only from SMALL forwards, where the time is the peer's, and throughput only from
 LARGE ones, where the time is the payload's. A sample is dominated by one or the
 other and cannot measure both.
 
-**Why goodput exists at all.** Loss on a healthy TCP path is absorbed by
-retransmission, so it appears as a transfer taking longer and NEVER as a forward
-failing. That is why the delivery-ratio term (#495) structurally cannot see it,
-and why a peer at 60 ms with 3% loss out-sorted one at 81 ms with none while
-being 2.9x slower on a 513 KB payload — measured from outside, in a contributor's
-netem lab (issue #21). It also captures a rate limit, which no small-message
-probe can detect.
-
-**Shaped after BBR's bottleneck-bandwidth estimator**, which solves the same
-problem — deriving a path's capacity from whatever transfers an application
-happens to make. Three rules taken from it, each of which is easy to get wrong
-and two of which were:
-
-- **A windowed MAX, not an average.** Samples come in low for reasons that say
-  nothing about capacity. This is the same argument
-  `mem_bandwidth::remeasure_keeping_the_best` already makes locally, and the
-  exact opposite of what latency wants.
-- **An app-limited sample may RAISE the estimate but never establish or lower
-  one.** BBR uses such a sample only when it exceeds the current estimate; with
-  no current estimate there is nothing to exceed, so it is discarded. Both
-  halves matter and the second was missing at first: the max filter already
-  stops a small sample lowering anything WITHIN a window, so the rule looks
-  redundant until the window rotates — and a long conversation is one prefill
-  then thousands of decode steps, so two rotations later a 2 KB forward would
-  have established the figure at the speed of the decode loop. **A wrongly-low
-  estimate is far worse than none**, because unknown charges no transfer while a
-  low one charges an enormous one and routes around a healthy peer.
-- **The round trip is subtracted before dividing.** An acknowledgement is sent
-  once the whole message has ARRIVED (gotcha #446), so the observed time is
-  propagation plus transfer, and `vertex_cost` charges latency separately.
-  Leaving it in would double-charge it and would understate throughput worst on
-  exactly the distant peers this exists to rank.
-
-**How it is consumed.** `VertexCost::transfer_ms`, a term of its own — NOT folded
-into `network_ms`, which is multiplied by `ASSUMED_FORWARD_PASSES`. The large
-payload crosses once, on the prompt pass; every decode step after it carries one
-position. It applies only to a segment that is entered per token AND does not
-start at layer 0, because a first segment receives the PROMPT
-(`ActivationUnits::PromptBytes`) rather than hidden states — three orders of
-magnitude smaller — and charging a transfer that does not happen would penalise
-exactly the split the search should be free to choose. Only the inbound
-direction is charged: the return payload varies by shape, `2 * latency_ms`
-already carries the round trip, and a conservative stated term beats a
-speculative one on a cost model whose own calibration is an open question
-(`ASSUMED_FORWARD_PASSES`, `docs/FUTURE_WORK.md`).
-
-**Unknown charges nothing**, so a peer never sent a large forward is priced
-exactly as before this existed — the standing contract of every routing input
-here. Local and NEVER gossiped, like `ack_srtt_ms`: it describes OUR path to that
-peer, which is not a fact about the peer. And `goodput_samples` is published and
-logged beside the estimate for the reason `peer_delivery_samples` is: an
-unmeasured path and a fast one are indistinguishable from the figure alone, and
-that ambiguity is what hid #495 being inert.
-
-**A test for a max filter must cross a window boundary.** `rotate_for_test`
-exists because the window is five minutes and the app-limited rule governs only
-what happens across rotations — the first version of its test passed with the
-rule disabled.
+→ `docs/invariants/scheduling.md`
 
 ## A reply under way is never moved to a machine that cannot continue it
 
@@ -979,58 +205,7 @@ reply already under way ends with `SegmentFailoverExhausted` carrying
 `cannot_resume_message`, and the machines that just failed are barred for that
 request id.
 
-**Why.** `failover_segment` re-sends the current step and nothing else, and the
-KV cache is keyed by `(layer range, request id)` — so a machine that has not
-served this segment for this request holds nothing, and no path rebuilds it.
-`split::executor` then derives `kv_offset` from the CACHE rather than from
-`index_pos`, and the worker's decode arm has no check that the two agree. The
-replacement therefore answers from the current token alone while the reply
-carries on looking normal.
-
-**Measured, so do not re-derive it** (`examples/failover_kv_probe.rs`,
-llama-3.2-3b, P = probability of the token the healthy machine would have
-chosen; every run carries a control holding the history, which reproduced the
-healthy machine EXACTLY at cosine 1.000000):
-
-| segment replaced | decode steps first | control | stand-in |
-|---|---|---|---|
-| 14 of 28 layers | 24 | 0.9966 | **0.0054** |
-| 4 of 28 layers | 24 | 0.9966 | **0.1186** |
-| 4 of 28 | 1 | 0.0522 | **0.0000** |
-
-Four things a change here must keep.
-
-- **The prompt pass still fails over, and must.** There the stand-in is handed
-  the whole prompt and builds its own cache; it is the case standbys exist for
-  and the only one the existing failover tests exercise.
-- **There is no safe early window.** Failing over one decode step in is WORSE,
-  not gentler, because the missing state is the PROMPT rather than the decoded
-  history. Do not add a "recent enough" exemption; the test is the WORK KIND.
-- **Ending is not losing the reply.** `should_retry_after` retries this variant
-  when a remote segment was involved, so a non-streamed request re-runs from the
-  prompt on a fresh route — a correct whole answer beats a long one that is
-  quietly wrong. Streamed, the retry is suppressed and the reader keeps what
-  they were sent; otherwise `note_salvaged_reply` returns what was generated.
-  Removing the blacklist would break this: the retry would re-learn the same
-  holder and reproduce the failure.
-- **The guard is on the CALL SITE, not the predicate.** The unit tests beside
-  `failover_can_restore_state` and `cannot_resume_message` all still pass with
-  the call removed from `failover_segment`, which is the one edit that
-  reintroduces the defect —
-  `a_reply_under_way_is_never_moved_to_a_machine_that_cannot_continue_it` in
-  `tests/repo_consistency.rs` checks the call and its ORDERING, with a
-  planted-violation self-test for both "deleted" and "present but too late".
-
-**Confidently wrong is a real state, and margin will not catch it.** At one
-decode step the stand-in's top-1 margin EXCEEDS the healthy machine's. Judge a
-change here by P(the reference's token), never by confidence or entropy — and
-never by raw-logit cosine, which shares a large frequency-prior component and
-scored −0.076 on a case where the argmax agreed.
-
-**Still open** (`docs/FUTURE_WORK.md` items 17 and 18): mid-reply failover now
-does not happen at all. Making it WORK needs the boundary activations retained
-for segments that have a standby — and that, not more standbys, is what a
-multi-node standby would need first.
+→ `docs/invariants/scheduling.md`
 
 ## A failed request hands back the work it had already done
 
@@ -1040,60 +215,7 @@ the caller — called at the one point per dispatch path where the attempt is
 definitively over, which is after the retry in `dispatch_single` and after the
 sole attempt on the batched path.
 
-**Why.** A 4m43s reply on a 14B, already decoding, was discarded outright when
-its tail peer's connection dropped (report #028). On a streamed request the
-client at least keeps the text it was sent; on a non-streaming one the caller
-gets a 503 and every token is thrown away. Nothing was wrong with the error —
-the peer really had gone — but "the request failed" and "there is nothing to
-show for it" are two different claims, and only the first was true.
-
-**The failure stays a failure.** `PipelineExecutor::execute` still returns the
-`Err`; the salvage is recorded on the way past. So the log line, the peer
-penalty, the trust update and the error broadcast in `execute_request` all fire
-exactly as before, and nothing here can make a lost peer look healthy. The only
-thing that changes is what the caller is handed at the very end.
-
-**It is the last resort, never the first.** A retry that produces a COMPLETE
-answer beats a truncated one, so `may_salvage` only records; the taking happens
-after `should_retry_after` has had its turn. Reversing that order would trade a
-whole answer for half of one on every retryable failure.
-
-Four things a change here must keep.
-
-- **An empty salvage is not a salvage.** `note_salvaged_reply` refuses one, and
-  a failure with nothing recorded keeps its error — which carries the class, the
-  hint and the peer attribution. Replacing that with a `200` carrying nothing is
-  gotcha #433's lie pointing the other way, and it is the control test beside
-  the positive one.
-- **Streamed replies are excluded, and not only for taste.** The text has
-  already reached the client, so the honest terminal event is the error it
-  already gets; and `api::openai::streaming` treats "no finish event arrived" as
-  "this path never streamed" and re-emits the whole content as one delta, so
-  turning a streamed failure into an `Ok` would hand the reader the reply twice
-  (gotcha #414).
-- **The caller must be able to tell.** `inference::FINISH_REASON_INTERRUPTED`
-  is `"error"`, which is vLLM's own value for this (`FinishReason::ERROR`,
-  beside `ABORT`). The OpenAI schema defines no member meaning "the machinery
-  gave up part-way", and reusing one that exists is the same lie in a new place:
-  `"stop"` claims the model chose to end, `"length"` claims a limit was reached.
-  **The Anthropic surface cannot pass it through** — that vocabulary has no
-  member for an interrupted turn, and an undefined `stop_reason` was removed
-  from it once already (gotcha #300) — so `map_finish_reason` gets an explicit
-  arm to `max_tokens`, the only defined value meaning "incomplete, cut off".
-  Without that arm the catch-all reports it as `end_turn`, which Anthropic
-  defines as the turn completing naturally. `pause_turn` was considered and
-  rejected: it instructs the caller to resend and continue, so a client obeying
-  it would retry into the failure with nothing said.
-- **Both attempts may salvage, and the longer one wins.** They describe the same
-  prompt, so the reply that got further is strictly the more useful one — and
-  the tie-break must be length, not arrival order, or a retry that dies early
-  overwrites a first attempt that nearly finished.
-
-**Still open, and deliberately not conflated with this** (`docs/FUTURE_WORK.md`
-item 17): a standby still cannot be assembled from several nodes that cover a
-segment's range between them, which is why that request had no redundancy to
-fail over to in the first place. Salvage makes the loss partial; it does not
-make the request survivable.
+→ `docs/invariants/scheduling.md`
 
 ## A disconnect retires a session key; it must not destroy it
 
@@ -1102,47 +224,7 @@ never sealable, for `PREVIOUS_KEY_GRACE`, carrying its own replay window — and
 `open` falls back to it after the current and superseded keys, including when
 there is no session at all.
 
-**Why.** The removal exists to force a fresh handshake and stop epoch desync,
-and that part is right. Destroying the key with it is not: a forward sealed
-moments before the drop then cannot be read, and the `previous` slot that exists
-for exactly this problem goes with the entry.
-
-**The two ends do not drop together, and that asymmetry is the bug.**
-`handle_connection_closed` keeps the session when the peer is
-`in_active_pipeline` — but that reads `active_pipelines`, which is the
-COORDINATOR's map and holds nothing for work a node is SERVING for someone else
-(gotcha #194). So on a brief drop the server clears its session while the
-coordinator keeps sealing with the old key, and every forward in flight fails to
-decrypt. The serving side has no equivalent signal to consult: between decode
-tokens it has no inbound forward outstanding at all, so "is work in flight" is
-false precisely when the request is alive.
-
-Measured on v0.3.164 (report #028): a 4m43s generation, already streaming, died
-outright when its tail peer's connection dropped and the retry reached the same
-node with `Could not decrypt forward`. The identical signature was recorded five
-weeks and ninety-five versions earlier and closed as a rotation race on one
-peer; it is the same shape seen from the other side — a key one end threw away.
-
-Four things a change here must keep.
-
-- **Retired keys OPEN, never SEAL.** That is what keeps this from reintroducing
-  the nonce reuse the removal exists to prevent, and it is pinned by
-  `a_retired_key_cannot_be_used_to_seal`.
-- **The reconnect still handshakes afresh.** `retired` is a separate map, so it
-  does not satisfy `establish_session`'s idempotence guard.
-- **Its own replay window travels with it**, so this is a second authenticated
-  check rather than a relaxed one — WireGuard's per-keypair counter, the same
-  detail that made the previous-key grace safe when it was added.
-- **The window is bounded and swept.** `evict_stale` drops retired keys past the
-  grace period; holding one longer widens the window in which an old key opens
-  anything, for no benefit.
-
-**A test here must use an EPHEMERAL session.** `establish_session` derives from
-long-term identity keys, so a reconnect re-derives the identical key and a
-static-key test passes with the fix reverted — which is how the first version of
-`a_forward_in_flight_survives_the_peer_reconnecting` was written, and a null
-control caught it. Forward secrecy means the real link is ephemeral and a
-reconnect genuinely changes the key.
+→ `docs/invariants/network.md`
 
 ## A peer advertises the memory it will HONOUR, not the memory it has
 
@@ -1150,38 +232,7 @@ reconnect genuinely changes the key.
 memory can this peer give a model's layers"**, and `ram_model_budget_mb` is the
 figure a node without a graphics card puts behind it.
 
-**Why.** `ram_available_mb` is `sysinfo`'s raw reading with no margin. The same
-node's own admission sizes a swap-safe budget from total RAM and contribution
-level — `total × 0.8 × (0.5/0.8)`, so **4096 MB on an 8 GB machine at the
-default level**, about half what it advertises. The scheduler routed on the
-first number and the peer enforced the second, so segments were offered and
-refused on arrival: measured, one peer refused 46 layers and then 28 layers
-1.7 s later, each costing a round trip before the refusal was known, inside a
-request whose first token took 154 s (report #022). Nothing bars a peer that
-refused for capacity from being re-offered work — the blacklist fires only for
-missing-shard errors — so the re-plan met the same stale figure and made the
-same mistake.
-
-**The stated budget is tested BEFORE the card, and that ordering is the
-point.** The figure is computed only on the branch where models load into
-system memory, so its presence carries the placement decision rather than
-merely a number. A node that HAS a card and has been told not to use it
-(`inference.gpu_layers = 0`) still gossips that card, because the card is
-really there — so asking about `gpu` first judged it by memory its models would
-never occupy while it loaded every one of them into RAM. That ordering was
-right only while the card was the only thing that answered.
-
-Three further things a change here must keep. **The accessor owns the device
-choice**: two callers were writing the `match &c.gpu` themselves, and a third
-would have had to get it right again. **The graphics branch is otherwise
-untouched** — free VRAM already excludes what is resident, which is the property
-`already_warm` pricing depends on; the RAM budget has the same property because
-it subtracts `ram_committed_mb`. And **unknown never excludes**: a node that has
-stated neither falls back to `ram_available_mb` and behaves exactly as before,
-which is what keeps a mixed-version swarm routable. The field is additive and
-`#[serde(default)]` per the protocol rule; the meaning of the existing field is
-deliberately NOT changed, because the peer list displays it as free memory and
-that reading is legitimate and different.
+→ `docs/invariants/scheduling.md`
 
 ## A hand-off is priced as the shape it will be given, not as the whole model
 
@@ -1191,214 +242,14 @@ price gate (`costs_more_than_staying_here`), the line that logs the gate's
 verdict, and `privacy_cost_ms` all go through it, so none of them can price a
 peer differently from the others.
 
-**Why the shape is the whole question.** `parallax::vertex_cost` exempts
-exactly one shape from per-token network — a remote candidate covering the
-WHOLE model, entered once for the entire request and decoding remotely. Every
-other remote range is entered once per token and charged
-`2 * latency * ASSUMED_FORWARD_PASSES`; the function's own comment says so.
-So the two shapes a hand-off can take differ by a factor of the token count in
-their network term, and "the whole model" is the cheap one.
-
-Prompt privacy is auto-on whenever this node holds both ends, which makes
-`boomerang_assignment` — peer gets `(1, n-1)` — the COMMON shape, not an edge
-case. The gate priced `(0, num_layers)` regardless. Measured on the release
-pair 2026-09-06 (gotcha #478): a processor-only node holding llama-3.2-1b
-whole handed the middle to a card **496 ms away** and took **9.1 s to return
-one token**, against a local processor decoding that model at 4.28 tok/s.
-
-Three things a change here must keep.
-
-- **The site that decides the shape passes the shape.** `DelegationInput`
-  already carried `layers_to_assign`, documented as "how many layers the peer
-  would ACTUALLY be given ... the middle for a boomerang" — the capacity term
-  read it (gotcha #454) and the price term did not. A shape parameter that only
-  some terms consult is worse than none, because the ones that ignore it look
-  correct in a suite where every test passes the same shape.
-- **A model too short to cut a middle from is priced whole**, because
-  `delegated_layer_span` hands it over whole. The two must agree by
-  construction, which is why both read `BOOMERANG_MIN_LAYERS`.
-- **This must not become "never delegate".** The feature exists because a
-  processor node beside an idle card is the failure being fixed. The same peer
-  offered the WHOLE model is still taken — pinned by
-  `the_same_peer_still_gets_the_whole_model_when_that_is_the_shape`, the
-  control beside
-  `a_boomerangs_middle_is_priced_as_the_middle_it_will_be_given`.
-
-**The general rule**: a cost model parameterised by shape must be handed the
-shape that will actually execute. Same class as gotcha #434 — there a decode
-step was budgeted as a prefill; here a boomerang was budgeted as a delegation.
-Ask of any price whether the thing being priced is the thing about to be done.
+→ `docs/invariants/scheduling.md`
 
 ## Delegation asks the same capacity bound routing does, and the retry it promises must exist
 
 Three defects reported from one live node on v0.3.153, all in the path that
 hands a whole model — or a boomerang's middle — to a single peer.
 
-**`inference::scheduler::delegation_target` gates on `max_hostable_layers`**,
-the same bound `route_shortest_path` uses, checked against
-`delegated_layer_span(num_layers, encrypted)` — every layer for a whole-model
-hand-off, `num_layers - 2` for a boomerang, read by both the gate and
-`boomerang_assignment` so the span checked is the span handed over.
-
-**What it replaced.** The function had two accept branches and neither could
-see this request. The processor-speed branch had no memory test whatsoever, so
-anything clearing `2x` our processor won; and `boomerang_assignment` checked
-only `covers()` — whether the peer HOLDS those layers, never whether it can run
-them. Measured: a peer whose own `max_hostable_layers` read 2-15 throughout was
-handed 34 of a 36-layer model, timed out at 156 s, and answered the immediate
-retry with `CUDA_ERROR_OUT_OF_MEMORY` (gotcha #454). The bound was on the very
-candidate being accepted.
-
-The whole-model branch did have a check, priced at `ADMISSION_KV_CONTEXT` — a
-fixed 4,096 tokens however long the prompt is. The same peer took a 29-token
-request in 0.98 s, an 8,841-token one in 238 s, and returned **nothing at all**
-for an ~18,000-token one across its full 600 s deadline; proportional scaling
-predicts ~486 s, so it was not merely slow (gotcha #455). The code comment
-defended the constant by naming the peer's runtime head-room check as the thing
-that "refuses gracefully" past it. No refusal ever arrived.
-
-`needed` survives as the discriminator between the two accept reasons — "has a
-card worth preferring to our processor" against "is a measurably faster
-processor" — and can no longer admit anything the bound refuses.
-
-**And the gate is priced on the prompt** (2026-09-05).
-`costs_more_than_staying_here` runs `parallax::vertex_cost` — the routing
-search's own function — over the peer and over the local candidate, and refuses
-a peer that prices above running the model here. Before this the gate and the
-search could disagree about the same machine, and did: a reporter's Apple M4
-(`est_tokens_per_sec` 14.82 against a local 6.46, the best figure on their
-network) was fully delegated two ~11-12k-token prompts and took **5-6 minutes
-to the first token, twice**, while the search had priced it at ~234 minutes of
-prefill and avoided it.
-**Why the old terms could not see it**: `est_tokens_per_sec` is
-`bandwidth / 4.4 * efficiency`, a memory-bandwidth estimate of how fast a
-machine WRITES tokens. Prefill is compute-bound and `vertex_cost`'s own comment
-puts the hardware spread at ~55x on prefill against ~6x on decode — so an M4,
-with excellent unified-memory bandwidth and ten cores doing the matmuls, looks
-fast on the decode axis and is dreadful on the one that dominates a long
-prompt. **A gate comparing machines needs the axis the WORK is on.**
-Unknown still never excludes — no prompt length, no local candidate, or a peer
-at the shared prior all leave it open, since refusing on missing information
-strands a node beside a machine that may be faster. The first request produces
-the measurement that stops the second; the report showed the same peer chosen
-twice because nothing learned. Unknown
-capacity still never excludes, per `max_hostable_layers`'s own contract.
-
-**Both accept branches log the same fields.** The whole-model line carried
-`peer_free_vram_mb` and the boomerang line carried none, so the log written to
-explain "why this peer" omitted the one number that showed the mismatch.
-
-**`router::should_retry_after` is the whole retry decision, as four terms.**
-Single-peer delegation sets `standbys: vec![]` deliberately, with a comment
-naming its safety net: *"the retry in `dispatch_single` re-routes, and this node
-still holds every layer, so the request can always come home."* That retry fired
-on two error classes and the error a departed peer actually produces —
-`SegmentFailoverExhausted` — was in neither, so both of two concurrent requests
-died with the local node in the same candidate list holding every layer, and no
-retry line in the log (gotcha #456).
-
-Three things a change here must keep:
-
-- **The bar and the retry move together.** `failover_segment`'s exhaustion arm
-  blacklists the failed node and every standby it tried, for this request id
-  only. `is_transient_remote_failure`'s doc already states the principle —
-  *"the blacklist is what makes the retry actually work"* — and without it the
-  retry re-learns the same holders and reproduces the plan that just ran out of
-  memory. Pinned by `an_exhausted_segment_bars_the_machines_that_just_failed_it`,
-  which is itself pinned by planting the violation (#413).
-- **Nothing is retried once text has reached the client.** A retry restarts
-  generation from the prompt, so on a streamed reply the reader watches the
-  answer begin a second time. `TraceSnapshot::ttft_ms` is stamped on the first
-  event carrying real text — empty terminal events do not set it, a
-  non-streaming request never does — so it is exactly "output has left this
-  node". This binds the two pre-existing classes as well.
-- **The condition stays a function.** It had four terms inline, and the missing
-  one could not have been tested for while it lived in the `if`.
-
-**The general rule.** A comment describing a mechanism in another module is a
-claim, not a fact: grep that mechanism for the case being relied on. Two of
-these three were exactly that shape, as were #437 (a doc naming a writer nothing
-writes) and #451 (a guard whose input nothing fills).
-
-**A decision that rejects a cheaper option names it.**
-`scheduler::cheapest_whole_model_peer` is reported as `cheapest_peer` /
-`cheapest_peer_cost_ms` on every arm that keeps a request on this node, and the
-fast-path line also carries `candidates`, `local_runs_on_processor` and
-`parallax_routing` so a reader can tell which of the three ways it got there.
-
-The candidate list has always been logged with a cost per holder, and every arm
-has always logged a reason — but no arm named the peer the reason was ABOUT. One
-tester filed three reports in a day off a log showing a peer priced 55x cheaper
-beside a local decision that never mentioned it, twice concluding there was a
-penalty mechanism overriding cost. There is none: `delegation_target` is a yes/no
-gate that runs before any pricing (#447 (iii), open), and
-`pipeline_may_replace_processor_route` declines a chain whose remote peers are
-priced from a prior rather than a measurement (#444). Both correct, both logged,
-neither legible (gotcha #460). **A reason without its subject makes a competent
-reader invent a mechanism.**
-
-**Every long wait in a request's life has a cancel checkpoint — including the
-load.** `inference::cancel`'s module doc named two waits and read as complete;
-the third, `ModelProcessPool::get_or_spawn`, is the longest and had none, so a
-client that gave up while its segment was loading cancelled nothing and the
-request went on to claim a KV cache and prefill for nobody (gotcha #459). That
-one is BRACKETED by `cancel::bail_if_cancelled` rather than wrapped in
-`unless_cancelled`: the wrap stops a wait by dropping the future, and dropping a
-load half-done abandons a spawning subprocess and a partly-registered worker —
-and the model may be exactly what the next request wants. A new wait that can run
-for minutes needs one of the two forms, and the choice between them is whether
-the work can safely be abandoned mid-flight.
-
-**A failover reproduces the forward the segment was given, and the local node is
-run in-process.** `FailoverInput` carries everything `failover_segment` needs —
-activations, `pre_embedded`, `generated_ids`, the vision embeddings, `is_last`,
-and the originating failure — as a struct, so a field added to the wire forward
-has to be decided about rather than defaulted to nothing by omission.
-
-`find_standbys` sorts the LOCAL node first, deliberately: a node holding every
-shard is the most reliable fallback there is, and its own comment says so.
-`failover_segment` only knew how to dial, and the local node has no
-`peer_id_bytes` — so the most-preferred standby was a guaranteed second failure,
-and a request whose holder died with `CUDA_ERROR_OUT_OF_MEMORY` ended one line
-later with `Network error: No peer_id_bytes for backup node`, with the machine
-that could have answered sitting right there (gotcha #458). The main loop has run
-local segments in-process since the beginning; failover never learned to.
-
-Three things a change must keep. **A standby that cannot be addressed is that
-standby's failure, not the request's** — the `None` arm continues to the next
-one, where returning `Err` ended the whole failover on the first unaddressable
-entry. **The local attempt is subject to the same rule**: if running here fails,
-the next standby is still tried. And **nothing is defaulted by omission** — the
-three fields that had been hardcoded to nothing (`pre_embedded`,
-`generated_ids`, `vision_embeddings`) each silently changed the answer rather
-than failing, which is why none of them was ever reported.
-
-**A gossiped figure is a snapshot, and a decision made between two of them must
-remember itself.** `SharedState::peer_vram_commitments` holds
-`request_id -> [(peer, MB)]` for work this node has scheduled onto peers and not
-yet seen reflected in their capability broadcast, which arrives every 30 s on a
-small swarm. `gather_candidates` subtracts it ONCE, so both consumers — the
-advertised `gpu_vram_available_mb` and `max_hostable_layers` — inherit it.
-
-Measured live: two requests 3 ms apart, both accepted whole onto one peer
-against the identical `peer_free_vram_mb=Some(4598)`; sixteen seconds later one
-died with `CUDA_ERROR_OUT_OF_MEMORY` inside `mlp` while the other kept decoding
-on that peer, and the loser resent alone afterwards completed in 62 s
-(gotcha #457).
-
-Three things a change must keep. **The charge is what the bound weighs** — cold
-peers pay weights plus this prompt's KV, warm peers pay the KV alone — so the
-reservation and the capacity bound cannot come to describe different quantities.
-**It is recorded on the EXECUTING path** (`assemble_awaiting_dht`), never in
-`assemble_pipeline_for`, which the dashboard also calls to preview a route: a
-preview that booked memory would never release it, since nothing calls
-`release_request_state` for a request that does not exist. And **the request
-being scheduled is excluded from its own total**, or a re-assembly charges
-itself twice and routes around memory it reserved for nobody but itself.
-
-This is not a second accountant for the peer's memory — the peer owns that, and
-its own admission remains the backstop. It makes this node's estimate honest
-about the commitments this node has itself made.
+→ `docs/invariants/scheduling.md`
 
 ## A cap sized in units of the WORK is a ceiling on the product
 
@@ -1410,25 +261,7 @@ reached. That caps the allocation at roughly one message the transport already
 accepted (`MAX_ACTIVATION_SIZE` 128 MB on the wire, `MAX_PAYLOAD` 512 MB over
 worker IPC) and it is exact.
 
-**What it replaced, and why the replacement is not a weakening.** A March 2026
-hardening pass added `MAX_TENSOR_ELEMENTS = 32 * 1024 * 1024`, and it was right
-about the hazard: the count comes off the wire, so a twelve-byte message
-declaring a billion elements reserves 4 GB before the first bounds check. But
-an element count is not a memory bound — it is a bound on the WORK. A hidden
-state is `positions × hidden_dim` elements, so 32 M is **exactly 8192 positions
-at hidden 4096** and only 4096 at the 8192-wide hidden of a 70 B. Every prompt
-past that was unroutable across nodes, on every model, for six months, with a
-message (`Tensor too large: 43876352 elements`) that named no model, no shape
-and no prompt. Reported from the field on v0.3.153 — a 32-layer 8 B split over
-two nodes, an 11.2 k-token agent prompt, four identical failures (gotcha #451).
-The element count varying with prompt length was the whole tell.
-
-**The rule to carry.** When adding a limit to something a peer declares, ask
-what the EXACT bound is before reaching for a round number — it is usually the
-input you are already holding. A constant that happens to be large enough today
-is a product limit nobody chose, and it will be discovered by a user rather than
-by a test. And when a refusal is a hard wall, its message must name the shape it
-refused, or the person who hits it cannot tell a policy from a bug.
+→ `docs/invariants/scheduling.md`
 
 ## A model's geometry is learned in one place, and unknown must not be silent
 
@@ -1437,29 +270,7 @@ the geometry from the local `gguf_header.bin` on a miss.
 `the_model_geometry_is_read_through_one_accessor` in
 `tests/repo_consistency.rs` fails the build on a bare `gguf_meta.get(`.
 
-**Why.** The map was filled at startup, by the admin HuggingFace shard download
-and by local manifest generation — and by nothing at all on the path a model
-takes when its shards arrive from the swarm while the daemon runs. Its one
-reader is `gather_candidates`, which uses it to charge a peer for what THIS
-prompt's KV cache costs per layer (`max_hostable_layers`, the #447 fix), and
-that bound treats an absent geometry as *charge nothing*. So the bound was inert
-on precisely the case it was written for — a model being distributed for the
-first time — and a warm 6 GB card was handed 28 layers of an 11.2 k-token prompt
-on a release that already contained the fix (gotcha #451).
-
-Three things a change must keep. The accessor reads only an EXISTING header
-(one `exists()` on a miss); materialising a header out of `shard_000` copies
-megabytes and belongs on the startup and shard-landing paths, which call
-`ensure_gguf_header` first. `check_and_load_model` — the choke point every
-shard landing funnels through — warms it, so the routing path does not normally
-pay the parse. And **`None` still means unknown, never zero**: a coordinator
-holding none of a model's shards genuinely cannot know its shape, and the
-capacity bound must keep declining to judge rather than charging nothing while
-pretending to.
-
-**The general shape**: a guard whose input is "unknown → do not apply" is
-worthless until you check that something fills that input on the path the guard
-exists for. Grep for the writer, and check it runs where the reader runs.
+→ `docs/invariants/scheduling.md`
 
 ## Three consumers have now read `standbys.len()` as an answer it cannot give
 
@@ -1496,42 +307,7 @@ segment_layers)` is asked of every standby candidate, beside
 to separate: `standby_covers` asks whether a node HOLDS the range,
 `standby_has_room` whether it could RUN it.
 
-**Why the running total.** `find_standbys` picks one standby per segment and
-sorts the LOCAL node first — deliberately, since a node holding everything is
-the most reliable fallback there is. Each pick was weighed against nothing, so a
-16 GB processor-only Mac mini holding 12 of a 48-layer 14B was named standby for
-all four remote segments; three failed over to it in turn and its worker was
-killed mid-reply (gotcha #464). The plan logged `standbys=4` and it had the
-capacity to be one — what HA practice calls "HA capable on paper".
-
-`primary_layer_commitments` seeds the tally from the plan's primaries and each
-chosen standby adds to it, so the fourth segment's search sees what the first
-three committed. This is **decide-time accounting**, the same thing Kubernetes'
-scheduler does with assumed pods: capacity is decremented when an assignment is
-DECIDED, not when it is bound. Ours needs no cache because a plan is built
-synchronously in one pass.
-
-Four things a change must keep.
-
-- **Primary duty counts.** A failover is precisely when a node runs its own
-  segment and the one it stood in for, at the same time.
-- **Standbys are charged at FULL weight**, never discounted by the chance of
-  being used: `charge_additional_segment` never gives a range back, so a
-  worker charged for a failed-over segment holds it for its life.
-- **Unknown never excludes** — `max_hostable_layers`'s own contract, and what
-  keeps a mixed-version swarm routable during a rollout.
-- **This cannot lose a usable standby.** One candidate is picked per segment and
-  one that does not fit is refused at `charge_additional_segment` with a 503, so
-  before this the request died. Where nothing fits there was never a standby and
-  `segments_without_standby` now reports that honestly instead of counting a
-  fiction.
-
-Note what the tally does NOT duplicate: `max_hostable_layers` already nets off
-`peer_vram_commitments`, but that is CROSS-request and deliberately excludes the
-request being scheduled — so within one plan it is always zero. This is the
-missing within-plan piece, and it is not double-counting for a warm peer either,
-since a warm peer's advertised free memory excludes its resident weights but not
-the KV the new segment will claim.
+→ `docs/invariants/scheduling.md`
 
 ## A count and an outcome that disagree are two different questions
 
@@ -1554,71 +330,7 @@ different GGUF build**, against `expected_build_tag` — this node's own manifes
 hash for that shard. It is the single read accessor for the holder map (~60
 consumers), which is why the filter lives there and not at the call sites.
 
-**Why.** A model id comes from a display name (`slugify_model_name`,
-deliberately — it unified three disagreeing derivations, #310), so every
-independent build of one model collapses into one identity. Three Q4_K_M builds
-of Qwen2.5-Coder-7B were live on the swarm at once, within 800 bytes of each
-other, sharing not one shard hash. Holder records keyed on `ShardId` alone
-pooled them, so the scheduler routed to either: correctness was safe (every
-shard is hash-verified before load) but a wrong pick is a guaranteed wasted
-transfer of the whole shard. Measured live 2026-09-05 — one peer gossiped
-contradicting hashes **556 times** while remaining a routing candidate **14,190
-times** (gotcha #406).
-
-Five things a change here must keep:
-
-- **The tag is a per-shard CONTENT hash** (`build_tag_from_hash`), not the
-  manifest hash the original design proposed. `merge_known_shard_hashes`
-  recomputes a manifest hash locally whenever it recovers one the sender
-  lacked, so two nodes on the same build routinely disagree on it — it would
-  have produced false mismatches. Shard bytes have no such problem.
-- **Our own manifest is the reference, and that is deliberately not a judgement
-  about which build is correct.** Our hash is what a download would be verified
-  against, so a holder that disagrees with it cannot hand us bytes we would
-  accept, whoever is right. That is what makes the filter sound even when we
-  have no origin knowledge.
-- **Unknown never excludes**, on either side — `build_tags_conflict` is the one
-  place that decides, so a caller cannot read "unknown" as "wrong". An older
-  peer, a DHT provider record, a local registration and a partial holder's
-  all-zero placeholder all land there. Same contract as
-  `max_hostable_layers`, and what keeps a rollout routable.
-- **A tagless re-announce must not erase a build already learned.** Peers
-  re-announce on a timer, so one older-peer refresh would otherwise restore
-  the pooling on the next tick.
-- **The drop is reported.** `note_build_tag` logs once per *transition*, never
-  per announcement — a peer repeats itself indefinitely (556 times here), and
-  anything a peer repeats on a timer will be repeated at you for ever. A peer
-  silently absent from every routing decision is otherwise undiagnosable from
-  outside the process; `conflicting_build_holders` is the programmatic view.
-
-**`model::manifest::shard_announce` is the ONE constructor for
-`ShardAnnounce`**, for the reason the "one invariant, N paths" rule gives: a
-site that forgot the tag would send an announcement claiming nothing, which is
-indistinguishable on the wire from an older peer — so a missed site is
-invisible rather than merely wrong. Adding a field extends the helper, not the
-eight call sites. `shard_announce_is_built_in_one_place` fails the build on a
-bare literal.
-
-**Switchable in the field**: `SWARMLLM_BUILD_FILTER=0` restores the old
-behaviour. This is a swarm-wide protocol change and the filter can in principle
-leave a model with no holders — correctly, since none of them could give us
-bytes we would accept, but a node in that state used to reach the model via a
-failed transfer and an origin refetch. The hatch is for diagnosing that without
-a downgrade, the role `SWARMLLM_KV_RECONCILE=0` plays for #462.
-
-**What it also closed, which the original write-up got wrong.** That entry said
-"correctness is safe — every shard is hash-verified before load". True for a
-model assembled on ONE node. In a distributed pipeline each node verifies its
-own shards against its own manifest and **nothing compares the build between
-segments**, so a chain could run layers 0-10 from one build and 10-20 from
-another with both sides passing. Not garbage — both are quantisations of the
-same model — but neither model's output, and silent. Closing it directly needs
-a build discriminator carried per segment; that is the residual if the filter
-is switched off.
-
-**Still open**: the reverse index (`node_shards`) is unfiltered, which is
-correct today because every consumer reads it about the LOCAL node. A consumer
-that asked it about a peer would bypass this filter.
+→ `docs/invariants/network.md`
 
 ## Additive Protocol Evolution (NETWORKING_PLAN cross-cutting)
 
@@ -1652,50 +364,7 @@ is the single answer to "is this forward doing a prefill?", for the deadline
 carries the resolved verdict (`is_prefill()`) so the log cannot contradict the
 budget it is describing.
 
-**The work KIND decides first (2026-09-02, gotcha #434).** `work_kind_for
-(sequence_num)` is authoritative — 0 is the prompt pass, everything later is a
-single-token decode step — and a decode step is a decode step whatever it
-carries. Segment 0 of a DECODE step is handed the sampled token as
-`PromptBytes` (that is the unit the first segment takes), and while the units
-alone decided, every decode step of a remote first segment was budgeted as a
-PREFILL: 240 s for 16 layers, measured live against a silent peer with a
-standby idle throughout, where the decode budget is 32 s. The decode
-coefficient is per-layer and never reads the byte count, so a decode-kind
-forward also uses the MEASURED basis regardless of units. The spec-verify
-sites pass `WorkKind::Decode` with `PromptBytes` and rely on exactly this.
-
-**Within the prompt pass, `ActivationUnits::PromptBytes` means prefill,
-unconditionally.** Segment 0 of a non-pre-embedded pipeline is handed the
-prompt itself; every later hop carries hidden states. A forward carrying the
-prompt performs the whole prefill by construction, however short the prompt —
-so the size test does not apply to it. Only `HiddenStates` may be classified
-by size, because `PREFILL_ACTIVATION_THRESHOLD_BYTES` (100_000) is a
-**hidden-state** scale: one token of hidden state is thousands of bytes, one
-token of prompt is a few.
-
-**Why it is a rule.** The units were already explicit, and already honoured on
-the *measured* path — `for_forward` refuses to predict from the peer-speed
-coefficient for `PromptBytes`, with a comment saying that feeding those into the
-same average "would silently corrupt the estimate". It then fell through to a
-fallback that made exactly that unit error: prompt bytes compared against the
-hidden-state threshold answered "decode" for anything under ~100 KB of text
-(~25k tokens), i.e. essentially every real prompt. The forward that does the
-entire prefill got `DECODE_SECS_PER_LAYER = 2` rather than
-`PREFILL_SECS_PER_LAYER = 15` — 32 s instead of 240 s at 16 layers. Measured on
-the live swarm 2026-08-29 (gotcha #407): a 4728-token prompt, `activation_bytes
-= 24045`, holder abandoned after 32 s of a job needing minutes; the standby
-answered correctly and the request succeeded, so **nothing failed and nothing
-alerted** — the whole cost was a wasted deadline inside a 176 s request.
-
-The guard existed on the sophisticated path and was missing from the crude one
-beneath it. When a value's units depend on which path produced it, every
-consumer needs the units — the fallback included. A threshold is a comparison
-against a scale, so it is a unit conversion wearing a constant's clothes.
-
-**Do not re-derive the verdict at a call site**, and do not widen
-`PREFILL_ACTIVATION_THRESHOLD_BYTES` to "cover" prompts: that would break the
-`HiddenStates` classification it was chosen for. `SegmentBudget` remains
-constructible only through `for_forward` for the same reason it always was.
+→ `docs/invariants/scheduling.md`
 
 ## A ticker merged into a response stream is a termination condition
 
@@ -1704,43 +373,7 @@ encoders. Its wait is cancellable — `tokio::select!` on the interval versus a
 `tokio::sync::watch` finish signal, which is why the signal is a `watch` and not
 an `AtomicBool`: the ticker has to *wait* on it, not merely read it.
 
-**Why it is shared.** OpenAI and Anthropic each had a byte-identical copy, and
-both carried the same defect: sleep the whole interval, THEN check whether the
-response had finished. `Stream::merge` ends only when both halves end, so every
-streamed reply stayed open for the remainder of that sleep — measured, an
-8-token reply delivered in 0.5 s held its connection to 15.0 s, while the same
-request answered non-streaming in 0.56 s (gotcha #390). Clients that stop at
-`[DONE]` never noticed; anything reading to end-of-stream waited, and the server
-held a task and a connection per stream either way.
-
-The comment above the old copy said *"the ticker MUST terminate"* and was right
-about the hazard it had in mind — an unbounded ticker holds the response open
-for ever. **Terminating late is the same bug with a bound on it.**
-
-Three things a change here must keep:
-
-- **A dropped sender ends the ticker.** The token stream is gone; there is
-  nothing left to keep alive. Without this, `changed()` returning `Err` in a
-  loop that ignored it would spin.
-- **An unfinished response still gets keep-alives**, or a slow request looks dead
-  to the client and to any intermediary. That is the hazard the original comment
-  was written about and it is still covered by a test.
-- **The interval is a `Duration`, not a count of seconds.** That is what lets a
-  test drive it at millisecond scale and assert exactly, with no `tokio`
-  `test-util` dev-dependency: an hour-long interval means a ticker that waits it
-  out cannot possibly answer inside the timeout.
-
-**A note on the observed period.** Keep-alive comments arrive at alternating
-gaps of 12.52 s and 15.00 s, not a flat 15 s, and end-of-stream used to land on
-whichever boundary came next — which is why the pre-fix measurements clustered at
-those same two values and why they looked inexplicable until the ticker itself
-was timed. The likely cause is two sources beating against each other: the merged
-ticker on its own interval, and axum's `KeepAlive`, which resets on every write.
-That explanation is *unverified* — it fits the numbers and nothing depends on it,
-since the hold it produced is gone.
-
-Ask of any periodic task merged into a response stream: when the thing it is
-keeping alive finishes, how long until this notices?
+→ `docs/invariants/api-surfaces.md`
 
 ## Event System
 
@@ -1859,1663 +492,6 @@ documented). Caller sees Err in ~10–20s instead of `FIRST_TOKEN_TIMEOUT`
 `is_transient_remote_failure` retry in `dispatch_single` so a single
 silent-drop transparently re-routes to a different holder.
 
-## Centralised Wire-Format Helpers
-
-These helpers exist as the single source of truth for invariants that
-silently break at the wire if duplicated:
-
-- **`network::protocol::build_layer_forward_aad`** — encryption AAD
-  bytes for `LayerForward` envelopes. Both encrypt
-  (`network/manager/tensors.rs`, `network/pipeline_stream.rs`) and
-  decrypt (`decode_layer_forward_encrypted`) MUST go through it.
-  Adding a new authenticated field to `LayerForward` means extending
-  this helper, not appending bytes on the encrypt side. Post-R100,
-  the helper covers the cleartext header AND the spec/kv-truncate
-  trailer fields; the decoder reconstructs AAD via the helper after
-  parsing trailers (since trailer bytes don't appear contiguously
-  on the wire — sealed payload sits between header and trailers).
-  Post-R139, also covers the chunk-meta trailer (0x05) so chunked
-  STREAM frames can't be reordered / truncated / substituted across
-  transfers without Poly1305 rejection.
-- **`network::pipeline_stream::chunk_layer_forward`** (R139) — splits
-  a `LayerForward` at byte-offset boundaries into K chunks for
-  STREAM-style chunked send. Returns the input verbatim wrapped in a
-  single-element Vec when `activations.len() ≤ chunk_size_bytes`
-  (single-chunk implicit fallthrough — no chunk_meta on the wire).
-  Sender call sites that opt into chunked send MUST go through this
-  helper rather than re-implementing the split; the chunk_meta
-  values it sets are the contract the receiver's
-  `try_assemble_chunked_forward` and `build_layer_forward_aad` both
-  rely on.
-- **`SharedState::resolve_pending_layer_result`** — the ONLY way to deliver a
-  `LayerResult` into `pending_layer_results`. Never `remove(&request_id)` +
-  `tx.send(...)` from a network path. The map is keyed by `request_id`, but a
-  request that has failed over has TWO forwards outstanding: the abandoned one
-  and the standby's. Resolving by id alone lets the abandoned forward's late
-  error (from `fail_tensor_forward`, `fail_pending_forward`, or the
-  stale-forward sweep) consume the standby's waiter — which then discards the
-  standby's genuine result and surfaces the empty payload downstream as
-  `Internal: Tensor bytes too short`. Observed live 2026-08-01: a request that
-  would have completed in ~10s via failover failed after 181s (gotcha #229).
-  Waiters record the node they expect in `PendingLayerResult::awaiting`; the
-  helper checks and takes in one atomic `remove_if`. A bare `remove` is only
-  legitimate for owner-side cleanup — a coordinator dropping its OWN waiter on
-  an error path, or the health monitor's stale sweep.
-- **`daemon::dispatch::timestamp_fresh_one_sided`** — generic
-  one-sided staleness check (R94). Time units must be consistent
-  across `ts`/`now`/`max_age`/`skew`. Use directly for any new
-  timestamp gate; gossip and pre-signed-message helpers below are
-  thin wrappers around it.
-- **`daemon::dispatch::gossip_timestamp_fresh`** — private `u64`-ms
-  wrapper used inside `daemon/dispatch/mod.rs` itself for the four
-  inbound gossip handlers (`RegionShardSummary`, `ModelDemandGossip`,
-  `WishlistAnnouncement`, `PoolModelAvailability`). The
-  `network::manager::events.rs` GossipSub pre-filter uses
-  `timestamp_fresh_one_sided` directly via an inline closure — both
-  sites share the same one-sided invariant, but via the underlying
-  primitive rather than this wrapper.
-- **`credit::ledger::check_signed_freshness`** — one-sided staleness
-  check for `chrono::DateTime<Utc>`-typed signed messages (balance
-  reports, credit transactions, pool removals). Constants
-  `CLOCK_SKEW_TOLERANCE_SECS` / `BALANCE_REPORT_MAX_AGE_SECS` are
-  `pub(crate)` so all callers share the same window (gotcha #32). R94
-  routed `pool/manager::handle_inbound_removal` through here.
-- **`pipeline::pack_verify_tokens_to_le_bytes`** (R93) — packs `&[u32]`
-  speculative-verify tokens as i64-LE bytes for the worker's
-  multi-token decode branch. Shared by `speculative.rs::send_verify_batch`
-  and `dsd.rs::forward_verify_through_segments`.
-- **`pipeline::build_spec_verify_forward`** (R93) — constructs the
-  18-field `LayerForward` envelope for spec verify (R139 added the
-  18th field, `chunk_meta`). Adding a new field
-  to `LayerForward` extends this helper, not the call sites.
-- **`pipeline::build_kv_truncate_forward`** (R95) — sibling helper
-  for stop-sequence KV-truncate signals (empty activations,
-  `spec_logits_requested: false`).
-- **`pipeline::register_pending_layer_result`** (R93) — cap-check +
-  oneshot insert + `PendingLayerResultGuard` RAII (gotcha #45). Used
-  by speculative prefill, speculative verify, and DSD verify;
-  `distributed.rs` keeps two inline call sites that need `&mut self`
-  or skip the cap during failover.
-- **`storage::Database::with_write_table`** (R96) — opens a write
-  transaction, runs a closure on the data table, commits on `Ok` or
-  rolls back on `Err`. Used by `put_json`, `insert_raw`, `remove`,
-  `clear_tree`, `replace_tree`. Read-side dedup deferred (lifetime
-  constraints on `ReadOnlyTable`).
-- **`swarmllm_types::ShardResponse::empty()`** (R97) — canonical
-  empty/error response for refused requests, queue-full rejections,
-  and disk read/seek/open failures. 8+ rejection sites across
-  `network/manager/{requests,shard_transfer}` go through it.
-- **`swarmllm_types::LayerResult::error(request_id, reason)`** (R106)
-  — canonical empty/error LayerResult for failed pipeline forwards.
-  Five rejection sites (`network/manager/{tensors,requests,mod}.rs`,
-  `network/pipeline_stream.rs`, `daemon/dispatch/layer_forward.rs`)
-  go through it. Adding a new field to `LayerResult` only requires
-  updating this constructor — mirrors `ShardResponse::empty()`.
-- **`network/manager/connections::try_enqueue_redial`** (R97) —
-  dedup + cap + push for `pending_redial`. Used by both the
-  active-pipeline and unregistered-peer reconnect paths.
-- **`responses::types::raw_tool_kind_or_unknown`** (R93) — extracts
-  the `type` field from a `ToolDef::Raw` JSON value with `<unknown>`
-  fallback. Used by both Chat and Anthropic `translate_tools` error
-  arms.
-- **`cli::bail_if_no_api_key` / `cli::exit_daemon_unreachable`** (R96)
-  — the canonical "daemon not running" / "daemon unreachable"
-  messages. Used by `cli::{bench, chat, peers, status}`.
-- **`model::auto_manage::spawn_check_and_load`** — canonical
-  "shard landed → reload model → refresh dashboard" spawn. Always
-  performs the three steps together: compute_vram_budget →
-  check_and_load_model → signal_dashboard(ModelsChanged). Used by
-  `api/admin_models/shards.rs::delete_shard`,
-  `network/manager/requests.rs` shard-download landing, and
-  `model/acquisition.rs::register_model`. New paths that complete a
-  shard or shard-set acquisition MUST go through this helper rather
-  than open-coding the three-step sequence.
-- **`pool::invite::{encode_invite_code, decode_invite_code}`** (R140) —
-  canonical `swarmpool://` v2 invite code codec. Encode JSON-serializes
-  `InviteCodePayload` → ChaCha20-Poly1305 seals with a random embedded
-  key → base64url; decode reverses with version + expiry + token-length
-  validation. The decoder normalizes ANY user-pasted error to
-  `SwarmError::Validation` (clean UX message) rather than `Internal` —
-  the most likely failure cause is a truncated/mistyped paste, not a
-  daemon bug. New entry points that accept v2 codes (CLI, MCP tool, web
-  API) MUST go through `decode_invite_code` rather than parsing the
-  blob manually. Adding a field to `InviteCodePayload` requires bumping
-  `INVITE_VERSION` AND updating the decoder's mismatch error to point
-  users at a daemon upgrade. `pool::invite::looks_like_v2` is the
-  prefix-sniff helper used by API + frontend to route between v2 and
-  the legacy 8-char path.
-- **`inference::worker_ipc::worker_error_is_fatal`** (R146) — the single
-  source of truth for "did this worker error destroy the worker's device
-  state, or just this request?". Used by the worker to stamp
-  `WorkerMsg::Error.fatal` AND by the daemon's
-  `ModelProcessPool::classify_worker_error` to re-derive the verdict from
-  the message text (the field is `#[serde(default)]`, so a worker binary
-  older than the field always reports `false`). A `true` verdict evicts
-  the worker from the pool, which drops the last `Arc<WorkerHandle>` and
-  lets `Drop` kill the child — the only thing that actually returns VRAM
-  to the OS. New fatal-error classes go in the pattern list, not into a
-  caller-side special case; divergence between the two sides means a
-  stranded worker holding its whole allocation for the daemon's lifetime.
-  Lean inclusive: a needless respawn costs one model reload.
-- **`daemon::shard_loader::force_cpu_for`** (R146) — the single mapping
-  from `inference.gpu_layers` (`-1` auto / `0` CPU only / `>0` GPU) to the
-  loader's `force_cpu` flag. Every device-placement decision goes through
-  it: `ModelProcessPool::effective_gpu_layers` → `--gpu-layers` spawn arg
-  → `model_worker::set_worker_force_cpu` → `ShardLoadParams.force_cpu` /
-  `SplitModel::load_from_gguf(force_cpu)`. Do NOT re-derive placement by
-  calling `Device::cuda_if_available` directly in a new load path — that
-  is exactly how `gpu_layers` came to be silently ignored for every
-  sharded model. Partial offload is not expressible (see
-  `docs/FUTURE_WORK.md`); a fractional value logs a warning rather than
-  being quietly rounded.
-- **`daemon::gpu_support::MIN_COMPUTE_CAP` + `local_gpu_is_supported`**
-  (2026-08-07) — the single answer to "can this card run OUR kernels?".
-  `MIN_COMPUTE_CAP` is a property of the BUILD and MUST equal
-  `CUDA_COMPUTE_CAP` in `release.yml` / `cache-warm.yml` / `ci.yml`;
-  `compute_cap_matches_release_workflow` fails the build if they drift, and
-  `flash_attn_and_the_compute_cap_floor_agree` ties the floor to the feature
-  in BOTH directions (8.0 is only worth paying for because of flash-attn).
-  Do NOT ask `Device::cuda_if_available` whether the GPU is usable — it
-  SUCCEEDS on a pre-Ampere card and only module load fails, per request, so
-  the node starts cleanly, logs "GPU detected", advertises itself to the
-  swarm as a GPU node, and then fails everything with
-  `CUDA_ERROR_NO_BINARY_FOR_GPU`. An unreadable capability is **unknown,
-  never unsupported**: sending a working card to the CPU because nvidia-smi
-  misbehaved is a worse bug than the one this prevents. Enforcement is at
-  `ModelProcessPool::effective_gpu_layers` (the same choke point as
-  `gpu_layers` and OOM CPU-pinning), with
-  `worker_ipc::permanent_gpu_failure` as the backstop for when the probe
-  returned unknown.
-- **`model::auto_manage::vram::ADMISSION_KV_CONTEXT`** (2026-08-18; CPU since
-  2026-08-21) — the context length admission charges KV cache for, on either device,
-  whatever the user configured.
-  **Admission may charge less than the worst case exactly where a runtime check
-  catches the difference, and nowhere else.** Both workers now have one:
-  `kv_budget::claim_exceeds_headroom` in `forward_inner_impl`, a 503 that re-routes.
-  The GPU worker derives its budget from free VRAM at load; the CPU worker is HANDED
-  its budget by the daemon at spawn (`--kv-budget-bytes` →
-  `inference::split::CPU_KV_BUDGET_BYTES`, computed by
-  `ModelProcessPool::record_cpu_kv_budget` as the typical-context charge plus the RAM
-  budget still uncommitted at admission), because only the daemon knows what else is
-  resident. **`ModelProcessPool::charges_ram` decides whether a spawn is charged against
-  RAM at all** — going to the CPU, OR no GPU detected, OR a build without CUDA. The
-  first alone missed every CPU-only node: with no GPU there is no VRAM budget,
-  `admit_to_gpu` admits everything, and the model landed in RAM uncharged and
-  un-budgeted. It changes charging, never placement — the worker still falls back
-  to the CPU on its own, so a working card whose probe failed is not sent to the CPU
-  by it (unreadable is unknown, not absent). Until 2026-08-21 the CPU had no guard, so `estimate_worker_ram_mb` priced
-  the WHOLE ceiling — correct for the mechanism that existed, and what turned a 2.3 GB
-  phi-3.5 into a "needs 27125 MB" refusal at a 32k override (external report; MHA,
-  0.75 MB/token). **Do not remove one side without the other**: admission at a typical
-  context with no runtime guard means swapping, which degrades every request on the
-  machine; a guard with ceiling-priced admission means refusing models that fit.
-  `a_cpu_refusal_itemises_weights_kv_and_context` pins that the same model is now
-  admitted and that the old ceiling figure is still what `resident_footprint` reports
-  when asked for it.
-  **The RAM budget itself is a LIVE snapshot, never a startup figure**:
-  `vram::ram_budget_now` → `RamBudget { cap_mb (from `cfg()`), live_headroom_mb
-  (max(70% of available NOW, total/4)) }`, installed into the pool as a provider
-  closure (`set_ram_budget_provider`, `Weak<SharedState>`) and asked at EVERY
-  admission, by `free_ram_for_admission`'s retry loop, and by `record_cpu_kv_budget`.
-  The clamp used to be folded into the cap once at startup, so a daemon restarted
-  while memory was busy carried the smaller figure for life — the same
-  `max_ram_mb = 18000` answered "budget allows 13370 MB" one day and "10500 MB" the
-  next with 14773 MB actually free (external report, gotcha #362). The refusal names
-  whichever limit applied (`RamBudget::limiting_figure`). `set_ram_budget_mb` is the
-  no-provider fallback (tests) and the startup log figure; do not read it for a
-  decision.
-  Why it exists: `inference.max_seq_len_override` is the only way to hold an agentic
-  client's system prompt (~5000 tokens of tool schema before the user speaks), and
-  raising it used to raise this charge in step, so the model stopped fitting the card
-  and was loaded on the CPU — measured at 396 s of prompt processing and a thermal
-  warning (external report 2026-08-17). Pre-paying at load bought nothing the runtime
-  check was not already enforcing.
-  **Deliberately NOT `DEFAULT_MAX_SEQ_LEN`.** That is a product default and moves with
-  the audience — it went 4096 → 8192 the same day — while this is a statement about a
-  typical working conversation. Tying them would mean raising the default silently
-  re-broke the case above. `raising_the_context_no_longer_costs_a_model_its_place_on_the_gpu`
-  and `the_cap_is_inert_at_the_context_it_was_derived_from` pin both halves.
-
-- **`ModelProcessPool::free_vram_for_admission` + `plan_vram_reclaim`** (2026-08-25)
-  — reclaim graphics memory from models nothing is using rather than demoting the
-  requested one to the processor. Called from the admission-refusal branch in
-  `get_or_spawn_worker`, BEFORE the CPU fallback is taken. **The exact sibling of
-  `free_ram_for_admission`**, which has done reclaim-then-retry for the RAM budget
-  since v0.3.111; the GPU side simply never had it, so a model that happened to
-  load first kept the card for as long as it stayed resident and everything asked
-  for afterwards ran on the CPU (gotcha #388).
-  **Why the pre-existing LRU eviction did not cover it**: `evict_split_models_lru`
-  frees against `estimate_vram_from_shard_dir` (shard bytes × layer fraction —
-  weights ONLY) while `admit_to_gpu` weighs `estimate_gpu_footprint_mb` (weights +
-  KV at `ADMISSION_KV_CONTEXT`). Two estimates of one quantity, and the SMALLER one
-  decides how much to free — so eviction reaches its own stop condition while
-  admission is still short, every time. Measured live: eviction freed 1202 MB, then
-  admission refused against a 2449 MB shortfall and the model loaded on the CPU at
-  ~7 tok/s with the card at 12%.
-  **Neither timer can do this job.** `try_idle_vram_unload` runs on the auto-manage
-  tick, so it cannot act on the request arriving *now*, and its regional-demand
-  clause deliberately keeps a model the SWARM wants resident for up to
-  `idle_hard_unload_secs` (1 hour) — precisely a popular 8B.
-  Three properties a change here must keep. **Plan before destroying**: the whole
-  plan is costed first and abandoned whole if it cannot succeed, because unloading
-  models and still not fitting costs a cold start and buys nothing. The RAM sibling
-  may unload opportunistically — its alternative is failing the request outright;
-  here the alternative is a slower answer, so a wasted eviction is a real
-  regression. **An idle floor** (`VRAM_MAKE_ROOM_MIN_IDLE_SECS`): two models
-  alternating faster than they load would otherwise evict each other on every
-  request; below the floor the previous behaviour is kept, so this can only improve
-  placement. **LRU by real idle time, not residency**: `spawned_at` cannot tell a
-  worker answering steadily for an hour from one loaded an hour ago and never used
-  since, so `WorkerHandle::last_used` is stamped in `register_response` — the ONE
-  place every execution path (local, distributed, peer-served) passes through.
-  **Do not "correct" the estimate.** 6033 MB charged against a measured
-  `vram_after_load_mb=4853` is not a 24% over-charge; the difference is the KV
-  headroom doing its job, and trusting the measured figure would admit a model and
-  then OOM it.
-
-- **`should_return_to_gpu` + `ModelProcessPool::worker_should_return_to_gpu`**
-  (2026-08-27) — the single answer to "is this resident worker still in the right
-  place?", asked on the request path in `get_or_spawn` rather than on a timer.
-  **A pin that clears buys nothing while the worker it produced is still running.**
-  A momentarily-full card demotes a model and pins it; `unload_model` lifts the pin
-  when a GPU tenant goes away and logs `clearing CPU pins`; and `get_or_spawn`'s
-  fast path then returned the processor worker regardless of device. `clear_cpu_pin`
-  is documented as letting "the next worker spawn" use the card, and there is no
-  next spawn — the worker survives until `idle_unload_secs` (15 min) of *no requests
-  at all*, which someone actively using the model never reaches. Reported by an
-  external tester: gemma-2-2b-it re-requested against a card at 653 of 6141 MB
-  reused its processor worker (gotcha #401).
-  **The decision reads the WORKER, not the model.**
-  `WorkerHandle::placed_on_cpu_because` records why the process actually went to
-  the processor, at the moment it was spawned; `cpu_reason` (and so
-  `effective_gpu_layers`) answers for a spawn happening *now*, off the pin that is
-  exactly the thing being cleared. **A running worker is a fact; `cpu_reason` is a
-  prediction**, and they differ precisely in the window this change creates. Three
-  callers were asking the prediction about a resident worker and are now corrected
-  to the fact: `unload_model` (whether killing this worker freed graphics memory —
-  a model on its way back to the card would have lifted every other model's pin on
-  the strength of memory it never held), `cpu_placement_reason` (the dashboard's
-  "why is this not on my GPU?" — which would have dropped its explanation from a
-  model still on the processor, and explained a model happily on the card as "you
-  configured CPU-only"), and `would_fit_on_gpu`'s already-charged short-circuit,
-  which would otherwise have re-created the 2026-08-18 contradiction its own
-  comment describes. **A new caller asking about a model that has a worker should
-  ask the worker — a LIVE one.** `ModelProcessPool::live_worker` is that
-  accessor. The reader task marks a worker dead the instant its socket closes
-  and leaves it in the map for whoever notices to retire, so a bare
-  `workers.get` can hand back a corpse, and a corpse's placement describes a
-  process that no longer exists while the prediction for the next spawn is
-  available and correct. On the request path the same gap cost one request per
-  worker death: `get_or_spawn` returned the dead handle, the caller's own
-  liveness check failed with `worker is dead`, and only the NEXT request — which
-  found the map cleaned — succeeded (gotcha #475). It now retires the corpse and
-  spawns, in both places a resident worker is handed back, since one can die
-  between them.
-  `WorkerHandle::gpu_estimate_mb` caches what admission priced the model at,
-  because `estimate_gpu_footprint_mb` re-reads `gguf_header.bin` and scans the
-  model directory: fine once per spawn, not fine once per request.
-  Four guards, three carried over from `plan_vram_reclaim` because this destroys
-  something that works. Only a worker THIS NODE demoted (on a machine with no card
-  `cpu_placed` is false, and there is nowhere to promote to). The demotion must have
-  stopped applying — of `cpu_reason`'s three causes only the OOM pin ever clears, so
-  this fires on the event that lifted it rather than polling. Never a busy worker,
-  and not one used inside `VRAM_MAKE_ROOM_MIN_IDLE_SECS`, because unloading kills
-  the subprocess and the idle floor makes the race window empty rather than merely
-  unlikely (the residual — a model under continuous load waits for a gap — is in
-  `docs/FUTURE_WORK.md`). And **cost the move before making it**: an unreadable
-  footprint or an unset budget is not evidence, and leaves the model where it is.
-  `admit_to_gpu` treats the same gap as "do not judge" and lets a spawn through;
-  the question here is whether to destroy something working, and the answer on no
-  information is no.
-  **The outcome is announced after admission, not before it.** The retirement logs
-  what it is doing; the user-facing `model_gpu_restored` event is emitted only once
-  the worker is on the card, because admission prices the model again and has the
-  last word — the same correction `admit_to_gpu`'s refusal log already carries.
-
-- **Graphics memory has ONE owner: `ModelProcessPool`** (2026-08-27). It admits
-  (`admit_to_gpu`), charges (`vram_reserved_mb`), and reclaims — on demand
-  (`free_vram_for_admission`) and on the idle timer (`try_idle_vram_unload`,
-  which runs outside the auto-manage gate). **Nothing else may take memory away
-  from a loaded model.**
-  **What this replaced.** `SharedState.split_models` — a cache of per-segment
-  metadata read out of `gguf_header.bin` — was governed by its own VRAM budget
-  that evicted entries *and unloaded their workers*. Two accountants for one
-  card, and the second was the weaker: a different estimate (weights only,
-  against the pool's weights + KV — gotcha #388's shape), a different in-flight
-  oracle (`active_pipelines`, which per gotcha #194 cannot see peer-served work
-  or the split fast path), and **no idle floor at all** — measured, it evicted a
-  model that had answered a request three seconds earlier, which
-  `free_vram_for_admission` refuses by design. Worse, it was placement-blind, so
-  registering a metadata entry for a segment bound for the PROCESSOR killed a
-  model running happily on the card (gotcha #402).
-  **Researched, not guessed.** Ollama's scheduler is the direct analogue and
-  keeps one owner: a single centralised free-space tracker, `runnerRef.vramSize`
-  reported by the runner, victims chosen by refCount (in-flight) → keep-alive →
-  `lastUsedAt`. Our pool already had the equivalent of all three.
-  **The split-model map is now a metadata CACHE**, bounded by
-  `MAX_SPLIT_MODEL_ENTRIES` via `inference::split::trim_split_model_cache` —
-  count-capped, LRU, active-pipeline-protected, and structurally unable to
-  unload anything (it takes no pool and returns only keys). **Do not restore the
-  unload**: it existed (2026-07-21) because eviction was *supposed* to free
-  graphics memory and did not, so the budget was enforced against a phantom.
-  That premise is gone — this no longer claims to free anything. Trimming an
-  entry still wanted now costs a header re-read, not a killed worker.
-  **A registration budget survives, and may refuse but never take.**
-  `SharedState::split_model_budget_with` + `split_models_committed_mb` + the
-  `MemoryScope` enum answer "should this node advertise another segment as
-  locally servable?" — `compute_vram_budget` (the card) or, on a node with no
-  card, `inference.max_split_model_memory_mb`. `MemoryScope` exists because
-  those two were reached through one `.or()` and describe different memory:
-  filtering by graphics residency under the second would disable it on exactly
-  the machines it is for. **`ModelProcessPool::model_uses_gpu_memory`** is the
-  single answer to "does this model occupy graphics memory", resident from the
-  worker's own `placed_on_cpu_because` and otherwise predicted from
-  `cpu_reason`, read through `charges_ram` so "sent to the processor", "no card
-  detected" and "a build without CUDA" give one answer rather than three.
-  **The rule to carry**: a budget over a collection whose members live in
-  different places must be told which place each one is in — and a component
-  that does not own a resource must not be able to reclaim it.
-
-  **`evict_worker_where` / `evict_this_worker` is how a worker leaves
-  `workers`** (2026-09-05, gotcha #467), and `unload_model` is the one
-  exception — it must DRAIN before killing, so it removes the entry itself and
-  ends in the same `after_worker_gone`.
-  `a_worker_only_leaves_the_pool_where_its_memory_is_released` in
-  `tests/repo_consistency.rs` fails the build on a tenth site, with a self-test
-  that plants the violation.
-  **Why**: #461 fixed the three `handle.dead` fast-fail sites; there were NINE.
-  The other six are the paths a worker actually dies on — a failed IPC send and
-  a closed reader channel on each of `forward` / `forward_batch` / `generate`,
-  plus `classify_worker_error`'s fatal arm, which is the CUDA-OOM path. And the
-  health-tick reap could not cover them: it scans `workers` for `dead` entries,
-  and these had already removed the entry, so the charge leaked exactly as
-  before on the six paths that matter most.
-  **`evict_this_worker` compares identity, not just the key** (`Arc::ptr_eq`).
-  A bare `remove(key)` lets a caller holding a handle that has already been
-  replaced evict the LIVE worker that replaced it — a latent hazard on all six
-  sites, closed on the way past.
-  **When a report names three call sites, it is describing symptoms, not scope**
-  — grep the operation and count them before calling the fix complete, and ask
-  what the safety net you just added can actually see.
-
-  **`after_worker_gone` is everything that follows a worker's process no longer
-  existing**, however it stopped: release BOTH budgets, and — if it held
-  graphics memory — lift the CPU pins its occupancy caused. `unload_model` and
-  `retire_dead_worker` both end in it.
-  **Why it is one function.** The two halves are one event and were written
-  separately: `unload_model` had done both since gotcha #401,
-  `retire_dead_worker` was added for #461 and did only the release. So a GPU
-  worker that CRASHED or was OOM-killed — the exact case #461 was written for —
-  freed the card and left every other model pinned to the processor at ~10x the
-  cost, indefinitely (gotcha #466). The pin's clearing condition is "GPU memory
-  freed"; it does not care how the process ended.
-  **After adding a second path to an existing invariant, read what the old path
-  does AFTER the part you copied.** Knowing the "one invariant, N paths" rule
-  did not prevent this; applying it deliberately, as a checklist over the new
-  path's siblings, is what caught it within hours.
-
-  **A range that subsumes loaded ranges replaces them, before it loads**
-  (2026-09-05, report #010). `model_worker::subsumed_segment_keys`; the worker's
-  `models` map is keyed by the exact `(start, end, tp_rank, tp_size)`, so a plan
-  restating coverage the worker already has — [16..48) plus [0..16) becoming
-  [0..48) — misses, and the whole model is read from disk again beside the copy
-  already resident. Measured: 63 seconds, and sustained swap on a 16 GB
-  processor-only node.
-  **Dropped BEFORE the load**, so the process holds `max(old, new)` and not
-  their sum; the peak is the thing that kills a small machine. **Strict
-  subsumption only** — a partial overlap describes layers each range still needs
-  — and **within one tensor-parallel shape**, since another rank's range says
-  nothing about this one's.
-  **Do not "fix" this by skipping the CHARGE for a covered range**, which is what
-  the report proposed: the worker really did load a second copy, so the charge
-  was accurate, and skipping it would have under-counted real memory on a machine
-  that was already swapping. The accounting was the part working correctly. Ask
-  which side of a double-count is the lie before removing either.
-
-  **What WAS missing is the release, the mirror image of that** (2026-09-08).
-  The worker drops the covered ranges and frees their memory; the daemon went on
-  charging for them, because `charged_segments` recorded which ranges existed and
-  nothing ever removed one. A worker that had consolidated its coverage kept
-  paying for what it had dropped — and since the charge is what admission weighs,
-  the node then refused later models that would have fitted.
-  `WorkerHandle::release_subsumed_segments` mirrors `subsumed_segment_keys` on the
-  daemon side, which is why `charged_segments` now records what each range COST
-  rather than just which ranges exist.
-  Three things a change must keep. **The release happens AFTER admission**, never
-  before: admission is deliberately weighed against everything still charged, and
-  a refusal means the forward is never sent and the worker never drops anything,
-  so releasing first would free a charge for memory still held. **Strict
-  containment only**, the worker's own rule — a partial overlap is two ranges that
-  each still need their layers. And **the subtraction saturates**, because an
-  under-run on a `u64` budget is 18 exabytes of free memory and admits everything
-  for ever.
-  **Known gap, pre-existing rather than introduced**: the worker keys its map by
-  `(start, end, tp_rank, tp_size)` and drops within one tensor-parallel shape,
-  while the daemon's charges carry no rank — `record_charged_segment` is
-  idempotent on the range, so a range serving several ranks is charged once for
-  all of them. Under tensor parallelism the release can free a charge the worker
-  only partly dropped. Smaller than the error being fixed and in the same
-  direction as the daemon's existing simplification; a rank-aware daemon model is
-  the real fix (`docs/FUTURE_WORK.md`).
-
-  **A worker's charge is released by SUBTRACTING what THAT worker owed**
-  (2026-09-05). `WorkerHandle::charged_mb` records the spawn's admission charge
-  plus every range `charge_additional_segment` adds; `charged_segments` records
-  the ranges. `release_reserved` subtracts and removes the key only at zero.
-  **Why**: `ram_reserved_mb` / `vram_reserved_mb` are keyed by `ModelId` and
-  `add_reserved` accumulates — right, because one worker can hold several
-  segments — so a release that dropped the key could not say "only this
-  worker's share". Several workers' lifetimes overlap under one id: a
-  replacement is admitted and charged while the corpse is still in `workers`,
-  and dropping the key discarded the replacement's charge, leaving it running
-  un-accounted. That is UNDER-charging, the opposite direction from #461/#467
-  and milder, but the same class.
-  Taking `spawn_lock` in the eviction paths would also close it and is the
-  wrong trade — six of those callers are on the request hot path and that lock
-  is held for a whole model load, minutes on a processor.
-  Three things a change must keep. **The subtraction saturates**: an under-run
-  wraps a `u64` budget to 18 exabytes and admits everything for ever. **It
-  comes off the budget the worker was charged against** (`charged_against_ram`),
-  or the two drift apart on churn. And **`unload_model` reads the figures before
-  dropping the handle** — it waits for the process to exit afterwards, which
-  outlives the handle; `DepartedWorker` carries them across.
-  A test that charges the pool but leaves the handle's figure at zero now
-  asserts nothing; `admit_and_insert_cpu_worker` does what a spawn does, in the
-  order it does it.
-
-  **A worker that DIED gives its budget back too** (2026-09-04, gotcha #461).
-  `ModelProcessPool::retire_dead_worker` is the single answer to "this worker's
-  process is gone": under `spawn_lock`, `remove_if(dead)` then
-  `release_vram_charge` + `release_ram_charge`. Every site that discovers
-  `handle.dead` goes through it, and so does `reap_dead_workers` on the health
-  tick.
-  **Why both.** Only the graceful `unload_model` released the charge; the three
-  `dead` fast-fail sites did `workers.remove(&model_id)` and nothing else. So a
-  worker that exited any other way — an internal crash, an OS OOM-kill, or a
-  user closing the process in a system monitor to free memory — left its whole
-  reservation charged until the daemon restarted. Measured on a 16 GB Mac mini:
-  six consecutive requests refused with a byte-for-byte identical "11487 MB is
-  already in use", over a minute, immediately after real free memory had gone
-  UP.
-  And the call-site half alone is not enough: the charge is ONE shared budget
-  (`ram_committed_mb` sums every model), so a dead 14B refuses every OTHER
-  model, while the call-site check only fires if someone asks for *that* model
-  again — which nobody need ever do. `spawn_lock` is required because a spawn
-  charges and inserts under it, and releasing between the two would free the
-  NEW worker's charge; `remove_if` is required so a late caller holding the
-  corpse cannot retire the live worker that replaced it.
-  **Ask of any "clean up on next use" fix: what if there is no next use, and
-  who else is paying meanwhile?**
-
-  **Retirement DRAINS, it does not kill** (2026-08-29).
-  `unload_model` waits for the worker's `responses` map to empty
-  (`await_responses_drained`, bounded by `WORKER_DRAIN_WAIT`) before sending
-  `DaemonMsg::Shutdown`. Every retirement funnels through `unload_model` —
-  `free_vram_for_admission` against its victims, `worker_should_return_to_gpu`
-  against the processor copy it replaces, the idle timer — so all of them
-  inherit it, and a new displacement path gets it for free.
-  **Two things worth knowing before touching it.** The "stop admitting" half is
-  already done by `workers.remove`, because every forward path re-acquires the
-  handle from that map; a request arriving after the remove spawns a fresh
-  worker. And **dropping the handle is not what kills the in-flight request** —
-  the map holds an `Arc` and the caller holds another, so the child outlives the
-  drop. The explicit `Shutdown` is the entire race, which is why one wait in one
-  place closes it rather than the cross-cutting change `docs/FUTURE_WORK.md`
-  anticipated.
-  The bound is not negotiable: a request that never completes must not hold that
-  model's memory for the daemon's lifetime, since that would refuse every later
-  load on the device — the same trade `WORKER_EXIT_WAIT` already makes, and a
-  worse failure than the race. It reports what it stranded. Retirement only ever
-  targets idle models, so the common path returns without sleeping at all, and a
-  test pins that so no unload pays for a race that is not happening.
-
-- **`model::auto_manage::storage_budget` is the ONE answer to "how much shard
-  storage may this node hold?", and `held_shard_bytes` the one answer to "how
-  much does it hold?"** (2026-09-03, gotcha #448). `storage_budget_now(&state)`
-  gives both for this node, live. Consumers: the download pass
-  (`scoring::remaining_budget`, whose refusal logs every figure and the rule
-  that produced it), prune's disk pressure (`prune::compute_resource_pressure`),
-  the settings storage bar (`api::admin::storage_breakdown`), the pool page
-  (`api::pool`) and the diagnostics report's `storage:` line.
-  `the_storage_budget_has_one_accountant` in `tests/repo_consistency.rs`
-  fails the build on a new spelling of the rule.
-  **Why**: there were three. The download pass quartered the figure for
-  Minimal contribution (the DEFAULT level) — half of `max_disk_mb`, then a
-  quarter of that, 6.25 GB on a stock install — while prune pressure and the
-  pool page used the unscaled figure, and the settings bar drew the cap as
-  headroom AFTER "used". A tester holding 18 GB against an explicit 50 GB
-  read "no remaining storage budget" every cycle with nothing on any surface
-  saying what the budget was, and built a careful theory about phantom
-  manifest reservations — there is none; held bytes come from the registry's
-  reverse index, so a manifest with no local shard contributes nothing. The
-  node was over budget for downloading and at 36% for pruning, so it refused
-  every download and pruned nothing, for ever. **Two accountants for one
-  resource wedge exactly where they disagree** — the same shape as the
-  graphics-memory rule above, on the disk.
-  The rule: an explicit `max_storage_mb` is honoured as written (the VRAM
-  precedent — a number the user typed is not silently scaled by a level they
-  may not connect to it); otherwise 25 / 50 / 75% of `max_disk_mb` by
-  contribution level, the shares the setup wizard has always promised
-  (`contribution_disk_share_pct`); never above `max_disk_mb`; never above
-  held + 80% of free disk — the held term makes the clamp invariant under our
-  own holdings, where the old form subtracted held from a figure that already
-  excluded it. **A refusal must name its arithmetic**: `held_mb`,
-  `budget_mb`, `budget_from`, and what to do about it. A competent reader
-  handed a bare "no remaining budget" will build a theory from the numbers
-  they CAN see.
-  Two siblings fixed in the same pass: `evaluate_and_download` read
-  `max_storage_mb`/`max_shards` from the boot snapshot through a local
-  binding the live-config guard cannot see (#281's shape); and the quarantine
-  sweep named only `.quarantine`, so `.mismatched` files (2026-07-27) were
-  never reclaimed — `QUARANTINE_EXTENSIONS` now lists both.
-- **`model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER
-  BOUND on "idle since", and the worker's own `last_used` is the signal that
-  moves** (2026-09-02, gotcha #437). The idle unload used to trust
-  `model_trust.last_request_at`, which NOTHING in the current code writes; a
-  two-day-old persisted value outranked a worker loaded 215 s earlier and the
-  model was unloaded five seconds after answering, so every request after that
-  paid a cold reload and lost the worker's prefix cache. `ModelProcessPool::
-  model_idle_secs` (seconds since `register_response`, the one place every
-  execution path passes) is now a fourth input, and residency clamps the answer.
-  A new "how long has X been idle" judgement must be bounded by "how long has
-  X existed", and must read a signal the COMMON path actually writes — grep for
-  the writer before trusting a doc comment that names one.
-- **An admitted prompt is RECORDED, not just decided** (2026-09-05).
-  `KvCacheStore::record_prompt_admission` / `outstanding_admission_bytes`;
-  `ensure_room_for_prompt` adds the outstanding total to the live figure before
-  calling `admit_prompt`, and records its own claim once admitted.
-  **Why**: admission reads occupancy, decides, evicts and returns — and the
-  prefill allocates afterwards. On the batched path they are not even adjacent:
-  `admit_slot` marks the slot `Prefilling` and returns to the worker's message
-  loop, with the chunks run on later scheduler ticks. So the next prompt is
-  weighed against memory the previous one has already been promised, and the
-  loop being strictly sequential does not help — the window spans a return to
-  it. The coordinator-side reservation (`peer_vram_commitments`, #457) makes two
-  large prompts reaching one worker rare, not impossible, and the peer's own
-  admission is what these rules call the backstop.
-  Three things a change must keep. **The claim is drawn down by what that
-  request has actually allocated**, so nothing is charged twice — and a claim
-  nothing removed contributes zero once its prefill finished, which is what
-  bounds a leak. **`clear_request` releases it**, so all eight worker paths that
-  end or abandon a request inherited the release unedited and a new one cannot
-  forget. And **the TTL sweep covers the case draw-down cannot** — a prompt
-  admitted and then never prefilled at all. `promised_mb` appears beside
-  `live_mb` in both DIAG lines, because a refusal caused by an invisible
-  reservation is the kind of thing a reader invents a mechanism to explain.
-
-- **`inference::split::kv_budget::admit_prompt` + `PrefixCache::release`**
-  (2026-09-02, gotcha #440) — ONE decision for a whole prompt, before prefill,
-  charging live caches PLUS the prefix cache's snapshots (the same device
-  memory, previously charged nowhere): fit → evict cached prompts, oldest hit
-  first → refuse with a 503 at token 0. Wired at both worker entry points
-  (`ensure_room_for_prompt`, after the lookup and before hydration — hydration
-  is itself an allocation of the matched prefix). The per-chunk guard below now
-  charges `KvOccupancy::external_bytes`, set by the worker after every
-  snapshot insert or release. **A budget must see every tenant of the memory
-  it bounds**: on an 8 GB card the second 6.4k-token prompt found ~300 MB free,
-  was admitted against a KV-store-only figure, and its cache landed in WSL2's
-  host-backed memory — 3-5 tok/s where the empty card did 19-33, with nothing
-  refused and nothing logged. A cache of reconstructible data ranks below the
-  request in hand. **The snapshot taken AFTER a prefill is sized the same
-  way** (`plan_snapshot` → `insert_from_kv(.., max_positions)`): it is a full
-  copy of the request's own cache, and taken whole it put the card straight
-  back over the top — every reply cut at the next growth quantum, measured
-  after the admission half alone had shipped to the card. Older prompts go
-  first, then the snapshot is cut to what fits (a partial prefix still saves
-  its length next turn — `lookup` narrows), then skipped.
-  `SWARMLLM_KV_PREFIX_CHARGE=0` disables all of it for A/B.
-  **The per-chunk guard goes through `KvCacheStore::claim_room`**, which
-  evicts through `set_external_evictor` (installed by the worker over its
-  prefix cache, `Weak` on both sides) BEFORE refusing. Shipping the charge
-  without the eviction (v0.3.149) refused admitted prompts mid-prefill
-  where the release before had served them slowly. **A guard that can see a
-  reclaimable tenant must be able to reclaim it, or it is stricter than the
-  guard it replaced.**
-  **The reconciliation covers the PROCESSOR too** (2026-09-04, gotcha #462).
-  `device_free_and_total_bytes` answers for `Device::Cpu` from sysinfo's
-  `available_memory` (cached 250 ms — every caller is already off the
-  per-token path), so a CPU worker's budget is reconciled exactly as a card's
-  is. It had a CUDA arm and no processor arm, so `kv_budget_now` returned the
-  load-time figure unchanged and a CPU worker's ceiling stayed the grant the
-  daemon made at spawn, for life: it could not see a second worker start, the
-  machine fill, or **its own weights grow** when repeated local-standby
-  failovers took it from 12 to 29 of a 48-layer model — the process was killed
-  and a reply that had already streamed 238 tokens over ~10 minutes was lost.
-  `available`, never `free`: reclaimable page cache is memory this process can
-  have. **A reconciliation written for one device is not device-independent
-  because its arithmetic is — grep the "cannot say" arm and ask which
-  population lands there.** Here it was every processor-only node.
-
-  **The budget is reconciled with the CARD at every decision that takes
-  device memory** (2026-09-03): `SplitModel::kv_budget_now(live, cached)` =
-  `min(load-time budget, live + cached + free_now − margin)`, `free_now` from
-  cudarc's `mem_get_info` (microseconds), margin 5% of the card with a
-  256 MB floor (`kv_budget::budget_reconciled_with_device`). Asked by
-  `ensure_room_for_prompt`, `snapshot_positions_that_fit` and the per-chunk
-  guard — never on the per-token path. **The load-time budget is a
-  prediction; the card is the fact**: `kv_headroom_bytes` was taken from free
-  memory at load and could not see a tenant that arrived later (a second
-  worker, the full build's llama.cpp context, a snapshot), so on the released
-  v0.3.149 it said 4491 MB of room where the card had ~2 GB, and the admitted
-  prompt's cache spilled to host memory at 1.95 tok/s. The reconciled form is
-  invariant under evicting a cached prompt (bytes move from `cached` to
-  `free_now`), which is what keeps `admit_prompt`'s evict-then-fit arithmetic
-  valid against it. A device that cannot say (the processor) leaves the
-  load-time figure alone; `None` still means unknown, never zero.
-- **`inference::split::kv_budget`** (2026-08-08) — the KV memory budget and the
-  admission check against it. The loader records `kv_headroom_bytes` on the
-  model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward
-  claims another growth quantum, and refuses with `ServiceUnavailable` (503,
-  so a coordinator re-routes to a peer). **Do NOT re-introduce a load-time
-  context clamp** — one existed, it shrank every user's context so a single
-  full-length conversation would fit, and it did not bound concurrency at all.
-  Three invariants a new caller must preserve: the check runs ONLY when
-  `positions_claimed` is non-zero (otherwise it walks the whole store per
-  generated token for an answer that is almost always "no"); it charges the
-  POSITIONS claimed, not one quantum, because a prefill jumps many quanta in a
-  single forward and charging one under-counted the largest claim a request
-  ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
-  and any GPU node whose free VRAM could not be read records `None`, and reading
-  that as a zero budget refuses everything.
-- **`SharedState::release_request_state`** (2026-08-09) — clears the maps a
-  finished request leaves behind: `active_pipelines`, `active_traces`,
-  `request_holder_blacklist`, `peer_vram_commitments` and
-  `local_memory_refusals`. They are keyed by request id and share one
-  lifetime. Five call sites removed all three by hand and the invariant was held
-  by three adjacent lines plus a comment asserting it — the shape this codebase
-  keeps getting caught by. Dropping one is silent and unbounded: `active_traces`
-  is the oracle behind `model_is_in_use`, so a stranded entry refuses to delete
-  that model for the rest of the daemon's life, and a stale blacklist entry keeps
-  barring a peer that was only meant to be skipped once.
-  It deliberately does NOT touch `active_count` or `queue_notify` — those belong
-  to the dispatch path that owns the slot, and must move together (§ Inference
-  Router Queue). `per_request_state_is_released_in_one_place` fails the build on
-  a new direct removal; `TraceGuard` is allowlisted because it registers a trace
-  for the split fast path and owns nothing else.
-
-- **`inference::pipeline::remote_generate::StreamReassembler`** (2026-08-09) — the
-  single place a remote reply's token stream is put back in order. Each token is
-  an independent `request_response` send, so the transport orders nothing between
-  them and the terminal token can overtake content still in flight. Emit through
-  the reassembler, never straight from the receive loop, and **never treat a
-  `finish_reason` as end-of-stream on its own** — that is precisely what
-  truncated replies from distant peers (gotcha #282).
-  The contract: content tokens carry `token_id` 0,1,2…; the done token carries
-  the total sent. An all-zero stream means the peer is too old to sequence, and
-  the reassembler degrades to arrival order so a mixed-version network keeps
-  working — do not "simplify" that away. Only the consecutive run is released, so
-  a lost token truncates rather than silently reordering the reply.
-  Any new multi-message exchange should be asked the same question — what happens
-  if these arrive backwards. R139's chunked activation forwards already answer it
-  (slot table indexed by `chunk_idx` plus a filled count); this path did not.
-
-- **A hole in a peer-served reply is FILLED, not waited out** (2026-09-02,
-  gotcha #438). `daemon::state::retained_replies::RetainedReplies` keeps each
-  fast-path reply this node streams — every content token as it is queued,
-  the terminal token when the decode ends — and `SwarmMessage::ResendTokens`
-  is answered from it, ONLY to the peer the reply was for. The requester's
-  `StreamReassembler` reports `has_hole` / `resend_range`, and the fast-path
-  loop asks after `hole_wait` (4×RTT, clamped 1-5 s), at most
-  `MAX_RESEND_ASKS` times, gated on the peer advertising
-  `features::RESEND_TOKENS`. Three things a change must keep: **a resend goes
-  only to the requester** (model output is the requester's and nobody else's);
-  **a duplicate of an emitted token is dropped by the reassembler**, or a
-  resend racing its original sits in `pending` for ever as a phantom hole;
-  and **the old deadlines still bound everything** — an exhausted ask budget
-  falls through to `STRAGGLER_TIMEOUT` / `INTER_TOKEN_TIMEOUT`, so a peer that
-  never answers cannot hold a request longer than before.
-  **An acknowledgement must come from the code that accepted the message.**
-  `requests.rs` used to send `SwarmResponse::Ack` for a `StreamingToken` its
-  own dispatcher had just dropped on backpressure — a drop reported as a
-  delivery. It now answers `SwarmResponse::Dropped` to a peer advertising the
-  bit (an older peer could not decode it and gets the ACK it always got), and
-  the serving side re-sends that token once from the retained reply, after
-  `STREAM_TOKEN_RESEND_DELAY_MS`; the re-send carries no `stream_token` key
-  in `PendingRrSend`, so it cannot loop, and anything further is the
-  requester's `ResendTokens` to ask for. `SWARMLLM_FAULT_DROP_STREAM_TOKEN=<n>`
-  drops content token `n` of every reply once — the only way to lose a token
-  on demand — and `SWARMLLM_RESEND_TOKENS=0` disables asking, so
-  `examples/dropped_token_test.sh` shows both the fix and the truncation it
-  replaces inside one binary.
-- **`api::mcp::dispatch::spawn_model_call_task`** (2026-08-10) — the single place
-  that decides whether a fan-out model call actually **answered**, as opposed to
-  merely not erroring. Every real model call in `compare` / `research` /
-  `batch_prompts` passes through it, so it stamps `"empty": true` onto any result
-  whose call succeeded with blank text, and `count_answered` downstream only reads
-  that flag. Do NOT re-derive blankness by inspecting the collected JSON.
-  **The three tools deliberately name the answer field differently** — `content`
-  for compare and batch, `response` for research — so a downstream check has to
-  know every one of those names and silently mis-reports the moment a fourth tool
-  picks a new one. That is not hypothetical: the first cut of this fix did exactly
-  that, checked `content` only, and would have flagged every successful research
-  answer as blank (gotcha #291). The verdict belongs where the text is, before any
-  tool names it. A new fan-out tool inherits the flag with no author action.
-  Note `status` is deliberately NOT changed for a blank answer — clients already
-  branch on `"ok"`, and reclassifying a success to fix a reporting gap would break
-  them.
-
-- **`crate::error::reclassify_flattened_error`** (2026-08-12) — recovers an
-  error's CLASS from a message that crossed a boundary carrying no types.
-  `SwarmError` survives neither the worker IPC hop nor the network hop; both
-  deliver a `String`, and whatever is left is re-wrapped as `Inference` → HTTP
-  500. Call it at any such boundary before falling back to `Inference`.
-  Two boundaries had the identical problem and only the worker one had a
-  remedy (three private helpers in `process_pool.rs`, now folded into this).
-  A prompt too long for a peer-held model answered `500 server_error` carrying
-  the words "Validation error", while the same request on a local model
-  answered `400 invalid_request_error` — so whose fault a mistake was depended
-  on which machine held the model (gotcha #304). It also mis-attributed blame:
-  `failure_is_penalty_worthy` exempts `Validation` but never saw one, so the
-  peer was docked for the caller's mistake. **Matching on prose is #295's trap
-  and this is the exception** — the markers are `SwarmError`'s own
-  `#[error(...)]` Display prefixes, i.e. part of the type, not wording written
-  for a human that gets rewritten. Adding a variant means adding its marker
-  here; nothing else may re-derive a class from a message.
-
-- **`crate::error::classify_error`** (2026-08-12) — the single answer to "what is
-  this failure, to a caller": `(StatusCode, client-safe message, error type)`.
-  `ApiError::into_response` is one caller; the SSE encoders are the others.
-  **Never choose an error type at a call site.** It used to live inside
-  `into_response`, so streaming could not reach it and both encoders hardcoded
-  one: the same over-long prompt was a `400 invalid_request_error` when the
-  client did not stream and a `"server_error"` inside a `200` when it did — the
-  user's own mistake reported as this server breaking, and monitoring told this
-  node has a bug (gotcha #301). Classify where the typed error still exists:
-  `StreamFailure::from_error` does it at the site that previously discarded it
-  with `e.to_string()`. Do NOT re-derive a type by matching on the message —
-  that is #295's substring-matching-prose trap, and the wording is what changes.
-  `a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling` fails
-  the build on a new literal.
-
-- **`crate::error::failure_log_level` + the `log_failure!` macro** (2026-08-17) —
-  the single answer to "how loudly should this failure be recorded in THIS
-  node's log". **Never pick `error!` vs `warn!` at a site that logs a
-  `SwarmError`.** The level is derived from the status `classify_error` already
-  had to choose, because that status IS the answer to whose mistake it was: 4xx
-  → Info, `501` → Info, other 5xx → Warn, 500 → Error. A new variant therefore
-  inherits a sensible level with no second decision to forget.
-  **Why it exists**: an over-long prompt produced three `ERROR` lines when the
-  model happened to be peer-held and one `WARN` when it was local — the same
-  user mistake at a different severity, decided by which machine held the model
-  — and a `501` for embeddings (deliberate, documented, answered with what to
-  use instead) logged `ERROR Server error`. `ERROR` means "this node is broken",
-  so the product was reporting its users' typos as its own faults (gotcha #316).
-  This is the logging-layer survivor of #300-#305: the HTTP surface had already
-  been taught to classify, and every site that *logged* still hardcoded a level.
-  **`classify_error` is pure and must stay pure** — it used to `tracing::error!`
-  from its catch-all, which meant merely *asking* it what level to use emitted
-  an ERROR of its own (gotcha #315). The full error is logged by whoever reports
-  the failure, from the original `SwarmError` rather than the genericised
-  message. Pin that behaviourally by counting emitted events, not by scanning
-  source for `tracing::` — the first attempt did the latter and tripped over the
-  comment explaining the removal.
-- **`crate::error::error_hint_with_key`** (2026-08-17) — returns the actionable
-  hint as a stable `(key, english)` pair, from ONE match arm. `error_hint` is a
-  thin view over it. The envelope carries `hint_key` beside the unchanged
-  English `hint`, and the dashboard looks up `error_hint.<key>`, falling back to
-  the English it was sent so nothing can ever render as a raw key name.
-  A separate `error_hint_key` function would be a second decision to keep in
-  step — this codebase's most-repeated defect — so they cannot drift here.
-  Adding a hint means adding its translation in all 21 locales;
-  `every_backend_hint_key_has_a_translation` fails the build both ways (a key
-  with no entry, and an entry no variant can emit).
-- **Credits are DORMANT — nothing may publish or act on a balance** (2026-08-17).
-  `MIN_BALANCE_FOR_INFERENCE = 0` and `credit::priority::calculate_tier` returns
-  `DORMANT_TIER` regardless of its arguments, so no balance affects who is
-  served or how fast; the leaderboard neither ranks by credits nor publishes
-  them. The figure is self-minted — no credit has ever moved between nodes as
-  payment for work — so acting on it meant rationing the product by a number
-  nobody can stand behind. `credits_stay_dormant` in `tests/repo_consistency.rs`
-  fails the build if that changes, and it scans the WHOLE of `api/identity.rs`
-  rather than the lines that were fixed: the leaderboard's *self* entry is built
-  by different code from its peer entries, so the first fix left the node still
-  publishing its own (gotcha #317). **It also scans `frontend/js` for code that
-  reads a credit figure** (2026-08-30) — the backend half was checked and the
-  dashboard half was not, so an unreachable `sortKey === 'credits'` branch
-  survived the cleanup that removed every element rendering the balance. It
-  sorted on a field the peer payload has not carried for releases, so it read
-  `undefined` and nobody noticed; one restored column header would have had the
-  peer list ranking by a self-minted number with nothing to catch it. Comments
-  are excluded, because one of them documents precisely why nothing renders the
-  figure. Design and exit criteria in `docs/CREDITS_DESIGN.md`.
-- **`AnthropicSseEvent::Error`** (2026-08-12) — the ONLY way the Anthropic
-  streaming surface reports a failure. Emit `event: error`; never write the
-  reason into assistant content, and never invent a `stop_reason` for it.
-  Before it existed this surface could not say "that went wrong" at all, so each
-  path improvised: the router arm reported every failure as `stop_reason:
-  "end_turn"` with an empty body (a `PromptPrivacyUnavailable` refusal — the
-  thing #295 exists to explain — reached the client as the model choosing to say
-  nothing), and the split path wrote `[inference failed: …]` into the message,
-  where a client cannot tell it from a real reply and it persists as an
-  assistant turn, alongside `stop_reason: "error"`, which the API does not
-  define (gotcha #300). Three invariants a new caller must keep: the frame is
-  **terminal** (`build_anthropic_sse_response` ends its keepalive ticker on it,
-  as it does on `message_stop` — a terminal frame that does not stop the ticker
-  hangs the connection); close any open content block first; and translate the
-  type through `anthropic_error_type`, because our canonical types are
-  OpenAI-flavoured and Anthropic clients match on Anthropic's own set (#302).
-
-- **`SharedState::cfg()`** (2026-08-09) — the live config, and the single answer
-  to "what is this setting **now**". `state.config` is the boot-time snapshot:
-  correct for what is decided once at startup (listen addresses, data dir, how
-  the swarm was built), wrong for anything the Settings panel can change.
-  **Reading a user-settable value from `state.config` is the recurring bug this
-  ends**: the setting saves, answers `{"status":"ok"}`, shows its new value, and
-  the running daemon carries on with the old one. Measured on the released
-  v0.3.87 — `max_disk_mb` 50000 → 123456 still reported 50000; contribution →
-  Maximum left the storage target at 6250 MB.
-  `PUT /api/admin/config` stores the whole updated config here, so a new setting
-  is live with no extra wiring. The `OperationalParams` watch channel remains,
-  but ONLY to wake subsystems that must *react* rather than re-read — resizing
-  the router's concurrency, retiming the auto-manage interval. A value that is
-  merely read each tick needs nothing but `cfg()`.
-  **Do not add another per-setting mirror.** Four already existed
-  (`contribution_auto` from R121, `dashboard_trust_lan`, the two cross-pool
-  toggles) because each was bolted on when someone noticed one setting doing
-  nothing, which left the next one broken; `OperationalParams` meanwhile carried
-  five fields nothing consumed while documenting itself as hot-reloadable.
-  `user_settable_config_is_read_live_not_from_the_boot_snapshot` in
-  `tests/repo_consistency.rs` fails the build on a new frozen read. It checks
-  whole SECTIONS, not field names, because the frozen value is just as often
-  reached through a method — `config.resources.shard_upload_mbps(..)` never
-  mentions `max_bandwidth_mbps`, and that is how that one survived a first pass.
-  **Some things genuinely cannot follow live and the UI must say so** rather than
-  implying otherwise: libp2p connection limits are fixed when the swarm is built,
-  and CPU thread counts are handed to a worker as it spawns (recycling a live
-  worker would drop whatever it is answering). `settings.contribution_restart_note`
-  is where that is said.
-
-- **`SharedState::record_peer_serve`** (2026-08-09) — the single answer to "this
-  node did inference work for a peer", counting it AND billing for it. Reached
-  from exactly two places, the only two inbound paths that serve someone else:
-  `dispatch/layer_forward.rs` (one segment of a pipeline) and
-  `dispatch/remote_generate.rs` (the whole decode, the fast path).
-  **Do not count or bill serving at a call site**, and do not write
-  `requests_served_atomic`, `forwards_served_atomic` or `pending_credit_earn`
-  anywhere else — `serving_is_counted_and_paid_in_exactly_one_place` in
-  `tests/repo_consistency.rs` fails the build if you do.
-  **Why it is enforced rather than documented**: the previous helper,
-  `track_forward_participation`, had a doc comment saying exactly this and was
-  still called by only one of the two paths — the *less* travelled one. The fast
-  path is how a machine holding a whole model answers a peer, so in practice
-  most serving recorded nothing and earned nothing while the requester was still
-  debited (gotcha #279).
-  **The converse is equally load-bearing**: work the node does for ITSELF must
-  not come through here. The router's completion hook and the local-segment path
-  both used to bump these counters, and `pipeline/distributed.rs` used to credit
-  the node for its own segment, so a user whose only traffic was their own chat
-  was told they had served the swarm and was paid for it. The product promises
-  "earn credits by serving inference for others" and "inference across your own
-  devices is free"; both directions have to hold for that to be true.
-  Note that `release_escrow` transfers nothing to `to_node` despite recording it,
-  and `credit::transaction::create_transaction` has no production callers — so
-  this accumulator is the ONLY way a serving node is ever paid (gotcha #280).
-
-- **`config::InferenceConfig::claims_shard`** (2026-08-09) — the single answer to
-  "does this node claim shard N?", i.e. how `inference.shard_range` is read.
-  **Never read `shard_range` directly.** Five places asked the question with
-  their own copy of the comparison and THREE never asked at all: the startup
-  disk scan, the periodic rescan, and one manifest path. The rescan is the one
-  that mattered — startup applied the range correctly and then, minutes later,
-  the rescan found the remaining files still on disk and re-registered them, so
-  a node configured for shards 0-1 of a four-shard model came up serving
-  `layers=[0..12)` and was serving `[0..28)` on its own five minutes later.
-  The feature then fails twice over: the node stops being half of a split model
-  AND loads the whole thing into memory, which is the saving being asked for.
-  Silent — no error, no warning, and the config key parses.
-  **A new shard-registration path MUST call this**; that is the whole reason it
-  is a method on the config that owns the field rather than a free function
-  someone can forget. Verified on two machines: the restriction held for 10
-  minutes against the 4m47s it previously took to lose it, and a genuine
-  two-segment pipeline then answered correctly across both.
-
-- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** (2026-08-21
-  night) — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`. One weight
-  column against `rows` activation rows in one call; the AVX2 Q4_K and Q6_K kernels
-  (`dot_q4k_q8k_rows::<R>`, `dot_q6k_q8k_rows::<R>`) unpack the column once and
-  share it across R rows. **Overrides MUST stay bit-identical to the per-row loop**
-  (`vec_dot_rows_generic`): each row keeps its own accumulators and sees the
-  single-row kernel's operations in the same order; `examples/qmatmul_bench`
-  asserts exact equality against the upstream ordering for Q4_K and Q6_K at every
-  m it prices — run it after touching either kernel. **R is a register-pressure
-  knob, not a "bigger is better" one**: Q4_K at R=8 spilled the 16 ymm registers and
-  R=4 was 1.2x faster at every m. `matmul` also runs the column-outer loop per
-  `ROW_BLOCK = 128` rows so the quantized activations stay in L2 — a whole-prompt
-  forward had streamed ~3 MB from L3 per column, which is why a per-row cost measured
-  at m=128 never carried to large m. The `examples/prefill_bench` single-forward
-  number is only representative of the production 128-token chunks because of this.
-- **`inference::decode_attn::gqa_decode_attention_cpu`** (2026-08-21 night) — single-
-  position attention straight over the KV cache in its stored `[b, kvh, S, d]` layout,
-  one rayon task per (batch, kv head). Dispatched at the top of
-  `standard_attention` for `q_len == 1` on the CPU (MHA and GQA). The two batched
-  matmuls it replaces cost 1.3 ms/layer at ~920 KV for ~11 MFLOP — GEMM packing and
-  dispatch, a quarter of every decoded token. **Returns `Ok(None)` for anything
-  outside its scope** (non-CPU, non-f32, `q_len > 1`, K/V whose `(S, d)` plane is not
-  dense, a mask it cannot reduce to one row) and the caller carries on unchanged —
-  it is an accelerator, never a requirement; keep it that way. `SWARMLLM_DECODE_ATTN=
-  standard` disables it (same discipline as `SWARMLLM_FORCE_STANDARD_ATTN`); that is
-  how its +24% decode was attributed (A/B/A/B in one binary). Not bit-identical to
-  the matmul path (different summation order); `decode_kernel_matches_the_matmul_
-  path` bounds it (abs < 1e-5, rel < 1e-4 with a 0.05 floor — the first metric
-  flagged fp32 noise on a near-zero output as a failure). The DRAM floor for the
-  cache read at ~900 KV × 28 layers is ~7 ms/token on this box; the kernel sits at
-  ~15 — the remainder is per-layer dispatch, not arithmetic.
-- **`inference::fast_math`** (2026-08-21 night) — eight-lane AVX2 `expf`
-  (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by
-  `vectorised_exp_tracks_libm` over [-80, 80]) and the fused `silu_mul` CustomOp2.
-  Every `exp` on the CPU path had been a scalar libm call — ~540 M in the softmax
-  rows and ~205 M in SiLU for an 896-token llama-3.2-3b prompt. **Used by the fused
-  softmax (`attn_softmax::softmax_row`), the three SiLU×up call sites in
-  `layers/mod.rs`, and the decode kernel.** Not bit-identical; every consumer keeps
-  its tolerance test against the composed candle reference (softmax 1e-6 rel, silu
-  2e-6). A new elementwise pass that calls `f32::exp` in a loop is the thing to
-  route through here instead. Inputs below ~-87.3 underflow to 0 (libm: denormal),
-  above 88.37 saturate — right for softmax (shifted ≤ 0) and SiLU (limits).
-- **`inference::cpu_pools::in_phase_pool`** (2026-08-07) — binds a forward pass
-  to the CPU thread pool that suits its phase, at ONE choke point:
-  `SplitModel::forward_inner_impl` and `forward_batch`. Every entry point —
-  LoRA, speculative verify, pre-embedded segment, SWIFT skip-mask, batched
-  prefill — funnels through those, so a new one inherits it and cannot forget.
-  Do NOT call `install` at a call site instead.
-  **Reading a prompt and writing a reply want different thread counts**: decode
-  is bandwidth-bound (69% of roofline), so past the point that saturates memory
-  the extra threads only contend. **The cap is PHYSICAL CORES and must not
-  become a fraction of them.** A fraction was tried — `max(4, physical/2)`,
-  measured correctly on an 8-core Ryzen — and a second machine (6-core Intel
-  i5-10500T) showed decode climbing monotonically to all six, where that rule
-  would have cost 23%. Peak threads is bandwidth divided by per-core draw, which
-  core count cannot predict; physical-vs-SMT is the only part both machines and
-  the mechanism agree on. Prefill keeps the global pool untouched; decode is
-  capped only ever downward, and every contribution level is already at or below
-  physical, so the common path builds no pool and pays nothing.
-  `SWARMLLM_DECODE_THREADS` overrides, and `=0` restores the single-pool
-  behaviour for A/B measurement inside one binary — the same discipline as
-  `SWARMLLM_FORCE_STANDARD_ATTN`.
-  **The calibration is keyed by the forward's PROCESSOR DEPTH, and a forward
-  with no processor layers is never timed** (2026-09-01, gotcha #432).
-  `in_phase_pool` takes `cpu_layers` — `SplitModel::cpu_layer_count()`, zero for
-  a segment entirely on the card, the whole segment on a processor-only node,
-  the processor's share of a hybrid split — and `cpu_pools::Calibrations` keeps
-  one calibration per depth. Why: one worker serves every forward its model is
-  asked for, and while the 8B was loading as a 12/32 hybrid split the SAME
-  process served two one-layer card-only segments of it for a boomerang
-  request. Their 1-5 ms tokens settled the process-wide calibration on ONE
-  thread (`4:5ms 3:2ms 2:2ms 1:1ms`), and the full model then decoded its 20
-  processor layers single-threaded for the worker's life: 2.9 tok/s, below the
-  4.0 the model does on the processor alone. Re-run with the cold request kept
-  local it read `4:211ms 3:194ms 2:221ms 1:351ms`, chose 4, and did 5.2-5.6.
-  Any GPU holder that serves segments for peers can hit this. A new caller
-  passes the depth of THIS forward, never a property of the worker.
-- **`inference::layers::new_kv_cache`** (2026-08-07) — the only way to construct
-  a KV cache. **Never call `KvCache::new(2, max_seq_len)`**, which is what every
-  site did and which reads as obviously correct — the parameter is even called
-  `max_seq_len`. candle's `Cache::new(dim, n)` sets `grow_by` AND `max_seq_len`
-  to `n`, and `append` allocates the full buffer on the FIRST append, so passing
-  a model's context length reserved the whole context window from token one: a
-  100-token chat held 940 MB at 3% utilisation on llama-3.2-3b. The helper
-  passes `KV_CACHE_GROWTH_TOKENS` instead and lets `append` grow on demand; the
-  conversation's real ceiling is enforced separately by the
-  `total_seq > max_seq_len` guard in `forward_inner_impl`, so this value cannot
-  shorten a conversation. `kv_cache_reservation(positions)` is the sibling for a
-  cache that must hold N tokens immediately — prefix-cache hydration — and it
-  deliberately ignores the snapshot's recorded `max_seq_len`, because snapshots
-  cross the network and a peer on an older build recorded a whole-context value.
-  **Reason about KV memory from `KvCacheStore::occupancy()`, never from process
-  RSS**: the reservation is lazily-faulted zero pages, so a 4-8x change in
-  reserved bytes moved RSS ~5% and in both directions. Two conclusions drawn
-  from RSS about this cache were wrong before the counter existed.
-- **`inference::split::kv_cache::LayerKv`** (2026-08-10) — one layer's KV cache:
-  the f32 BHSD cache every path reads, plus an optional f16 BSHD mirror for the
-  CUDA flash kernel. **Never touch the inner `KvCache` directly.** `append` and
-  `reset` are INHERENT methods and so take priority over the `Deref`, which is
-  what stops an existing call site reaching the inner versions and leaving the
-  mirror behind; `KvCacheStore::truncate_to` (the speculative-decode path) got
-  correct behaviour for free from that, since it truncates via reset+append.
-  **Why a mirror rather than replacing the f32 cache**: rounding to f16 moves
-  from every-read to once-at-write, and since the f32 source is never itself
-  overwritten the flash kernel receives bitwise the same numbers — so the flash
-  path is numerically unchanged, not merely close, while `standard_attention`
-  keeps full precision. Published results on f16 KV divergence (arXiv 2604.15409)
-  are worst under long context and GQA, which is exactly our case, so the f32
-  copy stays.
-  **Three things a new caller must respect.** (1) The mirror is GQA-only —
-  `layers::model_wants_kv_mirror` gates it, because MHA decode reads the f32
-  cache and an unread mirror cost 3-8% per token plus 50% more KV memory
-  (measured on phi-3.5). (2) `set_mirror_wanted(true)` is deliberately INERT: a
-  mirror started against a cache that already holds positions can never catch up
-  and would be refused forever by the length guard while still costing memory.
-  (3) The mirror is real VRAM and `kv_budget::kv_bytes_per_token` must charge for
-  it — omitting it let a model be admitted and then OOM instead of returning the
-  503 that reroutes to a peer.
-  Worth 1.41x on GQA decode at ~2064 KV; the win is long-context only (~1.04x at
-  256), which is what an O(history) cost predicts.
-- **`inference::split::kv_cache::SeqCache` / `KvPair` + `LayerKv::truncate`**
-  (2026-09-02, gotcha #439) — the KV cache buffer is this project's own, not
-  candle's, for ONE reason: candle's `Cache` keeps its length private, so the
-  only way to keep the first `n` positions was snapshot + `reset()` +
-  `append()` — two full copies of the retained prefix per layer (K and V, then
-  the f16 mirror rebuilt), and two prefix-sized TEMPORARIES on the device —
-  every time a speculative draft was rejected, i.e. once per generated token
-  on a prompt that drafts and misses. Found while chasing 33 → 2.8-4.7 tok/s
-  on a prompt of 32 tool schemas with the card at 7.9 of 8 GB — and measured
-  NOT to be that crawl's cause (one binary, both modes, same pressure: no
-  change; the cause is live KV spilling to host memory because the prefix
-  cache's snapshots are not charged, gotcha #439/#440). It is still waste
-  removed, and exact rollback accounting. `truncate` now moves
-  two length fields. Growth semantics are candle's, unchanged, because
-  `KvOccupancy` and the KV budget reason about that quantum. **Never
-  re-introduce a copy on the rollback path**, and never reach the inner
-  cache's `reset`/`append` from a call site — `LayerKv`'s inherent methods
-  keep the mirror in step. `SWARMLLM_KV_TRUNCATE=copy` restores the old path
-  for A/B inside one binary. Two tests pin it: bitwise equality with the copy
-  path after truncate + append, and buffer identity (no reallocation) with the
-  copy mode as the control that the check can see one.
-- **`inference::attn_softmax::scaled_masked_softmax`** (2026-08-07) — the single
-  expression of attention's tail: scale, optional Gemma-2 logit soft-cap,
-  additive mask, softmax. Do NOT re-express those as separate candle ops in a
-  new attention path. Each one materialises a whole
-  `[batch, heads, q_len, kv_len]` score tensor — 11 MB at llama-3.2-3b prefill
-  shapes — so writing them out cost 34.6 ms where one fused pass costs 11.4,
-  and attention fell from 22.4% of a prompt chunk to 9.5% when they were folded
-  together. The fused CPU kernel declines anything it cannot index (non-CPU,
-  non-f32, strided, or a mask that is not a shared `[q_len, kv_len]` block) and
-  falls through to `composed`, which is the original expression and the
-  reference its tests compare against — so a new caller is always correct,
-  just possibly not fast.
-  **The mask is ADDITIVE f32 everywhere: `0.0` visible, `-inf` masked.** There
-  used to be two representations — a `u8` predicate for the standard path and a
-  float copy the flash arm rebuilt on every call — and a new attention backend
-  had to know which it was being handed. `SplitModel::causal_mask` is the only
-  producer. It also returns a CONTIGUOUS tensor deliberately: a `narrow()` view
-  costs 2.1x in `broadcast_add` and is refused by the fused kernel outright, so
-  any path that slices a mask (the query-blocking loop in `standard_attention`
-  does) must `.contiguous()` it before passing it on.
-  Changing the scale means changing `scale_from_head_dim`, which reproduces
-  candle's `tensor / f64` (an `affine(1/rhs)`, i.e. already a multiply) exactly.
-  `scale_matches_candle_division` pins that against candle itself rather than
-  against the helper — an equivalence test where both sides call the same
-  helper passes happily with the scale inverted.
-- **`inference::layers::standard_attention` grouped GQA decode** (c4cc3b16,
-  2026-08-16) — for `q_len == 1` with `n_kv_head < n_head`, standard attention
-  no longer expands the KV cache with `repeat_kv`; it reshapes the query heads
-  into extra matmul rows against the unexpanded cache
-  (`grouped_gqa_decode_attention`). Identical arithmetic — the reshape is valid
-  ONLY because `repeat_kv` numbers heads group-major (query head `h` belongs to
-  group `h / n_rep`); get that backwards and every head reads another group's
-  cache while still producing plausible logits, which is why
-  `grouping_query_heads_matches_expanding_kv_heads` compares against the
-  expanded path rather than asserting shapes. MHA was pinned byte-identical
-  (`mha_decode_matches_the_plain_path` — now within 1e-5, since the decode kernel
-  serves MHA decode too, 2026-08-22). This flipped the CPU decode routing: GQA decode
-  had been sent to the fused kernel precisely because of the `repeat_kv` cost,
-  and with it gone the same benchmark reports the opposite at every length
-  (3-9x) — so **all CPU decode now takes standard**, with the control run
-  reproducing the old verdict on the reverted code. 1.41x end-to-end CPU decode
-  on llama-3.2-3b; 4h-soak-validated (`soak_0816_cpu_speedup.md`).
-- **`inference::layers::cuda_decode_prefers_standard`** (2026-08-08) — on CUDA:
-  MHA decode takes standard, GQA decode takes flash **at every context length**;
-  prefill always flash. The GQA side rested on the same reason the CPU rule did —
-  `standard_attention` rebuilt the `repeat_kv` expansion every token — and that
-  premise changed with the grouped path above, so it is a re-measure candidate
-  (`docs/FUTURE_WORK.md`); it stands unchanged because GPUs already route GQA
-  decode to a fused kernel and this box cannot resolve a small GPU delta (#267).
-  The MHA side is not premise-dependent: flash has no split-KV kernel, one query
-  row cannot fill the card, up to 25x per call.
-  **There is no crossover, and re-introducing one needs a FORWARD measurement,
-  not a per-call one.** A 1024-token threshold shipped on 2026-08-07 from timing
-  the attention call in isolation; measured end to end the next day it was wrong
-  at every length (1.13x at kv~272, 1.42x at ~528, 1.61x at ~912 in flash's
-  favour). Isolated, `repeat_kv`'s allocation and bandwidth cost is amortised
-  against warm buffers and no competing traffic. **Third occurrence of gotcha
-  #255.** Controls that make the change attributable: at 2048 KV both arms were
-  identical (both already flash) and MHA identical to the decimal.
-- **`inference::layers::cuda_decode_prefers_standard` (superseded note, 2026-08-07)** — the
-  measured CUDA attention routing rule, extracted so it is testable without
-  a GPU. **The right kernel is opposite for prefill and decode, and it turns
-  on GQA** — the same lesson as the CPU crossover above it (gotcha #255) on
-  a different device. Flash unconditionally costs up to **25x per attention
-  call** on MHA decode, because candle-flash-attn ships no split-KV kernel
-  and one query row cannot fill the card; GQA reverses above ~1k context
-  because `standard_attention` rebuilds the `repeat_kv` expansion every
-  token. Changing the constant means re-running
-  `flash_vs_standard_attention_on_cuda` — the measured table lives in the
-  dispatch's comment and in `docs/FUTURE_WORK.md`, and the benchmark
-  asserts the dispatch never picks a kernel materially slower than
-  always-standard.
-- **`inference::mem_bandwidth::measured_gbps`** (2026-08-18) — what this machine's
-  memory actually delivers, measured once and cached. **The figure a processor-only
-  node advertises as its speed.** It was `estimate_tokens_per_sec_7b(50.0, false)` —
-  a hardcoded bandwidth for every machine — so every CPU node in the swarm quoted
-  the identical 1.70 tok/s whether it was an eight-channel server or a fanless
-  mini-PC. Nothing could tell two of them apart, which is why a delegation gate
-  comparing them would have been comparing a constant with itself. Measured 29.9
-  GB/s on the 5800H laptop this was written on, against the 50 assumed.
-  Buffer must exceed any last-level cache (256 MB) or it reports cache bandwidth;
-  min-of-3 because every error source is additive; reads at decode width, not
-  thread-per-core, so it ranks machines the way running a model does. Costs 254 ms
-  once, on the health-monitor task rather than the startup path.
-  **Adding a device class means giving it a real measurement, not a constant.**
-
-- **`NodeCapability.cpu`** (2026-08-18) — a processor described the way a graphics
-  card always has been. `GpuInfo` has existed since the beginning; the CPU had no
-  representation, so a peer without a card rendered as the bare word "CPU" and every
-  such machine looked identical. Additive and `#[serde(default)]`, per the
-  additive-protocol rule — verified in BOTH directions against the released
-  v0.3.101 binary: an older node ignores the new field with no deserialisation
-  failure, and a newer node reads `cpu: None` from an older one and falls back to
-  the old label. **A new capability field is not done until that pair has been run**;
-  the swarm is always mixed-version during a rollout.
-  Deliberately carries no more than the GPU already does — the `os` field's refusal
-  to send a build string is about identifying the INSTALL, whereas a processor model
-  identifies the hardware doing the work, which is what a peer needs to judge.
-
-- **`PeerInfo::ack_srtt_ms` is what routing prices a peer by** (2026-09-02).
-  Written by the network manager on every acknowledged tensor forward from
-  `AckRttEstimator::srtt_ms` (the RFC 6298 `srtt` the ACK deadline is built
-  from), capped at `ACK_SRTT_ROUTING_CAP_MS` (10 s) because the estimator
-  DOUBLES on a miss up to the deadline maximum — the right deadline for a
-  silent peer and the wrong latency for a route, which would take ~30 good
-  samples to decay. Read by `get_peer_metrics` ahead of `latency_ms`, the
-  health ping, which stays the fallback for a peer never forwarded to. The
-  ping is taken idle and cannot see the queueing a loaded event loop adds to
-  every forward (#386); routing prices the forward. **Local, never gossiped**
-  — it describes OUR path (the #341 rule). Pinned by
-  `a_measured_ack_latency_outranks_the_health_ping_when_choosing_a_holder`
-  with a control that the ping still decides without it.
-- **`inference::cancel::unless_cancelled` — every wait that can run for minutes
-  watches the request's cancel flag** (2026-09-03, gotcha #445). The flag
-  (`InferenceRequest::cancel`) is the ONE cancellation signal: set by
-  `CancelOnDisconnect` (non-streaming), by both SSE surfaces on
-  `sse_tx.closed()` (they used to only drop `token_rx`, which the pipeline
-  notices at its next send — after the prompt pass), and by `/cancel`. Read
-  by `ModelProcessPool::forward_for_request` around the WAIT for the worker's
-  answer (never around the send: a half-written `Forward` frame corrupts the
-  worker's stream), by `PipelineExecutor::wait_for_result` for a remote
-  segment (the caller then sends `CancelInference` and does NOT fail over),
-  and by the per-token loop as before. Dropping the wait is the mechanism —
-  the armed `ResponseGuard` sends `CancelRequest`, the worker skips a queued
-  forward and stops a running one between layers. The router never retries a
-  request whose flag is set; the marker error is `REQUEST_ABANDONED`
-  (`ServiceUnavailable`, penalty-exempt, matched only by `is_request_
-  abandoned`). **A new wait longer than a token goes through this helper**, and
-  a new surface that learns the client left must set the flag — a tester's
-  worker ran 81 CPU-minutes on two one-layer segments after the client had
-  gone because the flag was read in one place and set in one other.
-- **A prompt pass asks between layers whether its request was cancelled**
-  (2026-09-02, gotcha #441). `KvCacheStore::set_cancel_oracle` is installed by
-  the worker over its `cancelled` set; `forward_inner_impl` probes it once per
-  layer and returns `CANCELLED_MID_FORWARD`; `forward_was_cancelled` on the
-  worker is the ONE place that looks at that message (the sequential path
-  answers a normal `GenerateDone{finish_reason:"cancelled"}` and clears the
-  KV; the batch path lets the drain step collect the slot). Why: the cancel
-  check lived only in the decode loop, and the prompt is one forward before
-  the first token — minutes on a processor-only node with an agent-sized
-  prompt, which a tester found still pegging five cores eleven minutes after
-  "cancelling" was logged. A cancel check belongs at the granularity of the
-  WORK; a new long-running loop inside a forward inherits this probe only if
-  it runs per layer, so anything longer than a layer must probe on its own —
-  which is what `SplitModel::forward_prompt_in_chunks` does for the segment
-  path (2026-09-03, gotcha #445): a prompt longer than `prefill_chunk_tokens`
-  runs in chunks, `index_pos` advancing, and probes between them, because a
-  ONE-layer segment (the boomerang's local ends) has no between-layers at
-  all. Parity with the one-shot pass is pinned on the output and on the
-  cache left behind; a decode step is one position and takes the one-shot
-  path unchanged.
-- **`SharedState::local_fast_path_for` is the single answer to "may this
-  request take the local split fast path?"** (2026-09-03, gotcha #443). Both
-  API surfaces used to compose it themselves (`has_complete_split_model &&
-  !should_offer_work_to_the_swarm`), and the fast path skips the router —
-  which is where `delegation_target` lives. On a node whose card is too
-  small the model is not REGISTERED (`scan.rs` refuses over the graphics
-  budget), so the fast path was skipped by accident and delegation looked
-  reachable; on a node with no card the model is always registered, the fast
-  path always won, and the #442 fix shipped in v0.3.150 was unreachable on
-  the very node it was for. The predicate now stands aside when
-  `serves_on_cpu` AND a connected peer exists; the scheduler then delegates
-  or assigns locally. A feature behind a gate is only as reachable as the
-  gate's callers: test it from the API, not from the function.
-- **`ModelProcessPool::serves_on_cpu` is the whole-model delegation
-  precondition** (2026-09-02, gotcha #442) — "would this request run on our
-  processor": no usable card, told to use the processor, a build without
-  CUDA, or a card the model does not fit. It replaced
-  `is_cpu_bound_for_lack_of_vram` alone, whose doc read a node with NO card
-  as "working normally" — so a processor-only node holding every shard ran
-  the model itself with GPU peers idle on the same pool. Peer-side gates in
-  `delegation_target` are unchanged. The case it could not reach — a model no
-  single peer's card holds — is the priced comparison below.
-- **A node holding every layer that would run the model on its processor lets
-  the priced search compete with its fast path** (2026-09-03, gotcha #444).
-  `assemble_pipeline_for` answers `serves_on_cpu` ONCE (a lazy `OnceCell`,
-  since it prices the model against the graphics budget and reads the header
-  for a model with no worker) and threads it into `gather_candidates`, which
-  prices the LOCAL candidate by the device the request would USE: processor
-  speed from measured bandwidth, the processor prefill prior, and — on a node
-  that has a card — no `observed_latency_ms_per_layer`, because that figure
-  is per node and was measured on whatever the card served for someone else.
-  When no whole-model peer qualifies (`delegation_target` → `None`),
-  `pipeline_may_beat_local` skips the fast path and `route_shortest_path`
-  runs; `pipeline_may_replace_processor_route` then keeps the request home
-  for an all-local chain or one whose remote segments include a peer priced
-  at `UNKNOWN_COMPUTE_MS` — **a route this node can price is never given up
-  for one it cannot**. Greedy never makes this call (nothing to compare), and
-  a parallax error falls back to the fast path, not greedy. The decision line
-  logs `local_processor_cost_ms` and `pipeline_cost_ms` (`parallax::
-  chain_cost_ms`) so the choice can be checked from a log.
-  **Why this is not `cbbed678` again**: that pass priced local layers at a
-  constant 10,000 — a penalty, not a price — so the search could not see the
-  LAN split that was best and sent a request abroad. Here the local figure is
-  the same measured one every peer advertises about itself, and every remote
-  hop is still charged per token, so a short prompt with only distant cards
-  stays home (pinned by `a_short_prompt_stays_on_the_processor_when_the_
-  cards_are_far_away`, whose near-peer arm proves the route exists).
-  **Under prompt privacy the router adds split points 1 and N−1 when the
-  local node holds the whole model.** Privacy is auto-on for a node holding
-  both ends, so the tester's shape is a boomerang across SEVERAL peers —
-  local(0,1), card, card, local(N−1,N) — and `route_shortest_path` only cut
-  ranges at shard boundaries, of which a node holding everything has none in
-  the interior. Added only for that topology, so every other encrypted route
-  is exactly what it was. Test it from `assemble_pipeline_for`, not from the
-  router: the first cut passed the router's tests and stayed local end to
-  end for exactly this reason.
-- **A peer's capacity for a prompt is weights PLUS that prompt's KV cache**
-  (2026-09-03 evening, gotcha #447 follow-up). `scheduler::max_hostable_layers`
-  takes `prompt_kv_bytes_per_layer` — `kv_bytes_per_position_per_layer(gguf_meta,
-  on_gpu) × prompt_tokens`, the same arithmetic the worker charges at admission,
-  mirror included for a GQA model on a card — on top of the weights for a cold
-  peer and ALONE for a warm one. A warm peer used to be uncapped ("it has already
-  paid for the weights"), which is true and was the whole story until the prompt
-  was 8,000 tokens: the #447 card was warm. Unknown prompt or geometry → 0, and
-  unknown never excludes. **The peer's own admission is the backstop**:
-  `model_worker::handle_forward` now runs `ensure_room_for_prompt` for the prompt
-  pass (`sequence_num == 0`, the work kind of #434) of a SEGMENT too, so an
-  over-committed peer refuses at token 0 with the 503 the coordinator fails over
-  from, instead of dying in attention 22 s in. A new admission check on the
-  `Generate` path has to be asked whether the segment path got it too.
-- **`mem_bandwidth::remeasure_keeping_the_best`** (2026-09-03 evening) — the
-  memory-bandwidth figure a processor-only node advertises may RISE over its
-  run and never fall. It was a `OnceLock` taken on the first capability
-  broadcast, so a node that booted busy carried a low figure for its whole
-  run — and since #428 that figure is what every peer's scheduler ranks it on.
-  Bandwidth is a hardware ceiling, so the best observation is the least
-  contaminated one (the argument `PASSES` already makes within one measurement).
-  The health monitor re-measures on a blocking thread at ten minutes and then
-  hourly, ONLY while no inference is in flight (a measurement under a decode
-  measures the decode), never on a GPU node. `best_of` treats an unmeasurable
-  pass as no information, not zero. A new consumer of the figure reads
-  `measured_gbps()` as before; a new measurement of any hardware ceiling should
-  be shaped the same way.
-- **A peer's advertised version may bring the update check FORWARD and may do
-  nothing else** (2026-09-03 evening). `update::PeerVersionWatch` on
-  `state.events.peer_versions`, fed by the capability-gossip handler through
-  `EventBus::note_peer_version`; `state.events.update_nudge` (a `Notify`, not a
-  third broadcast channel — one listener, no payload) wakes `UpdateChecker::run`,
-  which then runs the SAME `check_for_update` the hourly poll runs, after a
-  random delay of up to 90 s and no closer than ten minutes to the last check.
-  The version is self-attested, so: two DISTINCT peers must agree; the version
-  must be newer AND plausibly adjacent (same major.minor, ≤ 25 patch releases
-  ahead); one version nudges once; a peer that reports something older
-  withdraws its vote; the map is capped. **Never let the gossiped value name,
-  select or fetch an artifact** — announcing `9.9.9` would otherwise be a
-  one-message way to make the whole swarm hit the update path at once.
-- **`inference::process_pool::worker_socket_path`** (2026-09-04, gotcha #449) —
-  the worker IPC socket path, and the ONLY place it is built. `sun_path` in
-  `sockaddr_un` is a fixed array of **104 bytes on macOS/BSD and 108 on
-  Linux**, so a path one byte over does not truncate — `bind` refuses, the
-  worker never starts, and since prompt privacy keeps the first and last
-  layers local, the node answers nothing at all whatever the swarm holds.
-  That was every request on every Mac: macOS hands each user a private
-  per-boot temp dir (49 characters, measured) and the name was
-  `swarmllm-worker-<36-char uuid>.sock` (57).
-  Three things a change must keep. The name stays SHORT
-  (`worker_socket_filename`, 12 hex chars — every character here is one the
-  directory cannot use). `$TMPDIR` is tried first (per-user and private on
-  macOS, short on Linux) and `/tmp/swarmllm-<uid>` only as a fallback,
-  created 0700 and **verified after creation** — `/tmp` is world-writable, so
-  a pre-created hostile directory is the attack, and the check is
-  `symlink_metadata` + uid + `mode & 0o077 == 0`, refusing rather than
-  repairing. And the arithmetic lives in `first_dir_that_fits`, a pure
-  function tested against the literal 104: **a platform-dependent length
-  limit is invisible to a single-platform suite**, so a test that asks the
-  host cannot see the bug that only exists on the other host.
-- **`update::SelfUpdateBlocker` — "this node cannot update itself" carries WHY**
-  (2026-09-04, gotcha #450). `UpdateChecker::self_update_blocker` probes and
-  returns the reason; `can_self_update` is a thin wrapper over it. `key()` is
-  the stable string the dashboard translates (21 locales), `advice()` the
-  English one the daemon log and `swarmllm update` print — written together,
-  in one match, so a new case cannot reach one surface and not the others.
-  **Why**: it used to be a bare bool, and each of the three surfaces rendered
-  its own sentence about a package manager, correct for a `.deb` under
-  `ProtectSystem=strict` and useless to the Mac user whose binary sat in
-  `/Applications`. `UpdateInfo` now also carries `install_dir`, because the
-  folder is the thing the person has to act on and nothing named it.
-  **The CLI asks before downloading**: the probe is a file create-and-delete,
-  and `swarmllm update` used to fetch ~1 GB before discovering the answer.
-  `looks_like_packaged_install` keys on the unit file the packaging installs,
-  not on the binary's path — `/usr/local/bin` is equally a manual install, and
-  the advice that follows is wrong for the other case.
-- **`inference::scheduler::delegation_target`** (2026-08-18) — the single decision
-  to hand a WHOLE model to a peer rather than run it on this node's CPU. Fires only
-  when `ModelProcessPool::is_cpu_bound_for_lack_of_vram` says we have a working GPU
-  this model does not fit, and only for a peer that holds every layer, is directly
-  reachable within `DELEGATE_MAX_LATENCY_MS`, is trusted at least as much as an
-  ordinary peer, and advertises GPU room with margin.
-  **It returns a peer or nothing, and never falls through to the routing search.**
-  That is the whole difference from the version reverted in `cbbed678`: that one
-  priced a full local node at 10,000/layer and let the DP decide, which made local
-  layers unusable, priced out the good split (some layers here, rest on a peer 5 ms
-  away) and picked a node in another country. Both outcomes here are a single
-  segment. Do NOT reintroduce a penalty term — it distorts every other route.
-  **Prompt privacy changes the SHAPE, it does not disqualify the peer.** With privacy
-  off the peer gets the whole model. With privacy on, `boomerang_assignment` keeps
-  layer 0 and the final layer local — the embedding and the sampling, which is what
-  the guarantee actually is — and gives the peer everything between, as encrypted
-  activations. Since `encrypted_pipeline_auto` is on by default for any model whose
-  ends this node holds, that is the COMMON path, not an edge case: treating privacy
-  as a veto stranded the default configuration on its CPU for no privacy gain.
-  **The boomerang is constructed, not searched, for the same reason.** Asked to route
-  it, the general search answers "all of it locally" — that satisfies the encrypted
-  constraint at zero network cost and nothing in its cost model knows this node is
-  about to fall back to its CPU. Verified 2026-08-18: merely standing the fast path
-  aside produced `segments=1 node=<local> layer_start=0 layer_end=28`. Teaching the
-  search that local compute is expensive here is what `cbbed678` did, and it
-  distorted every other route.
-  Three things made it inert until it was run on real machines, all now fixed and
-  all worth knowing before touching this: gotcha #329 (`would_fit_on_gpu` said yes
-  for a model resident on the CPU), #330 (every node gossips zero free VRAM), #331
-  (the latency bound was calibrated against network intuition, not against what
-  `peer_registry.latency_ms` actually measures).
-
-- **`inference::router::distributed_exec::failure_is_penalty_worthy`**
-  (R146) — gates `penalty_serve_failure` on (a) the assignment actually
-  having had a remote segment and (b) the error not being locally
-  attributable. Any new automatic credit or reputation penalty MUST route
-  through an equivalent attribution check. `ServiceUnavailable` means
-  "THIS server can't serve" and `Internal` means our own bug — neither can
-  ever justify charging a peer.
-- **`ModelRegistry::manifests_to_gossip`** (2026-08-11) — the single answer to
-  "which manifests should this node re-broadcast?": ones it published **and ones
-  it holds a shard of**. Both the one-shot startup announcement
-  (`daemon/background.rs`) and the 30s periodic broadcast
-  (`health/monitor.rs::broadcast_manifests`) go through it.
-  **Never filter on `publisher` alone.** Doing so broke model discovery
-  swarm-wide: every holder used to rewrite `publisher` to itself at startup to
-  earn broadcast rights, and `register_manifest` overwrites unconditionally, so
-  holders erased each other's claim until none of them broadcast. Since there is
-  **no on-demand manifest fetch**, a node that joined later could never learn a
-  model in full — `all_shards_available` stayed false and every request answered
-  "No model loaded" while the dashboard listed the model as available. Measured:
-  `phi-3.5-mini` registered 81 times under 50 distinct publishers (gotcha #296).
-  The correct predicate already existed in the startup path and was missing from
-  the timer, so discovery worked only for peers connected during someone's boot.
-  Holding a shard is the honest signal, which is why the gossip handler
-  deliberately does NOT require `sender == publisher`. `publisher` means who
-  published it — do not reintroduce a self-claim to grant broadcast rights.
-- **`model::manifest::merge_known_shard_hashes`** (2026-08-24) — the rule that a
-  shard hash may go from unknown to known but never back. Called from
-  `ModelRegistry::register_manifest`, the single funnel every adoption path uses
-  (gossip ingress, DB reload, disk scan, acquisition), so no caller can skip it.
-  **Why**: a shard's BLAKE3 hash is a property of the MODEL, but a manifest is
-  built from what its author holds on disk — `build_shard_infos_from_layouts`
-  hashes a shard file only when it exists and writes all-zero otherwise. So every
-  partial holder publishes real hashes for its own shards and placeholders for
-  the rest, and the registry's blind `insert` let a placeholder destroy a hash we
-  already had. That matters because `network/manager/requests.rs` verifies a
-  completed P2P transfer ONLY when the manifest carries a non-zero hash: lose the
-  hash and the bytes are taken on trust, recorded as held, and re-served to other
-  peers unchecked. Measured on the live node — five shards fetched against a
-  manifest carrying placeholders for exactly those five, one corrupt (gotcha
-  #381).
-  Three things a change here must keep. The merge is **one-directional**: a real
-  incoming hash still replaces a real stored one (a genuine re-publish), and only
-  unknown is treated as no information — so this cannot be used to pin a stale
-  hash. `manifest_hash` is **recomputed ONCE, below EVERY correction**, because the
-  stored manifest is then a local composite rather than what the publisher sent
-  and `load_from_dir` re-derives that hash to validate a saved copy; recomputing
-  also keeps the changed-detection quiet, since each correction is deterministic
-  and an unchanged re-gossip lands on the same bytes.
-  **This used to say "when anything was recovered", and that narrowness was the
-  bug.** `register_manifest` corrects an incoming manifest TWICE — the merge
-  here, and the `origin_verified` override below it — and only the first
-  recomputed. So a manifest whose shard hash the origin had corrected said one
-  thing and authenticated another, and since `manifests_to_gossip` re-broadcasts
-  that exact object, every peer's `verify_hash_strict` refused it. The failure
-  was inverted: the better informed a node was, the more of its announcements
-  the swarm discarded. It was intermittent rather than permanent — the stale
-  hash is written only on the registration where a correction fires, and the
-  next registration needing none rewrites it consistently — which is why one
-  model is refused over and over in a log while others from the same sender
-  pass. The change-detection MUST read the final value too, or a peer
-  re-gossiping a contradicted manifest every 30 s compares a corrected hash
-  against an uncorrected one and reports a change for ever (gotcha #472).
-  **A hash OF a structure has exactly one compute site: after the last thing
-  that touches the structure.** The accept path is the consumer
-  that matters: `classify_p2p_shard_acceptance` (same module) turns "do we have a
-  hash?" into a three-way policy rather than a yes/no gate — verify against the
-  hash; or, with no hash but a reachable origin, discard the peer's copy and
-  fetch that shard from the ORIGIN; or accept-unchecked only when neither is
-  possible. Enforcing verification unconditionally was shipped once and
-  soak-caught, which is why the third case survives — but it is now *reported* as
-  unchecked rather than counted as verified. The second case is self-limiting,
-  not a retreat from P2P: the origin download hashes what it writes, so the
-  manifest gains the real hash and this merge then spreads it by gossip.
-  Three things it must keep. The peer is NOT penalised — it may have served
-  perfect bytes, and "cannot tell" is neither fine nor the peer's fault. The
-  fetch must actually **happen** before a copy is discarded, which is why
-  `AutoShardManager::complete_pending_origin_fetches` sits OUTSIDE the
-  `auto_manage.enabled` gate — the same distinction already drawn for
-  `try_idle_vram_unload`: that switch means "do not decide what to fetch on my
-  behalf", not "abandon a shard this node already asked for". **Never throw away
-  data you cannot replace.** And a recovered hash is PERSISTED — via
-  `ModelRegistry::set_persist_hook`, installed at startup with a `Weak`, in the
-  same shape as `set_ram_budget_provider` — because `load_from_db` is what
-  repopulates the registry at boot and the disk copy is the thing carrying
-  placeholders. Persisting is gated on the merge having changed something, or a
-  peer re-gossiping placeholders writes to the DB every 30s for every model.
-  The sibling half is `daemon/background.rs`: a shard with no hash is counted as
-  `unchecked`, never as `verified`. It had been counted as verified, so the sweep
-  reported "all shards OK verified=21" over five shards it had never hashed. **A
-  check that cannot run must be reported, not rounded up into the success line.**
-
-- **`types::slugify_model_name`** (2026-08-15) — the single derivation of a model
-  id from a human display name. It is what
-  `daemon::manifest::generate_and_register_local_manifest` registers, persists
-  and gossips, so resolving a name a user typed, building the model's directory
-  path, and announcing which models this node hosts must all arrive at the same
-  string or they are looking for a model nobody published.
-  There were **three** derivations and no two agreed. Two were near-identical
-  slugifiers differing on any character that is neither alphanumeric nor `-`/`.`
-  — one DELETED it, the other REPLACED it with `-` — so `Model (Q4_K_M)`
-  registered as `model-q4-k-m` and resolved as `model-q4km`; quant suffixes carry
-  underscores, so that is an ordinary GGUF name. The third was no derivation at
-  all: `health::monitor`'s capability announcement sent the RAW display name, so
-  a node that loaded a model with `-m` advertised holdings under an id no peer
-  could match to a manifest — **invisible as a holder of a model it was sitting
-  on**, and a phantom `shard_count: 0` entry in every peer's list (gotcha #310).
-  **The replace-and-collapse semantics are canonical because they made the ids
-  already on disk and in the DHT.** `the_shared_helper_still_produces_the_ids_
-  already_on_disk` reproduces the old manifest algorithm verbatim and asserts
-  agreement, so changing the semantics renames every user's models and goes red.
-  A new surface that turns a name into an id calls this; it must never grow a
-  second copy, and a raw display name is never a `ModelId`.
-- **`inference::split::token_embedding::rows_on_demand_eligible`** (2026-08-18) — the
-  single answer to "is this model's `token_embd.weight` held quantized with its rows
-  dequantized on lookup, or dequantized whole at load?". **Two places must agree**: the
-  loader, which allocates, and the footprint estimators, which decide whether the model
-  is admitted at all. A disagreement is invisible until a node either refuses a model
-  that would have fitted or is admitted and then runs out of memory — the same trap
-  `EMBEDDING_DTYPE` already carries a test for. `table_supports_row_gather` is the
-  device-independent half, for the estimators, which are built once and consulted for
-  both a CPU and a CUDA worker; the `SWARMLLM_DENSE_EMBEDDING` override lives in THAT
-  inner predicate so both callers inherit it, because putting it one level up left the
-  estimator pricing a gather the loader was not doing.
-  **The gather must stay on the device holding the table.** `QTensor::data()` is a
-  zero-copy borrow on CPU and a full device-to-host copy on CUDA, so the CPU
-  implementation reused on a GPU would move the whole table across PCIe every decode
-  step — llama.cpp measured that shape at 6.18 ms/token against 1.72 before
-  `k_get_rows_kq`. Both devices therefore go through the vendored
-  `QTensor::gather_rows`: CPU slices rows out of the borrow, CUDA runs `index_select`
-  over a `[vocab, row_bytes]` byte view (no new kernel — `is_u32_u8` is already in
-  `candle-kernels`, and the quantized buffer's padding is only ever trailing, so rows
-  are contiguous). Metal has none and keeps the dense table.
-  Measured 754 MB on CPU and 736 MB on an RTX 3070, both llama-3.2-3b against a 751 MB
-  prediction. Weight-tied models gain most because the loader used to load that tensor
-  TWICE — once dequantized for the lookup, once quantized for the LM head — and now
-  shares one `Arc<QTensor>` via `QMatMul::from_arc`.
-  **Verify a change here with DECODE RATE, not memory**: the failure mode above frees
-  exactly as much memory while being far slower. The check that rules it out is
-  PREFILL — gathering 512 rows costs no more than gathering 1 would if each row made a
-  host trip, so unchanged prefill is positive evidence the gather stayed on-device.
-  A new embedding path goes through `TokenEmbedding`, whose two variants both return
-  `EMBEDDING_DTYPE` so no call site can tell them apart.
-
-- **`model::huggingface::is_trusted_publisher`** (R141) — canonical
-  curator-allowlist check for an HF `repo_id`. Splits on the first `/`
-  and case-insensitively matches the prefix against
-  `TRUSTED_HF_PUBLISHERS` (in `huggingface/watcher.rs`). Used by BOTH
-  the watcher's trust-promotion path (`promote_trust_for_trending` →
-  `min_downloads_for_repo` consumes the tiered 10k/100k threshold) AND
-  the wishlist scorer (`compute_wishlist` Candidate-row pass — flat +10
-  score bonus + `wishlist.why.trusted_publisher` why-tag). Any new
-  surface that needs to gate on "is this from a known-good curator"
-  MUST go through this helper rather than re-creating the allowlist —
-  the allowlist is a trust delegation and divergence creates a security
-  / consistency gap. Adding a curator: append to
-  `TRUSTED_HF_PUBLISHERS` (one place); both consumers pick it up
-  automatically. Removing a curator (compromise, abandoned account,
-  loss of trust) requires the same one-place edit; do not soft-disable
-  via wrappers because the trust delta is a real security event worth
-  surfacing in the diff.
-- **`inference::split::read_gguf_header`** (2026-08-29) — the single way to parse
-  a GGUF header off a PATH, and the buffering is the entire reason it exists.
-  `gguf_file::Content::read` walks the metadata with many tiny reads — for every
-  string a length, then its bytes — so handing it a bare `std::fs::File` turns
-  each one into a syscall. A 7.8 MB header carrying a 128k-token vocabulary and
-  280k merges is roughly 820k of them.
-  **Measured on the live node** (gotcha #410): `GET /api/admin/models` took a
-  stable 11.2 s, of which **9.6 s was KERNEL time** — it parses every local
-  model's header and seven call sites were passing an unbuffered handle.
-  Optimisation cannot touch syscall count, which is why the release binary was
-  no faster than a debug one on that path. Direct A/B on one header: 980 ms
-  unbuffered against 98 ms buffered.
-  **Two sites deliberately do NOT use it** — `local_embedder` and `vision` keep
-  their own `BufReader`, because the same handle goes on to read tensors and the
-  helper's handle dies with it. They still buffer; that is the invariant, not the
-  helper. A `Cursor` over a slice or an mmap already holds the bytes and needs
-  neither.
-  **`ModelProcessPool::footprint_inputs` also parsed the same file twice** — once
-  through `GgufTokenizerMeta::from_gguf_file`, which materialises the whole
-  vocabulary and merge list as owned `String`s, purely to reach `vocab.len()` as
-  a fallback, and once through its own reader for everything else. The count was
-  already in the parsed `Content`; counting the array borrows it.
-  `a_gguf_header_is_never_parsed_straight_off_an_unbuffered_file` in
-  `tests/repo_consistency.rs` fails the build on a new unbuffered site. It checks
-  PROXIMITY — a `File::open` within a few lines of a `Content::read` with no
-  `BufReader` or `Cursor` between them — not naming. A naming rule was the first
-  cut and it silently missed the `match File::open { Ok(mut f) => Content::read(
-  &mut f)` form, which is the shape one of the seven sites actually had.
-  **The general rule**: before theorising about why something is slow, split
-  user from system time (`utime`/`stime` in `/proc/<pid>/stat`). It is two
-  numbers and it partitions the hypothesis space in one step — kernel-dominated
-  means syscalls or waiting, and no amount of reading the code distinguishes
-  "parses a lot of metadata" from "makes 820k read calls". A **stable** duration
-  is a fixed amount of work, not contention; go and find the count.
-- **`inference::split::GgufTensorMeta::tied_output_location`** — the single
-  definition of "is this model weight-tied", i.e. does it reuse
-  `token_embd.weight` as the LM head instead of shipping an `output.weight`.
-  Consumed by BOTH sidecar writers (`daemon::manifest::extract_tied_output_weight`,
-  `huggingface::probe::download_tied_output_weight`) AND the reader
-  (`inference::split::resolve_tied_output` → `ShardReader`). Producer and
-  consumer MUST agree on which tensor the sidecar holds; a new surface that
-  needs the predicate goes through this method rather than re-deriving
-  `contains_key("output.weight")`. The sidecar filename is
-  `inference::split::TIED_OUTPUT_FILENAME`, never a literal.
-  **Why this exists**: a node serving the LAST pipeline segment needs the output
-  head, but on a weight-tied model that tensor physically lives in shard 0 —
-  which that node frequently does not hold. The sidecar carries the raw bytes;
-  `ShardReader::new` maps them over the tensor's gguf byte range so
-  `ct.tensor(&mut reader, "token_embd.weight", …)` resolves unchanged. It maps
-  the sidecar ONLY when no local shard already covers that offset, since a
-  duplicate `gguf_offset` would make `find_shard`'s binary search ambiguous.
-  `tied_output` is a REQUIRED parameter on `ShardReader::new` with no
-  convenience wrapper — for three releases the sidecar had three writers and
-  zero readers, and every weight-tied model was unservable on any node lacking
-  shard 0 (gotcha #178).
-- **`SharedState::resolve_connected_peer_id_bytes`** — the resolver to use for
-  any message that `network::manager::relay::is_relay_eligible` refuses, i.e.
-  everything except `RemoteGenerateRequest` / `StreamingToken` /
-  `CancelInference`. For those direct-only messages "reachable" means
-  "connected", so the ungated `resolve_peer_id_bytes` hands back a target the
-  send path can only drop. **Gossipsub reachability is NOT request_response
-  reachability**: a peer relayed to us through the mesh is frequently
-  undialable, and `peer_id_map` is deliberately persistent across disconnects
-  (its only eviction is gated behind an 8,000-entry soft cap that never trips on
-  a small swarm). Replying to gossip via `peer_id_map` alone produced an
-  unbounded 30s loop of undeliverable sends — one departed peer, 45% of a
-  night's log volume (gotcha #220). `connected_node_ids` is the liveness oracle;
-  `peer_registry` is explicitly NOT, being preserved across disconnects for
-  reconnect. **When adding such a gate, re-check any `else`/fallback arm below
-  it** — the health-pong site had a `Broadcast` fallback that a naive `None`
-  would have turned into mesh-wide traffic every 30s, worse than the bug.
-- **`ModelRegistry::describes_a_different_build`** (2026-08-29) — is this
-  manifest the same FILE as ours, or another build wearing the same name? A
-  model id comes from a display name (`slugify_model_name`), so every
-  independent GGUF build of one model collapses into one identity: three Q4_K_M
-  builds of Qwen2.5-Coder-7B-Instruct were live on the swarm at once —
-  4,683,073,536 / 4,683,074,144 / 4,683,074,336 bytes — sharing not one shard
-  hash (gotcha #406).
-  **Compares SHAPE, never hashes**: a manifest carries a real `size_bytes` for
-  every shard whether or not its author holds it, but a hash only for the ones
-  it does, so every partial holder would read as a different build under a hash
-  comparison. **Gated on `has_origin_knowledge`** — our own origin download is
-  the only evidence that is not just another node's assertion, the same
-  adjudicator `origin_verified` uses — so a genuine re-publish (new bytes, new
-  shape, no origin copy of ours to weigh against it) still lands.
-  **Why it matters**: adoption is `manifests.insert`, last-writer-wins, so
-  before this the other build's `shard_count`, `total_size_bytes` and per-shard
-  sizes overwrote ours while `origin_verified` kept our hashes — a manifest
-  describing one file and authenticating another, and `size_bytes` is what
-  decides byte-range requests.
-  **Still open**: `record_shard_holder` keys on `ShardId` alone, so holders of
-  different builds are pooled and the scheduler will route to either. Bounded —
-  verification catches it, so it costs a wasted transfer, never a wrong answer.
-  Closing it needs a build discriminator on `ShardAnnounce`; see
-  `docs/FUTURE_WORK.md`.
-
-  **Both rejection messages share ONE rate limiter**
-  (`manifest::note_manifest_rejection` over `manifest::RejectionKey`), because
-  they are the same event at two granularities and a peer re-gossips on a timer
-  for as long as it is up. The manifest arm was rate-limited on 2026-08-26
-  (4709 WARN lines, 14% of a month's warnings); **the per-shard arm was missed,
-  and it is the worse of the two — it fires once per SHARD**, so one publisher
-  with an 8-shard model on a 30 s cadence produced 16-28 lines a minute
-  indefinitely, ~10% of the whole log, measured live 2026-08-29. The key
-  distinguishes the two kinds so neither can silence the other, and each shard
-  is its own key so eight genuine disagreements still get eight lines. A new
-  "we are ignoring what this peer keeps telling us" warning belongs behind this
-  limiter, not beside it: **anything a peer repeats on a timer will be repeated
-  at you for ever, so the first question about such a log line is what silences
-  it.**
-- **`model::manifest::is_backup_artifact_id`** — canonical check for a
-  model id that is a copied-folder backup (`<model>.FULLBACKUP`,
-  `<model>.old`, `<model>~`, `… copy`) rather than a real model identity.
-  A model's identity must come from the model, not from whatever a
-  directory was called. `ModelRegistry::register_manifest` nets this at
-  the single point EVERY adoption path funnels through (gossip ingress,
-  DB reload on startup, local disk scan, acquisition) — so a backup name
-  can neither be stored, persisted, nor re-gossiped regardless of how it
-  arrived. Belt-and-suspenders explicit guards also sit at the network
-  boundary (`daemon/dispatch` ModelManifest handler emits a
-  `security`/`manifest_rejected` activity event + skips the auto-manage
-  wake; ShardAnnounce + RegionShardSummary skip backup ids so holder /
-  region counts stay clean without a manifest) and the local disk scan
-  (`daemon/startup.rs`, so an artifact is never persisted). New surfaces
-  that accept a model id from disk or the network MUST reject via this
-  helper rather than re-deriving the keyword list. The keyword list is
-  matched against the LAST dotted segment only, so a legit id carrying
-  dots from its source filename (`tinyllama-1.1b-chat-v1.0.q4-k-m`) is
-  never caught. The v0.3.10 disk-scan-only guard was insufficient because
-  a peer on an older build re-gossips the name straight back in.
-
 ## A tensor forward is acknowledged on receipt; a result is always its own request (2026-08-21)
 
 `requests.rs` answers an inbound `LayerForward` with `SwarmResponse::Ack` the
@@ -3575,64 +551,7 @@ hypothesis was the loop; a shadow node cleared it in four minutes. Keep it.
 Identify turns a connection into a peer — BEFORE the Kademlia insert, so a
 foreign node never enters the routing table either.
 
-**The trap.** libp2p's `identify` protocol is `/ipfs/id/1.0.0` — universal to
-every libp2p node on the internet, IPFS and every other rust-libp2p project
-included. `handle_identify_received`
-registered a peer on the strength of it alone: minting a `NodeId` from the
-peer's Ed25519 key, establishing an encryption session, and counting it in
-`connected_node_ids`, the number the dashboard shows. The field that carries
-the peer's own statement of what it speaks — `info.protocols` — was never read
-anywhere in the codebase.
-
-Measured on the live swarm 2026-08-25/26 (gotcha #396): five foreign nodes on
-Linode, port 4001, relaying through one another, appeared in every node's peer
-list with no version, no shards and no latency but `healthy=true`. They
-identify as `openhydra/0.1.0` on `rust-libp2p/0.45.0` — port 4001 is the
-libp2p convention and identifies nobody, so reading IPFS into it was a guess;
-the rejection log line reports `agent_version` precisely so the next one does
-not have to be guessed at. Each one's
-first real SwarmLLM request answered `OutboundFailure … The remote supports
-none of the requested protocols` — the peer saying so in our own log, one
-second after we adopted it. They arrive via **PEX**, which dials an address
-without asking whose it is, so it spreads: a brand-new node with an empty data
-directory acquired all five within 90 seconds.
-
-**Both halves are load-bearing.** Declining to register is not sufficient:
-`handle_connection_closed` re-dials any peer with no registry entry, on the
-assumption it disconnected before Identify ran. So skipping registration alone
-trades a wrong peer-list entry for an endless dial loop — worse, and silent.
-`NetworkManager::foreign_peers` (bounded by `MAX_FOREIGN_PEERS`) records the
-verdict, and BOTH that re-dial branch and the PEX dial loop consult it. A new
-path that dials a peer learned from an untrusted source must do the same.
-
-**Safe to gate** because `/swarmllm/id/1.0.0` has been the identify
-`protocol_version` since the first P2P commit, so no released node fails it;
-the protocol-list arm is the belt-and-braces for a future build that changes it.
-Match the namespace as a PREFIX, never a substring — the peer controls those
-strings.
-
-**Declining to register is still not sufficient, and the second half needed a
-third.** Not re-dialling was covered by `foreign_peers`, and every one of the
-dial sites now routes through `NetworkManager::dial_checked`
-(`every_dial_goes_through_the_foreign_peer_gate` in `tests/repo_consistency.rs`
-keeps it that way) — **though "every" was wrong when this was written: the test
-matched `self.swarm.dial(` and `discovery::bootstrap_peers` was a free function
-taking `&mut Swarm`, so the one site that mattered was invisible to it for
-another release (gotcha #405). The pattern is now both forms, comment lines
-excluded, with the loopback probe named as the single exception.** And the node
-*still* opened 5-6 connections per foreign peer
-in seven minutes, each closed 43 ms later by this gate and then re-established.
-`dial_checked` refused none of them across two runs, which is the measurement
-that matters: **the dials come from inside libp2p, not from us.** Which behaviour
-was never pinned down and no longer needs to be — `SwarmBehaviour::blocked_peers`
-(`libp2p::allow_block_list`) refuses both directions at the swarm level, and
-`handle_identify_received` blocks the peer before disconnecting it. Measured
-5/6/6 connections → **1/1/1**, one unavoidable first contact each, healthy peers
-unaffected.
-
-**The general rule**: completing a handshake that everyone speaks proves nothing
-about who you are talking to. Before treating a successful negotiation as
-identity, ask which population could also complete it.
+→ `docs/invariants/network.md`
 
 ## One dial per PEER, never one per address
 
@@ -3641,97 +560,14 @@ are how bootstrap and cached addresses are dialled. Group by target peer, one
 `DialOpts::peer_id(..).addresses(all)` each, through `dial_checked`, with
 `PeerCondition::DisconnectedAndNotDialing`.
 
-**Why per-address dialling is wrong, not merely wasteful.** A bare
-`swarm.dial(addr)` carries no `PeerCondition`, so libp2p's per-peer dedup cannot
-see it, and it does not reach `dial_checked`, so the foreign-peer gate does not
-apply either. `discovery::bootstrap_peers` did exactly that, once per address,
-on every discovery tick. A peer cached at two addresses (TCP + QUIC) therefore
-got two simultaneous dials whenever it was momentarily disconnected; with
-request_response's own dial that reaches `max_connections_per_peer = 3`.
-The vendored rr layer then spreads sends across all three (ranked, but ranked
-among connections that should not all exist), and one that has quietly died
-swallows its share until the 8-failure rule closes the peer entirely. Measured
-paired against an unpatched node, same swarm, same 43 minutes: **13 connection
-establishments to one peer against 3** (gotcha #405).
-
-**It costs nothing.** `libp2p_swarm::connection::pool::concurrent_dial` is a
-`FuturesUnordered` — one dial attempt RACES every address it was given, bounded
-by `dial_concurrency_factor`, and yields exactly one connection. Handing one
-attempt every address is the same parallelism; it just stops keeping the losers.
-Do not "restore" per-address dialling for latency.
-
-Three rules a new dial site must follow:
-
-- **Read the peer from the LAST `/p2p/` component** (`target_peer_from_address`).
-  A relay circuit is `…/p2p/<relay>/p2p-circuit/p2p/<target>`; the first names
-  the RELAY, so every gate then asks about the wrong node and the dial asks
-  libp2p to reach the relay at an address belonging to someone else. This was
-  wrong in two independent places.
-- **Do not weaken the condition.** `PeerCondition::Disconnected` asks only
-  whether a connection is ESTABLISHED, so two dials issued before either
-  completes both pass. `DisconnectedAndNotDialing` is libp2p's own default and
-  our code had explicitly opted out of it at three sites. **The mDNS site keeps
-  the weaker condition deliberately** — a LAN rediscovery must be able to
-  override a stale bootstrap attempt; that one has a documented reason and the
-  WAN paths did not.
-- **Never dial yourself.** `dial_checked` refuses it for every source. A third
-  party hands your own address back — PEX relays whatever its registry holds,
-  and a circuit terminating at you names you in its last hop — and the
-  sender-side self-filter cannot help, because the sender is someone else.
-  libp2p refuses these, so nothing broke; it was 223 wasted dials in 45 minutes
-  that nothing surfaced.
-
-**Dial attribution is logged at DEBUG** (`site` field in `dial_checked`), not
-TRACE. Two investigations have turned on "was that dial ours?" and both had to
-rebuild to answer it; the second only found the self-dialling because the
-instrument was finally there to say so.
+→ `docs/invariants/network.md`
 
 ## Peer Cache: storable vs dialable
 
 `network/peer_cache.rs` answers two different questions and they must not be
 conflated:
 
-- **`filter_storable(addrs, local_peer_id)`** — what is worth *keeping*. Drops
-  only what is junk under any circumstances: not remotely reachable
-  (`addr_is_remotely_reachable`), or routing through our own peer id in ANY
-  `/p2p/` hop (the relay position of a `/p2p-circuit`, not just the target).
-  **Keeps private addresses regardless of where this node currently is** — a
-  laptop saving its cache on a hotspot must not permanently lose the LAN peers
-  it had at home. Used by `save_peer_cache`.
-- **`filter_dialable(addrs, local_peer_id, local_addrs)`** — what is worth
-  dialling *from here*. Everything `filter_storable` does, plus a peer's
-  RFC1918 / CGNAT / IPv6-ULA addresses are dropped when EITHER: (a) our own
-  reachable addresses contain no private address (`local_is_public_only` — we
-  can't route to anyone else's private network), OR (b) **the peer itself
-  advertises a publicly-reachable address** (`peer_has_public` — then its
-  private addresses are its own LAN/Docker bridge and we reach it publicly
-  instead). Used by every dial path and by `GET /api/admin/diagnostics`.
-
-  The `peer_has_public` clause is the **Docker fix** (2026-07-23): a Docker
-  node advertises its container bridge `172.17.0.1` alongside its real public
-  IP, and `172.17.0.1` is not globally unique — it is the Docker gateway of
-  *whichever* host dials it, so a dial loops back to the dialer's own node
-  rather than failing cleanly (confirmed live). A peer with a public address is
-  reached there; its private noise is dropped even when we are on a LAN too.
-  A peer with ONLY private addresses (no public) is still kept, so the home
-  two-machine / pool case is untouched — those peers are additionally found via
-  mDNS regardless.
-
-**`local_addrs` empty means "not bound yet", NOT "public."** `listen_multiaddrs`
-is empty until the swarm finishes binding; a node seconds into starting that
-concluded it was a public server would discard every LAN peer it had, breaking
-the home two-machine and pool cases the cache exists for. So the
-`local_is_public_only` clause treats empty as unknown → keep. The
-`peer_has_public` clause is independent of local context: it keys on the peer's
-own addresses, so it correctly drops a public-capable peer's Docker/LAN noise
-even at startup.
-
-Nothing in `src/pool/` reads this cache — pools route through `pool_state` /
-`allowed_node_set` — and mDNS discovers LAN peers independently, so a LAN pool
-has a second route back regardless.
-
-Retraction of a peer's *shard* claims is a different mechanism entirely; see
-`ShardAnnounce.complete_for_models` below.
+→ `docs/invariants/network.md`
 
 ## ModelRegistry Holder Counts
 
@@ -3743,51 +579,7 @@ deleted or lost a shard is still advertised as holding it for hours. An
 add-only writer wins every disagreement with a writer that removes, and its
 cadence decides how fast.
 
-Measured live 2026-08-22 on a three-way split (gotcha #364): the holder
-retracted shard 2 correctly and re-announced its reduced holding every 5 minutes
-(`Peer retracted shards it no longer hosts … dropped=1`, six times), the
-coordinator re-merged the stale DHT record every few seconds, and every request
-was then scheduled onto a node without those weights — `503 Segment failover
-exhausted`, indefinitely, while a healthy node holding exactly that shard was
-never considered. **Retraction alone is futile when something re-adds the claim
-faster than it is withdrawn** (same shape as #163).
-
-So `ModelRegistry::retracted_claims` records what a holder has withdrawn, and
-`merge_dht_providers` skips a (shard, node) pair found there. Two halves that
-must stay together: `record_shard_holder` CLEARS the entry, so a node that
-genuinely re-acquires the shard is believed the moment it announces that itself;
-the DHT path must NEVER clear it, which is the entire point. Honoured for
-`RETRACTION_HONOURED_SECS` (26 h — deliberately longer than the provider
-record's own life, or the record simply wins again at the end of the window).
-
-A new writer of `shard_holders` fed by anything other than the holder's own word
-must answer the same question first: can it remove, and if not, what stops it
-resurrecting something already withdrawn?
-
-`ModelRegistry::shard_holders` caches at most `MAX_HOLDERS_PER_SHARD = 50`
-holders per shard (LRU-evicted, local node never evicted). This is the
-**routing oracle** — pipeline scheduler, region eviction, busy-holder
-check etc. all read this map.
-
-`ModelRegistry::global_holder_count` holds the **uncapped swarm-wide
-count** from the most recent DHT `GetProviders` response, written by
-`network/manager/dht.rs::handle_dht_providers_found` with the raw
-`providers.len()` (PeerId count, not the resolved NodeId count — some
-PeerIds may fail to resolve but they're still distinct providers in the
-DHT's view). This is the **prune-score oracle** — `model/auto_manage/
-prune.rs` uses `max(cached_holder_count, global_holder_count)` for the
-`redundancy_ratio` numerator and the severe-saturation bonus check.
-
-Don't:
-- Read `global_holder_count` for routing decisions — DHT staleness is
-  fine for an O(hundreds of seconds) prune cadence but unacceptable for
-  scheduling.
-- Read `shard_holders().len()` alone for `redundancy_ratio` — at 1000-
-  node scale the cache pegs at 50 and the prune score saturates.
-- Forget to clear `global_holder_count` when a model is removed —
-  `remove_all_model_shards` retains over both maps; new code paths that
-  evict a model must do the same or stale figures will inflate future
-  ShardId-reuse scores.
+→ `docs/invariants/network.md`
 
 ## Cross-feature compile checks
 
@@ -3950,54 +742,7 @@ in `tests/repo_consistency.rs` fails the build if the default changes, and
 checks the two surfaces that hand the report to a person still ask for the safe
 form.
 
-**Why it exists.** `GET /api/admin/diagnostics` has been the documented thing to
-attach to a bug report for many releases; the dashboard has a one-click **Copy
-diagnostics** button whose whole point is that a non-engineer does not have to
-read what it copied; and its hint said *"No keys or invite codes are included"*,
-which reads as *safe to post*. It also copied this machine's own addresses and
-the first ten entries of the peer cache — on a live node, **other people's home
-IP addresses**, verified against the real swarm (gotcha #426). A comment in
-`reference-models.js` asserted the daemon had "already redacted" it, which is
-the #419 shape: a stale assurance reads as verification and stops the next
-person checking.
-
-Four properties a change here must keep.
-
-- **One pass over the finished text, not a rule per section.** Addresses reach
-  the report from at least four places — the listen-address list, the peer
-  cache, relay circuits, and the prose of whatever a failed dial produced — so a
-  per-section rule is the "One invariant, N paths" trap below. A section added
-  later inherits the redaction with no author action, pinned by a test that
-  plants an address in free prose.
-- **Keep the KIND, replace only the host.** Transport, port, peer id and the
-  `/p2p-circuit` structure all survive, so "this node has no public address" and
-  "that hop is relayed" stay legible. Deleting the lines would make `?full=1`
-  the form people paste instead, which is worse than not redacting.
-- **Salt the tag per report.** Two entries for one host share a tag, which is
-  what keeps "ten cache entries, all one machine" readable. **IPv4 is 2^32**, so
-  an unsalted digest is a reversible encoding of the thing being hidden,
-  recovered by enumeration in seconds.
-- **Exempt what identifies nobody.** Loopback and the unspecified address, and
-  the project's own bootstrap anchor — the anchor ships in every binary, so
-  hiding it protects no one and costs the most useful reading in the report. The
-  exemption is derived from `default_bootstrap_peers()`, never restated, so
-  moving the anchor moves the exemption.
-
-**Peer ids and node ids are deliberately NOT redacted.** They are the swarm's
-public identities, they appear throughout the rest of the report, and they are
-not a coordinate anyone can dial. The address is.
-
-**A query flag must have no invalid spelling.** `DiagnosticsQuery::full` is a
-`String`, not a `bool`, because serde deserializes a `bool` from a query string
-only for the literal words `true` and `false` — so `?full=1`, the form this
-project's own README, `docs/DIAGNOSTICS.md` and `two_node_test.sh` all use, was
-refused by the extractor with a bare-text 400 that never reached the JSON error
-envelope (§ "API errors must be readable by the caller"). `query_flag_is_on` is
-the shared predicate.
-
-**The general rule.** Before writing that something is safe to share, enumerate
-what is actually in it — and treat any surface built for a non-technical user to
-hand to a stranger as a publishing surface, not a debug dump.
+→ `docs/invariants/network.md`
 
 ## One invariant, N paths — the recurring bug of this codebase
 
@@ -4161,41 +906,7 @@ The daemon must write **only values that differ from the compiled default**.
 `config::to_minimal_toml` is the one serializer for the config file; do not call
 `toml::to_string_pretty(&config)` directly.
 
-**Why.** A `#[serde(default)]` fills a key that is *missing*. Once a key is
-written to disk it wins forever, so any later change to that default can never
-reach that install — and the file looks like a deliberate user choice, which is
-indistinguishable from one. `PUT /api/admin/config` is called by the setup
-wizard on "Start SwarmLLM", so in practice every field landed on disk on first
-run. This produced three separate user-visible faults before it was fixed:
-
-- `bootstrap_peers = []` stranded every node set up before 2026-07-21 with no
-  bootstrap peer, no DHT route and no log line (gotcha #198).
-- A default-on dashboard-trust flag shipped *off* to exactly the fresh installs
-  it was written for (gotcha #196).
-- `check_interval_hours = 6` kept nodes on a six-hour update check after the
-  default became hourly — found live on 2026-07-29 while watching a node fail
-  to notice a release.
-
-Rules that follow:
-
-1. **Never serialize the whole `Config` to disk.** Use `to_minimal_toml`.
-2. **A section's `impl Default` MUST agree with its fields' `#[serde(default)]`.**
-   These are different code paths: a *missing* section uses `impl Default`, a
-   *present but empty* section uses each field's serde default. They disagreed
-   for `updates.mode` (`Some(Notify)` vs `None`), which made the effective
-   update mode depend on whether the `[updates]` header happened to exist.
-   Pinned by `empty_section_matches_missing_section`, which checks every
-   section, so a new one inherits the coverage.
-3. **Every field needs a serde default**, or a pruned file will not reload.
-   Pinned by `empty_toml_parses_to_full_default`.
-4. **Changing a default does not reach existing installs.** If the old value is
-   already on disk it stays. When a default changes in a way that matters, add
-   an entry to `migrate_superseded_defaults` — and only when the old value was
-   the daemon's, never something a user could plausibly have chosen, because
-   silently overriding a deliberate setting is worse than a stale default.
-5. **Unknown keys warn, they do not fail.** `deny_unknown_fields` would refuse
-   to start on a config mentioning a later release's key. `warn_unknown_keys_in`
-   names the key and continues.
+→ `docs/invariants/state-and-config.md`
 
 ## Attention kernel choice and the query-length cliff (2026-08-23)
 
@@ -4203,74 +914,7 @@ Four helpers now own decisions that used to be spread across call sites. All
 four exist because a predicate that *reads* obviously correct was answering a
 different question than the one that mattered.
 
-- **`inference::layers::flash_handles_offset_causal`** — may flash attention take
-  a query block that lands on a warm prefix (`k_len > q_len && q_len > 1`)? Yes,
-  and it is not a judgement call: the vendored kernel's
-  `col_idx_limit_right = row_idx + 1 + max_seqlen_k - max_seqlen_q`
-  (`vendor/candle-flash-attn/kernels/mask.h`) is bottom-right aligned causal,
-  the same predicate `SplitExecutor::causal_mask` builds by hand. The dispatch
-  used to divert that shape to `standard_attention` on the stated grounds that
-  flash could not express the mask; since `prefill_chunk_tokens` is a CEILING
-  that always applies, that meant EVERY prompt chunk after the first took the
-  slower kernel on every GQA model (gotcha #368). A benchmark that prefills in
-  one call cannot see it. `SWARMLLM_FLASH_OFFSET_CAUSAL=0` restores the old
-  behaviour for A/B.
-
-- **`inference::layers::cuda_decode_prefers_standard`** — now `q_len == 1` for
-  EVERY head geometry, not just MHA. The GQA exclusion existed because
-  `standard_attention` rebuilt the `repeat_kv` expansion every token;
-  `grouped_gqa_decode_attention` deleted that work in August and the rule
-  outlived its premise by a week. Re-measured: standard wins at every context
-  length and the margin grows with it. **The isolated table overstates the
-  penalty** — its flash arm runs without the f16 KV mirror that production
-  always has — so end to end this is ~6% at 4120 KV and unresolvable at ~900.
-  Both numbers are recorded at the benchmark; the forward is the one that
-  describes a reply (#266). `SWARMLLM_GQA_DECODE_FLASH=1` restores the old rule.
-
-- **`inference::layers::grouping_applies` + `grouped_gqa_attention`** — read the
-  KV cache at its stored width instead of expanding it, for ANY query length
-  whose score matrix fits in one pass (not just `q_len == 1`). Blocked calls keep
-  the expanded path: the blocking loop slices the query axis, and under grouping
-  that axis carries repeats and positions interleaved, so a block boundary would
-  cut one query position's rows across two passes. The mask must be TILED to
-  match — row `r * q_len + t` sees mask row `t` — and getting that transposed
-  computes plausible garbage, which is why the test compares against the expanded
-  path with a REAL causal mask rather than a permissive one.
-
-- **`inference::cpu_pools::DECODE_SHAPED_MAX_TOKENS`** — the phase predicate is
-  no longer `seq_len == 1`. What the pool choice turns on is whether the matmuls
-  are bandwidth-bound, and a 4-token verify re-reads exactly the weights one
-  token does. Measured with `examples/qmatmul_bench`, the narrow pool wins at
-  every width to 32 and draws level at 128. **A short block must not feed the
-  decode-width calibration** — the calibration compares candidate widths by the
-  cost of one token, and a sample from a different query length is not that
-  measurement (same class of error as #367).
-
-Together these were one defect: every CPU decode fast path was gated on
-`q_len == 1` exactly, so a 2-token forward lost the grouping, the single-position
-kernel and the narrow pool at once and cost 7.8x a 1-token forward — for one
-extra token (gotcha #369).
-
-**Validated on a SECOND machine** (2026-08-23), because #367's lesson is that a
-fix measured on one is not measured: an Intel i5-10500T, 6 cores, no GPU — the
-same box whose first run found the .114 calibration defect. It holds there and by
-more, and the cost of a wide forward is LOWER than on the 8-core Ryzen, which is
-what fewer cores predicts (more bandwidth-bound, so extra rows cost less):
-
-```text
-  width   old (i5)   new (i5)   break-even accept
-      2   373/362     148/149    1.10-1.16 of 2
-      4   383/377     171/182    1.47-1.58 of 4
-      8   462/453     242/254    2.10-2.20 of 8
-```
-
-Against 2.5 of 4 on the Ryzen. Decode was unchanged on the i5 (8.08/8.05 against
-7.88/7.75 tok/s, arms overlapping) and prefill gained 1.5-2.9%, consistent in
-direction across both pairings.
-
-**The GPU changes above are still single-machine.** They were measured only on
-the RTX 3070 here; no second card was available. Treat their magnitudes as
-one machine's numbers until a second one confirms them.
+→ `docs/invariants/inference.md`
 
 ## Local speculative decoding — `inference::model_worker::ngram_spec_eligible`
 
@@ -4279,77 +923,7 @@ slot-admission gate and the decode loop. Two copies would eventually disagree,
 and the failure is silent: the gate diverts a request off the batched path and
 the loop then declines to speculate it, so it loses batching and gains nothing.
 
-Clauses: `!logprobs` (accepted tokens carry none back out), SWIFT off (it is
-already speculating), and a non-zero draft width — which is how
-`inference.ngram_lookup_enabled` arrives, so the switch cannot disagree with the
-shape.
-
-**Temperature is deliberately NOT one of them, and briefly was.** The argument
-for excluding sampled requests — that comparing a draft against what the sampler
-returned "is a verification only while the sampler is deterministic" — is wrong,
-and it left the feature inert for essentially all traffic: the OpenAI surface
-defaults to 0.7 and the Anthropic one to 1.0, so Claude Code and MCP tool use,
-the workload `ngram_lookup` names as its reason for existing, never speculated.
-
-With a deterministic draft `x` (`q = δ_x`) the speculative-sampling rule accepts
-with probability `min(1, p(x)/q(x)) = p(x)` and otherwise draws from
-`norm((p − q)₊)` — `p` with `x` removed, renormalised. "Draw `t ~ p`; keep the
-draft iff `t == x`" has exactly those two branches, so sampling each position
-with the real sampler and keeping a match IS that rule, at any temperature.
-`accepting_only_on_a_match_preserves_the_sampled_distribution` pins it, with a
-control that fails if the metric could not detect a bias.
-
-Measured at temperature 0.7 on an RTX 3070: a copying reply speculated at 8.83
-tokens per round — the same as greedy, because a copied token's distribution is
-sharply peaked — and ran 1.79-1.90 s -> 0.58-0.69 s. An open-ended reply at the
-same temperature accepted nothing and `SpecBackoff` suppressed 62 of 80 rounds,
-which is the correct outcome rather than a failure.
-
-**The DISTRIBUTED n-gram path carried the same gate for the same wrong reason**,
-and it was fixed the same way — but note the mechanism differed. It took the
-target's raw `argmax` (`greedy_accept_reject`), which ignores temperature, top-k,
-top-p AND the repetition penalties, so there the gate was correct for the
-implementation. `speculative::sampled_accept_reject` samples every position
-through the real sampler instead; at temperature 0 with no penalties it
-reproduces the argmax decision exactly (pinned by
-`at_temperature_zero_it_agrees_with_the_argmax_it_replaces`), so nothing already
-using it changes. It also closed a routing-dependent difference: penalties
-always applied on the local worker and never across peers, so the same request
-got a different answer depending on where it ran.
-
-**The peer-supplied non-finite guard is not optional and must survive any change
-of sampler.** These logits come from another node, and NaN comparisons are
-non-deterministic in `argmax`, so a malicious segment could otherwise steer which
-drafts are accepted. Both helpers reject the whole round, and a test asserts they
-agree on that verdict so the two cannot drift.
-
-**Draft-MODEL paths (`speculative.rs`'s main loop, `dsd.rs`) stay greedy-only on
-purpose.** A draft model has a real distribution `q`, so doing this properly
-needs `min(1, p/q)` and a residual built from both — a different algorithm, not
-this one. The rule here works only because an n-gram draft is a point mass.
-
-Three things a change here must keep:
-
-- **It runs on the sequential loop only, when the worker is otherwise idle AND
-  speculation has been paying.** `slot_admission_eligible` diverts a solo
-  speculatable request there; one arriving while others decode joins the batch
-  instead, because that loop owns the worker for its whole duration and
-  diverting would stall everyone in flight.
-  **The third condition was added after measuring, and matters as much as the
-  other two.** The trade was originally justified with this project's ~3%
-  batching figure (#348) — a PROCESSOR measurement. On a graphics card batching
-  amortises kernel launches across requests, the same launch-bound property
-  speculation exploits, so it is worth far more: 8 concurrent open-ended
-  requests took 29.07 s diverted against 12.48 s batched, aggregate throughput
-  77 -> 33 tok/s (gotcha #373). `spec_payoff_justifies_diverting` therefore gates
-  it on the tokens-per-round speculation has actually been achieving; unknown
-  lets one request find out, and the answer steers the rest. With it, both
-  workloads beat either fixed policy — open-ended 8-way 11.03 s against 12.48 s
-  batched, copy-heavy 8-way 3.37 s against 5.52 s.
-- **It is not bit-identical** (gotcha #370). Do not describe it as such.
-- **A miss is not free** (gotcha #371): the forward the draft provokes costs
-  even when nothing is accepted, which is what `SpecBackoff` exists for. Measure
-  the workload speculation CANNOT help, not just the one it can.
+→ `docs/invariants/inference.md`
 
 ## A prompt's length in tokens is a POSITION, not a statistic
 
@@ -4357,50 +931,7 @@ Three things a change here must keep:
 many positions does this prompt occupy?", for all five sites in that module.
 Never open-code it, and never estimate it.
 
-`distributed.rs` sets `index_pos = ptc + vision_expand` after the prompt pass,
-and ships `index_pos` to the worker as the **rotary position of the next token
-and the offset it attends from**. It must equal the number of KV positions the
-prefill actually wrote. It is not a report; it is a coordinate.
-
-It was `(prompt.chars().count() / 4).max(1)`, commented *"approximate ... no
-tokenizer in-process"* — true when written, and left in place after
-`standalone_tokenizer` began lazily building one from `gguf_header.bin` three
-lines below it. On a 24 KB tool-calling prompt the estimate came out **6053
-against a true 5529**, so the first generated token was computed 524 positions
-past the end of the cache. The logits are noise, and the model answers with
-end-of-turn or with filler repeated to the token limit (gotcha #400).
-
-Three properties a change here must keep:
-
-- **It only ever bit the pipeline path**, which is the one every request takes
-  while the model is not loaded — so the same request failed cold and succeeded
-  warm. Anything that makes a placement or path decision differently for a cold
-  request inherits this shape: *test it cold*.
-- **The error scales with prompt length.** A short prompt misses by a position
-  or two and still reads correctly. That is why four releases of `curl`
-  reproduction attempts failed — a retry is warm and a minimal repro is short —
-  and why the fix's test uses a prompt the old estimate demonstrably got wrong,
-  with a control asserting exactly that.
-- **The estimate survives only where there is genuinely no tokenizer** (no
-  `gguf_header.bin`), and warns when it does. Refusing the request would be
-  worse than a reply that may drift, but a node navigating by a guess must say
-  so, because nothing else can tell it it is lost.
-
-**The rule this encodes.** A value that is *reported* may be approximate; a
-value that is *acted on* may not. `ptc` fed both `usage.prompt_tokens` and
-`index_pos`, and the comment justifying the approximation was written for the
-first while the second silently depended on it being exact. When one number
-serves two purposes it inherits the stricter requirement — so a comment
-explaining why an estimate is good enough is a place to go and check what else
-reads it.
-
-**And the diagnostic lesson**, which cost more than the fix: an earlier pass
-cleared position bookkeeping by observing that `index_pos` "jumps correctly to
-the prompt length and then increments by one". That compared the number against
-ITSELF. The discriminator is `index_pos` against the worker's `kv_offset` on the
-same forward — two values that must be equal, printed in adjacent log lines the
-whole time. Ask what a number is supposed to EQUAL, not whether it looks
-plausible.
+→ `docs/invariants/inference.md`
 
 ## A peer's stated reason is the answer; do not substitute one of your own
 
@@ -4409,47 +940,7 @@ refuses a forward. Both exist because the correct handling was implemented on
 the **verify** hops and missing on the **prefill** hops, in the same files, with
 a comment on one of them explaining exactly why it mattered.
 
-- **`peer_error_from_result`** — recovers the peer's failure from a completed
-  `LayerResult`. A serving node reports why it refused in
-  `finish_reason: NetworkFinishReason::Error(msg)`, and `LayerResult::error`
-  leaves `token_ids` empty when it does, so a caller testing only
-  `token_ids.is_empty()` throws the reason away. It is applied at the single
-  choke point: `forward_through_segments` is now a thin wrapper over
-  `forward_through_segments_inner`, because the inner function has SIX `Ok`
-  return sites and checking each one is the mistake being fixed. The one path
-  that does not go through it — `speculative.rs`'s prefill, which awaits
-  `wait_for_result` directly — carries its own call and says so.
-- **`failover_segment` LOOPS over standbys, and a standby's error is a failure
-  of that standby, not the segment's output** (2026-09-02, gotcha #435). It
-  used to return whatever the first standby sent; a refusal (out of memory, a
-  missing shard) is an error `LayerResult` with EMPTY activations, and those
-  were forwarded to the next segment, which failed them as `Tensor bytes too
-  short` — an internal error blamed on a segment that was fine, seen live and
-  independently reported by a tester the same day. Every node already tried is
-  excluded from the standby search; exhaustion carries the last standby's
-  stated reason (`exhausted_message`). Every consumer of a `LayerResult` must
-  check `finish_reason` before using the payload.
-- **`every_holder_would_refuse`** — asked BEFORE failing over. Deliberately
-  narrow: only `Validation`, because that describes the REQUEST and every holder
-  reproduces it identically. A missing shard or a dead worker says nothing about
-  the next holder and must still fail over; narrowing this predicate too far
-  would disable failover itself, which is why the negative control test lists
-  five such errors by name.
-
-**What was measured (2026-08-30, released v0.3.135).** One over-long prompt gave
-three different answers depending on topology — `500 server_error` naming an
-internal mechanism, `503 Segment failover exhausted` advising
-`swarmllm get-model` for a prompt that is simply too long, and `400` after a
-wasted round trip per peer — while the same prompt on a LOCAL model was always a
-clean `400` naming the exact number of tokens to cut. Whose fault a mistake was
-depended on which machine held the model: gotcha #304's shape, on a path #304's
-fix did not reach. And because the class was flattened to `Inference`,
-`failure_is_penalty_worthy` (which exempts `Validation`) docked the serving peer
-for the caller's mistake. Gotcha #415.
-
-**The rule to carry.** Before failing over, ask whether the next holder could
-possibly answer differently — and never replace a reason you were given with one
-you invented.
+→ `docs/invariants/scheduling.md`
 
 ## A streaming path must announce that it finished
 
@@ -4459,25 +950,7 @@ delta. So a coordinator that streams tokens and then returns without sending a
 terminal `finish_reason: Some(..)` does not merely omit a marker — it
 **duplicates the entire reply**.
 
-`ngram_only_spec.rs` was the only coordinator missing it;
-`distributed.rs`, `remote_generate.rs`, `dsd.rs` and `speculative.rs` all had
-it, which is why nothing else showed the fault. Measured on the released
-v0.3.135: "Count 1 to 3, digits only" came back as `1\n2\n3<|eot_id|>1\n2\n3`
-from every peer-held model on default settings (gotcha #414).
-
-The same file also streamed the EOS token as reply text at two sites, while
-`finish_speculative` filters it out of the non-streaming content — so one reply
-differed by transport. **End-of-turn is a control token: it ends the reply, it
-is not part of it.** Keep it in the accumulator so the loop still stops on it,
-and exclude it from what is streamed.
-
-`a_streaming_pipeline_path_sends_its_terminal_finish_event` in
-`tests/repo_consistency.rs` fails the build on a streaming coordinator with no
-terminal send. `pipeline/mod.rs` is excluded because it holds the shared emit
-helpers — ending the stream is the coordinator's job, since only it knows why
-generation stopped.
-
-Ask of any "did this happen?" flag what its consumer does when it stays false.
+→ `docs/invariants/api-surfaces.md`
 
 ## A stream that fails must say so (2026-09-01)
 
@@ -4489,24 +962,7 @@ OpenAI streaming surface is `StreamEvent::Error`, typed through
 in `tests/repo_consistency.rs` fails the build on an `Err` arm that produces the
 literal `"stop"` within a few lines.
 
-**Why**: measured on the released v0.3.145 (gotcha #433), a streamed request for
-a model no node held answered `200`, an empty assistant delta, `finish_reason:
-"stop"`, `[DONE]` — while the identical request without `stream` answered 503
-with the hint naming the cause. The streaming branch of the no-coverage case in
-`api/openai/mod.rs` went to the legacy in-process `stream_response` (from before
-the router could stream), whose error arm mapped every failure to `"stop"` with
-a comment asserting the caller surfaced errors another way. Nothing did.
-
-Two rules follow. **Two branches that differ only by `stream` must reach the
-same decision-maker** — the router owns the in-process executor AND the
-distributed pipeline, streaming or not, so both forms of a request go through
-it and are refused by it identically; a fork on a presentation flag is a fork in
-policy. And **a peer's "I do not hold it" is a stale claim at whichever hop it
-arrives**: `dispatch::remote_generate::REMOTE_GENERATE_NOT_HOSTED` is the fast
-path's refusal, named so `remote_error_means_missing_shard` can match it and
-retract, blacklist and retry — the same handling a mid-pipeline missing-shard
-error has had since July. Unmatched, one honest refusal failed a request four
-other peers could have served.
+→ `docs/invariants/api-surfaces.md`
 
 ## Two counters both called "tokens" — write down which event each one counts
 
@@ -4514,29 +970,7 @@ other peers could have served.
 SENT fail to arrive?". It is deliberately NOT `usage.completion_tokens >
 emitted()`.
 
-`decode_token` accumulates bytes in a `carry` buffer and returns EMPTY until a
-multi-byte codepoint completes, and the serving node skips forwarding an
-empty-text event without numbering it. So `streamed_count` — what the done token
-carries and what `token_id` densely numbers — counts NETWORK SENDS, while
-`usage.completion_tokens` counts MODEL STEPS. They are equal only for pure
-ASCII, which is what everything got tested with.
-
-Comparing the two therefore refused correct replies: on the released v0.3.135,
-"one sentence in Chinese" answered `503 Reply truncated in transit: 1 of 3
-tokens arrived` and five emoji answered `9 of 12`, both having arrived complete,
-with a hint telling the user to try a different machine (gotcha #416). The
-product ships 21 locales and most are multi-byte.
-
-Three properties a change here must keep. **`missing()` is derived from the done
-token**, which is the only figure comparable to what arrived. **An unsequenced
-peer is never judged truncated** — it cannot say what to expect, the same
-degradation `is_complete` makes for mixed-version swarms. And **a genuine loss
-must still be caught**: `a_genuinely_lost_token_is_still_truncated` is the
-control, because "never report truncation" would silently reintroduce the
-truncated replies of gotcha #282.
-
-The clamp of `completion_tokens` down to `delivered` now happens only on a real
-truncation, so usage stops under-reporting every multi-byte reply.
+→ `docs/invariants/api-surfaces.md`
 
 ## A vocabulary piece becomes token ids in exactly one place
 
@@ -4545,29 +979,216 @@ piece is turned into ids on the BPE path. There are two sites that need it — t
 single-character early return and the output walk — and **both were
 `.unwrap_or(0)`**, i.e. `<unk>`.
 
-**What that cost.** A SentencePiece vocabulary deliberately contains no bare tab
-or newline; it carries `<0x09>` / `<0x0A>` and expects byte fallback, which
-`spm_encode` has always done. The BPE path did not. So on any GGUF taking that
-branch — `tokenizer_model == "llama"` that ALSO ships merges: TinyLlama,
-Llama-2, Mistral, Vicuna — **every newline in every prompt was handed to the
-model as `<unk>`**, chat-template newlines included, so essentially every
-multi-line prompt was structurally corrupted (gotcha #421).
+→ `docs/invariants/inference.md`
 
-**Byte fallback is gated on `is_sentencepiece` and must stay that way.** A GPT-2
-vocabulary maps every byte through `byte_encoder` into a character it does
-contain and carries no `<0xNN>` tokens, so a miss there is a genuine vocabulary
-problem and falling back would invent tokens. Pinned in both directions by
-`a_character_with_no_vocabulary_entry_falls_back_to_its_byte_token` (with a
-control: a character having neither a piece nor a byte token must still land on
-`<unk>`) and `a_gpt2_vocabulary_does_not_get_byte_fallback`.
+## Centralised Wire-Format Helpers
 
-**The general rule, and why this one is worth writing down.** Nothing internal
-could have found it: the tokenizer round-trips against itself perfectly, and the
-equivalence tests written the same day compare it to an *earlier version of
-itself* — both were equally wrong. It took HuggingFace `tokenizers` as an
-outside reference, and nine minutes. **A component that is only ever checked
-against its own past cannot be shown to be correct, only unchanged.**
-`examples/tokenizer_scaling` with `SWARM_TOK_TEXT` is the harness; 17/17 samples
-now agree on the fixed path and 6/6 on the untouched GPT-2 one.
 
-**Do not add a third site that maps a piece to an id.** Call the helper.
+These helpers exist as the single source of truth for invariants that
+silently break at the wire if duplicated:
+
+- **`network::protocol::build_layer_forward_aad`** — encryption AAD
+  bytes for `LayerForward` envelopes. Both encrypt
+  (`network/manager/tensors.rs`, `network/pipeline_stream.rs`) and
+  decrypt (`decode_layer_forward_encrypted`) MUST go through it.
+  Adding a new authenticated field to `LayerForward` means extending
+  this helper, not appending bytes on the encrypt side. Post-R100,
+  the helper covers the cleartext header AND the spec/kv-truncate
+  trailer fields; the decoder reconstructs AAD via the helper after
+  parsing trailers (since trailer bytes don't appear contiguously
+  on the wire — sealed payload sits between header and trailers).
+  Post-R139, also covers the chunk-meta trailer (0x05) so chunked
+  STREAM frames can't be reordered / truncated / substituted across
+  transfers without Poly1305 rejection.
+- **`network::pipeline_stream::chunk_layer_forward`** (R139) — splits
+  a `LayerForward` at byte-offset boundaries into K chunks for
+  STREAM-style chunked send. Returns the input verbatim wrapped in a
+  single-element Vec when `activations.len() ≤ chunk_size_bytes`
+  (single-chunk implicit fallthrough — no chunk_meta on the wire).
+  Sender call sites that opt into chunked send MUST go through this
+  helper rather than re-implementing the split; the chunk_meta
+  values it sets are the contract the receiver's
+  `try_assemble_chunked_forward` and `build_layer_forward_aad` both
+  rely on.
+- **`SharedState::resolve_pending_layer_result`** — the ONLY way to deliver a
+  `LayerResult` into `pending_layer_results`. Never `remove(&request_id)` +
+  `tx.send(...)` from a network path. The map is keyed by `request_id`, but a
+  request that has failed over has TWO forwards outstanding: the abandoned one
+  and the standby's. Resolving by id alone lets the abandoned forward's late
+  error (from `fail_tensor_forward`, `fail_pending_forward`, or the
+  stale-forward sweep) consume the standby's waiter — which then discards the
+  standby's genuine result and surfaces the empty payload downstream as
+  `Internal: Tensor bytes too short`. Observed live 2026-08-01: a request that
+  would have completed in ~10s via failover failed after 181s (gotcha #229).
+  Waiters record the node they expect in `PendingLayerResult::awaiting`; the
+  helper checks and takes in one atomic `remove_if`. A bare `remove` is only
+  legitimate for owner-side cleanup — a coordinator dropping its OWN waiter on
+  an error path, or the health monitor's stale sweep.
+- **`daemon::dispatch::timestamp_fresh_one_sided`** — generic
+  one-sided staleness check (R94). Time units must be consistent
+  across `ts`/`now`/`max_age`/`skew`. Use directly for any new
+  timestamp gate; gossip and pre-signed-message helpers below are
+  thin wrappers around it.
+- **`daemon::dispatch::gossip_timestamp_fresh`** — private `u64`-ms
+  wrapper used inside `daemon/dispatch/mod.rs` itself for the four
+  inbound gossip handlers (`RegionShardSummary`, `ModelDemandGossip`,
+  `WishlistAnnouncement`, `PoolModelAvailability`). The
+  `network::manager::events.rs` GossipSub pre-filter uses
+  `timestamp_fresh_one_sided` directly via an inline closure — both
+  sites share the same one-sided invariant, but via the underlying
+  primitive rather than this wrapper.
+- **`credit::ledger::check_signed_freshness`** — one-sided staleness
+  check for `chrono::DateTime<Utc>`-typed signed messages (balance
+  reports, credit transactions, pool removals). Constants
+  `CLOCK_SKEW_TOLERANCE_SECS` / `BALANCE_REPORT_MAX_AGE_SECS` are
+  `pub(crate)` so all callers share the same window (gotcha #32). R94
+  routed `pool/manager::handle_inbound_removal` through here.
+- **`pipeline::pack_verify_tokens_to_le_bytes`** (R93) — packs `&[u32]`
+  speculative-verify tokens as i64-LE bytes for the worker's
+  multi-token decode branch. Shared by `speculative.rs::send_verify_batch`
+  and `dsd.rs::forward_verify_through_segments`.
+- **`pipeline::build_spec_verify_forward`** (R93) — constructs the
+  18-field `LayerForward` envelope for spec verify (R139 added the
+  18th field, `chunk_meta`). Adding a new field
+  to `LayerForward` extends this helper, not the call sites.
+- **`pipeline::build_kv_truncate_forward`** (R95) — sibling helper
+  for stop-sequence KV-truncate signals (empty activations,
+  `spec_logits_requested: false`).
+- **`pipeline::register_pending_layer_result`** (R93) — cap-check +
+  oneshot insert + `PendingLayerResultGuard` RAII (gotcha #45). Used
+  by speculative prefill, speculative verify, and DSD verify;
+  `distributed.rs` keeps two inline call sites that need `&mut self`
+  or skip the cap during failover.
+- **`storage::Database::with_write_table`** (R96) — opens a write
+  transaction, runs a closure on the data table, commits on `Ok` or
+  rolls back on `Err`. Used by `put_json`, `insert_raw`, `remove`,
+  `clear_tree`, `replace_tree`. Read-side dedup deferred (lifetime
+  constraints on `ReadOnlyTable`).
+- **`swarmllm_types::ShardResponse::empty()`** (R97) — canonical
+  empty/error response for refused requests, queue-full rejections,
+  and disk read/seek/open failures. 8+ rejection sites across
+  `network/manager/{requests,shard_transfer}` go through it.
+- **`swarmllm_types::LayerResult::error(request_id, reason)`** (R106)
+  — canonical empty/error LayerResult for failed pipeline forwards.
+  Five rejection sites (`network/manager/{tensors,requests,mod}.rs`,
+  `network/pipeline_stream.rs`, `daemon/dispatch/layer_forward.rs`)
+  go through it. Adding a new field to `LayerResult` only requires
+  updating this constructor — mirrors `ShardResponse::empty()`.
+- **`network/manager/connections::try_enqueue_redial`** (R97) —
+  dedup + cap + push for `pending_redial`. Used by both the
+  active-pipeline and unregistered-peer reconnect paths.
+- **`responses::types::raw_tool_kind_or_unknown`** (R93) — extracts
+  the `type` field from a `ToolDef::Raw` JSON value with `<unknown>`
+  fallback. Used by both Chat and Anthropic `translate_tools` error
+  arms.
+- **`cli::bail_if_no_api_key` / `cli::exit_daemon_unreachable`** (R96)
+  — the canonical "daemon not running" / "daemon unreachable"
+  messages. Used by `cli::{bench, chat, peers, status}`.
+- **`model::auto_manage::spawn_check_and_load`** — canonical
+  "shard landed → reload model → refresh dashboard" spawn. Always
+  performs the three steps together: compute_vram_budget →
+  check_and_load_model → signal_dashboard(ModelsChanged). Used by
+  `api/admin_models/shards.rs::delete_shard`,
+  `network/manager/requests.rs` shard-download landing, and
+  `model/acquisition.rs::register_model`. New paths that complete a
+  shard or shard-set acquisition MUST go through this helper rather
+  than open-coding the three-step sequence.
+- **`pool::invite::{encode_invite_code, decode_invite_code}`** (R140) —
+  canonical `swarmpool://` v2 invite code codec. Encode JSON-serializes
+  `InviteCodePayload` → ChaCha20-Poly1305 seals with a random embedded
+  key → base64url; decode reverses with version + expiry + token-length
+  validation. The decoder normalizes ANY user-pasted error to
+  `SwarmError::Validation` (clean UX message) rather than `Internal` —
+  the most likely failure cause is a truncated/mistyped paste, not a
+  daemon bug. New entry points that accept v2 codes (CLI, MCP tool, web
+  API) MUST go through `decode_invite_code` rather than parsing the
+  blob manually. Adding a field to `InviteCodePayload` requires bumping
+  `INVITE_VERSION` AND updating the decoder's mismatch error to point
+  users at a daemon upgrade. `pool::invite::looks_like_v2` is the
+  prefix-sniff helper used by API + frontend to route between v2 and
+  the legacy 8-char path.
+
+## The single-source-of-truth helpers, by topic
+
+Each names the ONE place a decision is made. A second implementation of any of
+them is this codebase's most-repeated defect — see “One invariant, N paths”.
+**Read the topic file before changing one.**
+
+### API surfaces, errors and streaming → `docs/invariants/api-surfaces.md`
+
+- **`api::mcp::dispatch::spawn_model_call_task`** — the single place that decides whether a fan-out model call actually **answered**, as opposed to merely not erroring.
+- **`crate::error::reclassify_flattened_error`** — recovers an error's CLASS from a message that crossed a boundary carrying no types.
+- **`crate::error::classify_error`** — the single answer to "what is this failure, to a caller": `(StatusCode, client-safe message, error type)`.
+- **`crate::error::failure_log_level` + the `log_failure!` macro** — the single answer to "how loudly should this failure be recorded in THIS node's log".
+- **`crate::error::error_hint_with_key`** — returns the actionable hint as a stable `(key, english)` pair, from ONE match arm.
+- **`AnthropicSseEvent::Error`** — the ONLY way the Anthropic streaming surface reports a failure.
+
+### Inference kernels, caches and the tokenizer → `docs/invariants/inference.md`
+
+- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`.
+- **`inference::decode_attn::gqa_decode_attention_cpu`** — single-position attention straight over the KV cache in its stored `[b, kvh, S, d]` layout, one rayon task per (batch, kv head).
+- **`inference::fast_math`** — eight-lane AVX2 `expf` (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by `vectorised_exp_tracks_libm` over [-80, 80]) and the…
+- **`inference::cpu_pools::in_phase_pool`** — binds a forward pass to the CPU thread pool that suits its phase, at ONE choke point: `SplitModel::forward_inner_impl` and `forward_batch`.
+- **`inference::layers::new_kv_cache`** — the only way to construct a KV cache.
+- **`inference::split::kv_cache::LayerKv`** — one layer's KV cache: the f32 BHSD cache every path reads, plus an optional f16 BSHD mirror for the CUDA flash kernel.
+- **`inference::split::kv_cache::SeqCache` / `KvPair` + `LayerKv::truncate`** — the KV cache buffer is this project's own, not candle's, for ONE reason: candle's `Cache` keeps its length private, so the only way to keep…
+- **`inference::attn_softmax::scaled_masked_softmax`** — the single expression of attention's tail: scale, optional Gemma-2 logit soft-cap, additive mask, softmax.
+- **`inference::layers::standard_attention` grouped GQA decode** — (c4cc3b16, 2026-08-16) — for `q_len == 1` with `n_kv_head < n_head`, standard attention no longer expands the KV cache with `repeat_kv`;
+- **`inference::layers::cuda_decode_prefers_standard`** — on CUDA: MHA decode takes standard, GQA decode takes flash **at every context length**;
+- **`inference::layers::cuda_decode_prefers_standard` (superseded note, 2026-08-07)** — the measured CUDA attention routing rule, extracted so it is testable without a GPU.
+- **`inference::mem_bandwidth::measured_gbps`** — what this machine's memory actually delivers, measured once and cached.
+- **`inference::cancel::unless_cancelled` — every wait that can run for minutes watches the request's cancel flag** — .
+- **A prompt pass asks between layers whether its request was cancelled** — .
+- **`inference::split::token_embedding::rows_on_demand_eligible`** — the single answer to "is this model's `token_embd.weight` held quantized with its rows dequantized on lookup, or dequantized whole at load?".
+- **`inference::split::read_gguf_header`** — the single way to parse a GGUF header off a PATH, and the buffering is the entire reason it exists.
+- **`inference::split::GgufTensorMeta::tied_output_location`** — the single definition of "is this model weight-tied", i.e.
+
+### Worker memory: graphics, RAM and the KV cache → `docs/invariants/memory.md`
+
+- **`inference::worker_ipc::worker_error_is_fatal`** — the single source of truth for "did this worker error destroy the worker's device state, or just this request?".
+- **`daemon::shard_loader::force_cpu_for`** — the single mapping from `inference.gpu_layers` (`-1` auto / `0` CPU only / `>0` GPU) to the loader's `force_cpu` flag.
+- **`daemon::gpu_support::MIN_COMPUTE_CAP` + `local_gpu_is_supported`** — the single answer to "can this card run OUR kernels?".
+- **`model::auto_manage::vram::ADMISSION_KV_CONTEXT`** — the context length admission charges KV cache for, on either device, whatever the user configured.
+- **`ModelProcessPool::free_vram_for_admission` + `plan_vram_reclaim`** — reclaim graphics memory from models nothing is using rather than demoting the requested one to the processor.
+- **`should_return_to_gpu` + `ModelProcessPool::worker_should_return_to_gpu`** — the single answer to "is this resident worker still in the right place?", asked on the request path in `get_or_spawn` rather than on a timer.
+- **Graphics memory has ONE owner: `ModelProcessPool`** — .
+- **`model::auto_manage::storage_budget` is the ONE answer to "how much shard storage may this node hold?", and `held_shard_bytes` the one answer to "how much does it hold?"** — .
+- **`model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves** — .
+- **An admitted prompt is RECORDED, not just decided** — .
+- **`inference::split::kv_budget::admit_prompt` + `PrefixCache::release`** — ONE decision for a whole prompt, before prefill, charging live caches PLUS the prefix cache's snapshots (the same device memory, previously…
+- **`inference::split::kv_budget`** — the KV memory budget and the admission check against it.
+- **`inference::process_pool::worker_socket_path`** — the worker IPC socket path, and the ONLY place it is built.
+
+### Network protocol, peers and the model registry → `docs/invariants/network.md`
+
+- **`inference::pipeline::remote_generate::StreamReassembler`** — the single place a remote reply's token stream is put back in order.
+- **A hole in a peer-served reply is FILLED, not waited out** — .
+- **`NodeCapability.cpu`** — a processor described the way a graphics card always has been.
+- **`PeerInfo::ack_srtt_ms` is what routing prices a peer by** — .
+- **`mem_bandwidth::remeasure_keeping_the_best`** — the memory-bandwidth figure a processor-only node advertises may RISE over its run and never fall.
+- **A peer's advertised version may bring the update check FORWARD and may do nothing else** — .
+- **`update::SelfUpdateBlocker` — "this node cannot update itself" carries WHY** — .
+- **`ModelRegistry::manifests_to_gossip`** — the single answer to "which manifests should this node re-broadcast?": ones it published **and ones it holds a shard of**.
+- **`model::manifest::merge_known_shard_hashes`** — the rule that a shard hash may go from unknown to known but never back.
+- **`types::slugify_model_name`** — the single derivation of a model id from a human display name.
+- **`model::huggingface::is_trusted_publisher`** — canonical curator-allowlist check for an HF `repo_id`.
+- **`SharedState::resolve_connected_peer_id_bytes`** — the resolver to use for any message that `network::manager::relay::is_relay_eligible` refuses, i.e.
+- **`ModelRegistry::describes_a_different_build`** — is this manifest the same FILE as ours, or another build wearing the same name? A model id comes from a display name (`slugify_model_name`),…
+- **`model::manifest::is_backup_artifact_id`** — canonical check for a model id that is a copied-folder backup (`<model>.FULLBACKUP`, `<model>.old`, `<model>~`, `… copy`) rather than a real…
+
+### Scheduling, routing and failover → `docs/invariants/scheduling.md`
+
+- **`ModelProcessPool::serves_on_cpu` is the whole-model delegation precondition** — "would this request run on our processor": no usable card, told to use the processor, a build without CUDA, or a card the model does not fit.
+- **A node holding every layer that would run the model on its processor lets the priced search compete with its fast path** — .
+- **A peer's capacity for a prompt is weights PLUS that prompt's KV cache** — .
+- **`inference::scheduler::delegation_target`** — the single decision to hand a WHOLE model to a peer rather than run it on this node's CPU.
+- **`inference::router::distributed_exec::failure_is_penalty_worthy`** — gates `penalty_serve_failure` on (a) the assignment actually having had a remote segment and (b) the error not being locally attributable.
+
+### SharedState, live config and credits → `docs/invariants/state-and-config.md`
+
+- **`SharedState::release_request_state`** — clears the maps a finished request leaves behind: `active_pipelines`, `active_traces`, `request_holder_blacklist`, `peer_vram_commitments`…
+- **Credits are DORMANT — nothing may publish or act on a balance** — .
+- **`SharedState::cfg()`** — the live config, and the single answer to "what is this setting **now**".
+- **`SharedState::record_peer_serve`** — the single answer to "this node did inference work for a peer", counting it AND billing for it.
+- **`config::InferenceConfig::claims_shard`** — the single answer to "does this node claim shard N?", i.e.
+- **`SharedState::local_fast_path_for` is the single answer to "may this request take the local split fast path?"** — .

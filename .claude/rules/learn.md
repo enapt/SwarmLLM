@@ -6,7 +6,7 @@ Update knowledge artifacts the same commit as the change — not at session end.
 
 | Discovery | Update target |
 |---|---|
-| New architectural pattern or convention | `.claude/rules/architecture.md` |
+| New architectural pattern or convention | `.claude/rules/architecture.md` (the rule) + `docs/invariants/<topic>.md` (the evidence) |
 | New gotcha or pitfall | `memory/gotchas.md` (append at the next free index) |
 | Changed file structure (new/renamed/deleted) | `CLAUDE.md` Repository Structure |
 | Changed API endpoint | `docs/ARCHITECTURE.md` HTTP API |
@@ -21,6 +21,22 @@ Update knowledge artifacts the same commit as the change — not at session end.
 ## Code map
 
 `memory/code-map.md` is the dependency map index. Update when adding/removing/renaming a subsystem, API handler, JS component, channel, or WS message type. Read it at session start instead of re-exploring.
+
+## Where a rule lives
+
+`.claude/rules/architecture.md` loads into **every** session, so it holds the rule
+statement and nothing else. The evidence — what the rule replaced, what it was
+measured at, what a change must keep — goes in `docs/invariants/<topic>.md`,
+which is read on demand.
+
+Adding a rule means both halves: a heading and a short statement in the rules
+file with a `→ docs/invariants/<topic>.md` pointer, and the full reasoning in
+that topic file. A statement with no evidence behind it is an assertion; evidence
+with no statement in the loaded file will not be found in time to matter.
+
+The file was 4,573 lines and 308 KB before this split — every session paid for
+all of it, and one section had become a 1,657-line landfill for anything shaped
+like "there is one place that does X". Keep statements short.
 
 ## Memory hygiene
 

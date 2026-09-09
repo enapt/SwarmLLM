@@ -82,7 +82,10 @@ swarmllm/
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
 ├── packaging/     (swarmllm.service + deb/{postinst,prerm} maintainer scripts — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
-├── docs/          (ARCHITECTURE, CREDITS_DESIGN, FUTURE_WORK, DIAGNOSTICS, REFERENCE_MODELS)
+├── docs/          (ARCHITECTURE, CREDITS_DESIGN, FUTURE_WORK, DIAGNOSTICS, REFERENCE_MODELS,
+│                 NETWORKING, NETWORKING_PLAN, TESTING)
+├── docs/invariants/  (the evidence behind .claude/rules/architecture.md — 7 topic files)
+├── docs/plans/    (design notes + benchmarks/, archive/)
 ├── docs/book/     (mdBook documentation site)
 ├── vendor/        (patched upstream crates, all workspace-`exclude`d; every patch marked `SwarmLLM patch:`)
 │   ├── candle/                (k_quants::matmul tiled + row-blocked + `vec_dot_rows` multi-row AVX2 Q4_K/Q6_K kernels, bit-identical, exactness-asserted by qmatmul_bench; cudarc dynamic-linking hardcode removed;
@@ -211,7 +214,8 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
   switched off, what is actually true today, the bilateral-settlement design, and
   the exit criteria that must hold before any of it is switched back on
 - `docs/FUTURE_WORK.md` — deferred items with enough context to pick up cold
-- `.claude/rules/architecture.md` — invariants (SharedState, broadcast channels, scheduler oracle, centralised wire-format helpers)
+- `.claude/rules/architecture.md` — the invariants themselves, as statements (SharedState, broadcast channels, scheduler oracle, wire-format helpers). Loaded every session, so it is deliberately short.
+- `docs/invariants/` — the evidence behind each rule: what it replaced, what it was measured at, what a change must keep. Seven topic files (scheduling, memory, network, inference, api-surfaces, state-and-config, frontend). **Read the topic file before changing code a rule names.**
 - `.claude/rules/diagnosis.md` — **read before blaming any change for any symptom, and before implementing anything non-trivial.** Rule 0: look up how the failure mode is solved elsewhere first — WireGuard's per-keypair replay counter and vLLM's Head-Room Admission each changed an implementation the same day. Then: baseline before blaming, verify the mechanism fired, check the test fails without the fix.
 - `.claude/agents/root-cause.md` — `Task(root-cause)` establishes CAUSED / NOT-CAUSED / UNDETERMINED for a suspected cause, and never proposes a fix. Use it before reverting or attributing, especially when the suspect is your own recent change.
 - `.claude/sweep-log.jsonl` — per-finding history of every `/sweep` round (status: fixed / wontfix / deferred). Grep before re-reporting potential issues.
