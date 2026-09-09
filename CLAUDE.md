@@ -34,7 +34,7 @@ Shared state lives in `Arc<SharedState>` with `DashMap` for concurrent access. S
 - `state.models` (`ModelMgmt`) — `acquisition_progress`, `hf_sources`, `auto_manage_*`, `model_trust`, `locked_shards`, `removed_by_user` (user-deleted shard tombstones, 08-21), `prune_history`, `wishlist` (R111), `hf_trending_cache` (R112), `shard_download_backoff` (per-shard exponential download cooldown so one stuck download can't monopolize a slot), `shards_needing_repair` (shards found CORRUPT and awaiting a fresh verified copy — written only via `mark_shard_for_repair`), `shards_pending_verification` (held shards whose EXPECTED hash changed, so their bytes must be re-checked — how a node learns from the swarm that what it serves is wrong), etc.
 - `state.metrics` (`MetricsProviders`) — `node_stats`, `inference_requests_total`, `channel_metrics`, `providers_config`, `swarm_capacity` (R110), `hedge_tracker` (R136 Layer 2), `prefetch_orchestrator` (R136 Layer 3), `peer_speed` + `peer_model_warm_at` (measured per-peer prefill/decode speed — sizes segment timeouts and ranks candidates), etc.
 
-Cross-cutting fields (identity, db, peer_registry, model_registry, executor, split_models, `local_memory_refusals`, etc.) remain on the root struct, along with the two configs: `config` (the boot-time snapshot, for startup-only decisions) and `live_config` (the current one — **read it via `state.cfg()`** for anything the user can change while the node runs).
+Cross-cutting fields (identity, db, peer_registry, model_registry, executor, split_models, `local_memory_refusals`, `salvaged_replies` (what a failed request had already generated, handed to the caller once its retry has also failed), etc.) remain on the root struct, along with the two configs: `config` (the boot-time snapshot, for startup-only decisions) and `live_config` (the current one — **read it via `state.cfg()`** for anything the user can change while the node runs).
 
 ## Build Phases
 
@@ -240,120 +240,32 @@ baseline taken FIRST that scored the same**.
 ⚠ **CI on the bump commit reads "cancelled"** — the changelog push superseded it
 through the concurrency group. Normal; what matters is green on the tagged commit.
 
-**The round that stopped a silent wrong answer.** Seven commits on .165, and the two that matter share one
-subject: what happens to a reply when the machine serving part of it goes away.
+**The round that stopped a silent wrong answer.** Two fixes on one subject —
+what happens to a reply when a machine serving part of it goes away.
 
-- **A failed request now hands back what it had already generated.** Report
-  #028's second residual: a 4m43s reply, already decoding, was discarded whole
-  when its tail peer dropped. The salvage is recorded by the pipeline and taken
-  by the router only after the retry has ALSO failed — a complete answer from a
-  second route still beats a truncated one — and the executor still returns the
-  `Err`, so the peer penalty, the trust update and the logging are untouched.
-  `finish_reason` is `"error"` (vLLM's own value); Anthropic has no
-  interrupted-turn member and its catch-all is `end_turn`, so that surface gets
-  an explicit arm to `max_tokens`.
+- **A failed request hands back what it already generated.** Report #028's
+  second residual. Recorded by the pipeline, taken by the router only after the
+  retry has ALSO failed; the executor still returns the `Err`, so the peer
+  penalty and logging are untouched. `finish_reason` `"error"` (vLLM's value);
+  Anthropic has no interrupted-turn member so it maps to `max_tokens`.
 - **A reply already under way is no longer moved to a machine that cannot
   continue it.** Found while scoping report #028's OTHER residual, and it
-  inverted it. A stand-in holds none of the failed machine's KV cache, nothing
-  rebuilds it, and `split::executor` reads `kv_offset` from the cache rather
-  than from `index_pos` — so the replacement answered from the current token
-  alone while the reply carried on looking normal. **Measured**
-  (`examples/failover_kv_probe.rs`): replacing 4 of 28 layers takes
-  P(the healthy machine's own token) from **0.997 to 0.119**; half the model,
-  to **0.005**. There is no safe early window — one decode step in is WORSE
-  (0.0000), because what is missing is the PROMPT. Failover is correct on the
-  prompt pass and only there, so `failover_can_restore_state` refuses after it
-  and the retry/salvage above cover the request.
-- **The route-cost instrument could not see a hand-off**, which was most of the
-  traffic and all of the traffic it was added for: wired at one of
-  `assemble_pipeline_for`'s six returns, with the four hand-off returns ahead of
-  it. Zero samples in ten hours of live traffic. **So no log before 2026-09-09
-  carries hand-off data, and its absence is not evidence they are rare.**
-- Docs: item #8 had been resolved on 09-06 while its triage row still asked for
-  a measurement, and survived the 09-08 re-verification pass.
+  inverted it: a stand-in holds none of the failed machine's KV, nothing
+  rebuilds it, and `kv_offset` is read from the cache not `index_pos`.
+  **Measured** (`examples/failover_kv_probe.rs`): replacing 4 of 28 layers takes
+  P(the healthy machine's own token) from **0.997 to 0.119**; half the model to
+  **0.005**. No safe early window — one step in is WORSE, the missing state is
+  the PROMPT. Failover is correct on the prompt pass and only there.
+- The route-cost instrument could not see a hand-off (1 of 6 returns wired), so
+  **no log before 2026-09-09 carries hand-off data** and that absence is not
+  evidence they are rare.
 
-⚠ **Field data for `ASSUMED_FORWARD_PASSES` can only be collected once this is
-DEPLOYED** — the live node must run the fixed instrument.
+Rules: `.claude/rules/architecture.md` §§ "A failed request hands back the work
+it had already done" and "A reply under way is never moved to a machine that
+cannot continue it". Detail: `memory/round_log_0909_salvage.md`.
 
-**Previously released and deployed: v0.3.165-alpha (2026-09-08, tag on `3b55bcd4`).**
-Both nodes verified: local `225e6fe7f2b5cd74` (CUDA artifact — published sha256
-matched AND the installed binary byte-identical to the download, `ggml_cuda_init`
-present, 0 ERROR, node id kept, inference confirmed; rollback
-`~/.local/bin/swarmllm.0.3.164-alpha.bak`, backups pruned to newest 3) and
-Proxmox `9684263580c6660f` (.deb `0.3.165-alpha-1` over `0.3.164-alpha-1`, hash
-re-verified AFTER transfer, `active` + `enabled`, no `.dpkg-old`, journal errors
-"-- No entries --"). Back in each other's peer lists at 2 ms. Gate fully clean:
-CI green on all 13 jobs INCLUDING the three feature compile-checks (flash-attn,
-candle-cuda, windows-gpu-no-flash) and macOS, **Cache warm green on the bump
-commit itself** (the version bump edits `Cargo.lock`, so it re-ran), Docker
-green, 25 assets, not draft, `latest`, **smoke 9/9 + shapes 7/7 on the
-DOWNLOADED artifact against a .164 baseline taken FIRST that scored the same**.
-
-**The round a code review of the previous release started.** `/code-review` on
-the .164 fixes returned 15 findings; 9 of the top ones were confirmed against
-the code before anything was changed, and the headline was uncomfortable —
-**#495, shipped the day before, could not observe the failures it was written
-for**, for two independent reasons that neither the suite nor the field could
-distinguish from a healthy swarm (`expected_attempts_multiplier` reads 1.0 both
-for a reliable peer and for one nothing is recording).
-
-- **A transport failure was recorded as a perfect delivery.** The ACK fast-fail
-  sweep, a departed peer and a closed stream all end a forward by resolving the
-  waiter with a `LayerResult::error` THIS NODE built, which arrives in the same
-  arm as a peer's own refusal. With the ACK deadline well inside the segment
-  budget, that was the ordinary way a dead link was seen. Fixed structurally:
-  `#[serde(skip)] locally_constructed` — the wire format answers "did this come
-  from the peer", so no call site can forget.
-- **The sample cadence buried what was left**: once per segment per token on the
-  chain path against once per reply on the fast path, into one EMA at α=0.3.
-  Now the prompt pass plus every failure.
-- **The prompt-trust bar was on two of the three paths that assign layer 0**,
-  and *the bar failing the search is itself a route into the path with no bar* —
-  so tightening it made the exposure MORE likely on that shape. Also found while
-  fixing it, and not in the review: `find_standbys` took no `encrypted_pipeline`
-  at all, so a remote node could stand by for the prompt or the sampled tokens.
-- **Per-peer goodput** (`GoodputEstimator` + `VertexCost::transfer_ms`), the open
-  half of issue #21, researched from BBR's bottleneck-bandwidth estimator first:
-  a windowed MAX not an average, an app-limited sample may raise but never
-  establish or lower, and the round trip comes out before dividing. **Not yet
-  field-verified against netem** — the reporter has that lab and has been asked.
-- Four smaller: `cheapest_peer` now names the fact that disqualifies it (#460's
-  fix reproducing #460 one level down); a worker's memory charge follows the
-  ranges it drops; a node told to stay off its card stops advertising the card's
-  speed (35.6 tok/s broadcast against 4.95 measured); and `NoComparison` now
-  compares instead of discarding a chain already priced cheaper.
-- **The routing cost model is now instrumented rather than tuned**: every priced
-  route logs `predicted_ms` and `assumed_forward_passes` beside `total_ms` and
-  `tokens`. Nothing acts on either; `ASSUMED_FORWARD_PASSES` needs field data.
-
-⚠ **Two claims corrected in place this round, both mine.** `NoComparison` is not
-a cold-start window — `measured_gbps` measures on first call, so reaching it
-means the bandwidth measurement FAILED (a memory-starved machine). And the
-`r134` flake's `try_recv` hypothesis is disproved (the send is awaited inline);
-not reproduced in 48 runs including 8 full-suite runs at load 15.95, and
-deliberately not "fixed".
-
-⚠ **Null controls earned their keep three times.** One found a real defect in the
-goodput estimator (a small forward could ESTABLISH a wrongly-low figure two
-window rotations on — worse than unknown). Twice a control did NOT fire, which
-is a finding about the guard: one guard matched its own comment, another matched
-a binding on the line above. **Plant the violation in the form it would really
-appear** (gotchas #502, #503).
-
-**Report #028, fixed across .165's tail and .166.** A 4m43s generation, already
-streaming, was lost outright when its tail peer's connection dropped and the
-retry answered `Could not decrypt forward`. **A disconnect destroyed the session
-key**, and the two ends never drop together: `handle_connection_closed` keeps the
-session when the peer is `in_active_pipeline`, but that reads `active_pipelines`
-— the COORDINATOR's map, which holds nothing for work a node is SERVING
-(gotcha #194). So the server cleared while the coordinator kept sealing. Keys are
-now RETIRED rather than destroyed: openable, never sealable, with their own
-replay window (`.claude/rules/architecture.md` § "A disconnect retires a session
-key"). Of the two residuals, the discarded tokens are fixed in .166 (salvage)
-and the missing standby turned out to be the smaller half — see .166's KV
-finding above. Still open: a standby cannot be assembled from several nodes
-covering a range between them, and that is only worth building once a stand-in
-can inherit the conversation state (`docs/FUTURE_WORK.md` items 17 and 18).
+⚠ **`ASSUMED_FORWARD_PASSES` field data is collectable now** — the fixed
+instrument is deployed. Collect, do not tune (`docs/FUTURE_WORK.md` item 3).
 
 **Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
@@ -387,6 +299,7 @@ rather than failing. Check that node from the WSL side, or over `systemctl` and
 gotcha numbers index `memory/gotchas.md`. **Read the named round log before
 re-deriving any of these.**
 
+- **.165** (09-08): the round a `/code-review` of .164 started — **#495 had shipped INERT** (a transport failure recorded as a perfect delivery; fixed structurally with `#[serde(skip)] locally_constructed`), the prompt-trust bar was on 2 of 3 paths, and per-peer GOODPUT (BBR-shaped) closed issue #21's open half. ⚠ Not field-verified against netem. ⚠ Null controls caught THREE tests passing for the wrong reason. `round_log_0908_review_and_165.md`.
 - **.164** (09-08): the STABILITY round — #447(iii) (the gate proposes, the search chooses), the prompt-trust bar, and #495 (the loss term had NO input on the chain path, found from OUTSIDE by a contributor's netem lab). ⚠ The .164 field A/B was CONFOUNDED by two different BUILDS (#496). `round_log_0908_stability_round.md`.
 
 - **.162** (09-07): EIGHT fixes from the 16 GB Mac mini tester's eight reports (#017-#024). ⚠ THREE of the eight were WRONG about the CAUSE; #017/#018 are ONE knot and a naive cost comparison would have shipped a 503. `round_log_0907_macmini_eight_reports.md`.

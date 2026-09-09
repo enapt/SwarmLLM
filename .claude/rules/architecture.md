@@ -971,6 +971,67 @@ exists because the window is five minutes and the app-limited rule governs only
 what happens across rotations — the first version of its test passed with the
 rule disabled.
 
+## A reply under way is never moved to a machine that cannot continue it
+
+`distributed::failover_can_restore_state(sequence_num)` — true only on the
+PROMPT PASS — is asked by `failover_segment` BEFORE it looks for a stand-in. A
+reply already under way ends with `SegmentFailoverExhausted` carrying
+`cannot_resume_message`, and the machines that just failed are barred for that
+request id.
+
+**Why.** `failover_segment` re-sends the current step and nothing else, and the
+KV cache is keyed by `(layer range, request id)` — so a machine that has not
+served this segment for this request holds nothing, and no path rebuilds it.
+`split::executor` then derives `kv_offset` from the CACHE rather than from
+`index_pos`, and the worker's decode arm has no check that the two agree. The
+replacement therefore answers from the current token alone while the reply
+carries on looking normal.
+
+**Measured, so do not re-derive it** (`examples/failover_kv_probe.rs`,
+llama-3.2-3b, P = probability of the token the healthy machine would have
+chosen; every run carries a control holding the history, which reproduced the
+healthy machine EXACTLY at cosine 1.000000):
+
+| segment replaced | decode steps first | control | stand-in |
+|---|---|---|---|
+| 14 of 28 layers | 24 | 0.9966 | **0.0054** |
+| 4 of 28 layers | 24 | 0.9966 | **0.1186** |
+| 4 of 28 | 1 | 0.0522 | **0.0000** |
+
+Four things a change here must keep.
+
+- **The prompt pass still fails over, and must.** There the stand-in is handed
+  the whole prompt and builds its own cache; it is the case standbys exist for
+  and the only one the existing failover tests exercise.
+- **There is no safe early window.** Failing over one decode step in is WORSE,
+  not gentler, because the missing state is the PROMPT rather than the decoded
+  history. Do not add a "recent enough" exemption; the test is the WORK KIND.
+- **Ending is not losing the reply.** `should_retry_after` retries this variant
+  when a remote segment was involved, so a non-streamed request re-runs from the
+  prompt on a fresh route — a correct whole answer beats a long one that is
+  quietly wrong. Streamed, the retry is suppressed and the reader keeps what
+  they were sent; otherwise `note_salvaged_reply` returns what was generated.
+  Removing the blacklist would break this: the retry would re-learn the same
+  holder and reproduce the failure.
+- **The guard is on the CALL SITE, not the predicate.** The unit tests beside
+  `failover_can_restore_state` and `cannot_resume_message` all still pass with
+  the call removed from `failover_segment`, which is the one edit that
+  reintroduces the defect —
+  `a_reply_under_way_is_never_moved_to_a_machine_that_cannot_continue_it` in
+  `tests/repo_consistency.rs` checks the call and its ORDERING, with a
+  planted-violation self-test for both "deleted" and "present but too late".
+
+**Confidently wrong is a real state, and margin will not catch it.** At one
+decode step the stand-in's top-1 margin EXCEEDS the healthy machine's. Judge a
+change here by P(the reference's token), never by confidence or entropy — and
+never by raw-logit cosine, which shares a large frequency-prior component and
+scored −0.076 on a case where the argmax agreed.
+
+**Still open** (`docs/FUTURE_WORK.md` items 17 and 18): mid-reply failover now
+does not happen at all. Making it WORK needs the boundary activations retained
+for segments that have a standby — and that, not more standbys, is what a
+multi-node standby would need first.
+
 ## A failed request hands back the work it had already done
 
 `SharedState::salvaged_replies` holds what a request had generated when it

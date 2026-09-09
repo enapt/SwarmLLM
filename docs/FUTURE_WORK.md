@@ -2,7 +2,7 @@
 
 Captures items deliberately deferred from the model-management redesign and from prior sweeps. Each entry has enough context that a future implementer (or a future me) can pick it up without re-deriving the rationale.
 
-## Open bugs — triage index (2026-09-08)
+## Open bugs — triage index (2026-09-09)
 
 **This file is 13k lines and mixes live defects with deferred design work and measured
 dead ends. This index is the list of things that are WRONG and still open.** Perf
@@ -34,7 +34,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 |---|---|---|
 | 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | Needs a debug occupancy trace; harness in `memory/round_log_0902_perf_commits.md` |
-| 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger (a disconnect destroying the session key) and the token loss are both fixed; the residual is that no standby can be assembled from several nodes covering a range between them |
+| 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger and the token loss are both fixed. Residual: no standby can be assembled from several nodes covering a range between them. ⚠ **Blocked on item 18** — more standbys alone would arrange more takeovers into a path measured at P=0.119; the boundary activations must be retained first |
 
 ### P4 — test and infrastructure
 
