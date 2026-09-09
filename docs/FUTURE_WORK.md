@@ -41,7 +41,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | # | Bug | Why it ranks here |
 |---|---|---|
 | 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
-| 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | Needs a debug occupancy trace; harness in `memory/round_log_0902_perf_commits.md` |
+| 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | **Most likely never a wander** (2026-09-09): the refused figure is STORE-WIDE and was read as one request's; the `entries` count that says so was on a different line at `debug`. The refusal now carries `live_bytes`/`external_bytes`/`entries` and prints them. ⚠ Explanation, not a reproduction — `live_entries=1` with a total above that request's cache would reopen it |
 | 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger and the token loss are both fixed. Residual: no standby can be assembled from several nodes covering a range between them. **UNBLOCKED 2026-09-09** — item 18 shape 2 shipped, so a takeover now lands at P = 0.9965 rather than 0.119 and more standbys are worth having. Note the arming condition runs the other way too: retention is kept only where a standby covers the range, so a plan with no standbys retains nothing and gains nothing |
 
 ### P4 — test and infrastructure
@@ -12699,8 +12699,27 @@ arithmetic holds against it unchanged. Margin: 5% of the card, floor 256 MB.
 Replaying the .149 numbers: the second 6.4k prompt is now REFUSED at token 0
 (25 MB short of the margin with every cached prompt gone) where the load-time
 budget evicted 689 MB and spilled a 2.6 GB cache into host memory. The
-`allocated_bytes` wander (~1 GB) is still unexplained and still matters less:
-the card's own figure now bounds every decision.
+The `allocated_bytes` wander (~1 GB) **was most likely never a wander**, and the
+refusal line now says so directly (2026-09-09).
+
+`ClaimRefused::in_use_bytes` is STORE-WIDE — every live cache plus every prefix-cache
+snapshot, summed across all requests — and it was compared against the request in front
+of the reader: a 2184 MB cache and an 1804 MB snapshot against a reported 4898 MB. The
+~910 MB difference is other entries in the store, not memory going missing. Nothing in
+the refusal said the figure spanned more than one request, and the line carrying the
+`entries` count is a different one emitted at `debug`, which nodes do not run at — so
+the one fact that would have resolved it was structurally invisible (diagnosis rule 2).
+
+`ClaimRefused` now carries `live_bytes`, `external_bytes` and `entries`, and the refusal
+prints them beside the total, so `in_use_mb` is decomposable at a glance and
+`live_entries > 1` states outright that it is not this request's cache. Pinned by
+`a_refusal_decomposes_the_figure_it_reports`, whose null control collapses the parts and
+turns it red.
+
+⚠ **Not closed by measurement.** This is the explanation the numbers support plus a
+change that makes the next occurrence self-describing; it is not a reproduction. If a
+refusal ever prints `live_entries=1` with a total well above that request's own cache,
+the original suspicion is back and this note is wrong.
 
 Found by running OpenClaw against the live node (RTX 3070, 8 GB) with
 `max_seq_len_override = 32768` so its 14,633-token first turn was accepted at

@@ -495,10 +495,30 @@ pub(crate) fn forward_was_cancelled(e: &crate::error::SwarmError) -> bool {
 /// can, keeps `external_reserved` current, and returns what it freed.
 pub type ExternalEvictor = Box<dyn Fn(u64) -> u64 + Send + Sync>;
 
-/// Why a growth claim was refused: what the device held when it was asked.
+/// Why a growth claim was refused: what the device held when it was asked,
+/// DECOMPOSED.
+///
+/// The total alone is not readable. It is store-wide — every live cache plus
+/// every prefix-cache snapshot, across all requests — and a reader naturally
+/// compares it against the request in front of them. That is how ~1 GB came to
+/// be recorded as an unexplained "wander": a refusal reported 4898 MB against a
+/// request holding a 2184 MB cache and a 1804 MB snapshot, and the ~910 MB
+/// difference was other entries, not a leak. The `entries` count that would
+/// have said so is logged by a different line, at `debug`, which nodes do not
+/// run at (`docs/FUTURE_WORK.md` item 11).
+///
+/// So the refusal carries its own parts and the caller prints them together:
+/// `in_use_bytes == live_bytes + external_bytes`, over `entries` live caches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ClaimRefused {
     pub(crate) in_use_bytes: u64,
+    /// Bytes reserved by LIVE caches, summed across every request in the store.
+    pub(crate) live_bytes: u64,
+    /// Bytes held by the prefix cache's snapshots on the same device.
+    pub(crate) external_bytes: u64,
+    /// Live cache entries the figure covers — one per (model, request). Greater
+    /// than 1 means `in_use_bytes` is not this request's cache.
+    pub(crate) entries: usize,
 }
 
 pub(crate) struct KvCacheEntry {
@@ -817,11 +837,17 @@ impl KvCacheStore {
                 }
                 return Err(ClaimRefused {
                     in_use_bytes: in_use(&occ),
+                    live_bytes: occ.allocated_bytes,
+                    external_bytes: occ.external_bytes,
+                    entries: occ.entries,
                 });
             }
         }
         Err(ClaimRefused {
             in_use_bytes: in_use(&occ),
+            live_bytes: occ.allocated_bytes,
+            external_bytes: occ.external_bytes,
+            entries: occ.entries,
         })
     }
 
@@ -978,6 +1004,52 @@ impl KvCacheStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal's total is store-wide, and it says so.
+    ///
+    /// The figure covers every live cache plus the prefix cache's snapshots,
+    /// across all requests — so a reader comparing it against the request in
+    /// front of them sees a gap that looks like a leak. It is not: it is the
+    /// other entries. This pins that the parts are carried and that they add
+    /// up, so the refusal line can print them together (FUTURE_WORK item 11).
+    #[test]
+    fn a_refusal_decomposes_the_figure_it_reports() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        // Two live entries, so the total is demonstrably not one request's.
+        for req in ["req-a", "req-b"] {
+            let mut entry = store.get_or_create("m", req, 1);
+            let k = Tensor::zeros((1usize, 2, 8, 4), DType::F32, &Device::Cpu).unwrap();
+            let mut kv = new_kv_cache(64, true);
+            kv.append(&k, &k.clone()).unwrap();
+            entry.layers[0] = Some(kv);
+        }
+        store.set_external_reserved(1_000_000);
+
+        // A budget of zero refuses anything, which is all this needs.
+        let refused = store
+            .claim_room(0, 1024, 1)
+            .expect_err("a zero budget must refuse");
+        assert_eq!(
+            refused.in_use_bytes,
+            refused.live_bytes + refused.external_bytes,
+            "the reported total must be exactly the parts it is made of"
+        );
+        assert_eq!(
+            refused.external_bytes, 1_000_000,
+            "the snapshot charge is carried separately"
+        );
+        assert!(
+            refused.entries >= 2,
+            "the entry count must reveal that the total spans more than one \
+             request; got {}",
+            refused.entries
+        );
+        assert!(
+            refused.live_bytes > 0,
+            "live caches must be counted, not folded away"
+        );
+    }
+
     use crate::inference::layers::{kv_cache_reservation, new_kv_cache, KV_CACHE_GROWTH_TOKENS};
     use candle_core::{DType, Device, Tensor};
 

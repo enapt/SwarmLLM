@@ -511,11 +511,18 @@ impl SplitModel {
                     kv_cache_store.claim_room(budget, self.kv_bytes_per_token, claiming)
                 {
                     let in_use = refused.in_use_bytes;
+                    // Decomposed, because the total is store-wide and reads as
+                    // if it were this request's. `entries > 1` says outright
+                    // that it is not — the absence of that is what left ~1 GB
+                    // recorded as an unexplained wander (FUTURE_WORK item 11).
                     tracing::warn!(
                         request_id,
                         total_seq,
                         claiming_positions = claiming,
                         in_use_mb = in_use / (1024 * 1024),
+                        live_caches_mb = refused.live_bytes / (1024 * 1024),
+                        snapshots_mb = refused.external_bytes / (1024 * 1024),
+                        live_entries = refused.entries,
                         budget_mb = budget / (1024 * 1024),
                         "DIAG: refusing to grow the KV cache past this worker's budget"
                     );
