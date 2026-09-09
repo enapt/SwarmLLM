@@ -225,7 +225,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 All 20 build phases complete. All subsystems wired — no stubs. **2492 lib (dev,claude-subscription) — re-measured 2026-09-09, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 77 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
 **Released and deployed: v0.3.166-alpha (2026-09-09, tag on `d2975927`).**
-⚠ **14 commits sit unreleased on main** — the 2026-09-09 docs + harness sweep.
+⚠ **The 2026-09-09 docs + harness sweep sits unreleased on main.**
 Documentation, repo hygiene and the assistant harness only; the sole source
 edit is one comment character. **No release is owed.** Full suite green,
 counts unchanged. Detail: `memory/round_log_0909_docs_and_harness_sweep.md`.
