@@ -48,6 +48,14 @@
 //! continue the one before it. `restorable_history` returns `None` unless the
 //! history is contiguous from position 0 to the position being restored, and
 //! that is checked against the recorded spans rather than assumed.
+//!
+//! **Keyed by LAYER RANGE, not by segment index.** A segment is its range, and
+//! ranges do not move; an index does. Anything that inserts or removes a
+//! segment — which is what covering a failed range with several nodes needs —
+//! shifts every index after it, and an index-keyed history would then be handed
+//! to the wrong segment. That is not a crash: it is a replay assembled from
+//! another segment's inputs, rebuilding a cache that is plausible and wrong,
+//! which is the exact failure this module exists to prevent.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -97,7 +105,9 @@ struct SegmentHistory {
 /// Everything retained for one request.
 #[derive(Debug, Default)]
 struct RequestActivations {
-    segments: HashMap<usize, SegmentHistory>,
+    /// Keyed by the segment's layer range — see the module doc for why not by
+    /// its index.
+    segments: HashMap<(u32, u32), SegmentHistory>,
     bytes: usize,
     last_activity: Option<Instant>,
 }
@@ -116,7 +126,7 @@ impl RetainedActivations {
         Self::default()
     }
 
-    /// Record the input just sent to `segment_idx` at `index_pos`.
+    /// Record the input just sent to the segment covering `range`, at `index_pos`.
     ///
     /// `protect` is the caller's answer to "is this segment worth retaining for"
     /// — today, whether a standby covers it. A segment nothing can take over
@@ -128,7 +138,7 @@ impl RetainedActivations {
     pub(crate) fn record(
         &self,
         request_id: Uuid,
-        segment_idx: usize,
+        range: (u32, u32),
         index_pos: u32,
         activations: &[u8],
         protect: bool,
@@ -136,7 +146,7 @@ impl RetainedActivations {
         let Some(span) = crate::inference::tensor_util::activation_positions(activations) else {
             // A buffer whose header we cannot read is a buffer we cannot prove
             // the span of, so the history stops being provably contiguous.
-            self.mark_unrestorable(request_id, segment_idx);
+            self.mark_unrestorable(request_id, range);
             return;
         };
         if !protect {
@@ -145,7 +155,7 @@ impl RetainedActivations {
         if self.total_bytes.load(std::sync::atomic::Ordering::Relaxed) + activations.len()
             > MAX_RETAINED_BYTES_TOTAL
         {
-            self.mark_unrestorable(request_id, segment_idx);
+            self.mark_unrestorable(request_id, range);
             return;
         }
         self.evict_if_over_request_cap(request_id);
@@ -153,7 +163,7 @@ impl RetainedActivations {
         let mut entry = self.inner.entry(request_id).or_default();
         entry.last_activity = Some(Instant::now());
         let over_budget = entry.bytes + activations.len() > MAX_RETAINED_BYTES_PER_REQUEST;
-        let seg = entry.segments.entry(segment_idx).or_insert(SegmentHistory {
+        let seg = entry.segments.entry(range).or_insert(SegmentHistory {
             contiguous: true,
             ..Default::default()
         });
@@ -184,10 +194,10 @@ impl RetainedActivations {
     /// is already held for it. Used where a forward bypasses the coordinator —
     /// a chained run's middle, a tensor-parallel segment — so the history has a
     /// hole the recorder never sees.
-    pub(crate) fn mark_unrestorable(&self, request_id: Uuid, segment_idx: usize) {
+    pub(crate) fn mark_unrestorable(&self, request_id: Uuid, range: (u32, u32)) {
         let mut entry = self.inner.entry(request_id).or_default();
         entry.last_activity = Some(Instant::now());
-        let seg = entry.segments.entry(segment_idx).or_default();
+        let seg = entry.segments.entry(range).or_default();
         let freed = seg.bytes;
         seg.contiguous = false;
         seg.steps = Vec::new();
@@ -197,7 +207,8 @@ impl RetainedActivations {
             .fetch_sub(freed, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// The history to replay onto a stand-in for `segment_idx`, or `None` if
+    /// The history to replay onto a stand-in for the segment covering `range`,
+    /// or `None` if
     /// there is not a provably complete one.
     ///
     /// `up_to_index_pos` is the position the takeover step sits at, and the
@@ -207,11 +218,11 @@ impl RetainedActivations {
     pub(crate) fn restorable_history(
         &self,
         request_id: Uuid,
-        segment_idx: usize,
+        range: (u32, u32),
         up_to_index_pos: u32,
     ) -> Option<Vec<Vec<u8>>> {
         let entry = self.inner.get(&request_id)?;
-        let seg = entry.segments.get(&segment_idx)?;
+        let seg = entry.segments.get(&range)?;
         if !seg.contiguous || seg.steps.is_empty() || seg.next_index_pos != up_to_index_pos {
             return None;
         }
@@ -275,6 +286,15 @@ mod tests {
     /// A forward's wire bytes for `positions` positions of a 4-wide hidden
     /// state — the real encoder, so the header the recorder reads is the real
     /// header.
+    /// A forward's bytes with a distinguishable payload — so a test can tell
+    /// WHOSE history it got back, not merely that it got one of the right
+    /// shape.
+    fn forward_bytes_filled(positions: usize, fill: f32) -> Vec<u8> {
+        let t =
+            candle_core::Tensor::full(fill, (1, positions, 4), &candle_core::Device::Cpu).unwrap();
+        crate::inference::tensor_util::tensor_to_bytes(&t).unwrap()
+    }
+
     fn forward_bytes(positions: usize) -> Vec<u8> {
         let t = candle_core::Tensor::zeros(
             (1, positions, 4),
@@ -290,18 +310,18 @@ mod tests {
         let r = RetainedActivations::new();
         let id = Uuid::new_v4();
         // A 7-token prompt pass, then three decode steps.
-        r.record(id, 1, 0, &forward_bytes(7), true);
+        r.record(id, (4, 8), 0, &forward_bytes(7), true);
         for pos in 7..10 {
-            r.record(id, 1, pos, &forward_bytes(1), true);
+            r.record(id, (4, 8), pos, &forward_bytes(1), true);
         }
         let history = r
-            .restorable_history(id, 1, 10)
+            .restorable_history(id, (4, 8), 10)
             .expect("a history covering 0..10 is restorable");
         assert_eq!(history.len(), 4, "prompt pass plus three decode steps");
         // Asked for a position the history does not reach, it declines rather
         // than handing back what it has.
-        assert!(r.restorable_history(id, 1, 11).is_none());
-        assert!(r.restorable_history(id, 1, 9).is_none());
+        assert!(r.restorable_history(id, (4, 8), 11).is_none());
+        assert!(r.restorable_history(id, (4, 8), 9).is_none());
     }
 
     /// The property the module exists for: anything that loses a step makes the
@@ -310,26 +330,74 @@ mod tests {
     fn a_history_with_a_hole_is_never_offered_for_replay() {
         let r = RetainedActivations::new();
         let id = Uuid::new_v4();
-        r.record(id, 0, 0, &forward_bytes(7), true);
+        r.record(id, (0, 4), 0, &forward_bytes(7), true);
         // A step that does not continue the last one — a forward the
         // coordinator did not see, a chained run, a re-send at the wrong place.
-        r.record(id, 0, 9, &forward_bytes(1), true);
+        r.record(id, (0, 4), 9, &forward_bytes(1), true);
         assert!(
-            r.restorable_history(id, 0, 10).is_none(),
+            r.restorable_history(id, (0, 4), 10).is_none(),
             "a gap must make the segment unrestorable, not produce a short replay"
         );
         // And it stays that way: a later well-placed step does not heal it.
-        r.record(id, 0, 10, &forward_bytes(1), true);
-        assert!(r.restorable_history(id, 0, 11).is_none());
+        r.record(id, (0, 4), 10, &forward_bytes(1), true);
+        assert!(r.restorable_history(id, (0, 4), 11).is_none());
         assert_eq!(r.retained_bytes(), 0, "a hole releases what it was holding");
+    }
+
+    /// The reason the key is a RANGE and not an index.
+    ///
+    /// Two segments, each with its own history. If the key were the position in
+    /// the assignment, inserting a segment ahead of them — which is what
+    /// covering a failed range with several nodes requires — would shift both,
+    /// and the second segment's replay would be assembled from the first's
+    /// inputs. Nothing downstream could tell: it would rebuild a cache that is
+    /// plausible and wrong, which is the failure this module exists to prevent.
+    ///
+    /// Keyed by range, the identity travels with the segment and a shift is not
+    /// expressible.
+    #[test]
+    fn a_history_belongs_to_a_layer_range_not_to_a_position() {
+        let r = RetainedActivations::new();
+        let id = Uuid::new_v4();
+        // Segment A covers 0..4 and B covers 4..8. Both have seen 7 positions,
+        // so a misattribution cannot show up as a length or shape mismatch —
+        // the payloads are what distinguish them, and they are made to differ
+        // on purpose. A version of this test where both wrote the same bytes
+        // passed even with the two histories swapped, which is no test at all.
+        let a_bytes = forward_bytes_filled(7, 1.0);
+        let b_bytes = forward_bytes_filled(7, 2.0);
+        assert_ne!(
+            a_bytes, b_bytes,
+            "the fixture must be able to tell the two apart"
+        );
+        r.record(id, (0, 4), 0, &a_bytes, true);
+        r.record(id, (4, 8), 0, &b_bytes, true);
+
+        let a = r
+            .restorable_history(id, (0, 4), 7)
+            .expect("A is restorable");
+        let b = r
+            .restorable_history(id, (4, 8), 7)
+            .expect("B is restorable");
+        assert_eq!(a, vec![a_bytes], "0..4 got back another segment's history");
+        assert_eq!(b, vec![b_bytes], "4..8 got back another segment's history");
+
+        // A range nothing was recorded under answers nothing, rather than
+        // answering with a neighbour's history — the shape an off-by-one after
+        // a splice would take.
+        assert!(
+            r.restorable_history(id, (2, 6), 7).is_none(),
+            "a range that was never recorded must not borrow an overlapping one's history"
+        );
+        assert!(r.restorable_history(id, (8, 12), 7).is_none());
     }
 
     #[test]
     fn a_segment_nothing_can_take_over_is_not_retained() {
         let r = RetainedActivations::new();
         let id = Uuid::new_v4();
-        r.record(id, 0, 0, &forward_bytes(7), false);
-        assert!(r.restorable_history(id, 0, 7).is_none());
+        r.record(id, (0, 4), 0, &forward_bytes(7), false);
+        assert!(r.restorable_history(id, (0, 4), 7).is_none());
         assert_eq!(r.retained_bytes(), 0);
     }
 
@@ -337,12 +405,12 @@ mod tests {
     fn a_bypassed_forward_marks_the_segment_unrestorable() {
         let r = RetainedActivations::new();
         let id = Uuid::new_v4();
-        r.record(id, 2, 0, &forward_bytes(7), true);
-        assert!(r.restorable_history(id, 2, 7).is_some());
+        r.record(id, (8, 12), 0, &forward_bytes(7), true);
+        assert!(r.restorable_history(id, (8, 12), 7).is_some());
         // A chained run carried this segment; the coordinator never saw its
         // input, so what is held is no longer the whole story.
-        r.mark_unrestorable(id, 2);
-        assert!(r.restorable_history(id, 2, 7).is_none());
+        r.mark_unrestorable(id, (8, 12));
+        assert!(r.restorable_history(id, (8, 12), 7).is_none());
         assert_eq!(r.retained_bytes(), 0);
     }
 
@@ -350,8 +418,8 @@ mod tests {
     fn releasing_a_request_returns_every_byte_it_held() {
         let r = RetainedActivations::new();
         let id = Uuid::new_v4();
-        r.record(id, 0, 0, &forward_bytes(32), true);
-        r.record(id, 1, 0, &forward_bytes(32), true);
+        r.record(id, (0, 4), 0, &forward_bytes(32), true);
+        r.record(id, (4, 8), 0, &forward_bytes(32), true);
         assert!(r.retained_bytes() > 0);
         assert_eq!(r.retained_requests(), 1);
         r.release(id);
@@ -366,7 +434,7 @@ mod tests {
             .map(|_| Uuid::new_v4())
             .collect();
         for id in &ids {
-            r.record(*id, 0, 0, &forward_bytes(1), true);
+            r.record(*id, (0, 4), 0, &forward_bytes(1), true);
         }
         assert!(
             r.retained_requests() <= MAX_RETAINED_REQUESTS,
@@ -374,15 +442,17 @@ mod tests {
             r.retained_requests()
         );
         // The newest survived; the oldest did not.
-        assert!(r.restorable_history(*ids.last().unwrap(), 0, 1).is_some());
-        assert!(r.restorable_history(ids[0], 0, 1).is_none());
+        assert!(r
+            .restorable_history(*ids.last().unwrap(), (0, 4), 1)
+            .is_some());
+        assert!(r.restorable_history(ids[0], (0, 4), 1).is_none());
     }
 
     #[test]
     fn a_stale_request_is_swept() {
         let r = RetainedActivations::new();
         let id = Uuid::new_v4();
-        r.record(id, 0, 0, &forward_bytes(4), true);
+        r.record(id, (0, 4), 0, &forward_bytes(4), true);
         r.sweep_stale(Duration::from_secs(3600));
         assert_eq!(r.retained_requests(), 1, "a fresh request is not swept");
         r.sweep_stale(Duration::from_millis(0));

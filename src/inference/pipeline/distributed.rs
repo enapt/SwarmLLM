@@ -771,7 +771,7 @@ impl PipelineExecutor {
                 // assembled from a hole — see `retained_activations`.
                 self.shared_state
                     .retained_activations
-                    .mark_unrestorable(request_id, idx);
+                    .mark_unrestorable(request_id, self.assignment.segments[idx].layer_range);
                 idx += 1;
                 continue;
             }
@@ -797,7 +797,7 @@ impl PipelineExecutor {
             let input_is_hidden_state = idx > 0 || pre_embedded;
             self.shared_state.retained_activations.record(
                 request_id,
-                idx,
+                segment.layer_range,
                 index_pos as u32,
                 &activations,
                 has_standby && input_is_hidden_state,
@@ -825,7 +825,7 @@ impl PipelineExecutor {
                     // of that record would not rebuild what the group holds.
                     self.shared_state
                         .retained_activations
-                        .mark_unrestorable(request_id, idx);
+                        .mark_unrestorable(request_id, segment.layer_range);
                     match self
                         .execute_tp_segment(
                             request_id,
@@ -1762,7 +1762,7 @@ impl PipelineExecutor {
         } else {
             self.shared_state.retained_activations.restorable_history(
                 request_id,
-                failed_idx,
+                failed_segment.layer_range,
                 index_pos as u32,
             )
         };

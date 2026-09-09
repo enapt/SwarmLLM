@@ -219,7 +219,9 @@ request id.
 keeps what this node sent to each segment that a standby covers, and
 `assemble_replay` concatenates that history with the takeover step into ONE
 forward at position 0 — a prompt pass to a machine holding no cache, so no new
-message type and nothing an older peer refuses. `restorable_history` answers
+message type and nothing an older peer refuses. It is keyed by LAYER RANGE, never by segment index — a segment is its range and
+ranges do not shift, so nothing that inserts a segment can hand one segment's
+history to another. `restorable_history` answers
 `None` unless it holds positions `0..index_pos` CONTIGUOUSLY, and every way of
 losing a step marks the segment unrestorable rather than shortening the replay:
 a partial replay rebuilds a cache that is plausible and wrong, which is the same

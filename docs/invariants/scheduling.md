@@ -673,6 +673,15 @@ segment size, and costing no traffic until something actually fails.
 
 **Four more things the replay half must keep.**
 
+- **The history is keyed by LAYER RANGE, not by segment index.** A segment is
+  its range and ranges do not move; an index does. Anything that inserts or
+  removes a segment — which is what item 17's multi-node cover needs — shifts
+  every index after it, and an index-keyed history would then be handed to the
+  wrong segment: a replay assembled from another segment's inputs, rebuilding a
+  cache that is plausible and wrong. Pinned by
+  `a_history_belongs_to_a_layer_range_not_to_a_position`, whose two segments
+  write DIFFERENT payloads on purpose — an earlier version had both write the
+  same bytes and passed with the histories swapped.
 - **A partial history is never replayed.** This is the whole design. A replay
   built from a history with a hole rebuilds a cache that is plausible and wrong,
   and nothing downstream can tell — the same invisibility as the defect above.
