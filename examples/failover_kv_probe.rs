@@ -208,10 +208,18 @@ fn main() -> anyhow::Result<()> {
         .collect();
     let prompt = Tensor::from_vec(ids, &[1, prompt_tokens], &Device::Cpu)?;
 
+    // What a coordinator retaining boundary activations would keep: every
+    // input it has sent to segment B, in order. Petals calls this the
+    // client-side cache of "past inputs sent to a given pipeline stage"
+    // (arXiv 2312.08361 §"fault tolerance"); it is what lets a replacement be
+    // brought up to the failed machine's state instead of inheriting nothing.
+    let mut retained_b_inputs: Vec<Tensor> = Vec::new();
+
     // Prompt pass through both segments.
     let h = a
         .forward(&prompt, 0, &store, req)
         .map_err(|e| anyhow::anyhow!("A prefill: {e}"))?;
+    retained_b_inputs.push(h.clone());
     let logits = b
         .forward_pre_embedded(&h, 0, &store, req)
         .map_err(|e| anyhow::anyhow!("B prefill: {e}"))?;
@@ -234,6 +242,7 @@ fn main() -> anyhow::Result<()> {
         let logits = b
             .forward_pre_embedded(&h, pos, &store, req)
             .map_err(|e| anyhow::anyhow!("B decode: {e}"))?;
+        retained_b_inputs.push(h.clone());
         // The control follows the same tokens, one step behind in the same
         // loop, so it arrives at the takeover holding an equivalent history.
         let h_twin = a
@@ -270,21 +279,43 @@ fn main() -> anyhow::Result<()> {
         .forward_pre_embedded(&h, pos, &store, "stand-in-has-no-cache")
         .map_err(|e| anyhow::anyhow!("B stand-in: {e}"))?;
 
+    // The arm this probe was extended for: a stand-in that is REPLAYED the
+    // retained inputs before it is asked to continue. Everything segment B was
+    // ever sent, concatenated along the sequence axis with the takeover step on
+    // the end, as ONE forward at index_pos 0 — which is what a fresh cache
+    // makes it. That is Petals' "send the cached activations to restore state",
+    // and it is one round trip carrying O(t) bytes rather than a re-run of the
+    // whole pipeline.
+    //
+    // If this arm reproduces the intact machine, retention is worth building
+    // and the protocol needs no new message: it is an ordinary prefill.
+    let mut replay = retained_b_inputs.clone();
+    replay.push(h.clone());
+    let replay_refs: Vec<&Tensor> = replay.iter().collect();
+    let restored_input = Tensor::cat(&replay_refs, 1)?;
+    let restored = b
+        .forward_pre_embedded(&restored_input, 0, &store, "stand-in-replayed")
+        .map_err(|e| anyhow::anyhow!("B restored: {e}"))?;
+
     let (tok_healthy, top_healthy) = argmax_and_top(&healthy)?;
     let (tok_control, _) = argmax_and_top(&control)?;
     let (tok_standby, top_standby) = argmax_and_top(&standby)?;
+    let (tok_restored, _) = argmax_and_top(&restored)?;
     let cos_control = cosine(&healthy, &control)?;
     let cos = cosine(&healthy, &standby)?;
+    let cos_restored = cosine(&healthy, &restored)?;
 
     let (p_healthy, margin_healthy) = prob_and_margin(&healthy, tok_healthy)?;
     let (p_control, _) = prob_and_margin(&control, tok_healthy)?;
     let (p_standby, margin_standby) = prob_and_margin(&standby, tok_healthy)?;
+    let (p_restored, _) = prob_and_margin(&restored, tok_healthy)?;
 
     println!("next token, machine intact      : {tok_healthy}  top5 {top_healthy:?}");
     println!("next token, control (has history): {tok_control}  cosine {cos_control:.6}");
     println!("next token, stand-in (no cache)  : {tok_standby}  top5 {top_standby:?}");
-    println!("\ncosine(logits) vs intact — control {cos_control:.6}, stand-in {cos:.6}");
-    println!("P(intact machine's token) — intact {p_healthy:.4}, control {p_control:.4}, stand-in {p_standby:.4}");
+    println!("next token, stand-in REPLAYED   : {tok_restored}  cosine {cos_restored:.6}");
+    println!("\ncosine(logits) vs intact — control {cos_control:.6}, stand-in {cos:.6}, replayed {cos_restored:.6}");
+    println!("P(intact machine's token) — intact {p_healthy:.4}, control {p_control:.4}, stand-in {p_standby:.4}, replayed {p_restored:.4}");
     println!("top-1 margin — intact {margin_healthy:.3}, stand-in {margin_standby:.3}");
 
     let control_agrees = tok_control == tok_healthy && cos_control > 0.999;
@@ -295,6 +326,24 @@ fn main() -> anyhow::Result<()> {
              stand-in result."
         );
         return Ok(());
+    }
+
+    // The verdict on the shape that would be built, reported separately from
+    // the verdict on today's behaviour.
+    if tok_restored == tok_healthy && cos_restored > 0.999 {
+        println!(
+            "\nREPLAY WORKS — a stand-in replayed the retained inputs reproduces the \
+             intact machine (cosine {cos_restored:.6}). Retaining boundary activations \
+             is sufficient to make failover correct, and needs no new message type: \
+             the replay is an ordinary prefill at index_pos 0."
+        );
+    } else {
+        println!(
+            "\nREPLAY DOES NOT SUFFICE — replaying the retained inputs did NOT \
+             reproduce the intact machine (cosine {cos_restored:.6}, token \
+             {tok_restored} vs {tok_healthy}). Something beyond the segment's inputs \
+             is carried in its cache; do not build retention on this assumption."
+        );
     }
 
     if tok_healthy == tok_standby && cos > 0.999 {
