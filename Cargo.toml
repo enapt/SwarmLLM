@@ -6,7 +6,6 @@ exclude = [
     "vendor/candle-paged-attention",
     "vendor/libp2p-request-response",
     "vendor/candle",
-    "vendor/float8",
 ]
 # Note: vendor/libp2p-gossipsub was removed in libp2p 0.55→0.56 upgrade —
 # upstream libp2p-gossipsub 0.49.4 ships the CVE-2026-33040 + CVE-2026-34219
