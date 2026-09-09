@@ -643,6 +643,7 @@ The Windows installer bundles GPU and CPU binaries plus a launcher that picks th
 - **[Tailscale & WAN](https://enapt.github.io/SwarmLLM/operations/tailscale-wan.html)** — remote access via Tailscale, WireGuard, or any VPN
 - **[Troubleshooting](https://enapt.github.io/SwarmLLM/troubleshooting.html)** — common issues and solutions
 - **[Diagnostics Guide](docs/DIAGNOSTICS.md)** — DIAG: log instrumentation for debugging
+- **[Reporting a problem](docs/TESTING.md)** — what to include so a bug report can be acted on
 - **[Changelog](CHANGELOG.md)** — release notes and unreleased work
 - **[Security Policy](SECURITY.md)** — responsible disclosure
 

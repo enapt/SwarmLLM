@@ -4,7 +4,7 @@ You're running an **alpha** build. Things will work; some things won't. This pag
 
 ## Before you file anything
 
-1. Confirm you're on the latest release: `./swarmllm version` and compare against the [GitHub releases page](https://github.com/enapt/SwarmLLM/releases). Auto-update is disabled in alpha — you must download new builds manually.
+1. Confirm you're on the latest release: `./swarmllm version` and compare against the [GitHub releases page](https://github.com/enapt/SwarmLLM/releases). By default the node checks hourly and tells you when a new build exists; `./swarmllm update` downloads and installs it. If your install cannot update itself — a packaged `.deb` under a read-only unit, for instance — the node says so and names the folder to replace by hand.
 2. Re-run the failing action with verbose logging: `./swarmllm run -vv 2>&1 | tee /tmp/swarmllm.log`. Verbose adds `DIAG:` instrumentation that traces every step of the request lifecycle.
 3. Search the [open issues](https://github.com/enapt/SwarmLLM/issues) — a one-line confirmation on an existing issue is more useful than a duplicate.
 

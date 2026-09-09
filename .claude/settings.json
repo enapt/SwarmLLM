@@ -52,7 +52,7 @@
       "Bash(docker *)",
       "Task(Explore)",
       "Task(Plan)",
-      "Task(Bash)",
+      "Task(root-cause)",
       "Task(general-purpose)",
       "Task(feature-dev:code-explorer)",
       "Task(feature-dev:code-architect)",
