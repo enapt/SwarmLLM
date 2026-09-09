@@ -221,8 +221,26 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2492 lib (dev,claude-subscription) — re-measured 2026-09-09, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 76 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Releasing: v0.3.166-alpha (2026-09-09) — the round that stopped a silent
-wrong answer.** Seven commits on .165, and the two that matter share one
+**Released and deployed: v0.3.166-alpha (2026-09-09, tag on `d2975927`).**
+Both nodes verified: local `225e6fe7f2b5cd74` (CUDA artifact — published sha256
+matched AND the installed binary byte-identical to the download,
+`ggml_cuda_init` present, 0 ERROR since startup, node id kept and
+`identity.key` unchanged, inference confirmed; rollback
+`~/.local/bin/swarmllm.0.3.165-alpha.bak`, backups pruned to newest 3) and
+Proxmox `9684263580c6660f` (.deb `0.3.166-alpha-1` over `0.3.165-alpha-1`, hash
+re-verified AFTER transfer, `active` + `enabled`, no `.dpkg-old`, journal errors
+"-- No entries --"). Back in each other's peer lists on .166. Gate clean: CI
+green on the TAGGED commit across all 13 jobs including the three feature
+compile-checks (flash-attn, candle-cuda, windows-gpu-no-flash) and macOS,
+**Cache warm green on the bump commit `626185ec`** — the changelog push changed
+no dependency so it did not re-run, which is the documented behaviour and was
+checked by sha rather than assumed — Docker green, 25 assets, not draft,
+`latest`, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact against a .165
+baseline taken FIRST that scored the same**.
+⚠ **CI on the bump commit reads "cancelled"** — the changelog push superseded it
+through the concurrency group. Normal; what matters is green on the tagged commit.
+
+**The round that stopped a silent wrong answer.** Seven commits on .165, and the two that matter share one
 subject: what happens to a reply when the machine serving part of it goes away.
 
 - **A failed request now hands back what it had already generated.** Report
