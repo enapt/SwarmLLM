@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.3.167-alpha] — 2026-09-09
+
+### Added
+
+- **A reply can now survive losing a machine part-way through.** Until now, a
+  machine going away mid-answer ended that answer — it had to, because the
+  replacement held none of the conversation state and would have carried on from
+  the current token alone, drifting rather than failing. The coordinator now
+  keeps what it has sent to each segment a standby covers, and replays it onto
+  the stand-in as a single pass. Measured on llama-3.2-3b: the probability of
+  the token the healthy machine would have chosen goes from 0.119 to 0.997 for a
+  five-layer segment, and holds at 14 and 21 layers. Needs no protocol change,
+  so a peer on an older version serves a replay without knowing anything is
+  different. Bounded: armed only where a standby exists, capped per request and
+  overall, released with the request. Chained runs and tensor-parallel segments
+  are excluded — their inputs never pass through the coordinator — and still end
+  rather than move.
+
+### Fixed
+
+- **A peer is no longer handed more layers than it says it can hold, while a
+  route that fits exists.** When no route fit the peers' advertised memory, the
+  search dropped that limit entirely and then picked the cheapest placement,
+  which is routinely a peer its own figure had already ruled out. Seen in the
+  field: a peer advertising 4096 MB was given a segment needing 5526 MB, twice
+  in eleven minutes, and refused both times quoting the number it had been
+  advertising all along. The relaxation now spends the safety margin first and
+  takes each peer at its word before going past it. The fully-relaxed step still
+  exists, because a self-report we cannot re-ask must not fail a request
+  outright — it is simply no longer reached while a route that respects the
+  peers' own numbers is available.
+- **The routing cost model's own predictions were being thrown away**, so the
+  figure that would show whether it is accurate never reached any log. Second
+  time this instrument has shipped inert; it now records, and the first field
+  measurements are written up in the deferred-work notes.
+- **A refusal to grow the KV cache now says what its memory figure is made of.**
+  The number is store-wide — every cache and cached prompt across all requests —
+  and read naturally as belonging to the request in front of you, which is how
+  roughly a gigabyte came to be recorded as unexplained. It now prints the live
+  caches, the cached prompts and how many requests it covers.
+- A source file carried a stray NUL byte in a comment, which hid it from every
+  text search of the repository.
+
+### Changed
+
+- A segment's retained history is keyed by the layers it covers rather than its
+  position in the pipeline, so that nothing which reorders segments can attach
+  one segment's history to another.
+- Documentation: the architecture rules were split into short statements plus
+  the evidence behind them, cutting what each session loads by more than half,
+  and a stale rule about attention-kernel selection that the code stopped
+  following three weeks ago was corrected in all four places it was asserted.
+
 All notable changes to SwarmLLM are documented here.
 
 ## [0.3.166-alpha] — 2026-09-09
