@@ -26,7 +26,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. Instrumented 2026-09-08; **the instrument could not see a hand-off until 2026-09-09** — zero samples in ten hours of live traffic. Needs field data, not tuning |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
-| 18 | A mid-decode failover silently loses the failed segment's KV context | **NEW 2026-09-09.** A standby holds none of the failed node's cache and nothing rebuilds it, so the replacement computes its layers with `kv_offset = 0` — attending to the current token alone. Fails no check, logs nothing. **Decides what item 17 is worth**: more standbys means more requests taking this path |
+| 18 | A failover after the prompt pass silently loses the failed segment's KV context | **NEW 2026-09-09, MEASURED.** A stand-in holds none of the failed node's cache and nothing rebuilds it. On llama-3.2-3b the probability of the token the healthy machine would have chosen falls from **0.997 to 0.119** with only 4 of 28 layers replaced, and to **0.005** with half the model. Fails no check, logs nothing. **Decides what item 17 is worth**: more standbys means more requests taking this path |
 
 ### P3 — correctness-adjacent, or blocked on a measurement
 
@@ -247,7 +247,7 @@ claim against the code before ranking it**; "cold-start" and "the measurement fa
 suggest very different priorities and only one of them was true.
 
 
-## A mid-decode failover silently loses the failed segment's KV context (open, 2026-09-09)
+## A failover after the prompt pass silently loses the failed segment's KV context (open, 2026-09-09, MEASURED)
 
 Found while scoping item 17 (give a segment a standby assembled from several
 nodes). **It inverts that item's premise and should be settled first.**
@@ -276,7 +276,8 @@ context-free from the failover point on. No error, no warning, no test.
 
 ### Why it decides item 17
 
-**Failover is correct at the prompt pass and lossy after it.** At
+**Failover is correct at the prompt pass and lossy after it — at every point
+after it, equally.** At
 `sequence_num == 0` the standby receives the whole prompt and builds its own
 cache — the case standbys were designed for, and the case every existing
 failover test exercises. Report #028's failure was at 4m43s, mid-decode, and
@@ -306,16 +307,58 @@ Three shapes, none free, in increasing order of cost:
 3. **Say it and continue.** Keep today's behaviour, but log it and mark the reply
    — the reader at least learns the tail may be unreliable.
 
-### Confidence, and what is NOT established
+### Measured 2026-09-09 — `examples/failover_kv_probe.rs`
 
-The mechanism rests on three independent reads of the code — `kv_offset` taken
-from the cache, no `index_pos`/cache agreement check, no hydration on the
-failover path — plus a pre-existing comment stating the first. **It has not been
-measured end to end.** Forcing a mid-decode failover needs a peer killed partway
-through a long distributed reply, and the observable is reply QUALITY, which is
-precisely the thing that degrades silently. Before acting on shape 1 or 2,
-reproduce it: kill a tail peer mid-reply on a real chain and read what follows
-the failover line in the output.
+Reproduced with no daemon, no network and no node killed. Two real segments of
+llama-3.2-3b: segment A keeps its cache (it is a different machine, and nothing
+happened to it), segment B is replaced. `KvCacheStore` is keyed by request id
+and `failover_segment` re-sends the current step unchanged, so a stand-in is
+exactly "the same hidden state, at the same `index_pos`, against a request id
+with no cache" — which is what the probe drives.
+
+**Every run carries a control**: a second request driven through the identical
+tokens, so it reaches the takeover holding an equivalent cache, and is then
+handed the same input as the stand-in. It differs from the stand-in in one
+respect only — it has the history.
+
+| segment B (replaced) | decode steps first | P(healthy machine's token) — control | — stand-in | top-1 margin, healthy → stand-in |
+|---|---|---|---|---|
+| 14 of 28 layers | 24 | 0.9966 (exact) | **0.0054** | 7.42 → 0.04 |
+| 4 of 28 layers | 24 | 0.9966 (exact) | **0.1186** | 7.42 → 0.89 |
+| 4 of 28 layers | 8  | 0.6583 (exact) | **0.1087** | 1.86 → 0.08 |
+| 4 of 28 layers | 1  | 0.0522 (exact) | **0.0000** | 0.29 → 0.72 |
+
+The control reproduced the healthy machine **exactly in all four** (cosine
+1.000000, same token), so the probe measures the missing cache and not the
+request id.
+
+**Three things the measurement says that reading the code did not.**
+
+- **Even a small tail segment is destroyed.** Replacing 4 of 28 layers — report
+  #028's shape, layers 41-48 of 48 — takes the correct token from 99.7% to
+  11.9%. The greedy pick happened to survive that step, which is exactly why
+  this is invisible: it does not crash, it drifts. Both API surfaces sample by
+  default (0.7 on OpenAI, 1.0 on Anthropic), so 11.9% diverges at once.
+- **There is no safe early window.** Failing over after 1 decode step is not
+  gentler, it is worse (P = 0.0000), because the missing cache is not the
+  decoded history — it is the PROMPT, which the prompt pass wrote and the
+  stand-in never saw. "Only fail over in the first N tokens" is not a mitigation.
+- **Margin alone misleads.** At 1 decode step the stand-in's top-1 margin is
+  LARGER than the healthy machine's (0.72 against 0.29): it is confidently
+  wrong. P(the healthy machine's token) is the robust metric; raw-logit cosine
+  is not one at all, since logit vectors share a large frequency-prior component.
+
+**Caveat, stated because the absolute numbers depend on it**: the probe drives
+synthetic token ids, so the healthy machine's own confidence is not
+representative of real prose — it ranges from 0.05 to 0.997 across these runs.
+Both arms always receive identical input, so the comparison is sound; read the
+collapse, not the absolute value.
+
+**Still not established end to end**: that a real peer dying mid-reply on the
+live swarm produces this. The mechanism, the arithmetic and the control are
+settled; the remaining gap is only whether some path between
+`failover_segment` and the worker rebuilds the cache in a way three code reads
+and this probe all missed.
 
 ## A long generation with no segment redundancy is lost entirely (open, 2026-09-08)
 
