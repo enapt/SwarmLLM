@@ -726,7 +726,7 @@ impl KvCacheStore {
             return 0;
         }
         // One pass over the caches, summing per request id. The cache key is
-        // "model_key request_id", and one request can hold several entries
+        // "model_key\0request_id", and one request can hold several entries
         // (tensor-parallel ranks), so they are added together.
         let mut allocated_by_request: std::collections::HashMap<&str, u64> =
             std::collections::HashMap::new();
