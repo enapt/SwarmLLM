@@ -438,6 +438,16 @@ Note v0.3.165's `standby_may_take` moves the other way: it NARROWS eligibility (
 prompt privacy for the end segments). It could not have applied here — the plan's ends were
 remote, so privacy was off — but a future change in this area should weigh both.
 
+**Second wave, 2026-09-09** (same report file, later section): two more failures in one
+eleven-minute window of ordinary chat, from a third and fourth distinct trigger — a peer
+departing mid-pipeline, then the same peer going silent for 435 s instead of
+disconnecting. Neither involved an update, a restart, or a deliberate disconnect. That is
+four triggers across three days now reaching the same `total_standbys=0` ending, which is
+the argument for treating this as the swarm's ordinary condition rather than an edge case.
+What it does NOT change is the two directions above, or their cost. Note also where the
+time actually went: 3m32s and 7m56s, almost all of it waiting on the silent peer — the
+capacity misplacement fixed alongside it was about one second of that.
+
 **2. The generated tokens are lost. FIXED 2026-09-09.** 270 seconds of decode had already
 happened and none of it was returned. `SharedState::salvaged_replies` now keeps what a
 failed decode produced and `router::salvaged_reply_if_lost` hands it to the caller once
