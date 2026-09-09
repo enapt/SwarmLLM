@@ -51,7 +51,7 @@ Stripping IPs and tokens is fine — the daemon's `node_id` (visible in Settings
 
 ## What's known broken
 
-Maintained in [`docs/KNOWN_ISSUES.md`](./KNOWN_ISSUES.md) (if present) and the open GitHub issues. Before you file, please skim both.
+Tracked in the [open GitHub issues](https://github.com/enapt/SwarmLLM/issues). Before you file, please skim them — a one-line confirmation on an existing issue is more useful than a duplicate.
 
 ## Privacy notes
 

@@ -1927,7 +1927,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - **Admin API:** `GET /api/admin/claude-subscription/status` — CLI detection, version, subscription type, rate limit tier
 - **Dashboard:** Settings → Cloud Providers → Claude Subscription card with step-by-step setup guide, status detection, enable/disable toggle
 
-**Long-lived sessions** (`src/api/claude_session.rs`) — a persistent `claude` subprocess driven with `--input-format stream-json`, for interactive use where re-sending the whole conversation per turn would be wasteful. All five routes exist ONLY under `--features claude-subscription`; without it the router serves none of them.
+**Long-lived sessions** (`src/api/claude_session/`) — a persistent `claude` subprocess driven with `--input-format stream-json`, for interactive use where re-sending the whole conversation per turn would be wasteful. All five routes exist ONLY under `--features claude-subscription`; without it the router serves none of them.
 
 - `GET    /api/claude-code/sessions` — List live sessions
 - `POST   /api/claude-code/session` — Start a session (spawns the subprocess)
