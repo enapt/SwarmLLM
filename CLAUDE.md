@@ -224,57 +224,39 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2504 lib (dev,claude-subscription) — re-measured 2026-09-09, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 83 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.166-alpha (2026-09-09, tag on `d2975927`).**
-⚠ **The 2026-09-09 docs + harness sweep sits unreleased on main.**
-Documentation, repo hygiene and the assistant harness only; the sole source
-edit is one comment character. **No release is owed.** Full suite green; the
-only count change is 76 → 83 repo-consistency, for three guards added this
-round (the vendored-crate test count, that guard's own self-test, and a
-NUL-byte scan). Detail: `memory/round_log_0909_docs_and_harness_sweep.md`.
-Both nodes verified: local `225e6fe7f2b5cd74` (CUDA artifact — published sha256
-matched AND the installed binary byte-identical to the download,
-`ggml_cuda_init` present, 0 ERROR since startup, node id kept and
-`identity.key` unchanged, inference confirmed; rollback
-`~/.local/bin/swarmllm.0.3.165-alpha.bak`, backups pruned to newest 3) and
-Proxmox `9684263580c6660f` (.deb `0.3.166-alpha-1` over `0.3.165-alpha-1`, hash
-re-verified AFTER transfer, `active` + `enabled`, no `.dpkg-old`, journal errors
-"-- No entries --"). Back in each other's peer lists on .166. Gate clean: CI
-green on the TAGGED commit across all 13 jobs including the three feature
-compile-checks (flash-attn, candle-cuda, windows-gpu-no-flash) and macOS,
-**Cache warm green on the bump commit `626185ec`** — the changelog push changed
-no dependency so it did not re-run, which is the documented behaviour and was
-checked by sha rather than assumed — Docker green, 25 assets, not draft,
-`latest`, **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact against a .165
-baseline taken FIRST that scored the same**.
-⚠ **CI on the bump commit reads "cancelled"** — the changelog push superseded it
-through the concurrency group. Normal; what matters is green on the tagged commit.
+**Released and deployed: v0.3.167-alpha (2026-09-09, tag `aed7e03b` on commit
+`2efdad8d`).** Gate clean throughout: `cargo audit` shows only the two
+`hickory-proto` advisories and `paste`, all documented in `SECURITY.md`; **CI
+13/13 and Cache warm 3/3 on the BUMP commit** (a version bump edits
+`Cargo.lock`, so Cache warm re-ran — checked job-by-job, not by the workflow
+summary); 25 assets, not draft, `latest`; **smoke 9/9 + shapes 7/7 on the
+DOWNLOADED artifact against a .166 baseline taken FIRST that scored the same**,
+including the probabilistic `greedy check has a live control`.
 
-**The round that stopped a silent wrong answer.** Two fixes on one subject —
-what happens to a reply when a machine serving part of it goes away.
+Both nodes verified. Local `225e6fe7f2b5cd74` — CUDA artifact, published sha256
+matched AND the installed binary byte-identical to the download, `ggml_cuda_init`
+present, 0 ERROR since startup, node id and `identity.key` md5 unchanged,
+inference confirmed in 4 s; rollback `~/.local/bin/swarmllm.0.3.166-alpha.bak`,
+backups pruned to newest 3. Proxmox `9684263580c6660f` — .deb `0.3.167-alpha-1`
+over `0.3.166-alpha-1`, **hash re-verified AFTER transfer on the far side**,
+`active` + `enabled`, no `.dpkg-old`, `identity.key` md5 unchanged, journal
+errors "-- No entries --". Both paired at 99 ms.
 
-- **A failed request hands back what it already generated.** Report #028's
-  second residual. Recorded by the pipeline, taken by the router only after the
-  retry has ALSO failed; the executor still returns the `Err`, so the peer
-  penalty and logging are untouched. `finish_reason` `"error"` (vLLM's value);
-  Anthropic has no interrupted-turn member so it maps to `max_tokens`.
-- **A reply already under way is no longer moved to a machine that cannot
-  continue it.** Found while scoping report #028's OTHER residual, and it
-  inverted it: a stand-in holds none of the failed machine's KV, nothing
-  rebuilds it, and `kv_offset` is read from the cache not `index_pos`.
-  **Measured** (`examples/failover_kv_probe.rs`): replacing 4 of 28 layers takes
-  P(the healthy machine's own token) from **0.997 to 0.119**; half the model to
-  **0.005**. No safe early window — one step in is WORSE, the missing state is
-  the PROMPT. Failover is correct on the prompt pass and only there.
-- The route-cost instrument could not see a hand-off (1 of 6 returns wired), so
-  **no log before 2026-09-09 carries hand-off data** and that absence is not
-  evidence they are rare.
+**What it carries**: a reply can survive losing a machine mid-answer (measured
+P 0.119 → 0.997); a peer is no longer handed more layers than it says it can
+hold while a route that fits exists; the routing cost model's predictions
+finally reach the log; the KV refusal says what its figure is made of.
 
-Rules: `.claude/rules/architecture.md` §§ "A failed request hands back the work
-it had already done" and "A reply under way is never moved to a machine that
-cannot continue it". Detail: `memory/round_log_0909_salvage.md`.
+✅ **The `predicted_ms` instrument is CONFIRMED WORKING on the released binary** —
+first sample from ordinary traffic: `total_ms=3781 predicted_ms=7823
+assumed_forward_passes=64` (cold estimator, ratio 0.48). Item 3 can now
+accumulate field data from normal use for the first time.
 
-⚠ **`ASSUMED_FORWARD_PASSES` field data is collectable now** — the fixed
-instrument is deployed. Collect, do not tune (`docs/FUTURE_WORK.md` item 3).
+⚠ **UNRELEASED on main since .167: report #029's fix** — a machine's memory
+limit is now a split POINT, not only a cap. Without it a capacity-respecting
+route was not passed over but INEXPRESSIBLE, which is why `no route fits the
+peers' advertised memory` appeared 36 times in one node's log. Behaviour change;
+release-worthy.
 
 **Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
