@@ -2,6 +2,52 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.166-alpha] — 2026-09-09
+
+Two fixes about the same thing: what happens to an answer when a machine
+running part of it goes away part-way through.
+
+One of them was found while scoping the other, and inverted it. The outstanding
+request from the earlier report was to arrange MORE takeovers when a machine
+drops out; measuring what a takeover actually produces showed that mid-answer,
+it produces a quietly wrong reply.
+
+> Note: entries for 0.3.163 through 0.3.165 are missing from this file. Those
+> releases are described in the project's own notes; this gap is known.
+
+### Fixed
+
+- **An answer that was most of the way finished is no longer thrown away.**
+  When a machine running part of a model dropped out, everything generated so
+  far went with it — reported with a reply that had been running for four
+  minutes and forty-three seconds. What was written is now handed back, marked
+  as unfinished so it cannot be mistaken for a complete answer.
+  Retrying still comes first, because a complete answer from a different route
+  is better than a shortened one; this only applies when nothing else could
+  serve the request. For a reply being streamed as it is written nothing
+  changes — the reader already has the words that were sent.
+- **A reply is no longer continued on a machine that cannot continue it.**
+  When a machine dropped out mid-answer another was asked to take over, and it
+  holds none of the conversation so far. Nothing sends it, and no check
+  noticed, so it answered from the current word alone while the reply carried
+  on looking normal. Measured on a real model: replacing four layers out of
+  twenty-eight takes the chance of continuing with the word the healthy machine
+  would have chosen from 99.7% down to 11.9%.
+  Taking over is sound at the START of an answer and is unchanged there. After
+  that the reply now ends honestly — and is either re-run in full on another
+  route, or handed back as far as it got.
+- **The advice shown when this happens** said no other machine had the missing
+  part free. That is now only one of two reasons, so it says the answer could
+  not be continued elsewhere instead. Updated in all 21 languages.
+
+### Internal
+
+- The check that records what the planner expected a request to cost could not
+  see the most common case — a model handed whole to one machine. It had been
+  recording nothing for those since it was added. Logs from before this release
+  therefore contain no such measurements, and their absence should not be read
+  as those hand-offs being rare.
+
 ## [0.3.162-alpha] — 2026-09-07
 
 Eight fixes. Six come from eight reports filed by one tester in a day on a
