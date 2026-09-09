@@ -227,8 +227,8 @@ All 20 build phases complete. All subsystems wired — no stubs. **2492 lib (dev
 **Released and deployed: v0.3.166-alpha (2026-09-09, tag on `d2975927`).**
 ⚠ **The 2026-09-09 docs + harness sweep sits unreleased on main.**
 Documentation, repo hygiene and the assistant harness only; the sole source
-edit is one comment character. **No release is owed.** Full suite green,
-counts unchanged. Detail: `memory/round_log_0909_docs_and_harness_sweep.md`.
+edit is one comment character. **No release is owed.** Full suite green; the
+only count change is 76 → 77 repo-consistency, for a guard added this round. Detail: `memory/round_log_0909_docs_and_harness_sweep.md`.
 Both nodes verified: local `225e6fe7f2b5cd74` (CUDA artifact — published sha256
 matched AND the installed binary byte-identical to the download,
 `ggml_cuda_init` present, 0 ERROR since startup, node id kept and
