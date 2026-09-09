@@ -3221,7 +3221,18 @@ fn processor_holder_beside_two_gpu_halves(
     peer_latency_ms: u32,
     peer_tokens_per_sec: f32,
 ) -> (Arc<SharedState>, NodeId, NodeId, NodeId) {
-    let state = make_shared_state();
+    processor_holder_beside_two_gpu_halves_with(peer_latency_ms, peer_tokens_per_sec, |_| {})
+}
+
+/// As above, with a hook on the config — used to turn `parallax_routing` off,
+/// which is what makes the gate's hand-off the whole decision rather than a
+/// proposal the priced search then weighs.
+fn processor_holder_beside_two_gpu_halves_with(
+    peer_latency_ms: u32,
+    peer_tokens_per_sec: f32,
+    tweak: impl FnOnce(&mut Config),
+) -> (Arc<SharedState>, NodeId, NodeId, NodeId) {
+    let state = make_shared_state_with(tweak);
     let local = state.identity.node_id().clone();
     let b = NodeId([0xB1; 32]);
     let c = NodeId([0xC1; 32]);
@@ -4484,5 +4495,79 @@ fn a_genuinely_cheaper_hand_off_still_wins_when_this_node_is_unpriced() {
         "a whole-model delegation pays its network ONCE, so it should beat a \
          two-hop chain of equally distant peers (hand_off={hand_off_ms} \
          chain={chain_ms})"
+    );
+}
+
+/// Every route the caller can be handed records what the cost model expected of
+/// it — a whole-model hand-off included, not only a priced chain.
+///
+/// The instrumentation exists to answer one question: is
+/// `ASSUMED_FORWARD_PASSES` right? The measurement that raised the doubt
+/// (#447(iii)) was a boomerang priced ~5x apart from what ran at a dead heat —
+/// a HAND-OFF. It shipped wired at the single point the DP path passes through,
+/// and `assemble_pipeline_for` returns a plan from six places, four of them
+/// ahead of that point. So the shape the question is about recorded nothing.
+///
+/// Measured on the live node 2026-09-09 before this was fixed: five peers, ten
+/// hours of uptime, three deliberately-distributed requests across three
+/// models, and not one `predicted_ms` in the log — every one was a `segments=1`
+/// hand-off.
+#[test]
+fn a_hand_off_records_what_the_cost_model_expected_of_it() {
+    // Parallax routing off, so `search_will_decide` is false and the gate's
+    // plan IS the answer — the return that skipped the recording.
+    let (state, local, _b, _c) = processor_holder_beside_two_gpu_halves_with(600, 9.0, |c| {
+        c.inference.parallax_routing = false;
+    });
+    let near = NodeId([0xD1; 32]);
+    let model = ModelId("split-14b".into());
+    for i in 0..2 {
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: model.clone(),
+                index: i,
+            },
+            near.clone(),
+        );
+    }
+    state
+        .peer_registry
+        .insert(near.clone(), gpu_holder_info(&near, 3, 40.0));
+    state.connected_node_ids.insert(near.clone());
+
+    // The recording is a no-op without a live trace — that is how the
+    // dashboard's route preview is excluded — so the request needs one.
+    let request_id = uuid::Uuid::new_v4();
+    let trace = std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+        request_id,
+        "split-14b",
+        "chat",
+    ));
+    state.active_traces.insert(request_id, trace.clone());
+
+    let scheduler = PipelineScheduler::with_delegation_footprint(state, LOCAL_PROCESSOR_TPS, 8_000);
+    let assignment = scheduler
+        .assemble_pipeline_for(&model, &local, request_id, Some(14_000))
+        .unwrap();
+
+    // The control for the control: this really is a hand-off — prompt privacy
+    // is auto-on here (this node holds both ends), so the gate builds the
+    // boomerang, which is exactly the shape #447(iii) measured. A failure below
+    // is then a missing recording rather than a different route.
+    assert!(
+        assignment.segments.iter().any(|s| s.node_id == near),
+        "expected the peer to take the middle; got {:?}",
+        assignment.segments
+    );
+
+    let snap = trace.snapshot();
+    assert!(
+        snap.predicted_ms.is_some(),
+        "a hand-off must record what it was predicted to cost — that is the \
+         shape the calibration question is about"
+    );
+    assert!(
+        snap.assumed_forward_passes.is_some(),
+        "the token assumption travels with the prediction it was used in"
     );
 }

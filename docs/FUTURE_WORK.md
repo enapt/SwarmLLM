@@ -23,7 +23,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Why it ranks here |
 |---|---|---|
-| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. **Now instrumented** (2026-09-08): every priced route logs `predicted_ms` and `assumed_forward_passes` beside `total_ms` and `tokens`. Needs field data, not tuning |
+| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. Instrumented 2026-09-08; **the instrument could not see a hand-off until 2026-09-09** — zero samples in ten hours of live traffic. Needs field data, not tuning |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
 
@@ -338,10 +338,27 @@ instrumentation item 3 asks for.
 
 Every request that took a priced route now logs `predicted_ms` beside `total_ms`, and
 `assumed_forward_passes` beside `tokens`, on the existing `DIAG: request complete` line.
-Recorded once per request in `assemble_pipeline_for` for whatever chain was chosen —
+Recorded once per request in `assemble_pipeline_for` for whatever route was chosen —
 including a greedy one, since the question is whether the model describes what happens,
 not whether it chose it. The dashboard's route preview is excluded because it has no
 live trace.
+
+⚠ **It recorded nothing for a hand-off until 2026-09-09, which was most of the traffic
+and all of the traffic this entry is about.** The recording was wired at the single point
+the DP path passes through, and `assemble_pipeline_for` returns a plan from six places —
+the four hand-off returns are all ahead of it. So a whole-model delegation and a privacy
+boomerang, the shape #447(iii) measured at ~5x out, recorded no prediction at all.
+Measured on the live node before the fix: five peers, ten hours of uptime, three
+deliberately-distributed requests across three models (`llama-3.2-1b`, `qwen2.5-14b`,
+16 shards with 1 held locally), every one a `segments=1` hand-off, and **not one
+`predicted_ms` in the log**. All five returns now go through
+`scheduler::note_route_prediction`; local-only routes are still excluded deliberately,
+having no route choice to explain.
+
+**So any log older than 2026-09-09 has no hand-off samples in it, and their absence is
+not evidence that hand-offs are rare.** Same class as #495 shipping inert and #451's
+guard whose input nothing filled: an instrument that cannot observe the case it was
+built for reads exactly like a case that does not occur.
 
 **The half of this entry's hypothesis about `latency_ms` being a ping is already
 false**: `get_peer_metrics` has preferred `ack_srtt_ms` — measured on real forwards —

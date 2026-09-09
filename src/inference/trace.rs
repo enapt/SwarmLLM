@@ -306,9 +306,15 @@ impl RequestTrace {
     /// Record what the cost model expected this route to cost.
     ///
     /// Separate from [`Self::mark_assembled`] rather than a parameter on it:
-    /// only the parallax path has a priced figure at all, and threading an
-    /// `Option` through the greedy path and a dozen test call sites would say
-    /// nothing at any of them.
+    /// not every route has a priced figure — a local-only run has no route
+    /// choice to explain — and threading an `Option` through the greedy path
+    /// and a dozen test call sites would say nothing at any of them.
+    ///
+    /// Written by `scheduler::note_route_prediction`, which every returned
+    /// plan goes through: the priced chain AND the four hand-off returns ahead
+    /// of it. Wiring it to the chain alone left the shape the calibration
+    /// question is actually about — the boomerang of #447(iii) — recording
+    /// nothing at all.
     pub fn note_predicted_cost(&self, ms: u32, assumed_forward_passes: u32) {
         let mut g = self.lock();
         g.predicted_ms = Some(ms);

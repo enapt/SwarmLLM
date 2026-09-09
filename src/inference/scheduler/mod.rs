@@ -1636,6 +1636,49 @@ impl PipelineScheduler {
     }
 
     /// Assemble a pipeline for the given model with a specific request ID.
+    /// Record what the cost model expected of the plan being returned, so the
+    /// completion line can print it beside what the request actually cost.
+    ///
+    /// **Every route the caller can be handed goes through here**, not just the
+    /// one the priced search builds. When this instrumentation shipped it was
+    /// wired at the single point the DP path passes through — and
+    /// `assemble_pipeline_for` returns a plan from six places. The four hand-off
+    /// returns are all ahead of it, so a whole-model delegation and a privacy
+    /// boomerang recorded nothing at all.
+    ///
+    /// That is precisely backwards for the question being asked. The
+    /// calibration doubt is about `ASSUMED_FORWARD_PASSES`, and the measurement
+    /// that raised it (#447(iii)) was a BOOMERANG priced ~5x apart from a dead
+    /// heat — a hand-off shape. Measured on the live node 2026-09-09: five
+    /// peers, ten hours of uptime, three deliberately-distributed requests
+    /// across three models, and **not one `predicted_ms` in the log**, because
+    /// every one of them was a `segments=1` hand-off.
+    ///
+    /// Local-only routes are still excluded, deliberately: there is no route
+    /// choice to explain, and the comparison would be noise against a
+    /// single-segment local run.
+    fn note_route_prediction(
+        &self,
+        request_id: uuid::Uuid,
+        segments: &[PipelineSegment],
+        candidates: &[NodeCandidate],
+        local_node_id: &NodeId,
+        num_layers: u32,
+        prompt_tokens: Option<u32>,
+    ) {
+        self.shared_state.note_predicted_route_cost(
+            request_id,
+            parallax::chain_cost_ms(
+                segments,
+                candidates,
+                local_node_id,
+                num_layers,
+                prompt_tokens,
+            ) as u32,
+            parallax::ASSUMED_FORWARD_PASSES as u32,
+        );
+    }
+
     pub fn assemble_pipeline_for(
         &self,
         model_id: &ModelId,
@@ -1934,6 +1977,14 @@ impl PipelineScheduler {
                             supports_speculative: true,
                         };
                         if !search_will_decide {
+                            self.note_route_prediction(
+                                request_id,
+                                &assignment.segments,
+                                &candidates,
+                                local_node_id,
+                                num_layers,
+                                prompt_tokens,
+                            );
                             return Ok(assignment);
                         }
                         // The search can build this same shape now, and prices
@@ -1976,6 +2027,14 @@ impl PipelineScheduler {
                         supports_speculative: true,
                     };
                     if !search_will_decide {
+                        self.note_route_prediction(
+                            request_id,
+                            &assignment.segments,
+                            &candidates,
+                            local_node_id,
+                            num_layers,
+                            prompt_tokens,
+                        );
                         return Ok(assignment);
                     }
                     hand_off = Some(assignment);
@@ -2286,6 +2345,16 @@ impl PipelineScheduler {
                                      its processor: {reason} — handing it to the peer the \
                                      gate accepted, which prices cheaper than the chain"
                                 );
+                                // `hand_off_ms` is this same figure, already
+                                // computed to make the comparison above.
+                                self.note_route_prediction(
+                                    request_id,
+                                    &assignment.segments,
+                                    &candidates,
+                                    local_node_id,
+                                    num_layers,
+                                    prompt_tokens,
+                                );
                                 return Ok(assignment);
                             }
                             tracing::info!(
@@ -2331,6 +2400,14 @@ impl PipelineScheduler {
                                 "DIAG: parallax routing unavailable — handing the model to \
                                  the peer the gate accepted rather than running it on this \
                                  node's processor"
+                            );
+                            self.note_route_prediction(
+                                request_id,
+                                &assignment.segments,
+                                &candidates,
+                                local_node_id,
+                                num_layers,
+                                prompt_tokens,
                             );
                             return Ok(assignment);
                         }
@@ -2402,16 +2479,13 @@ impl PipelineScheduler {
         // model chose it. A no-op when the request has no live trace, which is
         // how the dashboard's route preview is excluded — it assembles a route
         // for a request that will never run.
-        self.shared_state.note_predicted_route_cost(
+        self.note_route_prediction(
             request_id,
-            parallax::chain_cost_ms(
-                &segments,
-                &candidates,
-                local_node_id,
-                num_layers,
-                prompt_tokens,
-            ) as u32,
-            parallax::ASSUMED_FORWARD_PASSES as u32,
+            &segments,
+            &candidates,
+            local_node_id,
+            num_layers,
+            prompt_tokens,
         );
 
         // Identify standby nodes for each segment
