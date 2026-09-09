@@ -263,17 +263,24 @@ fn capacity_points_fit_budget(
     clamped: &[(usize, (u32, u32))],
     cap: usize,
 ) -> bool {
-    let cost: usize = clamped
+    subrange_cost(with_capacity, clamped) <= cap
+}
+
+/// What emitting every sub-range implied by `points` would cost, in vertices.
+///
+/// The ONE definition, used by the budget decision above and by the
+/// `split_enabled` check that governs the same emission. They were briefly two
+/// copies of the same arithmetic — the defect this codebase names "one
+/// invariant, N paths" — and two copies of a cost model drift into disagreeing
+/// about what is affordable, which is the one thing they must agree on.
+fn subrange_cost(points: &[u32], clamped: &[(usize, (u32, u32))]) -> usize {
+    clamped
         .iter()
         .map(|(_, (lo, hi))| {
-            let k = with_capacity
-                .iter()
-                .filter(|&&p| p >= *lo && p <= *hi)
-                .count();
+            let k = points.iter().filter(|&&p| p >= *lo && p <= *hi).count();
             k.saturating_mul(k.saturating_sub(1)) / 2
         })
-        .sum();
-    cost <= cap
+        .sum()
 }
 
 /// Compute per-vertex cost for a (candidate, range) pair.
@@ -664,16 +671,6 @@ pub(super) fn route_shortest_path(
     // the number of interior points. Used twice — once for the declared
     // boundaries alone, once with the capacity boundaries added — so the
     // second set can be dropped rather than allowed to break the first.
-    let cost_of = |points: &[u32]| -> usize {
-        clamped
-            .iter()
-            .map(|(_, (lo, hi))| {
-                let k = points.iter().filter(|&&p| p >= *lo && p <= *hi).count();
-                k.saturating_mul(k.saturating_sub(1)) / 2
-            })
-            .sum()
-    };
-
     // A candidate's CAPACITY is a boundary too, and until 2026-09-09 it was not
     // one (report #029).
     //
@@ -706,7 +703,7 @@ pub(super) fn route_shortest_path(
     // what it had before these points existed. An enhancement that can cost you
     // the thing it enhances is not one, so when they do not fit they are simply
     // dropped and the declared boundaries stand.
-    let declared_cost = cost_of(&split_points);
+    let declared_cost = subrange_cost(&split_points, &clamped);
     let mut with_capacity = split_points.clone();
     for c in candidates {
         let Some(k) = c.max_hostable_layers else {
@@ -751,7 +748,7 @@ pub(super) fn route_shortest_path(
     // split points. That is trivial for a handful of holders and unbounded at
     // swarm scale, so it is budgeted: past the cap we emit whole ranges only,
     // which is exactly the pre-split behaviour rather than a degraded one.
-    let subrange_cost: usize = cost_of(&split_points);
+    let subrange_cost: usize = subrange_cost(&split_points, &clamped);
     let split_enabled = partial_ranges && subrange_cost <= MAX_SUBRANGE_VERTICES;
     if partial_ranges && !split_enabled {
         tracing::debug!(
