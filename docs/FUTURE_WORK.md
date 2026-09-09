@@ -444,6 +444,69 @@ free:
 - Let a standby be assembled from SEVERAL nodes covering the range between them.
   `failover_segment` replaces one segment with one node, so this is a real change to the
   failover shape, not a filter tweak.
+
+  **Designed and costed 2026-09-09; deliberately not built. Read this before
+  starting, it is most of the work.**
+
+  *Prior art.* Petals' `replace_failed_server` does exactly this and the loop is
+  three lines: `outputs = streams[s].send(inputs); replacements.append(s);
+  cache[s] = inputs; inputs = outputs` (arXiv 2312.08361, Algorithm 3). Note the
+  third clause — it writes each replacement's OWN retained history as it
+  cascades, so a later failure of a replacement is recoverable too. We do not
+  need that: we retain at the LOGICAL segment boundary, so a cover failure can
+  simply re-cascade the whole cover from there. Simpler than the prior art, and
+  correct for the same reason.
+
+  *The algorithm is easy and was written and tested before being reverted* —
+  greedy interval cover, take the candidate reaching furthest right, trim each
+  to `[p, min(its end, range.1))` so the pieces are contiguous and exact.
+  **Trimming is not optional**: two standbys holding `[32,44)` and `[40,48)`
+  cover `[32,48)`, but run as held they would put layers 40-44 through the model
+  TWICE and the reply would be quietly wrong in exactly the way a missing cache
+  makes it wrong. **Capacity folds into REACH, not into a filter** — a node that
+  holds everything but can run four layers is worth four layers here, not
+  disqualified; the first version filtered on room for the node's whole held
+  range, found none, and reported no cover for a swarm that could be covered.
+
+  *Where the real work is, and why it was not done in the same session.*
+
+  1. **`find_standbys` is the actual limiter, not the failover search.** It only
+     ever records a candidate whose `available_ranges` covers the segment
+     ENTIRELY (`r.0 <= seg.0 && r.1 >= seg.1`). So every entry in
+     `assignment.standbys` already covers alone, and a cover assembled from that
+     list can never find anything. The cover must be built from CANDIDATES at
+     plan time and recorded as trimmed sub-range members — at which point
+     `standby_covers` correctly matches none of them and the failover search
+     must be the thing that reassembles them.
+  2. **Durability across tokens is mandatory and is the expensive half.** The
+     cover has to survive to the next token: leaving `assignment.segments[k]`
+     pointing at the dead node costs a dead-node timeout per token, and pointing
+     it at only the first cover member silently skips the rest of the layers.
+     Two ways, both touching the hot path:
+     - *Splice the assignment.* Blocked today by `forward_through_segments_inner`
+       caching `num_segments` before the loop and deriving `is_last` and
+       `run_is_last` from it. `is_last` decides WHICH SEGMENT SAMPLES, so
+       getting it wrong is a silently wrong reply, and the chain path reads the
+       same cached value. Splicing also breaks `retained_activations`, which is
+       keyed by segment INDEX — every segment after the splice point shifts and
+       its history is misattributed, so a replay could be assembled from the
+       wrong segment's inputs. **Re-key retention by `layer_range` first**; a
+       segment is its range, and ranges do not shift.
+     - *A side map* `HashMap<usize, Vec<PipelineSegment>>` on the executor,
+       with one branch at the top of the forward loop. Leaves every index
+       invariant alone, at the cost of a second way to drive a segment.
+  3. **The cascade itself is small** once (2) is settled — the failover loop
+     already sends to one node and retries; it becomes a loop over remaining
+     pieces, where success on a piece that does not finish the range advances
+     the front and continues instead of returning.
+
+  *Value, honestly.* Unknown for report #028's own traces: the logs show no
+  cover among the STANDBY list, but the candidate set is not in the log, so
+  whether one existed among candidates cannot be told from them. The general
+  argument is stronger — in a swarm sharded across many small holders, "no
+  single node covers this segment" is likely the common case rather than the
+  rare one, which is consistent with `standbys_covering_this_segment=0`
+  appearing four times in three days.
 - Prefer a route that HAS standby coverage when one exists, at some cost in the primary
   route's price. That needs the cost model to be trustworthy first, which is item 3.
 
