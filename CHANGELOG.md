@@ -12,9 +12,6 @@ request from the earlier report was to arrange MORE takeovers when a machine
 drops out; measuring what a takeover actually produces showed that mid-answer,
 it produces a quietly wrong reply.
 
-> Note: entries for 0.3.163 through 0.3.165 are missing from this file. Those
-> releases are described in the project's own notes; this gap is known.
-
 ### Fixed
 
 - **An answer that was most of the way finished is no longer thrown away.**
@@ -47,6 +44,228 @@ it produces a quietly wrong reply.
   recording nothing for those since it was added. Logs from before this release
   therefore contain no such measurements, and their absence should not be read
   as those hand-offs being rare.
+
+## [0.3.165-alpha] — 2026-09-08
+
+Continues the work started in the previous release on how a machine judges its
+connection to another. That fix turned out not to catch what it was written for,
+so this release adds a proper measurement of how much data a connection can
+actually move, alongside the repair to what came before it. It also closes the
+remaining gaps in the rule about who may be trusted to see your prompt, and a
+memory bookkeeping fault that could make a small machine turn away work it had
+genuine room for.
+
+### Fixed
+
+- **A machine whose connection drops mid-request was still being scored as
+  though it had answered perfectly.** The previous release taught the network
+  to steer work away from an unreliable connection, by multiplying the cost of
+  using a machine by how many attempts it typically takes to get one whole
+  answer back. It did not work: every time this machine itself gave up waiting —
+  because no receipt arrived, a connection closed, or a stream shut down — that
+  outcome was recorded exactly like a genuine answer from the other machine,
+  since both looked identical to the code checking them. Because giving up
+  happens well within the time allowed for a genuinely slow reply, this was the
+  ordinary way a dead connection showed up, and it went completely uncounted.
+  The machine can now tell the two apart. A second, smaller fault in the same
+  feature is fixed alongside it: the measurement was blended into one running
+  average taken continuously as a reply was generated, so a single connection
+  failure that ended a whole reply was drowned out by the hundred good tokens
+  that came before it. It is now taken on the first exchange of a request —
+  when the whole prompt crosses the network, which is what genuinely tests the
+  connection — plus every failure, however it happens.
+- **Machines are now ranked, in part, by how much data they can actually move
+  to each other — not only by how quickly they answer a ping.** A slow
+  connection and a merely distant one look identical to a ping, and packet loss
+  on an otherwise healthy connection is repaired automatically underneath —
+  it never shows up as a failure, only as something taking longer. That is
+  exactly what the fix above cannot see. A contributor built a small lab that
+  deliberately damages a network connection to test this, and found that a
+  machine 60 milliseconds away losing 3% of its packets was still preferred
+  over one 81 milliseconds away losing none, while being nearly three times
+  slower to move half a megabyte. Every machine now measures how fast data
+  actually moves to each other machine it has sent work to, keeping the best
+  figure it has recorded rather than an average — a slow reading usually means
+  something else on the machine was busy at the time, not that the connection
+  itself is slow — and the planner uses that figure instead of assuming a
+  connection is as fast as it is close. A connection never yet measured is
+  treated exactly as before. Not yet confirmed against a deliberately damaged
+  network — that is the next step, with the same contributor's lab.
+- **The rule about who may be trusted to see your prompt in the clear now
+  applies everywhere a machine can be chosen for that job.** It used to be
+  checked in only two of the four places that can hand a machine that part of
+  the work. The gap made itself worse under pressure: when the rule ruled out
+  the only machine holding the very start of a model, the planner gave up and
+  fell back to a simpler method that had no rule at all — so the very check
+  meant to stop an untrusted machine seeing your prompt could end up handing it
+  to one anyway, by a longer road. A stand-by machine, which takes over
+  automatically if another one fails mid-request, is now covered by the same
+  rule and knows whether this protection is switched on at all — previously it
+  did not, so a stand-by machine could be ready to receive exactly the
+  information the protection exists to keep on your own machine. Where truly no
+  trusted machine can do the job, the request still gets served; it costs a
+  note in the log rather than a refusal.
+- **A machine that could not work out its own speed no longer throws away a
+  cheaper route it had already found.** When a machine cannot measure how fast
+  it is — usually because it is too short of memory to run the test at all,
+  which tends to be exactly the machines that most need work sent elsewhere —
+  it used to hand the whole request to whichever single other machine had
+  already agreed to take it, discarding a cheaper multi-machine route it had
+  just worked out for itself. The two options are now compared properly, and
+  the cheaper one wins.
+- **A machine told to stay on its own processor no longer tells the rest of the
+  network it is as fast as its graphics card.** Two figures travel to other
+  machines and are used to decide whether to send them work: how much memory a
+  model may take, and how quickly this machine can produce text. An earlier
+  fix corrected the memory figure for a machine whose graphics card is present
+  but switched off; the speed figure never got the same correction, so such a
+  machine kept advertising card-level speed. Measured here: a machine
+  broadcasting thirty-five tokens a second to the rest of the network, while
+  its own planner — looking at that very same machine — priced it at five. Both
+  figures are now worked out the same way, so they cannot disagree about the
+  same machine again.
+- **A machine no longer keeps charging itself for parts of a model it had
+  already let go of.** When a machine is asked for a bigger range of a model
+  that covers parts it already holds, it tidies up: the smaller, already-held
+  pieces are released once the bigger range is loaded, so it only ever holds
+  one copy rather than two. The bookkeeping that tracks how much memory is
+  spoken for did not follow — and that figure is what a machine checks before
+  agreeing to load anything else — so a machine that had genuinely freed memory
+  went on believing it was full, and turned away later models that would have
+  fit. On a small machine, that is the difference between answering a request
+  and refusing it.
+
+### Internal
+
+- Every routed request's log line now records what the planner expected it to
+  cost, next to what it actually cost — and how many tokens it expected to
+  generate, next to how many it produced — so claims about how a routing
+  decision performs can be checked against real traffic instead of argued
+  about.
+- The log line naming a cheaper machine that was passed over now also says why
+  it could not have been used, rather than leaving a reader to guess at a
+  reason.
+- Two of the project's own test scripts were quietly printing a harmless error
+  while scanning process lists; fixed.
+
+## [0.3.164-alpha] — 2026-09-08
+
+A short release: two fixes, both about how the network decides where to send
+work. The first came out of a contributor's own investigation of a network
+problem, using a lab built specifically to damage a connection and see whether
+SwarmLLM noticed. The second closes a pattern this project has now fixed three
+times across three releases — a shortlist that stopped looking too soon.
+
+### Fixed
+
+- **A machine that goes quiet partway through a request is now treated as
+  unreliable everywhere that can happen, not only when it is handed a whole
+  model.** SwarmLLM already had a way to steer requests away from a connection
+  that keeps failing, by multiplying the cost of a route by how many attempts,
+  on average, it takes that machine to return one whole answer. But that
+  measurement was only ever fed by requests handed to a single machine in full;
+  a machine running just one part of a model, as one step in a longer chain,
+  produced no such measurements at all and was treated as flawless forever,
+  however faulty its connection actually was. This is now measured on every
+  step of a chain, not only on hand-offs of a whole model. Found from outside
+  the project: a contributor built a lab that deliberately damages a network
+  connection and showed that a machine 60 milliseconds away losing 3% of its
+  packets was still being preferred over one 81 milliseconds away losing
+  none — nearly three times slower moving half a megabyte, in every one of
+  three trials. What this does not yet fix: it only catches a connection bad
+  enough that a message is given up on entirely. A connection that is merely
+  slow but still gets there is not yet measured at all, which is recorded as a
+  known gap.
+- **Two nearby machines were sometimes passed over in favour of one distant
+  one.** When your computer holds a whole model but would run it slowly, it
+  looks for a faster machine to hand the work to. That search used to stop at
+  the very first machine that qualified — so a single machine holding the whole
+  model, half a second away, could be chosen over two machines on your own
+  network that could have split the work between them and run it faster,
+  simply because the shortlist only ever considered a machine holding every
+  part of the model. The properly-priced route planner now gets the final say:
+  it weighs the hand-off against every other arrangement it can build, and the
+  hand-off is used only when nothing else can be priced at all, or when it
+  genuinely is the cheapest option — which it still sometimes is. This also
+  closes a related gap in the rule about who may be trusted with your prompt:
+  that check used to run only when a whole model was handed to one machine, so
+  a route the planner assembled itself could end up giving the first part of a
+  model — the part that sees your prompt in the clear — to a machine it does
+  not trust. Both routes now share the same rule, which stands aside
+  rather than refusing to answer only when truly no trusted machine is
+  available. Not yet confirmed on a real network with exactly this shape — a
+  processor-bound machine with both a whole-model peer and a cheaper split
+  route both in view.
+
+## [0.3.163-alpha] — 2026-09-07
+
+Four fixes from three reports. Two are related repairs to how a request behaves
+when your own machine's memory refuses to hold a model: one closes a gap that
+let the refusal spread further than it should, the other means a refusal no
+longer has to be final. The other two fix screens that could get stuck showing
+stale information from before you opened them — the chat tab's welcome screen,
+and the tab built for comparing several models side by side.
+
+### Fixed
+
+- **A refusal from your own machine's memory is no longer necessarily the end
+  of a request.** When a machine's own budget said no to loading a model —
+  because there was not enough safe memory available at that moment — the
+  request simply failed, even when another machine on the network could have
+  run it. Retrying in the obvious way is risky here: trying again straight
+  after a refusal reads the same figures and attempts to load the exact same
+  thing, which is one of the best-known ways to turn a slow moment into an
+  outage. So a retry now only happens once the refusal itself has been
+  recorded against that particular request, and the second attempt is not
+  allowed to hand the model back to the machine that just refused it — it has
+  to go to another one. If nothing else can serve the model either, the reply
+  still names exactly how much memory the model needs, what the budget allows,
+  and which setting to raise, rather than a message about a search that found
+  nothing. Verified on a machine whose budget refused a model needing about
+  3 GB against a 2.2 GB allowance: it now answers, running the middle of the
+  model on another machine.
+- **A machine's own memory limit was being ignored at exactly the moment it
+  mattered.** The route planner has a safety check: when a machine's estimate
+  of another machine's free memory might be out of date, it re-plans without
+  trusting anyone's figure, so one stale number cannot fail a request that
+  could otherwise be served. That second pass was also throwing away THIS
+  machine's own figure — which is not a stale guess but a number worked out
+  moments earlier from real, live memory, by the very same code about to load
+  the model. So the safety check was not actually helping: it only moved the
+  refusal from the planning stage, where another route could still be tried, to
+  the loading stage, where it was final. A machine's own figure is now kept and
+  enforced properly during planning, so a route that would overload it loses to
+  one that fits, instead of failing the whole search and discarding a good
+  option through another machine.
+- **The chat tab's welcome screen now updates as models and other machines are
+  found.** Opening the app could show "no models available yet" on a machine
+  that already had eleven models ready to use and six other machines
+  connected — and it would stay that way indefinitely, even though the
+  dashboard tab, one click away, showed everything correctly. The screen is
+  built the moment the page loads, before any real information has arrived,
+  which is normal; four separate places in the code were meant to rebuild it
+  once that information came in, but each of them first checked whether an
+  existing conversation was open and empty — which is never true for someone
+  who has just opened the app. They now check whether the welcome screen is
+  actually the thing on screen, rather than guessing from the state of a
+  conversation that does not exist yet, and switching to the chat tab now
+  refreshes it too, matching every other tab.
+- **The tab for comparing replies from several models now streams them in and
+  renders formatting properly, matching the ordinary chat tab.** It used to
+  show nothing at all until a model had completely finished — up to a minute
+  of a blank spinner for anything running on a processor-only machine, which is
+  exactly the situation this tab exists to help identify, and looks identical
+  to the tab having simply stalled. Replies also arrived as raw text, so bold
+  words, lists, code and tables all showed up as literal asterisks, dashes and
+  pipes on the one screen meant for reading several replies side by side. Both
+  were things this tab had simply never been given, rather than something that
+  broke; it now shares the streaming and the formatting the chat tab has always
+  had, including "Copy" returning the original formatted text rather than the
+  on-screen markup. While checking this, a related fault turned up: every
+  streamed reply that had been answered by another machine on the network,
+  through the Anthropic-compatible API, reported no prompt-length figure at
+  all, where the same request without streaming reported it correctly. Also
+  fixed.
 
 ## [0.3.162-alpha] — 2026-09-07
 
