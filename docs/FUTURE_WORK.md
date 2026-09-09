@@ -31,7 +31,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Why it ranks here |
 |---|---|---|
-| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation. **The instrument shipped inert TWICE**, both fixed on main. **First 15 field samples collected 2026-09-09** from a dev node in the real swarm: actual/predicted 0.34-6.16, median 1.20, and the prediction is nearly FLAT in reply length while the actual is not — 2 vs 192 tokens predicted 1.6x apart, actual 5.3x apart. Dominant error looks per-PEER. **Still not enough to tune on**, and the released binary records nothing |
+| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation. **The instrument shipped inert TWICE**, both fixed on main. **Field data collected 2026-09-09** from dev nodes in the real swarm, including a CONTROLLED run holding the peer fixed: **the error grows monotonically with reply length within one peer** (1.00 at 9 tokens → 3.3 at 239), and `predicted_ms` is flat across that range. A constant sits where a variable belongs. **Not just a wrong constant**: a ~64-token reply should then price at ratio 1 and measures 1.75. **Still not enough to tune on**, and the released binary records nothing |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
 | 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
@@ -678,6 +678,48 @@ n=15, actual/predicted min 0.34, median 1.20, max 6.16. Two models
 ⚠ **The released binary still does not have the fix**, so ordinary traffic on the live
 node is still recording nothing. Everything above came from a dev node run for the
 purpose.
+
+### Controlled run, same day — reply length varied, peer held fixed
+
+The session above could not separate per-peer variance from reply length. This one was
+designed to: one model (`llama-3.2-1b-q8-0`), reply length driven by an explicit
+"count from 1 to N" (which these models follow, so tokens ≈ 2N), three repeats per
+length, and the analysis grouped BY PEER so the comparison is within one machine.
+
+Peer `bf7b3263`, warm estimates only (`predicted_ms` ~880-1220):
+
+| reply tokens | predicted_ms | actual_ms | actual/predicted |
+|---|---|---|---|
+| 9 | 898 | 894 | 1.00 |
+| 39 | 1053 | 1656 | 1.57 |
+| 63 | ~930 (3 runs) | 1537-1715 | 1.72, 1.75, 1.76 |
+| 119 | 1095 / 1220 | 2047 / 2208 | 1.87, 1.81 |
+| 239 | 979 / 1086 | 3418 / 3429 | 3.49, 3.16 |
+
+Peer `7c10ea04` shows the same shape (39 → 1.31, 119 → 1.95, 239 → 4.19).
+
+**The error grows monotonically with reply length, within a single peer.** That is the
+question the earlier session left open, and it is answered: this is not peer variance.
+`predicted_ms` is essentially FLAT from 9 to 239 tokens (878-1220) while the actual grows
+894 → 3429. A constant sits where a variable belongs.
+
+**But it is NOT simply "the right constant applied to the wrong count", and that was
+tested rather than assumed.** If the model priced every reply as exactly
+`ASSUMED_FORWARD_PASSES = 64` passes and were otherwise calibrated, a ~64-token reply
+would land at ratio ≈ 1. Three runs at 63 tokens gave **1.72, 1.75, 1.76**. The crossover
+is nearer 10-15 tokens, so there is a second error term underneath the missing scaling —
+the per-pass cost, the fixed overhead, or both. This data cannot separate those.
+
+**A second axis, worth knowing before anyone reads a ratio.** `predicted_ms` for the
+same (model, peer) FALLS as the estimator warms: 2427 early, ~900-1200 once observations
+have accumulated. Cold predictions were 2-2.5x the warm ones. Any comparison that mixes
+cold and warm requests is measuring the estimator's warmth as much as its accuracy — the
+table above is warm-only for that reason.
+
+**Still not a licence to tune.** One model, two peers, one session, other people's
+machines under unknown load, and the two error terms are not separated. What it does
+establish is the SHAPE: the model does not scale with reply length, and fixing that is a
+structural change, not a new value for 64.
 
 **The half of this entry's hypothesis about `latency_ms` being a ping is already
 false**: `get_peer_metrics` has preferred `ack_srtt_ms` — measured on real forwards —
