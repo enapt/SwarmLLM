@@ -27,6 +27,7 @@ mod perf_history;
 mod relay;
 mod removed_shards;
 mod repair;
+pub(crate) mod retained_activations;
 pub(crate) mod retained_replies;
 mod tp_allreduce;
 
@@ -378,6 +379,10 @@ pub struct SharedState {
     /// Written by `dispatch::remote_generate` as it sends; read by the
     /// `ResendTokens` handler and by the network manager's re-send on a
     /// `SwarmResponse::Dropped`; swept on the health tick.
+    /// What this node has sent to each pipeline segment of each in-flight
+    /// request, so a stand-in can be replayed it and take the segment over
+    /// mid-reply. See the module doc for why a partial history is never used.
+    pub(crate) retained_activations: retained_activations::RetainedActivations,
     pub(crate) retained_replies: retained_replies::RetainedReplies,
     /// Coordinator-side waiters for remote segment results, keyed by
     /// `request_id`. The value records WHICH node the waiter expects to hear
@@ -1064,6 +1069,7 @@ impl SharedState {
             },
             model_loaded: std::sync::atomic::AtomicBool::new(false),
             streaming_token_txs: DashMap::new(),
+            retained_activations: retained_activations::RetainedActivations::new(),
             retained_replies: retained_replies::RetainedReplies::default(),
             is_ready: AtomicBool::new(false),
             config_watch_tx,

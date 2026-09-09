@@ -1611,7 +1611,15 @@ fn per_request_state_is_released_in_one_place() {
         "request_holder_blacklist",
         "peer_vram_commitments",
         "salvaged_replies",
+        // Released with `.release(`, not `.remove(` — it owns its own store
+        // rather than being a bare map. Both spellings are matched below, so
+        // adding a name here does not silently produce a guard that cannot
+        // fire (gotcha #413).
+        "retained_activations",
     ];
+    // The ways a caller clears one of these directly. A name is only guarded
+    // as well as the spellings listed here.
+    let operations = [".remove(", ".release("];
     let allowed = [
         // Owns the helper.
         "src/daemon/state/relay.rs",
@@ -1659,8 +1667,10 @@ fn per_request_state_is_released_in_one_place() {
                     continue;
                 }
                 for name in guarded {
-                    if l.contains(&format!("{name}.remove(")) {
-                        offenders.push(format!("{rel}:{line_no}: {l}"));
+                    for op in operations {
+                        if l.contains(&format!("{name}{op}")) {
+                            offenders.push(format!("{rel}:{line_no}: {l}"));
+                        }
                     }
                 }
             }
@@ -4775,6 +4785,112 @@ fn a_reply_under_way_is_never_moved_to_a_machine_that_cannot_continue_it() {
          alone — measured at P(healthy machine's token) = 0.119 replacing just 4 of 28 \
          layers — and nothing errors or warns.\nSee docs/FUTURE_WORK.md § \"A failover \
          after the prompt pass silently loses the failed segment's KV context\"."
+    );
+}
+
+/// Does this `failover_segment` body send the replayed payload at the replayed
+/// position, rather than the bare current step?
+///
+/// Both must move together. A replay carries every position from 0, so it is a
+/// prompt pass to a stand-in with no cache; sending those bytes while still
+/// naming the CURRENT `index_pos` would rotate every position wrongly and
+/// produce a fluent, wrong continuation with nothing erroring — the same shape
+/// of silent defect the replay exists to remove.
+fn failover_sends_replay_and_position_together(body: &str) -> bool {
+    // Every send of a payload in this function must use the replay-aware
+    // binding, never the raw `activations` it was handed.
+    //
+    // Matched on an identifier BOUNDARY, not as a substring: `activations` is a
+    // suffix of `send_activations`, so a plain `contains` can never tell the
+    // two apart. The first version of this guard did exactly that and could not
+    // fail; its null control is what said so (gotcha #502, and #503 on planting
+    // the violation in the form it would really take).
+    let raw_send = |hay: &str| -> bool {
+        let needle = "activations.to_vec(";
+        let bytes = hay.as_bytes();
+        let mut from = 0usize;
+        while let Some(rel) = hay[from..].find(needle) {
+            let at = from + rel;
+            let prev = if at == 0 { b' ' } else { bytes[at - 1] };
+            // An identifier character before it means this is the tail of a
+            // longer name, e.g. `send_activations`; anything else is the bare
+            // binding, which is the defect.
+            if !(prev == b'_' || prev.is_ascii_alphanumeric()) {
+                return true;
+            }
+            from = at + needle.len();
+        }
+        false
+    };
+    !raw_send(body) && body.contains("replay_index_pos")
+}
+
+/// The replayed payload and the replayed position move together.
+///
+/// `assemble_replay` builds a forward covering positions `0..=current`, which is
+/// only correct if it is SENT at position 0 — a stand-in holds no cache, so that
+/// is what a fresh cache makes it. Sending it while naming the current position
+/// instead rotates every position wrongly, and the reply stays fluent while
+/// ceasing to be the model's, which is precisely the failure the replay was
+/// built to end.
+///
+/// Asserts on the call site rather than on `assemble_replay`, whose own tests
+/// would all still pass with the send left on the old binding (gotcha #502).
+#[test]
+fn a_replayed_failover_is_sent_from_the_position_it_was_assembled_for() {
+    let root = repo_root();
+    let rel = "src/inference/pipeline/distributed.rs";
+    let src = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+    let body = fn_body(&src, "    async fn failover_segment(")
+        .unwrap_or_else(|| panic!("{rel}: failover_segment not found — has it been renamed?"));
+
+    assert!(
+        failover_sends_replay_and_position_together(body),
+        "{rel}: `failover_segment` sends a payload without the replay-aware binding, \
+         or no longer names `replay_index_pos`.\nA replay covers positions 0..=current \
+         and is only correct sent at position 0; sending it at the current position \
+         rotates every position wrongly and the reply stays fluent while ceasing to be \
+         the model's.\nSee `assemble_replay` and docs/invariants/scheduling.md."
+    );
+}
+
+/// The guard above must SEE the violation, planted in the form it would really
+/// take: the replay assembled and then sent on the old binding.
+#[test]
+fn the_replay_position_guard_catches_a_send_on_the_old_binding() {
+    let violation = r#"
+        let (replay_payload, replay_index_pos) = match replay_history {
+            Some(ref history) => (Some(assemble_replay(history, activations)?), 0u32),
+            None => (None, index_pos as u32),
+        };
+        loop {
+            let forward = LayerForward {
+                index_pos: index_pos as u32,
+                activations: activations.to_vec(),
+            };
+        }
+    "#;
+    assert!(
+        !failover_sends_replay_and_position_together(violation),
+        "the guard cannot see a send left on the raw `activations` binding"
+    );
+
+    let correct = r#"
+        let (replay_payload, replay_index_pos) = match replay_history {
+            Some(ref history) => (Some(assemble_replay(history, activations)?), 0u32),
+            None => (None, index_pos as u32),
+        };
+        let send_activations: &[u8] = replay_payload.as_deref().unwrap_or(activations);
+        loop {
+            let forward = LayerForward {
+                index_pos: replay_index_pos,
+                activations: send_activations.to_vec(),
+            };
+        }
+    "#;
+    assert!(
+        failover_sends_replay_and_position_together(correct),
+        "the guard must accept the correct shape"
     );
 }
 

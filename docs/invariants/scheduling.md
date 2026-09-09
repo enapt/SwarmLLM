@@ -640,6 +640,64 @@ healthy machine EXACTLY at cosine 1.000000):
 | 4 of 28 layers | 24 | 0.9966 | **0.1186** |
 | 4 of 28 | 1 | 0.0522 | **0.0000** |
 
+**The second half: giving the stand-in the state** (2026-09-09). The
+coordinator drives every hop, so it already SEES each segment's input. Keeping
+those inputs lets a replacement be replayed them; `state.retained_activations`
+is where they are kept and `assemble_replay` builds the forward.
+
+Measured with the same probe, extended with a replayed arm — the retained
+inputs concatenated with the takeover step, sent as ONE forward at position 0,
+which is what a fresh cache makes it:
+
+| segment replaced | stand-in today | replayed | intact |
+|---|---|---|---|
+| 5 of 28 layers | 0.1186 | **0.9965** | 0.9966 |
+| 14 of 28 | 0.0054 | **0.9963** | 0.9966 |
+| 21 of 28 | 0.0163 | **0.9968** | 0.9966 |
+
+The replayed cosine is 0.9997-0.9999 rather than the control's exact 1.000000.
+That is accumulation ORDER — one wide prefill sums differently from a run of
+single-position decodes — not the missing cache, which shows as cosine -0.08 to
+0.61 in the arm beside it.
+
+**Prior art, and it is the same design.** Petals handles the identical failure
+identically: servers keep past K/V for their layers, the client keeps "past
+inputs sent to a given pipeline stage", and on a disconnect it "can find another
+server with that pipeline stage and use client-side cache to restore the server
+state" — O(t) bytes in one round, recomputing only the failed stages rather than
+re-running the pipeline (arXiv 2312.08361, Algorithm 3). Retaining the boundary
+input is also the cheaper of the two things one could keep: ONE hidden vector
+per position against the segment's `2 x layers x kv_dim` of KV — 12 KB vs 32 KB
+per position for a 4-layer segment of llama-3.2-3b, widening linearly with
+segment size, and costing no traffic until something actually fails.
+
+**Four more things the replay half must keep.**
+
+- **A partial history is never replayed.** This is the whole design. A replay
+  built from a history with a hole rebuilds a cache that is plausible and wrong,
+  and nothing downstream can tell — the same invisibility as the defect above.
+  Every way of losing a step marks the segment unrestorable rather than
+  shortening the replay: the byte budget, a chained run whose middle the
+  coordinator never saw, a tensor-parallel segment driven elsewhere, an
+  unreadable header, or a step that does not continue the last.
+  `restorable_history` proves contiguity from 0 against recorded spans.
+- **The payload and the position move together.** A replay covers `0..=current`
+  and is correct only at position 0; sent at the current position it rotates
+  every position wrongly and stays fluent. Pinned by
+  `a_replayed_failover_is_sent_from_the_position_it_was_assembled_for` — whose
+  FIRST version could not fail, because `activations` is a suffix of
+  `send_activations` and `contains` cannot tell them apart. Only the null
+  control said so.
+- **Segment 0 is excluded unless pre-embedded.** Its input is token ids, and
+  `[1, seq]` ids are indistinguishable from a flat `[seq, hidden]` state by
+  shape alone, so the span cannot be read. Excluded rather than guessed.
+- **Retention is armed only where a standby covers the range.** A segment
+  nothing can take over gains nothing from being restorable, and retaining it
+  would spend the budget protecting the segments that can. It is also the bound
+  that keeps this affordable, and the one place Petals is deliberately not
+  followed — its client cache is unbounded and persists throughout inference;
+  this node is a server for other people's traffic too.
+
 Four things a change here must keep.
 
 - **The prompt pass still fails over, and must.** There the stand-in is handed

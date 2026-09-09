@@ -360,6 +360,17 @@ pub async fn diagnostics(
         ss.active_traces.len(),
         ss.active_pipelines.len()
     );
+    // Boundary activations held so a stand-in could take a segment over
+    // mid-reply. Bounded, released with the request and swept on the health
+    // tick — but it is the one structure here that scales with conversation
+    // LENGTH rather than request count, so an operator asking where the memory
+    // went should be able to see it rather than infer it.
+    let _ = writeln!(
+        out,
+        "failover_replay: {} requests, {} MB retained",
+        ss.retained_activations.retained_requests(),
+        ss.retained_activations.retained_bytes() / (1024 * 1024)
+    );
     let _ = writeln!(
         out,
         "tensor_parallel: {}  gpu_layers: {}",

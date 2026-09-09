@@ -765,11 +765,43 @@ impl PipelineExecutor {
         let mut idx = 0usize;
         while idx < num_segments {
             if idx < chained_through {
+                // A chained run carried this segment, so its input never passed
+                // through here and the history we hold for it is no longer the
+                // whole story. Say so rather than letting a later replay be
+                // assembled from a hole — see `retained_activations`.
+                self.shared_state
+                    .retained_activations
+                    .mark_unrestorable(request_id, idx);
                 idx += 1;
                 continue;
             }
             let is_last = idx == num_segments - 1;
             let segment = &self.assignment.segments[idx];
+
+            // What we are about to send this segment, kept so a stand-in can be
+            // replayed it and take the segment over mid-reply. Retained ONLY
+            // where a standby actually covers the range: a segment nothing can
+            // take over gains nothing from being restorable, and retaining it
+            // would spend the budget that protects the segments that can.
+            let has_standby = self
+                .assignment
+                .standbys
+                .iter()
+                .any(|s| crate::inference::scheduler::standby_covers(s, segment.layer_range));
+            // Segment 0's input is TOKEN IDS unless the caller pre-embedded
+            // them, and `[1, seq]` ids are indistinguishable from a flat
+            // `[seq, hidden]` state by shape alone — so its span cannot be read
+            // and its history cannot be proved contiguous. Excluded rather than
+            // guessed. (The wrong guess would self-correct into "unrestorable"
+            // at the next step, but relying on that is relying on an accident.)
+            let input_is_hidden_state = idx > 0 || pre_embedded;
+            self.shared_state.retained_activations.record(
+                request_id,
+                idx,
+                index_pos as u32,
+                &activations,
+                has_standby && input_is_hidden_state,
+            );
 
             // Check if this segment has a tensor-parallel group
             let tp_group = self
@@ -788,6 +820,12 @@ impl PipelineExecutor {
             // both fall through to the standard path below.
             let tp_outcome = match tp_group {
                 Some(ref group) => {
+                    // A tensor-parallel segment is driven across a group rather
+                    // than by the single forward we just recorded, so a replay
+                    // of that record would not rebuild what the group holds.
+                    self.shared_state
+                        .retained_activations
+                        .mark_unrestorable(request_id, idx);
                     match self
                         .execute_tp_segment(
                             request_id,
@@ -1709,7 +1747,37 @@ impl PipelineExecutor {
         //
         // See `docs/FUTURE_WORK.md` § "A failover after the prompt pass
         // silently loses the failed segment's KV context".
-        if !failover_can_restore_state(sequence_num) {
+        // The history to replay onto whatever takes this segment over, when
+        // there is a provably complete one. On the prompt pass there is nothing
+        // to replay — the forward already carries every position — so this is
+        // asked only where the reply is already under way.
+        //
+        // `restorable_history` answers `None` unless it holds positions
+        // `0..index_pos` CONTIGUOUSLY, so a partial history refuses here rather
+        // than rebuilding a cache that is plausible and wrong. That is the same
+        // failure this whole path exists to prevent, and it would be invisible
+        // in exactly the same way.
+        let replay_history = if failover_can_restore_state(sequence_num) {
+            None
+        } else {
+            self.shared_state.retained_activations.restorable_history(
+                request_id,
+                failed_idx,
+                index_pos as u32,
+            )
+        };
+        if let Some(ref history) = replay_history {
+            tracing::info!(
+                request_id = %request_id,
+                segment = failed_idx,
+                sequence_num,
+                index_pos,
+                replay_steps = history.len(),
+                replay_bytes = history.iter().map(|s| s.len()).sum::<usize>(),
+                "DIAG: failing over mid-reply by replaying this segment's retained inputs"
+            );
+        }
+        if !failover_can_restore_state(sequence_num) && replay_history.is_none() {
             self.cancel_segment_on(&abandoned, request_id, failed_idx)
                 .await;
             tracing::warn!(
@@ -1749,6 +1817,45 @@ impl PipelineExecutor {
                 last_failure.as_deref(),
             )));
         }
+
+        // What the stand-in is actually sent, and from which position. With a
+        // replay it is every position of the segment's history plus this step,
+        // starting at 0 — which is what a fresh cache makes it, so no receiver
+        // needs to know anything new. Without one it is the current step alone,
+        // exactly as before.
+        //
+        // Assembled once rather than per standby attempt: the history does not
+        // change between attempts, and decoding and concatenating it is the one
+        // genuinely costly part of this path.
+        let (replay_payload, replay_index_pos) = match replay_history {
+            Some(ref history) => match assemble_replay(history, activations) {
+                Ok(bytes) => (Some(bytes), 0u32),
+                Err(e) => {
+                    // The history was there and could not be assembled. Treat
+                    // it as no history at all rather than sending a partial
+                    // one: this is the branch where being wrong is silent.
+                    tracing::warn!(
+                        request_id = %request_id,
+                        segment = failed_idx,
+                        error = %e,
+                        "Could not assemble the retained history for replay —                          ending the reply rather than moving it without one"
+                    );
+                    self.cancel_segment_on(&abandoned, request_id, failed_idx)
+                        .await;
+                    for node in std::iter::once(&failed_segment.node_id).chain(tried.iter()) {
+                        self.shared_state
+                            .blacklist_holder_for_request(request_id, node);
+                    }
+                    return Err(SwarmError::SegmentFailoverExhausted(cannot_resume_message(
+                        failed_idx,
+                        sequence_num,
+                        last_failure.as_deref(),
+                    )));
+                }
+            },
+            None => (None, index_pos as u32),
+        };
+        let send_activations: &[u8] = replay_payload.as_deref().unwrap_or(activations);
 
         loop {
             self.cancel_segment_on(&abandoned, request_id, failed_idx)
@@ -1858,8 +1965,8 @@ impl PipelineExecutor {
                     .process_local_segment(
                         &backup,
                         sequence_num,
-                        index_pos,
-                        activations.to_vec(),
+                        replay_index_pos as usize,
+                        send_activations.to_vec(),
                         // Same conditions the main loop applies: the image and
                         // the pre-embedded flag belong to segment 0 alone, the
                         // generated ids to the segment that samples.
@@ -1925,8 +2032,12 @@ impl PipelineExecutor {
             let forward = LayerForward {
                 request_id,
                 sequence_num,
-                index_pos: index_pos as u32,
-                activations: activations.to_vec(),
+                // 0 when replaying: the stand-in holds no cache for this
+                // request, so a forward carrying every position IS a prompt
+                // pass to it, and `split::executor` takes `kv_offset` from that
+                // empty cache rather than from this field.
+                index_pos: replay_index_pos,
+                activations: send_activations.to_vec(),
                 format: TensorFormat::FP32,
                 model_id: backup.shard_id.model_id.clone(),
                 layer_range: backup.layer_range,
@@ -2148,6 +2259,38 @@ struct FailoverInput<'a> {
 /// The test is the WORK KIND rather than the elapsed reply, because the missing
 /// state is the prompt itself — failing over one token in is measurably worse
 /// than twenty-four tokens in, not better (gotcha #508).
+/// Concatenate a segment's retained inputs, plus the step being taken over,
+/// into ONE forward covering positions `0..=current`.
+///
+/// This is the whole of the replay protocol: a stand-in holds no cache for this
+/// request, so a forward at `index_pos` 0 carrying every position is an
+/// ordinary prompt pass to it, and the existing path serves it unchanged. No
+/// new message type, no capability bit, nothing an older peer would refuse.
+///
+/// The last position's output is what the caller wanted from the takeover step,
+/// so the result is used exactly as an unreplayed forward's would be.
+///
+/// Measured (`examples/failover_kv_probe.rs`, llama-3.2-3b): a stand-in given
+/// this reaches P = 0.9965 of the intact machine's own next token against its
+/// 0.9966, where the same stand-in without it reaches 0.119. The residual is
+/// accumulation order — one wide prefill sums differently from a run of
+/// single-position decodes — and shows as cosine 0.9997-0.9999 rather than the
+/// control's exact 1.000000.
+fn assemble_replay(history: &[Vec<u8>], current: &[u8]) -> Result<Vec<u8>, SwarmError> {
+    use crate::inference::tensor_util::{bytes_to_tensor, tensor_to_bytes};
+    let mut parts: Vec<candle_core::Tensor> = Vec::with_capacity(history.len() + 1);
+    for step in history.iter().chain(std::iter::once(&current.to_vec())) {
+        parts.push(bytes_to_tensor(step)?);
+    }
+    // The sequence axis is the second-to-last, matching `activation_positions`.
+    let dim = parts
+        .first()
+        .map(|t| t.dims().len().saturating_sub(2))
+        .ok_or_else(|| SwarmError::Internal("replay history is empty".into()))?;
+    let joined = candle_core::Tensor::cat(&parts, dim).map_err(SwarmError::internal)?;
+    tensor_to_bytes(&joined)
+}
+
 pub(super) fn failover_can_restore_state(sequence_num: u32) -> bool {
     matches!(
         super::work_kind_for(sequence_num),

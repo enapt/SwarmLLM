@@ -104,6 +104,7 @@ impl super::SharedState {
         self.peer_vram_commitments.remove(request_id);
         self.local_memory_refusals.remove(request_id);
         self.salvaged_replies.remove(request_id);
+        self.retained_activations.release(*request_id);
     }
 
     /// Keep what this attempt managed to generate before it failed.

@@ -215,6 +215,18 @@ reply already under way ends with `SegmentFailoverExhausted` carrying
 `cannot_resume_message`, and the machines that just failed are barred for that
 request id.
 
+**Unless the stand-in can be given the state.** `state.retained_activations`
+keeps what this node sent to each segment that a standby covers, and
+`assemble_replay` concatenates that history with the takeover step into ONE
+forward at position 0 — a prompt pass to a machine holding no cache, so no new
+message type and nothing an older peer refuses. `restorable_history` answers
+`None` unless it holds positions `0..index_pos` CONTIGUOUSLY, and every way of
+losing a step marks the segment unrestorable rather than shortening the replay:
+a partial replay rebuilds a cache that is plausible and wrong, which is the same
+invisible failure the refusal exists to prevent. The replayed payload and
+position 0 move together — sending the replay at the current position rotates
+every position wrongly and is equally silent.
+
 → `docs/invariants/scheduling.md`
 
 ## A failed request hands back the work it had already done

@@ -34,7 +34,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. Instrumented 2026-09-08; **the instrument could not see a hand-off until 2026-09-09** — zero samples in ten hours of live traffic. Needs field data, not tuning |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
-| 18 | A failover after the prompt pass loses the failed segment's KV context | **MEASURED and STOPPED 2026-09-09 (shape 1).** A stand-in holds none of the failed node's cache; P(healthy machine's token) fell from 0.997 to **0.119** replacing 4 of 28 layers. `failover_can_restore_state` now refuses mid-reply, so the request ends honestly instead of drifting. **Residual: mid-reply failover no longer happens at all** — shape 2 (retain boundary activations) is what would make it work, and what item 17 needs |
+| 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
 
 ### P3 — correctness-adjacent, or blocked on a measurement
 
@@ -42,7 +42,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 |---|---|---|
 | 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | Needs a debug occupancy trace; harness in `memory/round_log_0902_perf_commits.md` |
-| 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger and the token loss are both fixed. Residual: no standby can be assembled from several nodes covering a range between them. ⚠ **Blocked on item 18** — more standbys alone would arrange more takeovers into a path measured at P=0.119; the boundary activations must be retained first |
+| 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger and the token loss are both fixed. Residual: no standby can be assembled from several nodes covering a range between them. **UNBLOCKED 2026-09-09** — item 18 shape 2 shipped, so a takeover now lands at P = 0.9965 rather than 0.119 and more standbys are worth having. Note the arming condition runs the other way too: retention is kept only where a standby covers the range, so a plan with no standbys retains nothing and gains nothing |
 
 ### P4 — test and infrastructure
 
@@ -351,9 +351,22 @@ Three shapes, none free, in increasing order of cost:
    in `tests/repo_consistency.rs`, which checks the CALL SITE rather than the
    predicate — the unit tests beside it all still pass with the call removed,
    which is the one edit that reintroduces the defect.
-2. **Retain the boundary activations for segments that have a standby.** Bounded
-   by choosing which segments to protect. Makes failover genuinely correct where
-   it is armed, and is the only shape that makes item 17 worth building.
+2. **Retain the boundary activations for segments that have a standby.
+   SHIPPED 2026-09-09.** `state.retained_activations` keeps what this node sent
+   to each segment a standby covers, and `assemble_replay` concatenates that
+   history with the takeover step into ONE forward at position 0 — a prompt pass
+   to a machine holding no cache, so no new message type and nothing an older
+   peer refuses. Measured with the same probe: the replayed stand-in reaches
+   P = 0.9965 against the intact machine's 0.9966, at 5, 14 and 21 of 28 layers.
+   Bounded by arming only where a standby covers the range, plus per-request and
+   global byte caps, released with the request and swept on the health tick.
+   **A partial history is never replayed** — every way of losing a step marks
+   the segment unrestorable rather than shortening the replay, because a replay
+   with a hole rebuilds a plausible wrong cache and nothing downstream could
+   tell. Segment 0 is excluded unless pre-embedded (token ids carry no readable
+   span). Chained runs and tensor-parallel segments are excluded for the same
+   reason and are the residual: their inputs never pass through the coordinator,
+   so those segments still cannot be taken over mid-reply.
 3. **Say it and continue.** Keep today's behaviour, but log it and mark the reply
    — the reader at least learns the tail may be unreliable.
 

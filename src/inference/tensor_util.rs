@@ -353,3 +353,69 @@ pub fn sample_token_with_logprob_history(
     let logprob = info.map(|i| i.logprob);
     Ok((token_id, logprob))
 }
+
+/// How many sequence positions a wire-format activation buffer carries, read
+/// from its shape header without decoding the payload.
+///
+/// Activations cross a segment boundary as `[batch, seq, hidden]` (a prompt
+/// pass) or `[batch, 1, hidden]` (a decode step), so the position count is the
+/// second-to-last dimension. A 2-D `[seq, hidden]` buffer is read the same way.
+///
+/// Exists for retention accounting (`daemon::state::retained_activations`),
+/// which has to know a step's span to prove the history it holds is
+/// CONTIGUOUS — a replay assembled from a history with a hole in it would
+/// rebuild a plausible cache that is not the one the failed machine had, and
+/// nothing downstream could tell. Reading the header is the cheap half of
+/// `bytes_to_tensor`; it deliberately does not validate the payload, because
+/// the payload is validated when the buffer is actually decoded.
+pub fn activation_positions(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    let ndim = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
+    if ndim < 2 || bytes.len() < 4 + ndim * 4 {
+        return None;
+    }
+    let dim = |i: usize| -> Option<u32> {
+        let off = 4 + i * 4;
+        u32::from_le_bytes(bytes[off..off + 4].try_into().ok()?).into()
+    };
+    dim(ndim - 2)
+}
+
+#[cfg(test)]
+mod retention_header_tests {
+    use super::*;
+    use candle_core::{Device, Tensor};
+
+    #[test]
+    fn a_forwards_position_count_is_read_from_its_header() {
+        // A prompt pass: 7 positions of a 4-wide hidden state.
+        let prompt = Tensor::zeros((1, 7, 4), candle_core::DType::F32, &Device::Cpu).unwrap();
+        let bytes = tensor_to_bytes(&prompt).unwrap();
+        assert_eq!(activation_positions(&bytes), Some(7));
+
+        // A decode step.
+        let step = Tensor::zeros((1, 1, 4), candle_core::DType::F32, &Device::Cpu).unwrap();
+        assert_eq!(
+            activation_positions(&tensor_to_bytes(&step).unwrap()),
+            Some(1)
+        );
+
+        // The Q8_0 encoding carries the same header, so the count does not
+        // depend on which encoder the sender chose.
+        let q8 = tensor_to_bytes_q8_0(&prompt).unwrap();
+        assert_eq!(activation_positions(&q8), Some(7));
+
+        // Two dimensions, `[seq, hidden]`.
+        let flat = Tensor::zeros((5, 4), candle_core::DType::F32, &Device::Cpu).unwrap();
+        assert_eq!(
+            activation_positions(&tensor_to_bytes(&flat).unwrap()),
+            Some(5)
+        );
+
+        // Nothing readable rather than a guess.
+        assert_eq!(activation_positions(&[]), None);
+        assert_eq!(activation_positions(&[1, 0, 0, 0, 9, 9, 9, 9]), None);
+    }
+}

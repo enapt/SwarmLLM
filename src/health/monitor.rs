@@ -346,6 +346,14 @@ impl HealthMonitor {
                             "Swept retained fast-path replies"
                         );
                     }
+                    // Boundary activations kept so a stand-in can take a
+                    // segment over mid-reply. Normally released by
+                    // `release_request_state`; this catches a request that
+                    // ended without reaching it, so the bytes cannot be held
+                    // for the life of the daemon.
+                    self.shared_state.retained_activations.sweep_stale(
+                        crate::daemon::state::retained_activations::RETAINED_ACTIVATION_TTL,
+                    );
                     // NETWORKING_PLAN Phase 1 — bound the learned relay-route
                     // table + relay-forward rate counters so they can't grow
                     // unbounded under peer churn.
