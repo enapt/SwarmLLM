@@ -593,6 +593,28 @@ pub struct SharedState {
     /// may take the whole model; released by
     /// [`SharedState::release_request_state`] with every other per-request map.
     pub local_memory_refusals: dashmap::DashSet<uuid::Uuid>,
+    /// What a failed request had already generated, kept so the caller can be
+    /// handed it instead of nothing.
+    ///
+    /// `request_id -> InferenceOutput`, written by the distributed pipeline when
+    /// a segment fails part-way through a decode that has already produced
+    /// tokens, and taken by the router once the attempt — including its retry —
+    /// is definitively over.
+    ///
+    /// **The failure stays a failure everywhere else.** The executor still
+    /// returns `Err`, so the log line, the peer penalty, the trust update and
+    /// the error broadcast all fire exactly as before; this map changes only
+    /// what the caller receives at the very end. That is deliberate: nothing
+    /// here should make a lost peer look healthy.
+    ///
+    /// Reported against v0.3.164 (report #028): a 4m43s reply on a 14B, already
+    /// streaming, was discarded outright when its tail peer's connection
+    /// dropped. On a streamed request the client at least keeps the text it was
+    /// sent; on a non-streaming one every token was thrown away.
+    ///
+    /// Released by [`SharedState::release_request_state`] with every other
+    /// per-request map.
+    pub salvaged_replies: DashMap<uuid::Uuid, crate::inference::router::InferenceOutput>,
     /// Graphics memory this node has COMMITTED to peers by scheduling work onto
     /// them, and which their own gossip has not yet reported as spent.
     /// `request_id -> [(peer, MB)]`, same lifetime as the two maps above.
@@ -1070,6 +1092,7 @@ impl SharedState {
             perf_history: perf_history::PerfHistory::load(&db),
             request_holder_blacklist: DashMap::new(),
             local_memory_refusals: dashmap::DashSet::new(),
+            salvaged_replies: DashMap::new(),
             peer_vram_commitments: DashMap::new(),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {

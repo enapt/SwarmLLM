@@ -103,6 +103,47 @@ impl super::SharedState {
         self.request_holder_blacklist.remove(request_id);
         self.peer_vram_commitments.remove(request_id);
         self.local_memory_refusals.remove(request_id);
+        self.salvaged_replies.remove(request_id);
+    }
+
+    /// Keep what this attempt managed to generate before it failed.
+    ///
+    /// Called by the distributed pipeline at the moment it gives up, and only
+    /// when tokens have actually been produced — an empty salvage is not a
+    /// salvage, it is a failure wearing a 200, and the error it would replace
+    /// carries the class, the hint and the peer attribution that a caller needs.
+    ///
+    /// A request can be executed twice (the router retries once), so the LONGER
+    /// reply wins: both attempts describe the same prompt, and the one that got
+    /// further is strictly the more useful answer. Nothing here decides whether
+    /// the salvage is used — [`Self::take_salvaged_reply`] is asked that once
+    /// the retry is over.
+    pub fn note_salvaged_reply(
+        &self,
+        request_id: uuid::Uuid,
+        output: crate::inference::router::InferenceOutput,
+    ) {
+        if output.content.is_empty() {
+            return;
+        }
+        match self.salvaged_replies.entry(request_id) {
+            dashmap::mapref::entry::Entry::Occupied(mut e) => {
+                if output.content.len() > e.get().content.len() {
+                    e.insert(output);
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                e.insert(output);
+            }
+        }
+    }
+
+    /// Take the partial reply a failed request left behind, if it left one.
+    pub fn take_salvaged_reply(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Option<crate::inference::router::InferenceOutput> {
+        self.salvaged_replies.remove(&request_id).map(|(_, v)| v)
     }
 
     /// This node's own loader has refused to hold this model for this request.

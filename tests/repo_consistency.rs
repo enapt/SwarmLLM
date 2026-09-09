@@ -1610,6 +1610,7 @@ fn per_request_state_is_released_in_one_place() {
         "active_traces",
         "request_holder_blacklist",
         "peer_vram_commitments",
+        "salvaged_replies",
     ];
     let allowed = [
         // Owns the helper.
@@ -1669,7 +1670,7 @@ fn per_request_state_is_released_in_one_place() {
     assert!(
         offenders.is_empty(),
         "per-request state is removed outside `SharedState::release_request_state`.\n\
-         A path that owns a pipeline must clear all three together — clearing a \
+         A path that owns a pipeline must clear them together — clearing a \
          subset strands the rest.\n{}",
         offenders.join("\n")
     );

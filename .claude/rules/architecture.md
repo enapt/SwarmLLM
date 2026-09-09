@@ -971,6 +971,69 @@ exists because the window is five minutes and the app-limited rule governs only
 what happens across rotations — the first version of its test passed with the
 rule disabled.
 
+## A failed request hands back the work it had already done
+
+`SharedState::salvaged_replies` holds what a request had generated when it
+died, and `router::salvaged_reply_if_lost` is the single place it is handed to
+the caller — called at the one point per dispatch path where the attempt is
+definitively over, which is after the retry in `dispatch_single` and after the
+sole attempt on the batched path.
+
+**Why.** A 4m43s reply on a 14B, already decoding, was discarded outright when
+its tail peer's connection dropped (report #028). On a streamed request the
+client at least keeps the text it was sent; on a non-streaming one the caller
+gets a 503 and every token is thrown away. Nothing was wrong with the error —
+the peer really had gone — but "the request failed" and "there is nothing to
+show for it" are two different claims, and only the first was true.
+
+**The failure stays a failure.** `PipelineExecutor::execute` still returns the
+`Err`; the salvage is recorded on the way past. So the log line, the peer
+penalty, the trust update and the error broadcast in `execute_request` all fire
+exactly as before, and nothing here can make a lost peer look healthy. The only
+thing that changes is what the caller is handed at the very end.
+
+**It is the last resort, never the first.** A retry that produces a COMPLETE
+answer beats a truncated one, so `may_salvage` only records; the taking happens
+after `should_retry_after` has had its turn. Reversing that order would trade a
+whole answer for half of one on every retryable failure.
+
+Four things a change here must keep.
+
+- **An empty salvage is not a salvage.** `note_salvaged_reply` refuses one, and
+  a failure with nothing recorded keeps its error — which carries the class, the
+  hint and the peer attribution. Replacing that with a `200` carrying nothing is
+  gotcha #433's lie pointing the other way, and it is the control test beside
+  the positive one.
+- **Streamed replies are excluded, and not only for taste.** The text has
+  already reached the client, so the honest terminal event is the error it
+  already gets; and `api::openai::streaming` treats "no finish event arrived" as
+  "this path never streamed" and re-emits the whole content as one delta, so
+  turning a streamed failure into an `Ok` would hand the reader the reply twice
+  (gotcha #414).
+- **The caller must be able to tell.** `inference::FINISH_REASON_INTERRUPTED`
+  is `"error"`, which is vLLM's own value for this (`FinishReason::ERROR`,
+  beside `ABORT`). The OpenAI schema defines no member meaning "the machinery
+  gave up part-way", and reusing one that exists is the same lie in a new place:
+  `"stop"` claims the model chose to end, `"length"` claims a limit was reached.
+  **The Anthropic surface cannot pass it through** — that vocabulary has no
+  member for an interrupted turn, and an undefined `stop_reason` was removed
+  from it once already (gotcha #300) — so `map_finish_reason` gets an explicit
+  arm to `max_tokens`, the only defined value meaning "incomplete, cut off".
+  Without that arm the catch-all reports it as `end_turn`, which Anthropic
+  defines as the turn completing naturally. `pause_turn` was considered and
+  rejected: it instructs the caller to resend and continue, so a client obeying
+  it would retry into the failure with nothing said.
+- **Both attempts may salvage, and the longer one wins.** They describe the same
+  prompt, so the reply that got further is strictly the more useful one — and
+  the tie-break must be length, not arrival order, or a retry that dies early
+  overwrites a first attempt that nearly finished.
+
+**Still open, and deliberately not conflated with this** (`docs/FUTURE_WORK.md`
+item 17): a standby still cannot be assembled from several nodes that cover a
+segment's range between them, which is why that request had no redundancy to
+fail over to in the first place. Salvage makes the loss partial; it does not
+make the request survivable.
+
 ## A disconnect retires a session key; it must not destroy it
 
 `SessionManager::remove_session` moves the live key into `retired` — openable,

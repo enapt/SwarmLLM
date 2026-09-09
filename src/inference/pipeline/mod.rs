@@ -5,7 +5,7 @@
 //! The `PipelineExecutor` struct lives here; per-phase methods live in sibling
 //! files (`local`, `distributed`, `vision`, `prompt`, `tensor_parallel`).
 
-mod distributed;
+pub(crate) mod distributed;
 mod dsd;
 mod hedge_dispatch;
 mod local;

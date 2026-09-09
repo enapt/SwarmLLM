@@ -165,10 +165,34 @@ pub(super) fn to_sampling_params(req: &MessagesRequest) -> SamplingParams {
 }
 
 /// Map internal finish reason to Anthropic stop_reason.
+///
+/// The catch-all is `end_turn`, and that is right for an unrecognised value —
+/// but it must never be reached by a reply that did NOT finish, because
+/// `end_turn` is one of only two values Anthropic defines as "the turn
+/// completed naturally". Reporting a failure as the model choosing to stop is
+/// the defect gotcha #433 was filed for, on the other surface.
+///
+/// So [`crate::inference::FINISH_REASON_INTERRUPTED`] gets an explicit arm.
+/// Anthropic's vocabulary has no member for a turn cut short by the
+/// infrastructure — the set is `end_turn`, `max_tokens`, `stop_sequence`,
+/// `tool_use`, `pause_turn`, `refusal`, `model_context_window_exceeded` — and
+/// inventing one is not open to us either: this surface shipped an undefined
+/// `stop_reason: "error"` once and it was removed for exactly that reason
+/// (gotcha #300). Of the defined values, `max_tokens` is the only one whose
+/// contract is "this reply is incomplete because it was cut off", which is the
+/// fact a client has to act on; every Anthropic client already handles it as
+/// truncation and may continue from it. That is a translation into the target
+/// vocabulary — the same thing this function does for `stop` — and it is the
+/// nearest true statement available, not the nearest-sounding one.
+///
+/// `pause_turn` was considered and rejected: it means a server-tool loop hit
+/// its iteration limit and the caller should resend to continue, so a client
+/// obeying it would silently retry into the failure with nothing said.
 pub(super) fn map_finish_reason(reason: &str) -> &'static str {
     match reason {
         "stop" => "end_turn",
         "length" => "max_tokens",
+        crate::inference::FINISH_REASON_INTERRUPTED => "max_tokens",
         _ => "end_turn",
     }
 }

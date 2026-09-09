@@ -494,3 +494,160 @@ fn an_unreadable_balance_never_refuses_the_request() {
     assert!(!refuse_for_insufficient_credit(false, Some(-5000), 0));
     assert!(!refuse_for_insufficient_credit(false, None, 0));
 }
+
+/// A request that generated real tokens and then lost its peer hands those
+/// tokens to the caller rather than nothing.
+///
+/// Report #028: a 4m43s reply on a 14B, already decoding, was discarded
+/// outright when the tail peer's connection dropped. The retry is still tried
+/// first — a complete answer beats a truncated one — but when nothing else can
+/// serve the request, the work that was done is strictly better than a 503.
+#[test]
+fn a_reply_generated_before_the_failure_reaches_the_caller() {
+    use crate::error::SwarmError;
+
+    let (state, _tmp) = make_test_shared_state(crate::config::Config::default());
+    let id = uuid::Uuid::new_v4();
+
+    state.note_salvaged_reply(id, salvage(id, "the first half of an answer"));
+
+    let out = super::salvaged_reply_if_lost(
+        &state,
+        id,
+        Err(SwarmError::SegmentFailoverExhausted(
+            "tail peer gone".into(),
+        )),
+    );
+
+    let out = out.expect("a failure with something salvaged returns the salvage");
+    assert_eq!(out.content, "the first half of an answer");
+    assert_eq!(
+        out.finish_reason,
+        crate::inference::FINISH_REASON_INTERRUPTED,
+        "the caller must be able to tell this reply is unfinished"
+    );
+
+    // Taken, not copied — a second delivery would double-report the request.
+    assert!(state.take_salvaged_reply(id).is_none());
+}
+
+/// The control: a failure with nothing generated keeps its error.
+///
+/// This is the half that makes the change safe. The error carries the class,
+/// the hint and the peer attribution; replacing it with an empty `200` would be
+/// gotcha #433's lie pointing the other way — a failure dressed as a reply.
+#[test]
+fn a_failure_with_nothing_generated_keeps_its_error() {
+    use crate::error::SwarmError;
+
+    let (state, _tmp) = make_test_shared_state(crate::config::Config::default());
+    let id = uuid::Uuid::new_v4();
+
+    // Nothing recorded at all.
+    let out = super::salvaged_reply_if_lost(
+        &state,
+        id,
+        Err(SwarmError::SegmentFailoverExhausted("no standby".into())),
+    );
+    assert!(matches!(out, Err(SwarmError::SegmentFailoverExhausted(_))));
+
+    // And an empty reply is refused at the recording end, so it can never
+    // become a salvage later.
+    state.note_salvaged_reply(id, salvage(id, ""));
+    assert!(
+        state.take_salvaged_reply(id).is_none(),
+        "an empty salvage is not a salvage"
+    );
+}
+
+/// A successful reply is never replaced, even when a salvage happens to exist.
+///
+/// The first attempt can fail and record a partial while the retry succeeds in
+/// full; the complete answer must win.
+#[test]
+fn a_successful_reply_is_never_replaced_by_a_salvage() {
+    let (state, _tmp) = make_test_shared_state(crate::config::Config::default());
+    let id = uuid::Uuid::new_v4();
+
+    state.note_salvaged_reply(id, salvage(id, "half an answer"));
+
+    let mut complete = salvage(id, "the whole answer");
+    complete.finish_reason = "stop".to_string();
+
+    let out = super::salvaged_reply_if_lost(&state, id, Ok(complete))
+        .expect("an Ok is returned untouched");
+    assert_eq!(out.content, "the whole answer");
+    assert_eq!(out.finish_reason, "stop");
+}
+
+/// Both attempts can salvage; the one that got further is the useful one.
+#[test]
+fn the_longer_of_two_salvaged_attempts_is_the_one_kept() {
+    let (state, _tmp) = make_test_shared_state(crate::config::Config::default());
+    let id = uuid::Uuid::new_v4();
+
+    state.note_salvaged_reply(id, salvage(id, "twelve tokens in"));
+    state.note_salvaged_reply(id, salvage(id, "four"));
+    assert_eq!(
+        state.take_salvaged_reply(id).unwrap().content,
+        "twelve tokens in",
+        "a shorter second attempt must not overwrite a longer first one"
+    );
+
+    // ...and in the other order, so this is about length rather than arrival.
+    state.note_salvaged_reply(id, salvage(id, "four"));
+    state.note_salvaged_reply(id, salvage(id, "twelve tokens in"));
+    assert_eq!(
+        state.take_salvaged_reply(id).unwrap().content,
+        "twelve tokens in"
+    );
+}
+
+/// A salvage is per-request state and is released with the rest of it.
+///
+/// Left behind, it would be handed to nobody and held for the daemon's life —
+/// the leak `release_request_state` exists to prevent.
+#[test]
+fn a_salvage_is_released_with_the_rest_of_the_requests_state() {
+    let (state, _tmp) = make_test_shared_state(crate::config::Config::default());
+    let id = uuid::Uuid::new_v4();
+
+    state.note_salvaged_reply(id, salvage(id, "something"));
+    state.release_request_state(&id);
+    assert!(state.take_salvaged_reply(id).is_none());
+}
+
+/// Which failures may keep their partial reply at all.
+#[test]
+fn only_an_unstreamed_reply_with_tokens_may_be_salvaged() {
+    use crate::inference::pipeline::distributed::may_salvage;
+
+    assert!(
+        may_salvage(false, &[1, 2, 3]),
+        "the reported case: not streamed, tokens generated, all of it discarded"
+    );
+    assert!(
+        !may_salvage(false, &[]),
+        "nothing generated — the error is the better answer"
+    );
+    assert!(
+        !may_salvage(true, &[1, 2, 3]),
+        "a streamed reply already reached the client, and turning this into an \
+         Ok would make the OpenAI encoder re-emit the whole reply (gotcha #414)"
+    );
+    assert!(!may_salvage(true, &[]));
+}
+
+fn salvage(request_id: uuid::Uuid, content: &str) -> super::InferenceOutput {
+    super::InferenceOutput {
+        request_id,
+        content: content.to_string(),
+        prompt_tokens: 7,
+        completion_tokens: content.split_whitespace().count() as u32,
+        finish_reason: crate::inference::FINISH_REASON_INTERRUPTED.to_string(),
+        session_id: None,
+        token_logprobs: Vec::new(),
+        matched_stop_sequence: None,
+        trace: None,
+    }
+}

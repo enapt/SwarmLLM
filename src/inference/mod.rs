@@ -37,6 +37,27 @@ pub mod trace;
 pub mod vision;
 pub mod worker_ipc;
 
+/// The `finish_reason` on a reply that was cut short by a failure rather than
+/// by the model, a limit, or the caller.
+///
+/// **`"error"` is vLLM's own value for this** (`FinishReason::ERROR`, beside
+/// `ABORT`), which is the precedent worth following: the OpenAI schema defines
+/// only `stop` / `length` / `tool_calls` / `content_filter` / `function_call`,
+/// and none of them means "the machinery gave up part-way". A serving stack
+/// that has to say so goes outside that set, and the alternative — reusing a
+/// defined value — is the gotcha #433 lie in a new place: `"stop"` claims the
+/// model chose to end, `"length"` claims a limit was reached.
+///
+/// It is deliberately NOT a hint that the caller should retry. A reply carrying
+/// it is real output that really was generated; what it is not is finished.
+///
+/// The Anthropic surface cannot pass it through — that vocabulary has no member
+/// for an interrupted turn and an undefined `stop_reason` was removed once
+/// already (gotcha #300) — so `api::anthropic::convert::map_finish_reason`
+/// translates it to `max_tokens`, the only value Anthropic defines that means
+/// "incomplete, cut off". See that function for why the catch-all is not enough.
+pub const FINISH_REASON_INTERRUPTED: &str = "error";
+
 /// Strip a trailing partial stop-string suffix from `text` in place.
 ///
 /// Token-by-token stop-string checking only catches complete matches, so a

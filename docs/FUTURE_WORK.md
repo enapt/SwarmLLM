@@ -34,7 +34,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 8 | The RAM headroom clamp has a floor that can never refuse | Instrumented in `501c8ec8`; needs one `floor_is_binding` reading from a healthy small machine to decide keep-or-remove |
 | 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | Needs a debug occupancy trace; harness in `memory/round_log_0902_perf_commits.md` |
-| 17 | A long generation with no segment redundancy is lost entirely | **NEW 2026-09-08 (report #028).** The trigger is fixed; the two residuals are that no standby can be assembled from several nodes, and that already-generated tokens are discarded rather than returned |
+| 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger (a disconnect destroying the session key) and the token loss are both fixed; the residual is that no standby can be assembled from several nodes covering a range between them |
 
 ### P4 — test and infrastructure
 
@@ -44,6 +44,10 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 13 | `Could not decrypt forward` from one peer | **NOT dormant — recurred on v0.3.164 (report #028) and the cause is now identified**: a disconnect destroyed the session key, and the two ends do not drop together. Fixed by retiring rather than destroying |
 
 ### Closed in this pass (were listed open, verified fixed in code 2026-09-08)
+
+- The tokens a failed request already generated are discarded — `salvaged_replies`
+  plus `router::salvaged_reply_if_lost` (2026-09-09), with the failure still recorded,
+  penalised and logged exactly as before
 
 - A layer range contained in a resident one is loaded twice — `subsumed_segment_keys`
 - A local admission refusal does not teach the planner — `LocalMemoryUnavailable` (v0.3.163)
@@ -262,12 +266,29 @@ Note v0.3.165's `standby_may_take` moves the other way: it NARROWS eligibility (
 prompt privacy for the end segments). It could not have applied here — the plan's ends were
 remote, so privacy was off — but a future change in this area should weigh both.
 
-**2. The generated tokens are lost.** 270 seconds of decode had already happened. On a
-streamed request the client has that text and the stream then errors; on a non-streaming
-one it is lost entirely. Returning what was generated with a truncation `finish_reason`
-would be strictly better than an error, and is independent of everything above.
-`should_retry_after` deliberately does NOT retry once text has reached the client (a retry
-restarts generation from the prompt), so salvage — not retry — is the right shape here.
+**2. The generated tokens are lost. FIXED 2026-09-09.** 270 seconds of decode had already
+happened and none of it was returned. `SharedState::salvaged_replies` now keeps what a
+failed decode produced and `router::salvaged_reply_if_lost` hands it to the caller once
+the attempt — including its retry — is definitively over. Design and the four properties
+a change must keep are in `.claude/rules/architecture.md` § "A failed request hands back
+the work it had already done".
+
+Three decisions worth not re-deriving:
+
+- **Salvage runs AFTER the retry, not instead of it.** A complete answer from a second
+  route beats a truncated one from the first, and the retry was already correct. Only
+  when it also fails is the partial reply better than the error.
+- **The failure is still a failure everywhere except the response.** The executor returns
+  the `Err` and records the salvage on the way past, so the peer penalty, the trust
+  update, the error broadcast and the log line are untouched. Salvage must not be a way
+  for a dead peer to look healthy.
+- **Streamed replies are deliberately excluded.** The client already has the text, and
+  turning a streamed failure into an `Ok` would make `api::openai::streaming` re-emit the
+  whole reply as one delta (gotcha #414). Non-streaming was the total loss.
+
+The `finish_reason` is `"error"`, matching vLLM's `FinishReason::ERROR`; the Anthropic
+surface translates it to `max_tokens` because that vocabulary has no member for an
+interrupted turn and its catch-all would otherwise report the failure as `end_turn`.
 
 **Do not treat the churn as the cause.** The report notes 11 connection-closed events for
 9 peers in the preceding 10 minutes, well above that day's baseline. That is what made the

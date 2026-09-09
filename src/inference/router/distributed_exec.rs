@@ -271,6 +271,10 @@ pub(super) async fn execute_distributed_batch(
                     trace.clone(),
                 )
                 .await;
+                // The attempt is over — there is no retry on the batched path.
+                // Same point in the sequence as `dispatch_single`, so both
+                // paths salvage before anything interprets the outcome.
+                let output = super::salvaged_reply_if_lost(&shared_state, request.id, output);
                 match &output {
                     Ok(r) => trace.mark_finished(
                         crate::inference::trace::Outcome::Ok,

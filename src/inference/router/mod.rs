@@ -190,6 +190,47 @@ fn should_retry_after(
             && (remote_peer_could_not_serve(err) || segment_ran_out_of_machines(err)))
 }
 
+/// Hand back the work a definitively-failed request had already done.
+///
+/// Called at the one point per dispatch path where the attempt is over — after
+/// the retry in [`InferenceRouter::dispatch_single`], and after the single
+/// attempt on the batched path, which has no retry. Ordering matters both ways:
+/// before this, a retry may still produce a complete answer and must be
+/// preferred; after it, `release_request_state` clears the salvage along with
+/// every other per-request map.
+///
+/// **Only a failure is ever replaced.** An `Ok` is returned untouched, and a
+/// failure with nothing salvaged keeps its error — `note_salvaged_reply`
+/// refuses an empty reply, so reaching a salvage means real tokens were
+/// generated and delivered to nobody.
+///
+/// Report #028: a 4m43s reply on a 14B died when its tail peer's connection
+/// dropped, and every token was discarded. The retry is still the first answer
+/// to that — a complete reply beats a truncated one — but when it fails too,
+/// what was generated is strictly better than nothing.
+pub(super) fn salvaged_reply_if_lost(
+    shared_state: &SharedState,
+    request_id: uuid::Uuid,
+    output: Result<InferenceOutput, SwarmError>,
+) -> Result<InferenceOutput, SwarmError> {
+    let Err(err) = output else {
+        return output;
+    };
+    match shared_state.take_salvaged_reply(request_id) {
+        Some(salvaged) => {
+            tracing::warn!(
+                request_id = %request_id,
+                error = %err,
+                completion_tokens = salvaged.completion_tokens,
+                finish_reason = %salvaged.finish_reason,
+                "DIAG: returning the partial reply of a request that could not be completed"
+            );
+            Ok(salvaged)
+        }
+        None => Err(err),
+    }
+}
+
 /// Whether a request must be refused for want of credit.
 ///
 /// `balance` is `None` when the wallet could not be read, which is a different
@@ -1141,6 +1182,11 @@ impl InferenceRouter {
                     output = Err(first);
                 }
             }
+
+            // The attempt is over — the retry above has either not applied or
+            // has run and failed too. Anything this request managed to generate
+            // is better in the caller's hands than discarded.
+            output = salvaged_reply_if_lost(&shared_state, request.id, output);
 
             let elapsed = request_start.elapsed();
 

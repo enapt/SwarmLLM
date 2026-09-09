@@ -1381,6 +1381,48 @@ mod tests {
     use super::super::types::{AnthropicMessage, SystemContent};
     use super::*;
 
+    /// A reply cut short by a failure must not be reported to an Anthropic
+    /// client as the model choosing to stop.
+    ///
+    /// `end_turn` is one of only two values Anthropic defines as "the turn
+    /// completed naturally", and it is this function's catch-all — so an
+    /// internal finish reason that means "interrupted" would land on it by
+    /// default. That is gotcha #433's defect on this surface: a failure
+    /// reported as a finished answer, with nothing for the caller to branch on.
+    ///
+    /// `max_tokens` is the translation because Anthropic's vocabulary has no
+    /// member for an interrupted turn and an undefined `stop_reason` was
+    /// removed from here once already (gotcha #300). It is the only defined
+    /// value meaning "incomplete, cut off", which is the fact the client acts
+    /// on.
+    #[test]
+    fn an_interrupted_reply_is_not_reported_as_the_model_choosing_to_stop() {
+        use super::super::convert::{map_finish_reason, map_finish_reason_with_match};
+        use crate::inference::FINISH_REASON_INTERRUPTED;
+
+        assert_eq!(map_finish_reason(FINISH_REASON_INTERRUPTED), "max_tokens");
+
+        // And through the sibling every response path actually calls, with and
+        // without a matched stop string — neither may reach `end_turn`.
+        for matched in [None, Some("###")] {
+            assert_eq!(
+                map_finish_reason_with_match(FINISH_REASON_INTERRUPTED, matched),
+                "max_tokens",
+                "an interrupted reply reported as a natural end (matched={matched:?})"
+            );
+        }
+
+        // The control: the catch-all is still the catch-all for anything else,
+        // and the two real finish reasons are untouched.
+        assert_eq!(map_finish_reason("stop"), "end_turn");
+        assert_eq!(map_finish_reason("length"), "max_tokens");
+        assert_eq!(map_finish_reason("something-new"), "end_turn");
+        assert_eq!(
+            map_finish_reason_with_match("stop", Some("###")),
+            "stop_sequence"
+        );
+    }
+
     fn output_with(
         prompt_tokens: u32,
         completion_tokens: u32,

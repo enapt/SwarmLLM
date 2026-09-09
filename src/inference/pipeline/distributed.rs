@@ -102,6 +102,10 @@ impl PipelineExecutor {
 
         let mut generated_tokens: Vec<u32> = Vec::new();
         let mut finish_reason = String::new();
+        // Set when the decode was ended by a failure rather than by the model.
+        // The reply built below is still handed to `note_salvaged_reply`, but
+        // this function still returns the `Err` — see `may_salvage`.
+        let mut interrupted_by: Option<SwarmError> = None;
         // Outer-scope flag tracking whether a stop-string fired during the
         // decode loop. Drives the post-loop KV-truncate to remote segments
         // for session-keyed requests (gotcha #4 — stop tokens otherwise
@@ -444,18 +448,25 @@ impl PipelineExecutor {
                     }
 
                     if let Some(reason) = result.finish_reason {
-                        finish_reason = match reason {
-                            NetworkFinishReason::Stop => "stop".to_string(),
-                            NetworkFinishReason::MaxTokens => "length".to_string(),
+                        match reason {
+                            NetworkFinishReason::Stop => finish_reason = "stop".to_string(),
+                            NetworkFinishReason::MaxTokens => finish_reason = "length".to_string(),
                             NetworkFinishReason::Error(e) => {
                                 // Same recovery as the remote-generate sibling:
                                 // the class does not survive the wire, and
                                 // without it the caller is told this server
                                 // broke and the peer is charged for it.
-                                return Err(crate::error::reclassify_flattened_error(&e)
-                                    .unwrap_or(SwarmError::Inference(e)));
+                                let err = crate::error::reclassify_flattened_error(&e)
+                                    .unwrap_or(SwarmError::Inference(e));
+                                if may_salvage(is_streaming, &generated_tokens) {
+                                    interrupted_by = Some(err);
+                                    finish_reason =
+                                        crate::inference::FINISH_REASON_INTERRUPTED.to_string();
+                                    break;
+                                }
+                                return Err(err);
                             }
-                        };
+                        }
                         // Send finish event on streaming channel
                         if let Some(ref tx) = token_tx {
                             let _ = tx
@@ -483,6 +494,11 @@ impl PipelineExecutor {
                         seq_num,
                         "Pipeline failed and failover (if eligible) was unsuccessful"
                     );
+                    if may_salvage(is_streaming, &generated_tokens) {
+                        interrupted_by = Some(e);
+                        finish_reason = crate::inference::FINISH_REASON_INTERRUPTED.to_string();
+                        break;
+                    }
                     return Err(e);
                 }
             }
@@ -576,7 +592,7 @@ impl PipelineExecutor {
             self.request.sampling_params.max_tokens,
             matched_stop_seq.as_deref(),
         );
-        Ok(InferenceOutput {
+        let output = InferenceOutput {
             request_id,
             content: generated_text,
             prompt_tokens: prompt_token_count.unwrap_or_else(|| prompt.chars().count() / 4) as u32,
@@ -598,7 +614,26 @@ impl PipelineExecutor {
             // user-provided string that triggered termination.
             matched_stop_sequence: matched_stop_seq,
             trace: None,
-        })
+        };
+
+        // A decode ended by a failure still returns that failure. Everything
+        // that reasons about failures — the log line, the peer penalty, the
+        // trust update, the error broadcast in `execute_request` — therefore
+        // sees exactly what it saw before. All that is added is a copy of the
+        // work already done, which the router hands to the caller only once the
+        // attempt and its retry are definitively over.
+        if let Some(err) = interrupted_by {
+            tracing::info!(
+                request_id = %request_id,
+                completion_tokens = output.completion_tokens,
+                error = %err,
+                "DIAG: keeping the partial reply of a request that failed part-way"
+            );
+            self.shared_state.note_salvaged_reply(request_id, output);
+            return Err(err);
+        }
+
+        Ok(output)
     }
 
     /// Send a truncation-only `LayerForward` to every remote segment in the
@@ -2044,4 +2079,29 @@ pub(super) fn exhausted_message(segment: usize, last_failure: Option<&str>) -> S
             format!("{base} (last failure: {shown}{ellipsis})")
         }
     }
+}
+
+/// May a reply that ends in a failure still be handed to the caller?
+///
+/// Three conditions, and each one is load-bearing.
+///
+/// **Something was actually generated.** An empty salvage is not a salvage: it
+/// would replace an error carrying a class, a hint and a peer with a `200`
+/// carrying nothing, which is gotcha #433's lie pointing the other way. With no
+/// tokens the error is the better answer and is returned unchanged.
+///
+/// **The request is not being streamed.** A streamed reply has already been
+/// delivered token by token, so the client keeps the text whatever happens next
+/// and the honest terminal event is the error it already gets. It also must not
+/// become an `Ok`: `api::openai::streaming` treats "no finish event arrived" as
+/// "this path never streamed" and re-emits the whole content as one delta, so a
+/// salvage there would hand the reader the reply twice (gotcha #414).
+/// Non-streaming is exactly the case report #028 names as a total loss.
+///
+/// **It never pre-empts the retry.** This only decides whether to RECORD the
+/// partial reply; `router::salvaged_reply_if_lost` takes it after the retry has
+/// run and also failed. A complete answer from a second route beats a truncated
+/// one from the first, so salvage is the last resort and never the first.
+pub(crate) fn may_salvage(is_streaming: bool, generated: &[u32]) -> bool {
+    !is_streaming && !generated.is_empty()
 }
