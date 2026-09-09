@@ -422,7 +422,21 @@ failed. The node with 17 layers spare was fragmented into slivers of 1, 3 and
 
 `max_hostable_layers` now contributes two points per (candidate, range): the
 furthest it reaches from the range's start, and the earliest it can start and
-still reach the end — a candidate may take a prefix or a suffix of what it
+still reach the end — **and only if they fit the same sub-range budget the
+splitting is already held to** (`capacity_points_fit_budget`). The emission is
+O(k²) per range in the points inside it, so two more per candidate is free for a
+handful of holders and quadratic at swarm scale: with 42 candidates, keeping
+them took the routing call from microseconds to **4.6 seconds**, on the
+request's own scheduling path. They are an enhancement, so when they do not fit
+the declared boundaries simply stand.
+
+Note what the budget does NOT govern. A candidate that cannot hold its whole
+range is split regardless — `!split_enabled && !over_capacity` continues only
+for candidates that FIT — because that is a correctness bound, not the
+throughput optimisation. So dropping the capacity points costs expressiveness
+for candidates that fit, never correctness for those that do not. The first
+version of this note assumed otherwise, and the test written on that assumption
+could not fail — a candidate may take a prefix or a suffix of what it
 holds, and which is useful depends on its neighbours. Pinned by
 `a_route_everyone_can_afford_is_expressible_even_with_no_declared_boundary`,
 whose null control removes those points and fails with `parallax: no candidate

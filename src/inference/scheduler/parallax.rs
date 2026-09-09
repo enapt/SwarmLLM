@@ -241,6 +241,41 @@ impl CapacityBound {
 /// scheduler and the offline allocator.
 pub(super) const BASELINE_LAYER_COUNT: f32 = 32.0;
 
+/// Should the capacity-derived split points be kept, given what they cost?
+///
+/// The sub-range emission is O(k²) per range in the points falling inside it,
+/// so two extra points per candidate is cheap for a handful of holders and
+/// quadratic at swarm scale. Measured with 42 candidates: keeping them took the
+/// routing call from microseconds to **4.6 seconds**, which is on the request's
+/// own scheduling path.
+///
+/// They are an enhancement — they let a capacity-respecting route be expressed
+/// where no declared boundary falls at the right layer (report #029) — so when
+/// they do not fit the budget the declared boundaries simply stand. Being
+/// unable to express one good route is a worse outcome than a slow one only if
+/// the search still finishes, and at swarm scale it does not.
+///
+/// Pure so it can be tested without driving the DP: the interesting property is
+/// "dropped when they cost too much", and asserting that through wall-clock
+/// time would be exactly the load-sensitive test this repo keeps paying for.
+fn capacity_points_fit_budget(
+    with_capacity: &[u32],
+    clamped: &[(usize, (u32, u32))],
+    cap: usize,
+) -> bool {
+    let cost: usize = clamped
+        .iter()
+        .map(|(_, (lo, hi))| {
+            let k = with_capacity
+                .iter()
+                .filter(|&&p| p >= *lo && p <= *hi)
+                .count();
+            k.saturating_mul(k.saturating_sub(1)) / 2
+        })
+        .sum();
+    cost <= cap
+}
+
 /// Compute per-vertex cost for a (candidate, range) pair.
 ///
 /// Cost priority for `compute_ms`:
@@ -609,57 +644,6 @@ pub(super) fn route_shortest_path(
             split_points.push(num_layers - 1);
         }
     }
-    // A candidate's CAPACITY is a boundary too, and until 2026-09-09 it was not
-    // one (report #029).
-    //
-    // The points above are all facts about DISK — where a candidate's shards
-    // begin and end. `max_hostable_layers` is the other half of the same
-    // question, a fact about live memory, and it is already consulted to CAP
-    // what a candidate is handed. But a cap can only reject a range the search
-    // proposes; it cannot propose the range that would fit. So when no
-    // declared boundary happens to fall where memory runs out, a
-    // capacity-respecting route is not merely passed over — it is not
-    // expressible, and every pass of `CapacityBound` refuses in turn until the
-    // one that binds nobody.
-    //
-    // Measured on the live swarm: a 48-layer model whose four candidates could
-    // hold 17, 9, 14 and 19 layers — 59 between them, comfortably enough — was
-    // cut at layers 1 and 29 because those were the only boundaries on offer,
-    // handing 28 layers to a peer that could take 9. It refused, the retry
-    // produced the same two boundaries with a different peer, and the request
-    // failed. The node with 17 layers spare was meanwhile fragmented into
-    // three slivers of 1, 3 and 13.
-    //
-    // Both ends of the reach, because a candidate can take a PREFIX of what it
-    // holds or a SUFFIX of it, and which one is useful depends on who its
-    // neighbours are. Bounded by the ranges themselves, so this adds at most
-    // two points per (candidate, range) and the existing
-    // `MAX_SUBRANGE_VERTICES` cap still governs the vertex count.
-    for c in candidates {
-        let Some(k) = c.max_hostable_layers else {
-            continue;
-        };
-        if k == 0 {
-            continue;
-        }
-        for &(a, b) in &c.available_ranges {
-            let b = b.min(num_layers);
-            if b <= a || b - a <= k {
-                // It can hold everything it holds; no boundary to add.
-                continue;
-            }
-            // The furthest it reaches starting at `a`...
-            let prefix_end = a.saturating_add(k);
-            if prefix_end > a && prefix_end < num_layers {
-                split_points.push(prefix_end);
-            }
-            // ...and the earliest it can start and still reach `b`.
-            let suffix_start = b.saturating_sub(k);
-            if suffix_start > 0 && suffix_start < num_layers {
-                split_points.push(suffix_start);
-            }
-        }
-    }
     split_points.sort_unstable();
     split_points.dedup();
 
@@ -676,20 +660,98 @@ pub(super) fn route_shortest_path(
         .filter(|(_, (a, b))| a < b)
         .collect();
 
+    // Cost of the sub-ranges a given split set implies: O(k^2) per range in
+    // the number of interior points. Used twice — once for the declared
+    // boundaries alone, once with the capacity boundaries added — so the
+    // second set can be dropped rather than allowed to break the first.
+    let cost_of = |points: &[u32]| -> usize {
+        clamped
+            .iter()
+            .map(|(_, (lo, hi))| {
+                let k = points.iter().filter(|&&p| p >= *lo && p <= *hi).count();
+                k.saturating_mul(k.saturating_sub(1)) / 2
+            })
+            .sum()
+    };
+
+    // A candidate's CAPACITY is a boundary too, and until 2026-09-09 it was not
+    // one (report #029).
+    //
+    // The points above are all facts about DISK — where a candidate's shards
+    // begin and end. `max_hostable_layers` is the other half of the same
+    // question, a fact about live memory, and it is already consulted to CAP
+    // what a candidate is handed. But a cap can only reject a range the search
+    // proposes; it cannot propose the range that would fit. So when no declared
+    // boundary happens to fall where memory runs out, a capacity-respecting
+    // route is not merely passed over — it is not expressible, and every pass
+    // of `CapacityBound` refuses in turn until the one that binds nobody.
+    //
+    // Measured on the live swarm: a 48-layer model whose four candidates could
+    // hold 17, 9, 14 and 19 layers — 59 between them, comfortably enough — was
+    // cut at layers 1 and 29 because those were the only boundaries on offer,
+    // handing 28 layers to a peer that could take 9. It refused, the retry
+    // produced the same two boundaries with a different peer, and the request
+    // failed. The node with 17 layers spare was meanwhile fragmented into
+    // three slivers of 1, 3 and 13.
+    //
+    // Both ends of the reach, because a candidate can take a PREFIX of what it
+    // holds or a SUFFIX of it, and which one is useful depends on who its
+    // neighbours are.
+    //
+    // **Added only if they fit the same budget the sub-ranges are already held
+    // to.** The cost is quadratic in the points inside each range, so at swarm
+    // scale two more points per candidate can push the total past
+    // `MAX_SUBRANGE_VERTICES` — at which point splitting is abandoned
+    // ALTOGETHER and the search falls back to whole ranges, which is worse than
+    // what it had before these points existed. An enhancement that can cost you
+    // the thing it enhances is not one, so when they do not fit they are simply
+    // dropped and the declared boundaries stand.
+    let declared_cost = cost_of(&split_points);
+    let mut with_capacity = split_points.clone();
+    for c in candidates {
+        let Some(k) = c.max_hostable_layers else {
+            continue;
+        };
+        if k == 0 {
+            continue;
+        }
+        for &(a, b) in &c.available_ranges {
+            let b = b.min(num_layers);
+            if b <= a || b - a <= k {
+                // It can hold everything it holds; no boundary to add.
+                continue;
+            }
+            let prefix_end = a.saturating_add(k);
+            if prefix_end > a && prefix_end < num_layers {
+                with_capacity.push(prefix_end);
+            }
+            let suffix_start = b.saturating_sub(k);
+            if suffix_start > 0 && suffix_start < num_layers {
+                with_capacity.push(suffix_start);
+            }
+        }
+    }
+    with_capacity.sort_unstable();
+    with_capacity.dedup();
+    if with_capacity.len() > split_points.len() {
+        if capacity_points_fit_budget(&with_capacity, &clamped, MAX_SUBRANGE_VERTICES) {
+            split_points = with_capacity;
+        } else {
+            tracing::debug!(
+                declared_cost,
+                cap = MAX_SUBRANGE_VERTICES,
+                candidates = candidates.len(),
+                "parallax: capacity split points would exceed the sub-range budget — \
+                 keeping the declared boundaries only"
+            );
+        }
+    }
+
     // Emitting every sub-range is O(k^2) per range in the number of interior
     // split points. That is trivial for a handful of holders and unbounded at
     // swarm scale, so it is budgeted: past the cap we emit whole ranges only,
     // which is exactly the pre-split behaviour rather than a degraded one.
-    let subrange_cost: usize = clamped
-        .iter()
-        .map(|(_, (lo, hi))| {
-            let k = split_points
-                .iter()
-                .filter(|&&p| p >= *lo && p <= *hi)
-                .count();
-            k.saturating_mul(k.saturating_sub(1)) / 2
-        })
-        .sum();
+    let subrange_cost: usize = cost_of(&split_points);
     let split_enabled = partial_ranges && subrange_cost <= MAX_SUBRANGE_VERTICES;
     if partial_ranges && !split_enabled {
         tracing::debug!(
@@ -2112,6 +2174,48 @@ mod tests {
             at = s.layer_range.1;
         }
         assert_eq!(at, 48, "the route must cover every layer: {segs:?}");
+    }
+
+    /// Capacity split points are dropped when they cost too much, and kept
+    /// when they do not.
+    ///
+    /// The decision is tested directly rather than through the DP, because the
+    /// symptom of getting it wrong is TIME — 42 candidates took the routing
+    /// call from microseconds to 4.6 seconds — and a test that asserts on
+    /// wall-clock is the load-sensitive kind this repo keeps paying for.
+    ///
+    /// Note what the budget does NOT govern: a candidate that cannot hold its
+    /// whole range is split regardless (`!split_enabled && !over_capacity`),
+    /// because that is a correctness bound rather than the throughput
+    /// optimisation. So dropping these points costs expressiveness for
+    /// candidates that FIT, never correctness for those that do not.
+    #[test]
+    fn capacity_split_points_are_dropped_only_when_they_exceed_the_budget() {
+        // A handful of holders: cheap, so they are kept.
+        let small: Vec<(usize, (u32, u32))> = (0..4).map(|i| (i, (0u32, 48u32))).collect();
+        let modest: Vec<u32> = vec![0, 9, 14, 17, 19, 29, 31, 34, 39, 48];
+        assert!(
+            super::capacity_points_fit_budget(&modest, &small, super::MAX_SUBRANGE_VERTICES),
+            "four holders and ten points must fit the budget"
+        );
+
+        // Swarm scale: forty holders of the whole model, each contributing two
+        // points, is quadratic and does not fit.
+        let many: Vec<(usize, (u32, u32))> = (0..40).map(|i| (i, (0u32, 48u32))).collect();
+        let crowded: Vec<u32> = (0..48).collect();
+        assert!(
+            !super::capacity_points_fit_budget(&crowded, &many, super::MAX_SUBRANGE_VERTICES),
+            "forty holders with a point at every layer must NOT fit — that is the case \
+             the budget exists for"
+        );
+
+        // And the boundary is the budget itself, not an arbitrary count: the
+        // same points against fewer ranges do fit.
+        let few: Vec<(usize, (u32, u32))> = vec![(0, (0, 48))];
+        assert!(
+            super::capacity_points_fit_budget(&crowded, &few, super::MAX_SUBRANGE_VERTICES),
+            "one range of the same points is well inside the budget"
+        );
     }
 
     /// Report #025's machine: a 48-layer model, every shard held here, and a
