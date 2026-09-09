@@ -153,11 +153,37 @@ runs:
       echo "CUDAFORGE_THREADS=$threads" >> "$GITHUB_ENV"
   - name: Install system dependencies (Linux)
     if: runner.os == 'Linux'
-    run: 'sudo apt-get update
-
+    # `apt-get update` is retried, and the lists are cleared between attempts.
+    #
+    # The runner image ships third-party repositories this build never installs
+    # from — Google Chrome, Microsoft, and others — and a bad index on ANY of
+    # them fails the whole update with exit 100. That is not hypothetical: on
+    # 2026-09-09 all three Linux release jobs died here on
+    # "Failed to fetch .../chrome-stable/... Hash Sum mismatch", while Windows
+    # and macOS built fine, and the release published as a draft with 12 of its
+    # 25 assets. Nothing was wrong with the code.
+    #
+    # A hash-sum mismatch is a stale or half-written CDN index and clears on its
+    # own, so the fix is to retry rather than to prune repositories this action
+    # does not own — deleting a source list would silently change what a later
+    # step can install. `apt-get clean` and removing the lists is what makes the
+    # retry meaningful; without it apt reuses the bad index it already has.
+    run: |
+      set -euo pipefail
+      for attempt in 1 2 3; do
+        if sudo apt-get update; then
+          break
+        fi
+        if [ "$attempt" = "3" ]; then
+          echo "apt-get update failed three times — the runner's package indexes, not the build." >&2
+          exit 1
+        fi
+        echo "apt-get update failed (attempt $attempt) — clearing indexes and retrying"
+        sudo apt-get clean
+        sudo rm -rf /var/lib/apt/lists/*
+        sleep $((attempt * 10))
+      done
       sudo apt-get install -y libssl-dev pkg-config
-
-      '
     shell: bash
   - name: Free runner disk space
     if: inputs.cuda-linux == 'true'
