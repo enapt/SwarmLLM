@@ -10,6 +10,14 @@ opportunities, rejected experiments and completed plans are below and deliberate
 here. Entries are re-verified against the code on the date shown — a stale "open"
 entry is worse than no entry, and this pass found three (a quarter of the list).
 
+**A 2026-09-09 audit of the whole file found three more**, all the same shape: a
+body section frozen at an earlier, unfixed date while the index was updated
+around it. Each now carries a "Superseded — read this first" banner rather than
+being deleted, since the original reasoning is worth keeping. **Read an entry's
+BODY, not just its index row** — that is how the item-8 case was missed twice.
+The audit also found sections that call themselves open and are not indexed at
+all; they are listed below.
+
 Priority is user-visible impact x how many users x whether it fails silently.
 
 ### P1 — a whole platform, or every request of a kind
@@ -41,9 +49,37 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | # | Bug | Why it ranks here |
 |---|---|---|
 | 12 | `r134_receiver_applies_diff_and_advances_generation` is load-sensitive | **Not reproduced in 48 runs (2026-09-08)**, incl. 8 full-suite runs at load 15.95; the `try_recv` hypothesis is disproved (the send is awaited inline). Kept only as "check runner load before blaming a change" |
-| 13 | `Could not decrypt forward` from one peer | **NOT dormant — recurred on v0.3.164 (report #028) and the cause is now identified**: a disconnect destroyed the session key, and the two ends do not drop together. Fixed by retiring rather than destroying |
+
+### Open in their own headings, not yet triaged into the list above (2026-09-09)
+
+An audit of this file found sections that declare themselves open or partial in
+their own titles and appear nowhere in the index — so the index has been claiming
+a completeness it does not have. They are listed here rather than ranked, because
+ranking them means re-reading each against the code and that has not been done.
+**Do not read their absence from P1-P4 as a judgement that they are minor.**
+
+- `Routing never learns a peer is slow on the speculative path` — the single-token
+  half is FIXED (2026-08-30); the batch/HIT half is explicitly still open
+- `Speculative distributed decode has no failover` (2026-08-25) — title says NOT fixed
+- `Shard removal can strand prompt privacy` (2026-08-09) — surfaced, not fixed
+- `Every pipeline hop round-trips through the coordinator, and that is what makes
+  big models slow` (2026-08-20) — its own text calls this "the single
+  highest-leverage change available for distributed inference", and it is untagged
+- `A node cannot test its own inbound reachability` (2026-08-18) — partial fix shipped
+- Three untagged 2026-08-03/04 routing entries (`Parallax routing fails transiently
+  after a restart`, `The LAN peer is not a routing candidate although it holds the
+  shards`, `An unmeasured peer gets a 296-second budget while a standby sits unused`)
+  — status UNVERIFIED against current code
 
 ### Closed in this pass (were listed open, verified fixed in code 2026-09-08)
+
+- **`Could not decrypt forward` from one peer** (was item 13) — was filed under
+  "test and infrastructure" while its own row said it was fixed, and it is a
+  correctness bug, not a flake. Recurred on v0.3.164 as report #028; a disconnect
+  DESTROYED the session key and the two ends do not drop together, so a forward
+  sealed moments earlier could not be opened. Fixed by retiring the key —
+  openable, never sealable, bounded grace, own replay window. Rule:
+  `docs/invariants/network.md` § "A disconnect retires a session key"
 
 - **The RAM headroom clamp's floor** (was item 8) — STALE ROW, corrected 2026-09-09.
   The floor was removed on 2026-09-06 by research into what the three platforms mean
@@ -637,7 +673,16 @@ word in its own comment, then matched the predicate computed on the line above w
 the expression consulting it. **A guard must be shown to fail on the defect's real
 shape, not on a tidied version of it.**
 
-## Peer ranking uses ping, and a big payload under loss is not ping (open, 2026-09-07)
+## Peer ranking uses ping, and a big payload under loss is not ping (FIXED 2026-09-08)
+
+> **Superseded — read this first.** Both halves shipped. `GoodputEstimator`
+> (`src/network/manager/tensors.rs:1169`) and `VertexCost::transfer_ms`
+> (`src/inference/scheduler/parallax.rs`) are live, so "the shape of the fix,
+> if picked up" below describes work that exists. The current status — shipped,
+> **not yet field-verified against netem** — is the section
+> "Per-peer goodput: shipped, not yet field-verified (2026-09-08)" earlier in
+> this file, and the rule is `docs/invariants/network.md` § "Latency wants an
+> average; capacity wants a maximum". What follows is the original write-up.
 
 Measured and reported by the contributor on issue #21, with a published harness
 (`github.com/NidhalxMRR/netem-lab-swarmllm` — rootless veth namespaces, `tc
@@ -1225,7 +1270,15 @@ body) and the reported harm was fully fixed without it.
 Worth doing when someone is next in `compare.js`. A Stop control needs one new
 i18n key across 21 locales.
 
-## A worker's memory reservation over-counts after it drops a superseded range (open, 2026-09-05)
+## A worker's memory reservation over-counts after it drops a superseded range (FIXED 2026-09-08)
+
+> **Superseded — read this first.** The release described below as
+> "deliberately NOT done" was done: `WorkerHandle::release_subsumed_segments`
+> (`src/inference/process_pool.rs:963`, called at `:3103`) mirrors the worker's
+> own `subsumed_segment_keys` on the daemon side. The rule, including the
+> ordering constraint that the release must happen AFTER admission and the
+> tensor-parallel gap that is still open, is in `docs/invariants/memory.md`.
+> What follows is the original write-up, kept for the reasoning.
 
 Report #010 caught a live worker holding [16..48) and [0..16) being asked for
 [0..48), missing on the exact key, and reading the whole 14B from disk a second
@@ -4138,7 +4191,21 @@ logs an "ignoring LayerResult from a node this request is no longer waiting on"
 line — check whether that fires, because it would mean the result DID arrive and
 was discarded by the failover pinning.
 
-## `Could not decrypt forward` from one peer (open, 2026-08-04)
+## `Could not decrypt forward` from one peer (cause found and FIXED 2026-09-08)
+
+> **Superseded — read this first.** This is the 2026-08-04 incident write-up,
+> and its closing speculation ("most likely a session re-key landing between
+> two forwards") was never updated when the cause was actually found. The same
+> signature recurred on v0.3.164 as report #028: a peer disconnecting
+> **destroyed** its session key, so a forward sealed moments earlier could no
+> longer be opened — and the two ends do not drop together, so the coordinator
+> went on sealing with a key the server had thrown away. Fixed by RETIRING the
+> key instead: openable, never sealable, for a bounded grace period, with its
+> own replay window (`SessionManager::remove_session`, `src/crypto/session.rs`).
+> The rule is `docs/invariants/network.md` § "A disconnect retires a session
+> key; it must not destroy it", including why a test here must use an
+> EPHEMERAL session or it passes with the fix reverted. What follows is the
+> original incident.
 
 The trigger behind the failover storm fixed in the same round. One peer
 (`e561df35…`) answered 5 forwards with `Error("Could not decrypt forward")`,
@@ -5161,9 +5228,7 @@ Until one of these lands, the practical guidance for operators is that a
 CPU-only node is well suited to short prompts and poorly suited to long-context
 work, and that this scales with the machine rather than being a fixed limit.
 
-## R136 local 3-node benchmark — measured results` below for
-> the actual numbers, and the per-Tier sections below for full
-> context on what's open.
+## Inference optimisation survey (compiled 2026-05-16)
 
 Compiled 2026-05-16 from a survey of state-of-the-art LLM inference
 optimization (FlashAttention-3/4, FlowSpec, P-EAGLE, EAGLE-3, DSD,
@@ -12713,7 +12778,15 @@ config-file/CLI only, the Settings panel does not expose it, and it is handed to
 a worker as it spawns. Checked 2026-08-29 against the `#281` rule rather than
 assumed.
 
-## CUDA GQA-decode routing: the premise is dead, the answer is unresolved (2026-08-17)
+## CUDA GQA-decode routing: the premise is dead, the answer is unresolved (RESOLVED 2026-08-23)
+
+> **Superseded — read this first.** The change this entry says would close it
+> was made on 2026-08-23: `cuda_decode_prefers_standard`
+> (`src/inference/layers/mod.rs`) now returns true for `q_len == 1` with no GQA
+> exclusion, and `SWARMLLM_GQA_DECODE_FLASH=1` restores the old rule for an A/B
+> inside one binary. The re-measurement that motivated it is in
+> `docs/invariants/inference.md` § "Attention kernel choice and the
+> query-length cliff". What follows is the original write-up.
 
 `inference::layers::cuda_decode_prefers_standard` sends **MHA decode to
 standard and GQA decode to flash at every context length**. The stated reason
