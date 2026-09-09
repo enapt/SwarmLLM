@@ -286,6 +286,19 @@ is a finding about the guard: one guard matched its own comment, another matched
 a binding on the line above. **Plant the violation in the form it would really
 appear** (gotchas #502, #503).
 
+**Unreleased on main since .165: report #028.** A 4m43s generation, already
+streaming, was lost outright when its tail peer's connection dropped and the
+retry answered `Could not decrypt forward`. **A disconnect destroyed the session
+key**, and the two ends never drop together: `handle_connection_closed` keeps the
+session when the peer is `in_active_pipeline`, but that reads `active_pipelines`
+— the COORDINATOR's map, which holds nothing for work a node is SERVING
+(gotcha #194). So the server cleared while the coordinator kept sealing. Keys are
+now RETIRED rather than destroyed: openable, never sealable, with their own
+replay window (`.claude/rules/architecture.md` § "A disconnect retires a session
+key"). The residuals are recorded, not fixed — no standby can be assembled from
+several nodes covering a range, and already-generated tokens are discarded
+rather than returned.
+
 **Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
 whose last commits are docs it is green on the BUMP commit, not the tag — same
