@@ -174,6 +174,14 @@ local layer budget is enforced INSIDE the DP — carried along the best path,
 exactly as the capped-peer bitmask is — as well as by the exact summed check
 after reconstruction.
 
+**A capacity ceiling is a split POINT, not only a cap.** `route_shortest_path`
+builds boundaries from `available_ranges` (disk) plus the model's and the
+boomerang's ends; `max_hostable_layers` now also contributes the furthest a
+candidate reaches from each range's start and the earliest it can start and
+still reach the end. A cap can reject a proposed range but cannot propose the
+one that fits, so without these a capacity-respecting route is not passed over —
+it is not expressible, and every rung refuses down to the one binding nobody.
+
 **A relaxation spends the safety margin before it spends the peer's own
 number.** `max_hostable_layers_at_face_value` is the peer taken at its word with
 `DELEGATE_VRAM_MARGIN` spent, and `PeersAtFaceValue` sits above

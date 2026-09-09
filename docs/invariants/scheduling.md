@@ -401,6 +401,39 @@ for as long as the memory picture held.** The v0.3.162 fix (report #018)
 changed which log line explained the failure, not whether it happened, because
 it closed the fast path and this is the search's own second pass.
 
+**A capacity ceiling is a split point, not only a cap** (report #029,
+2026-09-09). `route_shortest_path` builds its candidate boundaries from
+`available_ranges` — facts about DISK, where a candidate's shards begin and
+end — plus the model's ends and, under encryption, the boomerang's. Capacity was
+consulted only to CAP what a candidate is handed, and a cap can reject a range
+the search proposes but cannot propose the range that would fit. So where no
+declared boundary happened to fall at the point memory runs out, a
+capacity-respecting route was not merely passed over: it was **not expressible**,
+and every rung of `CapacityBound` refused in turn down to the one binding
+nobody.
+
+Live shape: a 48-layer model whose four candidates could hold 17, 9, 14 and 19
+layers — 59 between them — with every one holding the whole model on disk, so
+the only boundaries on offer were 0, 48 and the boomerang's 1 and 47. The search
+cut at 1 and 29 and handed 28 layers to a peer that could take 9. It refused;
+the retry produced the same two boundaries with a different peer; the request
+failed. The node with 17 layers spare was fragmented into slivers of 1, 3 and
+13. Eight requests in ninety seconds, same shape.
+
+`max_hostable_layers` now contributes two points per (candidate, range): the
+furthest it reaches from the range's start, and the earliest it can start and
+still reach the end — a candidate may take a prefix or a suffix of what it
+holds, and which is useful depends on its neighbours. Pinned by
+`a_route_everyone_can_afford_is_expressible_even_with_no_declared_boundary`,
+whose null control removes those points and fails with `parallax: no candidate
+ranges` — one of the three `constrained_err` values seen 36 times in one node's
+own log on the day this was found.
+
+**This is why the relaxation fired so often.** Both halves are the same defect
+seen from opposite ends: #028 made the relaxation prefer routes that respect the
+peers' figures, and #029 is why such a route was frequently not among the ones
+on offer.
+
 **Why a relaxation spends the margin first** (report #028, 2026-09-09). The
 three reasons the relaxation names for unbinding a peer are *stale*, *zero on a
 pre-v0.3.103 node*, and *no capability gossiped at all*. Two of those never

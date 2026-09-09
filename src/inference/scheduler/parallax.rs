@@ -609,6 +609,57 @@ pub(super) fn route_shortest_path(
             split_points.push(num_layers - 1);
         }
     }
+    // A candidate's CAPACITY is a boundary too, and until 2026-09-09 it was not
+    // one (report #029).
+    //
+    // The points above are all facts about DISK — where a candidate's shards
+    // begin and end. `max_hostable_layers` is the other half of the same
+    // question, a fact about live memory, and it is already consulted to CAP
+    // what a candidate is handed. But a cap can only reject a range the search
+    // proposes; it cannot propose the range that would fit. So when no
+    // declared boundary happens to fall where memory runs out, a
+    // capacity-respecting route is not merely passed over — it is not
+    // expressible, and every pass of `CapacityBound` refuses in turn until the
+    // one that binds nobody.
+    //
+    // Measured on the live swarm: a 48-layer model whose four candidates could
+    // hold 17, 9, 14 and 19 layers — 59 between them, comfortably enough — was
+    // cut at layers 1 and 29 because those were the only boundaries on offer,
+    // handing 28 layers to a peer that could take 9. It refused, the retry
+    // produced the same two boundaries with a different peer, and the request
+    // failed. The node with 17 layers spare was meanwhile fragmented into
+    // three slivers of 1, 3 and 13.
+    //
+    // Both ends of the reach, because a candidate can take a PREFIX of what it
+    // holds or a SUFFIX of it, and which one is useful depends on who its
+    // neighbours are. Bounded by the ranges themselves, so this adds at most
+    // two points per (candidate, range) and the existing
+    // `MAX_SUBRANGE_VERTICES` cap still governs the vertex count.
+    for c in candidates {
+        let Some(k) = c.max_hostable_layers else {
+            continue;
+        };
+        if k == 0 {
+            continue;
+        }
+        for &(a, b) in &c.available_ranges {
+            let b = b.min(num_layers);
+            if b <= a || b - a <= k {
+                // It can hold everything it holds; no boundary to add.
+                continue;
+            }
+            // The furthest it reaches starting at `a`...
+            let prefix_end = a.saturating_add(k);
+            if prefix_end > a && prefix_end < num_layers {
+                split_points.push(prefix_end);
+            }
+            // ...and the earliest it can start and still reach `b`.
+            let suffix_start = b.saturating_sub(k);
+            if suffix_start > 0 && suffix_start < num_layers {
+                split_points.push(suffix_start);
+            }
+        }
+    }
     split_points.sort_unstable();
     split_points.dedup();
 
@@ -1987,6 +2038,80 @@ mod tests {
             !unbounded.is_empty(),
             "the last-resort rung must still produce a plan: {unbounded:?}"
         );
+    }
+
+    /// Report #029: a route everyone can afford must be EXPRESSIBLE, not merely
+    /// preferred once proposed.
+    ///
+    /// The live shape, 2026-09-09: a 48-layer model, four candidates that could
+    /// hold 17, 9, 14 and 19 layers — 59 between them — and every one of them
+    /// holding the whole model on disk, so the only declared boundaries were 0
+    /// and 48. The search cut at the boomerang's own ends and handed 28 layers
+    /// to a peer that could take 9; it refused, the retry produced the same two
+    /// boundaries with a different peer, and the request failed. The node with
+    /// 17 layers spare was fragmented into slivers of 1, 3 and 13.
+    ///
+    /// Capacity was consulted to CAP what each candidate was handed, which can
+    /// only reject a range the search proposes — it cannot propose the one that
+    /// would fit. So `CapacityBound::Everyone` had no route to find, and every
+    /// rung refused in turn down to the one that binds nobody.
+    #[test]
+    fn a_route_everyone_can_afford_is_expressible_even_with_no_declared_boundary() {
+        let local = NodeId([1u8; 32]);
+        // Every candidate holds the whole model on disk, so `available_ranges`
+        // offers no interior boundary at all — only capacity can.
+        let mut me = cand(1, vec![(0, 48)], 0, 0.0, true, true, 4.0);
+        me.node_id = local.clone();
+        me.max_hostable_layers = Some(17);
+        me.max_hostable_layers_at_face_value = Some(17);
+
+        let mut small = cand(2, vec![(0, 48)], 10, 0.0, true, true, 6.0);
+        small.max_hostable_layers = Some(9);
+        small.max_hostable_layers_at_face_value = Some(9);
+
+        let mut mid = cand(3, vec![(0, 48)], 12, 0.0, true, true, 6.0);
+        mid.max_hostable_layers = Some(14);
+        mid.max_hostable_layers_at_face_value = Some(14);
+
+        let mut big = cand(4, vec![(0, 48)], 14, 0.0, true, true, 6.0);
+        big.max_hostable_layers = Some(19);
+        big.max_hostable_layers_at_face_value = Some(19);
+
+        let cands = [me, small, mid, big];
+        let segs = route_shortest_path(
+            48,
+            &cands,
+            &local,
+            false,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("17 + 9 + 14 + 19 = 59 layers of capacity must cover a 48-layer model");
+
+        // Every segment inside the holder's own ceiling — the property the
+        // whole bound exists for, and the one the live plan violated by 19
+        // layers.
+        for s in &segs {
+            let span = s.layer_range.1 - s.layer_range.0;
+            let cap = cands
+                .iter()
+                .find(|c| c.node_id == s.node_id)
+                .and_then(|c| c.max_hostable_layers)
+                .expect("every candidate here declares a ceiling");
+            assert!(
+                span <= cap,
+                "node {:?} was given {span} layers against a ceiling of {cap}: {segs:?}",
+                s.node_id
+            );
+        }
+        // And the whole model is covered exactly once.
+        let mut at = 0u32;
+        for s in &segs {
+            assert_eq!(s.layer_range.0, at, "gap or overlap in {segs:?}");
+            at = s.layer_range.1;
+        }
+        assert_eq!(at, 48, "the route must cover every layer: {segs:?}");
     }
 
     /// Report #025's machine: a 48-layer model, every shard held here, and a

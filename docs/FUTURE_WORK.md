@@ -44,6 +44,12 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | **Most likely never a wander** (2026-09-09): the refused figure is STORE-WIDE and was read as one request's; the `entries` count that says so was on a different line at `debug`. The refusal now carries `live_bytes`/`external_bytes`/`entries` and prints them. ⚠ Explanation, not a reproduction — `live_entries=1` with a total above that request's cache would reopen it |
 | 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger and the token loss are both fixed. Residual: no standby can be assembled from several nodes covering a range between them. **UNBLOCKED 2026-09-09** — item 18 shape 2 shipped, so a takeover now lands at P = 0.9965 rather than 0.119 and more standbys are worth having. Note the arming condition runs the other way too: retention is kept only where a standby covers the range, so a plan with no standbys retains nothing and gains nothing |
 
+### Recently closed, kept for the reasoning
+
+| # | Bug | Outcome |
+|---|---|---|
+| 29 | Split points came only from what a peer holds on DISK, never from what it can LOAD | **FIXED 2026-09-09.** A capacity ceiling is now a split point as well as a cap. Without it a capacity-respecting route was not merely passed over but INEXPRESSIBLE: four candidates able to hold 17/9/14/19 of a 48-layer model, all holding it whole on disk, so the only boundaries were 0/48 plus the boomerang's — 28 layers went to a peer that could take 9, twice. Explains why `no route fits the peers' advertised memory` appeared 36 times in one node's log the same day. Evidence: `docs/invariants/scheduling.md` |
+
 ### P4 — test and infrastructure
 
 | # | Bug | Why it ranks here |
