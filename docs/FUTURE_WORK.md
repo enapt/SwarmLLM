@@ -31,7 +31,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Why it ranks here |
 |---|---|---|
-| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. **The instrument shipped inert TWICE** — blind to hand-offs until 2026-09-09, then writing into a trace not yet registered until later the same day, found by driving a request. Both fixed on main, **neither released**, so there is still not one sample. Needs field data, not tuning |
+| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation. **The instrument shipped inert TWICE**, both fixed on main. **First 15 field samples collected 2026-09-09** from a dev node in the real swarm: actual/predicted 0.34-6.16, median 1.20, and the prediction is nearly FLAT in reply length while the actual is not — 2 vs 192 tokens predicted 1.6x apart, actual 5.3x apart. Dominant error looks per-PEER. **Still not enough to tune on**, and the released binary records nothing |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
 | 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
@@ -632,9 +632,52 @@ guard whose input nothing filled: an instrument that cannot observe the case it 
 built for reads exactly like a case that does not occur. **Twice over, here — and the
 thing that found the second one was running one request, not reading the diff.**
 
-⚠ **Still unverified in the field.** The fix is on `main` and the live node runs the
-released v0.3.166, which does not have it. The first `predicted_ms=` in a log is the
-evidence this now works; until a release carries it, there is none.
+✅ **VERIFIED 2026-09-09, and the first field data is below.** Verified without waiting
+for a release: a dev build carrying the fix, run as an ordinary node on port 8819 with
+its own data dir and NO local models, bootstrapped into the real swarm (7 peers). Every
+request had to route remotely. Fifteen samples where there had never been one.
+
+**First field data — collect only, do NOT tune from it.**
+
+| reply tokens | prompt | predicted_ms | actual_ms | actual/predicted | peer |
+|---|---|---|---|---|---|
+| 2 | 19 | 999 | 1046 | 1.05 | bf7b3263 |
+| 2 | 19 | 1224 | 1399 | 1.14 | bf7b3263 |
+| 6 | 16 | 3560 | 9577 | 2.69 | 99aafc41 |
+| 8 | 15 | 2555 | 873 | 0.34 | bf7b3263 |
+| 8 | 15 | 5282 | 14526 | 2.75 | 99aafc41 |
+| 16 | 15 | 1573 | 4824 | 3.07 | bf7b3263 |
+| 16 | 15 | 899 | 907 | 1.01 | bf7b3263 |
+| 17 | 15 | 1202 | 1820 | 1.51 | bf7b3263 |
+| 32 | 15 | 2555 | 1192 | 0.47 | bf7b3263 |
+| 49 | 20 | 2982 | 1336 | 0.45 | bf7b3263 |
+| 52 | 20 | 1583 | 9757 | 6.16 | 225e6fe7 |
+| 119 | 27 | 1797 | 2137 | 1.19 | bf7b3263 |
+| 119 | 27 | 1546 | 3693 | 2.39 | 225e6fe7 |
+| 181 | 26 | 2266 | 2726 | 1.20 | bf7b3263 |
+| 192 | 26 | 1587 | 5538 | 3.49 | 225e6fe7 |
+
+n=15, actual/predicted min 0.34, median 1.20, max 6.16. Two models
+(llama-3.2-1b-q8-0, llama-3.2-3b-q4-k-m), every route a `segments=1` hand-off.
+
+**What this says, and what it does not.**
+
+- **The prediction is nearly flat in reply length while the actual is not.** Replies of
+  2 and 192 tokens drew predictions of 999 ms and 1587 ms — a factor of 1.6 — against
+  actuals of 1046 ms and 5538 ms, a factor of 5.3. That is the structural shape this
+  entry is about: `ASSUMED_FORWARD_PASSES = 64` is a constant, so the model prices a
+  2-token reply and a 192-token reply almost alike.
+- **The dominant error is per-PEER, not per-token.** `99aafc41` was under-predicted on
+  both its samples (2.69, 2.75) and `bf7b3263` straddles 1.0 (0.34-3.07). Any tuning of
+  the forward-pass count that ignores this is fitting peer variance.
+- **It is not enough to tune on, and it is not a controlled experiment.** Fifteen
+  samples, two models, three peers, other people's machines under unknown load, one
+  short session. Nothing here separates the forward-pass count from the per-token
+  network term — which was the open question and remains it.
+
+⚠ **The released binary still does not have the fix**, so ordinary traffic on the live
+node is still recording nothing. Everything above came from a dev node run for the
+purpose.
 
 **The half of this entry's hypothesis about `latency_ms` being a ping is already
 false**: `get_peer_metrics` has preferred `ack_srtt_ms` — measured on real forwards —
