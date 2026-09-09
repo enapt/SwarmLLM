@@ -224,39 +224,36 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2507 lib (dev,claude-subscription) — re-measured 2026-09-09, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 83 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.167-alpha (2026-09-09, tag `aed7e03b` on commit
-`2efdad8d`).** Gate clean throughout: `cargo audit` shows only the two
-`hickory-proto` advisories and `paste`, all documented in `SECURITY.md`; **CI
-13/13 and Cache warm 3/3 on the BUMP commit** (a version bump edits
-`Cargo.lock`, so Cache warm re-ran — checked job-by-job, not by the workflow
-summary); 25 assets, not draft, `latest`; **smoke 9/9 + shapes 7/7 on the
-DOWNLOADED artifact against a .166 baseline taken FIRST that scored the same**,
-including the probabilistic `greedy check has a live control`.
+**Released and deployed: v0.3.168-alpha (2026-09-09, tag `1159b3ab` on commit
+`bb906645`).** Gate: audit as documented; **CI 13/13 on the TAGGED commit**;
+**Cache warm 3/3 on the BUMP commit `ab75ceda`** (the docs commit after it
+changed no dependency so did not re-trigger it — checked by sha); 25 assets,
+`latest`, not draft; **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact**
+against a .167 baseline taken FIRST. Both nodes verified: ids and
+`identity.key` md5 unchanged, installed binary byte-identical to the download,
+deb hash re-verified AFTER transfer, journal "-- No entries --", paired at
+105 ms, 0 ERROR, inference confirmed. Rollback
+`~/.local/bin/swarmllm.0.3.167-alpha.bak`, backups pruned to newest 3.
 
-Both nodes verified. Local `225e6fe7f2b5cd74` — CUDA artifact, published sha256
-matched AND the installed binary byte-identical to the download, `ggml_cuda_init`
-present, 0 ERROR since startup, node id and `identity.key` md5 unchanged,
-inference confirmed in 4 s; rollback `~/.local/bin/swarmllm.0.3.166-alpha.bak`,
-backups pruned to newest 3. Proxmox `9684263580c6660f` — .deb `0.3.167-alpha-1`
-over `0.3.166-alpha-1`, **hash re-verified AFTER transfer on the far side**,
-`active` + `enabled`, no `.dpkg-old`, `identity.key` md5 unchanged, journal
-errors "-- No entries --". Both paired at 99 ms.
+**What it carries**: a machine's memory limit now decides WHERE a model is cut,
+not only whether the cut fits (report #029 — a capacity-respecting route was
+previously often INEXPRESSIBLE, which is why `no route fits the peers'
+advertised memory` appeared 36 times in one log); the new cut points are kept
+only if they fit the sub-range budget (they took a routing call from
+microseconds to 4.6 s with 42 candidates); and an unservable model now names
+the whole missing range ("layers 35-40") rather than only where the gap starts.
 
-**What it carries**: a reply can survive losing a machine mid-answer (measured
-P 0.119 → 0.997); a peer is no longer handed more layers than it says it can
-hold while a route that fits exists; the routing cost model's predictions
-finally reach the log; the KV refusal says what its figure is made of.
+⚠ **Report #029's fix is NOT field-verified.** A node carrying it joined the
+live swarm, but the 14B the report is about had layers 35-41 on no reachable
+peer — a real coverage gap, so the scenario could not be reproduced. What was
+established is no regression.
 
-✅ **The `predicted_ms` instrument is CONFIRMED WORKING on the released binary** —
-first sample from ordinary traffic: `total_ms=3781 predicted_ms=7823
-assumed_forward_passes=64` (cold estimator, ratio 0.48). Item 3 can now
-accumulate field data from normal use for the first time.
-
-⚠ **UNRELEASED on main since .167: report #029's fix** — a machine's memory
-limit is now a split POINT, not only a cap. Without it a capacity-respecting
-route was not passed over but INEXPRESSIBLE, which is why `no route fits the
-peers' advertised memory` appeared 36 times in one node's log. Behaviour change;
-release-worthy.
+⚠ **The .168 release build FAILED first time, on infrastructure, not code.**
+All three Linux jobs died on `apt-get update` fetching the runner image's
+Google Chrome repo ("Hash Sum mismatch"); Windows and macOS were fine and the
+release published as a DRAFT with 12 of 25 assets. `gh run rerun --failed`
+fixed it. The step now retries three times clearing the apt lists between
+attempts. **The same pattern is still un-retried in 4 places in `ci.yml`.**
 
 **Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
