@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.168-alpha] — 2026-09-09
+
+### Fixed
+
+- **A machine's memory limit now decides where a model is cut, not only whether
+  the cut fits.** The planner chose split points using what each machine holds
+  on disk, and checked how much it could actually load only afterwards, to
+  reject a piece that was too big. A rejection can turn down the piece the
+  planner offers but cannot offer the one that would have fitted — so when no
+  shard boundary happened to fall where memory ran out, a plan every machine
+  could afford was not merely passed over, it could not be described at all.
+  Reported from a live node: a 48-layer model whose four machines could hold 17,
+  9, 14 and 19 layers between them was cut into a 28-layer piece and handed to a
+  machine that could take nine, twice in a row, while the node with seventeen
+  layers spare was split into fragments of one, three and thirteen. This also
+  explains why the message about no route fitting the machines' advertised
+  memory appeared thirty-six times in one node's log: mostly such routes were
+  never on offer.
+- **A model that cannot be served now says how much of it is missing.** The
+  error named the first layer nobody could serve; it now names the whole gap
+  ("layers 35-40"), which is the difference between knowing something is
+  missing and knowing what to fetch.
+
+### Changed
+
+- The new cut points are kept only when they fit the same budget the planner
+  already holds itself to. Considering them grows with the square of the
+  boundaries in each range, and with forty-two machines that took a routing
+  decision — which sits on the request's own path — from microseconds to four
+  and a half seconds.
+
 ## [0.3.167-alpha] — 2026-09-09
 
 ### Added
