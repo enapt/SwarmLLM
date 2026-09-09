@@ -1677,6 +1677,79 @@ impl PipelineExecutor {
         let mut abandoned = failed_segment.node_id.clone();
         let mut last_failure: Option<String> = Some(original_failure.to_string());
 
+        // A stand-in cannot continue a reply that is already under way.
+        //
+        // The forward below carries the CURRENT step and nothing else, and the
+        // KV cache is keyed by `(layer range, request id)` — so a machine that
+        // has not served this segment for this request holds nothing, and no
+        // path rebuilds it. `split::executor` then takes `kv_offset` from the
+        // cache rather than from `index_pos`, and no check disagrees, so the
+        // replacement answers from the current token alone and the reply
+        // carries on regardless.
+        //
+        // Measured (`examples/failover_kv_probe.rs`, llama-3.2-3b): replacing 4
+        // of 28 layers takes the probability of the token the healthy machine
+        // would have chosen from 0.997 to 0.119; half the model takes it to
+        // 0.005. Both API surfaces sample by default, so that diverges at once.
+        // Nothing errors and nothing warns — the reply just stops being the
+        // model's.
+        //
+        // **There is no safe early window**: after ONE decode step it is worse
+        // (0.0000), because what is missing is the PROMPT, which the prompt
+        // pass wrote and the stand-in never saw. So the test is the work kind,
+        // not how far in we are.
+        //
+        // Ending here is not a lost reply. `should_retry_after` retries this
+        // variant when a remote segment was involved, and a retry re-runs from
+        // the prompt on a fresh route — a correct whole answer, which beats a
+        // long one that is quietly wrong. Where the reply has already been
+        // streamed the retry is suppressed and the reader keeps what they were
+        // sent; where it has not, `note_salvaged_reply` hands back everything
+        // generated before the failure, marked unfinished.
+        //
+        // See `docs/FUTURE_WORK.md` § "A failover after the prompt pass
+        // silently loses the failed segment's KV context".
+        if !failover_can_restore_state(sequence_num) {
+            self.cancel_segment_on(&abandoned, request_id, failed_idx)
+                .await;
+            tracing::warn!(
+                request_id = %request_id,
+                failed_segment = failed_idx,
+                failed_node = %failed_segment.node_id,
+                failed_layer_range = ?failed_segment.layer_range,
+                sequence_num,
+                index_pos,
+                last_failure = ?last_failure,
+                standbys_covering_this_segment = self
+                    .assignment
+                    .standbys
+                    .iter()
+                    .filter(|s| crate::inference::scheduler::standby_covers(
+                        s,
+                        failed_segment.layer_range
+                    ))
+                    .count(),
+                "DIAG: not failing over mid-reply — a stand-in holds none of this \
+                 segment's conversation state and would answer from the current \
+                 token alone"
+            );
+            // Bar the machine that just dropped, for this request only. The
+            // retry this error invites re-plans, and without this it re-learns
+            // the same holder and reproduces the same failure — the pairing
+            // `is_transient_remote_failure`'s doc calls "what makes the retry
+            // actually work". `tried` holds only the failed node here, since
+            // this returns before any standby is attempted.
+            for node in std::iter::once(&failed_segment.node_id).chain(tried.iter()) {
+                self.shared_state
+                    .blacklist_holder_for_request(request_id, node);
+            }
+            return Err(SwarmError::SegmentFailoverExhausted(cannot_resume_message(
+                failed_idx,
+                sequence_num,
+                last_failure.as_deref(),
+            )));
+        }
+
         loop {
             self.cancel_segment_on(&abandoned, request_id, failed_idx)
                 .await;
@@ -2063,6 +2136,54 @@ struct FailoverInput<'a> {
     /// "OutboundFailure" in the message text, and the message no longer carried
     /// it.
     original_failure: &'a str,
+}
+
+/// Can a stand-in reproduce what the machine it replaces would have computed?
+///
+/// Only on the prompt pass. There the stand-in is handed the whole prompt and
+/// builds its own KV cache, which is the case standbys were designed for and the
+/// only one every existing failover test exercises. After it, the cache the
+/// failed machine had accumulated is gone and nothing rebuilds it.
+///
+/// The test is the WORK KIND rather than the elapsed reply, because the missing
+/// state is the prompt itself — failing over one token in is measurably worse
+/// than twenty-four tokens in, not better (gotcha #508).
+pub(super) fn failover_can_restore_state(sequence_num: u32) -> bool {
+    matches!(
+        super::work_kind_for(sequence_num),
+        crate::daemon::state::WorkKind::Prefill
+    )
+}
+
+/// Why a reply already under way was ended rather than moved to another machine.
+///
+/// Deliberately NOT `exhausted_message`'s wording: standbys may well have been
+/// available here, and saying "none available" would send an operator looking
+/// for capacity they already have. Same variant, because the next step is the
+/// same one — retry, or hold the model locally so the reply never depends on a
+/// remote segment.
+pub(super) fn cannot_resume_message(
+    segment: usize,
+    sequence_num: u32,
+    last_failure: Option<&str>,
+) -> String {
+    let base = format!(
+        "Segment {segment} lost its machine {sequence_num} tokens into the reply, and a \
+         stand-in cannot continue it — the replacement holds none of the conversation \
+         state the failed machine had built"
+    );
+    match last_failure.map(str::trim).filter(|s| !s.is_empty()) {
+        None => base,
+        Some(reason) => {
+            let shown: String = reason.chars().take(EXHAUSTED_REASON_MAX_CHARS).collect();
+            let ellipsis = if shown.len() < reason.len() {
+                "…"
+            } else {
+                ""
+            };
+            format!("{base} (cause: {shown}{ellipsis})")
+        }
+    }
 }
 
 pub(super) fn exhausted_message(segment: usize, last_failure: Option<&str>) -> String {

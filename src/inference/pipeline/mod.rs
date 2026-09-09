@@ -2242,3 +2242,66 @@ mod peer_error_recovery_tests {
         assert!(err.to_string().contains("the card fell out"), "got {err:?}");
     }
 }
+
+#[cfg(test)]
+mod failover_state_tests {
+    use super::distributed::{cannot_resume_message, failover_can_restore_state};
+
+    /// A stand-in can only reproduce the failed machine on the PROMPT PASS.
+    ///
+    /// After it, the KV cache the failed machine accumulated is gone: the
+    /// forward carries the current step alone, the cache is keyed by
+    /// `(layer range, request id)` so a machine that has not served this
+    /// segment holds nothing, and `split::executor` then reads `kv_offset` from
+    /// the cache rather than from `index_pos`. Measured in
+    /// `examples/failover_kv_probe.rs`: replacing 4 of 28 layers takes the
+    /// probability of the healthy machine's own token from 0.997 to 0.119.
+    #[test]
+    fn a_stand_in_can_only_reproduce_the_failed_machine_on_the_prompt_pass() {
+        assert!(
+            failover_can_restore_state(0),
+            "the prompt pass hands the stand-in the whole prompt, so it builds \
+             its own cache — this is the case standbys exist for and must keep \
+             working"
+        );
+
+        // And every step after it, equally. There is deliberately no "recent
+        // enough to be safe" window: what the stand-in is missing is the
+        // PROMPT, so one token in is measurably worse than twenty-four
+        // (P = 0.0000 against 0.119), not better.
+        for seq in [1u32, 2, 8, 24, 500] {
+            assert!(
+                !failover_can_restore_state(seq),
+                "a reply already under way (step {seq}) cannot be continued by a \
+                 machine that holds none of its state"
+            );
+        }
+    }
+
+    /// The refusal must not borrow the wording of the case where no standby
+    /// existed — here one may well have.
+    #[test]
+    fn the_refusal_says_the_stand_in_cannot_continue_not_that_none_was_free() {
+        let m = cannot_resume_message(3, 412, Some("connection closed"));
+        assert!(m.contains("Segment 3"), "{m}");
+        assert!(
+            m.contains("412"),
+            "the reply's length is what makes this cost: {m}"
+        );
+        assert!(
+            m.contains("cannot continue"),
+            "the reason must name the missing state: {m}"
+        );
+        assert!(
+            !m.contains("no standby available"),
+            "that is the OTHER cause, and sends an operator hunting for capacity \
+             they already have: {m}"
+        );
+        // The originating failure still travels, as it does on the sibling.
+        assert!(m.contains("connection closed"), "{m}");
+
+        // And it stands alone when there is no cause to report.
+        let bare = cannot_resume_message(0, 1, None);
+        assert!(!bare.contains("cause:"), "{bare}");
+    }
+}

@@ -747,16 +747,23 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
         )),
         SwarmError::SegmentFailoverExhausted(_) => Some((
             "segment_failover_exhausted",
-            // Deliberately does NOT promise that retrying works. The condition
-            // is "no other machine was free to take over" — so where the failed
-            // node is the only reachable holder, a retry rebuilds the SAME route
-            // and fails identically. Measured on the live swarm 2026-08-25: six
-            // consecutive retries over about an hour, against a hint that said
-            // "usually momentary — try again". Advice that cannot work is the
-            // trap gotcha #295 exists for, so this now says what would actually
-            // change the outcome.
-            "A computer running part of this model stopped responding, and no \
-             other machine had the missing part free to take over. Retrying may \
+            // Deliberately does NOT promise that retrying works. Where the
+            // failed node is the only reachable holder, a retry rebuilds the
+            // SAME route and fails identically. Measured on the live swarm
+            // 2026-08-25: six consecutive retries over about an hour, against a
+            // hint that said "usually momentary — try again". Advice that cannot
+            // work is the trap gotcha #295 exists for, so this says what would
+            // actually change the outcome.
+            //
+            // The CAUSE clause is deliberately general, because this variant now
+            // carries two of them: no machine was free, and — since 2026-09-09 —
+            // a machine was free but could not continue a reply already under
+            // way, holding none of its conversation state. Both get the same
+            // next step, which is why they share a variant; naming only the
+            // first would send an operator hunting for capacity they already
+            // have.
+            "A computer running part of this model stopped responding, and the \
+             answer could not be continued on another machine. Retrying may \
              work if it was a brief hiccup — but if it keeps failing, this model \
              is being held by too few machines right now. Pick a model the \
              dashboard marks as ready, or fetch this one with \

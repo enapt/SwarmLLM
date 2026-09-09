@@ -4658,3 +4658,114 @@ fn the_advertised_speed_guard_catches_the_card_presence_form() {
          empty:\n---\n{real_window}\n---"
     );
 }
+
+/// Does this `failover_segment` body ask whether a stand-in could reproduce the
+/// failed machine, BEFORE it goes looking for one?
+fn failover_checks_state_before_searching(body: &str) -> bool {
+    let Some(check) = body.find("failover_can_restore_state(") else {
+        return false;
+    };
+    // The standby search is the thing that must not be reached first.
+    match body.find("self\n                .assignment\n                .standbys") {
+        Some(search) => check < search,
+        // No search found (renamed or reshaped) — the ordering claim cannot be
+        // made, so require only that the question is asked at all.
+        None => true,
+    }
+}
+
+/// A reply already under way is never moved to a machine that cannot continue it.
+///
+/// `failover_segment` re-sends the current step alone, and the KV cache is keyed
+/// by `(layer range, request id)` — so a stand-in holds nothing for this segment
+/// and nothing rebuilds it. `split::executor` then takes `kv_offset` from the
+/// cache rather than from `index_pos`, and no check disagrees, so the
+/// replacement answers from the current token alone while the reply carries on.
+///
+/// Measured in `examples/failover_kv_probe.rs` on llama-3.2-3b: replacing 4 of
+/// 28 layers takes the probability of the token the healthy machine would have
+/// chosen from 0.997 to 0.119; half the model takes it to 0.005. Nothing errors
+/// and nothing warns, which is why only a guard keeps it fixed.
+///
+/// The unit tests beside the predicate cannot pin this: they would all still
+/// pass with the call removed from `failover_segment`, which is the one edit
+/// that reintroduces the defect (gotcha #502 — assert the PATH, not the
+/// outcome).
+#[test]
+fn a_reply_under_way_is_never_moved_to_a_machine_that_cannot_continue_it() {
+    let root = repo_root();
+    let rel = "src/inference/pipeline/distributed.rs";
+    let src = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+    let body = fn_body(&src, "    async fn failover_segment(")
+        .unwrap_or_else(|| panic!("{rel}: failover_segment not found — has it been renamed?"));
+
+    assert!(
+        failover_checks_state_before_searching(body),
+        "{rel}: `failover_segment` no longer asks `failover_can_restore_state` before \
+         looking for a stand-in.\nA mid-reply takeover computes from the current token \
+         alone — measured at P(healthy machine's token) = 0.119 replacing just 4 of 28 \
+         layers — and nothing errors or warns.\nSee docs/FUTURE_WORK.md § \"A failover \
+         after the prompt pass silently loses the failed segment's KV context\"."
+    );
+}
+
+/// The guard above must be able to SEE the violation it exists to catch, in the
+/// form it would really take: the check deleted, the search left in place.
+#[test]
+fn the_mid_reply_failover_guard_catches_a_body_that_searches_first() {
+    let violation = r#"
+    async fn failover_segment(
+        &mut self,
+        failed_idx: usize,
+    ) -> Result<LayerResult, SwarmError> {
+        loop {
+            let standby = self
+                .assignment
+                .standbys
+                .iter()
+                .find(|s| standby_covers(s, failed_segment.layer_range))
+                .cloned();
+        }
+}
+"#;
+    assert!(!failover_checks_state_before_searching(violation));
+
+    // And the ordering half: asking only AFTER the search is no guard at all.
+    let too_late = r#"
+    async fn failover_segment(
+        &mut self,
+    ) -> Result<LayerResult, SwarmError> {
+        loop {
+            let standby = self
+                .assignment
+                .standbys
+                .iter()
+                .find(|s| standby_covers(s, failed_segment.layer_range))
+                .cloned();
+            if !failover_can_restore_state(sequence_num) {
+                return Err(oops);
+            }
+        }
+}
+"#;
+    assert!(!failover_checks_state_before_searching(too_late));
+
+    let good = r#"
+    async fn failover_segment(
+        &mut self,
+    ) -> Result<LayerResult, SwarmError> {
+        if !failover_can_restore_state(sequence_num) {
+            return Err(oops);
+        }
+        loop {
+            let standby = self
+                .assignment
+                .standbys
+                .iter()
+                .find(|s| standby_covers(s, failed_segment.layer_range))
+                .cloned();
+        }
+}
+"#;
+    assert!(failover_checks_state_before_searching(good));
+}

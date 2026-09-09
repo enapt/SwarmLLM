@@ -26,7 +26,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. Instrumented 2026-09-08; **the instrument could not see a hand-off until 2026-09-09** — zero samples in ten hours of live traffic. Needs field data, not tuning |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
-| 18 | A failover after the prompt pass silently loses the failed segment's KV context | **NEW 2026-09-09, MEASURED.** A stand-in holds none of the failed node's cache and nothing rebuilds it. On llama-3.2-3b the probability of the token the healthy machine would have chosen falls from **0.997 to 0.119** with only 4 of 28 layers replaced, and to **0.005** with half the model. Fails no check, logs nothing. **Decides what item 17 is worth**: more standbys means more requests taking this path |
+| 18 | A failover after the prompt pass loses the failed segment's KV context | **MEASURED and STOPPED 2026-09-09 (shape 1).** A stand-in holds none of the failed node's cache; P(healthy machine's token) fell from 0.997 to **0.119** replacing 4 of 28 layers. `failover_can_restore_state` now refuses mid-reply, so the request ends honestly instead of drifting. **Residual: mid-reply failover no longer happens at all** — shape 2 (retain boundary activations) is what would make it work, and what item 17 needs |
 
 ### P3 — correctness-adjacent, or blocked on a measurement
 
@@ -298,9 +298,23 @@ because the reader would watch the answer restart.
 
 Three shapes, none free, in increasing order of cost:
 
-1. **Retain nothing and refuse.** Mid-decode, with no cache to inherit, end the
-   request and return the salvage. Cheapest and honest; loses replies a degraded
-   continuation would have finished.
+1. **Retain nothing and refuse. SHIPPED 2026-09-09.**
+   `distributed::failover_can_restore_state` answers "could a stand-in reproduce
+   the machine it replaces?" — true only on the prompt pass — and
+   `failover_segment` asks it before looking for one. A reply already under way
+   ends with `SegmentFailoverExhausted` carrying `cannot_resume_message`, and
+   the nodes that just failed are barred for that request id so the retry
+   re-plans rather than re-learning them.
+   **This is not a lost reply.** `should_retry_after` retries the variant when a
+   remote segment was involved, so a non-streamed request re-runs from the
+   prompt on a fresh route — a correct whole answer, which beats a long one that
+   is quietly wrong. Where the reply was streamed the retry is suppressed and
+   the reader keeps what they were sent; where it was not, `note_salvaged_reply`
+   returns everything generated before the failure, marked unfinished.
+   Pinned by `a_reply_under_way_is_never_moved_to_a_machine_that_cannot_continue_it`
+   in `tests/repo_consistency.rs`, which checks the CALL SITE rather than the
+   predicate — the unit tests beside it all still pass with the call removed,
+   which is the one edit that reintroduces the defect.
 2. **Retain the boundary activations for segments that have a standby.** Bounded
    by choosing which segments to protect. Makes failover genuinely correct where
    it is armed, and is the only shape that makes item 17 worth building.
