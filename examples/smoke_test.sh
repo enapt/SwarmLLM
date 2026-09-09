@@ -44,6 +44,16 @@ cat > "$D/config.toml" <<'TOML'
 enabled = false
 prune_enabled = false
 
+# ISOLATED FROM THE NETWORK, NOT FROM THE GRAPHICS CARD. The three inference
+# checks load a model, and they compete for VRAM with whatever else is on this
+# machine — including the node you actually run. Observed 2026-09-09: this
+# script reported "inference returns non-empty text FAIL" and "Anthropic
+# endpoint returns text FAIL" on a binary that had passed 9/9 twice the same
+# day, because the live node had a 5.1 GB worker resident and idle, leaving
+# ~2.5 GB of an 8 GB card. `swarmllm unload <model>` freed it and the same
+# binary went 9/9 again. So before reading two inference failures as a
+# regression, check `nvidia-smi` and `swarmllm status`.
+#
 # Off the public swarm entirely. Every check here is against models this
 # machine holds, so peers add nothing — and a throwaway node that joins the
 # real network advertises the live node's shards under a second identity for
