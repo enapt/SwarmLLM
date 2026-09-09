@@ -597,6 +597,25 @@ pub(super) async fn execute_request(
     // First request for a model may miss the cache, but subsequent ones benefit.
     let _ = shared_state.dht_query_tx.try_send(model_id.clone());
 
+    // The trace goes into `active_traces` BEFORE the scheduler runs, because
+    // the scheduler writes into it.
+    //
+    // `note_predicted_route_cost` finds the trace by request id and is a no-op
+    // when there is no entry — so with the insert after assembly, as it was,
+    // EVERY prediction the scheduler recorded went nowhere. That is the second
+    // time this instrument has shipped inert: `45d11f56` wired five more of
+    // `assemble_pipeline_for`'s six returns, and all five still wrote into a
+    // map the request was not in yet. Measured on the live node 2026-09-09 —
+    // v0.3.166, five peers, five hours, a deliberately remote request that
+    // completed fine, and `predicted_ms` absent from its completion line.
+    //
+    // Safe to register early: `release_request_state` is called after
+    // `execute_request` on BOTH the Ok and Err paths of both dispatch paths, so
+    // an assembly failure cannot strand the entry — which matters, because
+    // `active_traces` is the oracle behind `model_is_in_use` and a stranded
+    // entry would refuse to delete that model for the life of the daemon.
+    shared_state.active_traces.insert(request.id, trace.clone());
+
     let schedule_start = std::time::Instant::now();
     tracing::info!(
         request_id = %request.id,
@@ -717,14 +736,13 @@ pub(super) async fn execute_request(
         );
     }
 
-    // Store assignment in shared state for monitoring. `active_traces` is
-    // inserted here and removed at every site that removes `active_pipelines`,
-    // so the two share one lifetime and one cleanup path.
+    // Store assignment in shared state for monitoring. `active_traces` was
+    // inserted before scheduling (see above) and is removed at every site that
+    // removes `active_pipelines`, so the two still share one cleanup path.
     let assignment_ref = assignment.clone();
     shared_state
         .active_pipelines
         .insert(request.id, assignment.clone());
-    shared_state.active_traces.insert(request.id, trace.clone());
 
     // Execute the distributed pipeline
     let execute_start = std::time::Instant::now();

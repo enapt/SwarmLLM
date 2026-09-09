@@ -4753,6 +4753,90 @@ fn failover_checks_state_before_searching(body: &str) -> bool {
     }
 }
 
+/// Is the request's trace registered BEFORE the scheduler is asked for a route?
+///
+/// The scheduler writes its cost prediction through `active_traces`, keyed by
+/// request id, and the write is a no-op when there is no entry. So the insert
+/// has to precede the assembly call or every prediction is silently discarded.
+fn trace_is_registered_before_scheduling(body: &str) -> bool {
+    let insert = body.find("active_traces.insert(");
+    let assemble = body
+        .find("assemble_awaiting_dht(")
+        .into_iter()
+        .chain(body.find("assemble_pipeline_for("))
+        .min();
+    match (insert, assemble) {
+        (Some(i), Some(a)) => i < a,
+        // No assembly here means nothing to order against; no insert at all is
+        // a different defect and the caller asserts on it separately.
+        _ => false,
+    }
+}
+
+/// The scheduler's cost prediction reaches the trace it is written into.
+///
+/// `note_predicted_route_cost` finds the trace by request id and does nothing
+/// when the request is not in `active_traces`. `execute_request` used to insert
+/// the trace AFTER assembling the pipeline, so every prediction the scheduler
+/// recorded went nowhere — and this instrument had already shipped inert once
+/// before (`45d11f56` wired five more of `assemble_pipeline_for`'s six returns,
+/// all of which still wrote into a map the request was not yet in).
+///
+/// Measured on the live node 2026-09-09: v0.3.166, five peers, five hours of
+/// uptime, a deliberately remote request that completed normally, and
+/// `predicted_ms` absent from its own completion line.
+///
+/// Asserts on the ORDER in the source, because the unit test beside the
+/// scheduler cannot: it inserts the trace itself before calling the scheduler,
+/// which manufactures exactly the precondition production was failing to
+/// provide (gotcha #502).
+#[test]
+fn the_route_prediction_reaches_a_trace_that_is_already_registered() {
+    let root = repo_root();
+    let rel = "src/inference/router/distributed_exec.rs";
+    let src = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+    let body = fn_body(&src, "async fn execute_request(")
+        .unwrap_or_else(|| panic!("{rel}: execute_request not found — has it been renamed?"));
+
+    assert!(
+        body.contains("active_traces.insert("),
+        "{rel}: `execute_request` no longer registers the request's trace at all — \
+         the completion line and every prediction written into it are lost."
+    );
+    assert!(
+        trace_is_registered_before_scheduling(body),
+        "{rel}: `execute_request` registers the trace AFTER asking the scheduler for a \
+         route.\n`note_predicted_route_cost` is a no-op for a request that is not in \
+         `active_traces`, so every prediction the scheduler records is silently \
+         discarded — which is how this instrument shipped inert twice.\nSee \
+         docs/FUTURE_WORK.md item 3."
+    );
+}
+
+/// The guard above must see the violation in the form it really took: the
+/// insert present, but after the assembly.
+#[test]
+fn the_trace_registration_guard_catches_an_insert_after_assembly() {
+    let violation = r#"
+        let assignment = assemble_awaiting_dht(&scheduler, model_id, &local, request.id).await?;
+        shared_state.active_pipelines.insert(request.id, assignment.clone());
+        shared_state.active_traces.insert(request.id, trace.clone());
+    "#;
+    assert!(
+        !trace_is_registered_before_scheduling(violation),
+        "the guard cannot see a trace registered after the scheduler ran"
+    );
+
+    let correct = r#"
+        shared_state.active_traces.insert(request.id, trace.clone());
+        let assignment = assemble_awaiting_dht(&scheduler, model_id, &local, request.id).await?;
+    "#;
+    assert!(
+        trace_is_registered_before_scheduling(correct),
+        "the guard must accept the correct order"
+    );
+}
+
 /// A reply already under way is never moved to a machine that cannot continue it.
 ///
 /// `failover_segment` re-sends the current step alone, and the KV cache is keyed

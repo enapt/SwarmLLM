@@ -31,7 +31,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Why it ranks here |
 |---|---|---|
-| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. Instrumented 2026-09-08; **the instrument could not see a hand-off until 2026-09-09** — zero samples in ten hours of live traffic. Needs field data, not tuning |
+| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation, and the field A/B shows it wrong by ~5x on one topology. **The instrument shipped inert TWICE** — blind to hand-offs until 2026-09-09, then writing into a trace not yet registered until later the same day, found by driving a request. Both fixed on main, **neither released**, so there is still not one sample. Needs field data, not tuning |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
 | 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
@@ -613,10 +613,28 @@ deliberately-distributed requests across three models (`llama-3.2-1b`, `qwen2.5-
 `scheduler::note_route_prediction`; local-only routes are still excluded deliberately,
 having no route choice to explain.
 
+⚠⚠ **And it was STILL inert after that fix, for a second and unrelated reason —
+found 2026-09-09 by driving a request rather than by reading the code.**
+`note_predicted_route_cost` looks the trace up in `active_traces` and does nothing when
+there is no entry, and `execute_request` inserted the trace AFTER assembling the
+pipeline. So all five newly-wired returns wrote their prediction into a map the request
+was not in yet. Measured: v0.3.166 on the live node, five peers, five hours of uptime, a
+deliberately remote `llama-3.2-1b` request that completed normally in 25.7 s — its own
+completion line carries `route=distributed segments=1 total_ms=25681` and **no
+`predicted_ms`**. The insert now precedes scheduling, guarded by
+`the_route_prediction_reaches_a_trace_that_is_already_registered`, which asserts the
+ORDER in the source because the unit test beside the scheduler inserts the trace itself
+and so manufactures the very precondition production was failing to provide.
+
 **So any log older than 2026-09-09 has no hand-off samples in it, and their absence is
 not evidence that hand-offs are rare.** Same class as #495 shipping inert and #451's
 guard whose input nothing filled: an instrument that cannot observe the case it was
-built for reads exactly like a case that does not occur.
+built for reads exactly like a case that does not occur. **Twice over, here — and the
+thing that found the second one was running one request, not reading the diff.**
+
+⚠ **Still unverified in the field.** The fix is on `main` and the live node runs the
+released v0.3.166, which does not have it. The first `predicted_ms=` in a log is the
+evidence this now works; until a release carries it, there is none.
 
 **The half of this entry's hypothesis about `latency_ms` being a ping is already
 false**: `get_peer_metrics` has preferred `ack_srtt_ms` — measured on real forwards —
