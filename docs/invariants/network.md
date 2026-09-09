@@ -616,7 +616,7 @@ manifest gains the real hash and this merge then spreads it by gossip.
 Three things it must keep. The peer is NOT penalised — it may have served
 perfect bytes, and "cannot tell" is neither fine nor the peer's fault. The
 fetch must actually **happen** before a copy is discarded, which is why
-`AutoShardManager::complete_pending_origin_fetches` sits OUTSIDE the
+`AutoShardManager::complete_pending_shard_fetches` sits OUTSIDE the
 `auto_manage.enabled` gate — the same distinction already drawn for
 `try_idle_vram_unload`: that switch means "do not decide what to fetch on my
 behalf", not "abandon a shard this node already asked for". **Never throw away
@@ -661,7 +661,7 @@ second copy, and a raw display name is never a `ModelId`.
 curator-allowlist check for an HF `repo_id`. Splits on the first `/`
 and case-insensitively matches the prefix against
 `TRUSTED_HF_PUBLISHERS` (in `huggingface/watcher.rs`). Used by BOTH
-the watcher's trust-promotion path (`promote_trust_for_trending` →
+the watcher's trust-promotion path (`promote_trust_for_known_sources` →
 `min_downloads_for_repo` consumes the tiered 10k/100k threshold) AND
 the wishlist scorer (`compute_wishlist` Candidate-row pass — flat +10
 score bonus + `wishlist.why.trusted_publisher` why-tag). Any new

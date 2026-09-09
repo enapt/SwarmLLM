@@ -2015,7 +2015,7 @@ meaning "verified"**:
   In practice a locally-published model's publisher holds every shard and so
   publishes real hashes, making this rare.
 - ~~The origin fallback requires auto-manage to be running.~~ **CLOSED**:
-  `complete_pending_origin_fetches` runs on the auto-manage loop but OUTSIDE its
+  `complete_pending_shard_fetches` runs on the auto-manage loop but OUTSIDE its
   `enabled` gate — the same distinction already drawn for `try_idle_vram_unload`.
   The switch means "do not decide what to fetch on my behalf", not "abandon a
   shard this node already asked for". The rule it protects still stands for any

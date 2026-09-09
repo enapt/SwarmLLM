@@ -115,7 +115,7 @@ and `the_cap_is_inert_at_the_context_it_was_derived_from` pin both halves.
 (2026-08-25)
 — reclaim graphics memory from models nothing is using rather than demoting the
 requested one to the processor. Called from the admission-refusal branch in
-`get_or_spawn_worker`, BEFORE the CPU fallback is taken. **The exact sibling of
+`get_or_spawn`, BEFORE the CPU fallback is taken. **The exact sibling of
 `free_ram_for_admission`**, which has done reclaim-then-retry for the RAM budget
 since v0.3.111; the GPU side simply never had it, so a model that happened to
 load first kept the card for as long as it stayed resident and everything asked

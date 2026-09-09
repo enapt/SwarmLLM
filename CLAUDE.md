@@ -51,37 +51,37 @@ swarmllm/
 │   ├── swarmllm-frontend/  (embedded + dev-mode frontend asset serving)
 │   └── swarmllm-types/     (shared types crate: NodeId, ModelManifest, SwarmMessage, etc.)
 ├── src/
-│   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs
+│   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs, update_restart.rs
 │   ├── bin/       (launcher.rs — Windows GPU/CPU auto-selecting launcher)
-│   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update, get_model, remove_model, unload_model (`swarmllm unload` — retire a worker, keep the files), diagnostics (pasteable node report) — R150 `swarmllm get-model` reference-model opt-in)
+│   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update, get_model, remove_model, privacy, unload_model (`swarmllm unload` — retire a worker, keep the files), diagnostics (pasteable node report) — R150 `swarmllm get-model` reference-model opt-in)
 │   ├── config/    (mod, providers, credit, network, ops, node, inference)
 │   ├── daemon/    (mod, manifest, shard_loader, gpu_support (CUDA compute-capability floor + pre-Ampere CPU fallback), dispatch/, startup, background, helpers, supervisor)
 │   │   └── state/        (mod, activity, capacity, capacity_plan, credits, events, hf, metrics, models, peer_speed, perf_history, relay, removed_shards, repair, retained_replies (fast-path replies kept for ResendTokens, #438), tp_allreduce)
-│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer}, behaviour, discovery, protocol, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), helpers, pipeline_stream)
-│   ├── model/     (manifest, shard, distribution, registry, acquisition, huggingface/, auto_manage/, lora)
-│   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist)
+│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer,relay}, behaviour, discovery, protocol, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), helpers, pipeline_stream)
+│   ├── model/     (manifest, shard, distribution, registry, acquisition, reference (R150 get-model), huggingface/, auto_manage/, lora)
+│   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist, quant (R133 recommender))
 │   │   └── huggingface/  (mod, download, private_types, probe, search, shards, watcher, tests)
-│   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, attn_softmax (fused scale+softcap+mask+softmax CPU kernel), decode_attn (single-position CPU attention straight over the KV cache — +24% decode), fast_math (AVX2 expf + fused SiLU×up), cpu_pools (per-phase rayon pools: prefill wide, decode narrow), local_embedder, mem_bandwidth (measured memory bandwidth — what a CPU node advertises as its speed, replacing a hardcoded 50 GB/s assumption), model_worker, token_embedding (quantized token_embd, rows dequantized on lookup — CPU), process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), hedging (R136 L2), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler))
+│   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, attn_softmax (fused scale+softcap+mask+softmax CPU kernel), decode_attn (single-position CPU attention straight over the KV cache — +24% decode), fast_math (AVX2 expf + fused SiLU×up), cpu_pools (per-phase rayon pools: prefill wide, decode narrow), local_embedder, mem_bandwidth (measured memory bandwidth — what a CPU node advertises as its speed, replacing a hardcoded 50 GB/s assumption), model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), hedging (R136 L2), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler), cancel (the one cancellation signal), prefill_pacer, thermal)
 │   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
 │   │   ├── scheduler/    (mod, parallax, parallax_allocator, tests)
-│   │   ├── pipeline/     (mod, distributed, dsd, local, prompt, remote_generate, speculative, tensor_parallel, vision)
+│   │   ├── pipeline/     (mod, distributed, dsd, local, prompt, remote_generate, speculative, tensor_parallel, vision, hedge_dispatch (R136 L2), ngram_only_spec (R136 L1))
 │   │   ├── split/        (mod, model, loader, executor, kv_cache, kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, tests/)
 │   │   │   └── tests/    (mod, common, core, gqa, gemma2, moe_mla, llama4_glm4)
-│   │   ├── chat_template/ (mod, parser, eval, fallbacks, tests, fixtures/llama3_official.jinja)
+│   │   ├── chat_template/ (mod, parser, eval, fallbacks, tests, fixtures/{llama3,qwen3}_official.jinja)
 │   │   └── layers/       (mod, qwen35)
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
 │   ├── identity/  (keypair, nickname)
-│   ├── crypto/    (session, pipeline_seal, gossip_seal, key_rotation, provider_keys)
-│   ├── pool/      (types, crypto, manager/, forward, scope)
-│   ├── api/       (server, sse, tool_parse (local-model tool-call parser), admin, admin_providers, websocket, middleware, identity, pool, metrics, providers, claude_sub*, mod, openai/, anthropic/, mcp/, admin_hf/, admin_models/, claude_session/)
+│   ├── crypto/    (session, pipeline_seal, gossip_seal, relay_seal, key_rotation, provider_keys)
+│   ├── pool/      (types, crypto, manager/, forward, scope, invite (the `swarmpool://` v2 codec))
+│   ├── api/       (server, sse, tool_parse (local-model tool-call parser), admin, admin_providers, websocket, middleware, dashboard_trust (may this request be handed the API key?), tailscale, identity, pool, metrics, providers, claude_sub*, mod, openai/, anthropic/, mcp/, admin_hf/, admin_models/, claude_session/)
 │   ├── storage/   (db)
 │   └── health/    (monitor, rebalancer)
-├── frontend/      (index.html + 10 HTML templates, css/, js/{core/4,components/19,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/, fonts/ (IBM Plex woff2, SIL OFL — see LICENSE-THIRD-PARTY.md))
+├── frontend/      (ONE index.html carrying 11 `<template>` elements, css/, js/{core/4,components/19,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/, fonts/ (IBM Plex woff2, SIL OFL — see LICENSE-THIRD-PARTY.md))
 ├── python/        (swarmllm-client SDK)
 ├── integrations/openclaw/  (OpenClaw provider plugin, TypeScript — `npm test`; built on OpenClaw's own self-hosted-provider SDK helper; see its README)
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
-├── packaging/     (swarmllm.service + deb/{postinst,prerm} maintainer scripts — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
+├── packaging/     (swarmllm.service + aur/, homebrew/, rpm/ + deb/{postinst,prerm} maintainer scripts — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
 ├── docs/          (ARCHITECTURE, CREDITS_DESIGN, FUTURE_WORK, DIAGNOSTICS, REFERENCE_MODELS,
 │                 NETWORKING, NETWORKING_PLAN, TESTING)
 ├── docs/invariants/  (the evidence behind .claude/rules/architecture.md — 7 topic files)
@@ -99,8 +99,7 @@ swarmllm/
 │   ├── candle-flash-attn/     (cudart linked STATICALLY so the binary needs only the display driver;
 │   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19)
 │   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257)
-│   ├── libp2p-request-response/ (9 tests, `--lib`)
-│   └── float8/
+│   └── libp2p-request-response/ (11 tests, `--lib`)
 └── tests/         (integration tests)
 ```
 
@@ -163,7 +162,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`)
 - Dark/light/system theme toggle, CSS custom properties for theming
 - i18n: 1335 translation keys (1337 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key; parity + these counts are asserted by `tests/repo_consistency.rs` (update the count in BOTH CLAUDE.md and `docs/ARCHITECTURE.md` when adding keys). Every locale carries idiomatic native strings, not English fallback — a new key MUST be translated across all 21 locales (see `.claude/rules/i18n.md`). Per-batch history in `memory/`.
-- Frontend payload: **~1065 KB** (html 130 + css 247 + js 687), plus **one** locale at a time (~83 KB en; Thai is the largest at 150 KB) and **88 KB of bundled fonts** (`frontend/fonts/`, IBM Plex Latin subsets — NOT counted by the payload test, which sums `js|css|html` only) — the other 20 locales are never fetched. Measured byte-accurate and capped by `frontend_payload_stays_within_budget` in `tests/repo_consistency.rs`; the long-standing "< 200KB target" in this file was 5.6x out and nothing checked it. The cap is a regression budget, not a goal: it fails on a step change, not on ordinary growth.
+- Frontend payload: **~1109 KB** (html 131 + css 254 + js 724), plus **one** locale at a time (~86 KB en; Thai is the largest at 157 KB) and **89 KB of bundled fonts** (`frontend/fonts/`, IBM Plex Latin subsets — NOT counted by the payload test, which sums `js|css|html` only) — the other 20 locales are never fetched. Measured byte-accurate and capped by `frontend_payload_stays_within_budget` in `tests/repo_consistency.rs`; the long-standing "< 200KB target" in this file was 5.6x out and nothing checked it. The cap is a regression budget, not a goal: it fails on a step change, not on ordinary growth.
 - Communication: WebSocket for real-time, REST for initial load, SSE for chat streaming
 - WebSocket message types (only 5): `activity_event` (unified event bus — all subsystem events, toasts, prune history), `stats_update` (2s interval — stats, shard registry, acquisitions, **swarm_capacity** (R110), **wishlist** (R111), **hardware** (2026-09-06 — RAM/GPU/disk; read from a CACHE refreshed on a blocking thread at most every 6 s, because measuring it spawns `nvidia-smi` at ~90 ms and this payload is shared by every client)), `peer_list` (full peer snapshot on change), `models_changed` (shard download/load/prune signals dashboard refresh), `update_available` (new version detected)
 - Broadcast channels (only 2): `activity_tx` (ActivityEvent — 256 capacity) for all events + `dashboard_tx` (DashboardSignal enum — 32 capacity) for PeersChanged/ModelsChanged/UpdateAvailable signals

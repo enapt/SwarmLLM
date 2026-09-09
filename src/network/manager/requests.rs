@@ -859,7 +859,7 @@ impl NetworkManager {
                             // fetch belongs here.
                             //
                             // Two so far. Auto-manage being off is NOT one of
-                            // them: `complete_pending_origin_fetches` runs
+                            // them: `complete_pending_shard_fetches` runs
                             // outside that gate deliberately. Offline mode IS —
                             // `trigger_download` skips the HuggingFace branch
                             // entirely when it is set, by design, since the
