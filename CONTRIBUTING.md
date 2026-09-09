@@ -38,6 +38,17 @@ cargo clippy --all-targets -- -D warnings
 
 Zero clippy warnings. No exceptions.
 
+To have these run automatically before every push, enable the tracked hook once:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It also checks two things that are easy to miss locally and fail the whole CI
+run: that `Cargo.lock` is in step with `Cargo.toml`, and that the
+`swarmllm-types` crate's own tests still pass — that crate is a separate
+package, so a workspace-root `cargo test` never compiles them.
+
 ## Submitting a PR
 
 1. Fork the repo and create a branch off `main`.

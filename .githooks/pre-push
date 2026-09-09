@@ -1,0 +1,55 @@
+#!/bin/bash
+# Pre-push hook: run cargo fmt --check and cargo clippy before pushing.
+# Tracked in .githooks/ and activated by `git config core.hooksPath .githooks`
+# (see CONTRIBUTING.md). It used to live only in .git/hooks, which is not
+# version controlled, so no contributor ever received it.
+# Prevents CI failures from unformatted or clippy-warning code
+
+# Cargo.lock must match Cargo.toml. CI builds everything with `--locked`;
+# local builds do not, so a version bump committed without its lock file
+# passes every local check and then fails EVERY compiling job in CI while
+# fmt and audit pass — which reads like a code break and is not one.
+# Measured 2026-08-26: 9 of 12 CI jobs red for exactly this.
+# `cargo metadata --locked` answers it in well under a second.
+echo "Pre-push: checking Cargo.lock is in step..."
+cargo metadata --locked --format-version 1 >/dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "ERROR: Cargo.lock is out of date with Cargo.toml."
+    echo "       Run 'cargo metadata >/dev/null' and commit the updated Cargo.lock."
+    exit 1
+fi
+
+echo "Pre-push: checking cargo fmt..."
+cargo fmt --check 2>&1
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "ERROR: cargo fmt --check failed. Run 'cargo fmt' before pushing."
+    exit 1
+fi
+
+# The types crate is a SEPARATE package: `cargo test` and
+# `cargo clippy --all-targets` from the workspace root do not compile its
+# tests, so a change to a shared type (LayerForward, SwarmMessage, NodeId)
+# can break them invisibly. CI runs `cargo test -p swarmllm-types` as its own
+# step; this is that step. It takes well under a second.
+# Measured 2026-08-27: a new field on LayerForward broke a fixture there and
+# passed every other local check.
+echo "Pre-push: checking swarmllm-types..."
+# Report the line that carries the count, not the doc-test line that follows
+# it — `tail -3` printed "0 passed" while 36 tests had just gone green,
+# which reads exactly like a guard that is doing nothing.
+cargo test --locked -p swarmllm-types --quiet 2>&1 | grep -E "^test result|^error" | head -2
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "ERROR: swarmllm-types tests failed. CI runs these as a separate step."
+    exit 1
+fi
+
+echo "Pre-push: checking cargo clippy..."
+cargo clippy --all-targets -- -D warnings 2>&1
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "ERROR: cargo clippy failed. Fix warnings before pushing."
+    exit 1
+fi
+
+echo "Pre-push: all checks passed."
