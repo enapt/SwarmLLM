@@ -1021,6 +1021,7 @@ mod tests {
             &SwarmError::ModelIncompleteInSwarm {
                 model_id: "m".into(),
                 layer: 0,
+                span: crate::error::describe_missing_layers(0, 1),
             }
         ));
     }

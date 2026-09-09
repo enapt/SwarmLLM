@@ -198,8 +198,21 @@ pub enum SwarmError {
     /// already answered 503, while this one fired when SOME shards were missing
     /// and answered 500. Two readings of one situation — "the swarm hasn't got
     /// all of this model" — differing only by how much was absent.
-    #[error("No reachable node holds the part of {model_id} containing layer {layer}. A model can be listed, and even loaded here, while the peer that held that piece has gone")]
-    ModelIncompleteInSwarm { model_id: String, layer: u32 },
+    ///
+    /// Carries the WHOLE gap, not just where it starts. "layer 35" and "layers
+    /// 35-40" cost the same to compute — the scheduler is walking the coverage
+    /// when it fails — and the second tells an operator how much is missing and
+    /// therefore what to fetch. The first leaves them to discover the extent one
+    /// failed request at a time.
+    #[error("No reachable node holds {span} of {model_id}. A model can be listed, and even loaded here, while the peer that held that piece has gone")]
+    ModelIncompleteInSwarm {
+        model_id: String,
+        layer: u32,
+        /// Human-readable description of the missing range, e.g. "layer 35" or
+        /// "layers 35-40". Built by [`describe_missing_layers`] so the two
+        /// forms cannot drift apart at the call sites.
+        span: String,
+    },
 
     // Overload
     #[error("Service unavailable: {0}")]
@@ -313,6 +326,56 @@ pub fn reclassify_flattened_error(message: &str) -> Option<SwarmError> {
         return Some(SwarmError::SegmentFailoverExhausted(d));
     }
     None
+}
+
+/// Describe a missing layer range the way an operator needs to read it.
+///
+/// One layer says "layer 7"; several say "layers 7-12", end inclusive, because
+/// a half-open range printed to a person invites an off-by-one they cannot
+/// check. Shared so the error and anything else describing a gap agree.
+pub fn describe_missing_layers(from: u32, to_exclusive: u32) -> String {
+    if to_exclusive <= from.saturating_add(1) {
+        format!("layer {from}")
+    } else {
+        format!("layers {}-{}", from, to_exclusive - 1)
+    }
+}
+
+#[cfg(test)]
+mod missing_layer_span_tests {
+    use super::*;
+
+    /// The gap is described end-INCLUSIVE, and a single layer does not read as
+    /// a range.
+    ///
+    /// A half-open range printed to a person is an off-by-one they have no way
+    /// to check: told "layers 35-41" they fetch seven, told "layers 35-40" they
+    /// fetch six, and only one of those is what is missing.
+    #[test]
+    fn a_missing_range_reads_the_way_an_operator_will_act_on_it() {
+        assert_eq!(describe_missing_layers(7, 8), "layer 7");
+        assert_eq!(describe_missing_layers(35, 41), "layers 35-40");
+        // Degenerate and inverted inputs still say something true rather than
+        // producing "layers 5-4".
+        assert_eq!(describe_missing_layers(5, 5), "layer 5");
+        assert_eq!(describe_missing_layers(5, 4), "layer 5");
+    }
+
+    /// The whole message a caller sees names the model and the span.
+    #[test]
+    fn the_error_names_the_model_and_the_missing_span() {
+        let e = SwarmError::ModelIncompleteInSwarm {
+            model_id: "qwen2.5-14b".into(),
+            layer: 35,
+            span: describe_missing_layers(35, 41),
+        };
+        let text = e.to_string();
+        assert!(text.contains("qwen2.5-14b"), "{text}");
+        assert!(
+            text.contains("layers 35-40"),
+            "the message must name the whole gap, not just where it starts: {text}"
+        );
+    }
 }
 
 /// Classify an error into (HTTP status, client-safe message, error type).
@@ -898,6 +961,7 @@ mod tests {
             SwarmError::ModelIncompleteInSwarm {
                 model_id: "m".to_string(),
                 layer: 3,
+                span: crate::error::describe_missing_layers(3, 3 + 1),
             },
             SwarmError::PromptPrivacyUnavailable {
                 model_id: "m".into(),
@@ -1387,6 +1451,7 @@ mod tests {
         let incomplete = ApiError(SwarmError::ModelIncompleteInSwarm {
             model_id: "m".into(),
             layer: 0,
+            span: crate::error::describe_missing_layers(0, 1),
         })
         .into_response();
         let nothing_available =

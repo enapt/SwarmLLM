@@ -3690,9 +3690,23 @@ impl PipelineScheduler {
                         .first()
                         .map(|c| c.shard_id.model_id.0.as_str())
                         .unwrap_or("this model");
+                    // How far the gap runs: the next layer any reachable
+                    // candidate covers, or the end of the model if none does.
+                    // Cheap — we are already holding the candidate list — and
+                    // it turns "layer 35" into "layers 35-40", which is the
+                    // difference between knowing something is missing and
+                    // knowing what to go and fetch.
+                    let resumes_at = candidates
+                        .iter()
+                        .flat_map(|c| c.available_ranges.iter())
+                        .filter(|(a, b)| *b > current_layer && *a > current_layer)
+                        .map(|(a, _)| *a)
+                        .min()
+                        .unwrap_or(num_layers);
                     return Err(SwarmError::ModelIncompleteInSwarm {
                         model_id: model.to_string(),
                         layer: current_layer,
+                        span: crate::error::describe_missing_layers(current_layer, resumes_at),
                     });
                 }
             }
