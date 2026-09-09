@@ -221,7 +221,43 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2492 lib (dev,claude-subscription) — re-measured 2026-09-09, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 76 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.165-alpha (2026-09-08, tag on `3b55bcd4`).**
+**Releasing: v0.3.166-alpha (2026-09-09) — the round that stopped a silent
+wrong answer.** Seven commits on .165, and the two that matter share one
+subject: what happens to a reply when the machine serving part of it goes away.
+
+- **A failed request now hands back what it had already generated.** Report
+  #028's second residual: a 4m43s reply, already decoding, was discarded whole
+  when its tail peer dropped. The salvage is recorded by the pipeline and taken
+  by the router only after the retry has ALSO failed — a complete answer from a
+  second route still beats a truncated one — and the executor still returns the
+  `Err`, so the peer penalty, the trust update and the logging are untouched.
+  `finish_reason` is `"error"` (vLLM's own value); Anthropic has no
+  interrupted-turn member and its catch-all is `end_turn`, so that surface gets
+  an explicit arm to `max_tokens`.
+- **A reply already under way is no longer moved to a machine that cannot
+  continue it.** Found while scoping report #028's OTHER residual, and it
+  inverted it. A stand-in holds none of the failed machine's KV cache, nothing
+  rebuilds it, and `split::executor` reads `kv_offset` from the cache rather
+  than from `index_pos` — so the replacement answered from the current token
+  alone while the reply carried on looking normal. **Measured**
+  (`examples/failover_kv_probe.rs`): replacing 4 of 28 layers takes
+  P(the healthy machine's own token) from **0.997 to 0.119**; half the model,
+  to **0.005**. There is no safe early window — one decode step in is WORSE
+  (0.0000), because what is missing is the PROMPT. Failover is correct on the
+  prompt pass and only there, so `failover_can_restore_state` refuses after it
+  and the retry/salvage above cover the request.
+- **The route-cost instrument could not see a hand-off**, which was most of the
+  traffic and all of the traffic it was added for: wired at one of
+  `assemble_pipeline_for`'s six returns, with the four hand-off returns ahead of
+  it. Zero samples in ten hours of live traffic. **So no log before 2026-09-09
+  carries hand-off data, and its absence is not evidence they are rare.**
+- Docs: item #8 had been resolved on 09-06 while its triage row still asked for
+  a measurement, and survived the 09-08 re-verification pass.
+
+⚠ **Field data for `ASSUMED_FORWARD_PASSES` can only be collected once this is
+DEPLOYED** — the live node must run the fixed instrument.
+
+**Previously released and deployed: v0.3.165-alpha (2026-09-08, tag on `3b55bcd4`).**
 Both nodes verified: local `225e6fe7f2b5cd74` (CUDA artifact — published sha256
 matched AND the installed binary byte-identical to the download, `ggml_cuda_init`
 present, 0 ERROR, node id kept, inference confirmed; rollback
@@ -286,7 +322,7 @@ is a finding about the guard: one guard matched its own comment, another matched
 a binding on the line above. **Plant the violation in the form it would really
 appear** (gotchas #502, #503).
 
-**Unreleased on main since .165: report #028.** A 4m43s generation, already
+**Report #028, fixed across .165's tail and .166.** A 4m43s generation, already
 streaming, was lost outright when its tail peer's connection dropped and the
 retry answered `Could not decrypt forward`. **A disconnect destroyed the session
 key**, and the two ends never drop together: `handle_connection_closed` keeps the
@@ -295,9 +331,11 @@ session when the peer is `in_active_pipeline`, but that reads `active_pipelines`
 (gotcha #194). So the server cleared while the coordinator kept sealing. Keys are
 now RETIRED rather than destroyed: openable, never sealable, with their own
 replay window (`.claude/rules/architecture.md` § "A disconnect retires a session
-key"). The residuals are recorded, not fixed — no standby can be assembled from
-several nodes covering a range, and already-generated tokens are discarded
-rather than returned.
+key"). Of the two residuals, the discarded tokens are fixed in .166 (salvage)
+and the missing standby turned out to be the smaller half — see .166's KV
+finding above. Still open: a standby cannot be assembled from several nodes
+covering a range between them, and that is only worth building once a stand-in
+can inherit the conversation state (`docs/FUTURE_WORK.md` items 17 and 18).
 
 **Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
