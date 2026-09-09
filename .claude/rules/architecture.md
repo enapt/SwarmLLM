@@ -168,10 +168,20 @@ second plan **cannot** hand this node the whole model.
 ## The relaxation is scoped to the figures that are actually unreliable
 
 **`parallax::CapacityBound`** says whose `max_hostable_layers` a routing pass
-honours: `Everyone`, `LocalOnly`, or `Nobody`. `assemble_pipeline_for` walks
-them in that order, and the local layer budget is enforced INSIDE the DP —
-carried along the best path, exactly as the capped-peer bitmask is — as well as
-by the exact summed check after reconstruction.
+honours, in four rungs: `Everyone`, `PeersAtFaceValue`, `PeersUnbounded`,
+`LocalUnbounded`. `assemble_pipeline_for` walks them in that order, and the
+local layer budget is enforced INSIDE the DP — carried along the best path,
+exactly as the capped-peer bitmask is — as well as by the exact summed check
+after reconstruction.
+
+**A relaxation spends the safety margin before it spends the peer's own
+number.** `max_hostable_layers_at_face_value` is the peer taken at its word with
+`DELEGATE_VRAM_MARGIN` spent, and `PeersAtFaceValue` sits above
+`PeersUnbounded` so a route that respects what peers actually claimed is always
+preferred to one that does not. Unknown is unbounded on every rung and always
+was — `max_hostable_layers` answers `None` for an absent capability, a gossiped
+zero, or an uncomputable per-layer size — so a relaxation can only ever act on a
+figure that is present and real.
 
 → `docs/invariants/scheduling.md`
 

@@ -666,14 +666,17 @@ assembly.
 
 **Capacity-respecting routing (`parallax::route_shortest_path`).** When
 `inference.parallax_routing` is on, the shortest-path DP replaces steps 5-7 and
-is run up to three times, relaxing one memory bound at a time
-(`parallax::CapacityBound`):
+is run up to four times, relaxing one memory bound at a time
+(`parallax::CapacityBound`). **A relaxation spends the safety margin before it
+spends a peer's own number**, so a route that respects what every peer actually
+advertised is always preferred to one that does not:
 
 | pass | bound honoured | why |
 |---|---|---|
 | `Everyone` | every candidate's `max_hostable_layers` | the normal answer |
-| `LocalOnly` | this node's only | a PEER's figure is a self-report — stale by up to a health tick, zero before v0.3.103, absent without capability gossip — so it may improve a route and must never fail a routable request. **Ours is not a self-report**: it is computed inside the same call from live memory by the estimator the loader will use, so dropping it moves the refusal from the planner (where the plan can change) to the loader (where it cannot) |
-| `Nobody` | none | last resort: with no route even inside our own memory, the loader's itemised refusal beats "no route" for a single-machine install |
+| `PeersAtFaceValue` | this node's, and each peer's own advertised figure with `DELEGATE_VRAM_MARGIN` spent | staleness is the only thing left for a relaxation to act on — an absent, zero or uncomputable figure is already `None`, i.e. unbounded on every pass — and the margin is exactly what a stale figure justifies reclaiming. A peer advertising 4096 MB was handed a 5526 MB segment twice in eleven minutes and refused both times (report #028) |
+| `PeersUnbounded` | this node's only | a PEER's figure is a self-report we cannot re-ask, so it may improve a route and must never fail a routable request outright (report #025). **Ours is not a self-report**: it is computed inside the same call from live memory by the estimator the loader will use, so dropping it moves the refusal from the planner (where the plan can change) to the loader (where it cannot) |
+| `LocalUnbounded` | none | last resort: with no route even inside our own memory, the loader's itemised refusal beats "no route" for a single-machine install |
 
 The local node's bound is enforced **inside** the DP, carried along the best
 path like the capped-peer bitmask, as well as by the exact summed check after

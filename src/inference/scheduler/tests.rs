@@ -352,6 +352,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         is_pool_member: false,
         gpu_vram_available_mb: None,
         max_hostable_layers: None,
+        max_hostable_layers_at_face_value: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         goodput_bytes_per_sec: None,
@@ -463,6 +464,7 @@ fn greedy_assign_multi_range_candidate() {
             is_pool_member: false,
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
+            max_hostable_layers_at_face_value: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
             goodput_bytes_per_sec: None,
@@ -488,6 +490,7 @@ fn greedy_assign_multi_range_candidate() {
             is_pool_member: false,
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
+            max_hostable_layers_at_face_value: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
             goodput_bytes_per_sec: None,
@@ -1443,6 +1446,7 @@ fn cost_cand(
         is_pool_member: false,
         gpu_vram_available_mb: None,
         max_hostable_layers: None,
+        max_hostable_layers_at_face_value: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         goodput_bytes_per_sec: None,
@@ -2677,6 +2681,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         is_pool_member: false,
         gpu_vram_available_mb: None,
         max_hostable_layers: cap,
+        max_hostable_layers_at_face_value: cap,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         goodput_bytes_per_sec: None,
@@ -2765,6 +2770,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         is_pool_member: false,
         gpu_vram_available_mb: None,
         max_hostable_layers: cap,
+        max_hostable_layers_at_face_value: cap,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         goodput_bytes_per_sec: None,
@@ -2853,6 +2859,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         is_pool_member: false,
         gpu_vram_available_mb: None,
         max_hostable_layers: None,
+        max_hostable_layers_at_face_value: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: gpu,
         goodput_bytes_per_sec: None,
@@ -2963,13 +2970,27 @@ fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
     let bytes_per_layer = 3_000u64 * 1_048_576 / 32;
     let cap = capability_with_gpu(Some(200));
 
-    let cold = super::max_hostable_layers(Some(&cap), bytes_per_layer, false, 0, 0);
+    let cold = super::max_hostable_layers(
+        Some(&cap),
+        bytes_per_layer,
+        false,
+        super::DELEGATE_VRAM_MARGIN,
+        0,
+        0,
+    );
     assert!(
         cold.is_some_and(|k| k < 32),
         "a COLD peer with 200 MB free cannot take a 3 GB model: {cold:?}"
     );
 
-    let warm = super::max_hostable_layers(Some(&cap), bytes_per_layer, true, 0, 0);
+    let warm = super::max_hostable_layers(
+        Some(&cap),
+        bytes_per_layer,
+        true,
+        super::DELEGATE_VRAM_MARGIN,
+        0,
+        0,
+    );
     assert_eq!(
         warm, None,
         "a peer already serving this model has already paid for it — the free \
@@ -2991,6 +3012,7 @@ fn a_long_prompt_shrinks_the_layers_a_peer_may_take() {
         Some(&cap),
         bytes_per_layer,
         false,
+        super::DELEGATE_VRAM_MARGIN,
         per_position_per_layer * 19,
         0,
     );
@@ -2998,6 +3020,7 @@ fn a_long_prompt_shrinks_the_layers_a_peer_may_take() {
         Some(&cap),
         bytes_per_layer,
         false,
+        super::DELEGATE_VRAM_MARGIN,
         per_position_per_layer * 8_111,
         0,
     );
@@ -3024,7 +3047,14 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
     let per_position_per_layer = 2 * 4 * 256 * 6;
     // Unknown prompt: warm stays uncapped, as it always was.
     assert_eq!(
-        super::max_hostable_layers(Some(&cap), bytes_per_layer, true, 0, 0),
+        super::max_hostable_layers(
+            Some(&cap),
+            bytes_per_layer,
+            true,
+            super::DELEGATE_VRAM_MARGIN,
+            0,
+            0
+        ),
         None
     );
     // 8,111 positions × 12 KB ≈ 99.6 MB per layer against ~909 MB usable → 9 layers.
@@ -3032,6 +3062,7 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
         Some(&cap),
         bytes_per_layer,
         true,
+        super::DELEGATE_VRAM_MARGIN,
         per_position_per_layer * 8_111,
         0,
     );
@@ -3095,10 +3126,24 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     // test here, the deduction is.
     let bytes_per_layer = 100 * 1_048_576;
 
-    let free = super::max_hostable_layers(Some(&cap), bytes_per_layer, false, 0, 0)
-        .expect("an advertised card yields a bound");
-    let booked = super::max_hostable_layers(Some(&cap), bytes_per_layer, false, 0, 4_000)
-        .expect("still a bound, just a smaller one");
+    let free = super::max_hostable_layers(
+        Some(&cap),
+        bytes_per_layer,
+        false,
+        super::DELEGATE_VRAM_MARGIN,
+        0,
+        0,
+    )
+    .expect("an advertised card yields a bound");
+    let booked = super::max_hostable_layers(
+        Some(&cap),
+        bytes_per_layer,
+        false,
+        super::DELEGATE_VRAM_MARGIN,
+        0,
+        4_000,
+    )
+    .expect("still a bound, just a smaller one");
     assert!(
         booked < free,
         "memory this node has already committed must not be offered again: \
@@ -3108,7 +3153,14 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     // Over-committed reads as no room, never as all of it — the subtraction
     // saturates rather than wrapping.
     assert_eq!(
-        super::max_hostable_layers(Some(&cap), bytes_per_layer, false, 0, 99_999),
+        super::max_hostable_layers(
+            Some(&cap),
+            bytes_per_layer,
+            false,
+            super::DELEGATE_VRAM_MARGIN,
+            0,
+            99_999
+        ),
         Some(0)
     );
 
@@ -3116,7 +3168,14 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     // commitments cannot manufacture information the peer never sent.
     let silent = capability_with_gpu(None);
     assert_eq!(
-        super::max_hostable_layers(Some(&silent), bytes_per_layer, false, 0, 4_000),
+        super::max_hostable_layers(
+            Some(&silent),
+            bytes_per_layer,
+            false,
+            super::DELEGATE_VRAM_MARGIN,
+            0,
+            4_000
+        ),
         None
     );
 }
@@ -3166,11 +3225,21 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
 /// zero every node before v0.3.103 sent, is routed to exactly as before.
 #[test]
 fn an_unreadable_memory_figure_never_caps_a_peer() {
-    assert_eq!(super::max_hostable_layers(None, 1024, false, 0, 0), None);
+    assert_eq!(
+        super::max_hostable_layers(None, 1024, false, super::DELEGATE_VRAM_MARGIN, 0, 0),
+        None
+    );
 
     let zeroed = capability_with_gpu(Some(0));
     assert_eq!(
-        super::max_hostable_layers(Some(&zeroed), 1024, false, 0, 0),
+        super::max_hostable_layers(
+            Some(&zeroed),
+            1024,
+            false,
+            super::DELEGATE_VRAM_MARGIN,
+            0,
+            0
+        ),
         None,
         "zero free VRAM is what a pre-v0.3.103 node always advertised — it is \
          no information, not 'no room' (gotcha #330)"

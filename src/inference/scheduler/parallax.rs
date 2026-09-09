@@ -147,10 +147,13 @@ pub(super) const MAX_SUBRANGE_VERTICES: usize = 4096;
 /// costs a round trip and a refusal. But the *reliability* of the claim
 /// differs by who is making it, and that is what this distinguishes:
 ///
-/// - A PEER's figure is a self-report. It is stale by up to a health tick,
-///   zero on any node older than v0.3.103, and absent for a peer that has
-///   gossiped no capability at all. It may make a route better and must never
-///   make a routable request fail — hence the caller's relaxed pass.
+/// - A PEER's figure is a self-report, and stale by up to a health tick. What
+///   it is NOT is absent or zero: `max_hostable_layers` already answers `None`
+///   for a peer that gossiped no capability, gossiped a zero (every node before
+///   v0.3.103, gotcha #330), or whose per-layer size we cannot compute — and
+///   `None` is unbounded in every variant here, before this enum is consulted.
+///   So the only thing a relaxation can act on is a figure that is PRESENT and
+///   NON-ZERO, which is to say a peer that has told us a real number.
 /// - THIS NODE's figure is not a self-report at all. It comes from our own
 ///   loader, computed inside the very scheduling call that consumes it, from
 ///   live memory. It is the same estimator `admit_to_cpu` will use to refuse
@@ -158,30 +161,75 @@ pub(super) const MAX_SUBRANGE_VERTICES: usize = 4096;
 ///   only moves the refusal from the planner, where the plan can still change,
 ///   to the loader, where it cannot (report #025).
 ///
-/// So the relaxation is scoped. [`Nobody`](Self::Nobody) remains as a LAST
-/// resort, for when not even our own bound leaves a route: there the local
-/// loader's itemised refusal is a better answer than "no route", and the
-/// caller says so in its log.
+/// **So the relaxation spends the MARGIN before it spends the peer's own
+/// number** (report #028). The routine bound already discounts what a peer
+/// advertised by [`DELEGATE_VRAM_MARGIN`], precisely because the figure is a
+/// moment out of date; that discount is the whole of what a stale figure can
+/// justify reclaiming, and `max_hostable_layers_at_face_value` is the peer
+/// taken at its word with the discount spent. A route that fits what peers
+/// actually claimed is preferred over one that does not — on 2026-09-09 a peer
+/// advertising 4096 MB was handed a 29-layer segment needing 5526 MB, twice in
+/// eleven minutes, and refused it both times with exactly the figure it had
+/// been advertising all along.
+///
+/// It is a PREFERENCE and not a wall, because report #025 is the other side of
+/// the same coin: there the only route ran across a peer whose figure refused
+/// it, and relaxing that figure was what kept the request alive. A self-report
+/// we cannot re-ask must not fail a request outright. Hence four rungs rather
+/// than a bound: [`PeersUnbounded`](Self::PeersUnbounded) still exists and still
+/// rescues #025, it is simply no longer reached while a route that respects the
+/// peers' own numbers is available.
+///
+/// This is the shape every cluster scheduler settled on. Kubernetes filters
+/// nodes on fit and never relaxes the memory predicate to place a pod — an
+/// infeasible pod stays Pending with the shortfall itemised ("0/2 nodes are
+/// available: 2 Insufficient memory"). Where overcommit IS allowed it is a
+/// bounded, declared ratio between request and limit (OpenShift), not the
+/// constraint being dropped. Omega's answer to a stale view is to resolve the
+/// conflict at commit time and re-plan — which is what
+/// `note_local_memory_refusal` already does here for the local node — never to
+/// place beyond what the machine reported.
+///
+/// [`LocalUnbounded`](Self::LocalUnbounded) remains as a LAST resort, for when
+/// not even our own bound leaves a route: there the local loader's itemised
+/// refusal is a better answer than "no route", and the caller says so in its
+/// log. It relaxes THIS node only, for the same reason — our loader is present
+/// to be asked, and a peer's is not.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum CapacityBound {
-    /// Every candidate is held to its figure.
+    /// Every candidate is held to its figure, peers with our margin on top.
     Everyone,
-    /// Only this node is. A peer's unreliable figure may not fail the request;
-    /// ours is not unreliable.
-    LocalOnly,
-    /// Nobody is. The loader decides, and its refusal names the shortfall.
-    Nobody,
+    /// Peers are held to what they actually advertised, the margin spent;
+    /// this node is still held to its loader's answer.
+    PeersAtFaceValue,
+    /// Peers are held to nothing. This is the rung that rescues report #025's
+    /// machine, where the only route runs across a peer whose figure refuses
+    /// it — and a self-report we cannot re-ask is not allowed to fail a
+    /// request outright. It sits BELOW `PeersAtFaceValue` so a route that fits
+    /// what peers actually claimed is always preferred to one that does not.
+    PeersUnbounded,
+    /// ...and this node's bound is released too. The loader decides, and its
+    /// refusal names the shortfall.
+    LocalUnbounded,
 }
 
 impl CapacityBound {
     /// Is THIS node held to the layer count its own loader says it can take?
     fn binds_local(self) -> bool {
-        !matches!(self, Self::Nobody)
+        !matches!(self, Self::LocalUnbounded)
     }
 
-    /// Is a PEER held to the layer count it advertises?
-    fn binds_peers(self) -> bool {
-        matches!(self, Self::Everyone)
+    /// How many layers may this PEER be given under this bound? `None` means
+    /// we cannot tell and so must not exclude it — never "no room".
+    ///
+    /// There is no variant that returns `None` for a peer whose figure is
+    /// known: that is the invariant this enum exists to carry.
+    fn peer_cap(self, c: &NodeCandidate) -> Option<u32> {
+        match self {
+            Self::Everyone => c.max_hostable_layers,
+            Self::PeersAtFaceValue => c.max_hostable_layers_at_face_value,
+            Self::PeersUnbounded | Self::LocalUnbounded => None,
+        }
     }
 }
 
@@ -607,15 +655,16 @@ pub(super) fn route_shortest_path(
         // `None` = we cannot tell what this peer can hold, which must never be
         // read as "nothing" (gotcha #330: every node before v0.3.103 gossiped
         // zero free VRAM).
-        let bound_applies = if &c.node_id == local_node_id {
-            capacity.binds_local()
+        let cap = if &c.node_id == local_node_id {
+            // Our own loader's answer, or nothing at all under the last resort.
+            capacity
+                .binds_local()
+                .then_some(c.max_hostable_layers)
+                .flatten()
         } else {
-            capacity.binds_peers()
-        };
-        let cap = if bound_applies {
-            c.max_hostable_layers
-        } else {
-            None
+            // A peer is ALWAYS held to a figure it gave us; which of the two it
+            // is held to is the only thing a relaxation changes.
+            capacity.peer_cap(c)
         };
         let over_capacity = cap.is_some_and(|k| hi - lo > k);
         let mut push = |range: (u32, u32)| {
@@ -760,7 +809,7 @@ pub(super) fn route_shortest_path(
     // past 64 of them the bound is dropped rather than approximated, and the
     // caller's relaxed pass is the backstop either way.
     let mut capped_bit: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
-    if capacity.binds_peers() {
+    {
         for v in &vertices {
             let c = &candidates[v.cand_idx];
             // **The local node is exempt, and prompt privacy is why**
@@ -779,7 +828,7 @@ pub(super) fn route_shortest_path(
             if &c.node_id == local_node_id {
                 continue;
             }
-            if c.max_hostable_layers.is_some() && !capped_bit.contains_key(&v.cand_idx) {
+            if capacity.peer_cap(c).is_some() && !capped_bit.contains_key(&v.cand_idx) {
                 let next = capped_bit.len() as u32;
                 if next >= 64 {
                     capped_bit.clear();
@@ -1062,6 +1111,7 @@ mod tests {
             is_pool_member: false,
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
+            max_hostable_layers_at_face_value: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
             goodput_bytes_per_sec: None,
@@ -1097,7 +1147,7 @@ mod tests {
                 &local,
                 false,
                 false,
-                CapacityBound::Nobody,
+                CapacityBound::LocalUnbounded,
                 tokens,
             )
             .expect("a route must exist")[0]
@@ -1296,7 +1346,7 @@ mod tests {
                 &local,
                 false,
                 false,
-                CapacityBound::Nobody,
+                CapacityBound::LocalUnbounded,
                 None
             )
             .is_ok(),
@@ -1839,6 +1889,106 @@ mod tests {
         }
     }
 
+    /// Report #028: a peer is not handed a segment its OWN advertised figure
+    /// refuses while a route that respects every peer's figure exists.
+    ///
+    /// The live shape, 2026-09-09: a coordinator planning `qwen2.5-14b` put
+    /// layers 0-29 — about 5526 MB of weights — on a peer advertising a
+    /// 4096 MB budget, twice in eleven minutes, and that peer refused both
+    /// times quoting the very number it had been advertising all along.
+    ///
+    /// The rung under test is [`CapacityBound::PeersAtFaceValue`]. Without it
+    /// the ladder steps straight from the margined bound to no bound at all,
+    /// and the search then picks the CHEAPEST placement — which is the peer
+    /// that cannot hold it. Deleting that rung from `assemble_pipeline_for`
+    /// turns this test red.
+    #[test]
+    fn a_peer_is_not_handed_more_than_it_says_it_can_hold_while_a_route_exists() {
+        let local = NodeId([1u8; 32]);
+        // Holds nothing: this request has to leave the node.
+        let mut me = cand(1, vec![], 0, 0.0, false, false, 4.0);
+        me.node_id = local.clone();
+
+        // Cheap and close, but its own figure covers 9 of the 48 layers. This
+        // is the peer an unbounded search picks, and the one that refuses.
+        let mut cheap = cand(2, vec![(0, 48)], 5, 0.0, true, true, 50.0);
+        cheap.max_hostable_layers = Some(8);
+        cheap.max_hostable_layers_at_face_value = Some(9);
+
+        // Slower and further away, but it can genuinely hold the model once the
+        // safety margin is spent. The route we want.
+        let mut roomy = cand(3, vec![(0, 48)], 60, 0.0, true, true, 5.0);
+        roomy.max_hostable_layers = Some(20);
+        roomy.max_hostable_layers_at_face_value = Some(48);
+
+        let cands = [me, cheap.clone(), roomy.clone()];
+
+        // Nobody fits with our margin on top, so the routine rung cannot answer.
+        assert!(
+            route_shortest_path(
+                48,
+                &cands,
+                &local,
+                false,
+                true,
+                CapacityBound::Everyone,
+                None
+            )
+            .is_err(),
+            "the margined bound should not find a route here"
+        );
+
+        // The rung under test: every peer taken at its word, and the answer is
+        // the peer that can actually hold it.
+        let segs = route_shortest_path(
+            48,
+            &cands,
+            &local,
+            false,
+            true,
+            CapacityBound::PeersAtFaceValue,
+            None,
+        )
+        .expect("a route that respects every peer's own figure exists");
+
+        for s in &segs {
+            let span = s.layer_range.1 - s.layer_range.0;
+            let face_value = cands
+                .iter()
+                .find(|c| c.node_id == s.node_id)
+                .and_then(|c| c.max_hostable_layers_at_face_value);
+            if let Some(k) = face_value {
+                assert!(
+                    span <= k,
+                    "node {:?} was given {span} layers against its own figure of {k}: {segs:?}",
+                    s.node_id
+                );
+            }
+        }
+        assert!(
+            segs.iter().any(|s| s.node_id == roomy.node_id),
+            "the peer that can hold the model must be the one used: {segs:?}"
+        );
+
+        // And the rung below still exists, because report #025 needs it: with
+        // no route even at face value, a peer's self-report may not be the
+        // thing that fails the request.
+        let unbounded = route_shortest_path(
+            48,
+            &cands,
+            &local,
+            false,
+            true,
+            CapacityBound::PeersUnbounded,
+            None,
+        )
+        .expect("the unbounded rung still routes");
+        assert!(
+            !unbounded.is_empty(),
+            "the last-resort rung must still produce a plan: {unbounded:?}"
+        );
+    }
+
     /// Report #025's machine: a 48-layer model, every shard held here, and a
     /// bound of 40 from our own loader — with one peer that holds every layer
     /// and is priced slower.
@@ -1857,7 +2007,12 @@ mod tests {
         // Holds everything and is slower, so the search prefers staying home
         // whenever it is allowed to.
         let mut peer = cand(2, vec![(0, 48)], 20, 0.0, true, true, 2.0);
+        // The face-value figure the margin buys back: 8 layers with
+        // `DELEGATE_VRAM_MARGIN` spent is 9, still far short of the 47 the
+        // boomerang's middle needs. So this machine reaches the unbounded rung,
+        // which is the one report #025 is about.
         peer.max_hostable_layers = Some(8);
+        peer.max_hostable_layers_at_face_value = Some(9);
 
         let cands = [me.clone(), peer.clone()];
         let local_layers = |segs: &[PipelineSegment]| -> u32 {
@@ -1891,7 +2046,7 @@ mod tests {
             &local,
             true,
             true,
-            CapacityBound::LocalOnly,
+            CapacityBound::PeersUnbounded,
             None,
         )
         .expect("a boomerang across the peer that holds every layer still routes");
@@ -1908,9 +2063,16 @@ mod tests {
         // The last resort is unchanged, and it is what keeps a single-node
         // install answering with the loader's itemised refusal rather than
         // "no route".
-        let unbounded =
-            route_shortest_path(48, &cands, &local, true, true, CapacityBound::Nobody, None)
-                .expect("the unbounded pass still routes");
+        let unbounded = route_shortest_path(
+            48,
+            &cands,
+            &local,
+            true,
+            true,
+            CapacityBound::LocalUnbounded,
+            None,
+        )
+        .expect("the unbounded pass still routes");
         assert_eq!(
             local_layers(&unbounded),
             48,
@@ -2659,6 +2821,7 @@ mod transfer_cost_tests {
             is_pool_member: false,
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
+            max_hostable_layers_at_face_value: None,
             has_gpu: true,
         }
     }

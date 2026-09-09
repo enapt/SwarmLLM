@@ -376,10 +376,11 @@ the constrained-node harness confirms the refusal message is unchanged.
 ## The relaxation is scoped to the figures that are actually unreliable
 
 **`parallax::CapacityBound`** says whose `max_hostable_layers` a routing pass
-honours: `Everyone`, `LocalOnly`, or `Nobody`. `assemble_pipeline_for` walks
-them in that order, and the local layer budget is enforced INSIDE the DP —
-carried along the best path, exactly as the capped-peer bitmask is — as well as
-by the exact summed check after reconstruction.
+honours, in four rungs: `Everyone`, `PeersAtFaceValue`, `PeersUnbounded`,
+`LocalUnbounded`. `assemble_pipeline_for` walks them in that order, and the
+local layer budget is enforced INSIDE the DP — carried along the best path,
+exactly as the capped-peer bitmask is — as well as by the exact summed check
+after reconstruction.
 
 **Why the bound is scoped at all.** The relaxation exists because a PEER's
 figure is a self-report: stale by up to a health tick, zero on any node older
@@ -400,6 +401,52 @@ for as long as the memory picture held.** The v0.3.162 fix (report #018)
 changed which log line explained the failure, not whether it happened, because
 it closed the fast path and this is the search's own second pass.
 
+**Why a relaxation spends the margin first** (report #028, 2026-09-09). The
+three reasons the relaxation names for unbinding a peer are *stale*, *zero on a
+pre-v0.3.103 node*, and *no capability gossiped at all*. Two of those never
+reach this enum: `max_hostable_layers` returns `None` for an absent capability
+(`let cap = capability?`), for `free_mb == 0` ("not 'no room': no information"),
+and for an uncomputable per-layer size — and `None` is unbounded on every rung.
+So the only thing an unbinding rung can act on is a figure that is PRESENT and
+NON-ZERO, which is to say a peer that told us a real number. Staleness is what
+is left, and staleness is exactly what `DELEGATE_VRAM_MARGIN` was already
+discounting for.
+
+Hence `max_hostable_layers_at_face_value`: the same figure with the margin
+spent, computed from the same call so the two cannot drift, and a rung that
+uses it before any rung goes past a peer's own word. Live shape, 2026-09-09: a
+coordinator planning `qwen2.5-14b` put layers 0-29 — about 5526 MB — on a peer
+advertising a 4096 MB budget, twice in eleven minutes six minutes apart, and it
+refused both times quoting the number it had been advertising all along.
+
+This is where every cluster scheduler landed. Kubernetes filters on fit and
+never relaxes the memory predicate to place a pod; an infeasible pod stays
+Pending with the shortfall itemised ("0/2 nodes are available: 2 Insufficient
+memory"). Where overcommit is allowed it is a bounded declared ratio between
+request and limit (OpenShift), never the constraint being dropped. Omega's
+answer to a stale view is to resolve the conflict at commit time and re-plan —
+which `note_local_memory_refusal` already does here for the local node — not to
+place beyond what the machine reported.
+
+**But it is a preference, not a wall**, and report #025 is why. There the only
+route ran across a peer whose figure refused it, and relaxing that figure kept
+the request alive. A self-report we cannot re-ask must not fail a request
+outright. So `PeersUnbounded` is still the third rung and still does exactly
+what it used to; it is simply no longer reached while a route that respects the
+peers' own numbers exists. Pinned by
+`a_peer_is_not_handed_more_than_it_says_it_can_hold_while_a_route_exists`, whose
+null control — making `PeersAtFaceValue` return `None` — hands a peer
+advertising 9 layers all 48.
+
+A note on what was NOT built. Learning from the refusal itself (Omega's other
+half) would need the coordinator to tell a memory refusal from any other 503,
+and it cannot: `LocalMemoryUnavailable` displays as `Service unavailable: {0}`,
+so it flattens to `ServiceUnavailable` across the wire and is indistinguishable
+from a spawn failure or a broken pipe. Recovering it from the message prose is
+the #295 trap. Carrying it structurally is an additive protocol change, and the
+benefit it buys — roughly one second on a request that fails either way — did
+not justify it against the risk of refusing routes that would have worked.
+
 **Why the DP, and not only the check after it.** The local node is exempt from
 "a capped candidate appears at most once" — prompt privacy needs it at both ends
 (gotcha #481) — so the per-vertex cap cannot bound what it takes in TOTAL:
@@ -412,7 +459,7 @@ chain is simply never built and the search returns the cheapest one that fits.
 
 Four things a change here must keep.
 
-- **`Nobody` stays, as the LAST resort.** With no route even inside our own
+- **`LocalUnbounded` stays, as the LAST resort.** With no route even inside our own
   memory there is nothing to protect, and the loader's itemised refusal —
   which names the footprint, the budget and what to raise — is a better answer
   to a single-node install than "no route". This is why the fix is not simply
@@ -422,10 +469,11 @@ Four things a change here must keep.
   hide a costlier one that would have fitted — the same approximation
   `used_capped` already makes. Both backstops behind it are unchanged: the
   exact summed check, and the next relaxation.
-- **Every pass says which one it is.** The `LocalOnly` line promises a re-plan
-  and can now keep it: the only refusal it invites is a peer's, and
-  `should_retry_after` retries that. The `Nobody` line promises nothing and
-  says the loader will decide.
+- **Every pass says which one it is.** The `PeersUnbounded` line promises a
+  re-plan and can now keep it: the only refusal it invites is a peer's, and
+  `should_retry_after` retries that. The `PeersAtFaceValue` line says the
+  margin has been spent and no more. The `LocalUnbounded` line promises
+  nothing and says the loader will decide.
 - **`Some(0)` still moves one layer.** Both the DP bound and the summed check
   apply `cap.max(1)`, so a privacy end can always be served and the search
   terminates.

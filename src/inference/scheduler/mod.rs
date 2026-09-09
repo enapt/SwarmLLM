@@ -98,6 +98,16 @@ struct NodeCandidate {
     /// node before v0.3.103 sent, gotcha #330). See
     /// [`max_hostable_layers`] for why unknown must never exclude.
     max_hostable_layers: Option<u32>,
+    /// The same figure with [`DELEGATE_VRAM_MARGIN`] spent — the peer taken at
+    /// its word rather than held to a safety margin on top of it. `None` on
+    /// exactly the same "we cannot tell" inputs as the field above.
+    ///
+    /// This is the ONLY loosening a routing pass may apply to a peer, and it
+    /// exists because the margin above is what the relaxation was always
+    /// really trying to reclaim: a figure a moment out of date, where the peer
+    /// may have freed memory since. Past this number the figure is no longer
+    /// the peer's, so no pass may go there — see [`parallax::CapacityBound`].
+    max_hostable_layers_at_face_value: Option<u32>,
     /// MEASURED prefill coefficient for this peer, ms per (layer x activation
     /// byte). `None` until this node has prefilled through it — see
     /// `parallax::vertex_cost` for what stands in meanwhile.
@@ -118,10 +128,14 @@ struct NodeCandidate {
 /// it would empty the candidate set during any rollout, and the swarm is always
 /// mixed-version while one is in progress.
 ///
-/// Carries [`DELEGATE_VRAM_MARGIN`] for the same reason the delegation path
-/// does: the advertised figure is free memory at the last health tick, not a
-/// reservation, and the worker needs room for activations and KV cache beyond
-/// the weights.
+/// `margin` is the headroom demanded on top of the peer's own figure.
+/// [`DELEGATE_VRAM_MARGIN`] is the routine value, for the same reason the
+/// delegation path uses it: the advertised figure is free memory at the last
+/// health tick, not a reservation, and the worker needs room for activations
+/// and KV cache beyond the weights. `1.0` spends that headroom and takes the
+/// peer at its word — which is as far as any relaxation may ever go, because
+/// beyond it the number is no longer the peer's. See
+/// [`parallax::CapacityBound`].
 ///
 /// Why it exists: observed on the live swarm 2026-08-21, a request for
 /// llama-3.1-8b was routed whole to a node that holds all 32 layers and is the
@@ -132,6 +146,9 @@ fn max_hostable_layers(
     capability: Option<&swarmllm_types::NodeCapability>,
     bytes_per_layer: u64,
     already_warm: bool,
+    // Headroom on top of the advertised figure: `DELEGATE_VRAM_MARGIN` for the
+    // routine bound, `1.0` to take the peer at its word.
+    margin: f64,
     // What THIS prompt's KV cache costs per layer on that peer — positions ×
     // bytes per position per layer, including the f16 mirror where its card
     // keeps one. 0 when the prompt length or the model's geometry is unknown.
@@ -180,7 +197,7 @@ fn max_hostable_layers(
     // our own commitments cannot turn no information into a refusal. Saturating,
     // so an over-commitment reads as no room rather than wrapping to all of it.
     let free_mb = free_mb.saturating_sub(committed_mb);
-    let usable_bytes = (free_mb as f64 * 1_048_576.0 / DELEGATE_VRAM_MARGIN) as u64;
+    let usable_bytes = (free_mb as f64 * 1_048_576.0 / margin) as u64;
     Some((usable_bytes / per_layer) as u32)
 }
 
@@ -2162,14 +2179,20 @@ impl PipelineScheduler {
             // the two kinds of memory figure in the graph are not equally
             // trustworthy — see `parallax::CapacityBound`.
             //
-            // 1. Everyone is held to their figure.
-            // 2. Only WE are. A peer's self-report is stale by up to a health
-            //    tick, zero on any node older than v0.3.103, and absent for a
-            //    peer that has gossiped no capability at all, so it may make a
-            //    route better and must never make a routable request fail.
-            // 3. Nobody is. Last resort: with no route even inside our own
-            //    memory there is nothing to protect, and the loader's itemised
-            //    refusal is a better answer to the user than "no route".
+            // 1. Everyone is held to their figure, peers with our safety
+            //    margin on top of what they advertised.
+            // 2. Peers are held to that figure with the margin SPENT — taken at
+            //    their word. A self-report is stale by up to a health tick, and
+            //    the margin is exactly what that staleness can justify
+            //    reclaiming. It stops there: a peer is never handed more than
+            //    it said it has, because a plan built past its own number is
+            //    one we already know it will refuse (report #028).
+            // 3. Our own bound is released too. Last resort: with no route even
+            //    inside our own memory there is nothing to protect, and the
+            //    loader's itemised refusal is a better answer to the user than
+            //    "no route". Peers stay at face value — there is no remote
+            //    loader here whose refusal would tell the user anything this
+            //    node could not already have worked out.
             //
             // Step 2 is what stopped the relaxation throwing away OUR bound
             // along with the peers'. Ours is not a self-report: it was computed
@@ -2190,30 +2213,49 @@ impl PipelineScheduler {
             };
             let routed = match route_with(parallax::CapacityBound::Everyone) {
                 Ok(segs) => Ok(segs),
-                Err(peers_err) => match route_with(parallax::CapacityBound::LocalOnly) {
+                Err(margin_err) => match route_with(parallax::CapacityBound::PeersAtFaceValue) {
                     Ok(segs) => {
                         tracing::info!(
                             model = %model_id,
-                            constrained_err = %peers_err,
-                            "DIAG: no route fits the peers' advertised memory — routing \
-                             without that bound but still within our own; a peer may refuse \
-                             and the request will re-plan"
+                            constrained_err = %margin_err,
+                            "DIAG: no route fits the peers' advertised memory with our \
+                             margin on top — routing again with the margin spent, taking \
+                             each peer at its word"
                         );
                         Ok(segs)
                     }
-                    Err(local_err) => {
-                        let unbounded = route_with(parallax::CapacityBound::Nobody);
-                        if unbounded.is_ok() {
-                            tracing::info!(
-                                model = %model_id,
-                                constrained_err = %peers_err,
-                                local_err = %local_err,
-                                "DIAG: no route fits this node's own memory either — \
-                                 planning as if nothing were bounded, so the loader decides \
-                                 and its refusal can name the shortfall"
-                            );
+                    Err(face_value_err) => {
+                        match route_with(parallax::CapacityBound::PeersUnbounded) {
+                            Ok(segs) => {
+                                // The rung report #025 needs, and the one that
+                                // can produce a placement a peer's own figure
+                                // has already refused (report #028). Both are
+                                // true, which is why it is reached only here.
+                                tracing::info!(
+                                    model = %model_id,
+                                    constrained_err = %face_value_err,
+                                    "DIAG: no route fits even what the peers themselves \
+                                     advertised — routing without their bound; a peer may \
+                                     refuse and the request will re-plan"
+                                );
+                                Ok(segs)
+                            }
+                            Err(local_err) => {
+                                let unbounded = route_with(parallax::CapacityBound::LocalUnbounded);
+                                if unbounded.is_ok() {
+                                    tracing::info!(
+                                        model = %model_id,
+                                        constrained_err = %face_value_err,
+                                        local_err = %local_err,
+                                        "DIAG: no route fits this node's own memory either \
+                                         — planning as if nothing were bounded, so the \
+                                         loader decides and its refusal can name the \
+                                         shortfall"
+                                    );
+                                }
+                                unbounded
+                            }
                         }
-                        unbounded
                     }
                 },
             };
@@ -2925,31 +2967,44 @@ impl PipelineScheduler {
                 self.shared_state
                     .committed_peer_vram_mb(&node_id, request_id)
             };
-            let max_hostable_layers = if node_id == *local_node_id {
-                self.shared_state
-                    .model_process_pool
-                    .max_local_hostable_layers(&manifest.id, has_gpu)
-            } else {
-                let warm = self.shared_state.peer_model_is_warm(
-                    &node_id,
-                    &manifest.id,
-                    std::time::Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
-                );
-                let prompt_kv_per_layer = if has_gpu {
-                    prompt_kv_per_layer_gpu
+            // Two figures for a peer, from ONE call each so they cannot drift:
+            // what it can hold with our safety margin on top (the routine
+            // bound) and what it can hold taken at its word (the most any
+            // relaxed pass may credit it with). The local node has neither —
+            // its own loader answers, and that answer needs no margin because
+            // it is not a self-report.
+            let (max_hostable_layers, max_hostable_layers_at_face_value) =
+                if node_id == *local_node_id {
+                    let ours = self
+                        .shared_state
+                        .model_process_pool
+                        .max_local_hostable_layers(&manifest.id, has_gpu);
+                    (ours, ours)
                 } else {
-                    prompt_kv_per_layer_cpu
+                    let warm = self.shared_state.peer_model_is_warm(
+                        &node_id,
+                        &manifest.id,
+                        std::time::Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
+                    );
+                    let prompt_kv_per_layer = if has_gpu {
+                        prompt_kv_per_layer_gpu
+                    } else {
+                        prompt_kv_per_layer_cpu
+                    };
+                    let for_margin = |margin: f64| {
+                        self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                            max_hostable_layers(
+                                p.capability.as_ref(),
+                                bytes_per_layer,
+                                warm,
+                                margin,
+                                prompt_kv_per_layer,
+                                committed_mb,
+                            )
+                        })
+                    };
+                    (for_margin(DELEGATE_VRAM_MARGIN), for_margin(1.0))
                 };
-                self.shared_state.peer_registry.get(&node_id).and_then(|p| {
-                    max_hostable_layers(
-                        p.capability.as_ref(),
-                        bytes_per_layer,
-                        warm,
-                        prompt_kv_per_layer,
-                        committed_mb,
-                    )
-                })
-            };
             let gpu_vram_available_mb = if node_id == *local_node_id {
                 // Never used for the local node — the loader's own admission
                 // check is the authority on whether WE can fit a model, and it
@@ -2997,6 +3052,7 @@ impl PipelineScheduler {
                 is_pool_member: is_pool,
                 gpu_vram_available_mb,
                 max_hostable_layers,
+                max_hostable_layers_at_face_value,
                 observed_prefill_ms_per_layer_byte,
                 has_gpu,
             });
