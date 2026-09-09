@@ -31,7 +31,6 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Why it ranks here |
 |---|---|---|
-| 8 | The RAM headroom clamp has a floor that can never refuse | Instrumented in `501c8ec8`; needs one `floor_is_binding` reading from a healthy small machine to decide keep-or-remove |
 | 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | Needs a debug occupancy trace; harness in `memory/round_log_0902_perf_commits.md` |
 | 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger (a disconnect destroying the session key) and the token loss are both fixed; the residual is that no standby can be assembled from several nodes covering a range between them |
@@ -44,6 +43,15 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 13 | `Could not decrypt forward` from one peer | **NOT dormant — recurred on v0.3.164 (report #028) and the cause is now identified**: a disconnect destroyed the session key, and the two ends do not drop together. Fixed by retiring rather than destroying |
 
 ### Closed in this pass (were listed open, verified fixed in code 2026-09-08)
+
+- **The RAM headroom clamp's floor** (was item 8) — STALE ROW, corrected 2026-09-09.
+  The floor was removed on 2026-09-06 by research into what the three platforms mean
+  by "available" (gotcha #482); `live_headroom_mb(.., with_floor)` defaults to false
+  and `SWARMLLM_RAM_HEADROOM_FLOOR=1` is the hatch. The row still asked for a
+  `floor_is_binding` reading "to decide keep-or-remove" — a decision already taken
+  three days earlier, and it survived the 2026-09-08 re-verification pass. **The
+  reading is no longer a precondition for anything**; the DIAG line stays as evidence
+  for anyone weighing the hatch
 
 - The tokens a failed request already generated are discarded — `salvaged_replies`
   plus `router::salvaged_reply_if_lost` (2026-09-09), with the failure still recorded,
@@ -923,7 +931,14 @@ The practical advice is unchanged and is the reason to keep this entry at all:
 change.** If it recurs, capture the failure message — that, not another
 hypothesis, is what would move this.
 
-## The RAM headroom clamp has a floor that can never refuse (open, 2026-09-04)
+## The RAM headroom clamp has a floor that can never refuse (RESOLVED 2026-09-06)
+
+> **Read the resolution before the history.** The floor is GONE — default off since
+> 2026-09-06, restorable with `SWARMLLM_RAM_HEADROOM_FLOOR=1`. Everything above that
+> note is the reasoning that led there, kept because the hatch means someone may have
+> to re-take the decision. **A `floor_is_binding` reading is no longer needed to decide
+> anything**; the triage index asked for one until 2026-09-09, which was three days
+> after the decision was taken.
 
 `RamBudget::from_machine` computes
 
