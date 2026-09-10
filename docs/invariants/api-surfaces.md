@@ -75,12 +75,17 @@ worse than a diagnosable prompt. Reaching ChatML for a non-ChatML model is the
 failure that put stray `<|im_end|>` in Llama-3 replies for several releases
 (gotcha #169); this must never become "fall back to ChatML".
 
-Reported against a Qwen3-8B (2026-09-05). This renderer DECLINES that template —
-it uses `namespace()`, a reversed slice `messages[::-1]`, `loop.index0`, the
-`tojson` filter and string methods, and is deliberately a subset of Jinja — so
-every request rendered a prompt ending on `<|im_end|>`. Pinned by
+Reported against a Qwen3-8B (2026-09-05). At the time this renderer was a
+hand-rolled Jinja subset and DECLINED that template — `namespace()`, a reversed
+slice `messages[::-1]`, `loop.index0`, `tojson` and string methods were all past
+its edge — so every request rendered a prompt ending on `<|im_end|>`. Pinned by
 `a_prompt_left_on_a_closed_turn_gets_the_models_turn_opened`, with the official
 template kept as a fixture.
+
+**Rendering moved to minijinja on 2026-09-10 and Qwen3 now renders natively**,
+so this particular template no longer reaches the repair. The repair stays: it
+guards every template that ends a conversation without opening the model's turn,
+which is a property of the template rather than of the engine.
 
 **A test that fixtures a turn-closing prompt must now close on `</s>`**, or the
 repair fixes it and the test asserts nothing — which is what
@@ -395,10 +400,10 @@ question is a FAILED render".
 ### What it replaced
 
 `build_prompt_inner` took any `Some(..)` from `apply_chat_template` as success.
-The renderer is a deliberate Jinja subset; the official Qwen3 template uses
-`messages[::-1]`, `namespace()`, `loop.index0`/`first`/`last`, `tojson`, and
-`startswith`/`split`/`rstrip`. Given that template it did not decline — it
-produced:
+The renderer was then a hand-rolled Jinja subset, and the official Qwen3
+template uses `messages[::-1]`, `namespace()`, `loop.index0`/`first`/`last`,
+`tojson`, and `startswith`/`split`/`rstrip`. Given that template it did not
+decline — it produced:
 
 ```
 <|im_start|>system
@@ -426,8 +431,9 @@ the general lesson, not a Qwen3 one.
 ### What a change must keep
 
 - **The check is a post-condition on the render, not a template allowlist.** Any
-  template past the subset's edge falls back loudly rather than silently
-  dropping the conversation.
+  template the engine cannot fully run falls back loudly rather than silently
+  dropping the conversation. This still matters with a real engine behind it:
+  the guard is about the OUTCOME, not about which constructs are implemented.
 - **Falling back is the safe outcome.** The fallback chain (gemma → model-name →
   ChatML) carries the question and the turn markers. For Qwen3 it reaches
   ChatML, which is the format Qwen3 actually uses.
@@ -439,9 +445,75 @@ the general lesson, not a Qwen3 one.
   `the_official_llama3_template_renders_exactly_as_jinja2_does` is the guard on
   that, and it passes unchanged.
 
-### What is still open
+### Resolved 2026-09-10 — the engine underneath was replaced
 
-Qwen3 now falls back rather than rendering natively, so template-specific
-behaviour is lost — tool-call framing and the `enable_thinking` switch come from
-the real template. Implementing the missing Jinja constructs is the proper fix;
-see `docs/FUTURE_WORK.md` item 5. This change makes the failure honest meanwhile.
+Qwen3 no longer falls back: both revisions of its template render natively. See
+"Chat templates render on minijinja" below for what changed and what a change
+must keep. This guard is unchanged and still load-bearing — it is what makes a
+future template the engine cannot run fail safely instead of silently.
+
+## Chat templates render on minijinja, not on a subset of our own
+
+**Rule:** `.claude/rules/architecture.md` § "A rendered prompt that lost the
+question is a FAILED render" — the post-condition above sits on top of this.
+
+### What it replaced
+
+About a thousand lines of hand-rolled Jinja (`chat_template/parser.rs` +
+`eval.rs`, both deleted 2026-09-10). A subset is not the wrong idea — llama.cpp,
+Jan and GPT4All all use `minja`, a C++ subset written for exactly this — but
+**ours failed in the worst available way**: a template past its edge did not
+decline, it HALF-rendered, emitting a well-formed prompt with every user message
+dropped.
+
+The decision was researched rather than assumed (diagnosis rule 0), and the
+research is what settled it: **HuggingFace's own Rust inference server (TGI) and
+SGLang both use `minijinja`**, and the `pycompat` shim TGI needs was contributed
+by minijinja's author. A spike proved it rendered both Qwen3 revisions —
+including the one an actual GGUF ships, which our subset could not — for three
+new crates, everything else already being in the tree.
+
+### What a change must keep
+
+- **The environment must match what model authors write against.**
+  `transformers` renders chat templates with
+  `ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)` and
+  `keep_trailing_newline`, so a template's own indentation and the newline after
+  a block tag are NOT part of the prompt. Rendering with Jinja's defaults puts
+  the author's layout into the text the model reads. Invisible on a template
+  that marks every block `{%-` (Qwen3 does, which is why it agreed either way);
+  the whole difference on one that does not.
+- **`pycompat` is required, not optional.** Chat templates call Python string
+  methods — `split`, `lstrip`, `startswith`. minijinja implements no Python
+  methods natively; the shim is what makes real templates work.
+- **Undefined must be falsy, not an error.** Templates guard optional fields
+  (`message.reasoning_content`) and probe for callables with `is defined`.
+- **`raise_exception` must fail the render.** It is how Gemma and Mistral
+  templates say they cannot accept a message; the caller then falls back. The
+  old engine skipped it silently and rendered a turn those models were never
+  trained on.
+- **A bad `strftime_now` specifier must not fail the render.** `chrono`'s
+  `Display` PANICS on an unknown specifier so it has to be caught, but the
+  format string comes from model metadata and one bad `%Q` should not discard an
+  otherwise fine prompt. It yields an empty string.
+- **The three amplification bounds stay.** A template arrives inside a
+  downloaded GGUF — untrusted input, and a program. R101 capped rendered output
+  at 4 MiB because a recursion cap does not stop `{% set x = x + x %}`; that
+  guard lived in the deleted evaluator. It is now output size + an instruction
+  budget (`fuel`) + a bound on the template SOURCE, because doubling a value is
+  one cheap instruction that costs a lot of memory. All three are tested by
+  planting the attack, with controls just under each ceiling so a refusal is
+  attributable to the cap rather than to any render failure.
+
+### What this did NOT change
+
+Tool definitions are not passed to the renderer, so `{% if tools %}` is always
+false here and native rendering does not add tool-call framing to any model.
+That is handled separately by the API layer and `tool_parse`.
+
+### Known divergence from Jinja2: none currently
+
+The hand-rolled engine kept `<think>…</think>` in assistant HISTORY where jinja2
+strips it. minijinja + pycompat matches jinja2 there. If a future divergence is
+found, pin it explicitly in the test the way that one was, rather than leaving it
+in a comment.

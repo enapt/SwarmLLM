@@ -91,9 +91,7 @@ buffer both encoders already share, so all four API paths inherit it.
 `chat_template::render_kept_the_last_question` is a post-condition on
 `apply_chat_template`, inside `build_prompt_inner`: a render that does not
 contain the last user message's text is discarded, logged, and replaced by the
-fallback chain. The renderer is a documented Jinja SUBSET, and a subset running
-a template past its edge does not fail — it half-renders, producing the system
-preamble and a correctly opened turn with every message missing.
+fallback chain.
 
 Asserting on the FRAME cannot see this. The Qwen3 render test asserted the
 prompt ends on `<|im_start|>assistant`, which a prompt that dropped every
@@ -101,6 +99,42 @@ message also does, and it was green while every Qwen3 request in the field
 arrived with no question in it.
 
 → `docs/invariants/api-surfaces.md`
+
+## Chat templates render on minijinja, and its settings are part of the contract
+
+Rendering is `minijinja` + `minijinja-contrib`'s `pycompat` — the engine
+HuggingFace's TGI and SGLang use — NOT a subset of our own. A thousand lines of
+hand-rolled Jinja were deleted on 2026-09-10 because a subset does not decline
+on a template past its edge, it HALF-renders.
+
+Four settings are load-bearing and must not be dropped: `trim_blocks`,
+`lstrip_blocks` and `keep_trailing_newline` (what `transformers` renders with,
+so a template's own indentation is not part of the prompt), and the `pycompat`
+unknown-method callback (templates call `split` / `lstrip` / `startswith`, which
+minijinja does not implement natively). `raise_exception` must fail the render;
+a bad `strftime_now` specifier must not.
+
+A template arrives inside a downloaded GGUF, so it is untrusted input AND a
+program: output size, an instruction budget, and the template source are all
+bounded.
+
+→ `docs/invariants/api-surfaces.md`
+
+## A context that will not fit is shrunk, not refused
+
+`inference::executor::context_retry_ladder` is the answer to "what context size
+will this card actually accept": halve from the capped figure to a floor, serve
+the first size accepted, and log what was granted. `effective_llama_context`
+caps by a CONSTANT, and whether that constant fits is not constant — an 8B's
+weights can leave less room than its 8192-token KV cache needs, which failed
+every request on a 6 GB card.
+
+llama.cpp will not say how much it needs and free memory read beforehand is
+evidence rather than proof, so the size is asked for rather than predicted.
+**Called only from `llama`-gated code, so every default build reports it dead**
+(gotcha #264).
+
+→ `docs/FUTURE_WORK.md` § "A context that does not fit is refused instead of shrunk"
 
 ## A prompt that closed someone else's turn is finished for the model
 

@@ -2,7 +2,7 @@
 
 Captures items deliberately deferred from the model-management redesign and from prior sweeps. Each entry has enough context that a future implementer (or a future me) can pick it up without re-deriving the rationale.
 
-## Open bugs — triage index (2026-09-09)
+## Open bugs — triage index (2026-09-10)
 
 **This file is 13k lines and mixes live defects with deferred design work and measured
 dead ends. This index is the list of things that are WRONG and still open.** Perf
@@ -33,10 +33,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 |---|---|---|
 | 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation. **The instrument shipped inert TWICE**, both fixed on main. **Field data collected 2026-09-09** from dev nodes in the real swarm, including a CONTROLLED run holding the peer fixed: **the error grows monotonically with reply length within one peer** (1.00 at 9 tokens → 3.3 at 239), and `predicted_ms` is flat across that range. A constant sits where a variable belongs. **Not just a wrong constant**: a ~64-token reply should then price at ratio 1 and measures 1.75. **Still not enough to tune on**, and the released binary records nothing |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
-| 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
-| 31 | Every Qwen3 request reaches the model with the question missing | **ROOT-CAUSED AND FIXED 2026-09-10.** Field-reported as an 8B processor bug; reproduced here in 5 s on a 1.7B **on the GPU**, so neither the size nor the device mattered. The renderer half-renders the official Qwen3 template — system preamble present, model's turn correctly opened, **every user message dropped** — so three different questions all arrived as the same 14 tokens and produced byte-identical replies. Not a forward-pass bug and not a tokenizer bug: both were ruled out with null controls first |
 | 32 | A long prompt on the boomerang path dies with a CUDA OOM mid-compute | **Field-reported 2026-09-09.** 20837 tokens, `DriverError(CUDA_ERROR_OUT_OF_MEMORY)` raised during the forward rather than at load, so admission let it in and the compute then could not fit. Escrow refunded and the daemon stayed healthy, but it is a hard failure and the KV admission path is supposed to make it a clean 503 |
-| 33 | A context that does not fit is refused instead of shrunk | **FIXED 2026-09-10.** The llama.cpp path capped context at a CONSTANT 8192 and asked for it whatever the card had left. On a 6 GB card holding an 8B's weights there is no room for the 1.12 GB that needs, so every request died at `Failed to create context: null reference from llama.cpp`. It now halves down to a floor and serves the size it gets, saying so |
 | 30 | The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on | `DELEGATE_MIN_TRUST == DEFAULT_TRUST == 0.5`, so a peer we have never observed clears the bar that decides who may be handed a user's prompt in cleartext. Raising it is a routing-policy change with live consequences (on a small swarm it can make a model unservable), so it needs a decision, not a patch. The trust *ratchet* that made this worse is fixed (issue #21, 2026-09-10) |
 | 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
 
@@ -52,6 +49,9 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Outcome |
 |---|---|---|
+| 5 | The chat-template renderer was a Jinja subset, and Qwen3 was past its edge | **FIXED 2026-09-10** by replacing the subset rather than extending it. Rendering is now `minijinja` + `pycompat`, the engine HF's TGI and SGLang use; ~1000 hand-rolled lines deleted. Both Qwen3 template revisions render natively, verified on real requests (0 fallbacks). Evidence: `docs/invariants/api-surfaces.md` § "Chat templates render on minijinja" |
+| 31 | Every Qwen3 request reached the model with the question missing | **FIXED 2026-09-10 (v0.3.169), and confirmed in the field.** Reported as an 8B processor bug; reproduced here in 5 s on a **1.7B on the GPU**, so neither size nor device mattered. The subset half-rendered the template — preamble present, turn opened, **every user message dropped** — so three different questions arrived as the same 14 tokens with byte-identical replies. Forward-pass and tokenizer were both ruled out with null controls FIRST. The reporter's own v0.3.169 log shows the fix firing (`rendered_len` 58 → 134) |
+| 33 | A context that did not fit was refused instead of shrunk | **FIXED 2026-09-10 (v0.3.170).** The llama.cpp path capped context at a CONSTANT 8192 and asked for it whatever the card had left; an 8B's weights on a 6 GB card leave no room for the 1.12 GB that needs, so every request died at `Failed to create context: null reference`. `context_retry_ladder` now halves to a floor and serves the size the card accepts, logging what was granted. ⚠ Reported as a v0.3.169 regression on a matching error string; it was not — that release never touched this path |
 | 29 | Split points came only from what a peer holds on DISK, never from what it can LOAD | **FIXED 2026-09-09.** A capacity ceiling is now a split point as well as a cap. Without it a capacity-respecting route was not merely passed over but INEXPRESSIBLE: four candidates able to hold 17/9/14/19 of a 48-layer model, all holding it whole on disk, so the only boundaries were 0/48 plus the boomerang's — 28 layers went to a peer that could take 9, twice. Explains why `no route fits the peers' advertised memory` appeared 36 times in one node's log the same day. Evidence: `docs/invariants/scheduling.md`. ✅ **FIELD-VERIFIED 2026-09-10** by the two-node tester on v0.3.168, and the mechanism was observed firing rather than inferred from an outcome: `qwen2.5-14b` was removed from the CPU node to force the request across the network, four candidates were priced at their real limits (**42 / 23 / 21 / 19** layers), and the route chosen was **27 layers + 21 layers — the second node landing exactly on its 21-layer ceiling**. A ceiling used as a boundary is the whole change; under the old code 21 was only ever a reason to reject. No reject loop, pipeline completed, escrow settled. (The earlier 2026-09-09 attempt was inconclusive because the 14B had layers 35-41 on no reachable peer — a real coverage gap, not a routing fault.) |
 
 ### P4 — test and infrastructure
@@ -365,6 +365,20 @@ Pinned by `the_official_qwen3_template_keeps_the_users_question_in_the_prompt`,
 which fails with the guard removed. The llama3 exact-match-against-Jinja2 test
 and the other 68 template tests are unaffected, so working templates still
 render natively.
+
+### Follow-up 2026-09-10 (second) — the engine was replaced, and this is now moot
+
+Everything in the section below is history. The two constructs were implemented
+in the hand-rolled subset and then the subset itself was deleted: rendering
+moved to `minijinja` the same day, both Qwen3 revisions render natively, and the
+"three more constructs" the shipped template needed are simply supported. The
+`<think>`-in-history divergence is gone too — minijinja matches jinja2 there.
+
+**Kept because two lessons in it are general and cost real time:** an
+unrecognised `for` TRUNCATES a template rather than skipping (its `endfor` reads
+as stray, and a stray `endfor` returns from the block), and the repo's
+`qwen3_official.jinja` fixture was not the template a Qwen3 GGUF actually ships.
+Both still matter.
 
 ### Follow-up 2026-09-10 — two constructs implemented, and the fixture was wrong
 
@@ -1861,7 +1875,27 @@ anything repeated per request is repeated at the user for ever.
 That separation is the decision, and a future change that makes the router
 consult it has re-opened everything above.
 
-## The chat-template renderer is a Jinja subset, and Qwen3 is past its edge (open, 2026-09-05)
+## The chat-template renderer is a Jinja subset, and Qwen3 is past its edge (FIXED 2026-09-10)
+
+> **Superseded — read this first.** The subset was REPLACED rather than
+> extended: rendering is now `minijinja` + `minijinja-contrib` pycompat, the
+> engine HuggingFace's own Rust inference server (TGI) and SGLang use, and about
+> a thousand lines of hand-rolled parser and evaluator were deleted. Both
+> revisions of the official Qwen3 template render natively — including the one
+> an actual Qwen3 GGUF ships — verified on real requests with zero fallbacks.
+> `docs/invariants/api-surfaces.md` § "Chat templates render on minijinja" has
+> what a change must keep, including the four environment settings that are part
+> of the contract.
+>
+> **One thing below is still true and worth keeping**: `enable_thinking` is a
+> template-level switch we do not pass, and tool definitions are not handed to
+> the renderer at all, so `{% if tools %}` is always false here. Native
+> rendering did not change either of those.
+>
+> The original analysis follows, because the reasoning about WHY a subset fails
+> the way it does is what motivated replacing it.
+
+### Original entry (2026-09-05)
 
 `apply_chat_template` DECLINES the official Qwen3 template — verified against
 the real thing, now kept at `chat_template/fixtures/qwen3_official.jinja`. It

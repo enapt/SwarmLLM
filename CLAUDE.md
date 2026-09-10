@@ -105,7 +105,7 @@ swarmllm/
 
 ## Key Dependencies
 
-libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25519-dalek 2, x25519-dalek 2, chacha20poly1305, blake3, dashmap 6, clap 4, tracing, reqwest, zstd. See `Cargo.toml` for full list.
+libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25519-dalek 2, x25519-dalek 2, chacha20poly1305, blake3, dashmap 6, clap 4, tracing, reqwest, zstd, **minijinja 2.24 + minijinja-contrib (pycompat)** — chat-template rendering, the engine HF's TGI and SGLang use; its `trim_blocks`/`lstrip_blocks`/`keep_trailing_newline`/`pycompat` settings are part of the contract, see `.claude/rules/architecture.md`. See `Cargo.toml` for full list.
 
 ## Coding Conventions
 
@@ -242,20 +242,16 @@ templates now render on **minijinja + minijinja-contrib pycompat**, the engine
 HF's TGI and SGLang use, replacing ~1000 lines of hand-rolled subset that
 half-rendered rather than failing.
 
-⚠ **A required status check can name a job that no longer exists.** Branch
-protection required `Feature compile-check (candle-cuda)` and
-`Feature compile-check (windows-gpu)`; the jobs are
-`Feature compile-check candle-cuda (Linux)` etc. So those two enforced NOTHING
-and every PR was permanently BLOCKED — which is why Dependabot PRs could never
-merge. Corrected 2026-09-10, and `flash-attn (Linux)` added. **Re-check the
-contexts against `gh run view --json jobs` whenever a job is renamed.**
+⚠ **A required status check can name a job that no longer exists** — two of
+this repo's did, so they enforced NOTHING and **every PR was permanently
+BLOCKED** (`MERGEABLE` + `BLOCKED`, zero failing checks). Corrected 2026-09-10.
+**Re-check the protection contexts against `gh run view --json jobs` whenever a
+job is renamed.** Gotcha #530.
 
-⚠ **Dependabot #23 (llama-cpp-2 0.1.138 → 0.1.156) is DEFERRED, not rejected.**
-It failed only because llama.cpp's Vulkan backend added
-`find_package(SPIRV-Headers)`; `spirv-headers` is now installed in CI
-(`28b6b178`), so a rebase should go green. Held back so an 18-patch bump of the
-inference backend does not land in the same release as a fix to that backend's
-context handling — a field report about either would be unattributable.
+⚠ **Dependabot #23 (llama-cpp-2 → 0.1.156) is DEFERRED, not rejected** — it
+failed only on a missing `spirv-headers`, installed in CI as of `28b6b178`, so a
+rebase should go green. Held back so an 18-patch backend bump did not land beside
+the .170 fix to that backend's context handling.
 
 **Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
@@ -287,23 +283,14 @@ rather than failing. Check that node from the WSL side, or over `systemctl` and
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`,
 gotcha numbers index `memory/gotchas.md`. **Read the named round log before
-re-deriving any of these.**
+re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
 - **.165** (09-08): the round a `/code-review` of .164 started — **#495 had shipped INERT** (a transport failure recorded as a perfect delivery; fixed structurally with `#[serde(skip)] locally_constructed`), the prompt-trust bar was on 2 of 3 paths, and per-peer GOODPUT (BBR-shaped) closed issue #21's open half. ⚠ Not field-verified against netem. ⚠ Null controls caught THREE tests passing for the wrong reason. `round_log_0908_review_and_165.md`.
 - **.164** (09-08): the STABILITY round — #447(iii) (the gate proposes, the search chooses), the prompt-trust bar, and #495 (the loss term had NO input on the chain path, found from OUTSIDE by a contributor's netem lab). ⚠ The .164 field A/B was CONFOUNDED by two different BUILDS (#496). `round_log_0908_stability_round.md`.
-
 - **.162** (09-07): EIGHT fixes from the 16 GB Mac mini tester's eight reports (#017-#024). ⚠ THREE of the eight were WRONG about the CAUSE; #017/#018 are ONE knot and a naive cost comparison would have shipped a 503. `round_log_0907_macmini_eight_reports.md`.
-
 - **.160/.161** (09-06): TEN fixes + a correction, mostly from questions parked on a reporter who was assumed never to answer; #484 a FALSE PRIVACY ASSURANCE, #481 a regression we shipped in .154. .161 was a same-day hotfix — the dashboard would not load AT ALL. `round_log_0906_delegation_shape.md`.
-- **.159** (09-06): 16 fixes — the small-machine harness (`examples/constrained_node_test.sh`), #472 a content hash recomputed mid-corrections, the dashboard memory figure that never counted workers. `round_log_0906_dashboard_chat.md`.
-- **.158** (09-05): 3 from ONE Qwen3 report — a backend asking for the whole TRAINING window as its context; a prompt left on a CLOSED turn; a `<think>` scratchpad returned as the answer. ⚠ The reporter's headline diagnosis was WRONG (grep against a source-less tarball).
-- **.156/.157** (09-05): 23 defects. **#467 — #461 covered 3 of NINE worker-removal sites, missing the CUDA-OOM path both reports came from.** ⚠ Grep the OPERATION; a report's call-site list is symptoms, not scope. `round_log_0905_dead_worker_memory.md`.
-- **.153/.154/.155** (09-04): #449 ALL inference broken on every Mac (a socket path over `sun_path`'s 104 bytes — a platform limit a single-platform suite cannot see); #451 an ~8000-token ceiling on EVERY distributed prompt; #454-#460 from one tester's two-node pool. `round_log_0904_*.md`.
-- **.147-.152** (09-02/03): the processor route (#444); #438 resend ladder; #440 prefix-cache snapshots never charged (5 → 23 tok/s); three failover defects from ONE trace (#434/#435/#436). `round_log_0902_*.md`, `round_log_0903_processor_route.md`.
-- **.142-.146** (09-01): hybrid GPU/CPU layer splitting (#431, 5.0 → 12.25 tok/s); **no Mac had EVER been able to update itself (#430)**; **every node was lying about how fast it is (#428/#429)**; **the "safe to share" button shared everyone's IP address (#426)**. `round_log_0901_diagnostics_privacy.md`.
-- **.136-.141** (08-30/31): faults visible ONLY over the network or ONLY on a released binary — #416 multi-byte replies refused as lost, #414 replies arriving twice, #418 244 s vs 0.80 s, #420 naive BPE (141 s), #421 every newline sent as `<unk>`. ⚠ **The perf bug was the LEAD, not the bug**, and a tokenizer compared only against its own past cannot be shown correct. `round_log_0831_tokenizer_quadratic.md` (LAST section first).
-- **.132-.135** (08-29/30): **the guards were the defect** — five tested by PLANTING the violation, four could not see what they guard (#413); #410 GGUF headers off an UNBUFFERED file (11.2 s → 0.21 s). ⚠ Split utime/stime BEFORE theorising. `round_log_0830_guard_audit.md`.
-- **.15-.131** (07-23→08-28): the era that produced most of the rules. A corrupt shard PROVED to spread and only the ORIGIN settles it (#382), then .121 quarantined the GOOD copy (#384) — **a repair mechanism is a destruction mechanism**; CPU prefill +20-40% / decode +25-37%; 25.7x from a budget read off the BOOT SNAPSHOT (#281, third time, → `SharedState::cfg()`); credits switched OFF; the whole prompt pipeline wrong (#246-#253); AVX2 compiled OUT of releases (3.09x). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement.** `round_log_0825_overnight_watch.md` and siblings.
+- **.132-.159** (08-29→09-06): the guards-were-the-defect audit (#413 — five tested by PLANTING the violation, four could not see what they guard); the small-machine harness `examples/constrained_node_test.sh`; #467 (#461 covered 3 of NINE worker-removal sites); #449 ALL inference broken on every Mac; #472 a content hash recomputed mid-corrections. `round_history.md` has one line each.
+- **.15-.131** (07-23→08-28): the era that produced most of the rules. A corrupt shard PROVED to spread and only the ORIGIN settles it (#382), then .121 quarantined the GOOD copy (#384) — **a repair mechanism is a destruction mechanism**; 25.7x from a budget read off the BOOT SNAPSHOT (#281, third time → `SharedState::cfg()`); credits switched OFF; AVX2 compiled OUT of releases (3.09x). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement.**
 - **R136-R150 + the 20 build phases**: NAT/reachability, SWARM-SPEC cascade, `swarmpool://` v2, cross-pool routing. `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)
