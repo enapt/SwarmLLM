@@ -72,6 +72,18 @@ tower-http = { version = "0.6", features = ["cors", "timeout"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Chat-template rendering. A model's template is a Jinja program, and this is
+# the same engine HuggingFace's own Rust inference server (TGI) and SGLang use
+# for the job, with the `pycompat` shim that gives templates the Python string
+# methods they rely on (`split`, `lstrip`, `startswith`).
+#
+# It replaces ~1000 lines of hand-rolled subset. That subset did not fail on a
+# template past its edge, it HALF-rendered — emitting a well-formed prompt with
+# every user message dropped — and shipping that cost a release. Growing it
+# construct by construct was reimplementing, less well, what this crate already
+# does: see docs/invariants/api-surfaces.md.
+minijinja = { version = "2.24", default-features = false, features = ["builtins", "serde", "loop_controls", "fuel"] }
+minijinja-contrib = { version = "2.24", default-features = false, features = ["pycompat"] }
 toml = "1"
 safetensors = "0.7"
 
@@ -262,6 +274,7 @@ windows-gpu = ["llama-vulkan", "candle-cuda", "flash-attn"]
 # Claude Subscription: proxy Claude model requests through a locally-authenticated `claude` CLI
 # subprocess (Pro/Max/Team/Enterprise subscription). Isolated for easy removal.
 claude-subscription = []
+
 
 [dev-dependencies]
 tempfile = "3"

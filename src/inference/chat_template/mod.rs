@@ -7,17 +7,13 @@
 
 use crate::types::{ChatMessage, Role};
 
-mod eval;
 mod fallbacks;
-mod parser;
 
 pub use fallbacks::chatml_fallback;
 
-use eval::{eval_block, EvalCtx, EvalState};
 use fallbacks::{
     gemma_fallback, llama3_fallback, mistral_fallback, vicuna_fallback, zephyr_fallback,
 };
-use parser::tokenize;
 
 /// Apply a Jinja2-style chat template to a list of messages.
 ///
@@ -32,6 +28,22 @@ use parser::tokenize;
 /// model an empty prompt — no system message, no user turn, and for a VLM no
 /// `<image>` placeholder, so vision embeddings were prepended instead of being
 /// inserted at the right token position.
+/// Ceiling on rendered prompt size (R101). A template is untrusted input and
+/// `{% set x = x + x %}` doubles a value in one statement, so output is bounded
+/// rather than trusted.
+const MAX_TEMPLATE_OUTPUT: usize = 4 * 1024 * 1024;
+
+/// Ceiling on the template SOURCE. Bounds how many value-doubling statements a
+/// straight-line template can contain, which fuel does not (a doubling is one
+/// cheap instruction that costs a lot of memory). Real chat templates are a few
+/// kilobytes; the largest fixture here is 4.2 KB.
+const MAX_TEMPLATE_BYTES: usize = 200 * 1024;
+
+/// Instruction budget for one render. Bounds a runaway loop without tripping on
+/// a long conversation: a 100-message chat through a branch-heavy template is
+/// comfortably under this.
+const TEMPLATE_FUEL: u64 = 5_000_000;
+
 pub fn apply_chat_template(
     template: &str,
     messages: &[ChatMessage],
@@ -39,22 +51,130 @@ pub fn apply_chat_template(
     eos_token: &str,
     add_generation_prompt: bool,
 ) -> Option<String> {
-    let tokens = tokenize(template)?;
-    let mut output = String::new();
-    let ctx = EvalCtx {
-        tokens: &tokens,
-        messages,
-        bos_token,
-        eos_token,
-        add_generation_prompt,
-        depth: std::cell::Cell::new(0),
-    };
-    let mut state = EvalState::new(messages);
-    eval_block(&ctx, 0, &mut output, &mut state)?;
-    if !messages.is_empty() && output.trim().is_empty() {
+    let mut env = minijinja::Environment::new();
+
+    // Chat templates lean on Python string methods — `split`, `lstrip`,
+    // `startswith` — which minijinja does not implement natively. This is the
+    // shim its own author added to HuggingFace's TGI for exactly this.
+    env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+    env.add_function("strftime_now", strftime_now);
+    env.add_function("raise_exception", raise_exception);
+
+    // Undefined must be FALSY rather than an error. Templates guard optional
+    // fields with `{% if message.reasoning_content %}` and probe for callables
+    // with `is defined`, and erroring on those would decline templates that
+    // work.
+    env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
+
+    // Match the environment model authors actually write against. HuggingFace
+    // `transformers` renders chat templates with an
+    // `ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)`
+    // and `keep_trailing_newline`, so a template's indentation and its
+    // newlines after a block tag are NOT part of the prompt. Rendering the
+    // same template with Jinja's defaults instead puts the author's
+    // indentation into the text the model sees.
+    //
+    // It is invisible on a template that marks every block with `{%-` / `-%}`
+    // — Qwen3 does, which is why it agreed either way — and it is the whole
+    // difference on one that does not.
+    env.set_trim_blocks(true);
+    env.set_lstrip_blocks(true);
+    env.set_keep_trailing_newline(true);
+
+    // A chat template is UNTRUSTED INPUT: it arrives inside a GGUF downloaded
+    // from the network, and it is a program. R101 found that a recursion cap
+    // alone does not stop `{% set x = x + x %}` doubling a value, and capped
+    // rendered output at 4 MiB. That guard lived in the evaluator this
+    // replaced, so it is re-established here rather than lost in the swap.
+    //
+    // Three bounds, because they stop different things: `fuel` bounds how many
+    // instructions a loop may run, the writer bounds how much a template may
+    // EMIT, and the length check below bounds how many doublings a
+    // straight-line template can even contain — 200 KB is already two orders of
+    // magnitude above any real chat template (the largest seen here is 4.2 KB).
+    if template.len() > MAX_TEMPLATE_BYTES {
+        tracing::warn!(
+            bytes = template.len(),
+            limit = MAX_TEMPLATE_BYTES,
+            "chat template is implausibly large — declining to render it"
+        );
         return None;
     }
-    Some(output)
+    env.set_fuel(Some(TEMPLATE_FUEL));
+
+    env.add_template("chat", template).ok()?;
+    let tmpl = env.get_template("chat").ok()?;
+    let rendered = tmpl
+        .render(minijinja::context! {
+            messages => messages,
+            add_generation_prompt => add_generation_prompt,
+            bos_token => bos_token,
+            eos_token => eos_token,
+        })
+        .map_err(|e| {
+            // Not a warning: declining is a supported outcome that the caller
+            // handles by falling back, and Gemma-family templates decline ON
+            // PURPOSE via `raise_exception` when handed a system turn.
+            tracing::debug!(error = %e, "chat template did not render");
+        })
+        .ok()?;
+
+    if rendered.len() > MAX_TEMPLATE_OUTPUT {
+        tracing::warn!(
+            bytes = rendered.len(),
+            limit = MAX_TEMPLATE_OUTPUT,
+            "chat template rendered implausibly large output — discarding it"
+        );
+        return None;
+    }
+
+    // A template that swallowed a whole conversation is not a render. Kept
+    // from the previous engine; `render_kept_the_last_question` in
+    // `build_prompt_inner` is the stronger form of the same idea.
+    if !messages.is_empty() && rendered.trim().is_empty() {
+        return None;
+    }
+    Some(rendered)
+}
+
+/// `strftime_now("%d %b %Y")` — the current date, as Llama-3.x templates ask
+/// for it.
+///
+/// Llama-3.x renders today's date into the system block guarded by
+/// `{% if strftime_now is defined %}`, with a HARDCODED date in the `else`.
+/// With no implementation the guard was false and every Llama-3 model on the
+/// network was told the date was 26 Jul 2024.
+///
+/// An unparseable format is an error rather than a panic: the format string
+/// arrives from model metadata, and `chrono`'s `Display` panics on a bad
+/// specifier instead of erroring.
+fn strftime_now(fmt: String) -> Result<String, minijinja::Error> {
+    // An unrenderable specifier yields an empty string rather than failing the
+    // render. `chrono`'s `Display` PANICS on an unknown specifier instead of
+    // erroring, so it must be caught — but the format string comes from model
+    // metadata, and discarding a whole template over one bad `%Q` would throw
+    // away a prompt that is otherwise fine.
+    if chrono::format::StrftimeItems::new(&fmt)
+        .any(|item| matches!(item, chrono::format::Item::Error))
+    {
+        tracing::debug!(format = %fmt, "chat template: unsupported strftime format");
+        return Ok(String::new());
+    }
+    Ok(chrono::Local::now().format(&fmt).to_string())
+}
+
+/// `raise_exception("...")` — how Gemma and Mistral templates say they do not
+/// support the message they were given, usually a system turn.
+///
+/// Failing the render is the correct answer: the caller falls back, and
+/// `template_expects_system` already refuses to inject a system message into a
+/// template containing this call. The previous engine treated it as a silent
+/// skip, which rendered a turn the model was never trained on.
+fn raise_exception(msg: String) -> Result<String, minijinja::Error> {
+    Err(minijinja::Error::new(
+        minijinja::ErrorKind::InvalidOperation,
+        msg,
+    ))
 }
 
 /// Extract stop strings from a chat template.

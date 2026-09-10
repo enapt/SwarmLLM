@@ -262,14 +262,22 @@ fn or_and_precedence() {
     assert_eq!(result, "MATCH");
 }
 
+/// `raise_exception` is how Gemma and Mistral templates say they do not support
+/// the message they were handed, and it is honoured: the render FAILS and the
+/// caller falls back.
+///
+/// The engine this replaced treated it as a silent skip and rendered on, which
+/// produced a turn the model was never trained on — Gemma emitting
+/// `<start_of_turn>system`. Declining is the answer the template asked for.
 #[test]
-fn raise_exception_ignored() {
+fn raise_exception_declines_the_render() {
     let template =
         "{% if messages[0]['role'] == 'system' %}{{ raise_exception('no system') }}{% endif %}OK";
     let msgs = test_messages();
-    let result = apply_chat_template(template, &msgs, "", "", false).unwrap();
-    // raise_exception produces no output but doesn't abort
-    assert!(result.ends_with("OK"), "Got: {:?}", result);
+    assert!(
+        apply_chat_template(template, &msgs, "", "", false).is_none(),
+        "a template that raises must decline, so the caller can fall back"
+    );
 }
 
 #[test]
@@ -803,12 +811,13 @@ fn a_sliced_message_loop_skips_what_the_slice_drops() {
         "messages[1:] must skip the first message"
     );
 
-    // A filter we do not implement is applied as identity — recognising the
-    // loop and walking everything beats not recognising it and emitting nothing.
+    // `| reverse` is now genuinely applied. The hand-rolled evaluator this
+    // replaced treated every filter it did not implement as identity, so this
+    // read back in message order; a real engine reverses it.
     let filtered = "{% for message in messages | reverse %}{{ message['content'] }};{% endfor %}";
     assert_eq!(
         apply_chat_template(filtered, &msgs, "", "", true).unwrap(),
-        "You are helpful.;Hello;"
+        "Hello;You are helpful.;"
     );
 }
 
@@ -1041,13 +1050,11 @@ fn mistral_fallback_multi_turn_alternates() {
 /// OpenAI, Anthropic, streaming and router paths collapsed to ChatML.
 #[test]
 fn real_mistral_template_failure_degrades_to_mistral_not_chatml() {
-    // A construct our evaluator does not implement, taken from the official
-    // Mistral-7B-Instruct-v0.3 template: bind the message list inside a
-    // `namespace()` and loop it through the namespace. (Plain slicing USED to
-    // be the example here; it is supported now, so this reaches for one of the
-    // constructs that still is not.)
-    let tmpl = "{%- set ns = namespace(loop_messages = messages[1:]) %}\
-                {%- for message in ns.loop_messages %}{{ message['content'] }}{%- endfor %}";
+    // A template that cannot render at all. `namespace()` and slicing USED to
+    // be the examples here and are both supported now, so this reaches for the
+    // one thing that will always fail: a syntax error. What is under test is
+    // the FALLBACK CHOICE, not which construct broke.
+    let tmpl = "{%- for message in messages %}{{ message['content'] }}{%- endnope %}";
     let msgs = test_messages();
 
     // Confirm the premise: this really does fail to render.
@@ -1514,28 +1521,19 @@ fn the_official_qwen3_template_renders_exactly_as_jinja2_does() {
             images: vec![],
         },
     ];
-    //
-    // ONE KNOWN DIVERGENCE, pinned rather than hidden: jinja2 strips the
-    // `<think>…</think>` block out of an assistant turn in HISTORY (via
-    // `content.split('</think>')[-1]`), and this renderer does not implement
-    // those string methods, so it keeps it. Everything else matches.
-    //
-    // Low impact here, and worth knowing why: our own API already removes a
-    // leading reasoning block from a reply before returning it
-    // (`inference::take_leading_reasoning_block`), so a client echoing our
-    // assistant turn back sends content with no `<think>` in it. The gap shows
-    // only when a caller supplies one itself.
+    // Including the reasoning block being stripped out of HISTORY, which the
+    // hand-rolled engine could not do: jinja2 uses
+    // `content.split('</think>')[-1]`, and Python string methods now work.
     assert_eq!(
         apply_chat_template(tmpl, &multi, "", "<|im_end|>", true).as_deref(),
         Some(
             "<|im_start|>system\nSYS<|im_end|>\n\
              <|im_start|>user\nfirst<|im_end|>\n\
-             <|im_start|>assistant\n<think>pondering</think>answer one<|im_end|>\n\
+             <|im_start|>assistant\nanswer one<|im_end|>\n\
              <|im_start|>user\nsecond<|im_end|>\n\
              <|im_start|>assistant\n"
         ),
-        "multi-turn render diverged from jinja2 in some way OTHER than the \
-         known <think>-in-history difference"
+        "multi-turn render diverged from jinja2"
     );
 
     // And the same conversation without a reasoning block matches jinja2 exactly.
@@ -1668,5 +1666,72 @@ fn the_template_a_real_qwen3_gguf_ships_still_reaches_the_model_with_the_questio
         prompt.trim_end().ends_with("<|im_start|>assistant"),
         "prompt does not open the model's turn: {:?}",
         &prompt[prompt.len().saturating_sub(60)..]
+    );
+}
+
+/// A chat template is untrusted input — it arrives inside a downloaded GGUF —
+/// and it is a program. R101 found a recursion cap does not stop
+/// `{% set x = x + x %}`, and capped rendered output. That guard lived in the
+/// evaluator replaced by minijinja, so this pins that it still holds.
+///
+/// Verified by PLANTING each attack rather than by trusting the constants.
+#[test]
+fn a_hostile_chat_template_cannot_amplify_without_bound() {
+    let msgs = test_messages();
+
+    // 1. A runaway loop is stopped by the fuel budget.
+    let spin = "{% for a in range(100000) %}{% for b in range(100000) %}x{% endfor %}{% endfor %}";
+    assert!(
+        apply_chat_template(spin, &msgs, "", "", true).is_none(),
+        "an unbounded loop must not be allowed to run to completion"
+    );
+
+    // 2. A template that EMITS more than the output cap is discarded.
+    //    2000 * 4096 characters is over 8 MiB, past the 4 MiB ceiling.
+    let flood = "{% for a in range(2000) %}{{ 'x' * 4096 }}{% endfor %}";
+    assert!(
+        apply_chat_template(flood, &msgs, "", "", true).is_none(),
+        "output past the ceiling must be discarded, not returned"
+    );
+
+    // 3. An implausibly large template source is declined before rendering,
+    //    which is what bounds straight-line value doubling.
+    let huge = format!("{}{{{{ 'ok' }}}}", "{# pad #}".repeat(40_000));
+    assert!(
+        huge.len() > 200 * 1024,
+        "test needs a template past the cap"
+    );
+    assert!(
+        apply_chat_template(&huge, &msgs, "", "", true).is_none(),
+        "a template past the source ceiling must be declined"
+    );
+
+    // CONTROLS, so `is_none()` above is attributable to the caps rather than to
+    // any old render failure: the same shapes just UNDER each ceiling render.
+    let under_source_cap = format!("{}{{{{ 'ok' }}}}", "{# pad #}".repeat(1_000));
+    assert!(under_source_cap.len() < 200 * 1024);
+    assert_eq!(
+        apply_chat_template(&under_source_cap, &msgs, "", "", true).as_deref(),
+        Some("ok"),
+        "a template under the source ceiling must still render"
+    );
+    let under_output_cap = "{% for a in range(100) %}{{ 'x' * 1024 }}{% endfor %}";
+    assert_eq!(
+        apply_chat_template(under_output_cap, &msgs, "", "", true).map(|s| s.len()),
+        Some(100 * 1024),
+        "output under the ceiling must be returned intact"
+    );
+
+    // And an ordinary template is untouched by any of the three.
+    assert_eq!(
+        apply_chat_template(
+            "{% for m in messages %}{{ m.content }};{% endfor %}",
+            &msgs,
+            "",
+            "",
+            true
+        )
+        .as_deref(),
+        Some("You are helpful.;Hello;")
     );
 }
