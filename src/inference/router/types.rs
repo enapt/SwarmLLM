@@ -314,6 +314,7 @@ mod deliver_result_tests {
             false,
             None,
             None,
+            None,
         );
         if cancelled {
             r.cancel = Some(Arc::new(AtomicBool::new(true)));

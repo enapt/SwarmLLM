@@ -8,6 +8,71 @@ names** — the rule statement in `architecture.md` is the summary, this is the
 reasoning, and several of these describe a fix that looked obviously correct
 and was not.
 
+## A model is told about its tools the way it was trained to be
+
+(2026-09-10). **`chat_template::build_prompt` is the ONE place that decides how
+a model learns what tools it has**, because the choice needs both the tool
+definitions and the model's own template, and nothing else holds both.
+`template_renders_tools` picks: a template that reads `tools` renders them
+itself; one that never mentions them gets `describe_tools_in_prose`, the
+hand-written JSON instruction that used to be the only option.
+
+Before this, the two API surfaces flattened tools into a system message at the
+edge — `ChatCompletionRequest::to_chat_messages` and `anthropic::convert` —
+where the template is not known. So **Qwen3's own `{%- if tools %}` branch was
+unreachable on every request ever made**: `apply_chat_template` had no `tools`
+parameter at all, the variable was always undefined, and a model trained to emit
+`<tool_call>{"name": …}</tool_call>` was instead handed a `{"tool_calls": [...]}`
+format it had never seen. Reported from the field against v0.3.170 on Qwen3-8B,
+where the model emitted repeated malformed special tokens and made no call at
+all, through two independent clients.
+
+Three things a change here must keep:
+
+- **`tools` is a REQUIRED parameter of `build_prompt` and of
+  `InferenceRequest::local`, with no shorter form that omits it.** That exact
+  convenience wrapper is how the template fallback was disabled on six of seven
+  paths (gotcha #171); making it required is what made the compiler enumerate
+  all eleven call sites here instead of leaving the router path silently
+  tool-less.
+- **Tools ride on `InferenceRequest` beside `messages`, not inside them.** The
+  router path builds its prompt deep inside `pipeline/prompt.rs` and
+  `router/{local,distributed}_exec.rs`, long after the API surface is gone.
+- **The Anthropic surface translates.** Anthropic says `{"name",
+  "description", "input_schema"}`; every HuggingFace template is written
+  against `{"type": "function", "function": {"name", "description",
+  "parameters"}}` and dumps it verbatim — Qwen3 does `{{- tool | tojson }}`
+  straight into `<tools>`. `convert::tool_definitions_for_template` is that
+  translation.
+
+`tool_choice: "none"` is enforced by returning no definitions at all, on both
+surfaces: a local model knows its tools only because the prompt describes them,
+so not describing them is the only place the choice can be held.
+
+The reading half already worked — `tool_parse::try_hermes` has always parsed
+`<tool_call>`. Rendering native framing without it would have produced a reply
+that looked like prose containing XML, so the round trip is pinned by
+`qwen3_native_framing` tests rather than assumed.
+
+## `tojson` is a minijinja FEATURE, and without it the whole render fails
+
+(2026-09-10). This crate builds minijinja with `default-features = false`, and
+the feature list did not include `json`. **Every real chat template that renders
+tools calls `tojson`** — Qwen3, Llama 3.1 and the Qwen3 GGUF-shipped variant all
+do — and an unknown filter fails the ENTIRE render, not that one expression. The
+model then silently gets a fallback template.
+
+It was invisible because the only `tojson` calls in those templates sit inside
+the tool branch, which nothing could reach until tools were passed. So the fix
+above would have shipped INERT: the first end-to-end attempt rendered Qwen3's
+non-tools branch and the test failed on a template that was, by then, being
+handed its tools correctly.
+
+Pinned as behaviour by `the_tojson_filter_is_available_to_templates` rather than
+as a line in `Cargo.toml` — what matters is that the filter resolves. Dropping
+the feature fails that test and `qwen3_renders_its_own_tool_framing`, both
+verified by removing it.
+
 ## A reasoning model's scratchpad is not the reply
 
 `inference::take_leading_reasoning_block` removes a leading `<think>…</think>`

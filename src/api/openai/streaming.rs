@@ -221,6 +221,7 @@ pub fn spawn_split_stream(
     // parameter was added to fix. `None` is legitimate only where no trace
     // exists at all.
     trace: Option<std::sync::Arc<crate::inference::trace::RequestTrace>>,
+    tools: Option<&[serde_json::Value]>,
 ) -> Option<SplitStream> {
     let meta = get_split_model_meta(&state.shared_state, model_id)?;
     let prompt = crate::inference::chat_template::build_prompt(
@@ -229,6 +230,7 @@ pub fn spawn_split_stream(
         &meta.bos_token,
         &meta.eos_token_str,
         Some(model_id.0.as_str()),
+        tools,
     );
 
     // Add the stop strings implied by the chat template to whatever the caller
@@ -364,6 +366,7 @@ pub fn spawn_split_stream(
 ///
 /// Creates the InferenceRequest and sends StreamSubmit. Returns receivers for
 /// the final result and streaming tokens. Used by both openai and anthropic handlers.
+#[allow(clippy::too_many_arguments)]
 pub async fn submit_stream_to_router(
     router_tx: &tokio::sync::mpsc::Sender<RouterCommand>,
     model_id: ModelId,
@@ -372,6 +375,7 @@ pub async fn submit_stream_to_router(
     session_id: Option<String>,
     lora_adapter: Option<String>,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    tools: Option<Vec<serde_json::Value>>,
 ) -> Result<
     (
         tokio::sync::oneshot::Receiver<
@@ -396,6 +400,7 @@ pub async fn submit_stream_to_router(
         true,
         session_id,
         lora_adapter,
+        tools,
     );
     inference_req.cancel = cancel;
     let traced_id = inference_req.id;
@@ -426,6 +431,7 @@ pub async fn run_split_generate(
     messages: &[ChatMessage],
     params: SamplingParams,
     request_id: &str,
+    tools: Option<&[serde_json::Value]>,
 ) -> Result<crate::inference::router::InferenceOutput, ApiError> {
     let meta = get_split_model_meta(&state.shared_state, model_id)
         .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
@@ -436,6 +442,7 @@ pub async fn run_split_generate(
         &meta.bos_token,
         &meta.eos_token_str,
         Some(model_id.0.as_str()),
+        tools,
     );
 
     tracing::debug!(
@@ -525,6 +532,7 @@ pub(super) async fn router_inference(
         false,
         req.session_id.clone(),
         req.lora_adapter.clone(),
+        req.tool_definitions(),
     );
     inference_req.cancel = cancel;
 
@@ -639,6 +647,7 @@ async fn router_inference_stream(
         req.session_id.clone(),
         req.lora_adapter.clone(),
         Some(cancel.clone()),
+        req.tool_definitions(),
     )
     .await?;
 
@@ -966,10 +975,22 @@ pub(super) async fn split_non_stream_response(
     messages: Vec<ChatMessage>,
     params: SamplingParams,
     model_id: crate::types::ModelId,
-    tools_requested: bool,
+    // The tool DEFINITIONS, not a flag derived from them: the prompt builder
+    // needs them to decide whether this model's own template renders tools or
+    // whether it must be told about them in prose. `tools_requested` is derived
+    // below rather than passed beside them, so the two cannot disagree.
+    tools: Option<Vec<serde_json::Value>>,
 ) -> Result<axum::response::Response, ApiError> {
-    let output =
-        run_split_generate(&state, &model_id, &messages, params.clone(), &request_id).await?;
+    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
+    let output = run_split_generate(
+        &state,
+        &model_id,
+        &messages,
+        params.clone(),
+        &request_id,
+        tools.as_deref(),
+    )
+    .await?;
     let trace = output.trace.clone();
 
     let response = build_chat_completion_response(
@@ -1005,9 +1026,14 @@ pub(super) async fn split_stream_response(
     messages: Vec<ChatMessage>,
     params: SamplingParams,
     model_id: crate::types::ModelId,
-    tools_requested: bool,
+    // The tool DEFINITIONS, not a flag derived from them: the prompt builder
+    // needs them to decide whether this model's own template renders tools or
+    // whether it must be told about them in prose. `tools_requested` is derived
+    // below rather than passed beside them, so the two cannot disagree.
+    tools: Option<Vec<serde_json::Value>>,
     include_usage: bool,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     // Captured before `state` is moved into the generation task. This is the
     // LOCAL-model streaming path — the one most likely to sit in a long prefill
     // on a modest machine — so omitting progress here would leave it missing
@@ -1058,6 +1084,7 @@ pub(super) async fn split_stream_response(
             params,
             &request_id,
             Some(stream_trace.clone()),
+            tools.as_deref(),
         ) {
             Some(pair) => pair,
             None => {

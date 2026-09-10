@@ -96,6 +96,7 @@ fn run_one(
         "<s>",
         "</s>",
         Some("llava-v1.5-7b-Q4_K_M"),
+        None,
     );
     eprintln!("prompt: {prompt:?}");
     assert!(

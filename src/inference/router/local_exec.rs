@@ -109,6 +109,7 @@ pub(super) async fn execute_local_batch(
                         &i.bos_token,
                         &i.eos_token,
                         Some(i.name.as_str()),
+                        request.tools.as_deref(),
                     ),
                     // No loaded-model metadata, but we still know WHICH model
                     // was asked for — enough for the family fallback to pick a
@@ -121,6 +122,7 @@ pub(super) async fn execute_local_batch(
                         "",
                         "",
                         Some(request.model_id.0.as_str()),
+                        request.tools.as_deref(),
                     ),
                 };
                 let stops = chat_template::extract_stop_strings(

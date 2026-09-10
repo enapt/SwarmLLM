@@ -100,6 +100,26 @@ arrived with no question in it.
 
 → `docs/invariants/api-surfaces.md`
 
+## A model is told about its tools the way it was trained to be
+
+**`chat_template::build_prompt` is the ONE place that decides how a model learns
+what tools it has** — it needs the tool definitions AND the model's own
+template, and nothing else holds both. `template_renders_tools` chooses: a
+template that reads `tools` renders them itself; one that never mentions them
+gets `describe_tools_in_prose`.
+
+Flattening tools into a system message at the API edge is what left Qwen3's own
+`{%- if tools %}` branch unreachable on every request ever made. `tools` is a
+REQUIRED parameter of `build_prompt` and `InferenceRequest::local`, and rides on
+the request beside `messages` — the router builds its prompt long after the API
+surface is gone. The Anthropic surface translates its `input_schema` shape into
+the `{"type": "function", "function": {...}}` one templates are written against.
+
+**`tojson` is a minijinja feature (`json`), and an unknown filter fails the
+WHOLE render.** Every real tool-rendering template calls it.
+
+→ `docs/invariants/api-surfaces.md`
+
 ## Chat templates render on minijinja, and its settings are part of the contract
 
 Rendering is `minijinja` + `minijinja-contrib`'s `pycompat` — the engine

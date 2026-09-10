@@ -29,7 +29,7 @@ fn chatml_template_roundtrip() {
     // Standard ChatML template used by Qwen2, many OpenHermes models, etc.
     let template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
     let msgs = test_messages();
-    let result = apply_chat_template(template, &msgs, "", "", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", true, None).unwrap();
     assert!(result.contains("<|im_start|>system\nYou are helpful.<|im_end|>"));
     assert!(result.contains("<|im_start|>user\nHello<|im_end|>"));
     assert!(result.ends_with("<|im_start|>assistant\n"));
@@ -49,8 +49,15 @@ fn llama3_style_template() {
     // Simplified Llama 3 / Llama 3.1 style template
     let template = "{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|start_header_id|>system<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'user' %}{{ '<|start_header_id|>user<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}";
     let msgs = test_messages();
-    let result =
-        apply_chat_template(template, &msgs, "<|begin_of_text|>", "<|eot_id|>", true).unwrap();
+    let result = apply_chat_template(
+        template,
+        &msgs,
+        "<|begin_of_text|>",
+        "<|eot_id|>",
+        true,
+        None,
+    )
+    .unwrap();
     assert!(
         result.contains("<|start_header_id|>system<|end_header_id|>\n\nYou are helpful.<|eot_id|>")
     );
@@ -63,7 +70,7 @@ fn mistral_style_template() {
     // Simplified Mistral Instruct template
     let template = "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token }}{% endif %}{% endfor %}";
     let msgs = user_only_messages();
-    let result = apply_chat_template(template, &msgs, "<s>", "</s>", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "<s>", "</s>", true, None).unwrap();
     assert_eq!(result, "<s>[INST] Hello [/INST]");
 }
 
@@ -71,7 +78,7 @@ fn mistral_style_template() {
 fn build_prompt_with_template() {
     let template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
     let msgs = test_messages();
-    let result = build_prompt(&msgs, Some(template), "", "", None);
+    let result = build_prompt(&msgs, Some(template), "", "", None, None);
     assert!(result.contains("<|im_start|>system\nYou are helpful.<|im_end|>"));
     assert!(result.ends_with("<|im_start|>assistant\n"));
 }
@@ -79,7 +86,7 @@ fn build_prompt_with_template() {
 #[test]
 fn build_prompt_without_template_falls_back() {
     let msgs = test_messages();
-    let result = build_prompt(&msgs, None, "", "", None);
+    let result = build_prompt(&msgs, None, "", "", None, None);
     assert!(result.contains("<|im_start|>system\nYou are helpful.<|im_end|>"));
     assert!(result.ends_with("<|im_start|>assistant\n"));
 }
@@ -88,7 +95,7 @@ fn build_prompt_without_template_falls_back() {
 fn dot_notation_works() {
     let template = "{% for message in messages %}{{ message.role }}: {{ message.content }}\n{% endfor %}{% if add_generation_prompt %}assistant: {% endif %}";
     let msgs = test_messages();
-    let result = apply_chat_template(template, &msgs, "", "", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", true, None).unwrap();
     assert!(result.contains("system: You are helpful.\n"));
     assert!(result.contains("user: Hello\n"));
     assert!(result.ends_with("assistant: "));
@@ -97,7 +104,7 @@ fn dot_notation_works() {
 #[test]
 fn empty_messages() {
     let template = "{% for message in messages %}{{ message.content }}{% endfor %}";
-    let result = apply_chat_template(template, &[], "", "", true).unwrap();
+    let result = apply_chat_template(template, &[], "", "", true, None).unwrap();
     assert_eq!(result, "");
 }
 
@@ -105,7 +112,7 @@ fn empty_messages() {
 fn no_generation_prompt() {
     let template = "{% for message in messages %}{{ message.content }}{% endfor %}{% if add_generation_prompt %}ASSIST{% endif %}";
     let msgs = test_messages();
-    let result = apply_chat_template(template, &msgs, "", "", false).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert!(!result.contains("ASSIST"));
 }
 
@@ -113,7 +120,7 @@ fn no_generation_prompt() {
 fn bos_eos_tokens() {
     let template = "{{ bos_token }}{% for message in messages %}{{ message.content }}{{ eos_token }}{% endfor %}";
     let msgs = user_only_messages();
-    let result = apply_chat_template(template, &msgs, "<s>", "</s>", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "<s>", "</s>", true, None).unwrap();
     assert_eq!(result, "<s>Hi</s>".replace("Hi", "Hello"));
 }
 
@@ -125,7 +132,7 @@ fn zephyr_tinyllama_template() {
 ' + message['content'] + eos_token }}{% elif message['role'] == 'assistant' %}{{ '<|assistant|>
 ' + message['content'] + eos_token }}{% endif %}{% if loop.last and add_generation_prompt %}{{ '<|assistant|>' }}{% endif %}{% endfor %}"#;
     let msgs = user_only_messages();
-    let result = apply_chat_template(template, &msgs, "<s>", "</s>", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "<s>", "</s>", true, None).unwrap();
     assert!(result.contains("<|user|>\nHello</s>"));
     assert!(
         result.ends_with("<|assistant|>"),
@@ -150,10 +157,10 @@ fn compound_and_condition() {
             images: vec![],
         },
     ];
-    let result = apply_chat_template(template, &msgs, "", "", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", true, None).unwrap();
     assert_eq!(result, "ABASSIST");
     // Without generation prompt, ASSIST should NOT appear
-    let result2 = apply_chat_template(template, &msgs, "", "", false).unwrap();
+    let result2 = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert_eq!(result2, "AB");
 }
 
@@ -161,7 +168,7 @@ fn compound_and_condition() {
 fn else_branch() {
     let template = "{% for message in messages %}{% if message['role'] == 'system' %}SYS:{{ message['content'] }}{% else %}OTHER:{{ message['content'] }}{% endif %}{% endfor %}";
     let msgs = test_messages();
-    let result = apply_chat_template(template, &msgs, "", "", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", true, None).unwrap();
     assert!(result.contains("SYS:You are helpful."));
     assert!(result.contains("OTHER:Hello"));
 }
@@ -172,7 +179,7 @@ fn zephyr_tinyllama_multiline_template() {
     // HuggingFace renders with trim_blocks=True, lstrip_blocks=True.
     let template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}\n";
     let msgs = user_only_messages();
-    let result = apply_chat_template(template, &msgs, "<s>", "</s>", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "<s>", "</s>", true, None).unwrap();
     assert!(
         result.contains("<|user|>\nHello</s>"),
         "Expected user message, got: {:?}",
@@ -208,7 +215,7 @@ fn set_variable() {
             images: vec![],
         },
     ];
-    let result = apply_chat_template(template, &msgs, "", "", false).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert!(result.contains("user: Hi"), "Got: {:?}", result);
     assert!(result.contains("model: Hey"), "Got: {:?}", result);
 }
@@ -221,7 +228,7 @@ fn trim_filter() {
         content: "  Hello  ".into(),
         images: vec![],
     }];
-    let result = apply_chat_template(template, &msgs, "", "", false).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert_eq!(result, "Hello");
 }
 
@@ -231,7 +238,7 @@ fn messages_index_access() {
     let template =
         "{% if messages[0]['role'] == 'system' %}SYS:{{ messages[0]['content'] }}{% endif %}DONE";
     let msgs = test_messages();
-    let result = apply_chat_template(template, &msgs, "", "", false).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert!(result.contains("SYS:You are helpful."), "Got: {:?}", result);
 }
 
@@ -239,7 +246,7 @@ fn messages_index_access() {
 fn messages_index_no_system() {
     let template = "{% if messages[0]['role'] == 'system' %}SYS{% else %}NO_SYS{% endif %}";
     let msgs = user_only_messages();
-    let result = apply_chat_template(template, &msgs, "", "", false).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert_eq!(result, "NO_SYS");
 }
 
@@ -248,7 +255,7 @@ fn undefined_variable_is_falsy() {
     // `tools` is undefined, should be falsy
     let template = "{% if tools %}TOOLS{% else %}NO_TOOLS{% endif %}";
     let msgs = user_only_messages();
-    let result = apply_chat_template(template, &msgs, "", "", false).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert_eq!(result, "NO_TOOLS");
 }
 
@@ -258,7 +265,7 @@ fn or_and_precedence() {
     // true or (false and false) → true
     let template = "{% for message in messages %}{% if message.role == 'user' or message.role == 'system' and not loop.first %}MATCH{% else %}SKIP{% endif %}{% endfor %}";
     let msgs = user_only_messages();
-    let result = apply_chat_template(template, &msgs, "", "", false).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert_eq!(result, "MATCH");
 }
 
@@ -275,7 +282,7 @@ fn raise_exception_declines_the_render() {
         "{% if messages[0]['role'] == 'system' %}{{ raise_exception('no system') }}{% endif %}OK";
     let msgs = test_messages();
     assert!(
-        apply_chat_template(template, &msgs, "", "", false).is_none(),
+        apply_chat_template(template, &msgs, "", "", false, None).is_none(),
         "a template that raises must decline, so the caller can fall back"
     );
 }
@@ -284,14 +291,14 @@ fn raise_exception_declines_the_render() {
 fn expression_trim_markers() {
     // {{- trims whitespace before, -}} trims whitespace after
     let template = "  hello  {{- ' world' }}  ";
-    let result = apply_chat_template(template, &[], "", "", false).unwrap();
+    let result = apply_chat_template(template, &[], "", "", false, None).unwrap();
     assert_eq!(result, "  hello world  ");
 }
 
 #[test]
 fn string_escape_sequences() {
     let template = "{{ 'hello\\nworld' }}";
-    let result = apply_chat_template(template, &[], "", "", false).unwrap();
+    let result = apply_chat_template(template, &[], "", "", false, None).unwrap();
     assert_eq!(result, "hello\nworld");
 }
 
@@ -299,7 +306,7 @@ fn string_escape_sequences() {
 fn loop_index0() {
     let template = "{% for message in messages %}{{ loop.index0 }}{% endfor %}";
     let msgs = test_messages();
-    let result = apply_chat_template(template, &msgs, "", "", false).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert_eq!(result, "01");
 }
 
@@ -307,7 +314,7 @@ fn loop_index0() {
 fn not_loop_first() {
     let template = "{% for message in messages %}{% if not loop.first %},{% endif %}{{ message.content }}{% endfor %}";
     let msgs = test_messages();
-    let result = apply_chat_template(template, &msgs, "", "", false).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert_eq!(result, "You are helpful.,Hello");
 }
 
@@ -320,7 +327,7 @@ fn gemma2_actual_template() {
         content: "What is 2+2?".into(),
         images: vec![],
     }];
-    let result = apply_chat_template(template, &msgs, "<bos>", "<eos>", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "<bos>", "<eos>", true, None).unwrap();
     assert!(
         result.starts_with("<bos>"),
         "Should start with bos_token, got: {:?}",
@@ -358,7 +365,7 @@ fn gemma2_user_assistant_alternation() {
             images: vec![],
         },
     ];
-    let result = apply_chat_template(template, &msgs, "<bos>", "<eos>", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "<bos>", "<eos>", true, None).unwrap();
     assert!(
         result.contains("<start_of_turn>user\nHi<end_of_turn>"),
         "Got: {:?}",
@@ -411,7 +418,7 @@ fn qwen25_actual_template_no_tools() {
             images: vec![],
         },
     ];
-    let result = apply_chat_template(template, &msgs, "", "", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", true, None).unwrap();
     assert!(
         result.contains("<|im_start|>system\nYou are helpful.<|im_end|>"),
         "Should contain system message, got: {:?}",
@@ -457,7 +464,7 @@ fn qwen25_no_system_message() {
         "{%- endif %}\n",
     );
     let msgs = user_only_messages();
-    let result = apply_chat_template(template, &msgs, "", "", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "", true, None).unwrap();
     assert!(
         result.contains("<|im_start|>system\nDefault system.<|im_end|>"),
         "Should contain default system message, got: {:?}",
@@ -475,7 +482,7 @@ fn phi35_actual_template() {
     // Phi-3.5's actual template
     let template = "{% for message in messages %}{% if message['role'] == 'system' and message['content'] %}{{'<|system|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'user' %}{{'<|user|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'assistant' %}{{'<|assistant|>\n' + message['content'] + '<|end|>\n'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% else %}{{ eos_token }}{% endif %}";
     let msgs = test_messages();
-    let result = apply_chat_template(template, &msgs, "", "<|endoftext|>", true).unwrap();
+    let result = apply_chat_template(template, &msgs, "", "<|endoftext|>", true, None).unwrap();
     assert!(
         result.contains("<|system|>\nYou are helpful.<|end|>"),
         "Got: {:?}",
@@ -508,6 +515,7 @@ fn failed_template_falls_back_to_vicuna_for_llava() {
         "",
         "</s>",
         Some("llava-v1.5-7b"),
+        None,
     );
     assert!(
         result.contains("USER: ") && result.contains("ASSISTANT:"),
@@ -528,6 +536,7 @@ fn failed_template_falls_back_to_gemma_by_model_name() {
         "",
         "<eos>",
         Some("gemma-2-2b-it"),
+        None,
     );
     assert!(
         result.contains("<start_of_turn>"),
@@ -543,10 +552,17 @@ fn failed_template_body_evidence_beats_model_name() {
     let msgs = user_only_messages();
     let broken_gemma = "{% for m in messages %}<start_of_turn>user";
     assert!(
-        apply_chat_template(broken_gemma, &msgs, "", "<eos>", true).is_none(),
+        apply_chat_template(broken_gemma, &msgs, "", "<eos>", true, None).is_none(),
         "fixture must actually fail to evaluate"
     );
-    let result = build_prompt_with_model(&msgs, Some(broken_gemma), "", "<eos>", Some("llava-7b"));
+    let result = build_prompt_with_model(
+        &msgs,
+        Some(broken_gemma),
+        "",
+        "<eos>",
+        Some("llava-7b"),
+        None,
+    );
     assert!(
         result.contains("<start_of_turn>"),
         "template body should win over model name, got: {result:?}"
@@ -567,7 +583,7 @@ fn template_rendering_nothing_is_reported_as_failure() {
         "   ",
     ] {
         assert!(
-            apply_chat_template(tmpl, &msgs, "", "</s>", true).is_none(),
+            apply_chat_template(tmpl, &msgs, "", "</s>", true, None).is_none(),
             "empty render should be a failure: {tmpl:?}"
         );
     }
@@ -583,7 +599,8 @@ fn empty_message_list_may_legitimately_render_empty() {
             &[],
             "",
             "</s>",
-            false
+            false,
+            None,
         ),
         Some(String::new())
     );
@@ -598,6 +615,7 @@ fn failed_template_with_unknown_model_name_still_uses_chatml() {
         "",
         "</s>",
         Some("some-unknown-model-7b"),
+        None,
     );
     assert!(
         result.contains("<|im_start|>"),
@@ -768,7 +786,7 @@ fn ambiguous_markers_remain_template_gated() {
 fn llama3_aliased_message_loop_renders() {
     let tmpl = "{% set loop_messages = messages %}{% for message in loop_messages %}{% set content = '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n'+ message['content'] | trim + '<|eot_id|>' %}{% if loop.index0 == 0 %}{% set content = bos_token + content %}{% endif %}{{ content }}{% endfor %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}";
     let msgs = user_only_messages();
-    let out = apply_chat_template(tmpl, &msgs, "<|begin_of_text|>", "<|eot_id|>", true)
+    let out = apply_chat_template(tmpl, &msgs, "<|begin_of_text|>", "<|eot_id|>", true, None)
         .expect("aliased message loop must render, not fall back to ChatML");
 
     assert_eq!(
@@ -790,7 +808,7 @@ fn llama3_aliased_message_loop_renders() {
 fn unrelated_set_does_not_alias_messages() {
     let tmpl = "{% set tools = 'x' %}{% for t in tools %}BODY;{% endfor %}";
     let msgs = test_messages(); // two messages
-    let out = apply_chat_template(tmpl, &msgs, "", "", true).unwrap();
+    let out = apply_chat_template(tmpl, &msgs, "", "", true, None).unwrap();
     assert_eq!(out, "BODY;", "must not repeat per message");
 }
 
@@ -806,7 +824,7 @@ fn a_sliced_message_loop_skips_what_the_slice_drops() {
     let msgs = test_messages(); // system, then user
     let sliced = "{% for message in messages[1:] %}{{ message['content'] }};{% endfor %}";
     assert_eq!(
-        apply_chat_template(sliced, &msgs, "", "", true).unwrap(),
+        apply_chat_template(sliced, &msgs, "", "", true, None).unwrap(),
         "Hello;",
         "messages[1:] must skip the first message"
     );
@@ -816,7 +834,7 @@ fn a_sliced_message_loop_skips_what_the_slice_drops() {
     // read back in message order; a real engine reverses it.
     let filtered = "{% for message in messages | reverse %}{{ message['content'] }};{% endfor %}";
     assert_eq!(
-        apply_chat_template(filtered, &msgs, "", "", true).unwrap(),
+        apply_chat_template(filtered, &msgs, "", "", true, None).unwrap(),
         "Hello;You are helpful.;"
     );
 }
@@ -832,7 +850,7 @@ fn rebinding_messages_to_its_own_tail_is_honoured() {
                 {%- for message in messages %}{{ message['content'] }};{%- endfor %}";
     let msgs = test_messages();
     assert_eq!(
-        apply_chat_template(tmpl, &msgs, "", "", true).unwrap(),
+        apply_chat_template(tmpl, &msgs, "", "", true, None).unwrap(),
         "SYS:You are helpful.;Hello;",
         "the system message belongs in the header only, not again in the loop"
     );
@@ -858,7 +876,8 @@ fn the_official_llama3_template_renders_exactly_as_jinja2_does() {
         format!("<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: {today}\n\n");
 
     let render = |msgs: &[ChatMessage]| {
-        apply_chat_template(tmpl, msgs, "<|begin_of_text|>", "<|eot_id|>", true).expect("renders")
+        apply_chat_template(tmpl, msgs, "<|begin_of_text|>", "<|eot_id|>", true, None)
+            .expect("renders")
     };
 
     let user = |c: &str| ChatMessage {
@@ -936,7 +955,7 @@ fn a_comment_does_not_leave_its_whitespace_behind() {
         ("A\n  {# c #}\n  B", "A\n  B"),
     ] {
         assert_eq!(
-            apply_chat_template(tmpl, &msgs, "", "", true).unwrap(),
+            apply_chat_template(tmpl, &msgs, "", "", true, None).unwrap(),
             want,
             "wrong whitespace around comment in {tmpl:?}"
         );
@@ -952,7 +971,7 @@ fn strftime_now_reports_todays_date_not_the_templates_fallback() {
     let tmpl = "{%- if strftime_now is defined %}\
                 {{- strftime_now(\"%Y\") }}\
                 {%- else %}FALLBACK{%- endif %}";
-    let out = apply_chat_template(tmpl, &msgs, "", "", true).unwrap();
+    let out = apply_chat_template(tmpl, &msgs, "", "", true, None).unwrap();
     assert_ne!(
         out, "FALLBACK",
         "the guard must report strftime_now present"
@@ -963,7 +982,10 @@ fn strftime_now_reports_todays_date_not_the_templates_fallback() {
     // A format we cannot render must not panic — chrono's Display panics on an
     // unknown specifier, and the format string comes from model metadata.
     let bad = "{{ strftime_now(\"%Q\") }}X";
-    assert_eq!(apply_chat_template(bad, &msgs, "", "", true).unwrap(), "X");
+    assert_eq!(
+        apply_chat_template(bad, &msgs, "", "", true, None).unwrap(),
+        "X"
+    );
 }
 
 /// Indexing a single message must still evaluate to that message's field, not
@@ -973,7 +995,7 @@ fn indexing_one_message_is_not_a_list_binding() {
     let tmpl = "{%- set first = messages[0]['content'] %}{{ first }}";
     let msgs = test_messages();
     assert_eq!(
-        apply_chat_template(tmpl, &msgs, "", "", true).unwrap(),
+        apply_chat_template(tmpl, &msgs, "", "", true, None).unwrap(),
         "You are helpful."
     );
 }
@@ -1059,7 +1081,7 @@ fn real_mistral_template_failure_degrades_to_mistral_not_chatml() {
 
     // Confirm the premise: this really does fail to render.
     assert!(
-        apply_chat_template(tmpl, &msgs, "<s>", "</s>", true).is_none(),
+        apply_chat_template(tmpl, &msgs, "<s>", "</s>", true, None).is_none(),
         "premise changed — template now renders, revisit this test"
     );
 
@@ -1069,6 +1091,7 @@ fn real_mistral_template_failure_degrades_to_mistral_not_chatml() {
         "<s>",
         "</s>",
         Some("Mistral-7B-Instruct-v0.3"),
+        None,
     );
     assert_eq!(prompt, "<s>[INST] You are helpful.\n\nHello[/INST]");
     assert!(
@@ -1093,7 +1116,14 @@ const TINYLLAMA_TMPL: &str = "{% for message in messages %}\n{% if message['role
 /// marker; the same question with a system message is answered normally.
 #[test]
 fn system_message_injected_for_zephyr_template() {
-    let out = build_prompt_with_model(&bare_user(), Some(TINYLLAMA_TMPL), "<s>", "</s>", None);
+    let out = build_prompt_with_model(
+        &bare_user(),
+        Some(TINYLLAMA_TMPL),
+        "<s>",
+        "</s>",
+        None,
+        None,
+    );
     assert!(
         out.contains("<|system|>"),
         "expected an injected system turn, got: {out:?}"
@@ -1106,7 +1136,7 @@ fn system_message_injected_for_zephyr_template() {
 #[test]
 fn system_message_never_injected_when_template_raises() {
     let gemma = "{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{{ '<start_of_turn>' + message['role'] + '\n' + message['content'] + '<end_of_turn>\n' }}{% endfor %}";
-    let out = build_prompt_with_model(&bare_user(), Some(gemma), "<bos>", "<eos>", None);
+    let out = build_prompt_with_model(&bare_user(), Some(gemma), "<bos>", "<eos>", None, None);
     assert!(
         !out.contains("system"),
         "must not inject into a template that raises on system: {out:?}"
@@ -1128,7 +1158,7 @@ fn caller_system_message_is_preserved() {
             images: vec![],
         },
     ];
-    let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None);
+    let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None, None);
     assert!(out.contains("You are a pirate."), "got: {out:?}");
     assert!(!out.contains(DEFAULT_SYSTEM_PROMPT), "got: {out:?}");
 }
@@ -1149,7 +1179,7 @@ fn blank_system_message_is_replaced() {
             images: vec![],
         },
     ];
-    let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None);
+    let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None, None);
     assert!(out.contains(DEFAULT_SYSTEM_PROMPT), "got: {out:?}");
 }
 
@@ -1164,6 +1194,7 @@ fn tinyllama_without_a_template_gets_zephyr_not_chatml() {
         "<s>",
         "</s>",
         Some("tinyllama-1.1b-chat-v1.0.q4-k-m"),
+        None,
     );
     assert!(
         out.contains("<|user|>"),
@@ -1187,7 +1218,14 @@ fn tinyllama_without_a_template_gets_zephyr_not_chatml() {
 /// by a broad "llama" substring, and vice versa.
 #[test]
 fn llama3_still_gets_llama3_format() {
-    let out = build_prompt_with_model(&bare_user(), None, "<s>", "</s>", Some("meta-llama-3.1-8b"));
+    let out = build_prompt_with_model(
+        &bare_user(),
+        None,
+        "<s>",
+        "</s>",
+        Some("meta-llama-3.1-8b"),
+        None,
+    );
     assert!(
         out.contains("<|start_header_id|>"),
         "Llama-3 must keep its own format: {out:?}"
@@ -1273,9 +1311,10 @@ fn both_prompt_entry_points_go_through_the_same_renderer() {
         images: vec![],
     }];
 
-    let via_wrapper = super::build_prompt(&msgs, Some(closing), "<s>", "</s>", Some("qwen2.5"));
+    let via_wrapper =
+        super::build_prompt(&msgs, Some(closing), "<s>", "</s>", Some("qwen2.5"), None);
     let via_inner =
-        super::build_prompt_with_model(&msgs, Some(closing), "<s>", "</s>", Some("qwen2.5"));
+        super::build_prompt_with_model(&msgs, Some(closing), "<s>", "</s>", Some("qwen2.5"), None);
 
     assert_eq!(
         via_wrapper, via_inner,
@@ -1312,7 +1351,7 @@ fn the_official_qwen3_template_opens_the_assistants_turn() {
         images: vec![],
     }];
 
-    let rendered = apply_chat_template(tmpl, &msgs, "", "<|im_end|>", true);
+    let rendered = apply_chat_template(tmpl, &msgs, "", "<|im_end|>", true, None);
 
     // Declining is an acceptable outcome — `build_prompt_with_model` then falls
     // back, and the turn-opening repair covers what the fallback leaves closed.
@@ -1346,7 +1385,7 @@ fn the_official_qwen3_template_keeps_the_users_question_in_the_prompt() {
 
     // Whatever path the prompt takes — the template rendering, or the fallback
     // it declines into — the question has to survive it.
-    let prompt = build_prompt_with_model(&msgs, Some(tmpl), "", "<|im_end|>", None);
+    let prompt = build_prompt_with_model(&msgs, Some(tmpl), "", "<|im_end|>", None, None);
     assert!(
         prompt.contains("BANANE VIOLETTE MYSTERE 42"),
         "the user's question is not in the prompt that would be sent:\n{prompt}"
@@ -1377,6 +1416,7 @@ fn a_prompt_left_on_a_closed_turn_gets_the_models_turn_opened() {
         "",
         "<|im_end|>",
         Some("qwen3-8b"),
+        None,
     );
     assert!(
         prompt.ends_with("<|im_start|>assistant\n"),
@@ -1430,7 +1470,8 @@ fn a_correct_prompt_is_not_rewritten() {
         content: "Say OK".into(),
         images: vec![],
     }];
-    let prompt = build_prompt_with_model(&msgs, Some(good), "", "<|im_end|>", Some("qwen2.5"));
+    let prompt =
+        build_prompt_with_model(&msgs, Some(good), "", "<|im_end|>", Some("qwen2.5"), None);
     assert_eq!(
         prompt.matches("<|im_start|>assistant").count(),
         1,
@@ -1452,7 +1493,7 @@ fn temp_probe3() {
             images: vec![],
         },
     ];
-    let t = |src: &str| apply_chat_template(src, &msgs, "", "<|im_end|>", true);
+    let t = |src: &str| apply_chat_template(src, &msgs, "", "<|im_end|>", true, None);
     println!("--- ns set only:      {:?}", t("A{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}B"));
     println!(
         "--- reversed loop:    {:?}",
@@ -1487,7 +1528,7 @@ fn the_official_qwen3_template_renders_exactly_as_jinja2_does() {
         },
     ];
     assert_eq!(
-        apply_chat_template(tmpl, &single, "", "<|im_end|>", true).as_deref(),
+        apply_chat_template(tmpl, &single, "", "<|im_end|>", true, None).as_deref(),
         Some(
             "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n\
              <|im_start|>user\nMARKER42<|im_end|>\n\
@@ -1525,7 +1566,7 @@ fn the_official_qwen3_template_renders_exactly_as_jinja2_does() {
     // hand-rolled engine could not do: jinja2 uses
     // `content.split('</think>')[-1]`, and Python string methods now work.
     assert_eq!(
-        apply_chat_template(tmpl, &multi, "", "<|im_end|>", true).as_deref(),
+        apply_chat_template(tmpl, &multi, "", "<|im_end|>", true, None).as_deref(),
         Some(
             "<|im_start|>system\nSYS<|im_end|>\n\
              <|im_start|>user\nfirst<|im_end|>\n\
@@ -1560,7 +1601,7 @@ fn the_official_qwen3_template_renders_exactly_as_jinja2_does() {
         },
     ];
     assert_eq!(
-        apply_chat_template(tmpl, &plain, "", "<|im_end|>", true).as_deref(),
+        apply_chat_template(tmpl, &plain, "", "<|im_end|>", true, None).as_deref(),
         Some(
             "<|im_start|>system\nSYS<|im_end|>\n\
              <|im_start|>user\nfirst<|im_end|>\n\
@@ -1590,7 +1631,7 @@ fn an_unimplemented_slice_does_not_swallow_the_rest_of_the_template() {
             images: vec![],
         },
     ];
-    let render = |src: &str| apply_chat_template(src, &msgs, "", "<|im_end|>", true);
+    let render = |src: &str| apply_chat_template(src, &msgs, "", "<|im_end|>", true, None);
 
     // The Qwen3 shape. Everything after the loop must survive.
     assert_eq!(
@@ -1625,6 +1666,7 @@ fn message_content_is_recognised_as_a_string() {
             "",
             "<|im_end|>",
             true,
+            None,
         )
         .as_deref(),
         Some("KEEP")
@@ -1657,7 +1699,7 @@ fn the_template_a_real_qwen3_gguf_ships_still_reaches_the_model_with_the_questio
 
     // Whatever the renderer manages, the prompt that would be SENT must carry
     // the question and open the model's turn.
-    let prompt = build_prompt_with_model(&msgs, Some(shipped), "", "<|im_end|>", None);
+    let prompt = build_prompt_with_model(&msgs, Some(shipped), "", "<|im_end|>", None, None);
     assert!(
         prompt.contains("BANANE VIOLETTE MYSTERE 42"),
         "the shipped Qwen3 template produced a prompt with no question in it:\n{prompt}"
@@ -1682,7 +1724,7 @@ fn a_hostile_chat_template_cannot_amplify_without_bound() {
     // 1. A runaway loop is stopped by the fuel budget.
     let spin = "{% for a in range(100000) %}{% for b in range(100000) %}x{% endfor %}{% endfor %}";
     assert!(
-        apply_chat_template(spin, &msgs, "", "", true).is_none(),
+        apply_chat_template(spin, &msgs, "", "", true, None).is_none(),
         "an unbounded loop must not be allowed to run to completion"
     );
 
@@ -1690,7 +1732,7 @@ fn a_hostile_chat_template_cannot_amplify_without_bound() {
     //    2000 * 4096 characters is over 8 MiB, past the 4 MiB ceiling.
     let flood = "{% for a in range(2000) %}{{ 'x' * 4096 }}{% endfor %}";
     assert!(
-        apply_chat_template(flood, &msgs, "", "", true).is_none(),
+        apply_chat_template(flood, &msgs, "", "", true, None).is_none(),
         "output past the ceiling must be discarded, not returned"
     );
 
@@ -1702,7 +1744,7 @@ fn a_hostile_chat_template_cannot_amplify_without_bound() {
         "test needs a template past the cap"
     );
     assert!(
-        apply_chat_template(&huge, &msgs, "", "", true).is_none(),
+        apply_chat_template(&huge, &msgs, "", "", true, None).is_none(),
         "a template past the source ceiling must be declined"
     );
 
@@ -1711,13 +1753,13 @@ fn a_hostile_chat_template_cannot_amplify_without_bound() {
     let under_source_cap = format!("{}{{{{ 'ok' }}}}", "{# pad #}".repeat(1_000));
     assert!(under_source_cap.len() < 200 * 1024);
     assert_eq!(
-        apply_chat_template(&under_source_cap, &msgs, "", "", true).as_deref(),
+        apply_chat_template(&under_source_cap, &msgs, "", "", true, None).as_deref(),
         Some("ok"),
         "a template under the source ceiling must still render"
     );
     let under_output_cap = "{% for a in range(100) %}{{ 'x' * 1024 }}{% endfor %}";
     assert_eq!(
-        apply_chat_template(under_output_cap, &msgs, "", "", true).map(|s| s.len()),
+        apply_chat_template(under_output_cap, &msgs, "", "", true, None).map(|s| s.len()),
         Some(100 * 1024),
         "output under the ceiling must be returned intact"
     );
@@ -1729,9 +1771,181 @@ fn a_hostile_chat_template_cannot_amplify_without_bound() {
             &msgs,
             "",
             "",
-            true
+            true,
+            None,
         )
         .as_deref(),
         Some("You are helpful.;Hello;")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tool framing: the model's own template, or prose for models that have none
+// ---------------------------------------------------------------------------
+
+const QWEN3_OFFICIAL: &str = include_str!("fixtures/qwen3_official.jinja");
+const LLAMA3_OFFICIAL: &str = include_str!("fixtures/llama3_official.jinja");
+
+fn weather_tool() -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+        }
+    })
+}
+
+/// The report this came from: Qwen3's template opens with `{%- if tools %}` and
+/// carries its own `# Tools` section, and we never passed `tools`, so that
+/// branch was unreachable on every request. The model was told about its tools
+/// in a JSON format it had never been trained on while its own framing sat
+/// unused.
+#[test]
+fn qwen3_renders_its_own_tool_framing() {
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "what time is it?".into(),
+        images: vec![],
+    }];
+    let tools = vec![weather_tool()];
+    let prompt = build_prompt(
+        &msgs,
+        Some(QWEN3_OFFICIAL),
+        "",
+        "<|im_end|>",
+        Some("qwen3-8b"),
+        Some(&tools),
+    );
+
+    // Qwen's own framing, straight out of its template.
+    assert!(prompt.contains("# Tools"), "no Tools section: {prompt}");
+    assert!(prompt.contains("<tools>"), "no <tools> block: {prompt}");
+    assert!(
+        prompt.contains("<tool_call>"),
+        "the template's own call format is missing: {prompt}"
+    );
+    assert!(
+        prompt.contains("\"name\": \"get_weather\"") || prompt.contains("get_weather"),
+        "the tool itself was not rendered: {prompt}"
+    );
+
+    // And NOT the prose fallback, which is what it used to get.
+    assert!(
+        !prompt.contains("You have access to the following tools"),
+        "a template that renders tools must not also be handed the prose form: {prompt}"
+    );
+    assert!(
+        prompt.contains("what time is it?"),
+        "question lost: {prompt}"
+    );
+}
+
+/// A model whose template says nothing about tools cannot render them, so it
+/// still gets the prose description — that path is the fallback, not the
+/// default.
+#[test]
+fn a_template_without_tool_support_still_gets_the_prose_description() {
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "what time is it?".into(),
+        images: vec![],
+    }];
+    let tools = vec![weather_tool()];
+    // A minimal template with no mention of tools at all.
+    let tmpl = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}<|im_start|>assistant\n";
+    let prompt = build_prompt(&msgs, Some(tmpl), "", "", Some("some-model"), Some(&tools));
+
+    assert!(
+        prompt.contains("You have access to the following tools"),
+        "a model whose template cannot render tools must be told in prose: {prompt}"
+    );
+    assert!(
+        prompt.contains("get_weather"),
+        "tool name missing: {prompt}"
+    );
+    assert!(
+        prompt.contains("what time is it?"),
+        "question lost: {prompt}"
+    );
+}
+
+/// No tools means neither form appears — a request that sends none must render
+/// exactly as it did before any of this.
+#[test]
+fn no_tools_means_no_tool_framing_of_either_kind() {
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "what time is it?".into(),
+        images: vec![],
+    }];
+    let with_none = build_prompt(
+        &msgs,
+        Some(QWEN3_OFFICIAL),
+        "",
+        "<|im_end|>",
+        Some("qwen3-8b"),
+        None,
+    );
+    let with_empty = build_prompt(
+        &msgs,
+        Some(QWEN3_OFFICIAL),
+        "",
+        "<|im_end|>",
+        Some("qwen3-8b"),
+        Some(&[]),
+    );
+    for prompt in [&with_none, &with_empty] {
+        assert!(!prompt.contains("# Tools"), "unasked-for tools: {prompt}");
+        assert!(
+            !prompt.contains("You have access to the following tools"),
+            "unasked-for prose: {prompt}"
+        );
+    }
+    assert_eq!(
+        with_none, with_empty,
+        "an empty tool list must render identically to no tool list"
+    );
+}
+
+/// `template_renders_tools` is the predicate that chooses between the two, so
+/// pin what it answers rather than only its effect.
+#[test]
+fn template_renders_tools_reads_the_template_not_the_request() {
+    assert!(template_renders_tools(QWEN3_OFFICIAL));
+    assert!(template_renders_tools(LLAMA3_OFFICIAL));
+    assert!(!template_renders_tools(
+        "{% for m in messages %}{{ m.content }}{% endfor %}"
+    ));
+}
+
+/// `tojson` comes from minijinja's `json` feature, and this crate builds
+/// minijinja with `default-features = false`. Without it the filter is unknown,
+/// which fails the WHOLE render rather than that one expression — so a model
+/// whose template calls it silently gets a fallback template instead of its
+/// own. Every real template that renders tools calls it.
+///
+/// Pinned as behaviour rather than as a line in `Cargo.toml`, because what
+/// matters is that the filter resolves, not how it came to.
+#[test]
+fn the_tojson_filter_is_available_to_templates() {
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "hi".into(),
+        images: vec![],
+    }];
+    let rendered = apply_chat_template(
+        "{% for m in messages %}{{ m | tojson }}{% endfor %}",
+        &msgs,
+        "",
+        "",
+        false,
+        None,
+    );
+    let rendered = rendered.expect("a template calling tojson must render");
+    assert!(
+        rendered.contains("\"content\":\"hi\"") || rendered.contains("\"content\": \"hi\""),
+        "tojson did not serialise the message: {rendered}"
     );
 }

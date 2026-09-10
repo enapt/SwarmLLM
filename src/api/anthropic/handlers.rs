@@ -223,10 +223,21 @@ pub(super) async fn anthropic_non_stream(
     params: SamplingParams,
     request_id: String,
     model: String,
-    tools_requested: bool,
+    // The tool DEFINITIONS, not a flag derived from them — the prompt builder
+    // needs them to choose between this model's own template and prose.
+    // `tools_requested` is derived below so the two cannot disagree.
+    tools: Option<Vec<serde_json::Value>>,
 ) -> Result<axum::response::Response, ApiError> {
-    let mut inference_req =
-        InferenceRequest::local(ModelId(model.clone()), messages, params, false, None, None);
+    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
+    let mut inference_req = InferenceRequest::local(
+        ModelId(model.clone()),
+        messages,
+        params,
+        false,
+        None,
+        None,
+        tools.clone(),
+    );
 
     // A client that disconnects must stop the work rather than leave the model
     // held for the whole generation — same contract as the OpenAI
@@ -256,8 +267,12 @@ pub(super) async fn anthropic_stream(
     params: SamplingParams,
     request_id: String,
     model: String,
-    tools_requested: bool,
+    // The tool DEFINITIONS, not a flag derived from them — the prompt builder
+    // needs them to choose between this model's own template and prose.
+    // `tools_requested` is derived below so the two cannot disagree.
+    tools: Option<Vec<serde_json::Value>>,
 ) -> Result<axum::response::Response, ApiError> {
+    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     // The request's own cancel flag: `/v1/messages` has no cancel-by-token
     // wire, but the flag is what a long wait inside the pipeline watches, so a
     // client leaving during the prompt pass stops the work instead of being
@@ -271,6 +286,7 @@ pub(super) async fn anthropic_stream(
         None,
         None,
         Some(cancel.clone()),
+        tools,
     )
     .await?;
     let progress_handle = Some((state.shared_state.clone(), traced_id));
@@ -509,8 +525,13 @@ pub(super) async fn anthropic_split_non_stream(
     params: SamplingParams,
     request_id: String,
     model: String,
-    tools_requested: bool,
+    // The tool DEFINITIONS, not a flag derived from them: the prompt builder
+    // needs them to decide whether this model's own template renders tools or
+    // whether it must be told about them in prose. `tools_requested` is derived
+    // below rather than passed beside them, so the two cannot disagree.
+    tools: Option<Vec<serde_json::Value>>,
 ) -> Result<axum::response::Response, ApiError> {
+    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     let requested_mid = crate::types::ModelId(model.clone());
     let output = crate::api::openai::run_split_generate(
         state,
@@ -518,6 +539,7 @@ pub(super) async fn anthropic_split_non_stream(
         messages,
         params.clone(),
         &request_id,
+        tools.as_deref(),
     )
     .await?;
 
@@ -540,8 +562,13 @@ pub(super) async fn anthropic_split_stream(
     params: SamplingParams,
     request_id: String,
     model: String,
-    tools_requested: bool,
+    // The tool DEFINITIONS, not a flag derived from them: the prompt builder
+    // needs them to decide whether this model's own template renders tools or
+    // whether it must be told about them in prose. `tools_requested` is derived
+    // below rather than passed beside them, so the two cannot disagree.
+    tools: Option<Vec<serde_json::Value>>,
 ) -> Result<axum::response::Response, ApiError> {
+    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     let progress_handle = Some((
         state.shared_state.clone(),
         crate::api::request_uuid(&request_id),
@@ -581,6 +608,7 @@ pub(super) async fn anthropic_split_stream(
             params,
             &rid,
             Some(stream_trace.clone()),
+            tools.as_deref(),
         ) {
             Some(pair) => pair,
             None => {

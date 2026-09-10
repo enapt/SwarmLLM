@@ -24,6 +24,21 @@ pub struct InferenceRequest {
     /// Optional LoRA adapter ID for per-request fine-tuned inference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_adapter: Option<String>,
+    /// Tool definitions the caller supplied, in OpenAI's
+    /// `{"type": "function", "function": {...}}` shape — which is also the
+    /// shape HuggingFace chat templates expect their `tools` variable in, so
+    /// it is carried through to the renderer unchanged.
+    ///
+    /// Kept BESIDE `messages` rather than flattened into a system message,
+    /// because whether a model wants its tools described in prose or rendered
+    /// by its own template is a question only the template can answer, and the
+    /// template is not known here. `None` and `Some([])` both mean "no tools";
+    /// a caller whose `tool_choice` forbids tool use sends `None`.
+    ///
+    /// Additive over the wire (`#[serde(default)]`), so a node on an older
+    /// build simply does not see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
     /// Optional cancellation flag. The router/pipeline checks this between
     /// per-token forward calls; flipping it to `true` causes the loop to
     /// stop with `finish_reason = "stop"` on the next iteration. Set by the
@@ -36,6 +51,12 @@ pub struct InferenceRequest {
 
 impl InferenceRequest {
     /// Create an inference request originating from the local API (not a network peer).
+    ///
+    /// `tools` is a required parameter with no shorter form that omits it. A
+    /// convenience wrapper passing `None` is exactly how a request loses the
+    /// context that made it correct — see `chat_template::build_prompt`, which
+    /// carries the same note for the same reason.
+    #[allow(clippy::too_many_arguments)]
     pub fn local(
         model_id: ModelId,
         messages: Vec<ChatMessage>,
@@ -43,6 +64,7 @@ impl InferenceRequest {
         stream: bool,
         session_id: Option<String>,
         lora_adapter: Option<String>,
+        tools: Option<Vec<serde_json::Value>>,
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
@@ -55,6 +77,7 @@ impl InferenceRequest {
             created_at: chrono::Utc::now(),
             session_id,
             lora_adapter,
+            tools,
             cancel: None,
         }
     }

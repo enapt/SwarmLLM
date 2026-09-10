@@ -133,6 +133,9 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
         false,
         None,
         None,
+        // The MCP surface exposes tools to ITS caller; it does not hand any to
+        // the model it drives, which answers in prose.
+        None,
     );
 
     match tokio::time::timeout(

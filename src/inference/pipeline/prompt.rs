@@ -195,6 +195,7 @@ impl PipelineExecutor {
                 bos,
                 eos,
                 Some(&model_id.0),
+                self.request.tools.as_deref(),
             );
             tracing::debug!(
                 model = %model_id,
@@ -229,6 +230,7 @@ impl PipelineExecutor {
                 &i.bos_token,
                 &i.eos_token,
                 Some(&model_id.0),
+                self.request.tools.as_deref(),
             ),
             None => {
                 if info.is_some() {
@@ -238,7 +240,14 @@ impl PipelineExecutor {
                          using the name-based template fallback"
                     );
                 }
-                chat_template::build_prompt(&self.request.messages, None, "", "", Some(&model_id.0))
+                chat_template::build_prompt(
+                    &self.request.messages,
+                    None,
+                    "",
+                    "",
+                    Some(&model_id.0),
+                    self.request.tools.as_deref(),
+                )
             }
         }
     }

@@ -301,27 +301,35 @@ impl ChatCompletionRequest {
             }
         }
 
-        // Inject tool definitions as a system message prefix — unless the
-        // caller asked for no tool use. A local model only knows its tools
-        // because they are described here, so "none" has to mean not
-        // describing them; there is nowhere else to enforce it.
-        if let Some(ref tools) = self.tools {
-            if !tools.is_empty()
-                && !crate::api::tool_parse::tool_choice_forbids_tools(&self.tool_choice)
-            {
-                let tool_desc = format_tool_system_prompt(tools);
-                messages.insert(
-                    0,
-                    ChatMessage {
-                        role: crate::types::Role::System,
-                        content: tool_desc,
-                        images: vec![],
-                    },
-                );
-            }
-        }
-
         Ok(messages)
+    }
+
+    /// The tools this request should be served with, in the shape a chat
+    /// template expects, or `None` when the model must not use any.
+    ///
+    /// Tools deliberately do NOT become a system message here. Whether a model
+    /// wants them rendered by its own template or described in prose is a
+    /// question only the template can answer, and the template is not known at
+    /// this layer — flattening them here is what left Qwen3's own `# Tools`
+    /// section unreachable while the model was handed a JSON format it had
+    /// never been trained on. `chat_template::build_prompt` owns that choice
+    /// now; this method's only job is `tool_choice`.
+    ///
+    /// `tool_choice: "none"` returns `None`: a local model knows its tools only
+    /// because the prompt describes them, so not describing them is the only
+    /// way to enforce it.
+    pub(super) fn tool_definitions(&self) -> Option<Vec<serde_json::Value>> {
+        let tools = self.tools.as_ref()?;
+        if tools.is_empty() || crate::api::tool_parse::tool_choice_forbids_tools(&self.tool_choice)
+        {
+            return None;
+        }
+        Some(
+            tools
+                .iter()
+                .filter_map(|t| serde_json::to_value(t).ok())
+                .collect(),
+        )
     }
 
     pub(super) fn to_sampling_params(&self) -> SamplingParams {
@@ -342,28 +350,6 @@ impl ChatCompletionRequest {
             self.top_logprobs.unwrap_or(0),
         )
     }
-}
-
-/// Format tool definitions into the system prompt that tells a local model how
-/// to request a tool call.
-///
-/// Thin adapter over [`crate::api::tool_parse::format_tool_prompt`], which is
-/// shared with the Anthropic surface. The wording must stay identical across
-/// both: [`crate::api::tool_parse::parse_tool_calls`] tries the requested shape
-/// first, so two wordings would mean two formats to parse. This was a
-/// byte-identical copy until 2026-07-26.
-pub(super) fn format_tool_system_prompt(tools: &[ToolDefinition]) -> String {
-    let specs: Vec<(String, Option<String>, Option<String>)> = tools
-        .iter()
-        .map(|t| {
-            (
-                t.function.name.clone(),
-                t.function.description.clone(),
-                t.function.parameters.as_ref().map(|p| p.to_string()),
-            )
-        })
-        .collect();
-    crate::api::tool_parse::format_tool_prompt(&specs)
 }
 
 /// Decode a base64 data URI image to raw RGB pixels.

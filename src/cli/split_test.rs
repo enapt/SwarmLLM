@@ -34,10 +34,10 @@ pub async fn test_split_inference(
         }];
         let bos = model.bos_token();
         let eos = model.eos_token_str();
-        swarmllm::inference::chat_template::apply_chat_template(template, &messages, bos, eos, true)
-            .unwrap_or_else(|| {
-                format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
-            })
+        swarmllm::inference::chat_template::apply_chat_template(
+            template, &messages, bos, eos, true, None,
+        )
+        .unwrap_or_else(|| format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"))
     } else {
         format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
     };

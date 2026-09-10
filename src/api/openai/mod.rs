@@ -27,8 +27,6 @@ use streaming::{
     dispatch_inference, router_inference, split_non_stream_response, split_stream_response,
     stream_response,
 };
-#[cfg(test)]
-use types::format_tool_system_prompt;
 
 use super::DEFAULT_TOP_K;
 
@@ -555,7 +553,7 @@ pub async fn chat_completions(
                 internal_messages.clone(),
                 params,
                 requested_mid.clone(),
-                req.tools.as_ref().is_some_and(|t| !t.is_empty()),
+                req.tool_definitions(),
                 req.extras
                     .get("stream_options")
                     .and_then(|v| v.get("include_usage"))
@@ -573,7 +571,7 @@ pub async fn chat_completions(
                 internal_messages.clone(),
                 params,
                 requested_mid.clone(),
-                req.tools.as_ref().is_some_and(|t| !t.is_empty()),
+                req.tool_definitions(),
             )
             .await;
         }
@@ -652,12 +650,14 @@ pub async fn chat_completions(
         // distributed-only nodes that have no local model but do have the probe.
         let prompt = {
             let (tmpl, bos, eos) = super::resolve_chat_template(&state, &req.model).await;
+            let tool_defs = req.tool_definitions();
             chat_template::build_prompt(
                 &internal_messages,
                 tmpl.as_deref(),
                 &bos,
                 &eos,
                 Some(req.model.as_str()),
+                tool_defs.as_deref(),
             )
         };
         // Echo `req.model` (the requested id), not the manifest display name —
@@ -1228,20 +1228,45 @@ mod tests {
         assert!(req.top_logprobs.is_none());
     }
 
+    /// Tools reach the prompt builder as definitions, in the shape a chat
+    /// template expects — `{"type": "function", "function": {...}}` — rather
+    /// than pre-flattened into a system message.
     #[test]
-    fn format_tool_system_prompt_output() {
-        let tools = vec![ToolDefinition {
+    fn tool_definitions_keep_the_shape_a_template_expects() {
+        let mut req: ChatCompletionRequest =
+            serde_json::from_str(r#"{"model":"m","messages":[]}"#).unwrap();
+        req.tools = Some(vec![ToolDefinition {
             tool_type: "function".into(),
             function: FunctionDefinition {
                 name: "get_weather".into(),
                 description: Some("Get weather info".into()),
                 parameters: Some(serde_json::json!({"type": "object"})),
             },
-        }];
-        let prompt = format_tool_system_prompt(&tools);
-        assert!(prompt.contains("get_weather"));
-        assert!(prompt.contains("Get weather info"));
-        assert!(prompt.contains("Parameters:"));
+        }]);
+        let defs = req.tool_definitions().expect("tools should be offered");
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0]["type"], "function");
+        assert_eq!(defs[0]["function"]["name"], "get_weather");
+        assert_eq!(defs[0]["function"]["description"], "Get weather info");
+        assert!(defs[0]["function"]["parameters"].is_object());
+    }
+
+    /// `tool_choice: "none"` has to mean the model is never told the tools
+    /// exist — describing them is the only thing that makes a local model
+    /// aware of them, so it is also the only place the choice can be enforced.
+    #[test]
+    fn tool_choice_none_offers_no_tools_at_all() {
+        let mut req: ChatCompletionRequest =
+            serde_json::from_str(r#"{"model":"m","messages":[],"tool_choice":"none"}"#).unwrap();
+        req.tools = Some(vec![ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name: "get_weather".into(),
+                description: None,
+                parameters: None,
+            },
+        }]);
+        assert!(req.tool_definitions().is_none());
     }
 
     #[test]

@@ -82,7 +82,12 @@ serde_json = "1"
 # every user message dropped — and shipping that cost a release. Growing it
 # construct by construct was reimplementing, less well, what this crate already
 # does: see docs/invariants/api-surfaces.md.
-minijinja = { version = "2.24", default-features = false, features = ["builtins", "serde", "loop_controls", "fuel"] }
+# `json` is what provides the `tojson` filter. Every real chat template that
+# renders tools uses it — Qwen3, Llama 3.1 and the Qwen3 GGUF-shipped variant
+# all do — and without the feature the filter is unknown, which fails the WHOLE
+# render rather than that one expression, so the model silently gets a fallback
+# template instead.
+minijinja = { version = "2.24", default-features = false, features = ["builtins", "serde", "loop_controls", "fuel", "json"] }
 minijinja-contrib = { version = "2.24", default-features = false, features = ["pycompat"] }
 toml = "1"
 safetensors = "0.7"

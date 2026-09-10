@@ -50,6 +50,7 @@ pub fn apply_chat_template(
     bos_token: &str,
     eos_token: &str,
     add_generation_prompt: bool,
+    tools: Option<&[serde_json::Value]>,
 ) -> Option<String> {
     let mut env = minijinja::Environment::new();
 
@@ -110,6 +111,12 @@ pub fn apply_chat_template(
             add_generation_prompt => add_generation_prompt,
             bos_token => bos_token,
             eos_token => eos_token,
+            // Undefined when there are none, NOT an empty list: every template
+            // gates its tool section on `{%- if tools %}`, and both are falsy
+            // there, but some also do `{{ tools | length }}` or index into it
+            // once inside. Undefined is what `transformers` passes, so it is
+            // what templates are written against.
+            tools => tools,
         })
         .map_err(|e| {
             // Not a warning: declining is a supported outcome that the caller
@@ -348,14 +355,20 @@ pub(crate) fn prompt_hands_over_to_the_model(prompt: &str) -> bool {
     !TURN_ENDING_MARKERS.iter().any(|m| tail.ends_with(m))
 }
 
+/// `tools` is a REQUIRED parameter with no convenience wrapper that passes
+/// `None`, deliberately. That exact shape is how the template fallback was
+/// disabled on six of seven paths (gotcha #171): a caller reaches for the
+/// short form, and the context it silently drops is the context that made the
+/// call correct.
 pub fn build_prompt(
     messages: &[ChatMessage],
     template: Option<&str>,
     bos_token: &str,
     eos_token: &str,
     model_name: Option<&str>,
+    tools: Option<&[serde_json::Value]>,
 ) -> String {
-    build_prompt_with_model(messages, template, bos_token, eos_token, model_name)
+    build_prompt_with_model(messages, template, bos_token, eos_token, model_name, tools)
 }
 
 /// Pick a fallback prompt format from the model name alone.
@@ -476,8 +489,10 @@ pub fn build_prompt_with_model(
     bos_token: &str,
     eos_token: &str,
     model_name: Option<&str>,
+    tools: Option<&[serde_json::Value]>,
 ) -> String {
-    let mut prompt = build_prompt_inner(messages, template, bos_token, eos_token, model_name);
+    let mut prompt =
+        build_prompt_inner(messages, template, bos_token, eos_token, model_name, tools);
     open_the_models_turn_if_the_prompt_closed_it(&mut prompt, model_name);
     warn_if_the_prompt_closes_the_turn(&prompt, model_name);
     prompt
@@ -611,20 +626,90 @@ fn render_kept_the_last_question(rendered: &str, messages: &[ChatMessage]) -> bo
     asked.is_empty() || rendered.contains(asked)
 }
 
+/// Does this template render tool definitions itself?
+///
+/// Every HuggingFace template that supports tools reads the `tools` variable —
+/// `{%- if tools %}` is the near-universal opening — so referencing it at all
+/// is the signal. A template that never mentions it cannot render tools no
+/// matter what it is handed, and its model must be told about them in prose
+/// instead.
+///
+/// Deliberately a cheap textual check rather than a trial render. A trial
+/// render answers a different question — "did this template produce anything
+/// when given tools" — which is true for every template, since one that
+/// ignores `tools` still renders the conversation perfectly well.
+pub fn template_renders_tools(template: &str) -> bool {
+    template.contains("tools")
+}
+
+/// Describe tools to a model whose template cannot, as a system message.
+///
+/// The wording is `api::tool_parse::format_tool_prompt`, shared with the
+/// surfaces that used to do this themselves, because
+/// `api::tool_parse::parse_tool_calls` tries the format it asks for first.
+fn describe_tools_in_prose(
+    messages: &[ChatMessage],
+    tools: &[serde_json::Value],
+) -> Vec<ChatMessage> {
+    let specs: Vec<(String, Option<String>, Option<String>)> = tools
+        .iter()
+        .filter_map(|t| {
+            let f = t.get("function")?;
+            Some((
+                f.get("name")?.as_str()?.to_string(),
+                f.get("description")
+                    .and_then(|d| d.as_str())
+                    .map(str::to_string),
+                f.get("parameters").map(|p| p.to_string()),
+            ))
+        })
+        .collect();
+    if specs.is_empty() {
+        return messages.to_vec();
+    }
+    let mut out = Vec::with_capacity(messages.len() + 1);
+    out.push(ChatMessage {
+        role: Role::System,
+        content: crate::api::tool_parse::format_tool_prompt(&specs),
+        images: Vec::new(),
+    });
+    out.extend_from_slice(messages);
+    out
+}
+
 fn build_prompt_inner(
     messages: &[ChatMessage],
     template: Option<&str>,
     bos_token: &str,
     eos_token: &str,
     model_name: Option<&str>,
+    tools: Option<&[serde_json::Value]>,
 ) -> String {
+    let tools = tools.filter(|t| !t.is_empty());
+
+    // A model whose template renders tools is told about them the way it was
+    // trained to be; every other model is told in prose. This is the ONE place
+    // that choice is made — it needs both the tools and the template, and the
+    // two API surfaces that used to flatten tools into a system message had
+    // only the first, so they described Qwen3's tools in a JSON format it had
+    // never seen while its own `{%- if tools %}` branch sat unreachable.
+    let renders_tools = template.is_some_and(template_renders_tools) && tools.is_some();
+    let described = match tools {
+        Some(t) if !renders_tools => Some(describe_tools_in_prose(messages, t)),
+        _ => None,
+    };
+    let messages: &[ChatMessage] = described.as_deref().unwrap_or(messages);
+    let tools_for_render = if renders_tools { tools } else { None };
+
     let injected = template
         .filter(|t| template_expects_system(t))
         .and_then(|_| with_system_message(messages));
     let messages: &[ChatMessage] = injected.as_deref().unwrap_or(messages);
 
     if let Some(tmpl) = template {
-        if let Some(result) = apply_chat_template(tmpl, messages, bos_token, eos_token, true) {
+        if let Some(result) =
+            apply_chat_template(tmpl, messages, bos_token, eos_token, true, tools_for_render)
+        {
             if render_kept_the_last_question(&result, messages) {
                 tracing::debug!(template_matched = true, "DIAG: chat template applied");
                 return result;

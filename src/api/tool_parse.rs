@@ -1605,3 +1605,36 @@ mod streaming_reasoning_tests {
         assert_eq!(out, "Sure. ", "the marker and after it stay withheld");
     }
 }
+
+#[cfg(test)]
+mod qwen3_native_framing {
+    use super::parse_tool_calls;
+
+    /// The exact framing Qwen3's own template asks the model for, now that the
+    /// template is actually rendered (2026-09-10). Rendering native framing and
+    /// then failing to read it back would produce a reply that looks like
+    /// prose containing XML, so the round trip is pinned rather than assumed.
+    #[test]
+    fn a_qwen3_native_tool_call_parses() {
+        let reply = "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"date\"}}\n</tool_call>";
+        let calls = parse_tool_calls(reply).expect("Qwen3's own framing must parse");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "terminal");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].arguments).unwrap()["command"],
+            "date"
+        );
+    }
+
+    /// Two calls in one reply — Qwen3's template invites "one or more".
+    #[test]
+    fn two_qwen3_native_tool_calls_parse() {
+        let reply = "<tool_call>\n{\"name\": \"a\", \"arguments\": {}}\n</tool_call>\n\
+                     <tool_call>\n{\"name\": \"b\", \"arguments\": {}}\n</tool_call>";
+        let calls = parse_tool_calls(reply).expect("both calls must parse");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+        assert_ne!(calls[0].id, calls[1].id, "ids must be unique");
+    }
+}

@@ -40,43 +40,6 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
         }
     }
 
-    // Tell a local model about its tools. Previously this path validated
-    // `req.tools` and forwarded them to the cloud proxy but never put them in
-    // the prompt, so a local model was never informed they existed and would
-    // reply "I'm unable to access external tools" (external report
-    // 2026-07-25). A cloud model gets tools natively via the proxy and is
-    // unaffected by this — the prompt injection only matters when we are the
-    // one running the model.
-    //
-    // `tool_choice: {"type": "none"}` means the model must not call a tool, and
-    // the only way to hold a local model to that is to not describe them.
-    if let Some(ref tools) = req.tools {
-        if !tools.is_empty() && !crate::api::tool_parse::tool_choice_forbids_tools(&req.tool_choice)
-        {
-            let specs: Vec<(String, Option<String>, Option<String>)> = tools
-                .iter()
-                .filter_map(|t| {
-                    let name = t.get("name")?.as_str()?.to_string();
-                    let desc = t
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .map(str::to_string);
-                    // Anthropic calls it `input_schema`; OpenAI calls the same
-                    // thing `parameters`.
-                    let schema = t.get("input_schema").map(|s| s.to_string());
-                    Some((name, desc, schema))
-                })
-                .collect();
-            if !specs.is_empty() {
-                messages.push(ChatMessage {
-                    role: Role::System,
-                    content: crate::api::tool_parse::format_tool_prompt(&specs),
-                    images: vec![],
-                });
-            }
-        }
-    }
-
     for msg in &req.messages {
         let role = match msg.role.as_str() {
             "user" => Role::User,
@@ -230,4 +193,47 @@ pub(super) fn resolve_model(model: &str) -> &str {
         "fable" => "claude-fable-5",
         _ => stripped,
     }
+}
+
+/// The tools this request should be served with, translated into the shape a
+/// chat template expects, or `None` when the model must not use any.
+///
+/// Anthropic describes a tool as `{"name", "description", "input_schema"}`;
+/// every HuggingFace chat template is written against the OpenAI/transformers
+/// shape, `{"type": "function", "function": {"name", "description",
+/// "parameters"}}`, and dumps it verbatim — Qwen3 does `{{- tool | tojson }}`
+/// straight into its `<tools>` block. Handing it Anthropic's shape would put a
+/// tool with no `parameters` key in front of the model.
+///
+/// Tools deliberately do NOT become a system message here. See
+/// `ChatCompletionRequest::tool_definitions` on the OpenAI surface for why that
+/// choice belongs to `chat_template::build_prompt` instead; a local model would
+/// otherwise be told about Anthropic's tools in a format its own template
+/// already knows how to write.
+///
+/// `tool_choice: {"type": "none"}` returns `None`: not describing the tools is
+/// the only way to hold a local model to it.
+pub(super) fn tool_definitions_for_template(
+    req: &MessagesRequest,
+) -> Option<Vec<serde_json::Value>> {
+    let tools = req.tools.as_ref()?;
+    if tools.is_empty() || crate::api::tool_parse::tool_choice_forbids_tools(&req.tool_choice) {
+        return None;
+    }
+    let converted: Vec<serde_json::Value> = tools
+        .iter()
+        .filter_map(|t| {
+            let name = t.get("name")?.as_str()?;
+            let mut function = serde_json::Map::new();
+            function.insert("name".into(), serde_json::Value::String(name.to_string()));
+            if let Some(desc) = t.get("description") {
+                function.insert("description".into(), desc.clone());
+            }
+            if let Some(schema) = t.get("input_schema") {
+                function.insert("parameters".into(), schema.clone());
+            }
+            Some(serde_json::json!({"type": "function", "function": function}))
+        })
+        .collect();
+    (!converted.is_empty()).then_some(converted)
 }

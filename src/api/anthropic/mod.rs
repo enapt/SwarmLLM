@@ -296,7 +296,7 @@ pub async fn messages(
                 sampling_params,
                 request_id,
                 model,
-                req.tools.as_ref().is_some_and(|t| !t.is_empty()),
+                convert::tool_definitions_for_template(&req),
             )
             .await;
         } else {
@@ -306,7 +306,7 @@ pub async fn messages(
                 sampling_params,
                 request_id,
                 model,
-                req.tools.as_ref().is_some_and(|t| !t.is_empty()),
+                convert::tool_definitions_for_template(&req),
             )
             .await;
         }
@@ -331,7 +331,7 @@ pub async fn messages(
                     sampling_params,
                     request_id,
                     model,
-                    req.tools.as_ref().is_some_and(|t| !t.is_empty()),
+                    convert::tool_definitions_for_template(&req),
                 )
                 .await;
             } else {
@@ -341,7 +341,7 @@ pub async fn messages(
                     sampling_params,
                     request_id,
                     model,
-                    req.tools.as_ref().is_some_and(|t| !t.is_empty()),
+                    convert::tool_definitions_for_template(&req),
                 )
                 .await;
             }
@@ -350,12 +350,14 @@ pub async fn messages(
         // Direct executor fallback (single-node, no router)
         if model_locally_available {
             let (tmpl, bos, eos) = super::resolve_chat_template(&state, &model).await;
+            let tool_defs = convert::tool_definitions_for_template(&req);
             let prompt = chat_template::build_prompt(
                 &internal_messages,
                 tmpl.as_deref(),
                 &bos,
                 &eos,
                 Some(model.as_str()),
+                tool_defs.as_deref(),
             );
 
             let mut executor = state.executor.lock().await;
