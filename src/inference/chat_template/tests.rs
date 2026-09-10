@@ -1430,3 +1430,243 @@ fn a_correct_prompt_is_not_rewritten() {
         "an already-correct prompt must not gain a second opener"
     );
 }
+
+#[test]
+fn temp_probe3() {
+    let msgs = vec![
+        ChatMessage {
+            role: Role::System,
+            content: "SYS".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "MARKER42".into(),
+            images: vec![],
+        },
+    ];
+    let t = |src: &str| apply_chat_template(src, &msgs, "", "<|im_end|>", true);
+    println!("--- ns set only:      {:?}", t("A{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}B"));
+    println!(
+        "--- reversed loop:    {:?}",
+        t("A{%- for message in messages[::-1] %}x{%- endfor %}B")
+    );
+    println!("--- reversed + inner set: {:?}", t("A{%- for message in messages[::-1] %}{%- set index = (messages|length - 1) - loop.index0 %}x{%- endfor %}B"));
+    println!("--- inner if (not-paren): {:?}", t("A{%- for message in messages %}{%- if ns.multi_step_tool and message.role == \"user\" and message.content is string and not(message.content.startswith('<t>') and message.content.endswith('</t>')) %}y{%- endif %}x{%- endfor %}B"));
+}
+
+/// The official Qwen3 template renders byte-for-byte as Jinja2 does, for the
+/// ordinary shapes.
+///
+/// Expected strings captured from `jinja2` 3.1.2 on the same fixture and the
+/// same messages, the way the Llama-3 sibling test above is pinned. Verifying
+/// against our own past output would have been satisfied by the broken
+/// behaviour this replaces: the renderer used to abandon the template at
+/// `{% for message in messages[::-1] %}` and emit only the system block.
+#[test]
+fn the_official_qwen3_template_renders_exactly_as_jinja2_does() {
+    let tmpl = include_str!("fixtures/qwen3_official.jinja");
+
+    let single = vec![
+        ChatMessage {
+            role: Role::System,
+            content: "You are a helpful assistant.".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "MARKER42".into(),
+            images: vec![],
+        },
+    ];
+    assert_eq!(
+        apply_chat_template(tmpl, &single, "", "<|im_end|>", true).as_deref(),
+        Some(
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n\
+             <|im_start|>user\nMARKER42<|im_end|>\n\
+             <|im_start|>assistant\n"
+        ),
+        "single-turn render diverged from jinja2"
+    );
+
+    // Multi-turn, including an assistant turn carrying a <think> block — the
+    // template strips the reasoning from history, and that is the branch doing
+    // real work rather than concatenating.
+    let multi = vec![
+        ChatMessage {
+            role: Role::System,
+            content: "SYS".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "first".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::Assistant,
+            content: "<think>pondering</think>answer one".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "second".into(),
+            images: vec![],
+        },
+    ];
+    //
+    // ONE KNOWN DIVERGENCE, pinned rather than hidden: jinja2 strips the
+    // `<think>…</think>` block out of an assistant turn in HISTORY (via
+    // `content.split('</think>')[-1]`), and this renderer does not implement
+    // those string methods, so it keeps it. Everything else matches.
+    //
+    // Low impact here, and worth knowing why: our own API already removes a
+    // leading reasoning block from a reply before returning it
+    // (`inference::take_leading_reasoning_block`), so a client echoing our
+    // assistant turn back sends content with no `<think>` in it. The gap shows
+    // only when a caller supplies one itself.
+    assert_eq!(
+        apply_chat_template(tmpl, &multi, "", "<|im_end|>", true).as_deref(),
+        Some(
+            "<|im_start|>system\nSYS<|im_end|>\n\
+             <|im_start|>user\nfirst<|im_end|>\n\
+             <|im_start|>assistant\n<think>pondering</think>answer one<|im_end|>\n\
+             <|im_start|>user\nsecond<|im_end|>\n\
+             <|im_start|>assistant\n"
+        ),
+        "multi-turn render diverged from jinja2 in some way OTHER than the \
+         known <think>-in-history difference"
+    );
+
+    // And the same conversation without a reasoning block matches jinja2 exactly.
+    let plain = vec![
+        ChatMessage {
+            role: Role::System,
+            content: "SYS".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "first".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::Assistant,
+            content: "answer one".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "second".into(),
+            images: vec![],
+        },
+    ];
+    assert_eq!(
+        apply_chat_template(tmpl, &plain, "", "<|im_end|>", true).as_deref(),
+        Some(
+            "<|im_start|>system\nSYS<|im_end|>\n\
+             <|im_start|>user\nfirst<|im_end|>\n\
+             <|im_start|>assistant\nanswer one<|im_end|>\n\
+             <|im_start|>user\nsecond<|im_end|>\n\
+             <|im_start|>assistant\n"
+        ),
+        "multi-turn render diverged from jinja2"
+    );
+}
+
+/// A `for` over a slice this renderer does not implement must still walk the
+/// list, because an unrecognised `for` leaves a stray `{% endfor %}` and a
+/// stray `endfor` ends the enclosing block — silently discarding the rest of
+/// the template. `[N:]` keeps its meaning; the others are identity.
+#[test]
+fn an_unimplemented_slice_does_not_swallow_the_rest_of_the_template() {
+    let msgs = vec![
+        ChatMessage {
+            role: Role::System,
+            content: "A".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "B".into(),
+            images: vec![],
+        },
+    ];
+    let render = |src: &str| apply_chat_template(src, &msgs, "", "<|im_end|>", true);
+
+    // The Qwen3 shape. Everything after the loop must survive.
+    assert_eq!(
+        render("[{%- for message in messages[::-1] %}x{%- endfor %}]TAIL").as_deref(),
+        Some("[xx]TAIL")
+    );
+    // `[N:]` still drops the messages it names.
+    assert_eq!(
+        render("[{%- for message in messages[1:] %}x{%- endfor %}]TAIL").as_deref(),
+        Some("[x]TAIL")
+    );
+    // A bare index is NOT a list and must not be treated as one.
+    assert_eq!(
+        render("{{ messages[0]['content'] }}TAIL").as_deref(),
+        Some("ATAIL")
+    );
+}
+
+/// `x is string` must be true for message content, because Qwen3's template
+/// BLANKS the message when it is false rather than degrading gracefully.
+#[test]
+fn message_content_is_recognised_as_a_string() {
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "KEEP".into(),
+        images: vec![],
+    }];
+    assert_eq!(
+        apply_chat_template(
+            "{%- for message in messages %}{% if message.content is string %}{{ message.content }}{% else %}BLANKED{% endif %}{%- endfor %}",
+            &msgs,
+            "",
+            "<|im_end|>",
+            true,
+        )
+        .as_deref(),
+        Some("KEEP")
+    );
+}
+
+/// The template an actual Qwen3 GGUF ships is NOT the one in
+/// `qwen3_official.jinja`, and the difference matters.
+///
+/// Captured from `Qwen/Qwen3-1.7B-GGUF`'s `gguf_header.bin` (4100 bytes; the
+/// other fixture is 4169). It is an older revision of the same template and it
+/// walks history with `{% for index in range(ns.last_query_index, -1, -1) %}`
+/// plus `{% set message = messages[index] %}`, where the newer one uses
+/// `messages[::-1]`. `range()`, namespace attributes and indexing the message
+/// list by a variable are all unimplemented here, so this one still does not
+/// render natively.
+///
+/// What this test pins is that it FAILS SAFELY: the half-render is caught and
+/// the fallback carries the question. That is the property that matters — a
+/// prompt without the question in it is answered fluently and wrongly, which
+/// is how this was reported in the first place.
+#[test]
+fn the_template_a_real_qwen3_gguf_ships_still_reaches_the_model_with_the_question() {
+    let shipped = include_str!("fixtures/qwen3_gguf_shipped.jinja");
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "BANANE VIOLETTE MYSTERE 42".into(),
+        images: vec![],
+    }];
+
+    // Whatever the renderer manages, the prompt that would be SENT must carry
+    // the question and open the model's turn.
+    let prompt = build_prompt_with_model(&msgs, Some(shipped), "", "<|im_end|>", None);
+    assert!(
+        prompt.contains("BANANE VIOLETTE MYSTERE 42"),
+        "the shipped Qwen3 template produced a prompt with no question in it:\n{prompt}"
+    );
+    assert!(
+        prompt.trim_end().ends_with("<|im_start|>assistant"),
+        "prompt does not open the model's turn: {:?}",
+        &prompt[prompt.len().saturating_sub(60)..]
+    );
+}

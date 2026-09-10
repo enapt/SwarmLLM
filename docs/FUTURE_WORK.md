@@ -365,14 +365,53 @@ which fails with the guard removed. The llama3 exact-match-against-Jinja2 test
 and the other 68 template tests are unaffected, so working templates still
 render natively.
 
-### What this does NOT fix
+### Follow-up 2026-09-10 — two constructs implemented, and the fixture was wrong
 
-The renderer is still a subset, and Qwen3 still falls back rather than rendering
-natively. The fallback carries the question and the turn markers, so replies are
-correct, but template-specific behaviour is lost — tool-call framing and the
-`enable_thinking` switch (item 5) come from the real template. Implementing
-`messages[::-1]` and the rest is still the proper fix; this change makes the
-failure honest in the meantime.
+`messages[::-1]` and `x is string` are now supported, and the NEWER official
+Qwen3 template renders **byte-identically to jinja2 3.1.2** for single-turn and
+multi-turn conversations (pinned by
+`the_official_qwen3_template_renders_exactly_as_jinja2_does`).
+
+Two things learned doing it, both worth more than the fix:
+
+- **An unrecognised `for` does not just skip — it truncates the template.** Its
+  `{% endfor %}` then looks like a stray one, and a stray `endfor` RETURNS from
+  the enclosing block, so everything after is silently dropped. That is the
+  mechanism behind the whole bug, and it means any future unimplemented
+  iterable is a silent content-loss bug rather than a missing feature.
+  `split_message_ref` now treats every slice shape it does not implement as
+  identity (walking all messages), keeping only `[N:]`'s real meaning — which
+  is what the function's own doc comment already said it did.
+- **`x is string` returning false is not a degraded answer, it is a blanked
+  one.** Qwen3's template reads `{% if message.content is string %}{% set
+  content = message.content %}{% else %}{% set content = '' %}{% endif %}`.
+
+**And the repo's `qwen3_official.jinja` fixture is NOT what a Qwen3 GGUF
+ships.** `Qwen/Qwen3-1.7B-GGUF` carries a 4100-byte older revision (the fixture
+is 4169) which walks history with `{% for index in range(ns.last_query_index,
+-1, -1) %}` + `{% set message = messages[index] %}` instead of
+`messages[::-1]`. So the fixture was giving confidence about a template no local
+model had. It is now beside `qwen3_gguf_shipped.jinja`, captured from the real
+header, and a test pins that the shipped one **fails safely** — the half-render
+is caught and the fallback carries the question.
+
+### What is still open
+
+Rendering the SHIPPED template natively needs three more constructs, none of
+which exist here: `range(start, stop, step)`, namespace attribute assignment
+(`{% set ns.x = ... %}` — `namespace()` parses but its fields read back empty),
+and indexing the message list by a variable (`messages[index]`). Until then a
+real Qwen3 GGUF falls back to ChatML, which is correct output but not the
+template's own behaviour — `enable_thinking` and the tools block come from the
+template (note the tools block is unreachable regardless: `apply_chat_template`
+takes no tools argument, so `{% if tools %}` is always false here).
+
+One known divergence remains even on the newer template: jinja2 strips
+`<think>…</think>` out of an assistant turn in HISTORY via
+`content.split('</think>')[-1]`, and those string methods are unimplemented, so
+this renderer keeps it. Low impact, because our own API already strips a leading
+reasoning block from a reply before returning it, so a client echoing our turn
+back sends no `<think>`. Pinned explicitly in the test rather than hidden.
 
 ## A long prompt on the boomerang path dies with a CUDA OOM mid-compute (open, 2026-09-09, field-reported)
 

@@ -264,12 +264,38 @@ fn split_message_ref(expr: &str) -> Option<(&str, usize)> {
     let mut rest = expr[end..].trim();
     let mut skip = 0usize;
     if let Some(after) = rest.strip_prefix('[') {
-        // Only a whole-tail `[N:]`. `messages[0]['content']` indexes a single
+        // Only a whole-tail SLICE. `messages[0]['content']` indexes a single
         // message and must NOT be mistaken for the list, or the expression is
-        // bound as an alias instead of being evaluated to its string value.
-        let (start, tail) = after.split_once(':')?;
-        rest = tail.trim_start().strip_prefix(']')?.trim();
-        skip = start.trim().parse::<usize>().ok()?;
+        // bound as an alias instead of being evaluated to its string value. A
+        // slice is distinguished from an index by containing a `:`.
+        let (inner, tail) = after.split_once(']')?;
+        rest = tail.trim();
+        if !inner.contains(':') {
+            return None;
+        }
+        // `[N:]` is honoured, because templates use it to drop a message they
+        // have already placed by hand and ignoring it renders that message
+        // twice. Every other slice shape is applied as IDENTITY, per the note
+        // above: walking every message beats not recognising the loop.
+        //
+        // That distinction is not cosmetic. An unrecognised `for` leaves its
+        // `{% endfor %}` looking like a stray one, and a stray `endfor` ENDS
+        // the enclosing block — so the rest of the template is silently
+        // dropped. The official Qwen3 template opens with
+        // `{% for message in messages[::-1] %}` (a reverse, to find the last
+        // user turn), and that one unparsed suffix discarded every message
+        // block after it: three different questions reached the model as the
+        // same 14 tokens of scaffolding.
+        //
+        // Reversal itself is not implemented. That loop assigns only to a
+        // `namespace()`, which this renderer also does not implement, so
+        // walking it forwards computes the same nothing while leaving the rest
+        // of the template intact.
+        let parts: Vec<&str> = inner.split(':').collect();
+        let single_sided_start = parts.len() == 2 && parts[1].trim().is_empty();
+        if single_sided_start {
+            skip = parts[0].trim().parse::<usize>().ok()?;
+        }
     }
     // Only a filter chain may follow the name or slice.
     if !rest.is_empty() && !rest.starts_with('|') {
@@ -624,6 +650,23 @@ fn eval_condition(condition: &str, state: &EvalState, ctx: &EvalCtx) -> bool {
         if name.trim() == "strftime_now" {
             return true;
         }
+    }
+
+    // `x is string` — templates use it to tell a plain text message from a
+    // multimodal content LIST, and take the other branch when it is a list.
+    // A `ChatMessage.content` in this crate is always a `String`, so the honest
+    // answer is "yes, whenever the expression resolves to something".
+    //
+    // Answering it wrongly is not a missing nicety. Qwen3's template reads
+    // `{% if message.content is string %}{% set content = message.content %}
+    //  {% else %}{% set content = '' %}{% endif %}` — so a false here does not
+    // degrade the render, it deliberately BLANKS the message, and the model is
+    // asked a question with no question in it.
+    if let Some(name) = condition.strip_suffix(" is not string") {
+        return eval_expr(name.trim(), state, ctx).is_none();
+    }
+    if let Some(name) = condition.strip_suffix(" is string") {
+        return eval_expr(name.trim(), state, ctx).is_some();
     }
 
     // Special boolean names
