@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.3.170-alpha] — 2026-09-10
+
+### Fixed
+
+- **A model whose weights nearly fill the graphics card can be used again.**
+  Every request failed instantly at "Failed to create context: null reference
+  from llama.cpp", on a model that had just reported loading successfully. The
+  context length was capped at a fixed 8192 tokens and then asked for whatever
+  the card had left, and whether that fits is not fixed: reported on a 6 GB card
+  serving an 8B, whose weights take essentially all the free memory while 8192
+  tokens of its key-value cache need another 1.12 GB that is not there. The size
+  is now asked for rather than assumed — start at the capped figure and halve on
+  each refusal, down to a floor short enough to be nearly free but long enough
+  to answer an ordinary question. The first size the card accepts is the one
+  served, and a shortened context is reported with what to do about it rather
+  than being silently different. If even the floor is refused, the error says
+  the weights fit but their cache does not.
+- **Models whose chat template this renderer could not run are no longer
+  prompted through a fallback.** A model's template is a program, and it was
+  being run on a hand-rolled subset that did not fail on a template past its
+  edge — it half-rendered, producing a well-formed prompt with every user
+  message dropped. Rendering now uses a real Jinja engine, the same one
+  HuggingFace's own Rust inference server uses. Both revisions of the official
+  Qwen3 template now render, including the one an actual Qwen3 file ships;
+  reasoning blocks are stripped out of conversation history as those templates
+  intend; and a template that declares it cannot accept a message is believed
+  rather than ignored, which previously rendered turns some models were never
+  trained on.
+- **Templates are rendered the way their authors wrote them.** The library model
+  authors target does not treat a template's own indentation, or the newline
+  after a block tag, as part of the prompt. This renderer did, so any template
+  that did not mark every block explicitly put its author's layout into the text
+  the model read.
+
+### Changed
+
+- Filters in a chat template are applied rather than ignored. The previous
+  renderer treated every filter it did not implement as doing nothing, so a
+  reversed loop silently ran forwards.
+- A chat template that renders implausibly large output, runs an unbounded loop,
+  or arrives implausibly large is refused. Templates come from downloaded model
+  files, so they are untrusted input, and a single statement can double a value.
+- Package-index refreshes in CI retry with the indexes cleared between attempts.
+  A bad index on a repository none of this project's builds installs from took
+  down all three Linux jobs of the v0.3.168 release and published it as a draft
+  missing half its files.
+
+### Known limits
+
+- Rendering a chat template natively restores what the template itself does. It
+  does not add tool-call framing to models that lacked it, which is passed to
+  the renderer separately and unchanged here.
+
 ## [0.3.169-alpha] — 2026-09-10
 
 ### Fixed
