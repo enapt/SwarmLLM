@@ -277,6 +277,79 @@ peer list ranking by a self-minted number with nothing to catch it. Comments
 are excluded, because one of them documents precisely why nothing renders the
 figure. Design and exit criteria in `docs/CREDITS_DESIGN.md`.
 
+## A settle that cannot be written down has not happened
+
+(2026-09-10). `credit::escrow` has three paths that change an escrow's status
+and then move a balance — `release_escrow`, `refund_escrow`, `cleanup_expired`
+— and **all three must leave the entry `Pending` and the balance untouched when
+the status write fails.** Two of them did. `release_escrow` logged a warning and
+reconciled anyway, which mints credits.
+
+The mechanism is the restart. `EscrowManager::new` re-inserts every `Pending`
+entry it finds in the `escrow` tree, so a settle whose status never reached the
+disk comes back claimable; `cleanup_expired` then refunds the **full**
+reservation at TTL with no caller involved at all. Measured on the replayed
+counterexample: 500 in, 40 of real compute consumed, **560 out**.
+
+Reported against v0.3.170 by a contributor who modelled the file in TLA+ and ran
+TLC against it (issue #21). It is a good illustration of what model checking
+finds and review does not: **the hazard was already understood twenty lines
+below, in the same file, with a comment explaining it** — "if DB write fails,
+revert status to prevent double-refund on restart" — and each path reads as
+careful in isolation. Nothing about `release_escrow` looks wrong until you ask
+what the *other* two do with the same failure. This is the codebase's
+one-invariant-N-paths defect again (`.claude/rules/architecture.md`), in the one
+shape a reviewer cannot catch by reading the function in front of them.
+
+The direction of the trade-off is fixed and is the one `create_escrow`'s own
+`SEC:` comment already chose: **credits are lost-or-refunded, never
+double-paid.** On a failed release the requester keeps the whole reservation and
+the serving node is paid nothing — wrong, but wrong in the direction that cannot
+inflate the supply. Do not "fix" that asymmetry by settling optimistically.
+
+Pinned by three tests in `credit::escrow`, one per path, each verified by
+planting the violation the test exists to catch (gotcha #413). They are only
+possible because of `Database::set_write_failure`, below.
+
+**The other 30 `Failed to persist` sites were swept and are not this class.**
+The dangerous shape is narrow: a persisted record meaning *"this is still
+owed"* left behind while memory proceeds as though it were settled, **and a
+startup path that re-reads that record and acts on it**. Most of the rest are
+settings that revert on restart, and their own warning says so. The three
+credit-adjacent ones are all safe for reasons worth writing down rather than
+re-deriving: `apply_credit_direct_noted` (the inference charge) reverts its own
+in-memory mutation, so memory and disk agree that nothing happened;
+`CreditLedger`'s periodic balance flush is a retry loop and the next tick
+carries the same figure; and the pool credit-forward totals are running
+statistics, so a failure under-counts a contribution rather than creating a
+second claim on the same credits.
+
+## `Database::set_write_failure` — a persist failure you can actually cause
+
+(2026-09-10). Several subsystems reason in comments about what happens when a
+redb write fails, and until this existed **none of those reverts had ever been
+executed**. They were argued for, reviewed, and never run; one of the three in
+`credit::escrow` turned out not to be there at all.
+
+The switch is armed at `Database::with_write_table`, the single write-transaction
+site (`begin_write` appears exactly once in `storage/db.rs`), so no mutating
+method can quietly keep working while another fails.
+
+**It is scoped to a TREE, and that is the whole point rather than a
+convenience.** The first version failed every write, and under it the escrow
+double-pay *did not reproduce* — because the balance write failed too, and
+`apply_credit_direct_noted` reverts its in-memory mutation when its persist
+fails, so the books came out even. A blanket failure is a different experiment
+from a partial one: the interesting case is a subsystem writing its own state
+and then moving a balance, with only the first write failing. **An instrument
+that makes the defect disappear is not a null result** — check what the
+injection actually covers before reading "no minting" as "no bug".
+
+`the_injected_write_failure_fires_on_one_tree_through_a_clone` pins the
+instrument itself: the armed tree fails, a second tree keeps working, the write
+really does not land, and the switch reaches a *clone* of the handle — which is
+how every subsystem holds its `Database`.
+
 ## `SharedState::cfg()`
 
 (2026-08-09) — the live config, and the single answer

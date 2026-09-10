@@ -187,6 +187,23 @@ impl EscrowManager {
     /// one always charged actual usage, so the two disagreed by orders of
     /// magnitude depending only on whether the estimate crossed the escrow
     /// threshold.
+    ///
+    /// **A settle that cannot be written down has not happened.** If the
+    /// persist fails this returns `Err` with the entry left `Pending` and the
+    /// balance untouched, rather than reconciling against a disk that still
+    /// says the credits are held. Warning and carrying on is a way to mint
+    /// credits: `EscrowManager::new` re-inserts every `Pending` entry it finds
+    /// at startup, so the settled escrow comes back claimable and
+    /// `cleanup_expired` refunds the *full* reservation at TTL with no caller
+    /// involved. Reported against v0.3.170 by a contributor who modelled this
+    /// file in TLA+ and ran TLC against it (issue #21) — 500 in, 40 of real
+    /// compute consumed, 520 out.
+    ///
+    /// The trade-off is the one `create_escrow`'s own `SEC:` comment above
+    /// already chose: credits are lost-or-refunded, never double-paid. Here
+    /// the requester keeps the whole reservation and the serving node is paid
+    /// nothing, which is wrong in the direction that cannot inflate the
+    /// supply.
     pub async fn release_escrow(
         &self,
         escrow_id: uuid::Uuid,
@@ -198,7 +215,7 @@ impl EscrowManager {
         // then drop the lock before the synchronous redb write. Holding the
         // RefMut across put_json otherwise blocked every other access on the
         // same shard for the disk-write duration.
-        let snapshot = {
+        let (snapshot, previous_to_node) = {
             let mut entry = self
                 .entries
                 .get_mut(&escrow_id)
@@ -211,17 +228,29 @@ impl EscrowManager {
                 )));
             }
 
+            let previous_to_node = entry.to_node.take();
             entry.status = EscrowStatus::Released;
             entry.to_node = Some(to_node.clone());
-            entry.clone()
+            (entry.clone(), previous_to_node)
         };
         let amount = snapshot.amount;
 
+        // Persist the settled status BEFORE touching the balance, and put the
+        // entry back the way we found it if that fails — the same order and
+        // the same revert `refund_escrow` and `cleanup_expired` below already
+        // use. Warning and settling anyway is how credits get minted: see the
+        // paragraph above.
         if let Err(e) = self
             .db
             .put_json(TREE_ESCROW, &escrow_id.to_string(), &snapshot)
         {
-            tracing::warn!(error = %e, "Failed to persist escrow release");
+            if let Some(mut entry) = self.entries.get_mut(&escrow_id) {
+                entry.status = EscrowStatus::Pending;
+                entry.to_node = previous_to_node;
+            }
+            return Err(SwarmError::Database(format!(
+                "Failed to persist escrow release: {e}"
+            )));
         }
 
         // Remove from in-memory map — entry is persisted to DB
@@ -769,5 +798,184 @@ mod tests {
         assert_eq!(em2.pending_count(), 1);
         let entry = em2.get_by_request_id(&request_id).unwrap();
         assert_eq!(entry.amount, 150);
+    }
+
+    /// The counterexample TLC produced against a TLA+ model of this file
+    /// (issue #21), replayed end to end: 500 in, 40 of real compute consumed,
+    /// and the supply must not have grown.
+    ///
+    /// Before the fix the balance ended at 560 — `release_escrow` reconciled
+    /// against a disk that still said `Pending`, so the reload put the settled
+    /// escrow back and the expiry sweep refunded the whole reservation on top
+    /// of the settlement.
+    #[tokio::test]
+    async fn a_release_that_could_not_be_written_down_cannot_mint_credits() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let balance = make_balance(500);
+        let from = NodeId([1u8; 32]);
+        let to = NodeId([2u8; 32]);
+        let request_id = uuid::Uuid::new_v4();
+
+        let escrow_id = {
+            let em = EscrowManager::new(db.clone(), DEFAULT_ESCROW_THRESHOLD);
+            let id = em
+                .create_escrow(request_id, 100, &from, &balance)
+                .await
+                .unwrap();
+            assert_eq!(balance.read().await.balance, 400);
+
+            // The request completed and consumed 40. The escrow's own record
+            // cannot reach the disk; the balance write is left working, which
+            // is what makes this the interesting failure rather than a clean
+            // one — see `set_write_failure`.
+            db.set_write_failure(Some(TREE_ESCROW));
+            let released = em.release_escrow(id, &to, 40, &balance).await;
+            db.set_write_failure(None);
+
+            // Direct evidence the injection fired: without it the release
+            // succeeds and the rest of this test measures nothing.
+            assert!(
+                released.is_err(),
+                "release reported success although the persist failed"
+            );
+            assert_eq!(
+                balance.read().await.balance,
+                400,
+                "balance was reconciled against a settle that was never written down"
+            );
+            id
+        };
+
+        // Restart. The entry is still Pending on disk, which is now the truth
+        // rather than a lie about a balance that had already moved.
+        let em2 = EscrowManager::new(db, DEFAULT_ESCROW_THRESHOLD);
+        assert_eq!(em2.pending_count(), 1);
+
+        // TTL passes with no caller involved and the sweep refunds it.
+        if let Some(mut entry) = em2.entries.get_mut(&escrow_id) {
+            entry.created_at =
+                chrono::Utc::now() - chrono::Duration::seconds(ESCROW_TTL_SECS as i64 + 10);
+        }
+        assert_eq!(em2.cleanup_expired(&balance).await, 1);
+
+        // Lost-or-refunded, never double-paid: the requester has their whole
+        // reservation back and the serving node was paid nothing. What must
+        // not happen is the supply growing.
+        assert_eq!(
+            balance.read().await.balance,
+            500,
+            "credits were minted by a settle that failed to persist"
+        );
+    }
+
+    /// Sibling of the above for the path that was already correct, so it
+    /// cannot regress into the shape `release_escrow` was in.
+    #[tokio::test]
+    async fn a_refund_that_could_not_be_written_down_leaves_the_escrow_claimable() {
+        let db = Database::open_temp().unwrap();
+        let em = EscrowManager::new(db.clone(), DEFAULT_ESCROW_THRESHOLD);
+        let balance = make_balance(500);
+        let from = NodeId([1u8; 32]);
+
+        let escrow_id = em
+            .create_escrow(uuid::Uuid::new_v4(), 100, &from, &balance)
+            .await
+            .unwrap();
+        assert_eq!(balance.read().await.balance, 400);
+
+        db.set_write_failure(Some(TREE_ESCROW));
+        let refunded = em.refund_escrow(escrow_id, &balance).await;
+        db.set_write_failure(None);
+
+        assert!(
+            refunded.is_err(),
+            "refund reported success on a failed write"
+        );
+        assert_eq!(balance.read().await.balance, 400);
+        assert_eq!(
+            em.get_escrow(&escrow_id).map(|e| e.status),
+            Some(EscrowStatus::Pending),
+            "entry must go back to Pending so the retry can settle it"
+        );
+
+        // And the retry works.
+        assert_eq!(em.refund_escrow(escrow_id, &balance).await.unwrap(), 100);
+        assert_eq!(balance.read().await.balance, 500);
+    }
+
+    /// Third path, same invariant.
+    #[tokio::test]
+    async fn an_expiry_that_could_not_be_written_down_is_retried_not_dropped() {
+        let db = Database::open_temp().unwrap();
+        let em = EscrowManager::new(db.clone(), DEFAULT_ESCROW_THRESHOLD);
+        let balance = make_balance(500);
+        let from = NodeId([1u8; 32]);
+
+        let escrow_id = em
+            .create_escrow(uuid::Uuid::new_v4(), 100, &from, &balance)
+            .await
+            .unwrap();
+        if let Some(mut entry) = em.entries.get_mut(&escrow_id) {
+            entry.created_at =
+                chrono::Utc::now() - chrono::Duration::seconds(ESCROW_TTL_SECS as i64 + 10);
+        }
+
+        db.set_write_failure(Some(TREE_ESCROW));
+        assert_eq!(em.cleanup_expired(&balance).await, 0);
+        db.set_write_failure(None);
+
+        assert_eq!(balance.read().await.balance, 400);
+        assert_eq!(
+            em.get_escrow(&escrow_id).map(|e| e.status),
+            Some(EscrowStatus::Pending)
+        );
+
+        // The next tick settles it exactly once.
+        assert_eq!(em.cleanup_expired(&balance).await, 1);
+        assert_eq!(balance.read().await.balance, 500);
+    }
+
+    /// The injected failure is an instrument, and an instrument that does not
+    /// fire makes every test above pass for the wrong reason. Pin it
+    /// directly: the armed tree fails, another tree keeps working, the write
+    /// really does not land, and the switch reaches a clone of the handle
+    /// rather than only the one it was set on — which is how the subsystems
+    /// under test hold theirs.
+    #[test]
+    fn the_injected_write_failure_fires_on_one_tree_through_a_clone() {
+        let db = Database::open_temp().unwrap();
+        let handed_to_subsystem = db.clone();
+
+        assert!(handed_to_subsystem
+            .put_json(TREE_ESCROW, "probe", &1i64)
+            .is_ok());
+
+        db.set_write_failure(Some(TREE_ESCROW));
+        assert!(
+            handed_to_subsystem
+                .put_json(TREE_ESCROW, "probe", &2i64)
+                .is_err(),
+            "the switch did not reach the clone the subsystem holds"
+        );
+        assert_eq!(
+            handed_to_subsystem
+                .get_json::<i64>(TREE_ESCROW, "probe")
+                .unwrap(),
+            Some(1),
+            "the write landed despite reporting failure"
+        );
+        assert!(
+            handed_to_subsystem
+                .put_json(crate::credit::ledger::TREE_CREDITS, "probe", &1i64)
+                .is_ok(),
+            "arming one tree must not take the others down with it — that is \
+             the difference the escrow counterexample turns on"
+        );
+
+        db.set_write_failure(None);
+        assert!(handed_to_subsystem
+            .put_json(TREE_ESCROW, "probe", &3i64)
+            .is_ok());
     }
 }

@@ -137,6 +137,14 @@ pub struct Database {
     /// databases. `Arc` lets the guard survive across Database clones;
     /// the last drop releases the underlying file.
     _temp_dir: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Test-only: the tree whose writes are made to fail, or `"*"` for all
+    /// of them. See `set_write_failure`.
+    ///
+    /// `Arc` so the switch is shared by every clone — the subsystem under
+    /// test holds its own clone of the `Database`, and a flag that did not
+    /// reach it would silently inject nothing.
+    #[cfg(any(test, debug_assertions))]
+    fail_writes_to: Arc<arc_swap::ArcSwapOption<String>>,
 }
 
 /// RAII guard for `open_temp()` files — removes the path on drop so test
@@ -206,6 +214,8 @@ impl Database {
         let db = Self {
             inner: Arc::new(inner),
             _temp_dir: None,
+            #[cfg(any(test, debug_assertions))]
+            fail_writes_to: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
         Ok(db)
     }
@@ -233,16 +243,67 @@ impl Database {
         Ok(Self {
             inner: Arc::new(inner),
             _temp_dir: Some(Arc::new(TempFileGuard(temp_path))),
+            fail_writes_to: Arc::new(arc_swap::ArcSwapOption::empty()),
         })
+    }
+
+    /// Make writes to one tree fail, or stop doing so (testing only).
+    /// `Some("*")` fails every tree; `None` disarms.
+    ///
+    /// A persist failure is the hazard several subsystems reason about in
+    /// comments — "if the DB write fails, revert so we don't double-refund on
+    /// restart" — and until this existed there was no way to make one happen,
+    /// so those reverts were argued for and never exercised. One of the three
+    /// in `credit::escrow` turned out not to be there at all.
+    ///
+    /// **It is scoped to a tree because failing every write is a different
+    /// experiment.** The interesting failure is a partial one: a subsystem
+    /// writes its own state and then moves a balance, and only the first
+    /// write fails. Failing both hides the bug, because the balance move
+    /// reverts itself (`apply_credit_direct_noted`) and the books come out
+    /// even — which is how this instrument first reported the escrow
+    /// double-pay as absent.
+    ///
+    /// Carries the same `cfg` gate and the same reasoning as `open_temp`
+    /// above: integration tests are separate crates, so `#[cfg(test)]` alone
+    /// would not reach them, and the gate keeps it out of release builds.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn set_write_failure(&self, tree: Option<&str>) {
+        self.fail_writes_to
+            .store(tree.map(|t| Arc::new(t.to_string())));
     }
 
     /// Open a write transaction, run `f` on the data table, commit on
     /// `Ok`, rollback (drop) on `Err`. Removes the open-write/open-table/
     /// commit boilerplate from every mutating method (R96).
+    // `tree_name` is read only by the cfg-gated fault injection below, so a
+    // release build (no `test`, no `debug_assertions`) correctly reports it
+    // unused — the same configuration-dependent warning `TempFileGuard` above
+    // carries, and the trap gotcha #264 records: acting on it here would
+    // delete the parameter the test builds need. Nothing local sees it;
+    // `cargo clippy --all-targets` re-enables the gate.
+    #[cfg_attr(
+        not(any(test, debug_assertions)),
+        allow(unused_variables, clippy::used_underscore_binding)
+    )]
     fn with_write_table<R>(
         &self,
+        tree_name: &str,
         f: impl FnOnce(&mut redb::Table<'_, &'static [u8], &'static [u8]>) -> Result<R, SwarmError>,
     ) -> Result<R, SwarmError> {
+        // Injected failure sits HERE, at the one choke point every mutating
+        // method goes through, so a test cannot fail one write path and leave
+        // another quietly working. `tree_name` is a parameter only so this
+        // check can be scoped; nothing else in the transaction uses it.
+        #[cfg(any(test, debug_assertions))]
+        if let Some(armed) = self.fail_writes_to.load_full() {
+            if armed.as_str() == "*" || armed.as_str() == tree_name {
+                return Err(SwarmError::Database(format!(
+                    "injected write failure for tree {tree_name}"
+                )));
+            }
+        }
         let txn = self
             .inner
             .begin_write()
@@ -267,7 +328,7 @@ impl Database {
     ) -> Result<(), SwarmError> {
         let k = make_key(tree_name, key);
         let bytes = serde_json::to_vec(value)?;
-        self.with_write_table(|table| {
+        self.with_write_table(tree_name, |table| {
             table
                 .insert(k.as_slice(), bytes.as_slice())
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
@@ -467,7 +528,7 @@ impl Database {
     /// Insert a raw byte value into a named tree.
     pub fn insert_raw(&self, tree_name: &str, key: &str, value: &[u8]) -> Result<(), SwarmError> {
         let k = make_key(tree_name, key);
-        self.with_write_table(|table| {
+        self.with_write_table(tree_name, |table| {
             table
                 .insert(k.as_slice(), value)
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
@@ -478,7 +539,7 @@ impl Database {
     /// Remove a key from a named tree.
     pub fn remove(&self, tree_name: &str, key: &str) -> Result<(), SwarmError> {
         let k = make_key(tree_name, key);
-        self.with_write_table(|table| {
+        self.with_write_table(tree_name, |table| {
             table
                 .remove(k.as_slice())
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
@@ -510,7 +571,7 @@ impl Database {
     pub fn clear_tree(&self, tree_name: &str) -> Result<(), SwarmError> {
         let start = tree_range_start(tree_name);
         let end = tree_range_end(tree_name);
-        self.with_write_table(|table| {
+        self.with_write_table(tree_name, |table| {
             let keys = Self::collect_tree_keys(table, start.as_slice(), end.as_slice())?;
             for key in &keys {
                 table
@@ -537,7 +598,7 @@ impl Database {
     ) -> Result<(), SwarmError> {
         let start = tree_range_start(tree_name);
         let end = tree_range_end(tree_name);
-        self.with_write_table(|table| {
+        self.with_write_table(tree_name, |table| {
             // Remove existing keys then insert the new set inside the
             // same transaction.
             let stale_keys = Self::collect_tree_keys(table, start.as_slice(), end.as_slice())?;

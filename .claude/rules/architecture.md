@@ -315,6 +315,25 @@ sole attempt on the batched path.
 
 → `docs/invariants/scheduling.md`
 
+## A settle that cannot be written down has not happened
+
+`credit::escrow` has three paths that change an escrow's status and then move a
+balance — `release_escrow`, `refund_escrow`, `cleanup_expired`. **All three
+leave the entry `Pending` and the balance untouched when the status write
+fails**, and return `Err`. Two of them did; `release_escrow` warned and
+reconciled anyway, which mints credits — `EscrowManager::new` re-inserts every
+`Pending` entry at startup, so the settled escrow comes back claimable and the
+expiry sweep refunds the full reservation. 500 in, 40 consumed, 560 out.
+
+The trade-off direction is fixed: **lost-or-refunded, never double-paid.**
+
+`Database::set_write_failure(Some(tree))` is how a persist failure is caused in
+a test, armed at `with_write_table`. It is scoped to a TREE deliberately —
+failing every write hides this class of bug, because the balance move reverts
+itself and the books come out even.
+
+→ `docs/invariants/state-and-config.md`
+
 ## A disconnect retires a session key; it must not destroy it
 
 `SessionManager::remove_session` moves the live key into `retired` — openable,
