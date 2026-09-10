@@ -298,7 +298,19 @@ const PEER_MODEL_WARM_TTL_SECS: u64 = 900;
 /// A peer with no `peer_registry` entry at all scores 0.3 (`get_peer_metrics`)
 /// and is correctly refused — we would be sending a plaintext prompt to
 /// something we know nothing about.
-const DELEGATE_MIN_TRUST: f32 = crate::credit::trust::DEFAULT_TRUST;
+///
+/// **Equal to `DEFAULT_TRUST` today, but no longer DEFINED as it.** Written as
+/// `= DEFAULT_TRUST`, the two numbers could never be moved apart, and raising
+/// the score a fresh peer starts on — for any unrelated reason, in a different
+/// module — would silently move the bar that decides who may read a user's
+/// prompt in cleartext. They are two separate decisions that currently agree,
+/// and `the_privacy_bar_and_the_starting_score_agree_by_choice` fails the build
+/// if they stop agreeing, so the coincidence has to be re-affirmed rather than
+/// inherited. Suggested by the contributor who reported the trust ratchet
+/// (issue #21) as the part of `docs/FUTURE_WORK.md` § "The plaintext-prompt
+/// trust bar…" worth doing on its own, precisely because it changes no
+/// behaviour.
+const DELEGATE_MIN_TRUST: f32 = 0.5;
 
 /// How much faster a peer must look before it is handed a model it will run on
 /// its PROCESSOR, as a multiple of what this node would manage.

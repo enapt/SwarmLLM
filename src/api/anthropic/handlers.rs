@@ -45,11 +45,10 @@ fn build_messages_response(
             // the shape the OpenAI sibling now returns. It is also what lets
             // the streaming path emit that text as it arrives rather than
             // holding the whole reply back (`tool_parse::content_prefix_len`).
-            let prefix = output.content
-                [..crate::api::tool_parse::content_prefix_len(&output.content)]
-                .trim();
-            let leading = (!prefix.is_empty()).then(|| super::types::ResponseContentBlock::Text {
-                text: prefix.to_string(),
+            let leading = crate::api::tool_parse::leading_content(&output.content).map(|text| {
+                super::types::ResponseContentBlock::Text {
+                    text: text.to_string(),
+                }
             });
             let blocks: Vec<super::types::ResponseContentBlock> = leading
                 .into_iter()

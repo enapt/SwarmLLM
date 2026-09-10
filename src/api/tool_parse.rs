@@ -182,6 +182,33 @@ pub struct ParsedToolCall {
 /// Try every known format against `text`, returning the first that yields at
 /// least one call. `None` means "this is ordinary prose" — the overwhelmingly
 /// common case, so every path must be cheap to reject.
+/// The part of a tool-carrying reply that is genuinely content, or `None`.
+///
+/// **The single answer for both non-streaming surfaces**, which each used to
+/// compute `text[..content_prefix_len(text)].trim()` themselves and so each had
+/// to be fixed separately for anything the other learned.
+///
+/// It is [`content_prefix_len`] plus one rule that only makes sense once a call
+/// has been found: **a reasoning block ended by a tool call rather than by
+/// `</think>` is still a reasoning block.** `inference::take_leading_reasoning_block`
+/// removes a leading `<think>…</think>`, and deliberately requires the closing
+/// tag — without one it cannot know where the scratchpad stops and the reply
+/// starts, and guessing would eat a genuine mid-thought answer. Here that
+/// question is already answered: the tool call is where it stops. Observed on
+/// Qwen3-1.7B, one run in three — the model opened `<think>`, went straight to
+/// the call, and a bare `<think>` was returned to the client beside a perfectly
+/// good tool call.
+///
+/// Anything after a CLOSED reasoning block is ordinary content and is kept, as
+/// is any prose that never opened one.
+pub fn leading_content(text: &str) -> Option<&str> {
+    let prefix = text[..content_prefix_len(text)].trim();
+    if prefix.starts_with("<think>") && !prefix.contains("</think>") {
+        return None;
+    }
+    (!prefix.is_empty()).then_some(prefix)
+}
+
 pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
     let trimmed = strip_code_fences(text.trim());
 
@@ -1636,5 +1663,57 @@ mod qwen3_native_framing {
         assert_eq!(calls[0].name, "a");
         assert_eq!(calls[1].name, "b");
         assert_ne!(calls[0].id, calls[1].id, "ids must be unique");
+    }
+}
+
+#[cfg(test)]
+mod leading_content_tests {
+    use super::leading_content;
+
+    /// The observed failure: Qwen3 opens a reasoning block and goes straight to
+    /// the call without closing it, so a bare `<think>` was handed back to the
+    /// client beside a perfectly good tool call.
+    #[test]
+    fn an_unclosed_reasoning_block_ended_by_a_call_is_not_content() {
+        let reply = "<think>\n{\"name\": \"terminal\", \"arguments\": {}}";
+        assert_eq!(leading_content(reply), None);
+    }
+
+    /// Scratchpad prose with no closing tag goes with it — the call is where
+    /// the thinking stopped, which is the thing `take_leading_reasoning_block`
+    /// cannot know on its own.
+    #[test]
+    fn unclosed_scratchpad_prose_goes_too() {
+        let reply =
+            "<think>I should run date to find out\n<tool_call>\n{\"name\": \"t\"}\n</tool_call>";
+        assert_eq!(leading_content(reply), None);
+    }
+
+    /// A CLOSED block is somebody else's job — `finalize_reply_text` has
+    /// already removed it — and whatever follows is ordinary content.
+    #[test]
+    fn content_after_a_closed_block_is_kept() {
+        let reply =
+            "<think>hmm</think>\nLet me check that.\n<tool_call>\n{\"name\": \"t\"}\n</tool_call>";
+        assert_eq!(
+            leading_content(reply),
+            Some("<think>hmm</think>\nLet me check that.")
+        );
+    }
+
+    /// Ordinary prose before a call is kept — dropping it was its own bug, and
+    /// OpenAI's wire format carries content and tool_calls together.
+    #[test]
+    fn prose_before_a_call_is_still_kept() {
+        let reply = "Let me check that.\n<tool_call>\n{\"name\": \"t\"}\n</tool_call>";
+        assert_eq!(leading_content(reply), Some("Let me check that."));
+    }
+
+    #[test]
+    fn nothing_before_the_call_is_none() {
+        assert_eq!(
+            leading_content("<tool_call>\n{\"name\": \"t\"}\n</tool_call>"),
+            None
+        );
     }
 }

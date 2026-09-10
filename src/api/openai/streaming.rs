@@ -92,9 +92,7 @@ fn build_chat_completion_response(
                 //
                 // `finish_reason` must be "tool_calls" or clients never
                 // dispatch them (the reported response said "length").
-                let prefix = &content[..crate::api::tool_parse::content_prefix_len(&content)];
-                let prefix = prefix.trim();
-                let leading = (!prefix.is_empty()).then(|| prefix.to_string());
+                let leading = crate::api::tool_parse::leading_content(&content).map(str::to_string);
                 (leading, Some(calls), "tool_calls".to_string())
             }
             None => (Some(content), None, finish_reason),

@@ -31,9 +31,9 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Why it ranks here |
 |---|---|---|
-| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation. **The instrument shipped inert TWICE**, both fixed on main. **Field data collected 2026-09-09** from dev nodes in the real swarm, including a CONTROLLED run holding the peer fixed: **the error grows monotonically with reply length within one peer** (1.00 at 9 tokens → 3.3 at 239), and `predicted_ms` is flat across that range. A constant sits where a variable belongs. **Not just a wrong constant**: a ~64-token reply should then price at ratio 1 and measures 1.75. **Still not enough to tune on**, and the released binary records nothing |
+| 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation. **The instrument shipped inert TWICE**, both fixed on main. **Field data collected 2026-09-09** from dev nodes in the real swarm, including a CONTROLLED run holding the peer fixed: **the error grows monotonically with reply length within one peer** (1.00 at 9 tokens → 3.3 at 239), and `predicted_ms` is flat across that range. A constant sits where a variable belongs. **Not just a wrong constant**: a ~64-token reply should then price at ratio 1 and measures 1.75. **Second independent confirmation 2026-09-10** on the released binary, driving the two remote-only models the swarm has: xlam-3b via peer `bf7b3263` measured 0.96 at 8 reply tokens and **2.62 at 120**; xlam-8b via peer `7c10ea04` measured 1.04 at 8 and **2.38 at 120**. Two peers, two models, same monotonic shape as the 2026-09-09 run, with `assumed_forward_passes=64` flat across all of it. **The structural claim is now settled: a constant sits where a variable belongs.** What is still NOT settled is which variable. `max_tokens` is the obvious candidate and the constant's own doc comment rejects it with a reason that still holds — commonly 2048 for a reply of 50, so it would over-penalise splitting — and the samples agree it is not simple proportionality either: at 8 tokens the prediction is already about right rather than 8x high, so a large part of `predicted_ms` is not per-token at all. **Do not tune the constant.** The next step is an estimator of expected reply length, and `state.metrics.prefetch_orchestrator` already keeps per-session response histories that nothing else reads for this |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
-| 32 | A long prompt on the boomerang path dies with a CUDA OOM mid-compute | **Field-reported 2026-09-09.** 20837 tokens, `DriverError(CUDA_ERROR_OUT_OF_MEMORY)` raised during the forward rather than at load, so admission let it in and the compute then could not fit. Escrow refunded and the daemon stayed healthy, but it is a hard failure and the KV admission path is supposed to make it a clean 503 |
+| 32 | A long prompt on the boomerang path dies with a CUDA OOM mid-compute | **Field-reported 2026-09-09. Mechanism identified 2026-09-10, not yet reproduced.** Admission charges the cache's FINAL size; the cache reaches it by **concatenation**, so a 20837-token prompt makes ~2300 growth allocations per model (double that with the f16 mirror), copies ~97 GB, and holds a ~170 MB transient at each step — none of it charged. Prefill measured LINEAR here at the sizes this card can reach, which is consistent: the quadratic term is ~14 ms at 3559 tokens and 35x that at 20837. The fix it points at is reserving the prompt's known length up front instead of growing into it. Read the section body before acting — the reproduction is missing and this is `docs/invariants/memory.md` territory |
 | 30 | The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on | `DELEGATE_MIN_TRUST == DEFAULT_TRUST == 0.5`, so a peer we have never observed clears the bar that decides who may be handed a user's prompt in cleartext. Raising it is a routing-policy change with live consequences (on a small swarm it can make a model unservable), so it needs a decision, not a patch. The trust *ratchet* that made this worse is fixed (issue #21, 2026-09-10) |
 | 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
 
@@ -44,7 +44,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | **Most likely never a wander** (2026-09-09): the refused figure is STORE-WIDE and was read as one request's; the `entries` count that says so was on a different line at `debug`. The refusal now carries `live_bytes`/`external_bytes`/`entries` and prints them. ⚠ Explanation, not a reproduction — `live_entries=1` with a total above that request's cache would reopen it |
 | 36 | Qwen3-8B with `tools` emits `<\|start\|>`/`<\|end\|>` garbage — Harmony tokens, not Qwen's | **Field-reported 2026-09-10, NOT reproduced here.** Item 35 fixed the framing this most likely stems from — the model was being handed an instruction it was never trained on — and the reporter should re-test before this is chased further. Qwen3-1.7B at 1480 prompt tokens produced coherent output on the old code, so if it survives item 35 it is size- or setup-specific and needs their machine. **We inject no Harmony tokens anywhere**: `grep -F '<\|start\|>' src/` finds nothing, so the model is generating them |
-| 37 | A tool-carrying reply can leave a stray `<think>` in `content` | **Observed here 2026-09-10, 1 run in 3, on Qwen3-1.7B with `/no_think`.** The reply's non-call prefix is kept (deliberately — vLLM does the same), but an unterminated reasoning marker survives `take_leading_reasoning_block`, which requires a closing tag before it removes anything. Cosmetic — the tool call itself is correct — and it is a pre-existing CLASS: before item 35 the same slot held a stray ` ```json ` fence. Intermittent, so it needs a reproduction before a fix; do not tighten the reasoning stripper to drop an unclosed `<think>` without one, since a genuinely mid-thought reply would lose its opening |
+| 37 | A tool-carrying reply can leave a stray `<think>` in `content` | **FIXED 2026-09-10.** Observed here 1 run in 3 on Qwen3-1.7B: the model opens a reasoning block, goes straight to the call, and never closes it — so `take_leading_reasoning_block`, which requires the closing tag before it removes anything, correctly declines, and the bare opener became the reply prefix. `tool_parse::leading_content` is now the single answer to "what part of a tool-carrying reply is content", shared by both non-streaming surfaces (each computed it themselves before), and it applies the one rule that only makes sense once a call has been found: **a reasoning block ended by a tool call rather than by `</think>` is still a reasoning block.** Closed blocks and ordinary prose are kept, as before |
 | 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger and the token loss are both fixed. Residual: no standby can be assembled from several nodes covering a range between them. **UNBLOCKED 2026-09-09** — item 18 shape 2 shipped, so a takeover now lands at P = 0.9965 rather than 0.119 and more standbys are worth having. Note the arming condition runs the other way too: retention is kept only where a standby covers the range, so a plan with no standbys retains nothing and gains nothing |
 
 ### Recently closed, kept for the reasoning
@@ -454,6 +454,66 @@ actually allocates.
 Related to, but not the same as, the boomerang cost problem — that one is about
 the route being slow (0.2 tok/s measured on the same model), this one is about
 it failing outright.
+
+### Investigated 2026-09-10 — what admission charges, and what it does not
+
+`kv_budget::admit_prompt` charges exactly `kv_bytes_per_token * positions`: the
+FINAL size of the cache. Two things the forward does are charged nowhere, and
+both are consequences of one design decision — the KV cache grows by
+**concatenation** (`SeqCache::append` → `Tensor::cat(&[&*ad, &next_ad])`).
+
+**1. A growth step needs the old buffer, the new block and the result live at
+once.** `KV_CACHE_GROWTH_TOKENS`'s own doc costs this correctly as ~2x ONE
+layer's single buffer rather than 2x the whole cache — which is right, and at
+chat lengths it is the ~34 MB it says. At 20837 tokens on a 3B it is one layer's
+K buffer of **85 MB**, so a transient of ~170 MB plus the new block, arriving
+when the card is by definition at its fullest. Uncharged.
+
+**2. The number of growth steps is O(n) and each copies O(n), so the copying is
+O(n²/quantum)** — and so is the number of separate device allocations:
+
+| prompt | grows/layer | `Tensor::cat` calls | bytes copied |
+|---|---|---|---|
+| 3559 | 7 | 389 | 2.8 GB |
+| 8192 | 16 | 896 | 15.0 GB |
+| 16126 | 31 | 1764 | **58.3 GB** |
+| 20837 | 41 | 2279 | **97.3 GB** |
+
+Double every call count for the f16 flash mirror, which grows alongside. The
+16126-token row is the report's second half — five minutes of prefill with no
+first token — and ~3500 fresh CUDA allocations on a nearly-full card is a much
+better explanation of both that and the OOM than the bandwidth alone (97 GB at
+device speed is under a second; allocation on a full card is not).
+
+**Measured here on the live node, and it is consistent rather than
+contradictory**: prefill is LINEAR at the sizes this 8 GB card can reach —
+0.489 ms/token at 1809 tokens, 0.479 at 3559, min of 3, prefix cache defeated
+with a unique prompt prefix. The quadratic term is 2.8 GB of copying at 3559
+tokens, ~14 ms against a 1.71 s prefill, so it is invisible there and should be.
+It is 35x that at 20837.
+
+**Not reproduced.** The card here is 8 GB with ~3.6 GB already taken, so
+admission correctly refuses long prompts before the forward is reached, and the
+one local model with a large enough context does not fit beside its own KV at
+these lengths. The mechanism above is established by reading and arithmetic,
+NOT by observing the failure.
+
+### The fix this points at
+
+**The prompt length is known before the cache is built** — `admit_prompt`
+receives `positions` and has already decided that much KV fits. Reserving that
+up front, instead of arriving at it through 41 concatenations, removes the
+repeated allocations, removes the O(n²) copying, and makes the peak equal to the
+figure admission actually checked.
+
+This is NOT a return to the bug the 512-token quantum was introduced to fix.
+That was reserving the model's `max_seq_len` — 131072 positions for this family,
+whatever the request needed. Reserving the prompt's own length is reserving what
+admission has already charged for and verified.
+
+Worth doing behind a reproduction rather than on this reasoning alone: the KV
+path is `docs/invariants/memory.md` territory and every memory defect since #452
+came from a change that looked obviously right.
 
 ## A context that does not fit is refused instead of shrunk (FIXED 2026-09-10)
 

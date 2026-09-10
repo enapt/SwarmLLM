@@ -4640,3 +4640,28 @@ fn a_hand_off_records_what_the_cost_model_expected_of_it() {
         "the token assumption travels with the prediction it was used in"
     );
 }
+
+/// `DELEGATE_MIN_TRUST` decides who may be handed a user's prompt in cleartext;
+/// `DEFAULT_TRUST` is the score a peer we have never observed starts on. They
+/// are the same number today, which is what makes the bar admit every unknown
+/// peer — a real routing-policy position, taken deliberately, and the open
+/// question in `docs/FUTURE_WORK.md` § "The plaintext-prompt trust bar sits
+/// exactly at the score an unknown peer starts on".
+///
+/// This test exists so that agreement stays a CHOICE. The bar used to be
+/// written as `= DEFAULT_TRUST`, so the two could not be moved apart and
+/// anything that raised the starting score would have moved the privacy bar
+/// with it, silently and from another module. If this fails, the two decisions
+/// have come apart: decide which one you meant to change.
+#[test]
+fn the_privacy_bar_and_the_starting_score_agree_by_choice() {
+    assert!(
+        (super::DELEGATE_MIN_TRUST - crate::credit::trust::DEFAULT_TRUST).abs() < f32::EPSILON,
+        "DELEGATE_MIN_TRUST ({}) and DEFAULT_TRUST ({}) have come apart. That may be \
+         correct — raising the bar above the starting score is one of the three options \
+         costed in docs/FUTURE_WORK.md — but it is a decision about who reads user \
+         prompts in cleartext, so make it on purpose and update this test.",
+        super::DELEGATE_MIN_TRUST,
+        crate::credit::trust::DEFAULT_TRUST
+    );
+}

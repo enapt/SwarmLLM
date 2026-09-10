@@ -165,6 +165,18 @@ turn-CLOSING marker.
 
 → `docs/invariants/api-surfaces.md`
 
+## What part of a tool-carrying reply is content is decided in one place
+
+**`tool_parse::leading_content`** is the single answer for both non-streaming
+surfaces, which each computed `text[..content_prefix_len(text)].trim()`
+themselves. It adds the one rule that only makes sense once a call has been
+found: **a reasoning block ended by a tool call rather than by `</think>` is
+still a reasoning block.** `inference::take_leading_reasoning_block` requires
+the closing tag and is right to — without one it cannot know where the
+scratchpad stops. Here the call answers that.
+
+→ `docs/invariants/api-surfaces.md`
+
 ## A tool-carrying reply streams the part that cannot be a tool call
 
 **`tool_parse::content_prefix_len`** is the single answer to "how much of this
