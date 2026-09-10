@@ -224,62 +224,41 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2543 lib (dev,claude-subscription) — re-measured 2026-09-10, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 85 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.170-alpha (2026-09-10, tag `ec0f58a2` on commit
-`1f55d9ec`).** Gate: audit as documented; **CI 13/13 AND Cache warm 3/3 both on
-the TAGGED commit** (the bump was the tag again); release built **10/10 first
-time**, 25 assets, `latest`, not draft; **smoke 9/9 + shapes 7/7 on the
-DOWNLOADED artifact** against a .169 baseline taken FIRST that scored the same.
-Both nodes verified: ids and `identity.key` md5 unchanged, installed binary
-byte-identical to the download, deb hash re-verified AFTER transfer, journal
-"-- No entries --", paired at 343 ms, 0 ERROR, and the Qwen3 template confirmed
-rendering NATIVELY on the released binary (0 fallbacks). Rollback
-`~/.local/bin/swarmllm.0.3.169-alpha.bak`, backups pruned to newest 3.
+**Released and deployed: v0.3.171-alpha (2026-09-10, tag on commit
+`049b0856`).** Gate: audit as documented (the two `hickory-proto` advisories +
+the `paste` warning); **CI 13/13 AND Cache warm 3/3 both on the TAGGED commit**;
+release built **10/10 first time**, 25 assets, `latest`, not draft; **smoke 9/9 +
+shapes 7/7 on the DOWNLOADED artifact** against a .170 baseline taken FIRST that
+scored the same. Both nodes verified: ids and `identity.key` md5 unchanged,
+installed binary byte-identical to the download, deb hash re-verified AFTER
+transfer, journal 0 ERROR, paired at 359 ms. **Tool calling confirmed on the
+released binary** — native `<tool_call>` framing, correct arguments, no leaked
+reasoning marker. Rollback `~/.local/bin/swarmllm.0.3.170-alpha.bak`, backups
+pruned to newest 3.
 
-**What it carries**: a model whose weights nearly fill the card is usable again
-— a context that will not fit is SHRUNK to one that does rather than refused
-(the cap was a constant; whether 8192 tokens of KV fits is not); and chat
-templates now render on **minijinja + minijinja-contrib pycompat**, the engine
-HF's TGI and SGLang use, replacing ~1000 lines of hand-rolled subset that
-half-rendered rather than failing.
+**What it carries**: tool calling works on models that ship their own tool
+format. A request with tools reached the model as a hand-written JSON
+instruction most models were never trained on, while the format the model
+actually ships went unused — it could not have been used, because the template
+variable holding the tools was never passed and that whole branch was
+unreachable on every request ever served. Plus the template-engine filter every
+tool-rendering template needs, a reply no longer leaking an unclosed reasoning
+marker beside a good tool call, a credit escrow that can no longer settle
+against a write that failed, and eighteen patch releases of the local inference
+backend.
+
+⚠ **The Actions cache sits at GitHub's 10 GB ceiling** (29 entries), so 31 MB
+flash-attn kernel caches evict between runs — one saved at 08:47 was gone by
+13:32, and that cell then recompiles all 19 kernels (~56 min). The mechanism
+itself WORKS: the release build hit a fresh entry and logged `All library
+kernels up-to-date, skipping compilation`. Trim the large rust-cache entries;
+do not go investigating cudaforge. Gotcha #538.
 
 ⚠ **A required status check can name a job that no longer exists** — two of
 this repo's did, so they enforced NOTHING and **every PR was permanently
-BLOCKED** (`MERGEABLE` + `BLOCKED`, zero failing checks). Corrected 2026-09-10.
+BLOCKED**. Corrected 2026-09-10 and re-verified at this release.
 **Re-check the protection contexts against `gh run view --json jobs` whenever a
 job is renamed.** Gotcha #530.
-
-⚠ **Dependabot #23 (llama-cpp-2 → 0.1.156) is DEFERRED, not rejected** — it
-failed only on a missing `spirv-headers`, installed in CI as of `28b6b178`, so a
-rebase should go green. Held back so an 18-patch backend bump did not land beside
-the .170 fix to that backend's context handling.
-
-**Release-gate warnings — procedure, not history. Read before every release.**
-⚠ **Cache warm runs only when the dependency graph changes**, so for a release
-whose last commits are docs it is green on the BUMP commit, not the tag — same
-code, and the cache it writes lands on `main` where the tag build reads it.
-Check the sha it ran on rather than assuming it re-ran. (A version bump edits
-`Cargo.lock`, so it does re-run for that commit — confirmed again at .165.)
-⚠ **`release_shapes.sh`'s `greedy check has a live control` is PROBABILISTIC.**
-It sends one prompt twice at DEFAULT sampling and needs the two to DIFFER; on a
-24-token reply they coincide often enough to report COULD NOT RUN — 2 of 5 runs
-on one binary at the .165 release. It alternated convincingly against .164
-(OK, CNR, CNR, OK) and that was pure chance: a manual replay of the exact
-sequence passed, then three further runs passed. **Do not attribute it to a
-release on four samples.** And `text()` returns `''` on an ERROR response, so
-two FAILED requests compare equal and get that same misleading wording — read
-the node log before believing it.
-⚠ **`release_shapes.sh` is LOAD-SENSITIVE — take the baseline on an IDLE box.**
-`long system prompt, cold` FAILED once beside a `cargo build` and passed on a
-quiet re-run. One shapes failure is a re-run candidate, not a signal.
-⚠ **`release_shapes.sh` on port 8810 reports "node did not start" — that is the
-LIVE node's P2P port** (`8800 + 10`), not a release fault. Use 8819.
-⚠ **`gh release download` needs `-R <owner>/<repo>` when run outside a git
-directory**, and it fails QUIETLY: a checksum loop that compares two empty
-strings reports MATCH. Guard every artifact check on the file existing and the
-digest being 64 hex characters.
-⚠ **The Proxmox LXC has no `curl`** — a remote health/peer check using it hangs
-rather than failing. Check that node from the WSL side, or over `systemctl` and
-`journalctl`.
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`,
 gotcha numbers index `memory/gotchas.md`. **Read the named round log before
