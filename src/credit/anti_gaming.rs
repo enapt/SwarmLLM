@@ -168,11 +168,6 @@ impl AntiGaming {
         }
     }
 
-    /// Report a spot-check failure — peer claimed work they didn't do.
-    pub fn report_spot_check_failure(&mut self, _node: &NodeId) -> PenaltyAction {
-        PenaltyAction::ReduceTrust { amount: 0.1 }
-    }
-
     /// Check rate limit for a node. Returns true if within limits.
     fn check_rate_limit(&mut self, node: &NodeId) -> bool {
         let cutoff = Instant::now() - self.window_duration;
@@ -323,13 +318,6 @@ impl std::fmt::Display for AntiGamingViolation {
     }
 }
 
-/// Action to take when a penalty is assessed.
-#[derive(Debug, Clone)]
-pub enum PenaltyAction {
-    /// Reduce the peer's trust score.
-    ReduceTrust { amount: f64 },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,17 +411,6 @@ mod tests {
 
         // Should be allowed again
         assert!(ag.check_transaction(&from, &to, 10).is_ok());
-    }
-
-    #[test]
-    fn spot_check_failure_returns_penalty() {
-        let mut ag = AntiGaming::new();
-        let action = ag.report_spot_check_failure(&node(1));
-        match action {
-            PenaltyAction::ReduceTrust { amount } => {
-                assert!((amount - 0.1).abs() < f64::EPSILON);
-            }
-        }
     }
 }
 

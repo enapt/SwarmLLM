@@ -485,9 +485,14 @@ pub struct InferenceConfig {
     /// entirely at probe-time (no wire round-trip). On a successful
     /// fetch the bytes are still sanity-checked (no NaN/Inf) before
     /// hydration — any check failure triggers
-    /// `TrustEvent::SpotCheckFail` on the sender. Default 0.5 (the
-    /// DEFAULT_TRUST level for a freshly-seen peer — any peer that has
-    /// misbehaved drops below and is locked out).
+    /// `TrustEvent::SpotCheckFail` on the sender. Default 0.5 — which is
+    /// exactly `DEFAULT_TRUST`, the score a freshly-seen peer starts on, so
+    /// this bar excludes peers with a RECORDED history of misbehaviour and
+    /// admits every peer we have no evidence about. It is also not permanent:
+    /// `TRUST_DECAY_RATE` walks a score back toward `DEFAULT_TRUST` from both
+    /// directions, so a docked peer returns to the bar in time. See
+    /// `docs/FUTURE_WORK.md` § "The plaintext-prompt trust bar sits exactly at
+    /// the score an unknown peer starts on".
     #[serde(default = "default_cross_node_prefix_trust_min")]
     pub cross_node_prefix_trust_min: f32,
     /// Enable SWIFT (arxiv 2410.06916) self-speculative decoding inside

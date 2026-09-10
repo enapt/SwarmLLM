@@ -134,6 +134,22 @@ failover.
 
 → `docs/invariants/scheduling.md`
 
+## Trust is paid for work that was checked, and the check runs whenever the payment would
+
+`router::spot_check::check_distributed_result` returns a verdict and
+`settle_participant_trust` applies it — in that order, on **every** distributed
+result. A peer earns `InferenceSuccess` only from a result judged well-formed,
+once per REQUEST rather than once per segment, and a malformed result pays
+nobody. The penalty is applied only where a single peer served the request,
+because with several the fault is not attributable to any of them and docking
+all of them is a way to demote honest competitors.
+
+Sampling a check that gates a reward inverts the reward: crediting every
+participant and then checking one result in twenty gave a peer returning
+degenerate output **+0.005 per request**, and it climbed to the 1.0 ceiling.
+
+→ `docs/invariants/scheduling.md`
+
 ## An unmeasured candidate is priced pessimistically, never excluded
 
 `priced_from_a_measurement` is one predicate with one meaning — "does the cost

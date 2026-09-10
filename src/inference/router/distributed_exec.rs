@@ -15,7 +15,7 @@ use crate::inference::pipeline::PipelineExecutor;
 use crate::inference::scheduler::PipelineScheduler;
 use crate::types::{InferenceRequest, NetworkCommand, PipelineAssignment};
 
-use super::spot_check::spot_check_distributed_result;
+use super::spot_check::{check_distributed_result, settle_participant_trust};
 use super::types::{deliver_result, InferenceOutput, QueuedRequest, StreamingTokenTx};
 
 const MODEL_LOAD_WAIT_SECS: u64 = 60;
@@ -769,26 +769,22 @@ pub(super) async fn execute_request(
                 "DIAG: execute_request completed successfully"
             );
 
-            // Update trust for all remote peers that participated in the pipeline
-            for seg in &assignment_ref.segments {
-                if seg.node_id != local_node_id {
-                    shared_state.credits.trust_manager.update_trust(
-                        &shared_state.peer_registry,
-                        &seg.node_id,
-                        crate::credit::trust::TrustEvent::InferenceSuccess,
-                    );
-                }
-            }
-
-            // Spot-check: probabilistically verify remote peer output
-            spot_check_distributed_result(
-                &shared_state,
-                &request,
+            // A peer earns trust from a request whose output came back
+            // well-formed — checked first, credited second. Crediting every
+            // participant up front and sampling the check afterwards made the
+            // expected trust of a peer returning degenerate output POSITIVE
+            // (+0.01 always against -0.1 on one in twenty), so such a peer
+            // climbed the candidate ranking and stayed over the bar that
+            // decides who may be handed a plaintext prompt. Issue #21.
+            let verdict = check_distributed_result(&assignment_ref, &local_node_id, output);
+            settle_participant_trust(
+                &shared_state.credits.trust_manager,
+                &shared_state.peer_registry,
+                request.id,
                 &assignment_ref,
                 &local_node_id,
-                output,
-            )
-            .await;
+                &verdict,
+            );
         }
         Err(ref e) => {
             crate::log_failure!(

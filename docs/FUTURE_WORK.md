@@ -34,6 +34,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation. **The instrument shipped inert TWICE**, both fixed on main. **Field data collected 2026-09-09** from dev nodes in the real swarm, including a CONTROLLED run holding the peer fixed: **the error grows monotonically with reply length within one peer** (1.00 at 9 tokens → 3.3 at 239), and `predicted_ms` is flat across that range. A constant sits where a variable belongs. **Not just a wrong constant**: a ~64-token reply should then price at ratio 1 and measures 1.75. **Still not enough to tune on**, and the released binary records nothing |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
+| 30 | The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on | `DELEGATE_MIN_TRUST == DEFAULT_TRUST == 0.5`, so a peer we have never observed clears the bar that decides who may be handed a user's prompt in cleartext. Raising it is a routing-policy change with live consequences (on a small swarm it can make a model unservable), so it needs a decision, not a patch. The trust *ratchet* that made this worse is fixed (issue #21, 2026-09-10) |
 | 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
 
 ### P3 — correctness-adjacent, or blocked on a measurement
@@ -48,7 +49,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Outcome |
 |---|---|---|
-| 29 | Split points came only from what a peer holds on DISK, never from what it can LOAD | **FIXED 2026-09-09.** A capacity ceiling is now a split point as well as a cap. Without it a capacity-respecting route was not merely passed over but INEXPRESSIBLE: four candidates able to hold 17/9/14/19 of a 48-layer model, all holding it whole on disk, so the only boundaries were 0/48 plus the boomerang's — 28 layers went to a peer that could take 9, twice. Explains why `no route fits the peers' advertised memory` appeared 36 times in one node's log the same day. Evidence: `docs/invariants/scheduling.md`. ⚠ **Field verification ATTEMPTED and inconclusive** (2026-09-09): a node carrying the fix joined the live swarm, but the 14B the report is about had layers 35-41 on no reachable peer at the time — a genuine coverage gap, not a routing fault — so the scenario could not be reproduced. The three models that WERE routable all had a peer able to take them whole, so the capacity points were not needed and not exercised. What this establishes is no regression, not that the fix fires |
+| 29 | Split points came only from what a peer holds on DISK, never from what it can LOAD | **FIXED 2026-09-09.** A capacity ceiling is now a split point as well as a cap. Without it a capacity-respecting route was not merely passed over but INEXPRESSIBLE: four candidates able to hold 17/9/14/19 of a 48-layer model, all holding it whole on disk, so the only boundaries were 0/48 plus the boomerang's — 28 layers went to a peer that could take 9, twice. Explains why `no route fits the peers' advertised memory` appeared 36 times in one node's log the same day. Evidence: `docs/invariants/scheduling.md`. ✅ **FIELD-VERIFIED 2026-09-10** by the two-node tester on v0.3.168, and the mechanism was observed firing rather than inferred from an outcome: `qwen2.5-14b` was removed from the CPU node to force the request across the network, four candidates were priced at their real limits (**42 / 23 / 21 / 19** layers), and the route chosen was **27 layers + 21 layers — the second node landing exactly on its 21-layer ceiling**. A ceiling used as a boundary is the whole change; under the old code 21 was only ever a reason to reject. No reject loop, pipeline completed, escrow settled. (The earlier 2026-09-09 attempt was inconclusive because the 14B had layers 35-41 on no reachable peer — a real coverage gap, not a routing fault.) |
 
 ### P4 — test and infrastructure
 
@@ -288,6 +289,72 @@ a peer, and exactly where this project keeps finding defects. **Check a reachabi
 claim against the code before ranking it**; "cold-start" and "the measurement failed"
 suggest very different priorities and only one of them was true.
 
+
+## The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on (open, 2026-09-10)
+
+Found while fixing the trust ratchet reported on issue #21. The ratchet is
+fixed; this is the part underneath it, and it is a policy decision rather than
+a defect to patch quietly.
+
+`inference/scheduler/mod.rs`:
+
+```rust
+const DELEGATE_MIN_TRUST: f32 = crate::credit::trust::DEFAULT_TRUST;  // 0.5
+
+fn trusted_with_the_plaintext_prompt(c: &NodeCandidate, local: &NodeId) -> bool {
+    &c.node_id == local || c.trust_score >= DELEGATE_MIN_TRUST
+}
+```
+
+`DEFAULT_TRUST` is also what a freshly-seen peer is given. So the bar admits
+every peer we have no evidence about — it excludes only peers that have
+actively been penalised, and only until the decay puts them back.
+`TRUST_DECAY_RATE` moves a score 1% toward `DEFAULT_TRUST` per health ping, from
+both directions, so a peer docked to 0.4 is back at 0.45 in ~70 pings and back
+at the bar eventually. Punishment expires; the bar is where it expires *to*.
+
+That makes the bar meaningful against a peer with a **recorded** history of
+misbehaviour and meaningless against a fresh identity — which is the cheap thing
+to obtain. Its docstring elsewhere ("any peer that has misbehaved drops below
+and is locked out", `config/inference.rs` on `cross_node_prefix_trust_min`)
+describes the first case and reads as though it covered both.
+
+### Why this was not simply changed
+
+Raising the bar above `DEFAULT_TRUST` means no peer is eligible for layer 0
+until it has earned trust, and trust is earned by serving requests. That
+bootstraps in principle — a peer can earn its score on middle and last segments,
+which are not behind this bar, and then become eligible for the first — but on a
+**small swarm the near-term effect is that a model with only fresh peers holding
+its early layers becomes unservable**, which is a worse failure than the one
+being prevented. It is a real trade and it is the user's to make, not a
+side-effect to ship inside a bug fix.
+
+### What the options actually are
+
+1. **Raise the bar** (e.g. `DEFAULT_TRUST + 0.05`) and accept that new peers
+   serve non-first segments until they have a history. Needs a fallback for
+   "nobody is eligible" that is better than failing the request.
+2. **Separate the two numbers.** The score a peer starts on and the score
+   required to read a prompt need not be the same constant; today they are the
+   same constant *by definition*, which is why no one notices they are being
+   conflated.
+3. **Make first-segment eligibility require evidence rather than a threshold** —
+   n observed well-formed results, in the manner of BOINC's adaptive
+   replication, which counts consecutive validated jobs per (host, app version)
+   rather than thresholding a scalar. This is the most honest of the three and
+   the most work.
+
+Option 2 is the smallest change that stops the conflation and leaves the policy
+dial exposed.
+
+### What is already fixed, so it is not re-derived
+
+The ratchet: trust used to be credited to every pipeline participant
+unconditionally and only *then* sampled for a check at 5%, giving a peer that
+returns degenerate output an expected **+0.005 per request**. It climbed to the
+1.0 ceiling — reproduced as a test, `a_peer_whose_output_is_always_malformed_gains_no_trust`,
+which reads 1.0 with the fix reverted. See `inference/router/spot_check.rs`.
 
 ## A failover after the prompt pass silently loses the failed segment's KV context (open, 2026-09-09, MEASURED)
 

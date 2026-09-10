@@ -5236,3 +5236,100 @@ fn the_vendored_test_counter_sees_every_spelling_of_a_test() {
     // An ungated module is not excluded.
     assert!(feature_gated_modules("mod codec;\npub mod handler;\n").is_empty());
 }
+
+/// Recursively collect every `.rs` file under a directory.
+fn rust_files_under(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|e| e == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A peer earns trust for work that was CHECKED, and only for that.
+///
+/// Issue #21 (2026-09-10): `distributed_exec` credited `InferenceSuccess` to
+/// every remote segment holder the moment the pipeline returned `Ok`, and only
+/// then sampled a 5% check. Expected movement for a peer whose output is always
+/// degenerate was `+0.01 + 0.05 x (-0.1) = +0.005` a request — it climbed to
+/// the 1.0 ceiling, over the bar deciding who may read a plaintext prompt.
+///
+/// Two ways to bring that back, so the guard checks both: crediting from a NEW
+/// path, and hoisting the credit back out of the `WellFormed` arm.
+#[test]
+fn inference_trust_is_credited_only_behind_the_well_formed_verdict() {
+    let root = repo_root();
+    const HOME: &str = "src/inference/router/spot_check.rs";
+
+    let mut offenders = Vec::new();
+    let mut credit_sites = 0usize;
+    for path in rust_files_under(&root.join("src")) {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        // The variant's own definition and the TrustManager unit tests name it
+        // without paying anybody.
+        if rel.ends_with("src/credit/trust.rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap_or_default();
+        for (line, stmt) in statements(&src) {
+            if !stmt.contains("TrustEvent::InferenceSuccess") {
+                continue;
+            }
+            credit_sites += 1;
+            if !rel.ends_with(HOME) {
+                offenders.push(format!("{rel}:{line}  {stmt}"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "TrustEvent::InferenceSuccess is credited outside {HOME}:\n  {}\n\n\
+         Trust is paid for a result that `check_distributed_result` judged \
+         well-formed, through `settle_participant_trust`. A second path that \
+         pays for merely not erroring re-creates issue #21, in which a peer \
+         returning garbage climbed to the trust ceiling.",
+        offenders.join("\n  ")
+    );
+
+    // The scanner must be able to see the site it is guarding — a scan that
+    // finds nothing is indistinguishable from one that cannot find anything.
+    assert!(
+        credit_sites >= 1,
+        "the scanner found no InferenceSuccess credit anywhere; it has gone \
+         blind (renamed variant? statements() no longer joining the chain?)"
+    );
+
+    // And the surviving site must sit behind the verdict, not above the match.
+    let src = std::fs::read_to_string(root.join(HOME)).expect("read spot_check.rs");
+    let body = fn_body(&src, "pub(super) fn settle_participant_trust(")
+        .expect("settle_participant_trust must exist");
+    let arm = body
+        .find("ResultCheck::WellFormed =>")
+        .expect("the WellFormed arm must exist");
+    let credit = body
+        .find("TrustEvent::InferenceSuccess")
+        .expect("the credit must exist");
+    assert!(
+        credit > arm,
+        "{HOME} credits InferenceSuccess before the WellFormed arm — that is \
+         the pre-fix ordering, in which every participant was paid and the \
+         check merely ran afterwards"
+    );
+}

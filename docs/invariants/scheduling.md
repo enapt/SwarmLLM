@@ -1420,3 +1420,90 @@ attributable. Any new automatic credit or reputation penalty MUST route
 through an equivalent attribution check. `ServiceUnavailable` means
 "THIS server can't serve" and `Internal` means our own bug — neither can
 ever justify charging a peer.
+
+## Trust is paid for work that was checked, and the check runs whenever the payment would
+
+**Rule:** `.claude/rules/architecture.md` § "Trust is paid for work that was
+checked, and the check runs whenever the payment would".
+
+### What it replaced
+
+`router/distributed_exec.rs` credited `TrustEvent::InferenceSuccess` to every
+remote segment holder the moment a pipeline returned `Ok`, and only then called
+a spot check that sampled 5% of results. The constants are `+0.01` for success
+and `-0.1` for a spot-check failure, so the expected movement for a peer whose
+output is always degenerate was:
+
+```
++0.01  +  0.05 x (-0.1)  =  +0.005 per request
+```
+
+Positive. Not "escapes detection sometimes" — **ahead on average, forever.** The
+break-even sampling rate is 10% and the configured rate was 5%. Reported by a
+contributor on issue #21 (2026-09-10), who derived the arithmetic from the
+source; reproduced here as a test that reads **1.0**, the clamp ceiling, with
+the fix reverted.
+
+Two things made it worse than the arithmetic suggests:
+
+- **The credit was per SEGMENT.** A peer handed three segments of one pipeline
+  was credited three times for one piece of behaviour, so taking more of a
+  pipeline ratcheted faster.
+- **Trust is not decorative.** `DELEGATE_MIN_TRUST` gates
+  `trusted_with_the_plaintext_prompt` — who may be handed a user's prompt in
+  cleartext — and `trust_score` is a tie-breaker in the candidate ordering. A
+  peer drifting upward gains both.
+
+### What the check can and cannot establish
+
+The three checks are *well-formedness* assertions over the assembled reply:
+empty text with a non-zero token count, text with a zero token count, and a long
+reply that is one character repeated. **A peer returning fluent, confident,
+wrong tokens passes all three**, and still earns trust. That limit is
+structural, not an oversight to tighten:
+
+- BOINC detects wrong results by **replication with consensus** — the same job
+  on two hosts, accepted only if they agree — and its *spot*-checking sends work
+  whose answer is already known. Its reputation is per (host, app version), and
+  adaptive replication lowers the replication probability as consecutive
+  validated results accumulate (Anderson, *BOINC: A Platform for Volunteer
+  Computing*, J. Grid Computing 18(1), 2020).
+- Sarmenta's analysis is the same shape: spot-checking works because the checked
+  work has a ground truth, and combining it with voting is what shrinks the
+  error rate exponentially (*Sabotage-tolerance mechanisms for volunteer
+  computing systems*, FGCS 18(4), 2001).
+
+We have no ground truth for an inference result and no second computation to
+compare against, so the honest claim is the weak one the checks support. Do not
+let the module's name imply more.
+
+### What a change must keep
+
+- **The check runs on every distributed result.** It is three assertions over a
+  string already in hand — there is no cost to amortise, and that was never the
+  reason it was sampled. `effective_spot_check_rate` still exists and still
+  governs *credit-transaction* verification in `anti_gaming.rs`; that is a
+  different question with a real cost behind it.
+- **The verdict comes before the credit.** Re-ordering these re-introduces the
+  defect exactly.
+- **One request, one observation per peer.** Dedupe segment holders.
+- **A malformed result pays nobody, and convicts nobody it cannot identify.**
+  Withholding the reward needs no attribution and is by itself enough to stop
+  the ratchet. The `-0.1` needs attribution, and the only case that supplies it
+  is a single remote peer. Docking all participants of a multi-peer pipeline
+  would let one bad node lower the trust of every honest node it shares a
+  pipeline with — and since candidates are ordered by trust, that is an attack
+  on competitors, not collateral damage.
+- **Take no locks on this path.** It runs on every completion now. The previous
+  version acquired the `anti_gaming` mutex twice per check; the helper it called
+  (`report_spot_check_failure`) ignored its node argument and returned a
+  constant that was only logged, alongside the real `-0.1` it had already
+  applied, so the log read as though two penalties had landed. Both it and its
+  single-variant `PenaltyAction` enum are gone.
+
+### What is still open
+
+The bar this trust feeds is `DELEGATE_MIN_TRUST`, which equals `DEFAULT_TRUST` —
+the score an unknown peer starts on. See `docs/FUTURE_WORK.md` § "The
+plaintext-prompt trust bar sits exactly at the score an unknown peer starts on".
+
