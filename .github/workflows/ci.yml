@@ -124,11 +124,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy
+      - name: Refresh package indexes (Linux)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/apt-update
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+        run: sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # Bump the `vN` suffix whenever an upstream runner-image change
@@ -157,11 +158,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Refresh package indexes (Linux)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/apt-update
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+        run: sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # See clippy step above for the rationale on -v2 + cache-bin: false.
@@ -219,11 +221,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Refresh package indexes (Linux)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/apt-update
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+        run: sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # See clippy step above for the rationale on -v2 + cache-bin: false.
@@ -321,11 +324,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Refresh package indexes
+        uses: ./.github/actions/apt-update
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
-      - name: Install cuda-nvcc (build-time only, dynamic-loading dlopens runtime)
+        run: sudo apt-get install -y libssl-dev pkg-config
+      - name: Add NVIDIA's CUDA repository (pinned keyring)
         run: |
           # R138 (closes R103 deferral): pin cuda-keyring .deb to a verified
           # SHA256 so a compromised mirror or in-transit modification can't
@@ -337,7 +340,13 @@ jobs:
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           echo "${CUDA_KEYRING_SHA256}  cuda-keyring_1.1-1_all.deb" | sha256sum -c -
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update
+      # Split from the step above so the refresh that follows adding the
+      # repository gets the same retry as every other one. The keyring must
+      # already be installed when this runs.
+      - name: Refresh package indexes (with CUDA repo)
+        uses: ./.github/actions/apt-update
+      - name: Install cuda-nvcc (build-time only, dynamic-loading dlopens runtime)
+        run: |
           sudo apt-get install -y cuda-nvcc-12-8
           echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
       # windows-gpu = ["llama-vulkan", "candle-cuda", "flash-attn"]; this
@@ -363,11 +372,12 @@ jobs:
       # exposes Vulkan_LIBRARY, Vulkan_INCLUDE_DIR, and glslangValidator
       # in /usr/{lib,include,bin} where CMake's FindVulkan module
       # canonically looks.
+      - name: Refresh package indexes (Vulkan SDK)
+        if: matrix.features == 'windows-gpu-no-flash'
+        uses: ./.github/actions/apt-update
       - name: Install Vulkan SDK (windows-gpu feature only)
         if: matrix.features == 'windows-gpu-no-flash'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvulkan-dev glslang-tools glslc
+        run: sudo apt-get install -y libvulkan-dev glslang-tools glslc
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # Don't bump this with -vN — the windows-gpu feature pulls in

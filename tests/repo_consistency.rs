@@ -5333,3 +5333,75 @@ fn inference_trust_is_credited_only_behind_the_well_formed_verdict() {
          check merely ran afterwards"
     );
 }
+
+/// Every apt refresh in CI goes through `.github/actions/apt-update`.
+///
+/// A bare `sudo apt-get update` fails the whole job when ANY repository on the
+/// runner image has a bad index — including third-party ones nothing here
+/// installs from. On 2026-09-09 all three Linux release jobs died on the
+/// runner's Google Chrome index and v0.3.168 published as a DRAFT with 12 of
+/// its 25 assets, with nothing wrong with the code. The retry lives in one
+/// composite action; this stops the one-liner coming back beside it.
+#[test]
+fn every_apt_refresh_goes_through_the_retrying_action() {
+    let root = repo_root();
+    const HOME: &str = ".github/actions/apt-update/action.yml";
+
+    let mut offenders = Vec::new();
+    let mut checked_files = 0usize;
+    let mut dirs = vec![root.join(".github")];
+    while let Some(d) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                dirs.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+                continue;
+            }
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel.ends_with(HOME) {
+                continue;
+            }
+            checked_files += 1;
+            let src = std::fs::read_to_string(&p).unwrap_or_default();
+            for (i, line) in src.lines().enumerate() {
+                let l = line.trim();
+                if l.starts_with('#') {
+                    continue;
+                }
+                if l.contains("apt-get update") {
+                    offenders.push(format!("{rel}:{}  {l}", i + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "a bare apt-get update is back in CI:\n  {}\n\n\
+         Use `uses: ./.github/actions/apt-update` instead. A single bad index on \
+         any repository the runner image ships fails the whole job, and that \
+         published v0.3.168 as a draft with 12 of 25 assets.",
+        offenders.join("\n  ")
+    );
+
+    // The scan has to actually reach the workflow files.
+    assert!(
+        checked_files >= 3,
+        "the scanner found only {checked_files} workflow files under .github — \
+         it is not looking where the workflows are"
+    );
+    assert!(
+        root.join(HOME).is_file(),
+        "{HOME} is missing, so the call sites point at nothing"
+    );
+}

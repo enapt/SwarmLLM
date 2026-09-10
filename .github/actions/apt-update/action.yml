@@ -1,0 +1,42 @@
+name: apt-get update, retried
+description: >
+  Refresh apt's package indexes, retrying with the lists cleared between
+  attempts. Use this everywhere instead of a bare `sudo apt-get update`.
+
+# Why this exists, so nobody replaces it with the one-liner again.
+#
+# The GitHub runner image ships third-party repositories no build here ever
+# installs from — Google Chrome, Microsoft, and others — and a bad index on ANY
+# of them fails the whole update with exit 100. That is not hypothetical: on
+# 2026-09-09 all three Linux release jobs died on
+# "Failed to fetch .../chrome-stable/... Hash Sum mismatch", Windows and macOS
+# built fine, and v0.3.168 published as a DRAFT carrying 12 of its 25 assets.
+# Nothing was wrong with the code.
+#
+# A hash-sum mismatch is a stale or half-written CDN index and clears on its
+# own, so the fix is to retry rather than to prune repositories this action does
+# not own — deleting a source list would silently change what a later step can
+# install. Clearing the lists between attempts is what makes the retry
+# meaningful; without it apt happily reuses the bad index it already has.
+
+runs:
+  using: composite
+  steps:
+    - name: apt-get update (up to 3 attempts)
+      shell: bash
+      run: |
+        set -euo pipefail
+        for attempt in 1 2 3; do
+          if sudo apt-get update; then
+            exit 0
+          fi
+          if [ "$attempt" = "3" ]; then
+            echo "apt-get update failed three times — the runner's package indexes, not the build." >&2
+            exit 1
+          fi
+          echo "apt-get update failed (attempt $attempt) — clearing indexes and retrying"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          # Back off — a half-written CDN index is not fixed by asking faster.
+          sleep $((attempt * 10))
+        done
