@@ -36,6 +36,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
 | 31 | Every Qwen3 request reaches the model with the question missing | **ROOT-CAUSED AND FIXED 2026-09-10.** Field-reported as an 8B processor bug; reproduced here in 5 s on a 1.7B **on the GPU**, so neither the size nor the device mattered. The renderer half-renders the official Qwen3 template — system preamble present, model's turn correctly opened, **every user message dropped** — so three different questions all arrived as the same 14 tokens and produced byte-identical replies. Not a forward-pass bug and not a tokenizer bug: both were ruled out with null controls first |
 | 32 | A long prompt on the boomerang path dies with a CUDA OOM mid-compute | **Field-reported 2026-09-09.** 20837 tokens, `DriverError(CUDA_ERROR_OUT_OF_MEMORY)` raised during the forward rather than at load, so admission let it in and the compute then could not fit. Escrow refunded and the daemon stayed healthy, but it is a hard failure and the KV admission path is supposed to make it a clean 503 |
+| 33 | A context that does not fit is refused instead of shrunk | **FIXED 2026-09-10.** The llama.cpp path capped context at a CONSTANT 8192 and asked for it whatever the card had left. On a 6 GB card holding an 8B's weights there is no room for the 1.12 GB that needs, so every request died at `Failed to create context: null reference from llama.cpp`. It now halves down to a floor and serves the size it gets, saying so |
 | 30 | The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on | `DELEGATE_MIN_TRUST == DEFAULT_TRUST == 0.5`, so a peer we have never observed clears the bar that decides who may be handed a user's prompt in cleartext. Raising it is a routing-policy change with live consequences (on a small swarm it can make a model unservable), so it needs a decision, not a patch. The trust *ratchet* that made this worse is fixed (issue #21, 2026-09-10) |
 | 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
 
@@ -435,6 +436,63 @@ actually allocates.
 Related to, but not the same as, the boomerang cost problem — that one is about
 the route being slow (0.2 tok/s measured on the same model), this one is about
 it failing outright.
+
+## A context that does not fit is refused instead of shrunk (FIXED 2026-09-10)
+
+Field-reported against v0.3.169 on a Qwen3-8B, RTX 4050 (5790 MB total,
+4534 MB free), reproduced 2/2, and filed as a regression because the error
+string matched one from v0.3.156 that v0.3.158 had claimed to fix.
+
+**It is not a v0.3.169 regression.** That release touched
+`chat_template/`, `router/spot_check.rs`, `router/distributed_exec.rs` and
+`credit/anti_gaming.rs` — `git diff --stat v0.3.168-alpha v0.3.169-alpha -- src/`
+shows it never went near `inference/executor.rs` or `inference/split/mod.rs`.
+What changed is what the request could REACH: the same report confirms the
+v0.3.169 template fix firing (`rendered_len` 58 → 134, the fallback carrying the
+question), and on the previous release this model had failed to load on the
+graphics card and fallen back to the processor, where 23 GB made the context
+free. Loading onto the card instead is what exposes a limit that was always
+there.
+
+### The limit
+
+`effective_llama_context` caps at `DEFAULT_MAX_SEQ_LEN` — 8192, a **constant**.
+Whether that fits is not constant:
+
+```
+Qwen3-8B: 36 layers x 8 KV heads x 128 dims, K and V, f16 = 144 KB per token
+  8192 tokens -> 1.12 GB
+Card: 5790 MB total, 4534 MB free; Q4_K_M weights ~4.7 GB
+```
+
+The weights take essentially all the free memory, so the 1.12 GB the context
+wants is not there. Context creation returned null 11 ms later — too fast to be
+a real allocation attempt, which is the tell that it was refused rather than
+attempted.
+
+The v0.3.158 fix was real and is still right: before it, the same path handed
+llama.cpp `n_ctx_train()` verbatim (40,960 for this model, 5.6 GB). Capping was
+necessary. It just is not sufficient, because one constant cannot be correct for
+every card.
+
+### The fix
+
+llama.cpp will not say how much it needs, and free memory read beforehand is
+evidence rather than proof — another process can take it in between. So ask:
+`context_retry_ladder` halves from the capped figure down to a 1024-token floor,
+and the first size the card accepts is the one served. A short context that works
+beats an exact one that does not, and the granted figure is logged at `warn`
+with what to do about it (free memory, smaller quantisation, lower
+`gpu_layers`), so a shortened context is visible rather than mysterious. If even
+the floor is refused, the error says the weights fit but their KV cache does not,
+instead of repeating llama.cpp's null.
+
+### Watch out for
+
+`context_retry_ladder` is called only from `llama`-gated code, so **every default
+build reports it as dead** and every default build is wrong about it (gotcha
+#264). It carries the same `cfg_attr` as `load_failure_message` beside it.
+Verified with `cargo check --features llama --all-targets`.
 
 ## The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on (open, 2026-09-10)
 

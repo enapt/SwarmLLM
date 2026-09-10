@@ -82,6 +82,32 @@ pub fn effective_llama_context(n_ctx_train: u32) -> u32 {
     effective.min(n_ctx_train as usize) as u32
 }
 
+/// Context sizes to try, largest first, when the card may not hold the one the
+/// model asks for.
+///
+/// Halving rather than stepping, so a card that is far too small reaches a
+/// workable size in a few tries instead of dozens. The floor is a context short
+/// enough to be nearly free (a 144 KB-a-token model needs 144 MB at 1024) but
+/// long enough to answer an ordinary question — below that, failing with an
+/// explanation is more useful than succeeding with a context that cannot hold
+/// the prompt.
+/// Only called from the `llama`-gated inference path, so every default build
+/// reports this as dead and every default build is wrong about it (gotcha #264).
+#[cfg_attr(not(feature = "llama"), allow(dead_code))]
+pub(crate) fn context_retry_ladder(requested: u32) -> Vec<u32> {
+    const FLOOR: u32 = 1024;
+    let mut sizes = Vec::new();
+    let mut n = requested.max(1);
+    loop {
+        sizes.push(n);
+        if n <= FLOOR {
+            break;
+        }
+        n = (n / 2).max(FLOOR);
+    }
+    sizes
+}
+
 /// What to say when llama.cpp refuses to load a model.
 ///
 /// Upstream returns "null result from llama cpp" for every load failure, so the
@@ -479,12 +505,62 @@ impl ModelExecutor {
         // against roughly 1.3 GB left after the weights. Capped it needs
         // 1.1 GB. Any model with a large training window on a modest card hits
         // this; that one just declares a big enough number to make it certain.
-        let n_ctx = effective_llama_context(model.n_ctx_train());
-        let ctx_size = NonZeroU32::new(n_ctx);
-        let ctx_params = LlamaContextParams::default().with_n_ctx(ctx_size);
-        let mut ctx = model
-            .new_context(backend, ctx_params)
-            .map_err(|e| SwarmError::Inference(format!("Failed to create context: {e}")))?;
+        // The cap above is a CONSTANT, and whether the KV cache fits is not.
+        //
+        // Reported 2026-09-10: the same Qwen3-8B, an RTX 4050 with 5790 MB
+        // total and 4534 MB free. Q4_K_M weights are ~4.7 GB, so they take
+        // essentially all of it, and the capped 8192-token context wants
+        // another 1.12 GB (36 layers x 8 KV heads x 128 dims, K and V, in f16
+        // = 144 KB a token) that is not there. Context creation returned null
+        // 11 ms later — too fast to be a real allocation — on every request.
+        //
+        // llama.cpp will not say how much it needs, and free memory read
+        // beforehand is evidence rather than proof, so the honest approach is
+        // to ASK: try the capped figure, and on refusal halve it and ask again.
+        // A smaller context that works beats an exact one that does not, and
+        // the figure actually granted is logged so a short context is visible
+        // rather than mysterious.
+        let requested = effective_llama_context(model.n_ctx_train());
+        let mut attempt = Err(SwarmError::Inference(
+            "no context size attempted".to_string(),
+        ));
+        let mut granted = requested;
+        for candidate in context_retry_ladder(requested) {
+            let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(candidate));
+            match model.new_context(backend, ctx_params) {
+                Ok(c) => {
+                    if candidate < requested {
+                        tracing::warn!(
+                            requested,
+                            granted = candidate,
+                            "the graphics card would not hold a {requested}-token context for \
+                             this model, so it is being served with {candidate}. Longer prompts \
+                             will be refused. Free memory before loading, use a smaller \
+                             quantisation, or lower `inference.gpu_layers` to move part of the \
+                             model to the processor."
+                        );
+                    }
+                    granted = candidate;
+                    attempt = Ok(c);
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        n_ctx = candidate,
+                        error = %e,
+                        "context creation refused at this size, trying a smaller one"
+                    );
+                    attempt = Err(SwarmError::Inference(format!(
+                        "Failed to create context: {e} — tried down to {candidate} tokens. The \
+                         model loaded but its KV cache does not fit in the memory left after \
+                         the weights. Free memory before loading, use a smaller quantisation, \
+                         or lower `inference.gpu_layers`."
+                    )));
+                }
+            }
+        }
+        let mut ctx = attempt?;
+        let n_ctx = granted;
 
         // Tokenize the prompt
         let tokens = model
@@ -1347,6 +1423,53 @@ mod tests {
         assert!(
             !exec.is_loaded(),
             "a refused load must not leave the executor claiming a model is loaded"
+        );
+    }
+}
+
+#[cfg(test)]
+mod context_ladder_tests {
+    use super::context_retry_ladder;
+
+    /// The ladder must reach a workable size in a few tries and stop, not walk
+    /// down forever or skip the requested size.
+    #[test]
+    fn the_ladder_halves_from_the_request_down_to_the_floor() {
+        assert_eq!(context_retry_ladder(8192), vec![8192, 4096, 2048, 1024]);
+        // Already at or below the floor: one attempt, the one asked for.
+        assert_eq!(context_retry_ladder(1024), vec![1024]);
+        assert_eq!(context_retry_ladder(512), vec![512]);
+        // Never empty, never zero — a zero would be handed to NonZeroU32.
+        assert_eq!(context_retry_ladder(0), vec![1]);
+        for requested in [1u32, 3, 999, 4096, 40_960, u32::MAX] {
+            let ladder = context_retry_ladder(requested);
+            assert!(!ladder.is_empty(), "empty ladder for {requested}");
+            assert_eq!(ladder[0], requested.max(1), "must try what was asked first");
+            assert!(ladder.iter().all(|&n| n > 0), "zero size for {requested}");
+            assert!(
+                ladder.windows(2).all(|w| w[0] > w[1]),
+                "must strictly descend for {requested}: {ladder:?}"
+            );
+            assert!(
+                ladder.len() <= 24,
+                "ladder for {requested} is {} long — that is a loop, not a retry",
+                ladder.len()
+            );
+        }
+    }
+
+    /// The floor is the point of the ladder: a 144 KB-a-token model needs
+    /// 144 MB at 1024 tokens, which fits where 1.12 GB at 8192 did not.
+    #[test]
+    fn the_floor_is_small_enough_to_fit_where_the_cap_did_not() {
+        let ladder = context_retry_ladder(8192);
+        let floor = *ladder.last().expect("ladder is never empty");
+        let kv_per_token_bytes: u64 = 144 * 1024;
+        let at_floor = kv_per_token_bytes * u64::from(floor);
+        assert!(
+            at_floor < 256 * 1024 * 1024,
+            "floor of {floor} tokens still needs {} MB",
+            at_floor / 1024 / 1024
         );
     }
 }
