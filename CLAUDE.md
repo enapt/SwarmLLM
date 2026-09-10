@@ -224,36 +224,38 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2525 lib (dev,claude-subscription) — re-measured 2026-09-10, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 85 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.169-alpha (2026-09-10, tag `63cf3975` on commit
-`7de8949d`).** Gate: audit as documented (the same two `hickory-proto`
-advisories + the `paste` warning); **CI 13/13 AND Cache warm 3/3 both on the
-TAGGED commit** — the bump was the tag, so no sha reasoning was needed; release
-built **8/8 first time**, 25 assets, `latest`, not draft; **smoke 9/9 + shapes
-7/7 on the DOWNLOADED artifact** against a .168 baseline taken FIRST that scored
-the same. Both nodes verified: ids and `identity.key` md5 unchanged, installed
-binary byte-identical to the download, deb hash re-verified AFTER transfer,
-journal "-- No entries --", paired at 119 ms, 0 ERROR, inference confirmed —
-including the Qwen3 fix on the released binary in production. Rollback
-`~/.local/bin/swarmllm.0.3.168-alpha.bak`, backups pruned to newest 3.
+**Released and deployed: v0.3.170-alpha (2026-09-10, tag `ec0f58a2` on commit
+`1f55d9ec`).** Gate: audit as documented; **CI 13/13 AND Cache warm 3/3 both on
+the TAGGED commit** (the bump was the tag again); release built **10/10 first
+time**, 25 assets, `latest`, not draft; **smoke 9/9 + shapes 7/7 on the
+DOWNLOADED artifact** against a .169 baseline taken FIRST that scored the same.
+Both nodes verified: ids and `identity.key` md5 unchanged, installed binary
+byte-identical to the download, deb hash re-verified AFTER transfer, journal
+"-- No entries --", paired at 343 ms, 0 ERROR, and the Qwen3 template confirmed
+rendering NATIVELY on the released binary (0 fallbacks). Rollback
+`~/.local/bin/swarmllm.0.3.169-alpha.bak`, backups pruned to newest 3.
 
-**What it carries**: **every Qwen3 request reached the model with the question
-missing** — the renderer half-rendered the official template, dropping every
-user message while still opening the model's turn, so three prompts of 3, 6 and
-540 words all arrived as the same 14 tokens and produced byte-identical replies;
-a render that lost the question is now a FAILED render. And **a machine that
-returns unusable output no longer earns trust for it** (issue #21: credit was
-paid on every request and checked on one in twenty, so a machine returning
-garbage climbed to the maximum trust score, over the bar deciding who may read a
-plaintext prompt).
+**What it carries**: a model whose weights nearly fill the card is usable again
+— a context that will not fit is SHRUNK to one that does rather than refused
+(the cap was a constant; whether 8192 tokens of KV fits is not); and chat
+templates now render on **minijinja + minijinja-contrib pycompat**, the engine
+HF's TGI and SGLang use, replacing ~1000 lines of hand-rolled subset that
+half-rendered rather than failing.
 
-⚠ **The .168 apt retry WORKED** — all three Linux release jobs passed first time,
-where .168 died on the runner's Google Chrome repo index. **The same pattern is
-still un-retried in 4 places in `ci.yml`.**
+⚠ **A required status check can name a job that no longer exists.** Branch
+protection required `Feature compile-check (candle-cuda)` and
+`Feature compile-check (windows-gpu)`; the jobs are
+`Feature compile-check candle-cuda (Linux)` etc. So those two enforced NOTHING
+and every PR was permanently BLOCKED — which is why Dependabot PRs could never
+merge. Corrected 2026-09-10, and `flash-attn (Linux)` added. **Re-check the
+contexts against `gh run view --json jobs` whenever a job is renamed.**
 
-⚠ **Qwen3 now FALLS BACK rather than rendering its own template**, so tool-call
-framing and the `enable_thinking` switch are not available for it. Implementing
-the missing Jinja constructs (`messages[::-1]`, `namespace()`, …) is the real
-fix — `docs/FUTURE_WORK.md` item 5.
+⚠ **Dependabot #23 (llama-cpp-2 0.1.138 → 0.1.156) is DEFERRED, not rejected.**
+It failed only because llama.cpp's Vulkan backend added
+`find_package(SPIRV-Headers)`; `spirv-headers` is now installed in CI
+(`28b6b178`), so a rebase should go green. Held back so an 18-patch bump of the
+inference backend does not land in the same release as a fix to that backend's
+context handling — a field report about either would be unattributable.
 
 **Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
