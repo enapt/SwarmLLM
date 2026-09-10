@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.3.169-alpha] — 2026-09-10
+
+### Fixed
+
+- **Qwen3 models now receive the question that was asked.** Every request to a
+  Qwen3 model reached the model with the user's message missing, and the reply
+  came back fluent, confident and about something else entirely — asked to reply
+  only with the word YES, the model returned an essay on building a website.
+  This affected Qwen3 on every device and at every size, not one model on one
+  machine: it was reported against an 8B running on a processor and reproduced
+  on a 1.7B running on a graphics card. The cause was the chat template. The
+  renderer is a deliberate subset of Jinja and the official Qwen3 template is
+  past its edge, so rather than failing it half-rendered — producing the system
+  preamble and correctly opening the model's turn, with every user message
+  dropped. Three prompts of three, six and five hundred words all arrived as the
+  same fourteen tokens and produced byte-identical replies. A rendered prompt
+  that does not contain the question is now treated as a failed render:
+  discarded with a warning, and rebuilt by the fallback chain, which for Qwen3
+  reaches the format Qwen3 actually uses. Measured before and after on
+  Qwen3-1.7B: prompt length was a constant fourteen tokens for every input, and
+  is now twenty-five, thirty-one and forty-two for three prompts that differ,
+  with every reply on topic. The check is general rather than Qwen3-specific, so
+  any template past the renderer's edge now falls back loudly instead of
+  silently losing the conversation.
+- **A machine that returns unusable output no longer earns trust for it.** A
+  machine taking part in a distributed request was credited trust the moment the
+  pipeline returned, and the check on what it had actually sent ran afterwards
+  on one result in twenty. A machine whose every reply was unusable therefore
+  gained trust on average and climbed to the maximum score. That mattered
+  because trust decides which machines may be handed a prompt in readable form,
+  and orders the list of machines a request is routed through. The check now
+  runs on every distributed result and the credit is paid behind it — it was
+  never expensive enough to be worth sampling. Reported on issue #21.
+
+### Changed
+
+- Trust is recorded once per request rather than once per segment, so a machine
+  given several pieces of one pipeline is no longer credited several times for
+  one piece of behaviour.
+- An unusable result now pays nobody, and only costs a machine trust when it was
+  the only remote machine that served the request. Docking every participant let
+  one bad machine lower the trust of every honest machine it shared a pipeline
+  with, which — since machines are ordered by trust — is a way to demote
+  competitors rather than collateral damage.
+
+### Known limits
+
+- The checks on a distributed result are well-formedness assertions, not
+  verification. A machine returning fluent, confident, wrong output passes them
+  and still earns trust; detecting that needs the same work computed twice and
+  compared, and there is no ground truth to compare against today.
+- Qwen3 now falls back rather than rendering its own template, so
+  template-specific behaviour such as tool-call framing and the thinking switch
+  is not available for it. Implementing the missing template constructs is the
+  real fix.
+
 ## [0.3.168-alpha] — 2026-09-09
 
 ### Fixed
