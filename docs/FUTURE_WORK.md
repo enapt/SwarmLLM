@@ -34,6 +34,8 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation. **The instrument shipped inert TWICE**, both fixed on main. **Field data collected 2026-09-09** from dev nodes in the real swarm, including a CONTROLLED run holding the peer fixed: **the error grows monotonically with reply length within one peer** (1.00 at 9 tokens → 3.3 at 239), and `predicted_ms` is flat across that range. A constant sits where a variable belongs. **Not just a wrong constant**: a ~64-token reply should then price at ratio 1 and measures 1.75. **Still not enough to tune on**, and the released binary records nothing |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
+| 31 | Qwen3-8B on the processor answers a question it was not asked | **Field-reported 2026-09-09 on v0.3.168, reproduced 2/2, never seen before.** The reply is fluent and coherent and has nothing to do with the prompt ("reply only with the word YES" → a smoothie recipe). `prompt_len` is consistent with the text, so the prompt IS reaching the model. Coherent-but-unrelated is the signature of the prompt being turned into the WRONG token ids, not of a broken forward |
+| 32 | A long prompt on the boomerang path dies with a CUDA OOM mid-compute | **Field-reported 2026-09-09.** 20837 tokens, `DriverError(CUDA_ERROR_OUT_OF_MEMORY)` raised during the forward rather than at load, so admission let it in and the compute then could not fit. Escrow refunded and the daemon stayed healthy, but it is a hard failure and the KV admission path is supposed to make it a clean 503 |
 | 30 | The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on | `DELEGATE_MIN_TRUST == DEFAULT_TRUST == 0.5`, so a peer we have never observed clears the bar that decides who may be handed a user's prompt in cleartext. Raising it is a routing-policy change with live consequences (on a small swarm it can make a model unservable), so it needs a decision, not a patch. The trust *ratchet* that made this worse is fixed (issue #21, 2026-09-10) |
 | 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
 
@@ -289,6 +291,64 @@ a peer, and exactly where this project keeps finding defects. **Check a reachabi
 claim against the code before ranking it**; "cold-start" and "the measurement failed"
 suggest very different priorities and only one of them was true.
 
+
+## Qwen3-8B on the processor answers a question it was not asked (open, 2026-09-09, field-reported)
+
+Reported from a two-node deployment on v0.3.168, reproduced 2 of 2 attempts,
+and distinct from the existing `Qwen3ArchitectureNotSupported` report — that one
+was a crash, this is a confident wrong answer, which is worse.
+
+- "Reply only with the word YES" produced a smoothie recipe.
+- "BANANE VIOLETTE MYSTERE 42" produced a list of the best films of all time.
+- `prompt_len=80`, consistent with the text plus the rendered template, so the
+  prompt reaches the model. This is not the prompt going missing.
+- The chat-template fix from v0.3.157 is confirmed working on this path — the
+  log shows `the chat template left the prompt at the end of a finished turn, so
+  the model's own turn was opened for it`.
+
+**Read the signature before picking a suspect.** Output that is fluent and
+grammatical but unrelated to the input is what a model produces when it is fed
+a *valid but wrong* token sequence. A broken forward pass — wrong RoPE, wrong
+head grouping, wrong rotation width — degrades fluency; it does not preserve it
+while swapping the topic. The reporter's own guess was the forward pass; the
+shape of the symptom points at the tokenizer first.
+
+That is cheap to discriminate and there is already a harness for it:
+`examples/tokenizer_scaling.rs` with `SWARM_TOK_TEXT` prints our ids for one
+string, and HuggingFace `tokenizers` (installed here) prints the reference ids
+for the same string. #420 and #421 were both found this way. Do that before
+touching `inference/layers` or `split/rope.rs`.
+
+**Blocked on having the model.** No Qwen3 GGUF is held locally — the same
+precondition that has item 5's `enable_thinking` work parked — so this cannot be
+reproduced here without downloading one. Note also that the GPU load still fails
+on that node with `null result from llama cpp` at 4794 MB requested against
+23705 MB free, which is not a memory problem; the node now falls back to the
+processor and loads, which is new and correct behaviour, and is how the model
+gets far enough to produce the wrong answer.
+
+## A long prompt on the boomerang path dies with a CUDA OOM mid-compute (open, 2026-09-09, field-reported)
+
+Same deployment, v0.3.168, on `xlam-2-3b-fc-r-q4-k-m` with prompt privacy on.
+
+- 20837-token prompt: `DriverError(CUDA_ERROR_OUT_OF_MEMORY)` **during the
+  forward**, not at load. Escrow refunded correctly, daemon stayed healthy.
+- 16126-token retry after freeing VRAM: no crash, but over five minutes of
+  prefill with no first token, cancelled cleanly by the client timeout — which
+  incidentally confirms the orphaned-request fix holds on this path too.
+
+The interesting half is the first one. `kv_budget::admit_prompt` exists so that a
+prompt too large for the memory is refused at token 0 with a 503 rather than
+accepted and then failing partway through. A driver OOM raised mid-forward means
+admission said yes to something that did not fit, so either the estimate is
+short for this shape or the memory it charges against is not the memory that ran
+out (activations and workspace during prefill are not the KV cache). Worth
+checking what admission charges for a 20k-token prefill against what the forward
+actually allocates.
+
+Related to, but not the same as, the boomerang cost problem — that one is about
+the route being slow (0.2 tok/s measured on the same model), this one is about
+it failing outright.
 
 ## The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on (open, 2026-09-10)
 
@@ -5068,6 +5128,56 @@ never have a standby.
 Relevant because greedy decoding is what tool calling, benchmarks and
 reproducible runs use, so it is over-represented in exactly the traffic testers
 generate.
+
+### Re-reported 2026-09-09 on v0.3.168 — and the stated cause is stale
+
+The same deployment reported this again, on a new model
+(`llama-xlam-2-8b-fc-r-q4-k-m`): an agentic client on the CPU machine talked to
+its own local daemon, which had complete coverage and ran all of it on the
+Ryzen 7 5700U for over ten minutes rather than reaching the GPU machine. Their
+conclusion was that "the scheduler never considers a remote peer when local
+coverage is complete", citing this entry.
+
+**That mechanism exists and has since `442d5459` (2026-09-03), well before
+v0.3.168.** `SharedState::local_fast_path_for` asks
+`local_fast_path_allowed(shedding, would_run_on_processor, has_peers)`, which is
+`!shedding && !(would_run_on_processor && has_peers)`. For a machine with no
+graphics card and six peers that is **false**, so the local fast path stands
+aside and the request goes to the router, where the priced search gathers remote
+candidates. A CPU-only node with peers no longer short-circuits.
+
+So something else produced the ten minutes, and the leading candidate is
+visible from here. Read from this third-party node on 2026-09-10, the holders of
+`llama-xlam-2-8b-fc-r-q4-k-m` are:
+
+```
+7c10ea04  9/9 shards   cpu {"cores":16,"name":"AMD Ryzen 7 5700U with Radeon Graphics"}   gpu null
+99aafc41  8/9 shards   cpu {"cores":10,"name":"Apple M4"}                                 gpu null
+96842635  2/9 shards   cpu {"cores":6,"name":"Intel Core i5-10500T"}                      gpu null
+```
+
+`7c10ea04` is their CPU machine — same `NodeCapability` string that identified it
+on 2026-08-19. **No holder of that model advertises a graphics card at all**, and
+the Apple M4 would run on its processor regardless (item 1). The instrument is
+sound: `api/admin.rs` reads `cpu` and `gpu` from the same `peer.capability`, and
+`cpu` is populated for every one of them, so `gpu: null` is a real absence rather
+than a missing capability record.
+
+If their GPU machine (RTX 4050 Laptop, identified in the 2026-08-19 settlement
+above) was not holding shards of that model, there was no remote candidate to
+route to and running locally was the only option available — which is a coverage
+outcome, not a scheduler gap, and no amount of scheduler work fixes it.
+
+**The discriminating question, before anyone changes routing code:** does the
+GPU machine hold shards of `llama-xlam-2-8b-fc-r-q4-k-m`, and does it advertise
+GPU room with margin for it? `GET /api/admin/models` on either of their nodes
+answers the first; the delegation gate needs the second. A reproduction that
+does not establish both is measuring coverage, not scheduling.
+
+What does still stand from the original entry is the **GPU→CPU** direction:
+`delegation_target` requires the receiving peer to advertise GPU room, so a
+GPU-poor node still never hands work to a CPU-only peer. That is deliberate and
+unchanged.
 
 ## Two reported crashes, one cause — a partial holder accepting whole-model work (FIXED 2026-07-27)
 
