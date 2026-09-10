@@ -86,6 +86,22 @@ buffer both encoders already share, so all four API paths inherit it.
 
 → `docs/invariants/api-surfaces.md`
 
+## A rendered prompt that lost the question is a FAILED render
+
+`chat_template::render_kept_the_last_question` is a post-condition on
+`apply_chat_template`, inside `build_prompt_inner`: a render that does not
+contain the last user message's text is discarded, logged, and replaced by the
+fallback chain. The renderer is a documented Jinja SUBSET, and a subset running
+a template past its edge does not fail — it half-renders, producing the system
+preamble and a correctly opened turn with every message missing.
+
+Asserting on the FRAME cannot see this. The Qwen3 render test asserted the
+prompt ends on `<|im_start|>assistant`, which a prompt that dropped every
+message also does, and it was green while every Qwen3 request in the field
+arrived with no question in it.
+
+→ `docs/invariants/api-surfaces.md`
+
 ## A prompt that closed someone else's turn is finished for the model
 
 `chat_template::open_the_models_turn_if_the_prompt_closed_it` runs in

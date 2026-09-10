@@ -386,3 +386,62 @@ as it does on `message_stop` — a terminal frame that does not stop the ticker
 hangs the connection); close any open content block first; and translate the
 type through `anthropic_error_type`, because our canonical types are
 OpenAI-flavoured and Anthropic clients match on Anthropic's own set (#302).
+
+## A rendered prompt that lost the question is a FAILED render
+
+**Rule:** `.claude/rules/architecture.md` § "A rendered prompt that lost the
+question is a FAILED render".
+
+### What it replaced
+
+`build_prompt_inner` took any `Some(..)` from `apply_chat_template` as success.
+The renderer is a deliberate Jinja subset; the official Qwen3 template uses
+`messages[::-1]`, `namespace()`, `loop.index0`/`first`/`last`, `tojson`, and
+`startswith`/`split`/`rstrip`. Given that template it did not decline — it
+produced:
+
+```
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>assistant
+```
+
+Every user message gone. The model received a well-formed request to answer
+nothing and answered something else, fluently, which is why it was field-reported
+as a broken forward pass ("RoPE, KV heads, or rotation dimensions") rather than
+a broken prompt.
+
+Measured here on `Qwen/Qwen3-1.7B-GGUF`: three prompts of 3, 6 and ~540 words
+all reported `prompt_tokens=14` and returned byte-identical replies. Control
+`llama-3.2-3b-instruct-q4-k-m` on the same node reported 42 and answered
+correctly. After the fix: 25 / 31 / 42, every reply on topic.
+
+### Why the existing test could not see it
+
+`the_official_qwen3_template_opens_the_assistants_turn` asserts the render ends
+on `<|im_start|>assistant`. A render that dropped every message ends that way
+too. **A test on the frame cannot see the content going missing** — which is
+the general lesson, not a Qwen3 one.
+
+### What a change must keep
+
+- **The check is a post-condition on the render, not a template allowlist.** Any
+  template past the subset's edge falls back loudly rather than silently
+  dropping the conversation.
+- **Falling back is the safe outcome.** The fallback chain (gemma → model-name →
+  ChatML) carries the question and the turn markers. For Qwen3 it reaches
+  ChatML, which is the format Qwen3 actually uses.
+- **Only the LAST user message is required to survive.** Templates legitimately
+  transform or truncate history; none legitimately drops the question being
+  asked. An empty or absent user message passes, because there is nothing to
+  check.
+- **Working templates must still render natively.**
+  `the_official_llama3_template_renders_exactly_as_jinja2_does` is the guard on
+  that, and it passes unchanged.
+
+### What is still open
+
+Qwen3 now falls back rather than rendering natively, so template-specific
+behaviour is lost — tool-call framing and the `enable_thinking` switch come from
+the real template. Implementing the missing Jinja constructs is the proper fix;
+see `docs/FUTURE_WORK.md` item 5. This change makes the failure honest meanwhile.

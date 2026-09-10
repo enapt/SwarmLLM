@@ -460,6 +460,37 @@ fn warn_if_the_prompt_closes_the_turn(prompt: &str, model_name: Option<&str>) {
     );
 }
 
+/// Did this render keep the question in it?
+///
+/// A chat template is a program, and this renderer is a documented SUBSET of
+/// Jinja. A subset running a program it does not fully implement can produce
+/// something that LOOKS like a prompt — the system preamble present, the
+/// model's turn correctly opened — with every user message missing. That
+/// reaches the model as a well-formed request to answer nothing, and the model
+/// duly answers something else, fluently. It reads like a broken forward pass;
+/// it is a broken prompt.
+///
+/// Observed on the official Qwen3 template, which uses `messages[::-1]` and
+/// other constructs past this renderer's edge: three different questions all
+/// arrived as the same 14 tokens of scaffolding and produced the same reply.
+/// The existing render test passed throughout, because it asserted only that
+/// the prompt ends by opening the model's turn — which a prompt that dropped
+/// every message also does.
+///
+/// Declining is safe: `build_prompt_inner` falls back, and a fallback that
+/// carries the question beats a faithful-looking render that does not.
+fn render_kept_the_last_question(rendered: &str, messages: &[ChatMessage]) -> bool {
+    let Some(asked) = messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, Role::User))
+        .map(|m| m.content.trim())
+    else {
+        return true;
+    };
+    asked.is_empty() || rendered.contains(asked)
+}
+
 fn build_prompt_inner(
     messages: &[ChatMessage],
     template: Option<&str>,
@@ -474,8 +505,17 @@ fn build_prompt_inner(
 
     if let Some(tmpl) = template {
         if let Some(result) = apply_chat_template(tmpl, messages, bos_token, eos_token, true) {
-            tracing::debug!(template_matched = true, "DIAG: chat template applied");
-            return result;
+            if render_kept_the_last_question(&result, messages) {
+                tracing::debug!(template_matched = true, "DIAG: chat template applied");
+                return result;
+            }
+            tracing::warn!(
+                model_name = model_name,
+                rendered_len = result.len(),
+                "DIAG: chat template rendered a prompt with the user's question missing — \
+                 discarding the render and falling back, because a prompt without the \
+                 question gets a fluent answer to something else"
+            );
         }
         // Template failed. Prefer evidence from the template body itself — it
         // describes the model that shipped it — then fall back to the same

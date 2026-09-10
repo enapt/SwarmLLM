@@ -1320,6 +1320,32 @@ fn the_official_qwen3_template_opens_the_assistants_turn() {
     }
 }
 
+/// Opening the model's turn is necessary and not sufficient: the prompt must
+/// also still CONTAIN the question.
+///
+/// The sibling test above accepts any render that ends on
+/// `<|im_start|>assistant`, which a render that dropped every message also
+/// does. Field-reported on a Qwen3-8B and reproduced here on a 1.7B: three
+/// different prompts all reached the model as the same 14 tokens and produced
+/// the same reply, because the user's text was not in any of them.
+#[test]
+fn the_official_qwen3_template_keeps_the_users_question_in_the_prompt() {
+    let tmpl = include_str!("fixtures/qwen3_official.jinja");
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "BANANE VIOLETTE MYSTERE 42".into(),
+        images: vec![],
+    }];
+
+    // Whatever path the prompt takes — the template rendering, or the fallback
+    // it declines into — the question has to survive it.
+    let prompt = build_prompt_with_model(&msgs, Some(tmpl), "", "<|im_end|>", None);
+    assert!(
+        prompt.contains("BANANE VIOLETTE MYSTERE 42"),
+        "the user's question is not in the prompt that would be sent:\n{prompt}"
+    );
+}
+
 /// A prompt that ends on a turn-CLOSING marker is finished for the model, so
 /// the model's own turn is opened before the request goes out.
 ///

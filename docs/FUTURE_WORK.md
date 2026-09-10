@@ -34,7 +34,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation. **The instrument shipped inert TWICE**, both fixed on main. **Field data collected 2026-09-09** from dev nodes in the real swarm, including a CONTROLLED run holding the peer fixed: **the error grows monotonically with reply length within one peer** (1.00 at 9 tokens → 3.3 at 239), and `predicted_ms` is flat across that range. A constant sits where a variable belongs. **Not just a wrong constant**: a ~64-token reply should then price at ratio 1 and measures 1.75. **Still not enough to tune on**, and the released binary records nothing |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
 | 5 | The chat-template renderer is a Jinja subset, and Qwen3 is past its edge | A popular model family renders through fallbacks. Partly mitigated in v0.3.157 (a closed turn is now reopened), root limitation stands |
-| 31 | Qwen3-8B on the processor answers a question it was not asked | **Field-reported 2026-09-09 on v0.3.168, reproduced 2/2, never seen before.** The reply is fluent and coherent and has nothing to do with the prompt ("reply only with the word YES" → a smoothie recipe). `prompt_len` is consistent with the text, so the prompt IS reaching the model. Coherent-but-unrelated is the signature of the prompt being turned into the WRONG token ids, not of a broken forward |
+| 31 | Every Qwen3 request reaches the model with the question missing | **ROOT-CAUSED AND FIXED 2026-09-10.** Field-reported as an 8B processor bug; reproduced here in 5 s on a 1.7B **on the GPU**, so neither the size nor the device mattered. The renderer half-renders the official Qwen3 template — system preamble present, model's turn correctly opened, **every user message dropped** — so three different questions all arrived as the same 14 tokens and produced byte-identical replies. Not a forward-pass bug and not a tokenizer bug: both were ruled out with null controls first |
 | 32 | A long prompt on the boomerang path dies with a CUDA OOM mid-compute | **Field-reported 2026-09-09.** 20837 tokens, `DriverError(CUDA_ERROR_OUT_OF_MEMORY)` raised during the forward rather than at load, so admission let it in and the compute then could not fit. Escrow refunded and the daemon stayed healthy, but it is a hard failure and the KV admission path is supposed to make it a clean 503 |
 | 30 | The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on | `DELEGATE_MIN_TRUST == DEFAULT_TRUST == 0.5`, so a peer we have never observed clears the bar that decides who may be handed a user's prompt in cleartext. Raising it is a routing-policy change with live consequences (on a small swarm it can make a model unservable), so it needs a decision, not a patch. The trust *ratchet* that made this worse is fixed (issue #21, 2026-09-10) |
 | 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
@@ -292,40 +292,87 @@ claim against the code before ranking it**; "cold-start" and "the measurement fa
 suggest very different priorities and only one of them was true.
 
 
-## Qwen3-8B on the processor answers a question it was not asked (open, 2026-09-09, field-reported)
+## Every Qwen3 request reaches the model with the question missing (ROOT-CAUSED AND FIXED 2026-09-10)
 
-Reported from a two-node deployment on v0.3.168, reproduced 2 of 2 attempts,
-and distinct from the existing `Qwen3ArchitectureNotSupported` report — that one
-was a crash, this is a confident wrong answer, which is worse.
+Field-reported against a Qwen3-8B running on a processor, and diagnosed there as
+"probably the CPU inference itself badly implemented for this architecture —
+RoPE, KV heads, or rotation dimensions". It is none of those, and it is much
+broader than the report: **it is not about Qwen3-8B, not about the processor,
+and not about that machine.**
 
-- "Reply only with the word YES" produced a smoothie recipe.
-- "BANANE VIOLETTE MYSTERE 42" produced a list of the best films of all time.
-- `prompt_len=80`, consistent with the text plus the rendered template, so the
-  prompt reaches the model. This is not the prompt going missing.
-- The chat-template fix from v0.3.157 is confirmed working on this path — the
-  log shows `the chat template left the prompt at the end of a finished turn, so
-  the model's own turn was opened for it`.
+### Reproduced in five seconds, on the other side of every variable
 
-**Read the signature before picking a suspect.** Output that is fluent and
-grammatical but unrelated to the input is what a model produces when it is fed
-a *valid but wrong* token sequence. A broken forward pass — wrong RoPE, wrong
-head grouping, wrong rotation width — degrades fluency; it does not preserve it
-while swapping the topic. The reporter's own guess was the forward pass; the
-shape of the symptom points at the tokenizer first.
+`Qwen/Qwen3-1.7B-GGUF` (official publisher, 4 shards, 1.8 GB), on the GPU, on
+this node:
 
-That is cheap to discriminate and there is already a harness for it:
-`examples/tokenizer_scaling.rs` with `SWARM_TOK_TEXT` prints our ids for one
-string, and HuggingFace `tokenizers` (installed here) prints the reference ids
-for the same string. #420 and #421 were both found this way. Do that before
-touching `inference/layers` or `split/rope.rs`.
+```
+prompt: "Reply only with the word YES"
+reply:  "<think>\nOkay, the user is asking about the process of creating a website..."
+```
 
-**Blocked on having the model.** No Qwen3 GGUF is held locally — the same
-precondition that has item 5's `enable_thinking` work parked — so this cannot be
-reproduced here without downloading one. Note also that the GPU load still fails
-on that node with `null result from llama cpp` at 4794 MB requested against
-23705 MB free, which is not a memory problem; the node now falls back to the
-processor and loads, which is new and correct behaviour, and is how the model
-gets far enough to produce the wrong answer.
+Three different prompts — 3 tokens, 6 tokens, ~30 tokens — all reported
+`prompt_tokens=14` and returned a **byte-identical** reply. A constant, not a
+measurement. Control: `llama-3.2-3b-instruct-q4-k-m`, same node, same request
+shape, `prompt_tokens=42`, answers `YES`.
+
+### The two obvious suspects were both ruled out first, with references
+
+- **Tokenizer.** Our ids for the reporter's exact strings match HuggingFace
+  `tokenizers` against `Qwen/Qwen3-1.7B/tokenizer.json` **exactly**:
+  `Reply only with the word YES` → `[20841, 1172, 448, 279, 3409, 14080]`, and
+  `BANANE VIOLETTE MYSTERE 42` → `[33, 1093, 27819, 647, 3810, 85448, 18224,
+  37923, 36, 220, 19, 17]`. The GGUF declares `pre=gpt2`, `merges=151387`,
+  `vocab=151936`, and `pre_tokenizer_patterns` handles `qwen2`.
+- **QK-Norm.** Qwen3 needs it and `ModelArch::from_gguf_arch` maps `"qwen3"` to
+  `ModelArch::Qwen2`, which looked like the answer. It is not: the tensors are
+  in the file (`blk.0.attn_q_norm.weight`, `blk.0.attn_k_norm.weight`), the
+  generic dense loader loads them with `.ok()`, and `layers/mod.rs` applies both
+  at each of its two attention sites.
+
+### The actual cause
+
+`apply_chat_template` on the official Qwen3 template renders:
+
+```
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>assistant
+
+```
+
+The user's message is not in it. The renderer is a documented Jinja SUBSET and
+that template is past its edge — `messages[::-1]`, `namespace()`, `loop.index0`
+/ `first` / `last`, `tojson`, `startswith` / `split` / `rstrip`. It does not
+fail; it half-renders. The model is handed a well-formed request to answer
+nothing and fluently answers something else, which is exactly why the symptom
+reads like a broken forward pass.
+
+**The existing test could not see it.** `the_official_qwen3_template_opens_the_assistants_turn`
+asserts the render ends on `<|im_start|>assistant` — which a render that dropped
+every message also does. It had been green the whole time.
+
+### The fix
+
+`chat_template::render_kept_the_last_question` is a post-condition on the
+renderer: a render that does not contain the last user message's text is
+treated as a FAILED render, logged, and discarded in favour of the fallback
+chain — which for Qwen3 reaches ChatML, the format Qwen3 actually uses. It is
+deliberately general rather than Qwen3-specific: any template past the subset's
+edge now falls back loudly instead of silently dropping the conversation.
+
+Pinned by `the_official_qwen3_template_keeps_the_users_question_in_the_prompt`,
+which fails with the guard removed. The llama3 exact-match-against-Jinja2 test
+and the other 68 template tests are unaffected, so working templates still
+render natively.
+
+### What this does NOT fix
+
+The renderer is still a subset, and Qwen3 still falls back rather than rendering
+natively. The fallback carries the question and the turn markers, so replies are
+correct, but template-specific behaviour is lost — tool-call framing and the
+`enable_thinking` switch (item 5) come from the real template. Implementing
+`messages[::-1]` and the rest is still the proper fix; this change makes the
+failure honest in the meantime.
 
 ## A long prompt on the boomerang path dies with a CUDA OOM mid-compute (open, 2026-09-09, field-reported)
 
