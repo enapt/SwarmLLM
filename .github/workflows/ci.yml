@@ -377,7 +377,15 @@ jobs:
         uses: ./.github/actions/apt-update
       - name: Install Vulkan SDK (windows-gpu feature only)
         if: matrix.features == 'windows-gpu-no-flash'
-        run: sudo apt-get install -y libvulkan-dev glslang-tools glslc
+        # `spirv-headers` is not optional here even though nothing in this repo
+        # includes it. llama.cpp's Vulkan backend gained a
+        # `find_package(SPIRV-Headers)` in its CMake, so from llama-cpp-2
+        # 0.1.156 onward the build fails at CONFIGURE time with "Could not find
+        # a package configuration file provided by SPIRV-Headers" — before a
+        # single Rust file is compiled. It reads like a code incompatibility in
+        # the dependency bump that surfaces it (Dependabot #23) and is a missing
+        # package on the runner.
+        run: sudo apt-get install -y libvulkan-dev glslang-tools glslc spirv-headers
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # Don't bump this with -vN — the windows-gpu feature pulls in
