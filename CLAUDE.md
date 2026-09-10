@@ -224,36 +224,36 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2517 lib (dev,claude-subscription) — re-measured 2026-09-10, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 84 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.168-alpha (2026-09-09, tag `1159b3ab` on commit
-`bb906645`).** Gate: audit as documented; **CI 13/13 on the TAGGED commit**;
-**Cache warm 3/3 on the BUMP commit `ab75ceda`** (the docs commit after it
-changed no dependency so did not re-trigger it — checked by sha); 25 assets,
-`latest`, not draft; **smoke 9/9 + shapes 7/7 on the DOWNLOADED artifact**
-against a .167 baseline taken FIRST. Both nodes verified: ids and
-`identity.key` md5 unchanged, installed binary byte-identical to the download,
-deb hash re-verified AFTER transfer, journal "-- No entries --", paired at
-105 ms, 0 ERROR, inference confirmed. Rollback
-`~/.local/bin/swarmllm.0.3.167-alpha.bak`, backups pruned to newest 3.
+**Released and deployed: v0.3.169-alpha (2026-09-10, tag `63cf3975` on commit
+`7de8949d`).** Gate: audit as documented (the same two `hickory-proto`
+advisories + the `paste` warning); **CI 13/13 AND Cache warm 3/3 both on the
+TAGGED commit** — the bump was the tag, so no sha reasoning was needed; release
+built **8/8 first time**, 25 assets, `latest`, not draft; **smoke 9/9 + shapes
+7/7 on the DOWNLOADED artifact** against a .168 baseline taken FIRST that scored
+the same. Both nodes verified: ids and `identity.key` md5 unchanged, installed
+binary byte-identical to the download, deb hash re-verified AFTER transfer,
+journal "-- No entries --", paired at 119 ms, 0 ERROR, inference confirmed —
+including the Qwen3 fix on the released binary in production. Rollback
+`~/.local/bin/swarmllm.0.3.168-alpha.bak`, backups pruned to newest 3.
 
-**What it carries**: a machine's memory limit now decides WHERE a model is cut,
-not only whether the cut fits (report #029 — a capacity-respecting route was
-previously often INEXPRESSIBLE, which is why `no route fits the peers'
-advertised memory` appeared 36 times in one log); the new cut points are kept
-only if they fit the sub-range budget (they took a routing call from
-microseconds to 4.6 s with 42 candidates); and an unservable model now names
-the whole missing range ("layers 35-40") rather than only where the gap starts.
+**What it carries**: **every Qwen3 request reached the model with the question
+missing** — the renderer half-rendered the official template, dropping every
+user message while still opening the model's turn, so three prompts of 3, 6 and
+540 words all arrived as the same 14 tokens and produced byte-identical replies;
+a render that lost the question is now a FAILED render. And **a machine that
+returns unusable output no longer earns trust for it** (issue #21: credit was
+paid on every request and checked on one in twenty, so a machine returning
+garbage climbed to the maximum trust score, over the bar deciding who may read a
+plaintext prompt).
 
-⚠ **Report #029's fix is NOT field-verified.** A node carrying it joined the
-live swarm, but the 14B the report is about had layers 35-41 on no reachable
-peer — a real coverage gap, so the scenario could not be reproduced. What was
-established is no regression.
+⚠ **The .168 apt retry WORKED** — all three Linux release jobs passed first time,
+where .168 died on the runner's Google Chrome repo index. **The same pattern is
+still un-retried in 4 places in `ci.yml`.**
 
-⚠ **The .168 release build FAILED first time, on infrastructure, not code.**
-All three Linux jobs died on `apt-get update` fetching the runner image's
-Google Chrome repo ("Hash Sum mismatch"); Windows and macOS were fine and the
-release published as a DRAFT with 12 of 25 assets. `gh run rerun --failed`
-fixed it. The step now retries three times clearing the apt lists between
-attempts. **The same pattern is still un-retried in 4 places in `ci.yml`.**
+⚠ **Qwen3 now FALLS BACK rather than rendering its own template**, so tool-call
+framing and the `enable_thinking` switch are not available for it. Implementing
+the missing Jinja constructs (`messages[::-1]`, `namespace()`, …) is the real
+fix — `docs/FUTURE_WORK.md` item 5.
 
 **Release-gate warnings — procedure, not history. Read before every release.**
 ⚠ **Cache warm runs only when the dependency graph changes**, so for a release
