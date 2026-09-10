@@ -13,7 +13,7 @@ exclude = [
 
 [package]
 name = "swarmllm"
-version = "0.3.170-alpha"
+version = "0.3.171-alpha"
 edition = "2021"
 default-run = "swarmllm"
 description = "Decentralized peer-to-peer LLM inference network"

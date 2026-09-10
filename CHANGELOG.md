@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.3.171-alpha] — 2026-09-10
+
+### Fixed
+
+- **Tool calling works on models that ship their own tool format.** A request
+  carrying tools reached the model as a hand-written instruction to answer in a
+  JSON shape most models have never been trained on, and the format the model
+  actually ships — written into its own chat template — was never used. It could
+  not have been: the template variable that holds the tools was never passed, so
+  the whole branch that renders them was unreachable on every request this
+  project has ever served. Reported on a Qwen3-8B, where a request with tools
+  produced repeated malformed markers and no tool call at all, through two
+  independent clients. Tools now travel with the request and the model's own
+  template renders them when it can; the written description remains for models
+  whose template has none, which is what it was always for. Reading the reply
+  back was already correct for every one of those formats.
+- **A chat template calling `tojson` no longer falls back silently.** That
+  filter comes from a feature of the template engine this project did not ask
+  for, and an unknown filter fails the whole render rather than the one
+  expression — so a model whose template used it was quietly prompted through a
+  generic fallback instead. Every template that renders tools calls it. This was
+  invisible until the fix above made those templates reachable.
+- **A reply that never closed its reasoning block no longer leaks the marker.**
+  A model that opens a scratchpad and goes straight to a tool call, without
+  closing it, left a bare marker in the reply beside a perfectly good call. The
+  reply is now trimmed at the call, which is where the thinking demonstrably
+  stopped.
+- **A settled credit escrow that could not be written to disk no longer moves a
+  balance.** When the write failed, the settlement was applied anyway while the
+  record on disk still said the credits were held — and every held record is
+  re-read at startup, so the expiry sweep then refunded the whole reservation on
+  top of the settlement. Credits gate nothing today, so nobody was served
+  differently; the effect was confined to a node's own accounting, which could
+  inflate. Reported by a contributor who modelled the file formally and produced
+  the counterexample. The two neighbouring paths already handled this correctly.
+
+### Changed
+
+- **The local inference backend is eighteen patch releases newer**, carrying
+  llama.cpp's own fixes including token decoding for multi-byte UTF-8. This
+  affects the GPU builds, which are the ones that compile it. Held back from the
+  previous release on purpose, so that a report about either it or that
+  release's context-sizing fix would be attributable to one of them.
+- **The trust required before a peer may be handed a prompt in cleartext is now
+  its own setting**, rather than being defined as the score a peer we have never
+  met starts on. Both numbers are unchanged and behaviour is identical; they
+  simply can no longer be moved by accident from somewhere unrelated.
+
 ## [0.3.170-alpha] — 2026-09-10
 
 ### Fixed
