@@ -481,6 +481,45 @@ fn template_expects_system(template: &str) -> bool {
     template.contains("'system'") || template.contains("\"system\"")
 }
 
+/// Move every system turn into the first user turn, for a template that
+/// refuses the role.
+///
+/// Gemma and Mistral declare no system role and their templates
+/// `raise_exception` on one, so the render fails outright rather than ignoring
+/// it. Both publishers document the same remedy: prepend the system text to the
+/// first user message. `template_expects_system` is the static sibling of this
+/// and is deliberately not reused — it answers false for ANY template
+/// containing `raise_exception`, including ones that raise only on role
+/// alternation, which is the right conservatism for deciding whether to ADD a
+/// default system prompt and the wrong basis for rewriting a prompt that
+/// already renders.
+///
+/// Answers `None` when there is nothing to move, or nothing to move it into: a
+/// conversation with no user turn keeps its system message and takes the
+/// fallback, which does render one.
+fn fold_system_into_first_user(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
+    if !messages.iter().any(|m| matches!(m.role, Role::System)) {
+        return None;
+    }
+    let system_text = messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::System))
+        .map(|m| m.content.trim())
+        .filter(|c| !c.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut out: Vec<ChatMessage> = messages
+        .iter()
+        .filter(|m| !matches!(m.role, Role::System))
+        .cloned()
+        .collect();
+    if !system_text.is_empty() {
+        let first_user = out.iter_mut().find(|m| matches!(m.role, Role::User))?;
+        first_user.content = format!("{system_text}\n\n{}", first_user.content);
+    }
+    Some(out)
+}
+
 /// Ensure a usable system turn, returning an owned list only when one is needed.
 ///
 /// A blank system message is treated as absent — it renders an empty system
@@ -815,6 +854,32 @@ fn build_prompt_attempt(
                  discarding the render and falling back, because a prompt without the \
                  question gets a fluent answer to something else"
             );
+        }
+        // A template that declares no system role does not ignore one, it
+        // RAISES on it — Gemma and Mistral both do — and the convention their
+        // publishers document is to prepend the system text to the first user
+        // turn. Retried here, on the failure path, rather than decided from the
+        // template's text: the template has just answered the question for
+        // itself, so a model that renders a system turn today cannot have its
+        // prompt changed by this.
+        //
+        // The tool description IS a system message (`describe_tools_in_prose`),
+        // so without this every Gemma-2 request carrying tools rendered through
+        // the fallback below instead of the model's own template — and a
+        // caller's own system message did the same on any model that refuses
+        // the role.
+        if let Some(folded) = fold_system_into_first_user(messages) {
+            if let Some(result) =
+                apply_chat_template(tmpl, &folded, bos_token, eos_token, true, tools_for_render)
+            {
+                if render_kept_the_last_question(&result, &folded) {
+                    tracing::debug!(
+                        template_matched = true,
+                        "DIAG: chat template applied with the system turn folded into the first user turn"
+                    );
+                    return result;
+                }
+            }
         }
         // Template failed. Prefer evidence from the template body itself — it
         // describes the model that shipped it — then fall back to the same

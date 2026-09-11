@@ -517,6 +517,40 @@ Qwen3 no longer falls back: both revisions of its template render natively. See
 must keep. This guard is unchanged and still load-bearing — it is what makes a
 future template the engine cannot run fail safely instead of silently.
 
+## A template that refuses a system role is still told what the system turn said
+
+(2026-09-11, gotcha #554, FUTURE_WORK #44.) Gemma and Mistral declare no system
+role, and their templates do not ignore one — they `raise_exception` on it, which
+by contract fails the whole render. The tool description IS a system message
+(`describe_tools_in_prose`), so **every Gemma-2 request carrying tools rendered
+through `gemma_fallback` rather than the template that shipped with the model**,
+and so did any request carrying a caller's own system message. Found by
+`examples/family_conformance.sh`, whose "the model's own template rendered" check
+exists for exactly this: a fallback answers, plausibly, and nothing else says the
+real template never ran.
+
+**`chat_template::fold_system_into_first_user`** moves every system turn into the
+first user turn — the remedy both publishers document — and it runs as a **RETRY
+on the failure path**, after `apply_chat_template` has already declined. That
+placement is the point: the template has answered the question for itself, so a
+model that renders a system turn today cannot have its prompt changed by this.
+
+**It is deliberately not keyed on `template_expects_system`.** That predicate
+answers false for ANY template containing `raise_exception`, including ones that
+raise only on role alternation. Conservative is right when deciding whether to
+ADD a default system prompt — the question it was written for — and wrong as
+grounds for rewriting a prompt that already renders.
+
+A conversation with no user turn answers `None` and takes the fallback, which
+does render a system turn: losing what the system message said is worse than
+rendering it in a shape the model was not trained on.
+
+⚠ **A test that asserts the turn markers cannot tell the template from the
+fallback** — `gemma_fallback` emits the same `<start_of_turn>` markers and the
+same generation prompt. The regression test puts a marker in its template that
+only the template can produce, because the first draft's identity assertion
+passed on the fallback it existed to rule out.
+
 ## Chat templates render on minijinja, not on a subset of our own
 
 **Rule:** `.claude/rules/architecture.md` § "A rendered prompt that lost the

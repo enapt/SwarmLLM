@@ -200,7 +200,15 @@ print(json.dumps({"model": sys.argv[1], "max_tokens": 600, "temperature": 0,
   FIN=$(python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('choices',[{}])[0].get('finish_reason','<none>'))" <<<"$R" 2>/dev/null || echo '<parse-error>')
   TXT=$(python3 -c "import json,sys;d=json.load(sys.stdin);print((d.get('choices',[{}])[0].get('message',{}).get('content') or ''))" <<<"$R" 2>/dev/null || echo '')
 
-  case "$TXT" in *4*) r=0;; *) r=1;; esac
+  # The word counts. Phi-4-mini answers "Four." and a digit-only match failed it,
+  # which says nothing about this daemon — a model that never received the
+  # question cannot produce either spelling, so accepting both costs the check
+  # none of its power. Same class as the two harness defects this file's first
+  # run produced (gotcha #548): the assertion, not the daemon, was wrong.
+  case "$(printf '%s' "$TXT" | tr '[:upper:]' '[:lower:]')" in
+    *4*|*four*) r=0;;
+    *) r=1;;
+  esac
   check "answers a checkable question" "$r" "got: $(printf '%.60s' "$TXT")"
 
   r=0; [ "$FIN" = "stop" ] || r=1

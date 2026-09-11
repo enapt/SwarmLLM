@@ -1265,6 +1265,89 @@ fn system_message_never_injected_when_template_raises() {
     );
 }
 
+/// A template that refuses a system role must still render the model's own
+/// prompt, with the system text moved into the first user turn.
+///
+/// Gemma-2 is the reported case, found by `examples/family_conformance.sh`
+/// 2026-09-11: the tool description IS a system message, so every Gemma-2
+/// request carrying tools rendered through the `gemma_fallback` instead of the
+/// template that shipped with the model.
+#[test]
+fn a_template_that_raises_on_system_renders_with_it_folded_into_the_user_turn() {
+    // The `OWN-TEMPLATE` marker is what makes the last assertion mean anything:
+    // `gemma_fallback` emits the same turn markers AND the same generation
+    // prompt, so without something only this template can produce, a test
+    // asserting those would pass on the fallback it exists to rule out.
+    let gemma = "{{ 'OWN-TEMPLATE ' }}{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{{ '<start_of_turn>' + message['role'] + '\n' + message['content'] + '<end_of_turn>\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<start_of_turn>model\n' }}{% endif %}";
+    let msgs = vec![
+        ChatMessage {
+            role: Role::System,
+            content: "You have a tool called get_time.".to_string(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "What time is it?".to_string(),
+            images: vec![],
+        },
+    ];
+    let out = build_prompt_with_model(&msgs, Some(gemma), "<bos>", "<eos>", None, None);
+    assert!(
+        out.contains("<start_of_turn>user\nYou have a tool called get_time.\n\nWhat time is it?"),
+        "the system text must ride in the first user turn: {out:?}"
+    );
+    assert!(
+        !out.contains("<start_of_turn>system"),
+        "a refused role must not be rendered anyway: {out:?}"
+    );
+    // The distinguishing property: this is the MODEL'S template, not the
+    // fallback.
+    assert!(
+        out.starts_with("OWN-TEMPLATE "),
+        "must be the model's own template, not gemma_fallback: {out:?}"
+    );
+    assert!(
+        out.ends_with("<start_of_turn>model\n"),
+        "the generation prompt must survive the retry: {out:?}"
+    );
+}
+
+/// The retry only fires when the template actually refused. A template that
+/// renders a system turn keeps rendering one.
+#[test]
+fn a_template_that_accepts_system_still_gets_its_own_system_turn() {
+    let msgs = vec![
+        ChatMessage {
+            role: Role::System,
+            content: "You are a pirate.".to_string(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "Hi".to_string(),
+            images: vec![],
+        },
+    ];
+    let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None, None);
+    assert!(out.contains("<|system|>"), "got: {out:?}");
+    assert!(
+        !out.contains("You are a pirate.\n\nHi"),
+        "must not fold a system turn the template renders perfectly well: {out:?}"
+    );
+}
+
+/// A conversation with no user turn has nowhere to put the system text, and
+/// losing it silently is worse than the fallback.
+#[test]
+fn folding_declines_when_there_is_no_user_turn_to_fold_into() {
+    let msgs = vec![ChatMessage {
+        role: Role::System,
+        content: "You are helpful.".to_string(),
+        images: vec![],
+    }];
+    assert!(super::fold_system_into_first_user(&msgs).is_none());
+}
+
 /// A caller-supplied system message must never be overridden.
 #[test]
 fn caller_system_message_is_preserved() {

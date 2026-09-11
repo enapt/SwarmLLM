@@ -120,6 +120,17 @@ WHOLE render.** Every real tool-rendering template calls it.
 
 → `docs/invariants/api-surfaces.md`
 
+## A template that refuses a system role is still told what the system turn said
+
+Gemma and Mistral `raise_exception` on a system turn, which fails the whole
+render — and the tool description IS a system message, so every such request
+rendered through a FALLBACK instead of the model's own template.
+**`chat_template::fold_system_into_first_user`** moves the system text into the
+first user turn, as a RETRY after the render has already declined, so a template
+that renders a system turn today is untouched.
+
+→ `docs/invariants/api-surfaces.md`
+
 ## Chat templates render on minijinja, and its settings are part of the contract
 
 Rendering is `minijinja` + `minijinja-contrib`'s `pycompat` — the engine
@@ -1141,6 +1152,25 @@ upstream first.** For harmony (gpt-oss) and solar-open it separates messages
 inside one reply, so stopping on it truncates every such reply at its first
 message. Both the EOS search and `chat_template::extract_stop_strings` carry the
 same exclusion, keyed on the same neighbours llama.cpp keys it on.
+
+→ `docs/invariants/inference.md`
+
+## Partial RoPE has one implementation, and it answers with a tensor the KV cache can write
+
+**`inference::layers::rope_over_heads`** is the single implementation of "rotate
+the leading `rope_dim` of each head, pass the rest through". Its result is
+contiguous, and the pass-through half is made contiguous BEFORE the `cat`, not
+the whole head after it.
+
+`Tensor::cat` answers with a transposed VIEW rather than a fresh buffer when any
+argument is non-contiguous and `dim != 0`. `slice_set` refuses a non-contiguous
+source and is how the KV cache writes K, so two copies of this branch — one in
+`LayerWeights`, one in `Qwen35AttnWeights`, both leaving the pass-through as a
+`narrow` view — killed every request on every partial-RoPE model: Phi-4-mini,
+GLM-4, Qwen 3.5. The discriminator is `rope_dim < head_dim`, not GQA.
+
+`SeqCache::append` makes its source contiguous too, so a new producer of K or V
+cannot bring the class back.
 
 → `docs/invariants/inference.md`
 
