@@ -5334,6 +5334,137 @@ fn inference_trust_is_credited_only_behind_the_well_formed_verdict() {
     );
 }
 
+/// A workflow step never carries both `uses:` and `shell:`, or `uses:` and `run:`.
+///
+/// GitHub rejects the whole file for either — `Unexpected value 'shell'`, and the
+/// action fails to load before a single step runs. **Nothing local catches it.**
+/// `actionlint` does not validate composite action files at all (it reads them as
+/// workflows and complains that `on:` and `jobs:` are missing), and a YAML parse
+/// only checks syntax, not the Actions schema.
+///
+/// So the only signal is a workflow that actually loads the file — and
+/// `.github/actions/gpu-build-env/action.yml` is loaded by `cache-warm.yml` and
+/// `release.yml` and by NOTHING in CI. On 2026-09-11 a conversion left a
+/// `shell: bash` on a step that had become a `uses:`, CI went green across all
+/// 14 jobs, and all three Cache warm jobs died at load. **A release tagged in
+/// that window would have failed every GPU build**, which is the same shape as
+/// the `cfg`-gated GPU code CLAUDE.md warns about: the path with the least
+/// coverage is the one the release depends on.
+#[test]
+fn no_workflow_step_mixes_uses_with_shell_or_run() {
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    let mut steps_seen = 0usize;
+    let mut dirs = vec![root.join(".github")];
+    while let Some(d) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                dirs.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+                continue;
+            }
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let src = std::fs::read_to_string(&p).unwrap_or_default();
+            let lines: Vec<&str> = src.lines().collect();
+            let mut i = 0usize;
+            while i < lines.len() {
+                let indent = lines[i].len() - lines[i].trim_start().len();
+                if !lines[i].trim_start().starts_with("- ") {
+                    i += 1;
+                    continue;
+                }
+                // A step block: this `- ` line plus every following line indented
+                // deeper than it. A blank line does not end it; a `- ` or a
+                // dedent does.
+                let start = i;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let l = lines[j];
+                    if l.trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    let ind = l.len() - l.trim_start().len();
+                    if ind <= indent {
+                        break;
+                    }
+                    j += 1;
+                }
+                // Keys at the step's own level: the `- ` line's own key, plus
+                // lines indented exactly two further (`  key:`).
+                let mut has_uses = false;
+                let mut has_shell = false;
+                let mut has_run = false;
+                for l in &lines[start..j] {
+                    let t = l.trim_start();
+                    let t = t.strip_prefix("- ").unwrap_or(t);
+                    if t.starts_with('#') {
+                        continue;
+                    }
+                    let ind = l.len() - l.trim_start().len();
+                    // Only the step's own keys, not keys nested under `with:`.
+                    if ind > indent + 2 {
+                        continue;
+                    }
+                    if t.starts_with("uses:") {
+                        has_uses = true;
+                    }
+                    if t.starts_with("shell:") {
+                        has_shell = true;
+                    }
+                    if t.starts_with("run:") {
+                        has_run = true;
+                    }
+                }
+                if has_uses {
+                    steps_seen += 1;
+                    if has_shell {
+                        offenders.push(format!(
+                            "{rel}:{}  `uses:` step also sets `shell:`",
+                            start + 1
+                        ));
+                    }
+                    if has_run {
+                        offenders.push(format!(
+                            "{rel}:{}  step sets both `uses:` and `run:`",
+                            start + 1
+                        ));
+                    }
+                }
+                i = j;
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "a step mixes `uses:` with `shell:`/`run:`, which makes GitHub refuse the \
+         whole file at load:\n  {}\n\n\
+         A `uses:` step runs an action and takes no shell. Drop the `shell:` (and \
+         split the step if it also needs a `run:`). Note that neither actionlint \
+         nor a YAML parse can see this, and gpu-build-env is loaded only by \
+         cache-warm and release — so CI going green means nothing here.",
+        offenders.join("\n  ")
+    );
+
+    // The scan has to actually reach steps that use actions.
+    assert!(
+        steps_seen >= 10,
+        "the scanner found only {steps_seen} `uses:` steps under .github — \
+         it is not parsing step blocks correctly"
+    );
+}
+
 /// Every apt command in CI goes through a retrying composite action.
 ///
 /// A bare `sudo apt-get update` fails the whole job when ANY repository on the

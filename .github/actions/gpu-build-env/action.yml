@@ -162,7 +162,6 @@ runs:
     uses: ./.github/actions/apt-install
     with:
       packages: libssl-dev pkg-config
-    shell: bash
   - name: Free runner disk space
     if: inputs.cuda-linux == 'true'
     run: "echo \"before:\"; df -h / | tail -1\nsudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc\
