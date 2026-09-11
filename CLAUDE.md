@@ -225,56 +225,40 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2579 lib (dev,claude-subscription) — re-measured 2026-09-11, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 86 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.173-alpha (2026-09-11, tag on `bcf5420e`).**
-Gate clean and checked job-by-job: CI 14/14 on the TAGGED commit + Cache warm 3/3
-(both kernel caches *restored* AND *"All library kernels up-to-date, skipping
-compilation"*), `cargo audit` = only the 3 documented advisories,
-`examples/check_ci_gate.sh` 14 required = 14 job names, release 10/10 FIRST time,
-25 assets, all 7 archives present BY NAME, `latest`, not draft. On the
-**DOWNLOADED** artifact: smoke 9/9, shapes 7/7, **conformance 7/7 families**
-against a .172 baseline taken FIRST that scored 9/9, 7/7 and **6 families with 1
-FAIL + 1 COULD NOT RUN** — the baseline reproduced both bugs this release fixes,
-which is what makes the comparison mean anything. **The streaming fix confirmed
-on the downloaded artifact AND on the deployed node**: the reporter's own case
-went 65 deltas in 121 s → 390 deltas ~18 ms apart in 8.0 s, matching what the
-non-streaming path already produced. Both nodes verified — ids and
-`identity.key` unchanged, install byte-identical, deb hash re-checked AFTER
-transfer, 0 ERROR, paired at 164 ms. Rollback
-`~/.local/bin/swarmllm.0.3.172-alpha.bak`. Detail:
-`memory/round_log_0911_streaming_truncation.md`.
+**Released and deployed: v0.3.173-alpha (2026-09-11, tag on `bcf5420e`).** Gate
+clean job-by-job; **smoke 9/9 + shapes 7/7 + conformance 7/7 families on the
+DOWNLOADED artifact**, against a .172 baseline taken FIRST that scored 9/9, 7/7
+and **6 families with 1 FAIL + 1 COULD NOT RUN** — the baseline reproduced both
+bugs the release fixes, which is what makes a comparison mean anything. Both
+nodes verified, ids and `identity.key` unchanged, 0 ERROR, paired at 164 ms.
+Rollback `~/.local/bin/swarmllm.0.3.172-alpha.bak`. Full gate detail:
+`memory/round_log_0911_streaming_truncation.md` § Release.
 
 **What it carries**: streamed replies no longer stop dead at ~65 tokens — on a
 GPU build running a whole model file (`-m`), generation ran on a thread the
 runtime needed in order to send tokens, so **nothing streamed until the answer
 was already complete**; the 64-slot queue then filled and a full queue was read
-as a departed client. Plus Phi-4-mini (and GLM-4, and Qwen 3.5) can be served at
-all — partial RoPE produced a K the cache would not accept — and Gemma models are
-told about their tools in their own prompt format instead of a fallback.
+as a departed client (65 deltas in 121 s → 390 ~18 ms apart in 8.0 s). Plus
+Phi-4-mini, GLM-4 and Qwen 3.5 can be served at all — partial RoPE produced a K
+the cache would not accept — and Gemma models are told about their tools in their
+own prompt format instead of a fallback.
 
-⚠ **`examples/family_conformance.sh` is part of the release gate**, and has now
-found six real defects in three runs. Releases .169-.173 each fixed a
-field-reported, family-specific defect and **all of them PASS
-`release_shapes.sh`**, which runs ONE family and asserts `>3` tokens came back.
-Run conformance on the DOWNLOADED artifact, and **compare against a baseline of
-the previous release taken FIRST** — that is what tells a fix that shipped from a
-check that was always green.
+⚠ **`examples/family_conformance.sh` is part of the release gate** and has found
+six real defects in three runs, every one of which PASSES `release_shapes.sh`.
+Run it on the DOWNLOADED artifact **against a baseline of the previous release
+taken FIRST** — that is what tells a fix that shipped from a check that was
+always green.
 
 ⚠ **A CPU build REFUSES `-m` outright** (it needs `llama`, which only `cuda` and
-`windows-gpu` pull in). A report naming `-m` came from a GPU build, and nothing on
-a CPU build can reproduce it — establish which BUILD and which PATH a report
-exercised before deciding any code is innocent.
+`windows-gpu` pull in), so nothing on one can reproduce a report naming it.
+**Establish which BUILD and which PATH a report exercised before deciding any
+code is innocent** (#552, #555).
 
-⚠ **Branch protection requires 14 contexts since 2026-09-11** (was 12; `Clippy
-(windows-latest / default)` and `Workflow lint` added). Verify with
-`examples/check_ci_gate.sh` — reading protection needs admin the `GITHUB_TOKEN`
-lacks, so it is a script, not a job. A required check naming a job that no longer
-exists blocks EVERY PR for ever (gotcha #530).
-
-⚠ **`cache-gc.yml` could delete a LIVE cache until 2026-09-11.** It grouped by
-job and ignored the ref, so main's cache lost to a pull request's copy that main
-cannot read. Now groups by `(ref, job)`, deletes by id, reclaims closed-PR and
-old-tag caches. Cleaned 11.15 → 7.50 GB; both 32 MB kernel caches survive and hit
-warm. Gotchas #538, #543.
+⚠ **Branch protection requires 14 contexts.** Verify with
+`examples/check_ci_gate.sh`, **against a COMPLETED run** — reading protection
+needs admin the `GITHUB_TOKEN` lacks, so it is a script, not a job. A required
+check naming a job that no longer exists blocks EVERY PR for ever (#530); the
+script fed an unfinished run advises causing exactly that (#557).
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
