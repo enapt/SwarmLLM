@@ -225,23 +225,32 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2602 lib (dev,claude-subscription) — re-measured 2026-09-11, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 88 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.173-alpha (2026-09-11, tag on `bcf5420e`).** Gate
-clean job-by-job; **smoke 9/9 + shapes 7/7 + conformance 7/7 families on the
-DOWNLOADED artifact**, against a .172 baseline taken FIRST that scored 9/9, 7/7
-and **6 families with 1 FAIL + 1 COULD NOT RUN** — the baseline reproduced both
-bugs the release fixes, which is what makes a comparison mean anything. Both
-nodes verified, ids and `identity.key` unchanged, 0 ERROR, paired at 164 ms.
-Rollback `~/.local/bin/swarmllm.0.3.172-alpha.bak`. Full gate detail:
-`memory/round_log_0911_streaming_truncation.md` § Release.
+**Released: v0.3.174-alpha (2026-09-11).** Gate as documented below; full
+detail in `memory/round_log_0911_field_report_and_privacy.md` § Release.
+Previous: v0.3.173-alpha (tag `bcf5420e`).
 
-**What it carries**: streamed replies no longer stop dead at ~65 tokens — on a
-GPU build running a whole model file (`-m`), generation ran on a thread the
-runtime needed in order to send tokens, so **nothing streamed until the answer
-was already complete**; the 64-slot queue then filled and a full queue was read
-as a departed client (65 deltas in 121 s → 390 ~18 ms apart in 8.0 s). Plus
-Phi-4-mini, GLM-4 and Qwen 3.5 can be served at all — partial RoPE produced a K
-the cache would not accept — and Gemma models are told about their tools in their
-own prompt format instead of a fallback.
+**What it carries** — nine fixes, five of them field-reported the same day:
+
+- **`tojson` was minijinja's, not `transformers`'.** It escaped `<`, `>`, `&`
+  and `'` into `\u003c`-style codes, so every tool schema reached every model
+  with its apostrophes mangled — on every tool-carrying request to every model
+  whose template renders tools. It also rejected `ensure_ascii`, and a filter
+  error fails the WHOLE render, so GLM-4 with tools was answered by a fallback.
+  Ours now matches `transformers` byte-for-byte, pinned against `jinja2`.
+- **A tool call wrapped in a tag the model invented is parsed** — structurally,
+  because the tag MOVES with the prompt (`<tools>` → `<xml>` at temperature 0).
+- **Auto-manage prune could delete the shard prompt privacy depends on**: it read
+  the EXPLICIT per-model map, missing the models privacy switched itself on for,
+  which is how it is normally on. Two more sites derived it the same partial way.
+- **The cloud routing catalogue was erased, not stale**, and only a human opening
+  the admin page rebuilt it. Per-provider merge + a 15-minute refresh.
+- **A warm peer is credited only for layers it actually holds** —
+  `NodeCapability::resident_layers` + three-state `PeerResidency`. Plus a
+  duplicate shard download and a cancel that reached only the newest.
+
+**Conformance is nine families** — GLM-4 (the partial-RoPE family nothing here
+could exercise) and Mistral-7B-v0.3 (system-role refusal + `[TOOL_CALLS]`) were
+added and all nine pass. ⚠ A full run is now **~2h** on this box; budget for it.
 
 ⚠ **`examples/family_conformance.sh` is part of the release gate** and has found
 six real defects in three runs, every one of which PASSES `release_shapes.sh`.
@@ -262,7 +271,7 @@ script fed an unfinished run advises causing exactly that (#557).
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
-- **.172** (09-11): Phi models never stopped generating — every Phi-3/3.5/4 declares one end-of-sequence token and ends each turn with ANOTHER — plus four tool-calling fixes. Same day: the CI/cache round (`cache-gc.yml` was ref-blind and would have deleted main's LIVE cache; `actionlint` now a CI job; branch protection to 14 contexts) and **`family_conformance.sh`**, which found two real bugs on its first run.
+- **.172-.173** (09-11): Phi models never stopped generating (one declared EOS, a DIFFERENT token ends each turn) + four tool-calling fixes; then streamed replies stopping dead at ~65 tokens (generation held the thread the runtime needed to SEND them, then a full 64-slot queue read as a departed client), and **partial RoPE meaning Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request**. Same day: the CI/cache round — `cache-gc.yml` was ref-blind and would have deleted main's LIVE cache, `actionlint` became a CI job, branch protection went to 14 contexts — and **`family_conformance.sh`**, which found two real bugs on its first run. `round_log_0911_*.md`.
 - **.166-.171** (09-09→09-10): five field-driven releases in two days. **Every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` and a context that will not fit is SHRUNK not refused (.170); **tools were NEVER passed to the template** — unreachable on every request ever served — plus an escrow that MINTED credits (.171). ⚠ Branch protection required two jobs that no longer existed; every PR was permanently BLOCKED (#530).
 - **.160-.165** (09-06→09-08): #484 a FALSE PRIVACY ASSURANCE; #495 shipped INERT (a transport failure recorded as a perfect delivery); the prompt-trust bar; per-peer GOODPUT closing issue #21's open half. ⚠ Null controls caught THREE tests passing for the wrong reason.
 - **.132-.159** (08-29→09-06): the guards-were-the-defect audit (#413 — five tested by PLANTING the violation, four could not see what they guard); #449 ALL inference broken on every Mac; #472 a content hash recomputed mid-fix.

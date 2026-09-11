@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.3.174-alpha] — 2026-09-11
+
+### Fixed
+
+- **Every model was being shown its available tools with the punctuation
+  mangled.** When a program gives the model a set of tools it may call, each
+  tool's description is written into the prompt as structured text. Apostrophes,
+  angle brackets and ampersands were being replaced with escape codes on the way
+  in, so a tool described as "the user's location" reached the model as "the
+  user\u0027s location". Nothing reported it — the text was still valid, just
+  slightly corrupted — and it applied to every request carrying tools, for every
+  model whose prompt format includes them. The same routine also rejected two
+  options that several models' prompt formats ask for, and because one rejected
+  option abandons the whole prompt, GLM-4 could not be told about its tools at
+  all and fell back to a generic description. Prompts are now built the way
+  HuggingFace builds them, checked character for character against it.
+- **A tool call wrapped in a tag the model invented is now understood.** One
+  model reliably puts its call inside a tag it made up, and which tag it picks
+  changes with the prompt. The reply used to come back as plain text with no
+  indication a call had been made, so a program driving that model did nothing
+  and saw no error. A call is now read whenever the entire reply is one such
+  wrapper; text with a call buried in it is still left alone, so ordinary
+  discussion of a JSON value cannot become a call nobody approved.
+- **Automatic storage management could delete the piece prompt privacy depends
+  on.** Prompt privacy keeps the first and last part of a model on your own
+  machine so no other machine ever sees your prompt or the words chosen in
+  reply. It switches itself on wherever that is already true, which is how it is
+  normally on at all. The routine that frees disk space protected models where
+  privacy had been switched on by hand, and not the ones where it had switched
+  itself on — so it could delete exactly the piece the setting depends on, after
+  which every request for that model failed. Two other places asked the same
+  question in the same incomplete way and have been corrected.
+- **Cloud models no longer disappear until you open the dashboard.** The list
+  deciding whether a cloud model is sent to its provider or refused locally was
+  rebuilt by emptying it and asking each provider afresh — and a provider that
+  timed out was indistinguishable from one with no models, so a single slow
+  provider erased its own models and a bad minute erased all of them. Nothing
+  rebuilt the list except loading the admin page, so it stayed empty, and models
+  the dashboard was still listing were refused instantly without the provider
+  ever being contacted. One node reported none of its cloud models for days
+  while its dashboard showed eighty. The list is now refreshed on its own every
+  fifteen minutes, and a provider that cannot be reached keeps the models it had.
+- **Asking for a part of a model that was already downloading no longer starts a
+  second copy of it.** Both downloads wrote the same file; one finished and the
+  other carried on, then reported a size mismatch against a file it no longer
+  owned. Cancelling also reached only the most recent download, leaving the
+  other one running — both now share one cancel.
+- **A busy machine is no longer offered more of a model than it can hold.** A
+  machine already running a model has paid for the part it is holding, and
+  charging it again would send work away from the machine best placed to do it.
+  The only available signal was whether it had answered recently, which says
+  nothing about how much it holds, so every part was treated as already paid
+  for. On one node this produced an estimate of fourteen thousand parts for a
+  model with thirty-two. Machines now say how much of each model they have
+  loaded, and are credited only for that; a machine running an older version
+  keeps the previous, more generous treatment, so mixed versions keep working.
+
+### Added
+
+- **Two more model families in the release checks.** GLM-4 and Mistral now run
+  in the per-family conformance suite, which asks whether each family produces a
+  sane answer rather than merely bytes. GLM-4 covers the attention layout that
+  made Phi-4-mini unusable until the previous release and which nothing here
+  could exercise; Mistral covers a prompt format that refuses system messages
+  and a tool-call format never before run end to end. Nine families, every check
+  passing.
+
 ## [0.3.173-alpha] — 2026-09-11
 
 ### Fixed

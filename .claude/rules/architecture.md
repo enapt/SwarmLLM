@@ -402,6 +402,23 @@ there is no session at all.
 
 → `docs/invariants/network.md`
 
+## What a peer HOLDS on disk and what it has LOADED are different facts
+
+`NodeCapability::hosted_shards` is disk; `NodeCapability::resident_layers` is
+memory. **`inference::scheduler::PeerResidency` is the single reading of the
+second**, in three states: `Layers(n)` exempts those layers' weights and charges
+full price beyond them, `Cold` charges everything, and `WarmAmountUnknown` — a
+peer that has published nothing — keeps the older, more generous pricing.
+
+The third state is not politeness. Reading silence as "holding nothing" charges
+full weights to every node on an older build and routes around the machines best
+placed to answer, which is the additive-protocol rule's exact failure. A bare
+"is it warm" boolean has the opposite fault: it exempts every layer under
+consideration, so a peer warm for part of a model is credited with the whole of
+it.
+
+→ `docs/invariants/scheduling.md`
+
 ## A peer advertises the memory it will HONOUR, not the memory it has
 
 **`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much

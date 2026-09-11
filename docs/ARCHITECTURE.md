@@ -343,6 +343,19 @@ without ever being able to read them.
   the relayed-back `LayerResult` arrives; the relay-unwrap path stamps
   `sender_peer_bytes = origin` so the result routes home rather than being
   dropped as unattributed.
+- **What a node advertises about its memory, and the distinction that matters.**
+  `NodeCapability` carries `hosted_shards` (what is on DISK) and
+  `resident_layers` (how many layers of each model are LOADED right now, summed
+  from each live worker's charged segments). They answer different questions and
+  a router needs both. A peer already running a model has paid for the weights it
+  is holding, so its advertised free memory already excludes them and charging
+  again would route around the machine best placed to answer; but exempting
+  *every* layer instead credits it with weights it has not paid for.
+  `inference::scheduler::PeerResidency` turns the field into three cases —
+  `Layers(n)`, `Cold`, and `WarmAmountUnknown` for a peer that has published
+  nothing, which keeps the older, more generous pricing so a mixed-version swarm
+  keeps routing. Added 2026-09-11, additive and `#[serde(default)]`; the same
+  fact Petals publishes for the same reason.
 - **Feature-gated + prefer-direct.** `NodeCapability` advertises
   `protocol_version: u16` and a `features: u64` bitset
   (`features::{RELAY, TENSOR_RELAY, PIPELINE_CHAIN, PIPELINE_CHAIN_V2,
@@ -1921,6 +1934,20 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - Custom providers via `[providers.custom]` config section
 - Provider health probes with per-model availability checking
 - Admin API: `GET/PUT /api/admin/providers` — view/configure provider API keys
+- **Catalogue refresh (`daemon::background::spawn_provider_catalog_refresh`).**
+  A model that cannot be resolved from its id — anything without a recognised
+  prefix or `provider:` syntax — is routed via `provider_model_map`, built by
+  asking each configured provider for its `/models`. That map used to be filled
+  only as a side effect of loading the admin page, so a node whose dashboard
+  nobody opened refused those models outright, in about a millisecond, without
+  the provider being asked. It is now refreshed every 15 minutes (first pass 20 s
+  after boot). **The merge is per provider**: one that does not answer keeps its
+  previous entries, because a failed fetch used to be indistinguishable from a
+  provider with no models and a bad minute erased the whole catalogue until
+  someone reopened the page. The display cache (30 s TTL, stale-while-revalidate)
+  is separate and can legitimately list more than the map — static entries for
+  Anthropic, Claude-subscription, Moonshot fallbacks and custom providers route
+  by prefix or `provider:model` syntax without it.
 
 ### Claude Subscription Provider (Optional, feature-gated)
 Routes Claude model requests through a locally-authenticated `claude` CLI subprocess, using the user's existing Pro/Max/Team/Enterprise subscription — no API key or per-token charges needed.
