@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.3.173-alpha] — 2026-09-11
+
+### Fixed
+
+- **Streamed replies no longer stop dead after about 65 tokens.** On a graphics
+  build running a whole model file, every streamed answer was cut off mid-sentence
+  at roughly 65 words-worth of output and reported as though the model had finished
+  normally — so a chat client or an agent received a truncated answer with nothing
+  in it to say anything was missing. The same question asked without streaming
+  answered in full, which is why it went unnoticed: most testing is done that way,
+  and most real clients stream. Two things were wrong. Generation was running on a
+  thread the program needed in order to send tokens out, so nothing reached the
+  client until the answer was already complete; and the queue it filled in the
+  meantime holds 64 items, after which the code handing tokens over could not tell
+  "the reader is a little behind" from "the reader has gone away", and stopped.
+  Generation now runs where waiting is expected, tokens arrive as they are produced,
+  and a full queue waits instead of ending the answer. Measured on one machine with
+  the same question: 65 words in two minutes before, the full answer in two and a
+  half seconds after, matching what the non-streaming path already produced.
+  Inference spread across several machines was never affected.
+- **Phi-4-mini can be served at all.** Every request to it failed before producing
+  a single word. So did every request to any other model that rotates only part of
+  each attention head rather than all of it — GLM-4 and Qwen 3.5 are in that group,
+  and were equally unusable, which nobody had noticed because no such model had been
+  run here. The two halves of each head were being joined in a way that produced a
+  result the memory cache would not accept. The reason recorded when this was first
+  reported — grouped-query attention — was wrong, and is corrected in the notes;
+  Phi-3.5 works on the same build because its rotation covers the whole head.
+- **Gemma models are told about their tools in their own prompt format.** A Gemma-2
+  request that came with tools was never rendered with the prompt format that ships
+  inside the model; it quietly fell back to a generic one, which reads plausibly
+  enough that nothing looked twice. The same happened to any Gemma or Mistral
+  request carrying a system message. Those models do not accept a system message at
+  all — they reject it outright rather than ignoring it — and a tool description is
+  delivered as one. The text is now folded into the first user message, which is
+  what both model publishers recommend, and only after the model's own format has
+  actually refused, so models that accept a system message are unaffected.
+
+### Changed
+
+- The pre-release family check now accepts an answer spelled as a word. A model
+  replying "Four." to "what is 2 plus 2" was being failed for it, which says
+  nothing about this software.
+
 ## [0.3.172-alpha] — 2026-09-11
 
 ### Fixed
