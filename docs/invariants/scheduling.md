@@ -891,8 +891,36 @@ warm peer being effectively unbounded; it does NOT make the exemption correct,
 and a peer warm for part of a model can still be credited with weights it has
 not paid for. `a_warm_peers_bound_cannot_exceed_the_layers_the_model_has`
 carries its own control — the same inputs without the ceiling still reproduce
-the field's four-digit figure. The real fix wants the RESIDENT layer count
-gossiped; see `docs/FUTURE_WORK.md` item 50.
+the field's four-digit figure.
+
+**Then fixed properly, the same day.** `NodeCapability::resident_layers` carries
+what each node has LOADED — distinct from `hosted_shards`, which is disk —
+summed from each live worker's charged segments, and **`PeerResidency` replaces
+the boolean with three states**, because collapsing any two of them costs
+something:
+
+- `Layers(n)` exempts n layers and charges full weight beyond them. Those
+  resident layers still pay THIS prompt's KV, which the peer has not paid for,
+  so a prompt whose cache will not fit beside them reduces how many this request
+  can use.
+- `Cold` charges everything, as before.
+- **`WarmAmountUnknown` keeps the old generous pricing**, and that third state is
+  the whole reason this is safe to ship into a mixed-version swarm. Reading a
+  silent peer as cold would charge full weights to every node on an older build
+  and route around the machines best placed to answer — the additive-protocol
+  rule's exact failure, and gotcha #329 from the other side.
+
+Absence of a model from a REPORTING peer's list is also not proof it is cold:
+gossip is up to 30 s old, so a model just loaded is missing from it, and the call
+site falls back to the recency signal rather than charging in full.
+
+Petals publishes the same fact for the same reason — its servers announce the
+blocks they are actively serving, not the ones they could load
+(<https://arxiv.org/pdf/2209.01188>).
+
+`only_the_layers_a_peer_actually_holds_are_exempt_from_their_weight` is the
+regression guard, verified by regressing the arm: with the old pricing a peer
+holding 8 of 32 layers is credited with all 32 where the honest answer is 18.
 
 Three further things a change here must keep. **The accessor owns the device
 choice**: two callers were writing the `match &c.gpu` themselves, and a third
