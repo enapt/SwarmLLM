@@ -553,39 +553,33 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
                                             result.push(entry);
                                         }
                                     }
-                                    return (provider_name, result);
+                                    return (provider_name, Some(result));
                                 }
                             }
-                            (provider_name, Vec::new())
+                            // Reached the provider but could not read a catalog
+                            // out of the answer. Unknown, not empty.
+                            (provider_name, None)
                         }
                         _ => {
                             tracing::debug!(
                                 provider = provider_name,
                                 "Failed to fetch /models, no fallback"
                             );
-                            (provider_name, Vec::new())
+                            (provider_name, None)
                         }
                     }
                 }
             });
 
     let results = futures::future::join_all(fetches).await;
-    // Clear stale entries before repopulating — prevents misdirecting requests
-    // to models removed from provider catalogs between refresh cycles.
-    state.shared_state.metrics.provider_model_map.clear();
-    for (provider, provider_models) in &results {
-        for m in provider_models {
-            if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
-                state
-                    .shared_state
-                    .metrics
-                    .provider_model_map
-                    .insert(id.to_string(), provider.to_string());
-            }
-        }
-    }
+
+    merge_provider_catalog(
+        &state.shared_state.metrics.provider_model_map,
+        results.iter().map(|(p, m)| (*p, m.as_deref())),
+    );
+
     for (_provider, provider_models) in results {
-        models.extend(provider_models);
+        models.extend(provider_models.unwrap_or_default());
     }
 
     models
@@ -1167,4 +1161,124 @@ pub async fn apply_update(
         "version": info.latest_version,
         "message": "Update applied. Restarting once in-flight work finishes.",
     })))
+}
+
+/// Fold a round of provider `/models` answers into the routing map.
+///
+/// Replaces the entries of every provider that ANSWERED and leaves alone the
+/// ones that did not — `None` means the fetch failed, `Some(vec![])` means the
+/// provider really has no models.
+///
+/// This used to be a `.clear()` of the whole map followed by a repopulate. The
+/// intent was right — a model dropped from a provider's catalog must stop being
+/// routed — but the order was not. A fetch that timed out looked exactly like a
+/// provider with no models, so one slow provider erased its own routing entries
+/// and a bad minute erased every provider's. Nothing rebuilds this map on a
+/// timer (the admin handler is its only writer), so an erased catalog stays
+/// erased until someone opens the page again, and in the meantime every cloud
+/// model that cannot be resolved from its id prefix answers 404 in about a
+/// millisecond — from us, without the provider ever being asked.
+///
+/// Reported from the field on 2026-09-11: `cloud_models_available` read 0 for
+/// days, and models the dashboard was still listing 404'd instantly. The
+/// dashboard's own cache already keeps its previous answer when a refresh comes
+/// back empty; the routing map, which matters more, did not.
+pub(crate) fn merge_provider_catalog<'a>(
+    map: &dashmap::DashMap<String, String>,
+    results: impl IntoIterator<Item = (&'a str, Option<&'a [serde_json::Value]>)>,
+) {
+    for (provider, provider_models) in results {
+        let Some(provider_models) = provider_models else {
+            tracing::debug!(
+                provider,
+                "provider did not answer /models — keeping its previous catalog entries"
+            );
+            continue;
+        };
+        map.retain(|_, owner| owner != provider);
+        for m in provider_models {
+            if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
+                map.insert(id.to_string(), provider.to_string());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod provider_catalog_tests {
+    use super::merge_provider_catalog;
+    use dashmap::DashMap;
+
+    fn model(id: &str) -> serde_json::Value {
+        serde_json::json!({ "id": id })
+    }
+
+    fn catalog(pairs: &[(&str, &str)]) -> DashMap<String, String> {
+        let map = DashMap::new();
+        for (id, provider) in pairs {
+            map.insert((*id).to_string(), (*provider).to_string());
+        }
+        map
+    }
+
+    /// The reported failure. One provider fails to answer and the rest of the
+    /// catalog must survive — under the old global clear, a bad minute left the
+    /// map empty and every cloud model 404'd locally until someone reopened the
+    /// admin page.
+    #[test]
+    fn a_provider_that_does_not_answer_keeps_its_previous_models() {
+        let map = catalog(&[
+            ("mistralai/mistral-large", "nvidia_nim"),
+            ("gpt-4o", "openai"),
+        ]);
+        merge_provider_catalog(
+            &map,
+            [
+                ("nvidia_nim", None),
+                ("openai", Some(&[model("gpt-4o")][..])),
+            ],
+        );
+        assert_eq!(
+            map.get("mistralai/mistral-large")
+                .map(|e| e.value().clone()),
+            Some("nvidia_nim".to_string()),
+            "a provider that did not answer must not lose its catalog"
+        );
+        assert_eq!(map.len(), 2);
+    }
+
+    /// ...and every provider failing at once must not wipe the map, which is
+    /// the state the reporter's node sat in for days.
+    #[test]
+    fn a_round_where_nothing_answers_changes_nothing() {
+        let map = catalog(&[
+            ("mistralai/mistral-large", "nvidia_nim"),
+            ("gpt-4o", "openai"),
+        ]);
+        merge_provider_catalog(&map, [("nvidia_nim", None), ("openai", None)]);
+        assert_eq!(map.len(), 2, "an all-failed round must be a no-op");
+    }
+
+    /// The behaviour the clear existed for is kept: a model a provider no
+    /// longer lists stops being routed to it.
+    #[test]
+    fn a_model_dropped_from_a_catalog_stops_being_routed() {
+        let map = catalog(&[("old-model", "openai"), ("gpt-4o", "openai")]);
+        merge_provider_catalog(&map, [("openai", Some(&[model("gpt-4o")][..]))]);
+        assert!(map.get("old-model").is_none(), "a dropped model must go");
+        assert!(map.get("gpt-4o").is_some());
+    }
+
+    /// A provider that genuinely lists nothing is not the same as one that did
+    /// not answer, and it does clear its own entries.
+    #[test]
+    fn a_provider_with_no_models_clears_only_its_own() {
+        let map = catalog(&[("a", "openai"), ("b", "groq")]);
+        merge_provider_catalog(&map, [("openai", Some(&[][..]))]);
+        assert!(map.get("a").is_none());
+        assert_eq!(
+            map.get("b").map(|e| e.value().clone()),
+            Some("groq".to_string())
+        );
+    }
 }
