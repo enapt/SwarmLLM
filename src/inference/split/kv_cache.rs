@@ -103,7 +103,15 @@ impl SeqCache {
             *ad = Tensor::cat(&[&*ad, &next_ad], self.dim)?;
             self.max_seq_len += self.grow_by;
         }
-        ad.slice_set(src, self.dim, self.current_seq_len)?;
+        // `slice_set` refuses a non-contiguous source, and a cache is in no
+        // position to decline one: the alternative to copying is failing every
+        // request on that model. Free when the tensor is already contiguous,
+        // which is the normal case. Partial RoPE handed a view here on every
+        // Phi-4-mini request ever made — `layers::rope_over_heads` is where
+        // that is prevented now, and this is why a new producer of K or V
+        // cannot bring the whole class back.
+        let src = src.contiguous()?;
+        ad.slice_set(&src, self.dim, self.current_seq_len)?;
         self.current_seq_len += seq_len;
         Ok(())
     }

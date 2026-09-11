@@ -408,6 +408,65 @@ for A/B inside one binary. Two tests pin it: bitwise equality with the copy
 path after truncate + append, and buffer identity (no reallocation) with the
 copy mode as the control that the check can see one.
 
+## `inference::layers::rope_over_heads` — partial RoPE has one implementation, and it answers with a tensor the KV cache can write
+
+(2026-09-11, gotcha #553, FUTURE_WORK #43.) A model whose rotary width is
+narrower than its head dimension rotates the leading `rope_dim` of each head and
+passes the rest through. The composition is the whole invariant:
+
+```rust
+let x_rot  = x.narrow(3, 0, rope_dim)?.contiguous()?;
+let x_pass = x.narrow(3, rope_dim, head_dim - rope_dim)?;   // a VIEW
+Tensor::cat(&[&rotated, &x_pass], 3)
+```
+
+**candle's `cat` answers with a transposed view rather than a fresh buffer when
+any argument is non-contiguous and `dim != 0`** — it transposes every argument
+to bring `dim` to the front, calls `cat0`, and transposes the result back. The
+values are right; the layout is not. `slice_set` refuses a non-contiguous
+source, and `slice_set` is how `SeqCache::append` writes K — so every request on
+such a model died at its first layer with `attn: slice-set only supports
+contiguous tensors`.
+
+**What a change here must keep.** The result is contiguous, and the
+pass-through half is made contiguous *before* the cat rather than the whole head
+after it. That is not only the fix but the cheap form of it: `cat` then writes
+both halves straight into one new buffer, where cat-then-`contiguous()` copies
+the full head twice — 25 MB per layer on a 2048-token prefill of Phi-4-mini,
+32 layers.
+
+**Why one function.** Two copies of the branch existed —
+`LayerWeights::apply_rotary_emb` and `Qwen35AttnWeights::apply_rotary_emb` — and
+both were wrong. The DeepSeek MLA path next door builds its `cat` from two
+explicitly `.contiguous()` halves and was always safe, with nothing recording
+why. `SeqCache::append` now also makes its source contiguous, so a future
+producer of K or V cannot reintroduce the class; that is free when the tensor is
+already contiguous, which is every current caller.
+
+**The discriminator is `rope_dim < head_dim`, and it is NOT GQA** — the first
+cause recorded for this, from the two models' most visible difference:
+
+| | head_count | head_count_kv | head_dim | rope.dimension_count | |
+|---|---|---|---|---|---|
+| Phi-3.5-mini | 32 | 32 | 96 | 96 | full RoPE — serves fine |
+| Phi-4-mini | 24 | 8 | **128** | **96** | partial RoPE — died |
+
+`head_dim` is `embedding_length / head_count` (3072/32 = 96 against 3072/24 =
+128) while the rope width is 96 in both GGUFs, so GQA moves `head_dim` and
+therefore correlates perfectly across these two models — and explains nothing.
+A 32/8 model with `head_dim == rope_dim` never takes the branch, and a 32/32
+model with partial rotary does. GLM-4 and Qwen 3.5 were broken the same way and
+nobody saw it, because no such model has been run here.
+
+⚠ **A test covering exactly this feature could not see it.**
+`test_partial_rope_glm4_style` calls `apply_rotary_emb` and asserts the output
+shape and that the pass-through half came back unchanged — both true of the
+broken view. The only operation that refuses a view is the cache write, and the
+test never reached one. `partial_rope_answers_with_a_k_the_cache_can_write` does:
+it asserts contiguity directly, then drives a prefill, a decode, and the batched
+path at mixed positions (which ropes *after* narrowing a row out, and so reaches
+the same defect by another route).
+
 ## `inference::attn_softmax::scaled_masked_softmax`
 
 (2026-08-07) — the single

@@ -8,19 +8,10 @@ use super::{run_attention, DeltaNetWeights, Qwen35AttnWeights, SsmState};
 
 impl Qwen35AttnWeights {
     pub(crate) fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> CandleResult<Tensor> {
-        let (_b_sz, _n_head, seq_len, n_embd) = x.dims4()?;
+        let (_b_sz, _n_head, seq_len, _head_dim) = x.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-
-        // Partial RoPE: only rotate first rope_dim dimensions
-        if self.rope_dim < n_embd {
-            let x_rot = x.narrow(3, 0, self.rope_dim)?.contiguous()?;
-            let x_pass = x.narrow(3, self.rope_dim, n_embd - self.rope_dim)?;
-            let rotated = candle_nn::rotary_emb::rope(&x_rot, &cos, &sin)?;
-            Tensor::cat(&[&rotated, &x_pass], 3)
-        } else {
-            candle_nn::rotary_emb::rope(&x.contiguous()?, &cos, &sin)
-        }
+        super::rope_over_heads(x, &cos, &sin, self.rope_dim, true)
     }
 
     pub(crate) fn forward_attn(

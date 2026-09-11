@@ -1123,6 +1123,47 @@ impl LayerWeights {
 /// typical chat by 8x.
 pub(crate) const KV_CACHE_GROWTH_TOKENS: usize = 512;
 
+/// RoPE over a tensor of heads, `[b, n_head, seq, head_dim]`, with the
+/// rotary tables already narrowed to this call's positions.
+///
+/// **The single implementation of partial RoPE.** A model whose rotary width
+/// is narrower than its head dimension — Phi-4-mini (head_dim 128, rope_dim
+/// 96), GLM-4, Qwen 3.5 — rotates the leading `rope_dim` of each head and
+/// passes the rest through untouched.
+///
+/// The result is contiguous, and that is the whole reason this is one
+/// function. Two copies of the partial branch existed and both left the
+/// pass-through half as a `narrow` view over the input. `Tensor::cat` answers
+/// with a TRANSPOSED VIEW when any argument is non-contiguous rather than a
+/// fresh buffer, and the KV cache writes K with `slice_set`, which refuses a
+/// non-contiguous source — so every request on such a model died at its first
+/// layer with `slice-set only supports contiguous tensors`. Making the
+/// pass-through contiguous first is what keeps that cheap: `cat` then writes
+/// both halves straight into one new buffer instead of copying the whole head
+/// twice.
+pub(crate) fn rope_over_heads(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    rope_dim: usize,
+    use_rope_contiguous: bool,
+) -> CandleResult<Tensor> {
+    let rotate = |t: &Tensor| -> CandleResult<Tensor> {
+        if use_rope_contiguous {
+            candle_nn::rotary_emb::rope(t, cos, sin)
+        } else {
+            candle_nn::rotary_emb::rope_i(t, cos, sin)
+        }
+    };
+    let head_dim = x.dim(3)?;
+    if rope_dim >= head_dim {
+        return rotate(&x.contiguous()?);
+    }
+    let x_rot = rotate(&x.narrow(3, 0, rope_dim)?.contiguous()?)?;
+    let x_pass = x.narrow(3, rope_dim, head_dim - rope_dim)?.contiguous()?;
+    Tensor::cat(&[&x_rot, &x_pass], 3)?.contiguous()
+}
+
 /// Build the KV cache for one layer, reserving space incrementally.
 ///
 /// **Every KV cache must be created here.** Calling `KvCache::new` with a
@@ -1973,29 +2014,10 @@ impl LayerWeights {
             return Ok(x.clone());
         }
 
-        let (_b_sz, _n_head, seq_len, n_embd) = x.dims4()?;
+        let (_b_sz, _n_head, seq_len, _head_dim) = x.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-
-        // Partial RoPE (GLM-4): only rotate the first rope_dim dimensions,
-        // pass the rest through unchanged.
-        if self.rope_dim < n_embd {
-            let x_rot = x.narrow(3, 0, self.rope_dim)?.contiguous()?;
-            let x_pass = x.narrow(3, self.rope_dim, n_embd - self.rope_dim)?;
-            let rotated = if self.use_rope_contiguous {
-                candle_nn::rotary_emb::rope(&x_rot, &cos, &sin)?
-            } else {
-                candle_nn::rotary_emb::rope_i(&x_rot, &cos, &sin)?
-            };
-            Tensor::cat(&[&rotated, &x_pass], 3)
-        } else {
-            // Full RoPE (standard path)
-            if self.use_rope_contiguous {
-                candle_nn::rotary_emb::rope(&x.contiguous()?, &cos, &sin)
-            } else {
-                candle_nn::rotary_emb::rope_i(&x.contiguous()?, &cos, &sin)
-            }
-        }
+        rope_over_heads(x, &cos, &sin, self.rope_dim, self.use_rope_contiguous)
     }
 
     pub(crate) fn forward_attn(
@@ -2380,13 +2402,25 @@ mod batched_attention_tests {
         head_dim: usize,
         dev: &Device,
     ) -> LayerWeights {
+        test_layer_weights_rope(n_head, n_kv_head, head_dim, head_dim, dev)
+    }
+
+    /// The same layer with an explicit rotary width. `rope_dim < head_dim` is
+    /// partial RoPE — Phi-4-mini (head_dim 128, rope_dim 96), GLM-4, Qwen 3.5.
+    fn test_layer_weights_rope(
+        n_head: usize,
+        n_kv_head: usize,
+        head_dim: usize,
+        rope_dim: usize,
+        dev: &Device,
+    ) -> LayerWeights {
         let hidden = n_head * head_dim;
         let kv_dim = n_kv_head * head_dim;
         // Real RoPE tables are not needed for an equivalence test — both paths
         // consume the same ones. Shapes must be right: `apply_rotary_emb`
-        // narrows dim 0 by index_pos and candle's rope wants (seq, dim/2).
-        let cos = Tensor::ones((128usize, head_dim / 2), DType::F32, dev).unwrap();
-        let sin = Tensor::zeros((128usize, head_dim / 2), DType::F32, dev).unwrap();
+        // narrows dim 0 by index_pos and candle's rope wants (seq, rope_dim/2).
+        let cos = Tensor::ones((128usize, rope_dim / 2), DType::F32, dev).unwrap();
+        let sin = Tensor::zeros((128usize, rope_dim / 2), DType::F32, dev).unwrap();
         LayerWeights {
             attention_wq: qmm(hidden, hidden, dev),
             attention_wk: qmm(hidden, kv_dim, dev),
@@ -2414,9 +2448,55 @@ mod batched_attention_tests {
             sin,
             use_rope_contiguous: true,
             attn_logit_softcap: None,
-            rope_dim: head_dim,
+            rope_dim,
             skip_rope: false,
         }
+    }
+
+    /// A model whose rotary width is narrower than its head dimension must
+    /// still be able to write K into its KV cache.
+    ///
+    /// Phi-4-mini is the reported case — head_dim 128, rope_dim 96, so every
+    /// request died at the first layer with `slice-set only supports
+    /// contiguous tensors`. Phi-3.5, which serves fine, is head_dim 96 /
+    /// rope_dim 96 and never takes this branch; that pair is the whole
+    /// difference, not the GQA the two models also differ in.
+    ///
+    /// Asserted on `forward_attn` rather than on the helper alone because the
+    /// cache write is what actually failed, and on the batched path too — it
+    /// ropes AFTER narrowing a row out when the rows sit at different
+    /// positions, which is the same defect reached by another route.
+    #[test]
+    fn partial_rope_answers_with_a_k_the_cache_can_write() {
+        let dev = Device::Cpu;
+        let (n_head, n_kv_head, head_dim, rope_dim) = (4usize, 2, 8, 6);
+        let hidden = n_head * head_dim;
+        let lw = test_layer_weights_rope(n_head, n_kv_head, head_dim, rope_dim, &dev);
+
+        // The invariant itself: what RoPE answers with is writable.
+        let heads = Tensor::randn(0f32, 1., (1usize, n_kv_head, 3usize, head_dim), &dev).unwrap();
+        let roped = lw.apply_rotary_emb(&heads, 0).unwrap();
+        assert_eq!(roped.dims(), heads.dims());
+        assert!(
+            roped.is_contiguous(),
+            "partial RoPE answered with a view the KV cache cannot slice_set"
+        );
+
+        // Prompt then decode, through the cache, on the single-request path.
+        let mut cache: Option<LayerKv> = None;
+        let x = Tensor::randn(0f32, 1., (1usize, 3usize, hidden), &dev).unwrap();
+        lw.forward_attn(&x, None, 0, &mut cache, 64, None)
+            .expect("partial-RoPE prefill must reach the KV cache");
+        let x1 = Tensor::randn(0f32, 1., (1usize, 1usize, hidden), &dev).unwrap();
+        lw.forward_attn(&x1, None, 3, &mut cache, 64, None)
+            .expect("partial-RoPE decode must reach the KV cache");
+
+        // The batched path ropes per row when the rows disagree on position.
+        let xb = Tensor::randn(0f32, 1., (2usize, 1usize, hidden), &dev).unwrap();
+        let mut owned: Vec<Option<LayerKv>> = vec![None, None];
+        let mut refs: Vec<&mut Option<LayerKv>> = owned.iter_mut().collect();
+        lw.forward_attn_batched(&xb, None, &[0, 5], &mut refs, 64, None)
+            .expect("partial-RoPE batched decode at mixed positions");
     }
 
     /// Batching the weight-shared projections must change speed and nothing
