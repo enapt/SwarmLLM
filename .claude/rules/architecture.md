@@ -1121,6 +1121,29 @@ emitted()`.
 
 → `docs/invariants/api-surfaces.md`
 
+## A model's turn-ender is found in its vocabulary, not taken from its declared EOS
+
+**`GgufTokenizerMeta::end_of_generation_ids_from_vocab`** searches the
+vocabulary BY NAME for the tokens that end a reply, and every path that resolves
+EOS ids merges it in — `eos_tokens_with_arch_fallback` and
+`split::entry::SplitModelEntry::from_header`. A declared EOS is trusted but
+never assumed COMPLETE: the per-family id lists only ever ran when a GGUF
+declared nothing, so a model that declares one token and ends its turns with
+another got no help from them at all.
+
+Phi-3/3.5/4 are that model. They declare `<|endoftext|>` and close every turn
+with `<|end|>`, and nothing stopped the reply there — it ran to `max_tokens`
+inventing further turns, visibly on a GPT-2-BPE vocabulary and invisibly on a
+SentencePiece one.
+
+**`<|end|>` is conditional, and the condition is the whole reason to read
+upstream first.** For harmony (gpt-oss) and solar-open it separates messages
+inside one reply, so stopping on it truncates every such reply at its first
+message. Both the EOS search and `chat_template::extract_stop_strings` carry the
+same exclusion, keyed on the same neighbours llama.cpp keys it on.
+
+→ `docs/invariants/inference.md`
+
 ## A vocabulary piece becomes token ids in exactly one place
 
 **`inference::tokenizer::BpeTokenizer::push_piece_ids`** is the only way a merged

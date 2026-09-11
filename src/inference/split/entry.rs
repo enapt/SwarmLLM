@@ -82,11 +82,23 @@ impl SplitModelEntry {
         let (vocab, bos_token, eos_token_str, eos_tokens, chat_template) = if let Some(t) = tok {
             let bos = t.bos_string();
             let eos_str = t.eos_string();
-            let eos_ids = if t.eos_token_ids.is_empty() {
+            // Same rule as `eos_tokens_with_arch_fallback`, which this path
+            // cannot call because it has no architecture string: a declared EOS
+            // is trusted but not assumed complete, so the turn-enders this
+            // model's own vocabulary names are merged in. Without it a Phi
+            // GGUF's cached metadata claims `<|endoftext|>` is the only
+            // end-of-turn token while the model ends every turn with `<|end|>`.
+            let from_vocab = t.end_of_generation_ids_from_vocab();
+            let mut eos_ids = if t.eos_token_ids.is_empty() && from_vocab.is_empty() {
                 FALLBACK_EOS_TOKEN_IDS.to_vec()
             } else {
                 t.eos_token_ids
             };
+            for id in from_vocab {
+                if !eos_ids.contains(&id) {
+                    eos_ids.push(id);
+                }
+            }
             (t.vocab, bos, eos_str, eos_ids, t.chat_template)
         } else {
             (

@@ -94,6 +94,17 @@ const CONTROL_TOKEN_NAMES: &[&str] = &[
     "python_tag",
     "end_of_turn",
     "start_of_turn",
+    // Phi-3/3.5/4: `<|end|>` closes a turn and the turn markers open one. A
+    // GPT-2-BPE vocab decodes all four to their literal characters, so they
+    // reached users as visible text (reported in the field on Phi-4-mini,
+    // 2026-09-10). Scrubbing is safe even for the harmony / solar-open formats
+    // where `<|end|>` must NOT stop generation: removing a control marker from
+    // visible text and ending the reply at it are different decisions, and only
+    // the second one truncates.
+    "end",
+    "user",
+    "assistant",
+    "system",
 ];
 
 /// Put generated text into its final, user-facing form.
@@ -643,6 +654,38 @@ mod control_token_strip_tests {
             strip_control_token_artifacts(&mut got);
             assert_eq!(got, keep, "over-stripped {keep:?}");
         }
+    }
+
+    /// Phi-3/3.5/4 markers. On a GPT-2-BPE vocabulary these decode to their
+    /// literal characters, so a reply carried a visible `<|end|>` and fabricated
+    /// `<|user|>` / `<|assistant|>` turns (reported in the field on Phi-4-mini,
+    /// 2026-09-10). Scrubbing them is safe even for the harmony formats where
+    /// `<|end|>` must NOT stop generation: removing a control marker from
+    /// visible text and ending the reply at it are different decisions.
+    #[test]
+    fn strips_phi_turn_markers() {
+        let cases = [
+            ("Bonjour<|end|>", "Bonjour"),
+            (
+                "answer<|end|>\n<|user|>next question",
+                "answer\nnext question",
+            ),
+            ("a<|assistant|>b<|system|>c", "abc"),
+        ];
+        for (input, want) in cases {
+            let mut got = input.to_string();
+            strip_control_token_artifacts(&mut got);
+            assert_eq!(got, want, "input {input:?}");
+        }
+    }
+
+    /// The scrubber matches a whole marker name, so the longer markers that
+    /// share a prefix with `end` must keep working.
+    #[test]
+    fn a_short_marker_name_does_not_shadow_a_longer_one() {
+        let mut got = "a<|end_header_id|>b<|endoftext|>c<|end_of_turn|>d".to_string();
+        strip_control_token_artifacts(&mut got);
+        assert_eq!(got, "abcd");
     }
 
     /// Multi-byte characters must not be split when scanning byte-wise.

@@ -271,6 +271,76 @@ pub struct GgufTokenizerMeta {
     pub add_bos_token: bool,
 }
 
+/// Token strings that END GENERATION, searched for BY NAME in the vocabulary.
+///
+/// **A model's declared EOS is not reliably the token it ends its turn with.**
+/// Phi-3/3.5/4 declare `eos_token_id = <|endoftext|>` and close every assistant
+/// turn with `<|end|>` — a different token, 32007 in Phi-3.5 — and their GGUFs
+/// carry no `eot_token_id` key to say so. Nothing then stopped generation: the
+/// model ended its turn and carried on, inventing a second assistant turn and a
+/// fabricated user turn until `max_tokens`. Reproduced on v0.3.171 with a plain
+/// no-tools request to Phi-3.5 ("Say exactly: hello" → 120/120 tokens,
+/// `finish_reason: "length"`, a fabricated Chinese user turn at the end).
+///
+/// The symptom differs by vocabulary family, from this one cause, which is why
+/// it read as two unrelated bugs in the field:
+///
+/// - **SentencePiece vocab** (Phi-3.5's GGUF): `decode_token_impl` maps any
+///   `<…>` token to empty, so `<|end|>` vanishes and the run-on is INVISIBLE.
+/// - **GPT-2 byte BPE vocab** (Phi-4-mini's GGUF): the same token decodes to
+///   its literal characters, so `<|end|>` LEAKS into visible content and the
+///   reply runs on after it.
+///
+/// Searching the vocabulary by name is llama.cpp's approach
+/// (`llama_vocab::impl::load`, which populates `special_eog_ids` from this same
+/// kind of candidate list) rather than a per-architecture table of ids: a name
+/// is stable across quantisations and vocab sizes, an id is not.
+///
+/// Kept to markers whose ONLY role is ending a turn. Three deliberate absences,
+/// each one a way this could go wrong:
+///
+/// - **`<|user|>` / `<|assistant|>` / `<|system|>`** open a turn. A model
+///   emitting one has gone wrong, but that is a stop-string concern
+///   (`chat_template::extract_stop_strings`), not an end-of-generation token.
+/// - **`</s>` and `<eos>`**, which llama.cpp's own candidate list does carry.
+///   Every marker above is a `<|…|>` form whose only role in any family is
+///   ending a turn; these two instead sit in the vocabulary of families that
+///   never emit them — Phi-3.5's SPM vocab holds `</s>` at id 2 and ends its
+///   turns with `<|end|>`. Adopting them would add a silent-truncation risk to
+///   every such model with nothing demonstrating it is needed, and the severity
+///   ordering below settles that: a wrong EOS truncates SILENTLY, an unknown one
+///   at worst runs to `max_tokens`. A genuine Llama-2 vocabulary still gets id 2
+///   from the narrowly-scoped `ids.is_empty() && plausible(2)` branch in
+///   [`GgufTokenizerMeta::eos_tokens_with_arch_fallback`], which fires only when
+///   the model declared nothing at all.
+const END_OF_GENERATION_TOKENS: &[&str] = &[
+    "<|end|>",
+    "<|eot_id|>",
+    "<|eom_id|>",
+    "<|im_end|>",
+    "<|endoftext|>",
+    "<|end_of_text|>",
+    "<end_of_turn>",
+    "<|return|>",
+    "<|call|>",
+];
+
+/// The token whose end-of-generation meaning is CONDITIONAL on its neighbours.
+const CONDITIONAL_END_TOKEN: &str = "<|end|>";
+
+/// A vocabulary carrying any of these uses `<|end|>` to close a MESSAGE, not to
+/// end generation — so `<|end|>` must NOT stop the reply there.
+///
+/// `<|return|>` + `<|call|>` is OpenAI's harmony format (gpt-oss); `<|calls|>` +
+/// `<|flush|>` is solar-open. Both emit `<|end|>` between messages of a reply
+/// that is still being written, so stopping on it truncates every such reply at
+/// its first message. **This guard is the reason to read upstream before
+/// shipping a one-line fix**: adding `<|end|>` unconditionally is correct for
+/// Phi and silently breaks harmony models, and llama.cpp carries the same
+/// exclusion for the same reason.
+const END_IS_MESSAGE_BOUNDARY_MARKERS: &[&str] =
+    &["<|return|>", "<|call|>", "<|calls|>", "<|flush|>"];
+
 /// Does this vocabulary entry look like an end-of-turn marker rather than an
 /// ordinary token?
 ///
@@ -416,6 +486,38 @@ impl GgufTokenizerMeta {
             .unwrap_or_default()
     }
 
+    /// End-of-generation ids found by NAME in this model's own vocabulary.
+    ///
+    /// The answer to "which tokens actually end a reply", independent of what
+    /// the GGUF declared as EOS — see [`END_OF_GENERATION_TOKENS`] for the
+    /// Phi-3/3.5/4 case that made this necessary and
+    /// [`END_IS_MESSAGE_BOUNDARY_MARKERS`] for the harmony exclusion.
+    ///
+    /// Needs only the vocabulary, so every path that resolves EOS ids can share
+    /// it whether or not it knows the architecture.
+    pub fn end_of_generation_ids_from_vocab(&self) -> Vec<u32> {
+        if self.vocab.is_empty() {
+            return Vec::new();
+        }
+        // `<|end|>` ends generation only when this vocabulary is not one of the
+        // formats that use it as a message separator.
+        let end_is_terminal = !self
+            .vocab
+            .iter()
+            .any(|t| END_IS_MESSAGE_BOUNDARY_MARKERS.contains(&t.as_str()));
+
+        self.vocab
+            .iter()
+            .enumerate()
+            .filter(|(_, tok)| {
+                let t = tok.as_str();
+                END_OF_GENERATION_TOKENS.contains(&t)
+                    && (end_is_terminal || t != CONDITIONAL_END_TOKEN)
+            })
+            .map(|(id, _)| id as u32)
+            .collect()
+    }
+
     /// Get EOS token IDs with architecture-specific fallbacks.
     ///
     /// **Every candidate this adds is checked against the vocabulary first.**
@@ -430,8 +532,25 @@ impl GgufTokenizerMeta {
     /// A wrong EOS truncates SILENTLY; an unknown one at worst lets the reply
     /// run to `max_tokens`. Those are not close in severity, so when nothing can
     /// be verified this returns EMPTY rather than guessing.
+    ///
+    /// **A declared EOS is trusted but never assumed complete.** The per-family
+    /// id lists below only ever ran when a GGUF declared NOTHING, so a model
+    /// that declares one EOS and ends its turns with another got no help from
+    /// them at all — which is every Phi-3/3.5/4 GGUF. The vocabulary search in
+    /// [`Self::end_of_generation_ids_from_vocab`] is merged in unconditionally
+    /// for that reason.
     pub fn eos_tokens_with_arch_fallback(&self, arch: &str) -> Vec<u32> {
         let mut ids = self.eos_token_ids.clone();
+        // A declared EOS is trusted, but it is not assumed to be COMPLETE: a
+        // model that ends its turns with a token it did not declare stops on
+        // nothing. Merged before the `ids.is_empty()` fallback below so a
+        // vocabulary that names its own turn-ender is never given a guess
+        // instead.
+        for id in self.end_of_generation_ids_from_vocab() {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
         // Verify against the vocabulary when we have one; trust the
         // architecture when we do not, since an unreadable vocab is not
         // evidence against an id the architecture is sure of.
@@ -642,6 +761,98 @@ mod eos_fallback_tests {
     /// is sure of — otherwise a model with no vocab loses its EOS entirely.
     #[test]
     fn an_empty_vocabulary_still_trusts_the_architecture() {
+        let ids = meta(vec![], vec![]).eos_tokens_with_arch_fallback("qwen2");
+        assert!(ids.contains(&151_643) && ids.contains(&151_645));
+    }
+
+    /// A vocabulary shaped like Phi-3/3.5: it DECLARES `<|endoftext|>` as EOS
+    /// and ends every turn with `<|end|>`, a different token.
+    fn phi_like() -> Vec<&'static str> {
+        let mut v = vec!["<unk>", "<s>", "</s>", "a", "b"];
+        v.resize(32_011, "tok");
+        v[32_000] = "<|endoftext|>";
+        v[32_001] = "<|assistant|>";
+        v[32_006] = "<|system|>";
+        v[32_007] = "<|end|>";
+        v[32_010] = "<|user|>";
+        v
+    }
+
+    /// The field failure, in miniature. Phi declares one EOS and ends its turns
+    /// with another, and the per-family lists only ever ran when a GGUF declared
+    /// NOTHING — so the declared `<|endoftext|>` suppressed them and `<|end|>`
+    /// stopped nothing. The model ended its turn and carried on inventing
+    /// further turns to `max_tokens`.
+    #[test]
+    fn a_turn_ender_the_model_did_not_declare_is_still_found() {
+        let ids = meta(phi_like(), vec![32_000]).eos_tokens_with_arch_fallback("phi3");
+        assert!(
+            ids.contains(&32_007),
+            "<|end|> is how phi3 ends every turn and must stop generation: {ids:?}"
+        );
+        assert!(
+            ids.contains(&32_000),
+            "the declared EOS must survive: {ids:?}"
+        );
+    }
+
+    /// The absence that keeps this fix from trading one silent failure for
+    /// another. Phi-3.5's SPM vocabulary carries `</s>` at id 2 and never emits
+    /// it — it ends turns with `<|end|>` — so adopting `</s>` would truncate
+    /// silently, which this file documents as much worse than running on.
+    #[test]
+    fn a_marker_the_family_never_emits_is_not_adopted() {
+        let ids = meta(phi_like(), vec![32_000]).eos_tokens_with_arch_fallback("phi3");
+        assert!(
+            !ids.contains(&2),
+            "phi ends turns with <|end|>, not </s>: {ids:?}"
+        );
+    }
+
+    /// Opening a turn is not ending one. `<|user|>` and `<|assistant|>` mean the
+    /// model has gone wrong and belong in the stop STRINGS, but adopting them as
+    /// end-of-generation tokens would end a reply on a token the model may
+    /// legitimately be unable to avoid in some templates.
+    #[test]
+    fn a_turn_opener_is_not_adopted_as_end_of_generation() {
+        let ids = meta(phi_like(), vec![32_000]).eos_tokens_with_arch_fallback("phi3");
+        assert!(!ids.contains(&32_010), "<|user|> opens a turn: {ids:?}");
+        assert!(
+            !ids.contains(&32_001),
+            "<|assistant|> opens a turn: {ids:?}"
+        );
+    }
+
+    /// The trap that makes the one-line version of this fix wrong. In OpenAI's
+    /// harmony format (gpt-oss) `<|end|>` separates messages INSIDE one reply,
+    /// so stopping there truncates every such reply at its first message.
+    /// llama.cpp carries the same exclusion, keyed on the same neighbours.
+    #[test]
+    fn end_does_not_stop_generation_where_it_separates_messages() {
+        let mut v = vec!["!", "\"", "#"];
+        v.resize(201_000, "tok");
+        v[200_002] = "<|end|>";
+        v[200_007] = "<|return|>";
+        v[200_008] = "<|call|>";
+        v[200_009] = "<|endoftext|>";
+        let ids = meta(v, vec![200_009]).eos_tokens_with_arch_fallback("gpt-oss");
+        assert!(
+            !ids.contains(&200_002),
+            "<|end|> only separates harmony messages and must not end the reply: {ids:?}"
+        );
+        assert!(
+            ids.contains(&200_007) && ids.contains(&200_008),
+            "harmony ends a reply on <|return|> / <|call|>: {ids:?}"
+        );
+    }
+
+    /// An empty vocabulary yields no name matches, and must not change what the
+    /// architecture fallbacks already did.
+    #[test]
+    fn the_vocabulary_search_is_silent_without_a_vocabulary() {
+        assert!(meta(vec![], vec![])
+            .end_of_generation_ids_from_vocab()
+            .is_empty());
         let ids = meta(vec![], vec![]).eos_tokens_with_arch_fallback("qwen2");
         assert!(ids.contains(&151_643) && ids.contains(&151_645));
     }

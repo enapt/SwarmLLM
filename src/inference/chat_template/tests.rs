@@ -733,6 +733,128 @@ fn extract_stop_strings_does_not_invent_ambiguous_markers() {
     assert!(!stops.contains(&"<|user|>".to_string()), "got {stops:?}");
 }
 
+/// Phi-4-mini-instruct's tool branch tests `'tools' in message and
+/// message['tools'] is not none` — a per-MESSAGE field, not the top-level
+/// variable it is handed. So the substring check in `template_renders_tools`
+/// passes, the prose description is suppressed as redundant, the branch never
+/// fires, and the model is told NOTHING about its tools. Reported from the field
+/// 2026-09-10 as "no engagement with the tools array whatsoever".
+#[test]
+fn a_template_that_ignores_the_tools_variable_still_gets_them_described() {
+    let phi4 = "{% for message in messages %}\
+        {% if message['role'] == 'system' and 'tools' in message and message['tools'] is not none %}\
+        {{ '<|' + message['role'] + '|>' + message['content'] + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}\
+        {% else %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|end|>' }}{% endif %}\
+        {% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>' }}{% endif %}";
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "terminal",
+            "description": "Run a shell command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    })];
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "What time is it?".to_string(),
+        images: Vec::new(),
+    }];
+    let prompt = super::build_prompt(&msgs, Some(phi4), "", "", Some("phi-4-mini"), Some(&tools));
+    assert!(
+        prompt.contains("terminal"),
+        "the model must be told its tool exists, got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("What time is it?"),
+        "the question must survive the retry, got:\n{prompt}"
+    );
+}
+
+/// The retry must not fire for a template that DOES use the variable — Qwen3
+/// renders its own `<tool_call>` framing and must keep it, not be handed our
+/// prose format on top.
+#[test]
+fn a_template_that_renders_tools_is_not_second_guessed() {
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {"name": "terminal", "parameters": {"type": "object", "properties": {}}},
+    })];
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "hi".to_string(),
+        images: Vec::new(),
+    }];
+    let prompt = super::build_prompt(
+        &msgs,
+        Some(QWEN3_OFFICIAL),
+        "",
+        "",
+        Some("qwen3-8b"),
+        Some(&tools),
+    );
+    assert!(prompt.contains("<tools>"), "got:\n{prompt}");
+    assert!(
+        !prompt.contains("respond with a JSON object"),
+        "the prose fallback must not be added on top:\n{prompt}"
+    );
+}
+
+/// Phi-3/3.5/4 close every turn with `<|end|>` while their GGUFs declare
+/// `<|endoftext|>` as EOS, so nothing stopped the reply there. Reproduced on
+/// v0.3.171: Phi-3.5 asked "Say exactly: hello" ran the full 120 tokens,
+/// `finish_reason: "length"`, having invented a second assistant turn and a
+/// fabricated user turn. The end-of-generation token id is the primary fix; this
+/// is what also removes a LEAKED marker from the text.
+#[test]
+fn a_phi_turn_closer_is_a_stop_string() {
+    let phi = "<|system|>\n{{ s }}<|end|>\n<|user|>\n{{ c }}<|end|>\n<|assistant|>\n";
+    let stops = super::extract_stop_strings(Some(phi));
+    assert!(
+        stops.contains(&"<|end|>".to_string()),
+        "<|end|> ends every phi turn, got {stops:?}"
+    );
+}
+
+/// The exclusion that makes the fix above safe. In harmony (gpt-oss) and
+/// solar-open, `<|end|>` separates messages inside a reply that is still being
+/// written, so stopping on it truncates every such reply at its first message.
+#[test]
+fn end_is_not_a_stop_where_it_separates_messages() {
+    let harmony = "<|start|>system<|message|>{{ s }}<|end|>\
+                   <|start|>assistant<|channel|>final<|message|>{{ c }}<|return|>";
+    let stops = super::extract_stop_strings(Some(harmony));
+    assert!(
+        !stops.contains(&"<|end|>".to_string()),
+        "<|end|> only separates harmony messages, got {stops:?}"
+    );
+}
+
+/// No template does NOT mean ChatML. `build_prompt_inner`'s no-template branch
+/// asks `fallback_by_model_name` first, so the prompt may be zephyr, llama3,
+/// gemma, mistral or vicuna — and this returned ChatML's single marker, leaving
+/// every one of those with no stop for the marker it will actually emit.
+#[test]
+fn no_template_still_stops_on_every_unsafe_marker() {
+    let stops = super::extract_stop_strings(None);
+    for expected in [
+        "<|im_end|>",
+        "<|eot_id|>",
+        "<|eom_id|>",
+        "<|start_header_id|>",
+        "<end_of_turn>",
+        "<|endoftext|>",
+    ] {
+        assert!(
+            stops.contains(&expected.to_string()),
+            "{expected} must stop even with no template, got {stops:?}"
+        );
+    }
+}
+
 /// Special tokens are never legitimate assistant output, so they must be stop
 /// strings even when this model's template doesn't mention them. Reported live
 /// 2026-07-25: a Llama-3.2 q8_0 returned `<|im_end|>hello</im_start>` — ChatML

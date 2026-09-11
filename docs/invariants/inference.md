@@ -651,3 +651,88 @@ duplicate `gguf_offset` would make `find_shard`'s binary search ambiguous.
 convenience wrapper — for three releases the sidecar had three writers and
 zero readers, and every weight-tied model was unservable on any node lacking
 shard 0 (gotcha #178).
+
+## A model's turn-ender is found in its vocabulary, not taken from its declared EOS
+
+**Rule:** `.claude/rules/architecture.md` § "A model's turn-ender is found in its
+vocabulary, not taken from its declared EOS".
+
+### What it replaced
+
+`eos_tokens_with_arch_fallback` carried per-family id lists for `qwen*` and
+`gemma*`, and they sat behind `if ids.is_empty()` — so they only ran for a GGUF
+that declared NO EOS at all. A model that declares one token and ends its turns
+with a different one was never considered. `split::entry` did not call the
+function at all: it used the declared ids verbatim, or a hardcoded
+`[2, 107, 32000]` when there were none.
+
+### What it was measured at
+
+Phi-3.5-mini-instruct-Q4_K_M, on the released v0.3.171 binary, 2026-09-11:
+
+- `tokenizer.ggml.eos_token_id = 32000` (`<|endoftext|>`), no `eot_token_id`
+  key, while `tokenizer.chat_template` closes every turn with `<|end|>` — token
+  **32007**, `token_type = 3` (CONTROL).
+- Resolved EOS set before: `[32000]`. After: `[32000, 32007]`.
+- End to end, a plain request with NO tools — "Say exactly: hello",
+  `max_tokens: 120`, `temperature: 0` — returned `finish_reason: "length"` and
+  120/120 completion tokens: *"Hello! How can I help you today? Hello! I'm Phi,
+  an AI digital assistant. What can I do for you? 你好，我需要一个关于如何在
+  Python中处理JSON数据的详细解释…"* — the model ended its turn, invented a second
+  assistant turn, then a fabricated user turn in Chinese, and began answering it.
+
+**The symptom differs by vocabulary family from this one cause**, which is why
+two field reports read as unrelated bugs:
+
+| Vocab | `decode_token_impl` does | Symptom |
+|---|---|---|
+| SentencePiece (Phi-3.5 GGUF) | any `<…>` token → empty | marker invisible, silent run-on |
+| GPT-2 byte BPE (Phi-4-mini GGUF) | chars → their own bytes | literal `<|end|>` in content, plus run-on |
+
+That is why the fix is the **token id**, not only a stop string: on the
+SentencePiece path the text never contains `<|end|>`, so a stop string could
+never match it.
+
+### What a change must keep
+
+- **The harmony exclusion.** `<|end|>` ends generation ONLY when the vocabulary
+  does not also hold `<|return|>`/`<|call|>` (o200k_harmony, gpt-oss) or
+  `<|calls|>`/`<|flush|>` (solar-open), where it separates messages inside a
+  reply still being written. Adding `<|end|>` unconditionally is correct for Phi
+  and silently truncates every harmony reply at its first message. llama.cpp
+  carries the identical exclusion in `llama_vocab::impl::load`, and reading that
+  before shipping is the only reason this is not in the codebase as a one-liner
+  bug.
+- **`</s>` and `<eos>` stay OUT**, though llama.cpp's candidate list has them.
+  Every name in `END_OF_GENERATION_TOKENS` is a `<|…|>` form whose only role in
+  any family is ending a turn; those two instead sit unused in the vocabularies
+  of families that never emit them — Phi-3.5's SPM vocab holds `</s>` at id 2 and
+  ends its turns with `<|end|>`. The severity ordering this file's sibling
+  already documents decides it: **a wrong EOS truncates SILENTLY, an unknown one
+  at worst runs to `max_tokens`, and those are not close.** A genuine Llama-2
+  vocabulary still gets id 2, from the narrowly-scoped
+  `ids.is_empty() && plausible(2)` branch.
+- **Turn OPENERS are not end-of-generation tokens.** `<|user|>`,
+  `<|assistant|>`, `<|system|>` mean the model has gone wrong and belong in
+  `extract_stop_strings` and `CONTROL_TOKEN_NAMES`, not here.
+- **Every path that resolves EOS ids merges the search in.** There were four,
+  and one of them (`split::entry`) had never called the arch fallback either.
+
+### The three places that act on a turn marker, and why each is separate
+
+1. **The EOS token id** (`gguf_meta`) — stops generation. Works on both vocab
+   families because it is checked on the id, before decoding.
+2. **`chat_template::extract_stop_strings`** — can also REMOVE a leaked marker
+   from the text, and is the only one that can. Template-gated, with the harmony
+   exclusion applied textually.
+3. **`inference::CONTROL_TOKEN_NAMES`** — scrubs a marker that leaked anyway.
+   Safe unconditionally, harmony included: *removing a control marker from
+   visible text and ending the reply at it are different decisions, and only the
+   second one truncates.*
+
+`extract_stop_strings(None)` returning ChatML's single marker was a fourth bug in
+the same area: `build_prompt_inner`'s no-template branch asks
+`fallback_by_model_name` first, so the prompt may be zephyr, llama3, gemma,
+mistral or vicuna — and each of those was left with no stop for the marker it
+will actually emit. It now returns the always-on list.
+

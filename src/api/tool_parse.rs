@@ -19,13 +19,27 @@
 //!
 //! Formats are tried in order, each independent:
 //!
-//! 1. **Generic** — `{"tool_calls": [{"function": {"name", "arguments"}}]}`.
-//!    What `format_tool_system_prompt` requests.
+//! 1. **Generic** — `{"tool_calls": [{"name", "arguments"}]}`, and the nested
+//!    `{"function": {"name", "arguments"}}` form. The flat one is what
+//!    [`format_tool_prompt`] requests; the nested one is the OpenAI wire shape,
+//!    which it used to request and which models still produce.
+//!
+//!    **What we ask for is as shallow as the parser allows, deliberately.** The
+//!    request used to be the full wire shape — five levels of nesting, plus an
+//!    `id` that [`assign_unique_ids`] always overwrites and a `type` nothing
+//!    reads — and a 4-bit 8B asked for that reproducibly miscounted its closing
+//!    delimiters: `"arguments": {"command": "date"}]}]}`, two `]` where `}`
+//!    belonged, identically on two different prompts (field report, Qwen3-8B,
+//!    2026-09-10). Asking for two useless fields and then discarding them buys
+//!    nothing and costs exactly the brace-matching the model got wrong.
 //! 2. **Hermes / Qwen-Instruct** — `<tool_call>{"name", "arguments"}</tool_call>`,
 //!    one block per call. The most common native format in circulating GGUFs.
 //! 3. **Mistral** — `[TOOL_CALLS][{"name", "arguments"}]`.
-//! 4. **Llama 3.x** — a bare `{"name", "parameters"}` object, optionally behind
-//!    a `<|python_tag|>` marker.
+//! 4. **Phi-4** — `functools[{"name", "arguments"}]`, or that array wrapped in
+//!    `<|tool_calls|>…<|/tool_calls|>`.
+//! 5. **Llama 3.x** — a bare `{"name", "parameters"}` object, optionally behind
+//!    a `<|python_tag|>` marker. Last, because it accepts a bare object and so
+//!    would swallow a more specific family's payload if tried before it.
 //!
 //! Adding a family means adding one `try_*` function and one line in
 //! [`parse_tool_calls`]. Deliberately NOT a trait or registry: four small
@@ -57,10 +71,10 @@ pub fn format_tool_prompt(tools: &[(String, Option<String>, Option<String>)]) ->
     let mut prompt = String::from(
         "You have access to the following tools. To call a tool, respond with a JSON object \
          in the following format:\n\
-         {\"tool_calls\": [{\"id\": \"call_<unique_id>\", \"type\": \"function\", \
-         \"function\": {\"name\": \"<function_name>\", \"arguments\": \"<json_args>\"}}]}\n\n\
+         {\"tool_calls\": [{\"name\": \"<function_name>\", \"arguments\": {…}}]}\n\n\
          `arguments` is a JSON object whose keys are the argument names listed below. \
-         Do not wrap it in `properties`, `parameters`, or a type declaration.\n\n\
+         Do not quote it as a string, and do not wrap it in `properties`, `parameters`, \
+         or a type declaration.\n\n\
          Available tools:\n",
     );
     for (name, description, schema) in tools {
@@ -217,6 +231,7 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
     let looks_like_tool_call = trimmed.contains("tool_call")
         || trimmed.contains("[TOOL_CALLS]")
         || trimmed.contains("<|python_tag|>")
+        || trimmed.contains("functools")
         // Not `starts_with('{')`: a model often prefixes prose before the
         // object, and requiring the object to be first re-introduces the bug
         // `parse_embedded_json` exists to fix.
@@ -228,6 +243,7 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
     try_generic(trimmed)
         .or_else(|| try_hermes(trimmed))
         .or_else(|| try_mistral(trimmed))
+        .or_else(|| try_phi(trimmed))
         .or_else(|| try_llama3(trimmed))
         .filter(|calls| !calls.is_empty())
         .map(assign_unique_ids)
@@ -242,7 +258,17 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
 /// needs an object, so the brace is reached first or the text cannot parse as
 /// a call at all. Leaving it out lets prose that merely mentions tool calls
 /// keep streaming.
-const CALL_MARKERS: [&str; 4] = ["<tool_call>", "[TOOL_CALLS]", "<|python_tag|>", "{"];
+const CALL_MARKERS: [&str; 6] = [
+    "<tool_call>",
+    "[TOOL_CALLS]",
+    "<|python_tag|>",
+    "<|tool_calls|>",
+    // Phi-4's marker sits BEFORE the brace, so without it the streaming
+    // surfaces emit the literal word `functools` as content and then withhold
+    // the call — the same leak the code-fence retraction above exists to stop.
+    "functools",
+    "{",
+];
 
 /// How many bytes at the END of `text` could be the beginning of `marker`.
 ///
@@ -296,11 +322,41 @@ pub fn content_prefix_len(text: &str) -> usize {
             safe = safe.min(text.len() - partial_marker_overlap(text, marker));
         }
     }
+    // A code fence that opens right where a call may begin is scaffolding FOR
+    // the call, not content. `strip_code_fences` already removes it before
+    // parsing, so a fenced call parses fine — but the prefix was measured on the
+    // unstripped text, and a reply of "```json\n{…call…}" therefore returned a
+    // structured tool call beside a `content` of exactly "```json". Observed on
+    // phi-3.5-mini, 2026-09-11.
+    //
+    // Pulled back only when something follows: a trailing fence with nothing
+    // after it is an ordinary unterminated code block and stays content.
+    if safe < text.len() {
+        safe = retract_over_fence_opener(text, safe);
+    }
     // Never cut inside a character.
     while safe > 0 && !text.is_char_boundary(safe) {
         safe -= 1;
     }
     safe
+}
+
+/// Move `safe` back over a code-fence opener that ends the safe prefix.
+///
+/// Recognises the two shapes a model actually emits before a fenced tool call:
+/// "```" and "```<lang>", each optionally followed by a newline. Anything else
+/// is left alone, so a fence with real prose before it keeps that prose.
+fn retract_over_fence_opener(text: &str, safe: usize) -> usize {
+    let head = text[..safe].trim_end_matches(['\n', '\r']);
+    let Some(at) = head.rfind("```") else {
+        return safe;
+    };
+    // Everything between the backticks and the cut must be a bare language tag.
+    if head[at + 3..].chars().all(|c| c.is_ascii_alphanumeric()) {
+        at
+    } else {
+        safe
+    }
 }
 
 /// A tool-carrying reply as it is generated, releasing the part that is
@@ -472,6 +528,15 @@ fn assign_unique_ids(mut calls: Vec<ParsedToolCall>) -> Vec<ParsedToolCall> {
 /// Models wrap JSON in ``` constantly — the report that prompted this included a
 /// response ending in a stray fence. An unterminated opening fence is also
 /// handled, since that is what truncation at `max_tokens` produces.
+///
+/// **The block is taken up to its CLOSING fence, not to the end of the text.**
+/// Requiring the whole reply to be one fenced block is the same
+/// whole-string-must-parse mistake [`parse_embedded_json`] exists to undo, and it
+/// defeated the one case a chatty model reliably produces: a fenced call followed
+/// by an explanation of it. Measured on phi-3.5-mini, 2026-09-11 — the identical
+/// call parsed alone and fenced, and returned `tool_calls: null` with the whole
+/// thing as text once the model added "Cette demande JSON spécifie…" after the
+/// closing fence, because the trailing fence and prose reached the brace scan.
 fn strip_code_fences(text: &str) -> &str {
     let t = text.trim();
     let Some(rest) = t.strip_prefix("```") else {
@@ -482,7 +547,13 @@ fn strip_code_fences(text: &str) -> &str {
         Some(nl) => &rest[nl + 1..],
         None => rest,
     };
-    rest.trim_end().strip_suffix("```").unwrap_or(rest).trim()
+    match rest.find("```") {
+        // Closing fence found: the block is what is between the two, whatever
+        // follows it.
+        Some(end) => rest[..end].trim(),
+        // No closing fence — an unterminated block, i.e. truncation.
+        None => rest.trim(),
+    }
 }
 
 /// Parse the first complete JSON object embedded in `text`.
@@ -819,6 +890,47 @@ fn try_llama3(text: &str) -> Option<Vec<ParsedToolCall>> {
         );
     }
     single_value_call(&v, 0).map(|c| vec![c])
+}
+
+/// Phi-4 — `functools[{"name", "arguments"}, …]`, or the same array wrapped in
+/// `<|tool_calls|>…<|/tool_calls|>`.
+///
+/// Phi-4-mini-instruct is trained by its publisher specifically for function
+/// calling and documents both spellings, and neither parsed: every call it made
+/// was handed to the caller as raw assistant text with no `tool_calls` field, so
+/// an agentic client executed nothing and saw no error. Reported from the field
+/// 2026-09-10 against `microsoft_Phi-4-mini-instruct-GGUF`, chosen by the
+/// reporter *as a control* on the grounds that a model built for this should be
+/// the case that works.
+///
+/// The array is parsed with a streaming deserializer rather than
+/// `serde_json::from_str`, because the model appends prose after the closing
+/// bracket about as often as not — and requiring the whole remainder to be JSON
+/// is the same mistake [`parse_embedded_json`] exists to undo.
+fn try_phi(text: &str) -> Option<Vec<ParsedToolCall>> {
+    let body = text
+        .split_once("<|tool_calls|>")
+        .or_else(|| text.split_once("functools"))
+        .map(|(_, rest)| rest)?
+        .trim_start();
+    let body = body
+        .split_once("<|/tool_calls|>")
+        .map_or(body, |(before, _)| before);
+    let v: Value = serde_json::Deserializer::from_str(body)
+        .into_iter::<Value>()
+        .next()?
+        .ok()?;
+    // An array of calls is the documented shape; a lone object is accepted for
+    // the same reason `try_generic` accepts one — the wrapper is what models drop.
+    match v.as_array() {
+        Some(arr) => Some(
+            arr.iter()
+                .enumerate()
+                .filter_map(|(i, e)| single_value_call(e, i))
+                .collect(),
+        ),
+        None => single_value_call(&v, 0).map(|c| vec![c]),
+    }
 }
 
 /// Parse one `{"name", "arguments"|"parameters"}` object from a JSON string.
@@ -1177,9 +1289,199 @@ mod tests {
         assert!(b[1].arguments.contains("Lima"));
     }
 
-    /// The format our own system prompt requests.
+    /// A model that fences its tool call returned a perfectly good `tool_calls`
+    /// array beside a `content` of exactly "```json". Observed on
+    /// phi-3.5-mini via `/v1/chat/completions`, 2026-09-11.
+    ///
+    /// `strip_code_fences` already removed the fence before parsing; the prefix
+    /// was measured on the UNSTRIPPED text, so the two disagreed about the same
+    /// reply.
     #[test]
-    fn parses_the_generic_format_we_prompt_for() {
+    fn a_fence_opening_a_tool_call_is_not_content() {
+        for reply in [
+            "```json\n{\"tool_calls\": [{\"function\": {\"name\": \"t\", \"arguments\": {}}}]}\n```",
+            "```\n{\"name\": \"t\", \"arguments\": {}}\n```",
+            "```json{\"name\": \"t\", \"arguments\": {}}",
+        ] {
+            assert_eq!(
+                super::leading_content(reply),
+                None,
+                "a fence is scaffolding for the call, not content: {reply:?}"
+            );
+        }
+    }
+
+    /// The fence retraction must not eat real prose. Text before the fence is
+    /// content the model produced and the wire format carries it beside the call.
+    #[test]
+    fn prose_before_a_fenced_call_is_still_content() {
+        let reply = "Here is the call:\n```json\n{\"name\": \"t\", \"arguments\": {}}\n```";
+        assert_eq!(super::leading_content(reply), Some("Here is the call:"));
+    }
+
+    /// An unterminated fence with nothing after it is an ordinary code block
+    /// being written, not a call being set up, and stays content.
+    #[test]
+    fn a_trailing_fence_with_nothing_after_it_stays_content() {
+        assert_eq!(super::content_prefix_len("```json"), 7);
+        assert_eq!(super::content_prefix_len("answer:\n```"), 11);
+    }
+
+    /// Phi-4-mini-instruct is trained by its publisher for function calling and
+    /// documents both spellings. Neither parsed: every call it made came back as
+    /// raw assistant text with no `tool_calls` field, so an agentic client
+    /// executed nothing and saw no error. Reported from the field 2026-09-10,
+    /// where the reporter had picked this model precisely as a control.
+    #[test]
+    fn parses_the_phi4_formats() {
+        let expect = |calls: Option<Vec<super::ParsedToolCall>>, label: &str| {
+            let calls = calls.unwrap_or_else(|| panic!("{label} did not parse"));
+            assert_eq!(calls.len(), 1, "{label}: {calls:?}");
+            assert_eq!(calls[0].name, "terminal", "{label}");
+            assert_eq!(calls[0].arguments, r#"{"command":"date"}"#, "{label}");
+        };
+        expect(
+            super::parse_tool_calls(
+                r#"functools[{"name": "terminal", "arguments": {"command": "date"}}]"#,
+            ),
+            "functools",
+        );
+        expect(
+            super::parse_tool_calls(
+                r#"<|tool_calls|>[{"name": "terminal", "arguments": {"command": "date"}}]<|/tool_calls|>"#,
+            ),
+            "tool_calls tags",
+        );
+        // Prose after the closing bracket is what the model actually does.
+        expect(
+            super::parse_tool_calls(
+                r#"functools[{"name": "terminal", "arguments": {"command": "date"}}]
+                   I will run that for you."#,
+            ),
+            "trailing prose",
+        );
+    }
+
+    /// Two calls in one `functools` array, which is the documented multi-call
+    /// shape ("all function calls generated in a single JSON list").
+    #[test]
+    fn parses_several_phi4_calls_in_one_list() {
+        let calls = super::parse_tool_calls(
+            r#"functools[{"name": "a", "arguments": {}}, {"name": "b", "arguments": {"x": 1}}]"#,
+        )
+        .expect("should parse");
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+        assert_ne!(calls[0].id, calls[1].id, "ids must be unique");
+    }
+
+    /// The marker must not turn ordinary prose into a tool call, and a truncated
+    /// list stays text like every other family's.
+    #[test]
+    fn a_phi4_marker_alone_is_not_a_tool_call() {
+        for text in [
+            "The Python functools module provides lru_cache.",
+            r#"functools[{"name": "terminal", "arguments": {"command": "da"#,
+            "functools[]",
+        ] {
+            assert_eq!(super::parse_tool_calls(text), None, "text: {text:?}");
+        }
+    }
+
+    /// Phi-4's marker sits BEFORE the brace, so the streaming surfaces must
+    /// withhold it rather than emit the literal word `functools` as content.
+    #[test]
+    fn the_phi4_marker_is_never_streamed_as_content() {
+        assert_eq!(
+            super::leading_content(
+                r#"functools[{"name": "terminal", "arguments": {"command": "date"}}]"#
+            ),
+            None
+        );
+        assert_eq!(
+            super::leading_content(
+                r#"Sure.<|tool_calls|>[{"name": "t", "arguments": {}}]<|/tool_calls|>"#
+            ),
+            Some("Sure.")
+        );
+    }
+
+    /// A chatty model fences its call and then explains it. Requiring the whole
+    /// reply to be one fenced block meant the trailing fence and prose reached the
+    /// brace scan, and a call this parser recovers perfectly well on its own came
+    /// back as `tool_calls: null` with the JSON visible to the user. Measured on
+    /// phi-3.5-mini, 2026-09-11, including the dropped outer brace it really
+    /// emitted.
+    #[test]
+    fn a_fenced_call_followed_by_prose_still_parses() {
+        let reply = "```json\n\
+             {\"tool_calls\": [{\"name\": \"terminal\", \"arguments\": {\"command\": \"date\"}}]\n\
+             ```\n\nCette demande JSON spécifie l'utilisation de la commande `date`.";
+        let calls = parse_tool_calls(reply).expect("a fenced call with prose after it");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].name, "terminal");
+        assert_eq!(calls[0].arguments, r#"{"command":"date"}"#);
+    }
+
+    /// Prose on BOTH sides of the fence. The explanation the model adds is its
+    /// content and the wire format carries it beside the call, so it must neither
+    /// be dropped nor mistaken for part of the call.
+    ///
+    /// Uses the wrapped form deliberately: a BARE `{"name", "arguments"}` object
+    /// surrounded by prose is NOT accepted, and must not be. `try_llama3` is the
+    /// only parser that takes a bare object and it requires the whole text to be
+    /// that object — loosening it would turn any reply discussing a JSON value
+    /// with a `name` field into a tool call the user never approved, which this
+    /// module's whole stance is against.
+    #[test]
+    fn prose_on_both_sides_of_a_fenced_call_is_handled() {
+        let reply = "Voici l'appel :\n```json\n\
+             {\"tool_calls\": [{\"name\": \"terminal\", \"arguments\": {\"command\": \"ls\"}}]}\n\
+             ```\nCela liste les fichiers.";
+        assert_eq!(super::leading_content(reply), Some("Voici l'appel :"));
+        let calls = parse_tool_calls(reply).expect("should parse");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].arguments, r#"{"command":"ls"}"#);
+    }
+
+    /// The guard the test above relies on: a bare call object mentioned inside
+    /// prose stays prose. Inventing a call from a JSON value a model merely talked
+    /// about would be worse than showing the text.
+    #[test]
+    fn a_bare_call_object_inside_prose_is_not_a_tool_call() {
+        assert_eq!(
+            parse_tool_calls(r#"The record looks like {"name": "Alice", "arguments": {}}."#),
+            None
+        );
+    }
+
+    /// The shape `format_tool_prompt` requests today: flat, no `id`, no `type`.
+    ///
+    /// Those two fields were in the request until 2026-09-11 and both were
+    /// discarded — `assign_unique_ids` always overwrites the id, and nothing ever
+    /// read `type` — so asking for them bought nothing and cost exactly the
+    /// delimiter-matching a 4-bit model gets wrong.
+    #[test]
+    fn parses_the_flat_shape_we_now_prompt_for() {
+        let text = r#"{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Paris"}}]}"#;
+        let calls = parse_tool_calls(text).expect("should parse");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
+        // The prompt and the parser must not drift apart: what we ask a model for
+        // has to be something we can read back.
+        assert!(
+            format_tool_prompt(&[("get_weather".to_string(), None, None)])
+                .contains(r#"{"tool_calls": [{"name": "<function_name>", "arguments": {…}}]}"#),
+            "the requested shape changed without this test"
+        );
+    }
+
+    /// The full OpenAI wire shape, which we no longer ask for and must still
+    /// accept — plenty of models emit it from pretraining regardless of the prompt.
+    #[test]
+    fn parses_the_nested_openai_shape_we_no_longer_request() {
         let text = r#"{"tool_calls": [{"id": "call_abc", "type": "function",
             "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}]}"#;
         let calls = parse_tool_calls(text).expect("should parse");
