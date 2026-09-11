@@ -177,7 +177,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
-- CI pipeline: `cargo fmt` → `cargo clippy --all-targets -- -D warnings` → `cargo test` → `cargo build --release`, plus **`actionlint` over `.github/workflows/` (job `Workflow lint`, added 2026-09-11)** — it runs `shellcheck` on every `run:` block, which is what guards the retry loops those steps depend on. **CI is now 14 jobs, not 13** (the release gate's "CI 13/13" wording predates this).
+- CI pipeline: `cargo fmt` → `cargo clippy --all-targets -- -D warnings` → `cargo test` → `cargo build --release`, plus **`actionlint` over `.github/workflows/` (job `Workflow lint`, added 2026-09-11)** — it runs `shellcheck` on every `run:` block, which is what guards the retry loops those steps depend on. **CI is 14 jobs**, and all 14 are required by branch protection since 2026-09-11.
 - **`examples/check_ci_gate.sh`** — does branch protection still require the checks CI actually produces? A required check is matched to a job by NAME, so a renamed job leaves the rule naming a job that never reports, and **every PR becomes permanently unmergeable** (gotcha #530). Reading protection needs admin, which `GITHUB_TOKEN` does not have, so this is a script you run rather than a job. Reports drift in both directions — required-but-absent (blocks everything) and produced-but-not-required (gates nothing). **Run it as part of the release gate.** As of 2026-09-11 it reports `Clippy (windows-latest / default)` and `Workflow lint` as unenforced.
 
 ## Key Design Decisions
@@ -225,73 +225,57 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2569 lib (dev,claude-subscription) — re-measured 2026-09-11, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 85 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.172-alpha (2026-09-11, tag on commit
-`e807ce38`).** Gate: audit as documented (the two `hickory-proto` advisories +
-the `paste` warning); **CI 14/14 AND Cache warm 3/3 both on the TAGGED commit**,
-checked job-by-job, with both flash-attn kernel caches showing *restored* AND
-*"All library kernels up-to-date, skipping compilation"*; release built **10/10
-first time**, 25 assets, all seven platform archives present BY NAME, `latest`,
-not draft; **smoke 9/9 + shapes 7/7 + family-conformance 24/24 across four
-families on the DOWNLOADED artifact**, against .171 baselines taken FIRST that
-scored 9/9 and 7/7. Both nodes verified: ids and `identity.key` md5 unchanged,
-installed binary byte-identical to the download, deb hash re-verified AFTER
-transfer, journal 0 ERROR, paired. **The Phi defect confirmed fixed on the
-deployed release binary** — the request that ran 120/120 tokens inventing a
-conversation this morning now answers in 9 and stops. Rollback
-`~/.local/bin/swarmllm.0.3.171-alpha.bak`, backups pruned to newest 3.
+**Released and deployed: v0.3.172-alpha (2026-09-11, tag on `e807ce38`).**
+Gate clean and checked job-by-job: CI 14/14 + Cache warm 3/3 on the TAGGED
+commit (both kernel caches *restored* AND *"kernels up-to-date, skipping
+compilation"*), release 10/10 first time, 25 assets, all 7 archives present BY
+NAME, `latest`, not draft; **smoke 9/9 + shapes 7/7 + conformance 24/24 on the
+DOWNLOADED artifact**, against .171 baselines taken FIRST that scored the same.
+Both nodes verified — ids and `identity.key` unchanged, install byte-identical,
+deb hash re-checked AFTER transfer, 0 ERROR, paired. **The Phi fix confirmed on
+the deployed binary**: a request that ran 120/120 tokens inventing a conversation
+now answers in 9 and stops. Rollback `~/.local/bin/swarmllm.0.3.171-alpha.bak`.
+Full detail: `memory/round_log_0911_*.md`.
 
-**What it carries**: Phi models stop at the end of their turn instead of
-inventing the next one — every Phi-3/3.5/4 declares one end-of-sequence token and
-ends each turn with a different one, so nothing stopped the reply; on one
-vocabulary family the marker leaked into the text, on the other the seam was
-invisible and the model simply rambled. Plus four tool-calling fixes, three of
-them found by a new pre-release check: Phi-4's own call format was unreadable,
-Qwen2.5-Coder used the wrong one of two tags its prompt names and so made no
-working call at all, a template that mentions tools without using them left the
-model told nothing, a fenced call followed by an explanation went unparsed, and a
-model repeating its tool list back was mistaken for calling one — passing a
-parameter *definition* where argument values belong.
+**What it carries**: Phi models stop at the end of their turn — every Phi-3/3.5/4
+declares one end-of-sequence token and ends each turn with ANOTHER, so nothing
+stopped the reply (the marker leaked on a BPE vocabulary, the seam was invisible
+on a SentencePiece one). Plus four tool-calling fixes: Phi-4's own call format was
+unreadable, Qwen2.5-Coder used the wrong one of two tags its own prompt names and
+so made no working call at all, a template mentioning tools without using them
+left the model told nothing, a fenced call followed by prose went unparsed, and an
+echoed tool DEFINITION was taken for a call — passing a parameter schema where
+argument values belong.
 
-⚠ **`examples/family_conformance.sh` is new and is part of the gate.** The four
-releases .169-.172 each fixed a field-reported, family-specific prompt/stop/tool
-defect and **all four pass `release_shapes.sh`**, which runs ONE family and
+⚠ **`examples/family_conformance.sh` is NEW and is part of the release gate.**
+Releases .169-.172 each fixed a field-reported, family-specific prompt/stop/tool
+defect and **all four PASS `release_shapes.sh`**, which runs ONE family and
 asserts `>3` tokens came back. Run conformance on the DOWNLOADED artifact.
 
-⚠ **NEW OPEN BUG — FUTURE_WORK #43: Phi-4-mini cannot serve a single request on
-the shard path.** `attn: slice-set only supports contiguous tensors`. It is GQA
-(24 head / 8 kv, fused QKV) where Phi-3.5 is 32/32. Pre-existing, not a .172
-regression. **The field reports on that model came via `-m` (llama.cpp, which
-handles GQA itself), so they say nothing about our path.**
+⚠ **OPEN: FUTURE_WORK #43 — Phi-4-mini cannot serve one request on the shard
+path** (`attn: slice-set only supports contiguous tensors`; GQA 24/8 against a
+fused QKV where Phi-3.5 is 32/32). Pre-existing. **Field reports on that model
+came via `-m`/llama.cpp, which handles GQA itself, so they say NOTHING about our
+path — ask which PATH a report exercised.**
 
-⚠ **Branch protection requires 14 contexts as of 2026-09-11** (was 12; `Clippy
+⚠ **Branch protection requires 14 contexts since 2026-09-11** (was 12; `Clippy
 (windows-latest / default)` and `Workflow lint` added). Verify with
-`examples/check_ci_gate.sh` — reading protection needs admin, which
-`GITHUB_TOKEN` lacks, so it is a script and not a job. Gotcha #530.
+`examples/check_ci_gate.sh` — reading protection needs admin the `GITHUB_TOKEN`
+lacks, so it is a script, not a job. A required check naming a job that no longer
+exists blocks EVERY PR for ever (gotcha #530).
 
-⚠ **The Actions cache is managed now, and `cache-gc.yml` used to be able to make
-it worse.** It was REF-BLIND: it grouped by job and kept the newest, so main's
-live 630 MB cache lost to a pull request's copy that main cannot read. It now
-groups by `(ref, job)`, deletes by id (keys are not unique across refs) and
-reclaims closed-PR and superseded-tag caches. Cleaned 11.15 → 7.50 GB on
-2026-09-11; both 32 MB kernel caches survive and are hit warm. Gotchas #538,
-#543.
+⚠ **`cache-gc.yml` could delete a LIVE cache until 2026-09-11.** It grouped by
+job and ignored the ref, so main's cache lost to a pull request's copy that main
+cannot read. Now groups by `(ref, job)`, deletes by id, reclaims closed-PR and
+old-tag caches. Cleaned 11.15 → 7.50 GB; both 32 MB kernel caches survive and hit
+warm. Gotchas #538, #543.
 
-⚠ **A required status check can name a job that no longer exists** — two of
-this repo's did, so they enforced NOTHING and **every PR was permanently
-BLOCKED**. Corrected 2026-09-10 and re-verified at this release.
-**Re-check the protection contexts against `gh run view --json jobs` whenever a
-job is renamed.** Gotcha #530.
+### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
-### Earlier rounds — one line each. Detail in `memory/round_log_*.md`,
-gotcha numbers index `memory/gotchas.md`. **Read the named round log before
-re-deriving any of these.** Older than .160: `memory/round_history.md`.
-
-- **.165** (09-08): the round a `/code-review` of .164 started — **#495 had shipped INERT** (a transport failure recorded as a perfect delivery; fixed structurally with `#[serde(skip)] locally_constructed`), the prompt-trust bar was on 2 of 3 paths, and per-peer GOODPUT (BBR-shaped) closed issue #21's open half. ⚠ Not field-verified against netem. ⚠ Null controls caught THREE tests passing for the wrong reason. `round_log_0908_review_and_165.md`.
-- **.164** (09-08): the STABILITY round — #447(iii) (the gate proposes, the search chooses), the prompt-trust bar, and #495 (the loss term had NO input on the chain path, found from OUTSIDE by a contributor's netem lab). ⚠ The .164 field A/B was CONFOUNDED by two different BUILDS (#496). `round_log_0908_stability_round.md`.
-- **.162** (09-07): EIGHT fixes from the 16 GB Mac mini tester's eight reports (#017-#024). ⚠ THREE of the eight were WRONG about the CAUSE; #017/#018 are ONE knot and a naive cost comparison would have shipped a 503. `round_log_0907_macmini_eight_reports.md`.
-- **.160/.161** (09-06): TEN fixes + a correction, mostly from questions parked on a reporter who was assumed never to answer; #484 a FALSE PRIVACY ASSURANCE, #481 a regression we shipped in .154. .161 was a same-day hotfix — the dashboard would not load AT ALL. `round_log_0906_delegation_shape.md`.
-- **.132-.159** (08-29→09-06): the guards-were-the-defect audit (#413 — five tested by PLANTING the violation, four could not see what they guard); the small-machine harness `examples/constrained_node_test.sh`; #467 (#461 covered 3 of NINE worker-removal sites); #449 ALL inference broken on every Mac; #472 a content hash recomputed mid-corrections. `round_history.md` has one line each.
-- **.15-.131** (07-23→08-28): the era that produced most of the rules. A corrupt shard PROVED to spread and only the ORIGIN settles it (#382), then .121 quarantined the GOOD copy (#384) — **a repair mechanism is a destruction mechanism**; 25.7x from a budget read off the BOOT SNAPSHOT (#281, third time → `SharedState::cfg()`); credits switched OFF; AVX2 compiled OUT of releases (3.09x). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement.**
+- **.166-.171** (09-09→09-10): five field-driven releases in two days. **Every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` and a context that will not fit is SHRUNK not refused (.170); **tools were NEVER passed to the template** — unreachable on every request ever served — plus an escrow that MINTED credits (.171). ⚠ Branch protection required two jobs that no longer existed; every PR was permanently BLOCKED (#530).
+- **.160-.165** (09-06→09-08): #484 a FALSE PRIVACY ASSURANCE; #495 shipped INERT (a transport failure recorded as a perfect delivery); the prompt-trust bar; per-peer GOODPUT closing issue #21's open half. ⚠ Null controls caught THREE tests passing for the wrong reason.
+- **.132-.159** (08-29→09-06): the guards-were-the-defect audit (#413 — five tested by PLANTING the violation, four could not see what they guard); #449 ALL inference broken on every Mac; #472 a content hash recomputed mid-fix.
+- **.15-.131** (07-23→08-28): the era that produced most of the rules. A corrupt shard PROVED to spread and the repair QUARANTINED THE GOOD COPY (#382/#384) — **a repair mechanism is a destruction mechanism**; 25.7x from a budget read off the BOOT SNAPSHOT (#281 → `SharedState::cfg()`); credits switched OFF; AVX2 compiled OUT of releases (3.09x). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement.**
 - **R136-R150 + the 20 build phases**: NAT/reachability, SWARM-SPEC cascade, `swarmpool://` v2, cross-pool routing. `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)
