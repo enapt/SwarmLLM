@@ -302,7 +302,23 @@ pub async fn hf_download_shards(
     let response_shards = shard_indices.clone();
 
     // Register download: AcquisitionStatus + cancel flag atomically.
-    let cancel_flag = shared.models.begin_download(mid.clone(), status);
+    let (cancel_flag, already_in_flight) = shared.models.begin_download(mid.clone(), status);
+    // A shard already on its way is left to the download that owns it. Starting
+    // a second fetch puts two writers on one `.tmp`: one finishes and registers
+    // the shard, the other keeps going and reports a size mismatch against a
+    // file it no longer owns. Field report, 2026-09-11.
+    let shard_indices: Vec<u32> = shard_indices
+        .into_iter()
+        .filter(|i| !already_in_flight.contains(i))
+        .collect();
+    if !already_in_flight.is_empty() {
+        tracing::info!(
+            model = %model_id_str,
+            shards = ?already_in_flight,
+            remaining = shard_indices.len(),
+            "shards already downloading — not starting a second fetch for them"
+        );
+    }
 
     // Capture network_tx for broadcasting HfSourceGossip + ModelManifest after download
     let network_tx = state.network_tx.clone();

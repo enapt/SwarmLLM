@@ -316,15 +316,51 @@ impl ModelMgmt {
     /// a cancel flag atomically from the caller's perspective, so subsystems
     /// that observe one but not the other (auto-manage scan vs hf download)
     /// don't race. Returns the cancel flag Arc.
+    /// Register a download, returning its cancel flag and **the requested
+    /// shards that were already being fetched**.
+    ///
+    /// The per-shard marks in `acquisition_progress` are how a second fetch of
+    /// one shard is avoided — auto-manage skips any shard marked `Downloading`.
+    /// This used to `insert` the new status wholesale, which erased those marks
+    /// for every shard the new request did not mention, and told the caller
+    /// nothing about the ones it did. So asking for a shard that was already on
+    /// its way started a SECOND download of it: two writers on one `.tmp`, one
+    /// of them finishing and registering the shard while the other kept going
+    /// and then reported `size mismatch: expected N bytes but wrote 0 bytes`.
+    /// Reported from the field 2026-09-11.
+    ///
+    /// Existing marks are therefore carried over, and the shards already in
+    /// flight are handed back so the caller can leave them alone.
     pub fn begin_download(
         &self,
         model_id: crate::types::ModelId,
-        status: crate::model::acquisition::AcquisitionStatus,
-    ) -> Arc<AtomicBool> {
+        mut status: crate::model::acquisition::AcquisitionStatus,
+    ) -> (Arc<AtomicBool>, Vec<u32>) {
+        use crate::model::acquisition::{AcquisitionState, ShardState};
+        let mut already_in_flight = Vec::new();
+        if let Some(existing) = self.acquisition_progress.get(&model_id) {
+            if matches!(existing.state, AcquisitionState::Downloading) {
+                for (&index, progress) in &existing.shard_progress {
+                    if matches!(progress.state, ShardState::Downloading) {
+                        if status.shard_progress.contains_key(&index) {
+                            already_in_flight.push(index);
+                        }
+                        // The live download owns this shard's progress.
+                        status.shard_progress.insert(index, progress.clone());
+                    } else {
+                        status
+                            .shard_progress
+                            .entry(index)
+                            .or_insert_with(|| progress.clone());
+                    }
+                }
+            }
+        }
+        already_in_flight.sort_unstable();
         let flag = Arc::new(AtomicBool::new(false));
         self.acquisition_progress.insert(model_id.clone(), status);
         self.download_cancel_flags.insert(model_id, flag.clone());
-        flag
+        (flag, already_in_flight)
     }
 
     /// Item 8 Phase 1: replace this peer's known set of prefix-cache block
@@ -928,6 +964,91 @@ mod tests {
         assert!(
             m.shard_download_backoff.get(&s).is_none(),
             "entry idle past the forget window self-evicts on read"
+        );
+    }
+
+    /// Registering a download must not erase the in-flight marks of shards it
+    /// is not asking for, and must say which of the ones it IS asking for are
+    /// already on their way.
+    ///
+    /// The reported failure: a shard already downloading was requested again,
+    /// a second fetch started, and the two wrote the same `.tmp` — one
+    /// finished and registered the shard while the other carried on and then
+    /// reported `size mismatch: expected N bytes but wrote 0 bytes`.
+    #[test]
+    fn a_second_request_for_a_downloading_shard_is_reported_not_restarted() {
+        use crate::model::acquisition::{AcquisitionStatus, ShardProgress};
+        let mgmt = make_mgmt();
+        let mid = ModelId("m".into());
+
+        let mut first = AcquisitionStatus::new_downloading(
+            mid.clone(),
+            2,
+            0,
+            "huggingface",
+            "auto",
+            "first".to_string(),
+        );
+        first
+            .shard_progress
+            .insert(0, ShardProgress::new_downloading(0, 0));
+        first
+            .shard_progress
+            .insert(1, ShardProgress::new_downloading(1, 0));
+        let (_flag, already) = mgmt.begin_download(mid.clone(), first);
+        assert!(already.is_empty(), "nothing was in flight yet");
+
+        // A user asks for shard 0 — already going — while shard 1 is untouched.
+        let mut second = AcquisitionStatus::new_downloading(
+            mid.clone(),
+            1,
+            0,
+            "huggingface",
+            "user",
+            "second".to_string(),
+        );
+        second
+            .shard_progress
+            .insert(0, ShardProgress::new_downloading(0, 0));
+        let (_flag, already) = mgmt.begin_download(mid.clone(), second);
+        assert_eq!(already, vec![0], "shard 0 was already being fetched");
+
+        let entry = mgmt
+            .acquisition_progress
+            .get(&mid)
+            .expect("the model keeps an entry");
+        assert!(
+            entry.shard_progress.contains_key(&1),
+            "shard 1 was not mentioned by the second request and must keep its \
+             in-flight mark — erasing it is what let a duplicate start"
+        );
+        assert_eq!(entry.shard_progress.len(), 2);
+    }
+
+    /// A model with no download in progress registers exactly as before.
+    #[test]
+    fn registering_a_fresh_download_reports_nothing_in_flight() {
+        use crate::model::acquisition::{AcquisitionStatus, ShardProgress};
+        let mgmt = make_mgmt();
+        let mid = ModelId("m".into());
+        let mut status = AcquisitionStatus::new_downloading(
+            mid.clone(),
+            1,
+            0,
+            "huggingface",
+            "user",
+            "only".to_string(),
+        );
+        status
+            .shard_progress
+            .insert(3, ShardProgress::new_downloading(3, 0));
+        let (_flag, already) = mgmt.begin_download(mid.clone(), status);
+        assert!(already.is_empty());
+        assert_eq!(
+            mgmt.acquisition_progress
+                .get(&mid)
+                .map(|e| e.shard_progress.len()),
+            Some(1)
         );
     }
 }

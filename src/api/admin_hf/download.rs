@@ -43,7 +43,7 @@ pub async fn hf_download(
         "user",
         format!("Downloading {} from HuggingFace...", filename),
     );
-    let _hf_cancel_flag = shared.models.begin_download(mid.clone(), status);
+    let (_hf_cancel_flag, _already) = shared.models.begin_download(mid.clone(), status);
 
     tokio::spawn(async move {
         let mut shutdown_rx = shared.shutdown_rx();
