@@ -143,6 +143,10 @@ struct NodeCandidate {
 /// cannot take an 8 GB model and its processor budget was already full. The
 /// information to route around it was on the wire and nothing consulted it.
 fn max_hostable_layers(
+    // The model's own layer count, and a ceiling on the answer. Nothing can
+    // host more layers of a model than the model has, and without this the
+    // warm branch below reports figures that are not about hosting at all.
+    model_layers: u32,
     capability: Option<&swarmllm_types::NodeCapability>,
     bytes_per_layer: u64,
     already_warm: bool,
@@ -198,7 +202,22 @@ fn max_hostable_layers(
     // so an over-commitment reads as no room rather than wrapping to all of it.
     let free_mb = free_mb.saturating_sub(committed_mb);
     let usable_bytes = (free_mb as f64 * 1_048_576.0 / margin) as u64;
-    Some((usable_bytes / per_layer) as u32)
+    // Clamped by the model, because the warm branch above answers a narrower
+    // question than its name. A warm peer is charged KV only, so with a short
+    // prompt the divisor is a few hundred KB and the quotient is thousands —
+    // `max_hostable_layers=14008` for a 32-layer model, reported from the field
+    // on 2026-09-11 beside the same peer's cold reading of 97.
+    //
+    // The exemption itself is right as far as it goes: the advertised free
+    // figure already excludes the weights of whatever is resident, so charging
+    // for them again double-counts. What it cannot know is HOW MUCH is
+    // resident — `peer_model_is_warm` answers about the MODEL, not its layers —
+    // so it exempts every layer under consideration, including ones whose
+    // weights the peer has not paid for. The ceiling does not fix that; it
+    // bounds the damage and stops the number being nonsense. A peer that is
+    // warm for part of a model and holds the rest only on disk can still be
+    // credited with more than it can hold — see `docs/FUTURE_WORK.md`.
+    Some(((usable_bytes / per_layer) as u32).min(model_layers))
 }
 
 /// KV-cache bytes ONE prompt position costs across ONE layer of `meta`'s model
@@ -3006,6 +3025,7 @@ impl PipelineScheduler {
                     let for_margin = |margin: f64| {
                         self.shared_state.peer_registry.get(&node_id).and_then(|p| {
                             max_hostable_layers(
+                                manifest.num_layers,
                                 p.capability.as_ref(),
                                 bytes_per_layer,
                                 warm,

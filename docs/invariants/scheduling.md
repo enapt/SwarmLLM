@@ -878,6 +878,22 @@ really there — so asking about `gpu` first judged it by memory its models woul
 never occupy while it loaded every one of them into RAM. That ordering was
 right only while the card was the only thing that answered.
 
+**The warm exemption is bounded by the model, because it is broader than its
+own justification.** Free memory excludes what is resident, so charging a warm
+peer for weights again double-counts — but `peer_model_is_warm` answers about
+the MODEL, not which of its layers are resident, so the exemption is applied to
+every layer under consideration. Charged KV only, a short prompt makes the
+divisor a few hundred KB: the field reported the same peer at **97 layers cold
+and 14008 warm** for a 32-layer model (2026-09-11), which is the capacity bound
+quietly ceasing to bound a warm peer at all. `max_hostable_layers` now takes the
+model's layer count and clamps by it. That makes the figure honest and stops a
+warm peer being effectively unbounded; it does NOT make the exemption correct,
+and a peer warm for part of a model can still be credited with weights it has
+not paid for. `a_warm_peers_bound_cannot_exceed_the_layers_the_model_has`
+carries its own control — the same inputs without the ceiling still reproduce
+the field's four-digit figure. The real fix wants the RESIDENT layer count
+gossiped; see `docs/FUTURE_WORK.md` item 50.
+
 Three further things a change here must keep. **The accessor owns the device
 choice**: two callers were writing the `match &c.gpu` themselves, and a third
 would have had to get it right again. **The graphics branch is otherwise

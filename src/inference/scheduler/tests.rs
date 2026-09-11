@@ -2963,6 +2963,51 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
     }
 }
 
+/// A warm peer's bound is charged KV only, so a short prompt makes the divisor
+/// a few hundred KB and the quotient absurd. Reported from the field on
+/// 2026-09-11: the same peer read 97 layers cold and **14008 warm**, for a
+/// 32-layer model.
+///
+/// The ceiling does not repair the exemption — `peer_model_is_warm` answers
+/// about the MODEL, not which of its layers are resident, so a peer warm for
+/// part of a model is still credited with weights it has not paid for. It stops
+/// the figure being nonsense, and stops the capacity bound silently ceasing to
+/// bound a warm peer at all.
+#[test]
+fn a_warm_peers_bound_cannot_exceed_the_layers_the_model_has() {
+    // 4 GB free beside the resident model, and a prompt whose KV costs 256 KB
+    // per layer — the shape that produced 14008.
+    let cap = capability_with_gpu(Some(4096));
+    let unclamped = super::max_hostable_layers(
+        u32::MAX,
+        Some(&cap),
+        3_000u64 * 1_048_576 / 32,
+        true,
+        super::DELEGATE_VRAM_MARGIN,
+        256 * 1024,
+        0,
+    );
+    assert!(
+        unclamped.is_some_and(|k| k > 1000),
+        "the field figure must still be reproducible without a ceiling: {unclamped:?}"
+    );
+
+    let clamped = super::max_hostable_layers(
+        32,
+        Some(&cap),
+        3_000u64 * 1_048_576 / 32,
+        true,
+        super::DELEGATE_VRAM_MARGIN,
+        256 * 1024,
+        0,
+    );
+    assert_eq!(
+        clamped,
+        Some(32),
+        "nothing can host more layers of a model than the model has"
+    );
+}
+
 #[test]
 fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
     // A 3 GB model over 32 layers, and a card reporting 200 MB free because it
@@ -2971,6 +3016,7 @@ fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
     let cap = capability_with_gpu(Some(200));
 
     let cold = super::max_hostable_layers(
+        u32::MAX,
         Some(&cap),
         bytes_per_layer,
         false,
@@ -2984,6 +3030,7 @@ fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
     );
 
     let warm = super::max_hostable_layers(
+        u32::MAX,
         Some(&cap),
         bytes_per_layer,
         true,
@@ -3009,6 +3056,7 @@ fn a_long_prompt_shrinks_the_layers_a_peer_may_take() {
     let cap = capability_with_gpu(Some(3_000));
     let per_position_per_layer = 2 * 4 * 256 * 6; // K+V, 4 heads × 256, f32 + f16 mirror
     let short = super::max_hostable_layers(
+        u32::MAX,
         Some(&cap),
         bytes_per_layer,
         false,
@@ -3017,6 +3065,7 @@ fn a_long_prompt_shrinks_the_layers_a_peer_may_take() {
         0,
     );
     let long = super::max_hostable_layers(
+        u32::MAX,
         Some(&cap),
         bytes_per_layer,
         false,
@@ -3048,6 +3097,7 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
     // Unknown prompt: warm stays uncapped, as it always was.
     assert_eq!(
         super::max_hostable_layers(
+            u32::MAX,
             Some(&cap),
             bytes_per_layer,
             true,
@@ -3059,6 +3109,7 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
     );
     // 8,111 positions × 12 KB ≈ 99.6 MB per layer against ~909 MB usable → 9 layers.
     let capped = super::max_hostable_layers(
+        u32::MAX,
         Some(&cap),
         bytes_per_layer,
         true,
@@ -3127,6 +3178,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     let bytes_per_layer = 100 * 1_048_576;
 
     let free = super::max_hostable_layers(
+        u32::MAX,
         Some(&cap),
         bytes_per_layer,
         false,
@@ -3136,6 +3188,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     )
     .expect("an advertised card yields a bound");
     let booked = super::max_hostable_layers(
+        u32::MAX,
         Some(&cap),
         bytes_per_layer,
         false,
@@ -3154,6 +3207,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     // saturates rather than wrapping.
     assert_eq!(
         super::max_hostable_layers(
+            u32::MAX,
             Some(&cap),
             bytes_per_layer,
             false,
@@ -3169,6 +3223,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     let silent = capability_with_gpu(None);
     assert_eq!(
         super::max_hostable_layers(
+            u32::MAX,
             Some(&silent),
             bytes_per_layer,
             false,
@@ -3226,13 +3281,22 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
 #[test]
 fn an_unreadable_memory_figure_never_caps_a_peer() {
     assert_eq!(
-        super::max_hostable_layers(None, 1024, false, super::DELEGATE_VRAM_MARGIN, 0, 0),
+        super::max_hostable_layers(
+            u32::MAX,
+            None,
+            1024,
+            false,
+            super::DELEGATE_VRAM_MARGIN,
+            0,
+            0
+        ),
         None
     );
 
     let zeroed = capability_with_gpu(Some(0));
     assert_eq!(
         super::max_hostable_layers(
+            u32::MAX,
             Some(&zeroed),
             1024,
             false,
