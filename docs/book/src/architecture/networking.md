@@ -98,7 +98,7 @@ Six topics, all subscribed at startup in `discovery::subscribe_topics`:
 | Topic | Constant | Content |
 |---|---|---|
 | `swarm/models` | `TOPIC_MODELS` | `ShardAnnounce`, `ModelManifest`, `PrefixCacheAnnounce` (cross-node prefix-KV index) |
-| `swarm/health` | `TOPIC_HEALTH` | `HealthPing`, `NodeCapability` (includes observed per-layer latencies for the Parallax scheduler), `TpAllReduceResponse` |
+| `swarm/health` | `TOPIC_HEALTH` | `HealthPing`, `NodeCapability` (observed per-layer latencies for the Parallax scheduler, the shards held on disk, and since v0.3.174 `resident_layers` — how much of each model is actually LOADED, which is what lets a router credit a busy peer for the weights it has already paid for without crediting it for ones it has not), `TpAllReduceResponse` |
 | `swarm/credits` | `TOPIC_CREDITS` | `CreditGossip`, `CreditTransaction` |
 | `swarm/identity` | `TOPIC_IDENTITY` | `NicknameGossip` (signed) |
 | `swarm/pools` | `TOPIC_POOLS` | `PoolMessage` (PoolState, PoolInvitation, CreditForward) |

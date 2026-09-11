@@ -258,6 +258,8 @@ Update cloud provider API keys. Bearer auth required. Keys are encrypted at rest
 ### GET /api/admin/provider-models
 List available models from all configured cloud providers. Results are cached for 60 seconds; stale results are returned immediately and refreshed in the background. Includes models from OpenAI, Anthropic (static list), DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together AI, DeepInfra, and Moonshot/Kimi.
 
+Calling this endpoint also refreshes the routing table that decides whether a model whose id carries no recognisable prefix is proxied to a provider or refused locally. Since v0.3.174 that table is **also** refreshed on its own every 15 minutes, so a node whose dashboard is never opened still routes its cloud models; before that it was filled only here, and a node that had not been visited refused them outright. A provider that fails to answer a refresh keeps the models it had, rather than having them dropped — a failed fetch used to be indistinguishable from a provider with no models.
+
 Response: `{ "models": [ { "id": "gpt-4o", "name": "GPT-4o", "provider": "openai" } ] }`
 
 ### GET /api/admin/provider-health
