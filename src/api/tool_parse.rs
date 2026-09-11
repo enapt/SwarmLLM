@@ -34,6 +34,8 @@
 //!    nothing and costs exactly the brace-matching the model got wrong.
 //! 2. **Hermes / Qwen-Instruct** — `<tool_call>{"name", "arguments"}</tool_call>`,
 //!    one block per call. The most common native format in circulating GGUFs.
+//!    Also `<tools>…</tools>`, which is the tag the model was shown its
+//!    DEFINITIONS in and reaches for by mistake — see [`try_hermes`].
 //! 3. **Mistral** — `[TOOL_CALLS][{"name", "arguments"}]`.
 //! 4. **Phi-4** — `functools[{"name", "arguments"}]`, or that array wrapped in
 //!    `<|tool_calls|>…<|/tool_calls|>`.
@@ -761,6 +763,40 @@ fn repair_unbalanced_close(slice: &str) -> Option<String> {
     Some(out)
 }
 
+/// Is this entry a tool CALL, or a tool DEFINITION the model echoed back?
+///
+/// They are nearly the same object. A call in the OpenAI wire shape is
+/// `{"type": "function", "function": {"name", "arguments"}}`; a definition is
+/// `{"type": "function", "function": {"name", "parameters"}}`, and
+/// [`arguments_to_string`] accepts `parameters` as an alias for `arguments`
+/// because the bare Llama-3 form (`{"name", "parameters"}`) really does use it
+/// for values.
+///
+/// So an echoed definition parsed cleanly as a call — and its `parameters` is a
+/// JSON *schema*, which went to the client as the arguments:
+/// `{"properties": {}, "type": "object"}`. That is the failure
+/// [`describe_arguments`] and [`unwrap_schema_echo`] both exist to prevent,
+/// arriving by a different door, and it is the worst kind: it parses, it
+/// validates, and `args.zone` is silently undefined.
+///
+/// The wrapper is what tells them apart, and the test is narrow: inside a
+/// `function` object, `parameters` can only be a schema — nothing emits argument
+/// VALUES there — so the wrapped form carrying `parameters` and no `arguments` is
+/// a definition. The bare form keeps the alias it needs.
+///
+/// Absent arguments are NOT the signal. `{"function": {"name": "list_files"}}` is
+/// a legitimate zero-argument call and stays one; only supplying a schema where
+/// arguments belong marks the object out.
+///
+/// Found while adding `<tools>` support: a reply echoing the definitions AND
+/// making a real call reported the echoed one, with a schema for its arguments.
+fn entry_is_a_call_not_a_definition(entry: &Value) -> bool {
+    match entry.get("function") {
+        Some(f) if f.is_object() => f.get("arguments").is_some() || f.get("parameters").is_none(),
+        _ => true,
+    }
+}
+
 /// `{"tool_calls": [{"id"?, "function": {"name", "arguments"}}]}` — the shape
 /// `format_tool_system_prompt` asks for. Also accepts a flattened
 /// `{"name", "arguments"}` entry, which models produce about as often as the
@@ -777,6 +813,7 @@ fn try_generic(text: &str) -> Option<Vec<ParsedToolCall>> {
         .get("function")
         .and_then(|f| f.get("name"))
         .and_then(Value::as_str)
+        .filter(|_| entry_is_a_call_not_a_definition(&v))
         .map(|_| std::slice::from_ref(&v));
     // Gather the call entries from whichever shape came back.
     //
@@ -814,6 +851,9 @@ fn try_generic(text: &str) -> Option<Vec<ParsedToolCall>> {
         .enumerate()
         .filter_map(|(i, entry)| {
             let entry: &Value = entry;
+            if !entry_is_a_call_not_a_definition(entry) {
+                return None;
+            }
             let id = entry
                 .get("id")
                 .and_then(Value::as_str)
@@ -836,25 +876,45 @@ fn try_generic(text: &str) -> Option<Vec<ParsedToolCall>> {
 /// Hermes 2/3 and Qwen-Instruct. A trailing unterminated block is skipped
 /// rather than guessed at.
 fn try_hermes(text: &str) -> Option<Vec<ParsedToolCall>> {
-    const OPEN: &str = "<tool_call>";
-    const CLOSE: &str = "</tool_call>";
-    if !text.contains(OPEN) {
-        return None;
-    }
-    let mut calls = Vec::new();
-    for (i, chunk) in text.split(OPEN).skip(1).enumerate() {
-        // No close tag → truncated mid-call; refuse it rather than invent.
-        if !chunk.contains(CLOSE) {
+    // `<tool_call>` is the format. `<tools>` is the tag the model was shown its
+    // tool DEFINITIONS in, and models reach for it by mistake: Qwen2.5-Coder-7B
+    // reproducibly answered an imperative tool request with
+    // `<tools>\n{"name": "get_time", "arguments": {"zone": "UTC"}}\n</tools>`
+    // (found by `examples/family_conformance.sh`, 2026-09-11). Qwen's own template
+    // names both tags a few lines apart — "signatures within <tools></tools>" and
+    // "return a json object ... within <tool_call></tool_call>" — so the confusion
+    // is built into the prompt the model is given.
+    //
+    // Accepting it is safe rather than merely convenient: `single_object_call`
+    // requires a top-level `name`, and an echoed DEFINITION nests its name under
+    // `function` (`{"type": "function", "function": {"name": …}}`), so a model
+    // repeating the definitions back yields no calls.
+    //
+    // `<tool_call>` is tried first and `<tools>` only if it produced nothing, so a
+    // reply that echoes the definitions AND makes a real call is read from the
+    // real call.
+    for (open, close) in [("<tool_call>", "</tool_call>"), ("<tools>", "</tools>")] {
+        if !text.contains(open) {
             continue;
         }
-        let Some(body) = chunk.split(CLOSE).next() else {
-            continue;
-        };
-        if let Some(call) = single_object_call(body.trim(), i) {
-            calls.push(call);
+        let mut calls = Vec::new();
+        for (i, chunk) in text.split(open).skip(1).enumerate() {
+            // No close tag → truncated mid-call; refuse it rather than invent.
+            if !chunk.contains(close) {
+                continue;
+            }
+            let Some(body) = chunk.split(close).next() else {
+                continue;
+            };
+            if let Some(call) = single_object_call(body.trim(), i) {
+                calls.push(call);
+            }
+        }
+        if !calls.is_empty() {
+            return Some(calls);
         }
     }
-    Some(calls)
+    None
 }
 
 /// `[TOOL_CALLS][{"name": ..., "arguments": {...}}]` — Mistral.
@@ -1454,6 +1514,47 @@ mod tests {
             parse_tool_calls(r#"The record looks like {"name": "Alice", "arguments": {}}."#),
             None
         );
+    }
+
+    /// The reply Qwen2.5-Coder-7B actually produced, verbatim. Found by
+    /// `examples/family_conformance.sh` on its first working run: the model used
+    /// the tag it was shown its DEFINITIONS in rather than the one it was told to
+    /// answer in, and the call came back as text with no `tool_calls` field — so a
+    /// client driving that model executed nothing and saw no error.
+    #[test]
+    fn parses_a_call_in_the_definitions_tag() {
+        let reply =
+            "<tools>\n{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}\n</tools>";
+        let calls = parse_tool_calls(reply).expect("Qwen2.5-Coder's real reply must parse");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].name, "get_time");
+        assert_eq!(calls[0].arguments, r#"{"zone":"UTC"}"#);
+    }
+
+    /// The reason accepting that tag is safe. A model echoing its tool
+    /// DEFINITIONS back nests each name under `function`, and a call requires a
+    /// top-level one, so a definition never becomes a call the user never asked
+    /// for.
+    #[test]
+    fn echoed_tool_definitions_are_not_calls() {
+        let echo = "<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_time\", \
+                    \"parameters\": {\"type\": \"object\", \"properties\": {}}}}\n</tools>";
+        assert_eq!(parse_tool_calls(echo), None, "a definition is not a call");
+    }
+
+    /// A reply that echoes the definitions AND makes a real call is read from the
+    /// real call. The echoed definition carries `parameters` — a schema — which is
+    /// what marks it out; a wrapped entry with neither `arguments` nor
+    /// `parameters` is an ordinary zero-argument call and is accepted as one.
+    #[test]
+    fn a_real_call_wins_over_echoed_definitions() {
+        let both = "<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"other\", \
+                    \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}}}}\n</tools>\n\
+                    <tool_call>\n{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}\n</tool_call>";
+        let calls = parse_tool_calls(both).expect("should parse");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].name, "get_time", "the real call, not the echo");
+        assert_eq!(calls[0].arguments, r#"{"zone":"UTC"}"#);
     }
 
     /// The shape `format_tool_prompt` requests today: flat, no `id`, no `type`.

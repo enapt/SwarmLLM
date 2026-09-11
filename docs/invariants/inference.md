@@ -674,6 +674,17 @@ Phi-3.5-mini-instruct-Q4_K_M, on the released v0.3.171 binary, 2026-09-11:
   key, while `tokenizer.chat_template` closes every turn with `<|end|>` — token
   **32007**, `token_type = 3` (CONTROL).
 - Resolved EOS set before: `[32000]`. After: `[32000, 32007]`.
+
+**Confirmed on a second model, 2026-09-11**, which is what shows the name search
+was right rather than lucky. Phi-4-mini-instruct-Q4_K_M has the identical defect —
+`eos_token_id = 199999` (`<|endoftext|>`), turns closed with `<|end|>` — but
+`<|end|>` is id **200020** there against 32007 in Phi-3.5, and its vocabulary is
+`gpt2` BPE against Phi-3.5's `llama` SentencePiece. So the same fault sits at a
+different id in a different vocabulary family under the same `general.architecture`
+string, `phi3`. **A per-architecture id table — the obvious fix — needs an entry
+per quantisation and breaks on the next one; a name is stable across both.**
+`<|return|>` and `<|call|>` are absent from that vocabulary, so the harmony
+exclusion correctly does not fire.
 - End to end, a plain request with NO tools — "Say exactly: hello",
   `max_tokens: 120`, `temperature: 0` — returned `finish_reason: "length"` and
   120/120 completion tokens: *"Hello! How can I help you today? Hello! I'm Phi,

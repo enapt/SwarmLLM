@@ -14,7 +14,17 @@ pub struct HfShardDownloadRequest {
     pub repo_id: String,
     pub filename: String,
     /// Which shard indices to download (e.g. [0,1,2] for the first 3 shards).
-    /// If empty, the server will probe the file and return shard info without downloading.
+    ///
+    /// Required unless `peer_fair_share` is set — an empty list with no fair
+    /// share is a `Validation` error, because it names no work to do. To learn a
+    /// file's shard layout first, call `GET /api/admin/hf/probe`, which answers
+    /// `shard_count`, `total_size` and `architecture` without downloading
+    /// anything.
+    ///
+    /// This comment used to say an empty list would probe and return shard info
+    /// here. It never did, and the validation twelve lines into the handler says
+    /// so — a comment describing an endpoint's contract is the first thing a
+    /// caller reads and the last thing anyone re-checks.
     #[serde(default)]
     pub shards: Vec<u32>,
     /// Optional: target an existing model_id so downloaded shards merge into its directory.
