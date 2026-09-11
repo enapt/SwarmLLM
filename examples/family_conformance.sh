@@ -70,7 +70,14 @@ shift 2 2>/dev/null || true
 # LEAKED into the reply on the second. One cause, two symptoms, and only one of
 # them is what a user reports. The `<|end|>` token also sits at id 32007 in one and
 # 200020 in the other, which is why it is found by name.
-DEFAULT_MODELS="llama-3.2-3b-instruct-q4-k-m qwen3-1.7b-q8-0 phi-3.5-mini-instruct.q4-k-m microsoft-phi-4-mini-instruct-q4-k-m qwen2.5-coder-7b-instruct-q4-k-m"
+#
+# `gemma2` and `tinyllama` are here for their own reasons, not for size. Gemma's
+# template REFUSES a system role with `raise_exception` and its attention carries a
+# logit soft-cap, so it exercises the two places the renderer and the attention
+# tail behave differently from everyone else. TinyLlama is the `zephyr` fallback
+# family — its name contains "llama" while its format is not Llama's, which is the
+# case `fallback_by_model_name` has a dedicated early branch for (gotcha #169).
+DEFAULT_MODELS="llama-3.2-3b-instruct-q4-k-m qwen3-1.7b-q8-0 phi-3.5-mini-instruct.q4-k-m microsoft-phi-4-mini-instruct-q4-k-m qwen2.5-coder-7b-instruct-q4-k-m gemma-2-2b-it-q4-k-m tinyllama-1.1b-chat-v1.0.q4-k-m"
 MODELS="${*:-$DEFAULT_MODELS}"
 MODELS_DIR="${SWARM_CONFORMANCE_MODELS_DIR:-$HOME/.local/share/swarmllm/models}"
 [ -x "$BIN" ] || { echo "not executable: $BIN"; exit 2; }

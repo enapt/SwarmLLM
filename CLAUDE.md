@@ -225,35 +225,56 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2569 lib (dev,claude-subscription) — re-measured 2026-09-11, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 85 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.171-alpha (2026-09-10, tag on commit
-`049b0856`).** Gate: audit as documented (the two `hickory-proto` advisories +
-the `paste` warning); **CI 13/13 AND Cache warm 3/3 both on the TAGGED commit**;
-release built **10/10 first time**, 25 assets, `latest`, not draft; **smoke 9/9 +
-shapes 7/7 on the DOWNLOADED artifact** against a .170 baseline taken FIRST that
-scored the same. Both nodes verified: ids and `identity.key` md5 unchanged,
+**Released and deployed: v0.3.172-alpha (2026-09-11, tag on commit
+`e807ce38`).** Gate: audit as documented (the two `hickory-proto` advisories +
+the `paste` warning); **CI 14/14 AND Cache warm 3/3 both on the TAGGED commit**,
+checked job-by-job, with both flash-attn kernel caches showing *restored* AND
+*"All library kernels up-to-date, skipping compilation"*; release built **10/10
+first time**, 25 assets, all seven platform archives present BY NAME, `latest`,
+not draft; **smoke 9/9 + shapes 7/7 + family-conformance 24/24 across four
+families on the DOWNLOADED artifact**, against .171 baselines taken FIRST that
+scored 9/9 and 7/7. Both nodes verified: ids and `identity.key` md5 unchanged,
 installed binary byte-identical to the download, deb hash re-verified AFTER
-transfer, journal 0 ERROR, paired at 359 ms. **Tool calling confirmed on the
-released binary** — native `<tool_call>` framing, correct arguments, no leaked
-reasoning marker. Rollback `~/.local/bin/swarmllm.0.3.170-alpha.bak`, backups
-pruned to newest 3.
+transfer, journal 0 ERROR, paired. **The Phi defect confirmed fixed on the
+deployed release binary** — the request that ran 120/120 tokens inventing a
+conversation this morning now answers in 9 and stops. Rollback
+`~/.local/bin/swarmllm.0.3.171-alpha.bak`, backups pruned to newest 3.
 
-**What it carries**: tool calling works on models that ship their own tool
-format. A request with tools reached the model as a hand-written JSON
-instruction most models were never trained on, while the format the model
-actually ships went unused — it could not have been used, because the template
-variable holding the tools was never passed and that whole branch was
-unreachable on every request ever served. Plus the template-engine filter every
-tool-rendering template needs, a reply no longer leaking an unclosed reasoning
-marker beside a good tool call, a credit escrow that can no longer settle
-against a write that failed, and eighteen patch releases of the local inference
-backend.
+**What it carries**: Phi models stop at the end of their turn instead of
+inventing the next one — every Phi-3/3.5/4 declares one end-of-sequence token and
+ends each turn with a different one, so nothing stopped the reply; on one
+vocabulary family the marker leaked into the text, on the other the seam was
+invisible and the model simply rambled. Plus four tool-calling fixes, three of
+them found by a new pre-release check: Phi-4's own call format was unreadable,
+Qwen2.5-Coder used the wrong one of two tags its prompt names and so made no
+working call at all, a template that mentions tools without using them left the
+model told nothing, a fenced call followed by an explanation went unparsed, and a
+model repeating its tool list back was mistaken for calling one — passing a
+parameter *definition* where argument values belong.
 
-⚠ **The Actions cache sits at GitHub's 10 GB ceiling** (29 entries), so 31 MB
-flash-attn kernel caches evict between runs — one saved at 08:47 was gone by
-13:32, and that cell then recompiles all 19 kernels (~56 min). The mechanism
-itself WORKS: the release build hit a fresh entry and logged `All library
-kernels up-to-date, skipping compilation`. Trim the large rust-cache entries;
-do not go investigating cudaforge. Gotcha #538.
+⚠ **`examples/family_conformance.sh` is new and is part of the gate.** The four
+releases .169-.172 each fixed a field-reported, family-specific prompt/stop/tool
+defect and **all four pass `release_shapes.sh`**, which runs ONE family and
+asserts `>3` tokens came back. Run conformance on the DOWNLOADED artifact.
+
+⚠ **NEW OPEN BUG — FUTURE_WORK #43: Phi-4-mini cannot serve a single request on
+the shard path.** `attn: slice-set only supports contiguous tensors`. It is GQA
+(24 head / 8 kv, fused QKV) where Phi-3.5 is 32/32. Pre-existing, not a .172
+regression. **The field reports on that model came via `-m` (llama.cpp, which
+handles GQA itself), so they say nothing about our path.**
+
+⚠ **Branch protection requires 14 contexts as of 2026-09-11** (was 12; `Clippy
+(windows-latest / default)` and `Workflow lint` added). Verify with
+`examples/check_ci_gate.sh` — reading protection needs admin, which
+`GITHUB_TOKEN` lacks, so it is a script and not a job. Gotcha #530.
+
+⚠ **The Actions cache is managed now, and `cache-gc.yml` used to be able to make
+it worse.** It was REF-BLIND: it grouped by job and kept the newest, so main's
+live 630 MB cache lost to a pull request's copy that main cannot read. It now
+groups by `(ref, job)`, deletes by id (keys are not unique across refs) and
+reclaims closed-PR and superseded-tag caches. Cleaned 11.15 → 7.50 GB on
+2026-09-11; both 32 MB kernel caches survive and are hit warm. Gotchas #538,
+#543.
 
 ⚠ **A required status check can name a job that no longer exists** — two of
 this repo's did, so they enforced NOTHING and **every PR was permanently
