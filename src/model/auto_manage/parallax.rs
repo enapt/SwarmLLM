@@ -337,6 +337,7 @@ mod tests {
                     features: 0,
                     relay_reservations: vec![],
                     anchor_mode: false,
+                    resident_layers: Vec::new(),
                 }),
                 last_seen: chrono::Utc::now(),
                 latency_ms: Some(10),

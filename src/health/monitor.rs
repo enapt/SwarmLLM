@@ -755,6 +755,12 @@ impl HealthMonitor {
             // nothing and serves nothing by design, which looks identical to a
             // broken node in a peer list.
             anchor_mode: self.shared_state.config.node.anchor_mode,
+            // What is LOADED, as distinct from what is on disk above. A peer
+            // pricing our spare capacity needs to know how much of a model we
+            // have already paid for; without it the only signal is "did this
+            // node serve the model recently", which cannot say how much of it
+            // is resident. See `NodeCapability::resident_layers`.
+            resident_layers: self.shared_state.model_process_pool.resident_model_layers(),
             // Advertise the protocol epoch + the optional features this build
             // implements, so peers negotiate new message types additively.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,

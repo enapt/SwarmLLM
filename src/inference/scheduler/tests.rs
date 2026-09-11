@@ -674,6 +674,7 @@ fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
         features: 0,
         relay_reservations: vec![],
         anchor_mode: false,
+        resident_layers: Vec::new(),
     }
 }
 
@@ -2960,7 +2961,92 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
         features: 0,
         relay_reservations: vec![],
         anchor_mode: false,
+        resident_layers: Vec::new(),
     }
+}
+
+/// A peer that says how much of a model it is holding is charged full weight
+/// for everything beyond that, instead of being handed the model for free.
+///
+/// The exemption is right for the layers a peer HAS resident — its advertised
+/// free memory already excludes those weights — and wrong for the rest. Before
+/// peers reported a count, "warm" was a bare flag and every layer was exempt,
+/// so a peer warm for a slice of a model could be credited with the whole of it.
+#[test]
+fn only_the_layers_a_peer_actually_holds_are_exempt_from_their_weight() {
+    // 1 GB free beside what is resident; 32 layers at ~94 MB each; no KV, so
+    // the arithmetic is purely about weights.
+    let cap = capability_with_gpu(Some(1024));
+    let bytes_per_layer = 3_000u64 * 1_048_576 / 32;
+
+    // Says it holds 8. It can keep those and buy what 1 GB pays for beyond.
+    let reported = super::max_hostable_layers(
+        32,
+        Some(&cap),
+        bytes_per_layer,
+        super::PeerResidency::Layers(8),
+        1.0,
+        0,
+        0,
+    );
+    let bought = (1024u64 * 1_048_576) / bytes_per_layer;
+    assert_eq!(
+        reported,
+        Some(8 + bought as u32),
+        "resident layers are free; the rest are not"
+    );
+    assert!(
+        reported.is_some_and(|k| k < 32),
+        "it must NOT be credited with the whole model: {reported:?}"
+    );
+
+    // The control: the same peer saying nothing keeps the old, generous answer,
+    // because charging an older build in full would route around it.
+    let silent = super::max_hostable_layers(
+        32,
+        Some(&cap),
+        bytes_per_layer,
+        super::PeerResidency::WarmAmountUnknown,
+        1.0,
+        0,
+        0,
+    );
+    assert_eq!(silent, None, "no KV and nothing to charge means unknown");
+
+    // And a cold peer pays for everything, exactly as before.
+    let cold = super::max_hostable_layers(
+        32,
+        Some(&cap),
+        bytes_per_layer,
+        super::PeerResidency::Cold,
+        1.0,
+        0,
+        0,
+    );
+    assert_eq!(cold, Some(bought as u32));
+}
+
+/// Resident layers are free of WEIGHT, not of this prompt's KV cache — the peer
+/// has not paid for that yet. A prompt whose KV will not fit beside the resident
+/// weights reduces how many of those layers this request can use.
+#[test]
+fn a_resident_layer_still_pays_for_this_prompts_kv() {
+    // 16 MB free, 8 resident layers, 4 MB of KV per layer: only 4 fit.
+    let cap = capability_with_gpu(Some(16));
+    let answer = super::max_hostable_layers(
+        32,
+        Some(&cap),
+        3_000u64 * 1_048_576 / 32,
+        super::PeerResidency::Layers(8),
+        1.0,
+        4 * 1_048_576,
+        0,
+    );
+    assert_eq!(
+        answer,
+        Some(4),
+        "the KV of resident layers comes off the top: {answer:?}"
+    );
 }
 
 /// A warm peer's bound is charged KV only, so a short prompt makes the divisor
@@ -2982,7 +3068,7 @@ fn a_warm_peers_bound_cannot_exceed_the_layers_the_model_has() {
         u32::MAX,
         Some(&cap),
         3_000u64 * 1_048_576 / 32,
-        true,
+        super::PeerResidency::WarmAmountUnknown,
         super::DELEGATE_VRAM_MARGIN,
         256 * 1024,
         0,
@@ -2996,7 +3082,7 @@ fn a_warm_peers_bound_cannot_exceed_the_layers_the_model_has() {
         32,
         Some(&cap),
         3_000u64 * 1_048_576 / 32,
-        true,
+        super::PeerResidency::WarmAmountUnknown,
         super::DELEGATE_VRAM_MARGIN,
         256 * 1024,
         0,
@@ -3019,7 +3105,7 @@ fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
         u32::MAX,
         Some(&cap),
         bytes_per_layer,
-        false,
+        super::PeerResidency::Cold,
         super::DELEGATE_VRAM_MARGIN,
         0,
         0,
@@ -3033,7 +3119,7 @@ fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
         u32::MAX,
         Some(&cap),
         bytes_per_layer,
-        true,
+        super::PeerResidency::WarmAmountUnknown,
         super::DELEGATE_VRAM_MARGIN,
         0,
         0,
@@ -3059,7 +3145,7 @@ fn a_long_prompt_shrinks_the_layers_a_peer_may_take() {
         u32::MAX,
         Some(&cap),
         bytes_per_layer,
-        false,
+        super::PeerResidency::Cold,
         super::DELEGATE_VRAM_MARGIN,
         per_position_per_layer * 19,
         0,
@@ -3068,7 +3154,7 @@ fn a_long_prompt_shrinks_the_layers_a_peer_may_take() {
         u32::MAX,
         Some(&cap),
         bytes_per_layer,
-        false,
+        super::PeerResidency::Cold,
         super::DELEGATE_VRAM_MARGIN,
         per_position_per_layer * 8_111,
         0,
@@ -3100,7 +3186,7 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
             u32::MAX,
             Some(&cap),
             bytes_per_layer,
-            true,
+            super::PeerResidency::WarmAmountUnknown,
             super::DELEGATE_VRAM_MARGIN,
             0,
             0
@@ -3112,7 +3198,7 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
         u32::MAX,
         Some(&cap),
         bytes_per_layer,
-        true,
+        super::PeerResidency::WarmAmountUnknown,
         super::DELEGATE_VRAM_MARGIN,
         per_position_per_layer * 8_111,
         0,
@@ -3181,7 +3267,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
         u32::MAX,
         Some(&cap),
         bytes_per_layer,
-        false,
+        super::PeerResidency::Cold,
         super::DELEGATE_VRAM_MARGIN,
         0,
         0,
@@ -3191,7 +3277,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
         u32::MAX,
         Some(&cap),
         bytes_per_layer,
-        false,
+        super::PeerResidency::Cold,
         super::DELEGATE_VRAM_MARGIN,
         0,
         4_000,
@@ -3210,7 +3296,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
             u32::MAX,
             Some(&cap),
             bytes_per_layer,
-            false,
+            super::PeerResidency::Cold,
             super::DELEGATE_VRAM_MARGIN,
             0,
             99_999
@@ -3226,7 +3312,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
             u32::MAX,
             Some(&silent),
             bytes_per_layer,
-            false,
+            super::PeerResidency::Cold,
             super::DELEGATE_VRAM_MARGIN,
             0,
             4_000
@@ -3285,7 +3371,7 @@ fn an_unreadable_memory_figure_never_caps_a_peer() {
             u32::MAX,
             None,
             1024,
-            false,
+            super::PeerResidency::Cold,
             super::DELEGATE_VRAM_MARGIN,
             0,
             0
@@ -3299,7 +3385,7 @@ fn an_unreadable_memory_figure_never_caps_a_peer() {
             u32::MAX,
             Some(&zeroed),
             1024,
-            false,
+            super::PeerResidency::Cold,
             super::DELEGATE_VRAM_MARGIN,
             0,
             0

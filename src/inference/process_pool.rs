@@ -3187,6 +3187,38 @@ impl ModelProcessPool {
     /// This is gotcha #329's distinction on the local node — "is it loaded?"
     /// and "would it fit?" are different questions — and the peer side has
     /// drawn it since #447 through `already_warm`.
+    /// Layers of each loaded model this node currently holds in memory.
+    ///
+    /// Gossiped as `NodeCapability::resident_layers` so a peer pricing our
+    /// spare capacity knows how much of a model we have already paid for,
+    /// rather than having to guess from a bare "did it serve this recently".
+    /// Summed from each live worker's charged segments, which is the same
+    /// bookkeeping the memory budget itself is kept on.
+    pub fn resident_model_layers(&self) -> Vec<swarmllm_types::ResidentModelLayers> {
+        let mut out = Vec::new();
+        for entry in self.workers.iter() {
+            let handle = entry.value();
+            if handle.dead.load(Ordering::Acquire) {
+                continue;
+            }
+            let Ok(segments) = handle.charged_segments.lock() else {
+                continue;
+            };
+            let layers: u32 = segments
+                .iter()
+                .map(|&((start, end), _)| end.saturating_sub(start))
+                .sum();
+            if layers > 0 {
+                out.push(swarmllm_types::ResidentModelLayers {
+                    model_id: entry.key().0.clone(),
+                    layers,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+        out
+    }
+
     pub fn hosts_whole_model(&self, model_id: &ModelId, num_layers: u32) -> bool {
         self.live_worker(model_id).is_some_and(|h| {
             h.charged_segments

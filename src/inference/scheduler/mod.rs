@@ -119,6 +119,27 @@ struct NodeCandidate {
     has_gpu: bool,
 }
 
+/// What a peer has told us about holding a model in memory.
+///
+/// Three states, and collapsing any two of them has a cost:
+///
+/// - [`Self::Layers`] — the peer published a resident-layer count for this
+///   model (`NodeCapability::resident_layers`). The weights of those layers are
+///   already paid for; anything beyond them is not.
+/// - [`Self::WarmAmountUnknown`] — we have seen it serve this model recently but
+///   it has published no count, which is every node on a build older than
+///   2026-09-11. Priced exactly as before: every layer exempt. Reading this as
+///   cold would charge full weights to every older peer and route around the
+///   machines best placed to answer, which is the regression the additive
+///   protocol rule exists to prevent.
+/// - [`Self::Cold`] — nothing resident, so weights are charged in full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerResidency {
+    Layers(u32),
+    WarmAmountUnknown,
+    Cold,
+}
+
 /// How many layers of a model a peer could plausibly hold, from the free
 /// memory it last advertised — GPU first, else RAM.
 ///
@@ -149,7 +170,7 @@ fn max_hostable_layers(
     model_layers: u32,
     capability: Option<&swarmllm_types::NodeCapability>,
     bytes_per_layer: u64,
-    already_warm: bool,
+    residency: PeerResidency,
     // Headroom on top of the advertised figure: `DELEGATE_VRAM_MARGIN` for the
     // routine bound, `1.0` to take the peer at its word.
     margin: f64,
@@ -179,14 +200,17 @@ fn max_hostable_layers(
     // prompt — ~2.4 GB of KV it did not have — and its worker died in
     // attention with `CUDA_ERROR_OUT_OF_MEMORY` 22 s in, with no standby
     // (gotcha #447).
-    let per_layer = if already_warm {
-        prompt_kv_bytes_per_layer
-    } else {
-        bytes_per_layer.saturating_add(prompt_kv_bytes_per_layer)
-    };
-    if per_layer == 0 || (!already_warm && bytes_per_layer == 0) {
-        // Nothing known to charge: unknown never excludes (see the doc comment).
-        return None;
+    // What one more layer costs a peer that has not already paid for it.
+    let full_price = bytes_per_layer.saturating_add(prompt_kv_bytes_per_layer);
+    // Nothing known to charge: unknown never excludes (see the doc comment).
+    // Each residency divides by a different thing, so each has its own "nothing
+    // to divide by" case — a warm peer of unknown extent is charged KV alone,
+    // while one that named a resident count still needs a per-layer weight in
+    // order to price the layers beyond it.
+    match residency {
+        PeerResidency::WarmAmountUnknown if prompt_kv_bytes_per_layer == 0 => return None,
+        PeerResidency::Cold | PeerResidency::Layers(_) if bytes_per_layer == 0 => return None,
+        _ => {}
     }
     let cap = capability?;
     // A GPU node is judged on its card; a node with no card, on its RAM. This
@@ -217,7 +241,36 @@ fn max_hostable_layers(
     // bounds the damage and stops the number being nonsense. A peer that is
     // warm for part of a model and holds the rest only on disk can still be
     // credited with more than it can hold — see `docs/FUTURE_WORK.md`.
-    Some(((usable_bytes / per_layer) as u32).min(model_layers))
+    // The exemption applies to the layers the peer ACTUALLY holds, and only
+    // those. Beyond them it pays full weight plus KV like anyone else.
+    //
+    // `None` — a peer that has told us nothing — keeps the old shape: every
+    // layer exempt, clamped by the model. That is generous, and deliberately
+    // so; see the parameter's comment.
+    let answer = match residency {
+        // Priced as before: every layer exempt. Generous on purpose — see
+        // `PeerResidency::WarmAmountUnknown`.
+        PeerResidency::WarmAmountUnknown => {
+            (usable_bytes / prompt_kv_bytes_per_layer.max(1)) as u32
+        }
+        PeerResidency::Cold => (usable_bytes / full_price.max(1)) as u32,
+        PeerResidency::Layers(resident) => {
+            // Resident layers still need THIS prompt's KV, which the peer has
+            // not paid for. What they cost comes off the top; what is left buys
+            // further layers at the full price.
+            let kv_for_resident = prompt_kv_bytes_per_layer.saturating_mul(u64::from(resident));
+            if kv_for_resident >= usable_bytes {
+                // Not even the resident layers' KV fits, so this prompt cannot
+                // use all of them however many weights are already in memory.
+                (usable_bytes / prompt_kv_bytes_per_layer.max(1)) as u32
+            } else {
+                let spare = usable_bytes - kv_for_resident;
+                let extra = (spare / full_price.max(1)) as u32;
+                resident.saturating_add(extra)
+            }
+        }
+    };
+    Some(answer.min(model_layers))
 }
 
 /// KV-cache bytes ONE prompt position costs across ONE layer of `meta`'s model
@@ -3012,11 +3065,33 @@ impl PipelineScheduler {
                         .max_local_hostable_layers(&manifest.id, has_gpu);
                     (ours, ours)
                 } else {
-                    let warm = self.shared_state.peer_model_is_warm(
-                        &node_id,
-                        &manifest.id,
-                        std::time::Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
-                    );
+                    // What the peer SAYS it has resident beats what we can
+                    // infer from having seen it serve the model recently. A peer
+                    // that reports residency but does not name this model tells
+                    // us nothing about it — gossip is up to 30 s old, so a model
+                    // it has just loaded would be missing — and falls back to
+                    // the recency signal, which is what this did before.
+                    let reported_resident =
+                        self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                            p.capability.as_ref().and_then(|c| {
+                                c.resident_layers
+                                    .iter()
+                                    .find(|r| r.model_id == manifest.id.0)
+                                    .map(|r| r.layers)
+                            })
+                        });
+                    let residency = match reported_resident {
+                        Some(layers) => PeerResidency::Layers(layers),
+                        None if self.shared_state.peer_model_is_warm(
+                            &node_id,
+                            &manifest.id,
+                            std::time::Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
+                        ) =>
+                        {
+                            PeerResidency::WarmAmountUnknown
+                        }
+                        None => PeerResidency::Cold,
+                    };
                     let prompt_kv_per_layer = if has_gpu {
                         prompt_kv_per_layer_gpu
                     } else {
@@ -3028,7 +3103,7 @@ impl PipelineScheduler {
                                 manifest.num_layers,
                                 p.capability.as_ref(),
                                 bytes_per_layer,
-                                warm,
+                                residency,
                                 margin,
                                 prompt_kv_per_layer,
                                 committed_mb,

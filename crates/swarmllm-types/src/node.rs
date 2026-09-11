@@ -199,6 +199,39 @@ pub struct NodeCapability {
     /// no label, per the additive-evolution rule.
     #[serde(default)]
     pub anchor_mode: bool,
+
+    /// Layers of each model this node currently has LOADED, by model id.
+    ///
+    /// `hosted_shards` says what is on disk; this says what is in memory right
+    /// now and therefore already paid for. The distinction decides how a peer's
+    /// spare capacity is priced: a node already serving a model has paid for the
+    /// weights it is holding, and charging it for them again routes around the
+    /// one machine best placed to answer (gotcha #329). Exempting EVERY layer
+    /// instead, which is what a bare "is it warm" flag forces, credits it with
+    /// weights it has not paid for.
+    ///
+    /// Petals announces the same thing for the same reason — each server
+    /// publishes the contiguous blocks it is actively serving, not the blocks it
+    /// could load — and clients route over those announcements
+    /// (<https://arxiv.org/pdf/2209.01188>).
+    ///
+    /// `#[serde(default)]` (empty) per the additive-evolution rule. **Empty is
+    /// ambiguous on purpose**: it means "this node said nothing about residency",
+    /// which is true both of an older build and of a node with nothing loaded.
+    /// A consumer must therefore treat a model's ABSENCE as no information and
+    /// fall back to whatever it did before, never as proof the model is cold —
+    /// reading absence as "not resident" would route around every peer running
+    /// an older build, which is the failure the additive rule exists to prevent.
+    #[serde(default)]
+    pub resident_layers: Vec<ResidentModelLayers>,
+}
+
+/// How many layers of one model a node has resident. See
+/// [`NodeCapability::resident_layers`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ResidentModelLayers {
+    pub model_id: String,
+    pub layers: u32,
 }
 
 impl NodeCapability {

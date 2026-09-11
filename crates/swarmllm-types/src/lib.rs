@@ -46,7 +46,7 @@ pub use network::{
 };
 pub use node::{
     features, ContributionLevel, CpuInfo, GpuInfo, LatencyObservation, NodeCapability, NodeStats,
-    PeerExchangeResponse, PeerInfo, PROTOCOL_VERSION,
+    PeerExchangeResponse, PeerInfo, ResidentModelLayers, PROTOCOL_VERSION,
 };
 pub use pool::{
     BlindedPoolInvitation, ContributionMode, PoolAcceptance, PoolCreditForward, PoolDeviceStats,
