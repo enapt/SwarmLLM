@@ -361,7 +361,7 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
             let stale = cached_models.clone();
             let bg_state = state.clone();
             tokio::spawn(async move {
-                let models = fetch_provider_models_inner(&bg_state).await;
+                let models = fetch_provider_models_inner(&bg_state.shared_state).await;
                 if !models.is_empty() {
                     let mut cache = bg_state
                         .shared_state
@@ -377,7 +377,7 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
     }
 
     // Empty cache (first call) — block and fetch
-    let models = fetch_provider_models_inner(&state).await;
+    let models = fetch_provider_models_inner(&state.shared_state).await;
     {
         let mut cache = state
             .shared_state
@@ -391,8 +391,16 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
 }
 
 /// Inner function that actually fetches models from all configured providers.
-async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value> {
-    let config = state.shared_state.metrics.providers_config.read().await;
+/// Ask every configured provider for its catalogue.
+///
+/// Takes `SharedState` rather than `AppState` so the periodic refresh in
+/// `daemon::background` can call it — the routing map this fills used to be
+/// written only by the admin handler, which meant a node whose dashboard was
+/// never opened routed only the cloud models resolvable from their id prefix.
+pub(crate) async fn fetch_provider_models_inner(
+    shared: &std::sync::Arc<crate::daemon::state::SharedState>,
+) -> Vec<serde_json::Value> {
+    let config = shared.metrics.providers_config.read().await;
     let mut models = Vec::new();
 
     // Collect (provider_name, base_url, api_key, needs_prefix) for all configured providers
@@ -574,7 +582,7 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
     let results = futures::future::join_all(fetches).await;
 
     merge_provider_catalog(
-        &state.shared_state.metrics.provider_model_map,
+        &shared.metrics.provider_model_map,
         results.iter().map(|(p, m)| (*p, m.as_deref())),
     );
 

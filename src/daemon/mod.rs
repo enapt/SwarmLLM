@@ -698,6 +698,11 @@ impl Daemon {
             self.db.clone(),
             shutdown_rx.clone(),
         );
+        background::spawn_provider_catalog_refresh(
+            &mut background_tasks,
+            shared_state.clone(),
+            shutdown_rx.clone(),
+        );
 
         supervisor::run(subsystems, shutdown_rx, shared_state).await;
 

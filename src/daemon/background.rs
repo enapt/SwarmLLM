@@ -19,6 +19,21 @@ const DRAIN_TIMEOUT_SECS: u64 = 5;
 /// settled pool_forwards, applied credit_txns, and expired pool invites.
 const SWEEP_INTERVAL_SECS: u64 = 3600;
 
+/// How often to re-ask configured cloud providers for their catalogues.
+///
+/// The map this fills is what decides whether a cloud model is proxied to its
+/// provider or refused here, and until 2026-09-11 its only writer was the admin
+/// page handler — so a node whose dashboard nobody opened routed only the
+/// models resolvable from their id prefix and answered 404 for the rest, from
+/// itself, without the provider ever being asked. Fifteen minutes is well
+/// inside how often a provider's catalogue changes and far outside anything a
+/// rate limit would notice.
+const PROVIDER_CATALOG_REFRESH_SECS: u64 = 900;
+
+/// Wait before the first catalogue fetch, so the daemon finishes coming up and
+/// a config file loaded at boot is in place before anything is asked of it.
+const PROVIDER_CATALOG_STARTUP_DELAY_SECS: u64 = 20;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -990,6 +1005,63 @@ pub(super) fn spawn_sighup_handler(
     _config: Config,
     _shutdown_rx: watch::Receiver<bool>,
 ) {
+}
+
+/// Keep the cloud routing catalogue fresh without waiting for a human.
+///
+/// `provider_model_map` decides whether a request for a cloud model is proxied
+/// or refused, and it was filled only as a side effect of someone opening the
+/// admin page. A node that had never had its dashboard opened — or whose
+/// catalogue had been wiped by a failed refresh — refused every cloud model it
+/// could not resolve from the id prefix, in about a millisecond, with the
+/// provider never asked. Reported from the field 2026-09-11: zero models for
+/// days while the dashboard still listed eighty.
+///
+/// Failure is not destructive: `merge_provider_catalog` replaces only the
+/// providers that answered, so a refresh that cannot reach anything leaves the
+/// previous catalogue in place.
+pub(super) fn spawn_provider_catalog_refresh(
+    tasks: &mut BackgroundTasks,
+    shared_state: std::sync::Arc<crate::daemon::state::SharedState>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    tasks.spawn(async move {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    return "provider_catalog_refresh";
+                }
+            }
+            () = tokio::time::sleep(std::time::Duration::from_secs(
+                PROVIDER_CATALOG_STARTUP_DELAY_SECS,
+            )) => {}
+        }
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(
+            PROVIDER_CATALOG_REFRESH_SECS,
+        ));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = tick.tick() => {
+                    let models =
+                        crate::api::admin_providers::fetch_provider_models_inner(&shared_state)
+                            .await;
+                    let routable = shared_state.metrics.provider_model_map.len();
+                    tracing::debug!(
+                        fetched = models.len(),
+                        routable,
+                        "provider catalogue refreshed"
+                    );
+                }
+            }
+        }
+        "provider_catalog_refresh"
+    });
 }
 
 /// Periodically prune `/v1/responses` records whose 30-day retention has
