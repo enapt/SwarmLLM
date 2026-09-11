@@ -247,6 +247,7 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
         .or_else(|| try_mistral(trimmed))
         .or_else(|| try_phi(trimmed))
         .or_else(|| try_llama3(trimmed))
+        .or_else(|| try_invented_wrapper(trimmed))
         .filter(|calls| !calls.is_empty())
         .map(assign_unique_ids)
 }
@@ -917,6 +918,46 @@ fn try_hermes(text: &str) -> Option<Vec<ParsedToolCall>> {
     None
 }
 
+/// A call the model wrapped in a tag it made up.
+///
+/// Qwen2.5-Coder-7B does this reproducibly, and **which** tag it picks moves
+/// with the prompt. On 2026-09-11 it answered the same imperative tool request
+/// with `<tools>…</tools>`, which `try_hermes` was taught to accept; later the
+/// same day, once `tojson` began emitting `transformers`' spacing, the same
+/// model at `temperature: 0` answered
+/// `<xml>\n  {"name": "get_time", "arguments": {"zone": "UTC"}}\n</xml>`
+/// instead. Both were verified against a baseline binary, so the tag really did
+/// move with the rendering rather than with sampling.
+///
+/// Enumerating tags is therefore a treadmill, and the next prompt change picks
+/// the next tag. The rule here is structural instead: the ENTIRE reply must be
+/// one element — no prose before it, none after — and its body must parse as a
+/// single call object. That is strictly tighter than the `<tools>` branch it
+/// generalises, which tolerates surrounding text.
+///
+/// Nothing is swept up. `single_object_call` requires a top-level `name`, so a
+/// model echoing its DEFINITIONS back (`{"type": "function", "function":
+/// {"name": …}}`) yields nothing, and a reply that merely discusses JSON is not
+/// wrapped in a lone tag to begin with. This runs last, so every named format
+/// answers first.
+fn try_invented_wrapper(text: &str) -> Option<Vec<ParsedToolCall>> {
+    let text = text.trim();
+    let inner = text.strip_prefix('<')?;
+    // The tag name, up to the end of the opening tag. Attributes are allowed
+    // and ignored; a closing tag (`</…`) is not an opening one.
+    let (open_tag, body) = inner.split_once('>')?;
+    let name = open_tag
+        .split([' ', '\t', '\n', '/'])
+        .next()
+        .filter(|n| !n.is_empty())
+        .filter(|n| {
+            n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':')
+        })?;
+    let body = body.strip_suffix(&format!("</{name}>"))?;
+    single_object_call(body.trim(), 0).map(|call| vec![call])
+}
+
 /// `[TOOL_CALLS][{"name": ..., "arguments": {...}}]` — Mistral.
 fn try_mistral(text: &str) -> Option<Vec<ParsedToolCall>> {
     let rest = text.split("[TOOL_CALLS]").nth(1)?.trim();
@@ -1555,6 +1596,51 @@ mod tests {
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(calls[0].name, "get_time", "the real call, not the echo");
         assert_eq!(calls[0].arguments, r#"{"zone":"UTC"}"#);
+    }
+
+    /// The same model, the same request, a different invented tag — because the
+    /// PROMPT changed. Once `chat_template::tojson` started emitting
+    /// `transformers`' spacing, Qwen2.5-Coder-7B at `temperature: 0` moved from
+    /// `<tools>` to `<xml>`. Verified against a baseline binary in both
+    /// directions on 2026-09-11, so this is the rendering, not sampling.
+    ///
+    /// The lesson is why `try_invented_wrapper` is structural: the previous fix
+    /// named one tag, and one prompt change later the model picked another.
+    #[test]
+    fn parses_a_call_the_model_wrapped_in_a_tag_it_invented() {
+        let reply = "<xml>\n  {\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}\n</xml>";
+        let calls = parse_tool_calls(reply).expect("Qwen2.5-Coder's real reply must parse");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].name, "get_time");
+        assert_eq!(calls[0].arguments, r#"{"zone":"UTC"}"#);
+    }
+
+    /// The wrapper rule takes the WHOLE reply or nothing. Prose around a JSON
+    /// object stays prose — loosening that is how a reply discussing a value
+    /// with a `name` field becomes a call the user never approved.
+    #[test]
+    fn an_invented_wrapper_is_only_read_when_it_is_the_whole_reply() {
+        for reply in [
+            "Sure, here is what I would send:\n<xml>\n{\"name\": \"get_time\", \"arguments\": {}}\n</xml>",
+            "<xml>\n{\"name\": \"get_time\", \"arguments\": {}}\n</xml>\nShall I run it?",
+            "<xml>\n{\"name\": \"get_time\", \"arguments\": {}}",
+            "<xml>\n{\"name\": \"get_time\", \"arguments\": {}}\n</other>",
+        ] {
+            assert_eq!(
+                parse_tool_calls(reply),
+                None,
+                "a wrapper that is not the entire reply must not parse: {reply}"
+            );
+        }
+    }
+
+    /// And a definition echoed inside an invented tag is still not a call, for
+    /// the same reason it is not inside `<tools>`: the name is nested.
+    #[test]
+    fn an_invented_wrapper_around_a_definition_is_not_a_call() {
+        let echo = "<xml>\n{\"type\": \"function\", \"function\": {\"name\": \"get_time\", \
+                    \"parameters\": {\"type\": \"object\", \"properties\": {}}}}\n</xml>";
+        assert_eq!(parse_tool_calls(echo), None, "a definition is not a call");
     }
 
     /// The shape `format_tool_prompt` requests today: flat, no `id`, no `type`.

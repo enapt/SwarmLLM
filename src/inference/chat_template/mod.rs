@@ -8,6 +8,7 @@
 use crate::types::{ChatMessage, Role};
 
 mod fallbacks;
+mod tojson;
 
 pub use fallbacks::chatml_fallback;
 
@@ -60,6 +61,12 @@ pub fn apply_chat_template(
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_function("strftime_now", strftime_now);
     env.add_function("raise_exception", raise_exception);
+
+    // `tojson` as `transformers` defines it, replacing minijinja's builtin.
+    // The builtin escapes `<`, `>`, `&` and `'` for the benefit of a web page,
+    // and rejects every keyword but `indent` — which fails the WHOLE render.
+    // See [`tojson`] for what each of those cost.
+    env.add_filter("tojson", tojson::tojson);
 
     // Undefined must be FALSY rather than an error. Templates guard optional
     // fields with `{% if message.reasoning_content %}` and probe for callables

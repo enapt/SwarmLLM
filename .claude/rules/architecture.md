@@ -118,6 +118,13 @@ the `{"type": "function", "function": {...}}` one templates are written against.
 **`tojson` is a minijinja feature (`json`), and an unknown filter fails the
 WHOLE render.** Every real tool-rendering template calls it.
 
+**And the `tojson` a template gets is OURS, not minijinja's** —
+`chat_template::tojson` implements the signature `transformers` defines
+(`ensure_ascii`, `indent`, `separators`, `sort_keys`, Python's separator
+defaults) and does not escape HTML. minijinja's builtin does both wrong for this
+use: it rewrites `<`, `>`, `&` and `'` for a web page, and it rejects every
+keyword but `indent` — which fails the whole render.
+
 → `docs/invariants/api-surfaces.md`
 
 ## A template that refuses a system role is still told what the system turn said

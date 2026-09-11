@@ -1,0 +1,13 @@
+[gMASK]<sop>{%- if tools -%}<|system|>
+# 可用工具
+{% for tool in tools %}{%- set function = tool.function if tool.get("function") else tool %}
+
+## {{ function.name }}
+
+{{ function | tojson(indent=4, ensure_ascii=False) }}
+在调用上述函数时，请使用 Json 格式表示调用的参数。{%- endfor %}{%- endif -%}{%- for msg in messages %}{%- if msg.role == 'system' %}<|system|>
+{{ msg.content }}{%- endif %}{%- endfor %}{%- for message in messages if message.role != 'system' %}{%- set role = message['role'] %}{%- set content = message['content'] %}{%- set meta = message.get("metadata", "") %}{%- if role == 'user' %}<|user|>
+{{ content }}{%- elif role == 'assistant' and not meta %}<|assistant|>
+{{ content }}{%- elif role == 'assistant' and meta %}<|assistant|>{{ meta }} 
+{{ content }}{%- elif role == 'observation' %}<|observation|>
+{{ content }}{%- endif %}{%- endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}

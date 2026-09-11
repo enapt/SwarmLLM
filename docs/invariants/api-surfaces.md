@@ -73,6 +73,51 @@ as a line in `Cargo.toml` — what matters is that the filter resolves. Dropping
 the feature fails that test and `qwen3_renders_its_own_tool_framing`, both
 verified by removing it.
 
+### …and the filter itself is ours, because minijinja's answers a different question
+
+(2026-09-11). Having the filter resolve is not the same as it behaving the way
+the model's author saw it behave. minijinja's `tojson` is written for embedding
+JSON in a web page, and it differs from `transformers`' in two ways that both
+reached the model:
+
+- **It escapes HTML.** `<`, `>`, `&` and `'` come out as `\u003c`, `\u003e`,
+  `\u0026` and `\u0027`. A tool described as "the user's location" was handed to
+  the model as `the user\u0027s location`, and so was any schema mentioning `<`
+  — on every tool-carrying request to every model whose template renders tools
+  through the filter. `transformers` overrides the builtin for exactly this
+  reason, and its source says so in a comment. llama.cpp's minja does not escape
+  either, so we were the only one of the three that did.
+- **It takes `indent` and nothing else**, then calls `Kwargs::assert_all_used`,
+  so any other keyword raises `unknown keyword argument` — and an error inside a
+  filter fails the WHOLE render. GLM-4's template asks for
+  `tojson(indent=4, ensure_ascii=False)`, so every GLM-4 request carrying tools
+  was answered through a fallback with none of the model's own `# 可用工具`
+  framing. minja rejects that keyword too (`Unknown argument ensure_ascii`), so
+  llama.cpp has the same bug: **the reference is where to start, not where to
+  stop.**
+
+`chat_template::tojson` implements `transformers`' signature —
+`tojson(x, ensure_ascii=False, indent=None, separators=None, sort_keys=False)` —
+with Python's separator defaults (`", "` / `": "` with no indent, `","` / `": "`
+with one), so a bare `{{ x | tojson }}` now produces the same bytes HuggingFace
+produces. The single POSITIONAL argument stays `indent`, as in Jinja2's builtin,
+minijinja and minja; `transformers` reads that slot as `ensure_ascii`, but no
+chat template passes it positionally and reinterpreting an indent as a flag is
+the worse failure.
+
+What a change here must keep:
+
+- `the_glm4_template_renders_exactly_as_transformers_does` compares byte-for-byte
+  against `jinja2` driven the way `transformers` drives it. The ONE deliberate
+  difference is key ORDER: a tool definition is a `serde_json::Value` by the time
+  it reaches the renderer and `serde_json` is built without `preserve_order`, so
+  keys arrive alphabetically. That is `docs/FUTURE_WORK.md` item 46, and the
+  reference string in the test is generated with `sort_keys=True` to say so out
+  loud rather than hide it.
+- `a_tool_schema_reaches_the_model_unescaped` is the regression guard for the
+  escaping half; it fails on an apostrophe alone.
+- All four tests were verified to fail with the filter registration removed.
+
 ## A reasoning model's scratchpad is not the reply
 
 `inference::take_leading_reasoning_block` removes a leading `<think>…</think>`

@@ -77,7 +77,31 @@ shift 2 2>/dev/null || true
 # tail behave differently from everyone else. TinyLlama is the `zephyr` fallback
 # family — its name contains "llama" while its format is not Llama's, which is the
 # case `fallback_by_model_name` has a dedicated early branch for (gotcha #169).
-DEFAULT_MODELS="llama-3.2-3b-instruct-q4-k-m qwen3-1.7b-q8-0 phi-3.5-mini-instruct.q4-k-m microsoft-phi-4-mini-instruct-q4-k-m qwen2.5-coder-7b-instruct-q4-k-m gemma-2-2b-it-q4-k-m tinyllama-1.1b-chat-v1.0.q4-k-m"
+#
+# ⚠ GLM-4's tool check reports `n/a`, and that is the model, not us. Asked to
+# call `get_time` for zone UTC it answers the bare text `get_time()` — no JSON,
+# no arguments, so the zone is simply dropped — although its own template
+# instructs it to express the arguments as JSON. Our render of that template is
+# byte-identical to `transformers`' (pinned by
+# `the_glm4_template_renders_exactly_as_transformers_does`), so a vLLM or TGI
+# user gets the same prompt and the same reply. Do NOT teach the parser to read
+# `name()`: it would turn any reply mentioning a function into a call the user
+# never approved, and it would still lose the arguments.
+#
+# `glm4` is here because of what its ABSENCE cost. Partial RoPE — `rope_dim <
+# head_dim` — killed every request on Phi-4-mini, GLM-4 and Qwen 3.5 alike, from
+# one `Tensor::cat` answering with a transposed view the KV cache refuses, and the
+# defect went unnoticed on two of those three families for want of a model to run
+# (FUTURE_WORK #43). GLM-4 would have caught it on its own. It is also the only
+# `ModelArch` here that is not Llama-shaped or Qwen-shaped.
+#
+# `mistral-7b-instruct-v0.3` covers a TEMPLATE family, not an attention one — its
+# GGUF declares `general.architecture = llama`, as every Mistral conversion does.
+# Two properties earn it a place: its template `raise_exception`s on a system role,
+# so it is the second family through the `fold_system_into_first_user` retry that
+# Gemma alone was proving (FUTURE_WORK #44), and it emits `[TOOL_CALLS]`, the one
+# branch of `tool_parse::try_mistral` no end-to-end run has ever exercised.
+DEFAULT_MODELS="llama-3.2-3b-instruct-q4-k-m qwen3-1.7b-q8-0 phi-3.5-mini-instruct.q4-k-m microsoft-phi-4-mini-instruct-q4-k-m qwen2.5-coder-7b-instruct-q4-k-m gemma-2-2b-it-q4-k-m tinyllama-1.1b-chat-v1.0.q4-k-m thudm-glm-4-9b-0414-q4-k-m mistral-7b-instruct-v0.3-q4-k-m"
 MODELS="${*:-$DEFAULT_MODELS}"
 MODELS_DIR="${SWARM_CONFORMANCE_MODELS_DIR:-$HOME/.local/share/swarmllm/models}"
 [ -x "$BIN" ] || { echo "not executable: $BIN"; exit 2; }

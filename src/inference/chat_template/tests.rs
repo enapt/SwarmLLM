@@ -2154,3 +2154,188 @@ fn the_tojson_filter_is_available_to_templates() {
         "tojson did not serialise the message: {rendered}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `tojson` — the filter every tool-rendering template calls
+// ---------------------------------------------------------------------------
+
+const GLM4_GGUF_SHIPPED: &str = include_str!("fixtures/glm4_gguf_shipped.jinja");
+
+/// GLM-4 asks for `tojson(indent=4, ensure_ascii=False)`. minijinja's builtin
+/// accepts `indent` and nothing else, and an error inside a filter fails the
+/// WHOLE render — so the model's own `# 可用工具` framing was unreachable and
+/// every GLM-4 request carrying tools was answered by a fallback prompt.
+#[test]
+fn the_glm4_template_renders_its_own_tool_section() {
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "what is the weather in Paris?".into(),
+        images: vec![],
+    }];
+    let tools = vec![weather_tool()];
+    let prompt = build_prompt(
+        &msgs,
+        Some(GLM4_GGUF_SHIPPED),
+        "",
+        "<|user|>",
+        Some("glm-4-9b-0414"),
+        Some(&tools),
+    );
+
+    assert!(
+        prompt.contains("可用工具"),
+        "GLM-4's own tool heading is missing, so this rendered through a fallback: {prompt}"
+    );
+    assert!(
+        prompt.contains("get_weather"),
+        "the tool itself was not rendered: {prompt}"
+    );
+    assert!(
+        prompt.contains("<|user|>") && prompt.contains("<|assistant|>"),
+        "GLM-4's turn markers are missing: {prompt}"
+    );
+    assert!(
+        !prompt.contains("You have access to the following tools"),
+        "a template that renders tools must not also be handed the prose form: {prompt}"
+    );
+    assert!(
+        prompt.contains("what is the weather in Paris?"),
+        "question lost: {prompt}"
+    );
+}
+
+/// minijinja's `tojson` rewrites `<`, `>`, `&` and `'` as `<` and friends,
+/// because it is written for embedding JSON in a web page. `transformers`
+/// overrides the same filter for exactly that reason. An apostrophe in a tool
+/// description is ordinary English, and it was reaching the model escaped.
+#[test]
+fn a_tool_schema_reaches_the_model_unescaped() {
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "where am I?".into(),
+        images: vec![],
+    }];
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "locate",
+            "description": "Find the user's location & report it if accuracy < 50m",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    })];
+    let prompt = build_prompt(
+        &msgs,
+        Some(QWEN3_OFFICIAL),
+        "",
+        "<|im_end|>",
+        Some("qwen3-8b"),
+        Some(&tools),
+    );
+
+    assert!(
+        prompt.contains("the user's location & report it if accuracy < 50m"),
+        "the description did not survive rendering: {prompt}"
+    );
+    for escape in ["\\u0027", "\\u0026", "\\u003c", "\\u003e"] {
+        assert!(
+            !prompt.contains(escape),
+            "{escape} reached the model — the HTML-escaping tojson is back: {prompt}"
+        );
+    }
+}
+
+/// Every keyword `transformers` accepts, since that is the signature templates
+/// are written against: `tojson(x, ensure_ascii=False, indent=None,
+/// separators=None, sort_keys=False)`.
+#[test]
+fn tojson_takes_the_arguments_transformers_defines() {
+    let msgs = user_only_messages();
+    let render = |expr: &str| {
+        apply_chat_template(
+            &format!("{{% set x = {{\"b\": 1, \"a\": \"café\"}} %}}{expr}"),
+            &msgs,
+            "",
+            "",
+            false,
+            None,
+        )
+    };
+
+    // Python's default separators are `", "` and `": "`, NOT serde_json's
+    // `","` and `":"` — and a bare `| tojson` is how Qwen and Llama-3.1 render
+    // every tool schema, so this is the common case, not a corner.
+    //
+    // Keys come out sorted whatever is asked for: a map reaching this filter is
+    // either a minijinja literal or a `serde_json::Value`, and `serde_json` is
+    // built here without `preserve_order`, so its map is a `BTreeMap`.
+    // `sort_keys` therefore changes nothing today — it is honoured rather than
+    // rejected, which is the whole point.
+    assert_eq!(
+        render("{{ x | tojson }}").as_deref(),
+        Some(r#"{"a": "café", "b": 1}"#),
+        "the default must match python's separators"
+    );
+    assert_eq!(
+        render("{{ x | tojson(separators=(',', ':')) }}").as_deref(),
+        Some(r#"{"a":"café","b":1}"#)
+    );
+    assert_eq!(
+        render("{{ x | tojson(sort_keys=True) }}").as_deref(),
+        Some(r#"{"a": "café", "b": 1}"#)
+    );
+    assert_eq!(
+        render("{{ x | tojson(ensure_ascii=True) }}").as_deref(),
+        Some(r#"{"a": "caf\u00e9", "b": 1}"#)
+    );
+    assert_eq!(
+        render("{{ x | tojson(indent=4, ensure_ascii=False) }}").as_deref(),
+        Some("{\n    \"a\": \"café\",\n    \"b\": 1\n}"),
+        "GLM-4's exact call"
+    );
+    // The positional slot stays `indent`, as in Jinja2's builtin and minja.
+    assert_eq!(
+        render("{{ x | tojson(2) }}").as_deref(),
+        Some("{\n  \"a\": \"café\",\n  \"b\": 1\n}")
+    );
+}
+
+/// Byte-for-byte against `jinja2` driven exactly as `transformers` drives it —
+/// `ImmutableSandboxedEnvironment(trim_blocks, lstrip_blocks)`, its own
+/// `tojson`, its own `raise_exception`.
+///
+/// One deliberate difference, and it is the only one: keys arrive
+/// ALPHABETICALLY rather than in the order the caller wrote them, because a
+/// tool definition is a `serde_json::Value` by the time it reaches here and
+/// `serde_json` is built without `preserve_order`, so its map is a `BTreeMap`.
+/// The reference below was generated with `sort_keys=True` for that reason.
+/// See `docs/FUTURE_WORK.md` — "A tool schema reaches the model with its keys
+/// alphabetised".
+#[test]
+fn the_glm4_template_renders_exactly_as_transformers_does() {
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "what is the weather in Paris?".into(),
+        images: vec![],
+    }];
+    let tools = vec![weather_tool()];
+    let rendered =
+        apply_chat_template(GLM4_GGUF_SHIPPED, &msgs, "", "<|user|>", true, Some(&tools))
+            .expect("GLM-4's template must render");
+
+    assert_eq!(rendered, "[gMASK]<sop><|system|>\n# 可用工具\n\n## get_weather\n\n{\n    \"description\": \"Get the weather\",\n    \"name\": \"get_weather\",\n    \"parameters\": {\n        \"properties\": {\n            \"city\": {\n                \"type\": \"string\"\n            }\n        },\n        \"type\": \"object\"\n    }\n}\n在调用上述函数时，请使用 Json 格式表示调用的参数。<|user|>\nwhat is the weather in Paris?<|assistant|>");
+}
+
+/// An astral character escapes as a surrogate pair, which is what Python does.
+#[test]
+fn ensure_ascii_escapes_an_astral_character_as_a_surrogate_pair() {
+    let msgs = user_only_messages();
+    let rendered = apply_chat_template(
+        "{% set x = [\"🙂\"] %}{{ x | tojson(ensure_ascii=True) }}",
+        &msgs,
+        "",
+        "",
+        false,
+        None,
+    );
+    assert_eq!(rendered.as_deref(), Some(r#"["\ud83d\ude42"]"#));
+}
