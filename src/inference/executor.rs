@@ -1201,6 +1201,34 @@ pub struct GenerationResult {
     pub matched_stop_sequence: Option<String>,
 }
 
+/// Run a synchronous generation loop without starving the async runtime.
+///
+/// The in-process llama.cpp executor (`-m`, i.e. every GPU build's whole-file
+/// path) generates on the calling thread and never yields. Called straight from
+/// a router task, that thread is a Tokio worker — and a worker inside a
+/// multi-second C++ loop cannot poll the task that is draining this request's
+/// tokens into the SSE response.
+///
+/// **That is why streamed replies did not stream.** Nothing reached the client
+/// until generation finished; the 64-slot token channel then filled, and the
+/// generation callback read a full channel as a departed client and ended the
+/// reply — at 65 tokens, reported as `finish_reason: "stop"`. Field-reported on
+/// v0.3.172 on two models and two devices. Measured here on a 0.5B: 65 tokens in
+/// 121 s, against 123 events arriving ~20 ms apart in 2.5 s with this in place,
+/// and a non-streamed request on the same node and prompt unaffected at 47 tok/s.
+///
+/// `block_in_place` hands the worker's remaining tasks to another thread for the
+/// duration, which is exactly the need here. It panics on a current-thread
+/// runtime, so that case — tests, and anything off a runtime entirely — runs the
+/// closure directly; there is no other worker to starve there.
+pub(crate) fn without_starving_the_runtime<R>(f: impl FnOnce() -> R) -> R {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum FinishReason {
     Stop,
@@ -1424,6 +1452,98 @@ mod tests {
             !exec.is_loaded(),
             "a refused load must not leave the executor claiming a model is loaded"
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_starvation_tests {
+    use super::without_starving_the_runtime;
+
+    /// A synchronous generation loop must not stop the runtime from draining
+    /// this request's tokens into the response.
+    ///
+    /// The defect, field-reported on v0.3.172: nothing reached a streaming
+    /// client until generation finished, so the token channel filled and the
+    /// reply was cut at 65 tokens. Modelled here as a consumer task that must
+    /// make progress while a blocking loop runs — with a plain call it cannot,
+    /// and the assertion below is what fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_blocking_loop_lets_the_rest_of_the_runtime_run() {
+        // ONE worker, and the blocking loop inside a spawned TASK — both
+        // deliberate, and each was needed to make this test able to fail.
+        // With more workers the consumer is simply picked up elsewhere; and run
+        // from the test body directly, the loop blocks `block_on`'s own thread
+        // rather than a worker, which starves nothing. One worker, holding a
+        // task, is the smallest faithful model of the real failure: the thread
+        // running generation is the only thread that could be draining the
+        // response.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u32>(4);
+        let drained = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = drained.clone();
+        tokio::spawn(async move {
+            while let Some(_v) = rx.recv().await {
+                seen.fetch_add(1, std::sync::atomic::Ordering::Release);
+            }
+        });
+
+        // The generation loop: emits more than the channel holds, so it can only
+        // finish if the consumer runs alongside it. Bounded so the failure is a
+        // failed assertion rather than a hung test.
+        let placed = tokio::spawn(async move {
+            without_starving_the_runtime(|| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut placed = 0u32;
+                for i in 0..32u32 {
+                    loop {
+                        if std::time::Instant::now() >= deadline {
+                            return placed;
+                        }
+                        match tx.try_send(i) {
+                            Ok(()) => {
+                                placed += 1;
+                                break;
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                return placed
+                            }
+                        }
+                    }
+                }
+                placed
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            placed, 32,
+            "the consumer never ran while the blocking loop held the worker, so \
+             generation stalled at the channel's capacity — exactly the reported \
+             cutoff at 65 tokens on a 64-slot channel"
+        );
+        for _ in 0..200 {
+            if drained.load(std::sync::atomic::Ordering::Acquire) == 32 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(drained.load(std::sync::atomic::Ordering::Acquire), 32);
+    }
+
+    /// It must also be safe off a multi-thread runtime: `block_in_place`
+    /// panics on a current-thread one, which is what `#[tokio::test]` gives by
+    /// default, and what a good deal of this suite runs on.
+    #[tokio::test]
+    async fn a_current_thread_runtime_runs_the_closure_instead_of_panicking() {
+        assert_eq!(without_starving_the_runtime(|| 7u8), 7);
+    }
+
+    #[test]
+    fn off_a_runtime_entirely_it_just_runs() {
+        assert_eq!(without_starving_the_runtime(|| 9u8), 9);
     }
 }
 

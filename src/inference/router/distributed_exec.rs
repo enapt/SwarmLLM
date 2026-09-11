@@ -484,26 +484,27 @@ pub(super) async fn execute_request(
         if let Some(ref tx) = token_tx {
             let tx = tx.clone();
             let mut accumulated = String::new();
-            let gen_result = executor.generate_stream(
-                &prompt,
-                &request.sampling_params,
-                |token: &str| -> bool {
+            let gen_result = crate::inference::executor::without_starving_the_runtime(|| {
+                executor.generate_stream(&prompt, &request.sampling_params, |token: &str| -> bool {
                     accumulated.push_str(token);
                     let event = super::types::StreamingTokenEvent {
                         text: token.to_string(),
                         finish_reason: None,
                         matched_stop_sequence: None,
                     };
-                    tx.try_send(event).is_ok()
-                },
-            )?;
+                    // Waits for room — see `StreamingTokenTx::send_live_blocking`.
+                    tx.send_live_blocking(event)
+                })
+            })?;
             // Send final done event
             let done_event = super::types::StreamingTokenEvent {
                 text: String::new(),
                 finish_reason: Some(gen_result.finish_reason.as_str().to_string()),
                 matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
             };
-            if tx.try_send(done_event).is_err() {
+            // Waits for room: a terminal event dropped on a full buffer makes
+            // the OpenAI encoder re-emit the whole reply as one delta.
+            if !tx.send_live_blocking(done_event) {
                 tracing::warn!(
                     request_id = %request.id,
                     "DIAG: streaming done_event send failed — receiver dropped"
@@ -518,7 +519,10 @@ pub(super) async fn execute_request(
             ));
         }
 
-        let (content, gen_result) = executor.generate(&prompt, &request.sampling_params)?;
+        let (content, gen_result) =
+            crate::inference::executor::without_starving_the_runtime(|| {
+                executor.generate(&prompt, &request.sampling_params)
+            })?;
 
         return Ok(InferenceOutput::from_gen_result(
             request.id,

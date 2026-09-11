@@ -1102,6 +1102,18 @@ a comment on one of them explaining exactly why it mattered.
 
 → `docs/invariants/scheduling.md`
 
+## A generation loop that blocks its thread must be told to, and a full buffer is not a departed client
+
+**`inference::executor::without_starving_the_runtime`** wraps every in-process
+`executor.generate*` call: that loop never yields, and on a Tokio worker it stops
+the runtime draining the response, so a streamed reply does not stream at all.
+**`api::sse_send_live_blocking`** is what a generation callback sends with —
+`try_send(..).is_ok()` reads a FULL channel as a departed client and ends the
+reply at the buffer's capacity, reported as a natural `stop`. Terminal
+`finish_reason` events go through it too.
+
+→ `docs/invariants/api-surfaces.md`
+
 ## A streaming path must announce that it finished
 
 `api/openai/streaming.rs` treats "no finish event arrived" as "this path never

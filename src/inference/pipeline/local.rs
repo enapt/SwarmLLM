@@ -217,16 +217,19 @@ impl PipelineExecutor {
                     return Err(SwarmError::NoModelLoaded);
                 }
                 let mut content = String::new();
-                let (gen_result, spec_state) = executor.generate_speculative(
-                    &mut draft,
-                    &prompt,
-                    &self.request.sampling_params,
-                    gamma,
-                    |token| {
-                        content.push_str(token);
-                        true
-                    },
-                )?;
+                let (gen_result, spec_state) =
+                    crate::inference::executor::without_starving_the_runtime(|| {
+                        executor.generate_speculative(
+                            &mut draft,
+                            &prompt,
+                            &self.request.sampling_params,
+                            gamma,
+                            |token| {
+                                content.push_str(token);
+                                true
+                            },
+                        )
+                    })?;
                 tracing::info!(
                     acceptance_rate = %spec_state.acceptance_rate(),
                     "Speculative decoding acceptance rate"
@@ -246,7 +249,10 @@ impl PipelineExecutor {
         if !executor.is_loaded() {
             return Err(SwarmError::NoModelLoaded);
         }
-        let (content, gen_result) = executor.generate(&prompt, &self.request.sampling_params)?;
+        let (content, gen_result) =
+            crate::inference::executor::without_starving_the_runtime(|| {
+                executor.generate(&prompt, &self.request.sampling_params)
+            })?;
 
         Ok(InferenceOutput::from_gen_result(
             self.request.id,

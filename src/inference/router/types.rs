@@ -75,6 +75,22 @@ impl StreamingTokenTx {
         self.inner.try_send(event)
     }
 
+    /// Hand a token to the consumer from a synchronous generation loop,
+    /// waiting for room instead of reading a full buffer as a departed client.
+    ///
+    /// Returns `false` only when generation should genuinely stop — the
+    /// receiver is gone, or it has stopped reading for longer than a live
+    /// client ever would. **This is what a generation callback must use**;
+    /// `try_send(..).is_ok()` ends the reply the moment the consumer falls one
+    /// buffer behind, which on this channel's 64 slots is a cutoff at 65
+    /// tokens. See `api::sse_send_live_blocking`.
+    pub fn send_live_blocking(&self, event: StreamingTokenEvent) -> bool {
+        // Stamp before the offer, as `try_send` does: TTFT is when the token
+        // was ready, not when a busy consumer got round to taking it.
+        self.stamp(&event);
+        crate::api::sse_send_live_blocking(&self.inner, event)
+    }
+
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }

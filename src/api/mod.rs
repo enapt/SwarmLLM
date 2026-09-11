@@ -97,6 +97,53 @@ pub(crate) async fn sse_send_live<T>(tx: &tokio::sync::mpsc::Sender<T>, ev: T) -
     )
 }
 
+/// How often [`sse_send_live_blocking`] re-offers a token while the consumer's
+/// buffer is full. Only ever reached while full, so the cost is bounded by how
+/// long the consumer is behind; a token at 50 tok/s is 20 ms apart, so 1 ms of
+/// polling adds no measurable latency.
+const SSE_BACKPRESSURE_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Blocking sibling of [`sse_send_live`], for the synchronous generation
+/// callbacks that have no way to `.await`.
+///
+/// **A full channel is backpressure, not a departed client.** `try_send`
+/// reports `Full` and `Closed` as the same `Err`, and three generation loops
+/// read `try_send(..).is_ok()` as "keep generating" — so a consumer that fell
+/// one buffer behind ended the reply. With a 64-slot channel that is a cutoff
+/// at 65 tokens, reported as `finish_reason: "stop"` because the generator has
+/// no way to say it was told to stop: field-reported on v0.3.172 at exactly 65
+/// completion tokens, on two models, on two devices, with and without tools,
+/// purely by setting `"stream": true`.
+///
+/// Same two "consumer gone" conditions as the async version, and the same
+/// [`SSE_CONSUMER_STALL_TIMEOUT`]: a dropped receiver, or a reader that has
+/// stopped for longer than a live client ever would.
+///
+/// It sleeps the calling thread, which is deliberate and costs nothing extra
+/// here: every caller is a generation loop that already occupies its thread
+/// end-to-end without yielding, so waiting for the consumer takes strictly less
+/// from the runtime than computing the next token would. Moving those loops to
+/// `spawn_blocking` so this could be a plain `blocking_send` is
+/// `docs/FUTURE_WORK.md`.
+pub(crate) fn sse_send_live_blocking<T>(tx: &tokio::sync::mpsc::Sender<T>, ev: T) -> bool {
+    use tokio::sync::mpsc::error::TrySendError;
+    let mut ev = ev;
+    let deadline = std::time::Instant::now() + SSE_CONSUMER_STALL_TIMEOUT;
+    loop {
+        match tx.try_send(ev) {
+            Ok(()) => return true,
+            Err(TrySendError::Closed(_)) => return false,
+            Err(TrySendError::Full(returned)) => {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                ev = returned;
+                std::thread::sleep(SSE_BACKPRESSURE_POLL);
+            }
+        }
+    }
+}
+
 /// Build SamplingParams with standard clamping applied across all API handlers.
 /// All fields are pre-clamped to safe ranges:
 /// - temperature: [0.0, 2.0]
@@ -669,6 +716,88 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(4);
         assert!(sse_send_live(&tx, 7u8).await);
         assert_eq!(rx.recv().await, Some(7));
+    }
+
+    /// A consumer that falls behind must slow the generator down, not end the
+    /// reply. Field-reported on v0.3.172: every streamed response stopped at
+    /// exactly 65 completion tokens — 64 buffered plus the one that could not
+    /// fit — with `finish_reason: "stop"`, on two models, two devices, with and
+    /// without tools, purely from setting `"stream": true`.
+    ///
+    /// Modelled on the real shape: a synchronous generation loop that keeps
+    /// going only while its send says so, against a consumer slower than it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_consumer_that_falls_behind_slows_generation_instead_of_ending_it() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u32>(4);
+        const TOKENS: u32 = 40;
+
+        let consumer = tokio::spawn(async move {
+            let mut got = Vec::new();
+            while let Some(v) = rx.recv().await {
+                got.push(v);
+                // Slower than the producer, which is the whole point.
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            got
+        });
+
+        let produced = tokio::task::spawn_blocking(move || {
+            let mut n = 0;
+            for i in 0..TOKENS {
+                if !sse_send_live_blocking(&tx, i) {
+                    break;
+                }
+                n += 1;
+            }
+            n
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            produced, TOKENS,
+            "generation stopped early on backpressure: produced {produced} of {TOKENS}"
+        );
+        let got = consumer.await.unwrap();
+        assert_eq!(
+            got,
+            (0..TOKENS).collect::<Vec<_>>(),
+            "tokens lost or reordered"
+        );
+    }
+
+    /// The null control for the test above: `try_send(..).is_ok()` — the shape
+    /// every generation callback used — stops at the buffer's capacity against
+    /// a consumer that has not started reading. Without this, a passing test
+    /// above proves only that 40 tokens fit somewhere.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_send_is_ok_ends_the_reply_at_the_buffers_capacity() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<u32>(4);
+        let mut produced = 0;
+        for i in 0..40u32 {
+            if tx.try_send(i).is_err() {
+                break;
+            }
+            produced += 1;
+        }
+        assert_eq!(
+            produced, 4,
+            "the defect this fix removes should stop at capacity, not {produced}"
+        );
+    }
+
+    /// A departed client still stops generation immediately — waiting for room
+    /// must not become waiting forever.
+    #[test]
+    fn sse_send_live_blocking_false_when_consumer_closed() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<u8>(4);
+        drop(rx);
+        let started = std::time::Instant::now();
+        assert!(!sse_send_live_blocking(&tx, 7u8));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a closed channel must be detected at once, not waited out"
+        );
     }
 
     #[tokio::test]

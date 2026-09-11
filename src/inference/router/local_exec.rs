@@ -79,7 +79,7 @@ pub(super) async fn execute_local_batch(
             // If the request is streaming, emit a final stop event so the
             // SSE client closes cleanly.
             if let Some(ref tx) = token_tx {
-                let _ = tx.try_send(StreamingTokenEvent {
+                tx.send_live_blocking(StreamingTokenEvent {
                     text: String::new(),
                     finish_reason: Some("stop".to_string()),
                     matched_stop_sequence: None,
@@ -144,31 +144,37 @@ pub(super) async fn execute_local_batch(
                 let mut accumulated = String::new();
                 let stop_strings = local_stop_strings.clone();
                 let mut hit_stop = false;
-                match executor.generate_stream(
-                    &prompt,
-                    &request.sampling_params,
-                    |token: &str| -> bool {
-                        accumulated.push_str(token);
-                        // Check for chat template stop strings
-                        if let Some(stop) = stop_strings
-                            .iter()
-                            .find(|s| accumulated.contains(s.as_str()))
-                        {
-                            // Truncate accumulated text at the stop string
-                            if let Some(pos) = accumulated.find(stop.as_str()) {
-                                accumulated.truncate(pos);
+                match crate::inference::executor::without_starving_the_runtime(|| {
+                    executor.generate_stream(
+                        &prompt,
+                        &request.sampling_params,
+                        |token: &str| -> bool {
+                            accumulated.push_str(token);
+                            // Check for chat template stop strings
+                            if let Some(stop) = stop_strings
+                                .iter()
+                                .find(|s| accumulated.contains(s.as_str()))
+                            {
+                                // Truncate accumulated text at the stop string
+                                if let Some(pos) = accumulated.find(stop.as_str()) {
+                                    accumulated.truncate(pos);
+                                }
+                                hit_stop = true;
+                                return false; // Signal to stop generation
                             }
-                            hit_stop = true;
-                            return false; // Signal to stop generation
-                        }
-                        let event = StreamingTokenEvent {
-                            text: token.to_string(),
-                            finish_reason: None,
-                            matched_stop_sequence: None,
-                        };
-                        tx.try_send(event).is_ok()
-                    },
-                ) {
+                            let event = StreamingTokenEvent {
+                                text: token.to_string(),
+                                finish_reason: None,
+                                matched_stop_sequence: None,
+                            };
+                            // Waits for room. `try_send(..).is_ok()` here ended the
+                            // reply as soon as the consumer fell one 64-slot buffer
+                            // behind — a cutoff at 65 tokens reported as a natural
+                            // stop.
+                            tx.send_live_blocking(event)
+                        },
+                    )
+                }) {
                     Ok(gen_result) => {
                         let finish = if hit_stop {
                             "stop".to_string()
@@ -181,7 +187,16 @@ pub(super) async fn execute_local_batch(
                             finish_reason: Some(finish.clone()),
                             matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
                         };
-                        let _ = tx.try_send(done_event);
+                        // The terminal event must not be dropped on a full
+                        // buffer: the OpenAI encoder reads "no finish event
+                        // arrived" as "this path never streamed" and re-emits
+                        // the WHOLE reply as one delta.
+                        if !tx.send_live_blocking(done_event) {
+                            tracing::debug!(
+                                request_id = %request.id,
+                                "DIAG: streaming done_event not delivered — consumer gone"
+                            );
+                        }
                         Ok(InferenceOutput::from_gen_result(
                             request.id,
                             session_id,
@@ -193,7 +208,9 @@ pub(super) async fn execute_local_batch(
                     Err(e) => Err(e),
                 }
             } else {
-                match executor.generate(&prompt, &request.sampling_params) {
+                match crate::inference::executor::without_starving_the_runtime(|| {
+                    executor.generate(&prompt, &request.sampling_params)
+                }) {
                     Ok((mut content, gen_result)) => {
                         // Second pass with the TEMPLATE-derived stops, which the
                         // executor never sees (it only knows the caller's own

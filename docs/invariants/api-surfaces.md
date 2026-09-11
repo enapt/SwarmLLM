@@ -257,6 +257,59 @@ since the hold it produced is gone.
 Ask of any periodic task merged into a response stream: when the thing it is
 keeping alive finishes, how long until this notices?
 
+## A generation loop that blocks its thread must be told to, and a full buffer is not a departed client
+
+(2026-09-11, gotchas #555/#556, FUTURE_WORK #45.) Field-reported on v0.3.172:
+every streamed reply stopped at **exactly 65 completion tokens** with
+`finish_reason: "stop"` — on two models, two devices, with and without tools,
+purely from setting `"stream": true`, while the same request non-streaming ran to
+1000 tokens. Two defects in series, and the second one hid the first.
+
+**`inference::executor::without_starving_the_runtime` is the outer half.** The
+in-process llama.cpp executor — the `-m` whole-file path, which only a GPU build
+has, since `cuda` and `windows-gpu` are the feature sets that pull in `llama` —
+generates on the calling thread and never yields. Called straight from a router
+task, that thread is a Tokio worker, and a worker inside a multi-second C++ loop
+cannot poll the task draining this request's tokens into the response. So
+**nothing streamed at all**: every delta arrived at the instant generation
+finished. `block_in_place` hands the worker's other tasks to a replacement thread
+for the duration. All seven in-process `executor.generate*` calls go through the
+helper, streaming and not — a blocking loop on a worker also stalls the libp2p
+event loop, which has a tripwire of its own.
+
+**`api::sse_send_live_blocking` is the inner half**, and it is what turned that
+stall into silent data loss. `try_send` reports `Full` and `Closed` as one `Err`,
+and the generation callbacks read `try_send(..).is_ok()` as "keep generating".
+With nothing draining, the 64-slot channel filled and the reply ended at 65 —
+and `GenerationResult` computes `finish_reason` from `completion_tokens >=
+max_tokens` alone, so a generation *told* to stop reports the same `"stop"` as
+one that ended its own turn. It is the blocking sibling of `sse_send_live`, with
+the same two "consumer gone" conditions and the same
+`SSE_CONSUMER_STALL_TIMEOUT`. Terminal `finish_reason` events go through it too:
+the OpenAI encoder reads "no finish event arrived" as "this path never streamed"
+and re-emits the whole reply as one delta.
+
+**Measured on a 0.5B, one node, same prompt**: before, 65 tokens in 121 s
+(`tpot_ms=1893`); after, 390 deltas ~20 ms apart, matching the non-streaming
+baseline's 390 tokens at 47 tok/s. The shard path was never affected — it sends
+tokens from an async task with `.send().await`, which is why it measured 0.126 s
+median gaps throughout and why nothing reproduced on a CPU build, which refuses
+`-m` outright.
+
+⚠ **Fixing only the inner half makes it worse, and that is how the outer half was
+found.** With backpressure handled but the runtime still starved, the generator
+waited out the 60 s stall limit on the 65th token and another 60 s on the
+terminal event: the same 65 tokens, now after 121 s instead of 1.4 s. A
+truncation that gets slower is not a truncation that is fixed.
+
+⚠ **Two null controls had to be repaired before either test could fail.** The
+first ran the blocking loop from the test body, where it blocks `block_on`'s own
+thread and starves no worker; the second gave the runtime two workers, so the
+consumer was simply picked up by the other one. The test needs **one worker AND
+the loop inside a spawned task** — the smallest arrangement in which the thread
+running generation is the only thread that could be draining the response. It
+then stalls at exactly the channel's capacity, which is the 65-on-64 shape.
+
 ## A streaming path must announce that it finished
 
 `api/openai/streaming.rs` treats "no finish event arrived" as "this path never

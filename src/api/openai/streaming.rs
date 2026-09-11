@@ -1316,20 +1316,28 @@ pub(super) async fn stream_response(
         }
 
         let mut executor = state.executor.lock().await;
-        let result = executor.generate_stream(&prompt, &params, |token| {
-            token_count += 1;
-            let send_result = tx.try_send(StreamEvent::Delta {
-                content: Some(token.to_string()),
-                role: None,
-                finish_reason: None,
-            });
-            if send_result.is_err() {
-                tracing::warn!(
-                    token_count,
-                    "DIAG: local stream token send failed — channel full or client disconnected"
+        let result = crate::inference::executor::without_starving_the_runtime(|| {
+            executor.generate_stream(&prompt, &params, |token| {
+                token_count += 1;
+                // Waits for room rather than ending the reply on a full buffer —
+                // the log line here used to say "channel full or client
+                // disconnected" and stop for either.
+                let delivered = crate::api::sse_send_live_blocking(
+                    &tx,
+                    StreamEvent::Delta {
+                        content: Some(token.to_string()),
+                        role: None,
+                        finish_reason: None,
+                    },
                 );
-            }
-            send_result.is_ok()
+                if !delivered {
+                    tracing::warn!(
+                    token_count,
+                    "DIAG: local stream token send failed — consumer gone or stalled past the limit"
+                );
+                }
+                delivered
+            })
         });
 
         // A failure is reported as one. This arm used to map every execution
