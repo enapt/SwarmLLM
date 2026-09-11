@@ -43,12 +43,25 @@ if ! gh api "repos/$REPO/branches/$BRANCH/protection/required_status_checks" \
   exit 2
 fi
 
-# The most recent CI run on the branch is the authority on what job names exist.
-# Its own names are what GitHub matches the protection contexts against.
+# The most recent COMPLETED CI run on the branch is the authority on what job
+# names exist. Its own names are what GitHub matches the protection contexts
+# against.
+#
+# Completed is load-bearing. A run that is queued or still going has only
+# created the jobs that have started, so every job further down reads as one
+# "no job produces", and this script then tells you to edit branch protection
+# to match — which is how you would delete a required check that is perfectly
+# healthy, and gotcha #530 is about exactly that class of edit. Observed
+# 2026-09-11 against a queued run: both `Build (…)` jobs reported BLOCKING and
+# both existed and passed a few minutes later.
 run=$(gh run list --repo "$REPO" --workflow=CI --branch "$BRANCH" \
-        --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null)
-if [ -z "${run:-}" ]; then
-  echo "COULD NOT CHECK: no CI run found on $BRANCH to read job names from." >&2
+        --limit 20 --json databaseId,status \
+        --jq 'map(select(.status == "completed")) | .[0].databaseId' 2>/dev/null)
+if [ -z "${run:-}" ] || [ "$run" = "null" ]; then
+  echo "COULD NOT CHECK: no COMPLETED CI run found on $BRANCH to read job names" >&2
+  echo "from. A run still in flight cannot answer this — it has not created all" >&2
+  echo "its jobs yet, and the missing ones would read as required-but-absent." >&2
+  echo "Wait for the current run to finish and try again." >&2
   exit 2
 fi
 gh run view "$run" --repo "$REPO" --json jobs --jq '.jobs[].name' 2>/dev/null \
