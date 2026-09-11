@@ -5566,3 +5566,86 @@ fn every_apt_command_goes_through_a_retrying_action() {
         );
     }
 }
+
+/// Whether prompt privacy is in force is asked in ONE place, and it is not the
+/// per-model map.
+///
+/// `SharedState::encrypted_pipeline_for` is the single answer. Reading
+/// `encrypted_pipeline_models` directly sees only an EXPLICIT per-model toggle
+/// and misses both automatic cases — an explicit global `encrypted_pipeline`,
+/// and the default `encrypted_pipeline_auto`, which has switched privacy on
+/// wherever a node holds both ends of a model since 2026-07-27.
+///
+/// Auto-manage prune did exactly that. Its skip looked like a guard and read
+/// like one; it protected models a user had toggled by hand and silently left
+/// unprotected the ones privacy was actually in force for, so prune would delete
+/// an end shard and strand the setting — every request for that model then
+/// failing at pipeline assembly, which is the state a live node reached on
+/// 2026-08-09.
+///
+/// Two files may touch the map: `daemon/state` owns it, and the admin lifecycle
+/// endpoints deliberately expose the EXPLICIT value as distinct from the
+/// effective one. Everywhere else asks `encrypted_pipeline_for`, or
+/// `privacy_explicitly_enabled_for` where the deliberateness is the point.
+#[test]
+fn prompt_privacy_is_never_re_derived_from_the_per_model_map() {
+    let allowed = [
+        // Owns the map: the field, the accessors, and the startup load.
+        "src/daemon/state/mod.rs",
+        // The admin endpoints that read and write the explicit choice itself.
+        "src/api/admin_models/lifecycle.rs",
+    ];
+    let mut offenders = Vec::new();
+    for path in rust_files_under(std::path::Path::new("src")) {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if allowed.iter().any(|a| rel.ends_with(a)) {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (line, text) in statements(&src) {
+            if !text.contains("encrypted_pipeline_models") {
+                continue;
+            }
+            // WRITING the map is not re-deriving the setting — tests set the
+            // explicit choice up that way, and that is what the map is for.
+            // Only a READ can answer the question wrongly.
+            if text.contains(".insert(") || text.contains(".remove(") {
+                continue;
+            }
+            offenders.push(format!("{rel}:{line}: {}", text.trim()));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "prompt privacy must be read through `SharedState::encrypted_pipeline_for` \
+         (or `privacy_explicitly_enabled_for` where a DELIBERATE choice is the \
+         question). Reading `encrypted_pipeline_models` directly misses the \
+         automatic cases, which are the default:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The scan above must actually be able to see the mistake it forbids —
+/// including the shape rustfmt produces, which is how the original went
+/// unnoticed. Planted here rather than trusted.
+#[test]
+fn the_privacy_map_guard_catches_the_form_the_defect_took() {
+    let wrapped = "fn f() {\n    if self\n        .shared_state\n        .encrypted_pipeline_models\n        .get(&manifest.id)\n        .map(|v| *v)\n        .unwrap_or(false)\n    {\n        continue;\n    }\n}\n";
+    assert!(
+        statements(wrapped)
+            .iter()
+            .any(|(_, t)| t.contains("encrypted_pipeline_models")),
+        "the guard cannot see a wrapped chain, which is the exact form prune had"
+    );
+    let inline = "fn f() { let on = s.encrypted_pipeline_models.get(&id); }\n";
+    assert!(statements(inline)
+        .iter()
+        .any(|(_, t)| t.contains("encrypted_pipeline_models")));
+    // A commented-out mention is not a violation.
+    let commented = "fn f() {\n    // s.encrypted_pipeline_models.get(&id)\n    let a = 1;\n}\n";
+    assert!(!statements(commented)
+        .iter()
+        .any(|(_, t)| t.contains("encrypted_pipeline_models")));
+}

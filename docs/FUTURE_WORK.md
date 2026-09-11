@@ -11923,7 +11923,40 @@ makes any of this observable; before v0.3.87 the movements were not recorded at
 all.
 
 
-## Shard removal can strand prompt privacy (found 2026-08-09, surfaced not fixed)
+## Shard removal can strand prompt privacy (FIXED 2026-09-11)
+
+**Superseded — read this first.** Everything below was written on 2026-08-09 and
+describes the state then. All of it is now done, and the entry's open question —
+*"something removes shards without clearing the flag"* — had an answer it never
+reached:
+
+- `delete_shard` **refuses** when the shard is an end of a privacy-enabled model,
+  naming the setting (`privacy_required_shards`, `api/admin_models/shards.rs`).
+- The dashboard **renders the blocked state** in red with its own label, detail
+  and tip, and keeps the toggle usable so turning the setting off is the fix
+  (`dashboard.js`, `enc.blocked*` keys).
+- **The path nobody suspected was `auto_manage::prune`** (fixed 2026-09-11). Its
+  skip read `encrypted_pipeline_models` — the EXPLICIT per-model map — so it
+  protected models a user had toggled by hand and left unprotected exactly the
+  ones privacy was in force for, since `encrypted_pipeline_auto` has been ON by
+  default wherever a node holds both ends since 2026-07-27. Prune's check
+  predates that default and was silently outgrown by it. Two more sites did the
+  same partial derivation (`pipeline::distributed`'s local-embedding decision and
+  `pipeline::remote_generate`'s fast-path disqualification, the latter deciding
+  whether a RAW PROMPT may go to a peer); both now ask the accessor. No live leak
+  is demonstrated for those two — the scheduler reads the accessor and would not
+  produce those shapes with privacy on — but the masking is a property of today's
+  scheduler, not a guarantee.
+- `prompt_privacy_is_never_re_derived_from_the_per_model_map` in
+  `tests/repo_consistency.rs` fails the build on a direct read, with a self-test
+  that plants the violation in the wrapped shape rustfmt produced.
+
+Evidence: `docs/invariants/state-and-config.md` § "Prompt privacy is read through
+one accessor".
+
+---
+
+### Original entry (2026-08-09), kept for the reasoning
 
 `encrypted_pipeline` is per-model and requires this node to hold the model's
 first and last shard. If those shards go away afterwards, the flag stays on and

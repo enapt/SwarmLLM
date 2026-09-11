@@ -34,6 +34,31 @@ const SATURATION_FACTOR_AUTO: f64 = 1.5;
 /// once you average across user-perceived "I just used this".
 const RECENT_REQUEST_PROTECT_SECS: i64 = 3600;
 
+/// Does prompt privacy protect this shard from being pruned?
+///
+/// Two different holds, deliberately not collapsed:
+///
+/// - **The ends, whenever privacy is in force.** Removing the first or last
+///   shard strands the setting — it stays on, nothing satisfies it, and every
+///   request for the model fails. `required_ends` comes from
+///   `SharedState::privacy_required_shards`, the same answer `delete_shard`
+///   refuses on.
+/// - **Every shard, when the USER asked for privacy explicitly.** Privacy needs
+///   only the ends, so this is not required for correctness; it is the older,
+///   broader protection, and narrowing a protection a user deliberately asked
+///   for is a privacy-affecting change that does not belong in a fix for the
+///   automatic case.
+fn privacy_holds_shard(
+    required_ends: Option<(u32, u32)>,
+    explicitly_enabled: bool,
+    index: u32,
+) -> bool {
+    if explicitly_enabled {
+        return true;
+    }
+    required_ends.is_some_and(|(first, last)| index == first || index == last)
+}
+
 /// Region-demand EMA (requests/10min, decayed) below which a model counts as
 /// "the network isn't asking for this either" for idle VRAM unload. Matches the
 /// `ema_rate < 0.1` "no demand" boundary in `geo_target_replicas`.
@@ -312,16 +337,24 @@ impl AutoShardManager {
                     continue;
                 }
 
-                // Skip shards for models with encrypted pipeline enabled.
-                // E2E encryption requires local first/last segments -- pruning
-                // any shard of an encrypted model would break the guarantee.
-                if self
-                    .shared_state
-                    .encrypted_pipeline_models
-                    .get(&manifest.id)
-                    .map(|v| *v)
-                    .unwrap_or(false)
-                {
+                // Prompt privacy needs BOTH ends of the model on this node, so
+                // pruning an end strands the setting: it stays on, nothing can
+                // satisfy it, and every request for the model then fails at
+                // pipeline assembly.
+                //
+                // This used to read `encrypted_pipeline_models` directly, which
+                // sees ONLY an explicit per-model toggle. Privacy has been ON BY
+                // DEFAULT wherever a node holds both ends since 2026-07-27
+                // (`encrypted_pipeline_auto`), and that map is empty for it — so
+                // the models most likely to have privacy in force were exactly
+                // the ones this did not protect. `privacy_required_shards` is the
+                // shared rule, and `delete_shard` refuses on the same answer.
+                if privacy_holds_shard(
+                    self.shared_state.privacy_required_shards(&manifest.id),
+                    self.shared_state
+                        .privacy_explicitly_enabled_for(&manifest.id),
+                    shard_id.index,
+                ) {
                     continue;
                 }
 
@@ -1209,12 +1242,7 @@ impl AutoShardManager {
                 .get(&model_id)
                 .map(|t| t.pinned_by_user)
                 .unwrap_or(false)
-                || self
-                    .shared_state
-                    .encrypted_pipeline_models
-                    .get(&model_id)
-                    .map(|v| *v)
-                    .unwrap_or(false)
+                || self.shared_state.privacy_explicitly_enabled_for(&model_id)
                 || self
                     .shared_state
                     .models
@@ -1455,7 +1483,56 @@ pub(crate) fn effective_prune_target(
 #[cfg(test)]
 mod tests {
 
-    use super::effective_idle_secs;
+    use super::{effective_idle_secs, privacy_holds_shard};
+
+    /// The defect this was written for. Prompt privacy is ON BY DEFAULT wherever
+    /// a node holds both ends of a model (`encrypted_pipeline_auto`, 2026-07-27),
+    /// and prune asked the per-model map instead — which is EMPTY in that case.
+    /// So a node that had never touched the setting, and therefore had privacy in
+    /// force, would prune the very shard the setting depends on, and every
+    /// request for that model would then fail at pipeline assembly.
+    #[test]
+    fn the_ends_are_held_when_privacy_is_on_without_an_explicit_toggle() {
+        assert!(privacy_holds_shard(Some((0, 3)), false, 0), "first shard");
+        assert!(privacy_holds_shard(Some((0, 3)), false, 3), "last shard");
+    }
+
+    /// But only the ends. The middle of a boomerang comes from peers by design,
+    /// so holding it back would stop prune freeing disk for no privacy gain.
+    #[test]
+    fn the_middle_is_prunable_when_privacy_was_not_asked_for_explicitly() {
+        assert!(!privacy_holds_shard(Some((0, 3)), false, 1));
+        assert!(!privacy_holds_shard(Some((0, 3)), false, 2));
+    }
+
+    /// An explicit choice keeps the older, broader hold on every shard. Privacy
+    /// itself needs only the ends, so this is not correctness — it is refusing to
+    /// narrow a protection the user deliberately asked for as a side effect of
+    /// fixing the automatic case.
+    #[test]
+    fn an_explicit_choice_still_holds_every_shard() {
+        for index in 0..4 {
+            assert!(privacy_holds_shard(Some((0, 3)), true, index));
+        }
+        // ...even where the rule reports no required ends, which is what a model
+        // with no manifest yet looks like.
+        assert!(privacy_holds_shard(None, true, 1));
+    }
+
+    /// With privacy off nothing is held, or prune could never touch a first or
+    /// last shard again.
+    #[test]
+    fn nothing_is_held_when_privacy_is_off() {
+        for index in 0..4 {
+            assert!(!privacy_holds_shard(None, false, index));
+        }
+    }
+
+    /// A one-shard model's single piece is both ends at once.
+    #[test]
+    fn a_single_shard_model_holds_its_only_piece() {
+        assert!(privacy_holds_shard(Some((0, 0)), false, 0));
+    }
 
     /// The reported failure: a model loaded 7s ago, with no request history
     /// because it was served locally, was treated as maximally idle and

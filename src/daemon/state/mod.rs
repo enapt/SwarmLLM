@@ -1799,6 +1799,20 @@ impl SharedState {
         )
     }
 
+    /// Did the USER explicitly switch prompt privacy on for this model?
+    ///
+    /// Distinct from [`SharedState::encrypted_pipeline_for`], which answers the
+    /// broader "is it on", automatic cases included. Read this ONLY where the
+    /// deliberateness is the point — a choice the user made can be honoured more
+    /// strongly than one the node made for them. Anything asking whether privacy
+    /// is *in force* wants `encrypted_pipeline_for`; confusing the two is how
+    /// prune came to protect the explicit case and miss the default one.
+    pub fn privacy_explicitly_enabled_for(&self, model_id: &crate::types::ModelId) -> bool {
+        self.encrypted_pipeline_models
+            .get(model_id)
+            .is_some_and(|v| *v)
+    }
+
     /// Pure rule behind [`SharedState::privacy_required_shards`], split out so
     /// the decision is testable without a registry — same shape as
     /// [`SharedState::resolve_encrypted_pipeline_inner`] above.

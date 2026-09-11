@@ -444,3 +444,54 @@ the very node it was for. The predicate now stands aside when
 `serves_on_cpu` AND a connected peer exists; the scheduler then delegates
 or assigns locally. A feature behind a gate is only as reachable as the
 gate's callers: test it from the API, not from the function.
+
+
+## Prompt privacy is read through one accessor, and the map is not it
+
+(2026-09-11.) `SharedState::encrypted_pipeline_for` resolves three cases in
+order: an explicit per-model choice, an explicit global `encrypted_pipeline`,
+and — since 2026-07-27 — `encrypted_pipeline_auto`, which is **ON by default**
+and switches privacy on wherever this node holds both ends of a model. That
+third case is how prompt privacy is normally in force at all, because it is the
+only one that needs no user action.
+
+`encrypted_pipeline_models` holds the FIRST case alone. Four sites re-derived
+the setting from it, each implementing a different prefix of the precedence
+rule, and every one of them under-reported privacy:
+
+- **`auto_manage::prune`** — its skip read the map, so it protected models a
+  user had toggled by hand and left unprotected exactly the models privacy was
+  actually in force for. Pruning an END shard strands the setting: it stays on,
+  nothing can satisfy it, and every request for that model then fails at
+  pipeline assembly. A live node reached that state on 2026-08-09, and the
+  investigation named `delete_shard` as the suspect — which was guarded, and
+  which is why the entry stayed open with its own question unanswered. Prune had
+  been reading the map since before auto-enable existed, so the guard was correct
+  when written and was silently outgrown by the default changing underneath it.
+- **`pipeline::distributed`** and **`pipeline::remote_generate`** — both did
+  `map.get(..).unwrap_or(config.inference.encrypted_pipeline)`, i.e. cases 1 and
+  2 without 3. The first decides whether to embed locally so a peer sees
+  activations rather than token ids; the second decides whether a request may
+  take the fast path that puts the RAW PROMPT on the wire to a peer. Both are
+  defence in depth for the case they were mis-answering. No live leak is
+  demonstrated — the scheduler reads the accessor and would not produce those
+  shapes with privacy on — but that masking is a property of today's scheduler,
+  not a guarantee, and two components disagreeing about one setting is the
+  standing defect of this codebase.
+
+What a change here must keep:
+
+- `privacy_required_shards` is the shared rule for "which shards may not be
+  removed", and BOTH `delete_shard` (refuses) and prune (skips) ask it.
+- Prune keeps a second, broader hold for an EXPLICIT choice: every shard, not
+  just the ends. Privacy needs only the ends, so this is not correctness —
+  narrowing a protection a user deliberately asked for is a privacy-affecting
+  change and does not belong in a fix for the automatic case.
+  `privacy_holds_shard` states both holds in one pure function, tested directly.
+- `prompt_privacy_is_never_re_derived_from_the_per_model_map` scans `src/` for
+  READS of the map (writes are how tests set the explicit choice), allowing only
+  `daemon/state` (owner) and `api/admin_models/lifecycle.rs` (the endpoints that
+  deliberately expose the explicit value as distinct from the effective one).
+  Its self-test plants the violation in the wrapped shape rustfmt produced,
+  which is the form that went unnoticed; the guard was also verified by
+  restoring the original prune code and watching it fail.

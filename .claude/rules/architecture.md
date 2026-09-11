@@ -38,6 +38,15 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
   `note_local_memory_refusal`, read only by
   `local_memory_refused_for_request`. It is the re-plan's queueing hint — see
   "A re-plan is warranted by a changed fact, never by a failed attempt".
+- `state.encrypted_pipeline_models` — **never read directly.**
+  `SharedState::encrypted_pipeline_for` is the single answer to "is prompt
+  privacy on for this model"; the map holds only the EXPLICIT per-model toggle
+  and misses both automatic cases, one of which
+  (`encrypted_pipeline_auto`, default ON wherever the node holds both ends) is
+  how privacy is normally switched on at all. Use
+  `privacy_explicitly_enabled_for` only where a DELIBERATE user choice is the
+  question. `prompt_privacy_is_never_re_derived_from_the_per_model_map` in
+  `tests/repo_consistency.rs` fails the build on a direct read.
 - `state.metrics.node_stats` — NOT `state.node_stats`
 - `state.metrics.providers_config` — NOT `state.providers_config`
 - `state.metrics.swarm_capacity` — R110. ArcSwap<SwarmCapacity>; refresh via `crate::daemon::state::refresh_swarm_capacity(state)`. Eagerly refreshed on peer connect (`network/manager/identify.rs`) and disconnect (`network/manager/connections.rs`) so the dashboard banner stays consistent with the peer-list panel under churn — the WS stats-cache 1.5s coalesce alone is too lazy.

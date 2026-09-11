@@ -310,12 +310,11 @@ fn eligible(exec: &PipelineExecutor) -> bool {
         return false;
     }
     let model_id = &exec.request.model_id;
-    let encrypted_for_model = exec
-        .shared_state
-        .encrypted_pipeline_models
-        .get(model_id)
-        .map(|r| *r.value())
-        .unwrap_or(exec.shared_state.config.inference.encrypted_pipeline);
+    // Ask the one accessor. Re-deriving it from the per-model map missed the
+    // automatic case (`encrypted_pipeline_auto`, the default), so a model with
+    // privacy in force did not disqualify the fast path here — the path that
+    // puts the RAW PROMPT on the wire to a peer.
+    let encrypted_for_model = exec.shared_state.encrypted_pipeline_for(model_id);
     // `encrypted_pipeline` forces local embedding (no raw tokens on wire).
     // `local_embedding_privacy` is similar. Both bypass the fast path.
     if encrypted_for_model || exec.shared_state.config.inference.local_embedding_privacy {

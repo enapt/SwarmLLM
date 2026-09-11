@@ -171,12 +171,13 @@ impl PipelineExecutor {
         // seeing raw token IDs — they only receive hidden-state activation tensors.
         // Auto-enabled when encrypted_pipeline is active (it requires both ends local).
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        let encrypted_for_model = self
-            .shared_state
-            .encrypted_pipeline_models
-            .get(model_id)
-            .map(|r| *r.value())
-            .unwrap_or(self.shared_state.config.inference.encrypted_pipeline);
+        // `encrypted_pipeline_for` is the single answer. Deriving it here from
+        // the per-model map plus the global flag implemented two thirds of the
+        // precedence rule and missed the third — `encrypted_pipeline_auto`, on
+        // by default, which switches privacy on wherever this node holds both
+        // ends of the model. This path is defence in depth for exactly that
+        // case, and it was defending less than the scheduler does.
+        let encrypted_for_model = self.shared_state.encrypted_pipeline_for(model_id);
         let use_local_embedding =
             self.shared_state.config.inference.local_embedding_privacy || encrypted_for_model;
         let local_embedder = if use_local_embedding {
