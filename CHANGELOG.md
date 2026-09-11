@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.3.172-alpha] — 2026-09-11
+
+### Fixed
+
+- **Phi models stop at the end of their turn instead of inventing the next one.**
+  Every Phi-3, Phi-3.5 and Phi-4 model declares one token as its end of sequence
+  and then ends each turn with a different one, and nothing said so, so nothing
+  stopped the reply there. Asked "say exactly: hello", a Phi model answered, then
+  invented a second answer, then made up a question from the user and began
+  answering that too, until it ran out of room. What you saw depended on the
+  model's vocabulary: some carried a stray `<|end|>` marker into the visible text,
+  others hid the seam entirely and simply rambled. A model's turn-ending tokens
+  are now found in its own vocabulary rather than taken on trust, so both
+  symptoms are gone, and models whose format uses that same token to separate
+  parts of one long answer are unaffected.
+- **Tool calls written in Phi-4's format are recognised.** Phi-4-mini is built by
+  its publisher for function calling and writes its calls in its own documented
+  format, which nothing here could read — so every call it made came back as
+  ordinary text with no error, and a client driving it would carry out nothing and
+  have no way to tell. Both spellings it uses are now understood. Note that this
+  model still cannot be served from shards at all, for a separate reason found
+  while testing this release and not yet fixed, so the change is verified against
+  its documented formats rather than against the model itself.
+- **A model whose template mentions tools without using them is told about them
+  anyway.** One template asks for its tools in a place they were never offered,
+  so its own tool section never appeared, and the written description was skipped
+  as redundant — leaving the model told nothing at all about tools that were
+  attached to the request. A reply built with tools that shows none of them is
+  now treated as a failed attempt and the written description is used instead.
+- **Tool calls from Qwen2.5-Coder are recognised.** Its own prompt names two
+  similar tags a few lines apart — one for the list of tools it has, one for
+  writing a call — and the model reaches for the wrong one. The call it wrote was
+  perfectly well formed and came back as plain text, so that model made no working
+  tool call at all. Both tags are now understood.
+- **A model repeating its tool list back is no longer mistaken for calling one.**
+  A tool's description and a call to it are nearly the same shape, and the
+  description was being accepted as a call — with the tool's own parameter
+  *definition* passed along where the argument values belong. A client would have
+  received a call it never asked for, carrying nothing it could use. Zero-argument
+  calls, which look similar, still work.
+- **A tool call inside a code block followed by an explanation is read
+  correctly.** Reading the block required the whole reply to be nothing but that
+  block, so the commonest thing a chatty model does — write the call, then
+  explain it — defeated it, and a perfectly good call was handed back as text. A
+  leftover code-fence marker no longer appears as the reply's visible content
+  either.
+
+### Changed
+
+- **Models are asked for a simpler shape when they have no tool format of their
+  own.** Two of the fields being requested were discarded on arrival, so asking
+  for them only added nesting for a small model to miscount. Both the old and the
+  new shape are still understood.
+- **A request whose model has no readable chat template now says so in the log.**
+  That is the condition behind a whole class of confusing replies, and nothing
+  previously named it.
+
+### Internal
+
+- Every step in the build that reaches the network is retried. A stale package
+  index had already published one release incomplete; the retry added then
+  covered the quick half of the work and not the half that downloads gigabytes.
+- The build cache no longer fills with entries nothing can use. Caches belonging
+  to finished pull requests and past releases are reclaimed, and the cleaner no
+  longer risks deleting a live cache in favour of an unusable one.
+- The build workflows are themselves checked now, which they were not. Every job
+  has a time limit, no two runs of the same work race each other, and the shell
+  inside each step is linted — including the retry loops the point above depends
+  on.
+- A new pre-release check runs several model families and asserts that each
+  produces a sane reply: that it answers the question, stops on its own, leaks no
+  internal markers, and has its tool calls read back properly. Every
+  model-specific fault fixed in the last four releases was reported by a user
+  rather than found here, and each one would have passed the checks that existed.
+
 ## [0.3.171-alpha] — 2026-09-10
 
 ### Fixed
