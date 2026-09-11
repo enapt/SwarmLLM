@@ -357,7 +357,22 @@ impl ModelMgmt {
             }
         }
         already_in_flight.sort_unstable();
-        let flag = Arc::new(AtomicBool::new(false));
+        // Share the live cancel flag rather than replacing it. Replacing it
+        // orphaned the running download's flag — it keeps its own `Arc` and
+        // still works, so the download carries on, but the map no longer points
+        // at it and a later cancel reached only the newest registration. One
+        // flag per model means one cancel stops everything being fetched for
+        // that model, which is what pressing cancel is asking for.
+        //
+        // A flag that is already SET is not reused: it belongs to a cancel in
+        // progress, and handing it to a fresh download would cancel that
+        // download the instant it started.
+        let flag = self
+            .download_cancel_flags
+            .get(&model_id)
+            .map(|f| f.value().clone())
+            .filter(|f| !f.load(std::sync::atomic::Ordering::Acquire))
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         self.acquisition_progress.insert(model_id.clone(), status);
         self.download_cancel_flags.insert(model_id, flag.clone());
         (flag, already_in_flight)
@@ -1023,6 +1038,43 @@ mod tests {
              in-flight mark — erasing it is what let a duplicate start"
         );
         assert_eq!(entry.shard_progress.len(), 2);
+    }
+
+    /// Registering a second download must not orphan the first one's cancel
+    /// flag: the running download keeps its own `Arc` and carries on, so a
+    /// cancel that reaches only the newest registration cannot stop it.
+    #[test]
+    fn a_second_registration_shares_the_running_downloads_cancel_flag() {
+        use crate::model::acquisition::AcquisitionStatus;
+        let mgmt = make_mgmt();
+        let mid = ModelId("m".into());
+        let status = || {
+            AcquisitionStatus::new_downloading(
+                mid.clone(),
+                1,
+                0,
+                "huggingface",
+                "user",
+                "x".to_string(),
+            )
+        };
+
+        let (first, _) = mgmt.begin_download(mid.clone(), status());
+        let (second, _) = mgmt.begin_download(mid.clone(), status());
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "both downloads must watch one flag, or one of them cannot be cancelled"
+        );
+
+        // Cancelling reaches the download that registered first.
+        second.store(true, std::sync::atomic::Ordering::Release);
+        assert!(first.load(std::sync::atomic::Ordering::Acquire));
+
+        // A flag already cancelled is NOT handed to a fresh download — that
+        // would cancel it before it began.
+        let (third, _) = mgmt.begin_download(mid.clone(), status());
+        assert!(!third.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!Arc::ptr_eq(&third, &first));
     }
 
     /// A model with no download in progress registers exactly as before.
