@@ -15,6 +15,15 @@ on:
   # derives the version from it works unchanged.
   workflow_dispatch:
 
+# One release at a time for a given tag. Both triggers can fire for the same
+# tag — a tag push, and the `workflow_dispatch` that exists to rebuild it — and
+# two runs uploading assets to one draft with `--clobber` would race over the
+# same names. `cancel-in-progress` is deliberately FALSE: a half-cancelled
+# release is worse than a queued one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   # Needed by the `prune-caches` job below to delete tag-scoped caches.
@@ -39,6 +48,10 @@ jobs:
   # same pool that artifact storage saturates.
   create-release:
     name: Create draft release
+    # GitHub's default is 360 min. Measured 2026-09-11: critical path 16.7 min with
+    # a warm cache, and a COLD flash-attn cell is ~56 min — so `build` is sized for
+    # the cold case with room to spare, not for the warm one.
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -104,6 +117,9 @@ jobs:
                 printf '\n---\n\nCommits: https://github.com/%s/commits/%s\n' \
                   "$GITHUB_REPOSITORY" "$TAG" >> "$NOTES_FILE"
               fi
+              # shellcheck disable=SC2086 # $PRERELEASE is a FLAG or empty, and
+              # quoting it would pass an empty argument to gh. The word
+              # splitting is the point.
               gh release create "$TAG" \
                 --draft \
                 --title "$TAG" \
@@ -111,6 +127,7 @@ jobs:
                 $PRERELEASE
             else
               echo "No CHANGELOG section for $VERSION — falling back to generated notes"
+              # shellcheck disable=SC2086 # see above: a flag or nothing.
               gh release create "$TAG" \
                 --draft \
                 --title "$TAG" \
@@ -122,6 +139,7 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     needs: create-release
+    timeout-minutes: 150
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -399,7 +417,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          cargo install cargo-deb --locked 2>/dev/null || true
+          # Retried, and a failure is REPORTED. This was
+          # `cargo install cargo-deb --locked 2>/dev/null || true`, which hid both the
+          # reason and the fact: on a network failure the next command died with
+          # "cargo-deb: command not found" and the real cause was in the discarded stderr.
+          # `|| true` is still needed for the already-installed case, so the check is
+          # on whether the binary EXISTS, not on the exit status.
+          for attempt in 1 2 3; do
+            cargo install cargo-deb --locked && break
+            if command -v cargo-deb >/dev/null 2>&1; then
+              echo "cargo-deb already present; install reported no work to do."
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "cargo install cargo-deb failed three times and cargo-deb is not on PATH." >&2
+              exit 1
+            fi
+            echo "cargo install cargo-deb failed (attempt $attempt) — retrying"
+            sleep $((attempt * 10))
+          done
           cargo deb --no-build
           # GITHUB_REF_NAME is "v0.1.0" but cargo-deb names the file
           # "swarmllm_0.1.0_amd64.deb" (Debian policy disallows "v" in
@@ -431,7 +467,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          cargo install cargo-generate-rpm --locked 2>/dev/null || true
+          # Retried, and a failure is REPORTED. This was
+          # `cargo install cargo-generate-rpm --locked 2>/dev/null || true`, which hid both the
+          # reason and the fact: on a network failure the next command died with
+          # "cargo-generate-rpm: command not found" and the real cause was in the discarded stderr.
+          # `|| true` is still needed for the already-installed case, so the check is
+          # on whether the binary EXISTS, not on the exit status.
+          for attempt in 1 2 3; do
+            cargo install cargo-generate-rpm --locked && break
+            if command -v cargo-generate-rpm >/dev/null 2>&1; then
+              echo "cargo-generate-rpm already present; install reported no work to do."
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "cargo install cargo-generate-rpm failed three times and cargo-generate-rpm is not on PATH." >&2
+              exit 1
+            fi
+            echo "cargo install cargo-generate-rpm failed (attempt $attempt) — retrying"
+            sleep $((attempt * 10))
+          done
           # RPM Version fields disallow `-`, which Cargo's SemVer
           # pre-release syntax uses (e.g. `0.2.0-alpha`). RPM convention
           # uses `~` for prerelease markers (sorts BEFORE the
@@ -473,6 +527,7 @@ jobs:
     name: Publish release
     needs: [create-release, build]
     if: always() && !cancelled() && needs.create-release.result == 'success'
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - name: Mark release as published
@@ -558,6 +613,7 @@ jobs:
     needs: publish
     # Runs even if publish refused, so a failed release still tidies up.
     if: always() && !cancelled()
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Delete tag-scoped caches from previous tags

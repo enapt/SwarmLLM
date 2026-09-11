@@ -37,6 +37,11 @@ env:
 jobs:
   fmt:
     name: Format
+    # GitHub's default is 360 min — six hours of runner time for one hung job.
+    # These are generous multiples of MEASURED durations (2026-09-11: slowest CI
+    # job 11 min, whole critical path 11 min), so they catch a hang and never a
+    # slow-but-working build.
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,6 +49,46 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+
+  # Lint the workflows themselves. Nothing did, and that is how six of the
+  # eight accumulated no `timeout-minutes` at all (GitHub's default is a
+  # six-hour runner burn per hung job), three ran with no `concurrency` group,
+  # and every `apt-get install` in the repository sat un-retried behind an
+  # `apt-get update` that was retried — the cheap half guarded, the half that
+  # downloads tens of megabytes not.
+  #
+  # `actionlint` also runs `shellcheck` over every `run:` block, which is the
+  # half that matters most here: the retry loops those steps now depend on are
+  # shell, and a shell bug in a retry loop does not fail loudly, it just stops
+  # retrying. `shellcheck` is preinstalled on the ubuntu runner image.
+  #
+  # Pinned by version AND content hash, the same way `book.yml` pins mdbook and
+  # `ci.yml` pins NVIDIA's keyring: a linter runs before anything is verified,
+  # so it is exactly the wrong thing to fetch from a mutable URL.
+  actionlint:
+    name: Workflow lint
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.7
+          ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-delay 5 --retry-connrefused \
+            -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xz -C "$HOME/.local/bin" -f /tmp/actionlint.tar.gz actionlint
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: actionlint
+        run: |
+          shellcheck --version | head -2
+          actionlint -color .github/workflows/*.yml
 
   # `cargo audit` against the RustSec advisory DB. The four `--ignore`
   # advisories below are documented in SECURITY.md § "Known accepted
@@ -53,6 +98,7 @@ jobs:
   # crates fail the job.
   audit:
     name: Audit
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,7 +108,26 @@ jobs:
           key: cargo-audit
           cache-targets: false
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: |
+          # Retried: this reaches crates.io and had no retry at all, so a
+          # transient registry failure failed the Audit job outright. The
+          # already-installed case is handled by checking whether the binary
+          # EXISTS rather than by trusting the exit status — `cargo install` of a
+          # crate that is already current does not report success on every
+          # version of cargo.
+          for attempt in 1 2 3; do
+            cargo install cargo-audit --locked && break
+            if command -v cargo-audit >/dev/null 2>&1; then
+              echo "cargo-audit already present; install reported no work to do."
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "cargo install cargo-audit failed three times and cargo-audit is not on PATH." >&2
+              exit 1
+            fi
+            echo "cargo install cargo-audit failed (attempt $attempt) — retrying"
+            sleep $((attempt * 10))
+          done
       - name: Run cargo audit
         run: |
           cargo audit \
@@ -74,6 +139,7 @@ jobs:
   clippy:
     name: Clippy (${{ matrix.os }} / ${{ matrix.features }})
     needs: fmt
+    timeout-minutes: 30
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -129,7 +195,9 @@ jobs:
         uses: ./.github/actions/apt-update
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y libssl-dev pkg-config
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libssl-dev pkg-config
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # Bump the `vN` suffix whenever an upstream runner-image change
@@ -150,6 +218,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     needs: fmt
+    timeout-minutes: 45
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -163,7 +232,9 @@ jobs:
         uses: ./.github/actions/apt-update
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y libssl-dev pkg-config
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libssl-dev pkg-config
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # See clippy step above for the rationale on -v2 + cache-bin: false.
@@ -213,6 +284,7 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     needs: test
+    timeout-minutes: 40
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -226,7 +298,9 @@ jobs:
         uses: ./.github/actions/apt-update
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y libssl-dev pkg-config
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libssl-dev pkg-config
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # See clippy step above for the rationale on -v2 + cache-bin: false.
@@ -264,6 +338,7 @@ jobs:
     # is worse than no job, because it is read as coverage.
     name: Feature compile-check ${{ matrix.features }} (Linux)
     needs: fmt
+    timeout-minutes: 90
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -327,7 +402,9 @@ jobs:
       - name: Refresh package indexes
         uses: ./.github/actions/apt-update
       - name: Install system dependencies
-        run: sudo apt-get install -y libssl-dev pkg-config
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libssl-dev pkg-config
       - name: Add NVIDIA's CUDA repository (pinned keyring)
         run: |
           # R138 (closes R103 deferral): pin cuda-keyring .deb to a verified
@@ -337,7 +414,10 @@ jobs:
           # publishes a new revision, the workflow fails fast with a hash
           # mismatch instead of silently installing it.
           CUDA_KEYRING_SHA256=d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          # --tries covers a transient failure; the SHA256 check below still decides
+          # whether what arrived is the right bytes.
+          wget -q --tries=3 --waitretry=10 --retry-connrefused \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           echo "${CUDA_KEYRING_SHA256}  cuda-keyring_1.1-1_all.deb" | sha256sum -c -
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
       # Split from the step above so the refresh that follows adding the
@@ -346,9 +426,11 @@ jobs:
       - name: Refresh package indexes (with CUDA repo)
         uses: ./.github/actions/apt-update
       - name: Install cuda-nvcc (build-time only, dynamic-loading dlopens runtime)
-        run: |
-          sudo apt-get install -y cuda-nvcc-12-8
-          echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/apt-install
+        with:
+          packages: cuda-nvcc-12-8
+      - name: Put cuda-nvcc on PATH
+        run: echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
       # windows-gpu = ["llama-vulkan", "candle-cuda", "flash-attn"]; this
       # matrix cell checks the first two (see the cell's comment for why
       # flash-attn is excluded here). The llama-vulkan half builds
@@ -385,7 +467,9 @@ jobs:
         # single Rust file is compiled. It reads like a code incompatibility in
         # the dependency bump that surfaces it (Dependabot #23) and is a missing
         # package on the runner.
-        run: sudo apt-get install -y libvulkan-dev glslang-tools glslc spirv-headers
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libvulkan-dev glslang-tools glslc spirv-headers
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # Don't bump this with -vN — the windows-gpu feature pulls in

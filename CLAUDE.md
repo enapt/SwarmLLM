@@ -177,7 +177,8 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
-- CI pipeline: `cargo fmt` → `cargo clippy --all-targets -- -D warnings` → `cargo test` → `cargo build --release`
+- CI pipeline: `cargo fmt` → `cargo clippy --all-targets -- -D warnings` → `cargo test` → `cargo build --release`, plus **`actionlint` over `.github/workflows/` (job `Workflow lint`, added 2026-09-11)** — it runs `shellcheck` on every `run:` block, which is what guards the retry loops those steps depend on. **CI is now 14 jobs, not 13** (the release gate's "CI 13/13" wording predates this).
+- **`examples/check_ci_gate.sh`** — does branch protection still require the checks CI actually produces? A required check is matched to a job by NAME, so a renamed job leaves the rule naming a job that never reports, and **every PR becomes permanently unmergeable** (gotcha #530). Reading protection needs admin, which `GITHUB_TOKEN` does not have, so this is a script you run rather than a job. Reports drift in both directions — required-but-absent (blocks everything) and produced-but-not-required (gates nothing). **Run it as part of the release gate.** As of 2026-09-11 it reports `Clippy (windows-latest / default)` and `Workflow lint` as unenforced.
 
 ## Key Design Decisions
 

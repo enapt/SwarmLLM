@@ -1,0 +1,63 @@
+name: apt-get install, retried
+description: >
+  Install apt packages, retrying with the indexes refreshed between attempts.
+  Use this everywhere instead of a bare `sudo apt-get install`.
+
+# Why this exists, as the companion to `apt-update`.
+#
+# `apt-update` was added after a stale third-party CDN index failed
+# `apt-get update` and took v0.3.168 out as a DRAFT with 12 of its 25 assets.
+# It retries the refresh — and every `apt-get install` that followed one was
+# still a bare command with no retry, in six places. An install reaches the same
+# CDNs the refresh does and fails the same transient ways: a half-written index,
+# a mirror mid-rotation, a connection reset partway through a download. The
+# retry was on the cheap half of the pair and not on the half that downloads
+# tens of megabytes.
+#
+# Refreshing the indexes between attempts is what makes the retry meaningful. A
+# failed install is very often a stale index naming a package version the mirror
+# has already rotated away, and retrying the install alone asks for the same
+# missing file again.
+#
+# A genuinely missing package still fails, after three attempts, with apt's own
+# message — this adds patience, not tolerance.
+
+inputs:
+  packages:
+    description: Space-separated package list, exactly as apt-get would take it.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: apt-get install (up to 3 attempts)
+      shell: bash
+      env:
+        APT_PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        if [ -z "${APT_PACKAGES// /}" ]; then
+          echo "apt-install called with no packages." >&2
+          exit 1
+        fi
+        # Word splitting is the point: the input is a package list.
+        # shellcheck disable=SC2086
+        for attempt in 1 2 3; do
+          if sudo apt-get install -y $APT_PACKAGES; then
+            exit 0
+          fi
+          if [ "$attempt" = "3" ]; then
+            echo "apt-get install failed three times for: $APT_PACKAGES" >&2
+            echo "Three transient failures in a row is usually a genuinely missing" >&2
+            echo "package or a renamed one, not the runner's mirrors." >&2
+            exit 1
+          fi
+          echo "apt-get install failed (attempt $attempt) — refreshing indexes and retrying"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          # A failure here is not fatal: the install retry below reports the
+          # real problem, and an update that cannot run is itself a symptom.
+          sudo apt-get update || true
+          # Back off — a half-written CDN index is not fixed by asking faster.
+          sleep $((attempt * 10))
+        done

@@ -19,8 +19,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: openclaw-plugin-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     defaults:
       run:

@@ -11,6 +11,12 @@ on:
         required: false
         default: "dev"
 
+# Two image builds per run; a rapid second push would run both again for
+# nothing. Superseding is right here — only the newest commit's images matter.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
@@ -22,6 +28,7 @@ env:
 jobs:
   build-cpu:
     name: Build CPU Image
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -87,6 +94,7 @@ jobs:
 
   build-cuda:
     name: Build CUDA Image
+    timeout-minutes: 90
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

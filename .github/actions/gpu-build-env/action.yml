@@ -159,7 +159,9 @@ runs:
     uses: ./.github/actions/apt-update
   - name: Install system dependencies (Linux)
     if: runner.os == 'Linux'
-    run: sudo apt-get install -y libssl-dev pkg-config
+    uses: ./.github/actions/apt-install
+    with:
+      packages: libssl-dev pkg-config
     shell: bash
   - name: Free runner disk space
     if: inputs.cuda-linux == 'true'
@@ -178,7 +180,9 @@ runs:
       # 2026-05-18 from the NVIDIA URL via direct wget. Kept in sync
       # with the matching pin in .github/workflows/ci.yml.
       CUDA_KEYRING_SHA256=d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df
-      wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+      # --tries covers a transient failure; the SHA256 check below still decides
+      # whether what arrived is the right bytes.
+      wget -q --tries=3 --waitretry=10 --retry-connrefused https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
       echo "${CUDA_KEYRING_SHA256}  cuda-keyring_1.1-1_all.deb" | sha256sum -c -
       sudo dpkg -i cuda-keyring_1.1-1_all.deb
   # Split from the step above so the refresh that follows adding NVIDIA's
@@ -195,16 +199,35 @@ runs:
       # dot-separated (/usr/local/cuda-12.8). One input, both spellings.
       apt_ver='${{ inputs.cuda-linux-version }}'
       dir_ver="${apt_ver//-/.}"
-      sudo apt-get install -y "cuda-toolkit-${apt_ver}"
+      # Retried in line, rather than through ./.github/actions/apt-install: a
+      # composite action cannot call another one from inside a `run:` block, and
+      # the package name is computed here. This is the single most expensive
+      # download in the whole pipeline (~3 GB), so it is the last one that
+      # should fail on a connection reset.
+      for attempt in 1 2 3; do
+        if sudo apt-get install -y "cuda-toolkit-${apt_ver}"; then
+          break
+        fi
+        if [ "$attempt" = "3" ]; then
+          echo "cuda-toolkit-${apt_ver} failed to install three times." >&2
+          exit 1
+        fi
+        echo "cuda-toolkit install failed (attempt $attempt) — refreshing and retrying"
+        sudo apt-get clean
+        sudo rm -rf /var/lib/apt/lists/*
+        sudo apt-get update || true
+        sleep $((attempt * 10))
+      done
       echo "/usr/local/cuda-${dir_ver}/bin" >> "$GITHUB_PATH"
       echo "CUDA_PATH=/usr/local/cuda-${dir_ver}" >> "$GITHUB_ENV"
-  - name: Install mold linker + select for Linux CUDA build
+  - name: Install mold linker
     if: inputs.cuda-linux == 'true'
-    run: 'sudo apt-get install -y mold
-
-      echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
-
-      '
+    uses: ./.github/actions/apt-install
+    with:
+      packages: mold
+  - name: Select mold for the Linux CUDA build
+    if: inputs.cuda-linux == 'true'
+    run: echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
     shell: bash
   # v0.2.36, up from v0.2.19. NOT a routine bump: the old version depends on
   # `@actions/cache ^3.2.4`, which speaks GitHub's retired cache service v1 and
