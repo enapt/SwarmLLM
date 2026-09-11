@@ -5334,7 +5334,7 @@ fn inference_trust_is_credited_only_behind_the_well_formed_verdict() {
     );
 }
 
-/// Every apt refresh in CI goes through `.github/actions/apt-update`.
+/// Every apt command in CI goes through a retrying composite action.
 ///
 /// A bare `sudo apt-get update` fails the whole job when ANY repository on the
 /// runner image has a bad index — including third-party ones nothing here
@@ -5342,10 +5342,24 @@ fn inference_trust_is_credited_only_behind_the_well_formed_verdict() {
 /// runner's Google Chrome index and v0.3.168 published as a DRAFT with 12 of
 /// its 25 assets, with nothing wrong with the code. The retry lives in one
 /// composite action; this stops the one-liner coming back beside it.
+///
+/// **`apt-get install` is checked the same way, and was the gap this guard had.**
+/// The retry was on `update` only, so six bare installs sat behind it — the half
+/// that downloads tens of megabytes, up to ~3 GB for the CUDA toolkit, reaching
+/// the same servers that fail the same transient ways (gotcha #544). A guard that
+/// covers the cheap command and not the expensive one describes the fix that was
+/// made rather than the invariant that was wanted.
 #[test]
-fn every_apt_refresh_goes_through_the_retrying_action() {
+fn every_apt_command_goes_through_a_retrying_action() {
     let root = repo_root();
-    const HOME: &str = ".github/actions/apt-update/action.yml";
+    // The two sanctioned homes for a bare apt command: the actions that exist to
+    // retry them. Each one necessarily contains the command it wraps.
+    // Written on a line that is already inside a retry loop. See the scan below.
+    const RETRY_LOOP_MARKER: &str = "apt-retry-loop";
+    const HOMES: [&str; 2] = [
+        ".github/actions/apt-update/action.yml",
+        ".github/actions/apt-install/action.yml",
+    ];
 
     let mut offenders = Vec::new();
     let mut checked_files = 0usize;
@@ -5368,7 +5382,7 @@ fn every_apt_refresh_goes_through_the_retrying_action() {
                 .unwrap_or(&p)
                 .to_string_lossy()
                 .replace('\\', "/");
-            if rel.ends_with(HOME) {
+            if HOMES.iter().any(|h| rel.ends_with(h)) {
                 continue;
             }
             checked_files += 1;
@@ -5378,7 +5392,18 @@ fn every_apt_refresh_goes_through_the_retrying_action() {
                 if l.starts_with('#') {
                     continue;
                 }
-                if l.contains("apt-get update") {
+                // One sanctioned exception, and it has to be written at the
+                // site: a composite action cannot `uses:` another one from
+                // inside a `run:` block, and `gpu-build-env` computes its
+                // package name, so its CUDA-toolkit install carries its own
+                // three-attempt loop. Such a line must say so with the marker
+                // below — an EXPLICIT, greppable opt-out rather than this
+                // scanner trying to recognise a loop by its shape, which a
+                // bare command could accidentally match.
+                if l.contains(RETRY_LOOP_MARKER) {
+                    continue;
+                }
+                if l.contains("apt-get update") || l.contains("apt-get install") {
                     offenders.push(format!("{rel}:{}  {l}", i + 1));
                 }
             }
@@ -5387,10 +5412,13 @@ fn every_apt_refresh_goes_through_the_retrying_action() {
 
     assert!(
         offenders.is_empty(),
-        "a bare apt-get update is back in CI:\n  {}\n\n\
-         Use `uses: ./.github/actions/apt-update` instead. A single bad index on \
+        "a bare apt command is back in CI:\n  {}\n\n\
+         Use `uses: ./.github/actions/apt-update` to refresh and \
+         `uses: ./.github/actions/apt-install` to install. A single bad index on \
          any repository the runner image ships fails the whole job, and that \
-         published v0.3.168 as a draft with 12 of 25 assets.",
+         published v0.3.168 as a draft with 12 of 25 assets. Where a composite \
+         action cannot be called — inside another composite's `run:` block — wrap \
+         the command in the same three-attempt loop instead.",
         offenders.join("\n  ")
     );
 
@@ -5400,8 +5428,10 @@ fn every_apt_refresh_goes_through_the_retrying_action() {
         "the scanner found only {checked_files} workflow files under .github — \
          it is not looking where the workflows are"
     );
-    assert!(
-        root.join(HOME).is_file(),
-        "{HOME} is missing, so the call sites point at nothing"
-    );
+    for home in HOMES {
+        assert!(
+            root.join(home).is_file(),
+            "{home} is missing, so the call sites point at nothing"
+        );
+    }
 }

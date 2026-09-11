@@ -43,7 +43,7 @@ runs:
         # Word splitting is the point: the input is a package list.
         # shellcheck disable=SC2086
         for attempt in 1 2 3; do
-          if sudo apt-get install -y $APT_PACKAGES; then
+          if sudo apt-get install -y $APT_PACKAGES; then # apt-retry-loop
             exit 0
           fi
           if [ "$attempt" = "3" ]; then
@@ -57,7 +57,7 @@ runs:
           sudo rm -rf /var/lib/apt/lists/*
           # A failure here is not fatal: the install retry below reports the
           # real problem, and an update that cannot run is itself a symptom.
-          sudo apt-get update || true
+          sudo apt-get update || true # apt-retry-loop
           # Back off — a half-written CDN index is not fixed by asking faster.
           sleep $((attempt * 10))
         done
