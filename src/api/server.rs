@@ -526,8 +526,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/chat/{*path}", get(serve_dashboard_catchall_with_nonce))
         .route("/setup", get(serve_dashboard_with_nonce))
         .route("/static/{*path}", get(assets::serve_static))
-        // Root redirect
-        .route("/", get(|| async { Redirect::to("/admin") }))
+        // Root redirect — to CHAT, which is what someone opening this address
+        // came for. It used to land on `/admin`, the operator console: eleven
+        // panels, a peer table of latencies and trust scores, and a live feed
+        // of shard announcements, none of which a person who wants to ask a
+        // question needs to see or can act on. The console is one click away
+        // and every one of its own URLs still works.
+        .route("/", get(|| async { Redirect::to("/chat") }))
         // Health check
         .route("/health", get(health))
         .route("/health/ready", get(metrics::health_ready))

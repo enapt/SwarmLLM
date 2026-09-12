@@ -419,7 +419,7 @@ A single Rust binary running three simultaneous functions on the same port (8800
 |-----------|---------------|-----------|
 | P2P node | Peer discovery, shard hosting, distributed inference | libp2p / TCP+QUIC |
 | HTTP server | OpenAI + Anthropic + MCP + admin endpoints | `localhost:8800/v1/*` |
-| Web dashboard | Setup wizard, chat, models, network map, settings | `localhost:8800/admin` |
+| Web dashboard | Setup wizard, chat, models, network map, settings | `localhost:8800` (chat); console at `/admin` |
 
 Full subsystem deep-dive in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

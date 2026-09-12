@@ -118,8 +118,15 @@ async fn admin_peers_returns_empty_array() {
     assert!(body.is_empty());
 }
 
+/// Someone who opens this node's address gets the CHAT page.
+///
+/// It landed on `/admin` until 2026-09-12 — the operator console, which opens
+/// with eleven panels, a peer table of latencies and trust scores, and a live
+/// feed of shard announcements. A person who wants to ask a question can act
+/// on none of it, and a non-technical tester called the result overwhelming.
+/// The console keeps its own URL and its place in the header.
 #[tokio::test]
-async fn root_redirects_to_admin() {
+async fn root_redirects_to_chat_not_the_operator_console() {
     let (base, _key) = spawn_test_server().await;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -128,13 +135,22 @@ async fn root_redirects_to_admin() {
 
     let resp = client.get(format!("{base}/")).send().await.unwrap();
     assert_eq!(resp.status(), 303);
-    assert!(resp
+    let location = resp
         .headers()
         .get("location")
-        .unwrap()
+        .expect("a redirect must say where to")
         .to_str()
         .unwrap()
-        .contains("/admin"));
+        .to_string();
+    assert_eq!(
+        location, "/chat",
+        "the front door opens on chat, not on the console"
+    );
+
+    // And the console is still reachable at its own address, so nothing that
+    // linked to it breaks.
+    let admin = reqwest::get(format!("{base}/admin")).await.unwrap();
+    assert_eq!(admin.status(), 200);
 }
 
 #[tokio::test]
