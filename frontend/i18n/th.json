@@ -703,6 +703,7 @@
   "nav.find_models_btn": "+ ค้นหาโมเดล",
   "nav.find_models_tip": "ค้นหาโมเดลบน HuggingFace เพื่อดาวน์โหลดและโฮสต์",
   "nav.leaderboard": "อันดับ",
+  "nav.more": "เพิ่มเติม",
   "nav.network_map": "แผนที่เครือข่าย",
   "nav.node_id_title": "รหัสโหนด",
   "nav.share_peer": "แบ่งปันที่อยู่เพียร์สวอร์มของคุณ",

@@ -703,6 +703,7 @@
   "nav.find_models_btn": "+ Model zoeken",
   "nav.find_models_tip": "Vind modellen op HuggingFace om te downloaden en te hosten.",
   "nav.leaderboard": "Ranglijst",
+  "nav.more": "Meer",
   "nav.network_map": "Netwerkkaart",
   "nav.node_id_title": "Knooppunt-ID",
   "nav.share_peer": "Jouw swarm-peeradres delen",

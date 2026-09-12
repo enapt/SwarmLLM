@@ -28,6 +28,23 @@
       document.querySelectorAll('.tab-btn').forEach(function(b) {
         b.classList.toggle('active', b.dataset.tab === tab);
       });
+      // The overflow trigger has no `data-tab`, so the loop above always
+      // clears it. Light it while one of ITS tabs is showing — otherwise
+      // choosing Leaderboard leaves a header where nothing is selected and
+      // the reader cannot tell where they are. Closing the panel here rather
+      // than in the click handler covers every way of arriving: the keyboard,
+      // the browser's Back button, and a link from another view.
+      var moreTrigger = document.getElementById('nav-more-trigger');
+      var morePanel = document.getElementById('nav-more-panel');
+      if (moreTrigger && morePanel) {
+        var inMenu = Array.prototype.some.call(
+          morePanel.querySelectorAll('.tab-btn[data-tab]'),
+          function(b) { return b.dataset.tab === tab; }
+        );
+        moreTrigger.classList.toggle('active', inMenu);
+        morePanel.style.display = 'none';
+        moreTrigger.setAttribute('aria-expanded', 'false');
+      }
       document.getElementById('view-chat').style.display = tab === 'chat' ? '' : 'none';
       document.getElementById('view-dashboard').style.display = tab === 'dashboard' ? '' : 'none';
       var lbView = document.getElementById('view-leaderboard');

@@ -802,13 +802,33 @@
       <div class="logo" id="logo" style="cursor:pointer"><img src="/static/icons/swarm.svg" width="20" height="20" alt="" aria-hidden="true" class="logo-icon">SwarmLLM<span class="app-version" id="app-version" hidden></span></div>
     </div>
     <div class="header-center">
+      <!-- Three destinations, because there are three things a person does
+           here: use it, get models for it, see how their node is doing. The
+           other four are worth having and are not worth a permanent seat —
+           seven tabs is most of why a non-technical tester called this
+           overwhelming.
+
+           They are grouped by how OFTEN they are wanted, never by how expert
+           you have to be to want them. Home Assistant gated features behind an
+           "Advanced mode" switch from 0.96 and is now removing it: one binary
+           switch over unrelated features, and a label that tells people they
+           are not qualified (OpenHomeFoundation/roadmap#54, #56). Nothing here
+           is hidden from anyone — it is one click away and stays in the URL
+           bar, the history, and the header once you are on it. -->
       <button class="tab-btn tab-btn-chat" data-tab="chat" data-i18n="nav.chat">Chat</button>
-      <button class="tab-btn active" data-tab="dashboard" data-i18n="nav.dashboard">Dashboard</button>
       <button class="tab-btn" data-tab="swarm" data-i18n="nav.swarm">Models</button>
-      <button class="tab-btn" data-tab="leaderboard" data-i18n="nav.leaderboard">Leaderboard</button>
-      <button class="tab-btn" data-tab="network-map" data-i18n="nav.network_map">Network Map</button>
-      <button class="tab-btn" data-tab="compare" data-i18n="nav.compare">Compare</button>
-      <button class="tab-btn" data-tab="devices" data-i18n="pool.title">My Devices</button>
+      <button class="tab-btn active" data-tab="dashboard" data-i18n="nav.dashboard">Dashboard</button>
+      <div class="nav-more" id="nav-more">
+        <button class="tab-btn nav-more-trigger" id="nav-more-trigger" type="button"
+                aria-haspopup="true" aria-expanded="false" aria-controls="nav-more-panel"
+                data-i18n="nav.more">More</button>
+        <div class="nav-more-panel" id="nav-more-panel" role="menu" style="display:none">
+          <button class="tab-btn" role="menuitem" data-tab="network-map" data-i18n="nav.network_map">Network Map</button>
+          <button class="tab-btn" role="menuitem" data-tab="leaderboard" data-i18n="nav.leaderboard">Leaderboard</button>
+          <button class="tab-btn" role="menuitem" data-tab="compare" data-i18n="nav.compare">Compare</button>
+          <button class="tab-btn" role="menuitem" data-tab="devices" data-i18n="pool.title">My Devices</button>
+        </div>
+      </div>
     </div>
     <div class="header-right">
       <div class="model-selector">

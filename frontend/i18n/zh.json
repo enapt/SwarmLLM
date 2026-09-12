@@ -703,6 +703,7 @@
   "nav.find_models_btn": "+ 查找模型",
   "nav.find_models_tip": "在 HuggingFace 上查找模型以下载和托管。",
   "nav.leaderboard": "排行榜",
+  "nav.more": "更多",
   "nav.network_map": "网络地图",
   "nav.node_id_title": "节点 ID",
   "nav.share_peer": "分享您的群集对等地址",

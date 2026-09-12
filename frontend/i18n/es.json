@@ -703,6 +703,7 @@
   "nav.find_models_btn": "+ Buscar modelo",
   "nav.find_models_tip": "Encuentra modelos en HuggingFace para descargar y alojar.",
   "nav.leaderboard": "Clasificación",
+  "nav.more": "Más",
   "nav.network_map": "Mapa de Red",
   "nav.node_id_title": "ID de Nodo",
   "nav.share_peer": "Comparte tu dirección de par swarm",

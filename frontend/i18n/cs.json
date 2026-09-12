@@ -703,6 +703,7 @@
   "nav.find_models_btn": "+ Najít model",
   "nav.find_models_tip": "Najděte modely na HuggingFace ke stažení a hostování.",
   "nav.leaderboard": "Žebříček",
+  "nav.more": "Více",
   "nav.network_map": "Mapa sítě",
   "nav.node_id_title": "ID uzlu",
   "nav.share_peer": "Sdílet adresu swarm uzlu",

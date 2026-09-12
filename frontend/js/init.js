@@ -33,10 +33,35 @@
       if (el) el.addEventListener(event, fn);
     }
 
-    // Tab buttons
+    // Tab buttons. The overflow trigger carries no `data-tab` and so is not
+    // one of these — it opens the menu below instead.
     document.querySelectorAll('.tab-btn[data-tab]').forEach(function(btn) {
       btn.addEventListener('click', function() { App.ui.switchTab(btn.dataset.tab); });
     });
+
+    // Overflow menu. `switchTab` closes it and owns the trigger's active
+    // state, so there is nothing to undo here when a destination is picked.
+    (function bindNavMore() {
+      var trigger = document.getElementById('nav-more-trigger');
+      var panel = document.getElementById('nav-more-panel');
+      if (!trigger || !panel) return;
+      var setOpen = function(open) {
+        panel.style.display = open ? '' : 'none';
+        trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+      };
+      trigger.addEventListener('click', function(e) {
+        e.stopPropagation();
+        setOpen(panel.style.display === 'none');
+      });
+      panel.addEventListener('click', function(e) { e.stopPropagation(); });
+      document.addEventListener('click', function() { setOpen(false); });
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && panel.style.display !== 'none') {
+          setOpen(false);
+          trigger.focus();
+        }
+      });
+    })();
 
     // Setup wizard
     on('btn-prev', 'click', function() { App.setup.prevStep(); });

@@ -370,6 +370,20 @@ a:hover { color: var(--accent-hover); }
 .tab-btn:hover { color: var(--text-primary); background: var(--bg-tertiary); }
 .tab-btn.active { color: var(--accent); background: var(--accent-glow); box-shadow: 0 0 10px rgba(59,130,246,0.15); }
 
+/* Overflow menu for the destinations that are not day-one. Its trigger wears
+   the active style while one of its own tabs is showing, so the header still
+   answers "where am I". */
+.nav-more { position: relative; display: inline-block; }
+.nav-more-trigger::after { content: " \25BE"; font-size: 0.8em; opacity: 0.7; }
+.nav-more-panel {
+  position: absolute; top: 100%; left: 0; z-index: 200; margin-top: 4px;
+  background: var(--bg-secondary); border: 1px solid var(--border-light);
+  border-radius: var(--radius); box-shadow: var(--shadow-lg);
+  min-width: 180px; padding: 4px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.nav-more-panel .tab-btn { text-align: left; width: 100%; }
+
 /* Model selector in header */
 .model-selector {
   display: flex;

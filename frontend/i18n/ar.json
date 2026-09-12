@@ -703,6 +703,7 @@
   "nav.find_models_btn": "+ البحث عن نموذج",
   "nav.find_models_tip": "ابحث عن النماذج على HuggingFace للتنزيل والاستضافة.",
   "nav.leaderboard": "لوحة المتصدرين",
+  "nav.more": "المزيد",
   "nav.network_map": "خريطة الشبكة",
   "nav.node_id_title": "معرّف العقدة",
   "nav.share_peer": "مشاركة عنوان ند الشبكة",

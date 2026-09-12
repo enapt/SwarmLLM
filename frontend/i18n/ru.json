@@ -703,6 +703,7 @@
   "nav.find_models_btn": "+ Найти модель",
   "nav.find_models_tip": "Найдите модели на HuggingFace для скачивания и хостинга.",
   "nav.leaderboard": "Рейтинг",
+  "nav.more": "Ещё",
   "nav.network_map": "Карта сети",
   "nav.node_id_title": "ID узла",
   "nav.share_peer": "Поделиться адресом пира",
