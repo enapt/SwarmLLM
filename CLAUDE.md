@@ -225,16 +225,14 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2626 lib (dev,claude-subscription) — re-measured 2026-09-12, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 93 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.175-alpha (2026-09-12, tag on `6bc9735d`).** Gate
-clean job-by-job — CI 14/14 and Cache warm 3/3 ON THE TAGGED COMMIT (kernels
-shown *restored* AND *skipped*), `check_ci_gate.sh` 14=14 against a COMPLETED
-run, release 10/10 first time; **smoke 9/9 + shapes 6+1-flaky + conformance 9/9
-families on the DOWNLOADED artifact**, matching a .174 baseline taken FIRST, plus
-`constrained_node_test.sh` 12/12 — the harness that matters most here, since two
-fixes change small-node memory behaviour. Both nodes verified, ids and
-`identity.key` unchanged, 0 ERROR, paired at 189 ms. Rollback
-`~/.local/bin/swarmllm.0.3.174-alpha.bak`. Detail:
-`memory/round_log_0912_six_reports.md` § Release.
+**Releasing: v0.3.176-alpha (2026-09-12).** Baseline taken FIRST —
+v0.3.175-alpha conformance **9/9 families, 52 checks, 0 FAIL** (2 `n/a`, the
+known GLM-4 one). Gate results recorded in
+`memory/round_log_0912_new_user_sweep.md` § Release as each step lands.
+
+**Previous: v0.3.175-alpha (tag `6bc9735d`)** — six field reports from a 16 GB
+processor-only Mac; gate clean, conformance 9/9. Rollback binaries live beside
+the installed one as `swarmllm.<version>.bak`.
 
 **New users first (user direction, 2026-09-12).** Growth is the bottleneck, not
 the depth of the stack. Rank work by "would someone hit this in their first
@@ -251,17 +249,25 @@ queue (the seven header icons, two of which duplicate Settings), what is
 already good and must not be simplified away, and the jargon inventory are in
 `memory/round_log_0912_new_user_sweep.md`. ⚠ Mobile layout is UNVERIFIED.
 
-**Unreleased on `main` after the .175 tag (2026-09-12):** #569 (`swarmllm status`
-traffic figure), **#46** every tool schema reached every model ALPHABETISED
-(`preserve_order` on serde_json + minijinja, guard verified to fail both ways),
-**#32** the KV cache is RESERVED at the admitted prompt length instead of grown
-by `Tensor::cat` (mechanism check: 0 growth steps vs 144 on a 1901-token prompt;
-the field OOM itself is unreproduced here), and **a silent peer is barred from
-the request's retry, which now happens by type**. Three 2026-08 routing entries
-closed against current code. `memory/round_log_0912_tool_schema_key_order.md`,
-`memory/round_log_0912_kv_reserve_and_silent_peer.md`. **User direction the same
-day: NEW USERS FIRST** — bugs a first-hour user hits, and a dashboard sweep (a
-non-technical user found it overwhelming); four Opus audit agents were run.
+**What v0.3.176 carries.** Under the hood: **#46** every tool schema reached
+every model ALPHABETISED (`preserve_order` on serde_json AND minijinja — two
+independent alphabetisers, so fixing either alone changed nothing; guard
+verified to fail both ways); **#32** the KV cache is RESERVED at the admitted
+prompt length instead of grown by `Tensor::cat` (mechanism check: 0 growth
+steps vs 144 on a 1901-token prompt — the field OOM itself is unreproduced
+here); **a silent peer is barred from the request's retry, which now happens by
+type**; and #569's traffic figure in `swarmllm status`. On the surface, the
+first-hour sweep: the front door opened on the OPERATOR CONSOLE and now opens
+on chat; the header carries three destinations plus "More" instead of seven;
+"Models" opened on models the swarm CANNOT have and now opens on what it can
+run; every peer showed a TRUST score of 50% that was simply the starting value
+and now shows nothing until measured; the shard-announce feed opens on demand.
+⚠ **Mobile (400px) is UNVERIFIED** — no tool here can give the page a narrow
+viewport (resize is a no-op, framing is refused, popups blocked), so the
+narrow-width CSS is written to need no verification and says so. Detail:
+`memory/round_log_0912_new_user_sweep.md`,
+`round_log_0912_tool_schema_key_order.md`,
+`round_log_0912_kv_reserve_and_silent_peer.md`.
 
 **Bumping the version LAST is now settled practice** — Cargo.toml changes in the
 bump commit, so Cache warm fires ON the tagged commit. That closes .174's open

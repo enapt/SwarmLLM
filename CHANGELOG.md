@@ -1,5 +1,75 @@
 # Changelog
 
+## [0.3.176-alpha] — 2026-09-12
+
+Mostly about the first hour: what you see when you open SwarmLLM, and what the
+models you use are actually told. Plus three problems underneath that nobody
+would have reported, because none of them looks like a fault from outside.
+
+### Fixed
+
+- **Every model was handed its list of tools scrambled.** When you give a model
+  tools to use, each one is described to it in a small block of text. The
+  descriptions were being alphabetised on the way out, so a tool written as
+  "name, description, what it takes" arrived as "description, name, what it
+  takes". Every other program that runs these models — the ones the model's
+  authors tested against — sends them in the order the author wrote. Small
+  models are sensitive to this kind of thing: changing nothing but the spacing
+  in these blocks was already enough to change how one model answered. Ours was
+  the odd one out and now is not.
+- **Long questions made your computer copy the conversation over and over.** As
+  a model reads a long question it keeps notes, and the space for those notes
+  was being extended a little at a time — each extension copying everything
+  noted so far. On a twenty-thousand-word question that came to two thousand
+  separate extensions and about 97 gigabytes copied, all of it on a machine
+  already close to full, and none of it counted when deciding whether the
+  question would fit. The space is now set aside once, at the size the question
+  needs, which is known before the work starts. One machine reported a long
+  question failing part-way through for lack of memory; this is the cause that
+  explains it, though we could not reproduce the failure itself on the hardware
+  we have.
+- **A computer that went quiet was asked again instead of being replaced.** When
+  a machine takes on part of your request and then says nothing, the work should
+  move elsewhere. For one kind of silence it did not: the request was given up
+  on with no second attempt. And for the kinds that did try again, nothing
+  stopped the second attempt from choosing the same silent machine and waiting
+  out the same silence twice. A machine that goes quiet is now passed over for
+  the rest of that request, and the request is re-planned once somewhere else.
+- **`swarmllm status` was missing the network traffic figure** that the
+  dashboard had been showing since the previous release.
+
+### Changed
+
+- **Opening SwarmLLM now takes you to chat.** It used to open on the node
+  console — eleven panels, thirty-odd numbers, a table of other computers'
+  response times and a live feed of technical messages scrolling past. Nothing
+  on it is anything you can do something about, and someone who had just
+  installed it found it overwhelming, which is the right reaction. The console
+  is still there, in the header and at its own address.
+- **The header has three places instead of seven**: Chat, Models, and
+  Dashboard — use it, get models for it, see how your computer is doing.
+  Network Map, Leaderboard, Compare and My Devices moved into a "More" menu.
+  Nothing is hidden and nothing needs turning on; the four kept their addresses
+  and still light up the header when you are on one.
+- **Models opens on models you can actually use.** It used to open on a list of
+  models the network does *not* have, most of them too big for it, under
+  headings like "Too large for this swarm" — so the page you go to for a model
+  opened on things you cannot have. It now opens on what the network can run
+  right now, with the ones your computer helps host marked.
+- **Other computers no longer show a trust score nobody measured.** Every
+  machine in the list read "50%", because that is simply where one starts
+  before it has done anything for you — so the column never varied, and read as
+  though everyone were half-untrustworthy. It now shows nothing until there is
+  something to show, and says so when you point at it.
+- **The technical feed on the console opens when you ask for it.** It was open
+  by default, and being the only thing on the page that moved, it drew the eye
+  first on a page about whether your computer is well. Its count is still
+  visible without opening it. The plain-English activity list beside it is
+  unchanged.
+- **Two explanations that explained nothing** — "Connected P2P nodes in the
+  swarm network" and "Layer forward passes this node processed" — now say what
+  the number means to the person whose computer it is, in all 21 languages.
+
 ## [0.3.175-alpha] — 2026-09-12
 
 Six problems reported from one machine, plus a suggestion about bandwidth.
