@@ -273,24 +273,44 @@ fn system_free_and_total_bytes() -> Option<(u64, u64)> {
     Some((free, total))
 }
 
-/// Sequence positions this forward will NEWLY reserve, or 0 if it fits inside
-/// what the cache already has.
+/// Sequence positions this forward will NEWLY allocate, or 0 if it fits
+/// inside what the cache already holds.
 ///
-/// A cache grows only when a conversation crosses a quantum boundary, so this
-/// is 0 for almost every decode step — which is what keeps the headroom check
-/// off the per-token path.
+/// `allocated` is the buffer the request's caches already have (0 before the
+/// first append), `reserved` what the worker asked the first allocation to
+/// cover, `total_seq` the positions the cache must hold after this forward.
+/// A forward that fits inside the buffer claims nothing — which is almost
+/// every decode step, and what keeps the headroom check off the per-token
+/// path. The first allocation is the larger of the reservation and the
+/// forward's own rounded need; growth past a buffer is charged in quanta.
 ///
 /// **It returns positions, not "one quantum".** A prefill jumps many quanta at
 /// once: 0 -> 5000 tokens at a 512 quantum reserves ten of them in a single
 /// forward. Charging one would under-count the largest claim any request
 /// makes by an order of magnitude, which is precisely the case the budget
 /// exists to catch.
-pub(crate) fn positions_claimed(index_pos: usize, total_seq: usize, quantum: usize) -> usize {
+///
+/// **It reads the buffer, not the quantum arithmetic.** The previous form
+/// derived the buffer from `index_pos` rounded up — true only while caches
+/// grew from one quantum. A reserved cache is larger than that from its first
+/// append, so the old arithmetic charged a reply for every quantum boundary
+/// it crossed inside memory the request already held, and could refuse it
+/// for room it did not need.
+pub(crate) fn positions_to_allocate(
+    allocated: usize,
+    reserved: usize,
+    total_seq: usize,
+    quantum: usize,
+) -> usize {
     let q = quantum.max(1);
-    total_seq
-        .div_ceil(q)
-        .saturating_sub(index_pos.div_ceil(q))
-        .saturating_mul(q)
+    let round_up = |n: usize| n.div_ceil(q).saturating_mul(q);
+    if allocated == 0 {
+        round_up(total_seq).max(reserved)
+    } else if total_seq > allocated {
+        round_up(total_seq - allocated)
+    } else {
+        0
+    }
 }
 
 /// Would reserving `positions` more push total KV occupancy past the budget?
@@ -609,24 +629,24 @@ mod tests {
         assert_eq!(kv_headroom_bytes(8 << 30, 4 << 30), 0);
     }
 
-    /// Growth is claimed exactly at quantum boundaries and nowhere else —
+    /// Growth is claimed exactly when the buffer is outgrown and nowhere else —
     /// that is what keeps the check off the per-token path.
     #[test]
-    fn growth_is_claimed_only_at_quantum_boundaries() {
+    fn growth_is_claimed_only_when_the_buffer_is_outgrown() {
         let q = 512;
         assert_eq!(
-            positions_claimed(0, 1, q),
+            positions_to_allocate(0, 0, 1, q),
             512,
             "a fresh request claims one"
         );
-        assert_eq!(positions_claimed(0, 512, q), 512);
-        // Decoding inside the current quantum claims nothing.
-        assert_eq!(positions_claimed(1, 2, q), 0);
-        assert_eq!(positions_claimed(510, 511, q), 0);
-        assert_eq!(positions_claimed(511, 512, q), 0);
-        // Crossing into the next claims one.
-        assert_eq!(positions_claimed(512, 513, q), 512);
-        assert_eq!(positions_claimed(513, 514, q), 0);
+        assert_eq!(positions_to_allocate(0, 0, 512, q), 512);
+        // Decoding inside the current buffer claims nothing.
+        assert_eq!(positions_to_allocate(512, 0, 2, q), 0);
+        assert_eq!(positions_to_allocate(512, 0, 511, q), 0);
+        assert_eq!(positions_to_allocate(512, 0, 512, q), 0);
+        // Outgrowing it claims one.
+        assert_eq!(positions_to_allocate(512, 0, 513, q), 512);
+        assert_eq!(positions_to_allocate(1024, 0, 514, q), 0);
     }
 
     /// **A prefill claims MANY quanta in one forward.** Charging it one — which
@@ -636,10 +656,35 @@ mod tests {
     #[test]
     fn a_large_prefill_claims_every_quantum_it_spans() {
         let q = 512;
-        assert_eq!(positions_claimed(0, 5000, q), 5120, "10 quanta, not 1");
-        assert_eq!(positions_claimed(0, 2000, q), 2048);
+        assert_eq!(
+            positions_to_allocate(0, 0, 5000, q),
+            5120,
+            "10 quanta, not 1"
+        );
+        assert_eq!(positions_to_allocate(0, 0, 2000, q), 2048);
         // Continuing a conversation charges only the new span.
-        assert_eq!(positions_claimed(1000, 5000, q), 5120 - 1024);
+        assert_eq!(positions_to_allocate(1024, 0, 5000, q), 5120 - 1024);
+    }
+
+    /// A reserved prompt is charged ONCE, for the reservation, and its reply
+    /// then runs inside that memory without being charged again at every
+    /// quantum boundary it crosses — the arithmetic the old form got wrong.
+    #[test]
+    fn a_reservation_is_charged_once_and_not_again_inside_it() {
+        let q = 512;
+        // First forward: nothing allocated, the worker reserved prompt + reply.
+        assert_eq!(
+            positions_to_allocate(0, 2560, 2000, q),
+            2560,
+            "the reservation is the claim"
+        );
+        // The reservation never undercuts what the forward itself needs.
+        assert_eq!(positions_to_allocate(0, 512, 2000, q), 2048);
+        // Decode steps inside the reserved buffer cross 2048 and claim nothing.
+        assert_eq!(positions_to_allocate(2560, 2560, 2049, q), 0);
+        assert_eq!(positions_to_allocate(2560, 2560, 2560, q), 0);
+        // Outgrowing the reservation is charged like any other growth.
+        assert_eq!(positions_to_allocate(2560, 2560, 2561, q), 512);
     }
 
     /// And the budget must see that full claim, not a single quantum's worth.
@@ -654,11 +699,11 @@ mod tests {
             budget,
             0,
             per_token,
-            positions_claimed(0, 1, q)
+            positions_to_allocate(0, 0, 1, q)
         ));
         // ...but a ten-quantum prefill must not.
         assert!(
-            claim_exceeds_headroom(budget, 0, per_token, positions_claimed(0, 5000, q)),
+            claim_exceeds_headroom(budget, 0, per_token, positions_to_allocate(0, 0, 5000, q)),
             "a prefill spanning 10 quanta must be refused against a 2-quantum budget"
         );
     }
@@ -666,7 +711,7 @@ mod tests {
     /// A zero quantum must not divide by zero.
     #[test]
     fn a_zero_quantum_is_treated_as_one() {
-        assert!(positions_claimed(0, 1, 0) > 0);
+        assert!(positions_to_allocate(0, 0, 1, 0) > 0);
     }
 
     /// The budget is against the WHOLE store, not one request — the case the

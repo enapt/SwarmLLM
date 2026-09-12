@@ -21,6 +21,7 @@ impl Qwen35AttnWeights {
         index_pos: usize,
         kv_cache: &mut Option<LayerKv>,
         max_seq_len: usize,
+        kv_reserve: usize,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _hidden) = x.dims3()?;
 
@@ -75,6 +76,7 @@ impl Qwen35AttnWeights {
                 let mut cache = super::new_kv_cache(
                     max_seq_len,
                     super::model_wants_kv_mirror(self.n_head, self.n_kv_head),
+                    kv_reserve,
                 );
                 let kv = cache.append(&k, &v)?;
                 *kv_cache = Some(cache);

@@ -33,7 +33,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 |---|---|---|
 | 3 | The routing cost model's network term overestimates a boomerang | Since v0.3.164 this constant decides every delegation. **The instrument shipped inert TWICE**, both fixed on main. **Field data collected 2026-09-09** from dev nodes in the real swarm, including a CONTROLLED run holding the peer fixed: **the error grows monotonically with reply length within one peer** (1.00 at 9 tokens → 3.3 at 239), and `predicted_ms` is flat across that range. A constant sits where a variable belongs. **Not just a wrong constant**: a ~64-token reply should then price at ratio 1 and measures 1.75. **Second independent confirmation 2026-09-10** on the released binary, driving the two remote-only models the swarm has: xlam-3b via peer `bf7b3263` measured 0.96 at 8 reply tokens and **2.62 at 120**; xlam-8b via peer `7c10ea04` measured 1.04 at 8 and **2.38 at 120**. Two peers, two models, same monotonic shape as the 2026-09-09 run, with `assumed_forward_passes=64` flat across all of it. **The structural claim is now settled: a constant sits where a variable belongs.** What is still NOT settled is which variable. `max_tokens` is the obvious candidate and the constant's own doc comment rejects it with a reason that still holds — commonly 2048 for a reply of 50, so it would over-penalise splitting — and the samples agree it is not simple proportionality either: at 8 tokens the prediction is already about right rather than 8x high, so a large part of `predicted_ms` is not per-token at all. **Do not tune the constant.** The next step is an estimator of expected reply length, and `state.metrics.prefetch_orchestrator` already keeps per-session response histories that nothing else reads for this |
 | 4 | Replica counts do not react to holders being unusable | Shards silently under-replicated; the system believes it is safer than it is |
-| 32 | A long prompt on the boomerang path dies with a CUDA OOM mid-compute | **Field-reported 2026-09-09. Mechanism identified 2026-09-10, not yet reproduced.** Admission charges the cache's FINAL size; the cache reaches it by **concatenation**, so a 20837-token prompt makes ~2300 growth allocations per model (double that with the f16 mirror), copies ~97 GB, and holds a ~170 MB transient at each step — none of it charged. Prefill measured LINEAR here at the sizes this card can reach, which is consistent: the quadratic term is ~14 ms at 3559 tokens and 35x that at 20837. The fix it points at is reserving the prompt's known length up front instead of growing into it. Read the section body before acting — the reproduction is missing and this is `docs/invariants/memory.md` territory |
+| 32 | A long prompt on the boomerang path died with a CUDA OOM mid-compute | **MECHANISM FIXED 2026-09-12, field OOM NOT reproduced here.** Field-reported 2026-09-09; the cache grew by `Tensor::cat` in 512-position quanta, so a 20837-token prompt made 2279 growth allocations per model (double with the f16 mirror), copied ~97 GB, and held a ~170 MB transient at each step — none of it charged, on a card admission had just judged full. Now the worker records the admitted length (`KvCacheStore::set_reserved_positions`) and every layer's cache is built to it: the prompt pass is ONE allocation per layer, the guard charges what will be allocated read off the buffer (`positions_to_allocate`), and `SWARMLLM_KV_RESERVE=0` is the in-binary A/B. The DIAG `KV cache growth during a prompt chunk` reports `growth_steps`, the mechanism check. The 8 GB card here cannot reach the failing lengths, so the OOM itself is unobserved — the reporter's machine is where that closes. Rule: `docs/invariants/memory.md` § "A prompt of known length is reserved, not grown into" |
 | 30 | The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on | `DELEGATE_MIN_TRUST == DEFAULT_TRUST == 0.5`, so a peer we have never observed clears the bar that decides who may be handed a user's prompt in cleartext. Raising it is a routing-policy change with live consequences (on a small swarm it can make a model unservable), so it needs a decision, not a patch. The trust *ratchet* that made this worse is fixed (issue #21, 2026-09-10) |
 | 18 | A failover after the prompt pass loses the failed segment's KV context | **FIXED 2026-09-09 (shapes 1 and 2).** Shape 1 stopped the silent drift (P fell 0.997 → 0.119 replacing 4 of 28 layers); shape 2 restores the state — the retained inputs are replayed onto the stand-in as one forward at position 0, measured back to **P = 0.9965** against an intact 0.9966. **Residual: chained runs and tensor-parallel segments** — their inputs never pass through the coordinator, so those segments are marked unrestorable and still end rather than move |
 
@@ -468,7 +468,7 @@ this renderer keeps it. Low impact, because our own API already strips a leading
 reasoning block from a reply before returning it, so a client echoing our turn
 back sends no `<think>`. Pinned explicitly in the test rather than hidden.
 
-## A long prompt on the boomerang path dies with a CUDA OOM mid-compute (open, 2026-09-09, field-reported)
+## A long prompt on the boomerang path dies with a CUDA OOM mid-compute (2026-09-09, field-reported; MECHANISM FIXED 2026-09-12, OOM not reproduced)
 
 Same deployment, v0.3.168, on `xlam-2-3b-fc-r-q4-k-m` with prompt privacy on.
 
@@ -550,6 +550,39 @@ admission has already charged for and verified.
 Worth doing behind a reproduction rather than on this reasoning alone: the KV
 path is `docs/invariants/memory.md` territory and every memory defect since #452
 came from a change that looked obviously right.
+
+### Done 2026-09-12 — the prompt is reserved at its admitted length
+
+Shipped as described above, with the reproduction still missing and said so.
+What changed, and why each part is the shape it is:
+
+- `KvCacheStore::set_reserved_positions(request_id, positions)` is written at
+  the TOP of `ensure_room_for_prompt`, before the charging switch and before the
+  budget question, with the same figure admission charges
+  (`kv_cache_reservation(prompt) + REPLY_RESERVE_POSITIONS`). A node with no
+  budget to check still pays for growth, so the reservation must not depend on
+  the budget being known.
+- `new_kv_cache(max_seq_len, mirror, reserve_positions)` builds each layer's
+  cache with `SeqCache::with_capacity(dim, initial, grow_by)`: the first
+  allocation is the reservation (clamped to one quantum and the context
+  window), growth after it is the ordinary quantum. The mirror is born the same
+  size. Prefix-cache hydration takes the larger of snapshot and reservation so
+  the suffix appends into the same buffer.
+- The guard moved from `positions_claimed(index_pos, ..)` — buffer size
+  DERIVED from the position, true only for a cache grown from one quantum — to
+  `positions_to_allocate(allocated, reserved, total_seq, quantum)`, with
+  `allocated` READ from the buffer (`allocated_positions`). Without this the
+  reserved reply would have been charged again at every quantum boundary inside
+  memory it already held, and refused for room it did not need — the kind of
+  regression #567-#569 were.
+- `KV_GROWTH_STEPS` counts every `cat`; the executor logs `growth_steps` for
+  each prompt pass at debug. **That line is the mechanism check**: 0 with the
+  reservation, the old count with `SWARMLLM_KV_RESERVE=0`.
+
+What stays open: the OOM itself was never observed on this hardware. Research
+before building (rule 0): vLLM allocates a request's blocks for the whole prompt
+before prefill (Kwon et al. 2023 §4.1); the general rule in every production KV
+cache is allocate once, write in place, never concatenate.
 
 ## A context that does not fit is refused instead of shrunk (FIXED 2026-09-10)
 

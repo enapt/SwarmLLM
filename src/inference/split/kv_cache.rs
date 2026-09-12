@@ -24,10 +24,21 @@ use super::SsmState;
 /// truncation only has to move the length; the stale positions are overwritten
 /// by the next append before anything can see them.
 ///
-/// Growth semantics are candle's, unchanged: the first append allocates
-/// `max_seq_len` positions, and each time the cache outgrows its buffer it is
-/// extended by `grow_by` with a concatenation. [`KvOccupancy`] and the KV
-/// budget reason about that quantum and must keep seeing the same numbers.
+/// Growth semantics are candle's with one addition: the first append allocates
+/// `max_seq_len` positions — the RESERVATION the cache was built with — and
+/// each time the cache outgrows its buffer it is extended by `grow_by` with a
+/// concatenation. [`KvOccupancy`] and the KV budget reason about that quantum
+/// and must keep seeing the same numbers.
+///
+/// **A prompt of known length is reserved, not grown into.** Growth is a
+/// `Tensor::cat`, which copies everything so far, so reaching N positions by
+/// growing costs O(N²/quantum) in copies and one fresh device allocation per
+/// step — 2279 allocations and 97 GB copied for a 20837-token prompt on a 3B,
+/// double that with the f16 mirror, none of it charged by admission, on a card
+/// that is by definition at its fullest (FUTURE_WORK #32). vLLM sizes a
+/// request's blocks to its whole prompt before prefill runs (Kwon et al. 2023,
+/// §4.1); here the worker records the admitted length and the executor builds
+/// every layer's cache to it, so the prompt pass is ONE allocation per layer.
 #[derive(Debug, Clone)]
 pub(crate) struct SeqCache {
     /// `None` until the first append, when the batch/head shape is known.
@@ -39,13 +50,16 @@ pub(crate) struct SeqCache {
 }
 
 impl SeqCache {
-    pub(crate) fn new(dim: usize, max_seq_len: usize) -> Self {
+    /// A cache whose FIRST allocation covers `initial` positions and which
+    /// grows by `grow_by` after that. candle's `Cache::new(dim, n)` is the
+    /// case where the two agree.
+    pub(crate) fn with_capacity(dim: usize, initial: usize, grow_by: usize) -> Self {
         Self {
             all_data: None,
             dim,
             current_seq_len: 0,
-            grow_by: max_seq_len,
-            max_seq_len,
+            grow_by: grow_by.max(1),
+            max_seq_len: initial.max(1),
         }
     }
 
@@ -102,6 +116,7 @@ impl SeqCache {
             let next_ad = Tensor::zeros(shape, src.dtype(), src.device())?;
             *ad = Tensor::cat(&[&*ad, &next_ad], self.dim)?;
             self.max_seq_len += self.grow_by;
+            KV_GROWTH_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         // `slice_set` refuses a non-contiguous source, and a cache is in no
         // position to decline one: the alternative to copying is failing every
@@ -117,6 +132,18 @@ impl SeqCache {
     }
 }
 
+/// Growth steps taken by every [`SeqCache`] in this process — one per
+/// `Tensor::cat`. A reserved prompt pass leaves it unchanged; that is the
+/// number the executor's prompt-pass DIAG reports and the mechanism check
+/// for FUTURE_WORK #32 reads.
+pub(crate) static KV_GROWTH_STEPS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// See [`KV_GROWTH_STEPS`].
+pub(crate) fn kv_growth_steps() -> u64 {
+    KV_GROWTH_STEPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A K cache and a V cache that move together — candle's `KvCache` over
 /// [`SeqCache`], same method names so the call sites did not change.
 #[derive(Debug, Clone)]
@@ -126,10 +153,11 @@ pub(crate) struct KvPair {
 }
 
 impl KvPair {
-    pub(crate) fn new(dim: usize, max_seq_len: usize) -> Self {
+    /// See [`SeqCache::with_capacity`].
+    pub(crate) fn with_capacity(dim: usize, initial: usize, grow_by: usize) -> Self {
         Self {
-            k: SeqCache::new(dim, max_seq_len),
-            v: SeqCache::new(dim, max_seq_len),
+            k: SeqCache::with_capacity(dim, initial, grow_by),
+            v: SeqCache::with_capacity(dim, initial, grow_by),
         }
     }
 
@@ -228,29 +256,31 @@ pub(crate) struct LayerKv {
     /// f16 BSHD, sequence on dim 1. `None` on CPU and until the first append,
     /// which is where the device becomes known.
     shadow: Option<KvPair>,
-    /// Reservation to build the mirror with, mirroring `main`'s growth quantum.
+    /// Growth quantum, shared with the mirror.
     growth: usize,
+    /// Positions the first allocation covers — the admitted prompt, or one
+    /// quantum when nothing was reserved. Shared with the mirror too: it used
+    /// to be born one quantum wide beside a reserved f32 cache and then grow
+    /// by concatenation, doubling every copy the reservation had just removed.
+    initial: usize,
     /// False when `main`'s sequence axis is not dim 2, which the mirror's
     /// transpose assumes. Such a cache never gets a mirror.
     mirrorable: bool,
 }
 
 impl LayerKv {
-    pub(crate) fn new(growth: usize) -> Self {
-        Self::with_dim(2, growth)
-    }
-
-    /// Build with an explicit sequence dim, for hydrating a prefix-cache
-    /// snapshot that recorded its own.
-    ///
-    /// A mirror is only maintained when the sequence axis is dim 2 (BHSD), since
-    /// `to_bshd_f16`'s `transpose(1, 2)` is meaningless otherwise. Any other
+    /// Build with the first allocation sized to `initial` positions and
+    /// growth of `growth` after that — how a prompt of known length is held in
+    /// one allocation per layer. See [`SeqCache`]. `dim` is the sequence axis;
+    /// a mirror is only maintained when it is dim 2 (BHSD), since
+    /// `to_bshd_f16`'s `transpose(1, 2)` is meaningless otherwise — any other
     /// layout simply gets no mirror and the original conversion path.
-    pub(crate) fn with_dim(dim: usize, growth: usize) -> Self {
+    pub(crate) fn with_capacity(dim: usize, initial: usize, growth: usize) -> Self {
         Self {
-            main: KvPair::new(dim, growth),
+            main: KvPair::with_capacity(dim, initial, growth),
             shadow: None,
             growth,
+            initial,
             mirrorable: dim == 2,
         }
     }
@@ -287,7 +317,7 @@ impl LayerKv {
     ) -> candle_core::Result<(Tensor, Tensor)> {
         let out = self.main.append(k, v)?;
         if self.shadow.is_none() && self.mirrorable && Self::wants_shadow(k) {
-            self.shadow = Some(KvPair::new(1, self.growth));
+            self.shadow = Some(KvPair::with_capacity(1, self.initial, self.growth));
         }
         if let Some(shadow) = self.shadow.as_mut() {
             // Convert only what is being added — this is the point of the mirror.
@@ -348,7 +378,7 @@ impl LayerKv {
     #[cfg(test)]
     pub(crate) fn force_shadow_for_test(&mut self) {
         if self.mirrorable {
-            self.shadow = Some(KvPair::new(1, self.growth));
+            self.shadow = Some(KvPair::with_capacity(1, self.initial, self.growth));
         }
     }
 
@@ -483,6 +513,30 @@ pub struct KvCacheStore {
     /// Same shape as `ModelProcessPool::vram_reserved_mb` does for whole
     /// models, one level down.
     admitted_claims: dashmap::DashMap<String, (u64, std::time::Instant)>,
+    /// Positions a request's caches are built to hold from their FIRST
+    /// allocation: `request_id -> (positions, when)`. Set by the worker the
+    /// moment a prompt's length is known (`ensure_room_for_prompt`), read by
+    /// the executor as it builds each layer's cache and by prefix-cache
+    /// hydration. A prompt held this way is one allocation per layer; grown
+    /// into, it was one `Tensor::cat` per quantum, each copying everything so
+    /// far, and none of those transients charged (FUTURE_WORK #32). Absent —
+    /// a cache built before the worker saw the prompt, or the request of a
+    /// build that never recorded one — means "grow as before".
+    reserved_positions: dashmap::DashMap<String, (usize, std::time::Instant)>,
+}
+
+/// `SWARMLLM_KV_RESERVE=0` records no reservation, so a prompt grows into its
+/// cache exactly as it did before 2026-09-12 and the two behaviours can be
+/// compared inside ONE binary — the same discipline as
+/// `SWARMLLM_FORCE_STANDARD_ATTN`. Read once.
+fn kv_reserve_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("SWARMLLM_KV_RESERVE")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    })
 }
 
 /// Given a request id, is that request cancelled?
@@ -531,9 +585,10 @@ pub(crate) struct ClaimRefused {
 
 pub(crate) struct KvCacheEntry {
     /// Per-layer KV cache. Index corresponds to layer index within the model segment.
-    /// Each `KvPair` holds a buffer sized in `KV_CACHE_GROWTH_TOKENS` quanta
-    /// and appends into it in place, concatenating only when a conversation
-    /// outgrows the current quantum.
+    /// Each `KvPair` holds a buffer born at the request's reservation (the
+    /// admitted prompt plus its reply reserve, or one `KV_CACHE_GROWTH_TOKENS`
+    /// quantum when nothing was reserved) and appends into it in place,
+    /// concatenating only when a conversation outgrows it.
     pub(crate) layers: Vec<Option<LayerKv>>,
     /// Per-layer SSM state for Qwen 3.5 hybrid models (delta net recurrent state + conv state).
     /// None for non-SSM layers. Only populated for Qwen35Ssm layer variants.
@@ -726,7 +781,55 @@ impl KvCacheStore {
             external_evictor: std::sync::Mutex::new(None),
             cancel_oracle: std::sync::Mutex::new(None),
             admitted_claims: dashmap::DashMap::new(),
+            reserved_positions: dashmap::DashMap::new(),
         }
+    }
+
+    /// Record how many positions this request's caches should hold from
+    /// their first allocation. Replaces an earlier figure — a retry re-admits
+    /// rather than stacking. Zero, or `SWARMLLM_KV_RESERVE=0`, records
+    /// nothing, and the caches then grow as they always did.
+    pub(crate) fn set_reserved_positions(&self, request_id: &str, positions: usize) {
+        if positions == 0 || !kv_reserve_enabled() {
+            self.reserved_positions.remove(request_id);
+            return;
+        }
+        self.reserved_positions.insert(
+            request_id.to_string(),
+            (positions, std::time::Instant::now()),
+        );
+    }
+
+    /// Positions reserved for this request's caches; 0 when nothing was
+    /// recorded, which every caller reads as "one quantum, grow from there".
+    pub(crate) fn reserved_positions(&self, request_id: &str) -> usize {
+        self.reserved_positions
+            .get(request_id)
+            .map(|r| r.0)
+            .unwrap_or(0)
+    }
+
+    /// Positions the caches under `key` are ALLOCATED for right now — the
+    /// buffer, not the positions written — or 0 before the first append. What
+    /// the head-room guard compares a forward against: a forward that fits
+    /// inside this claims nothing, whatever quantum boundary it crosses.
+    ///
+    /// A cache that was `reset()` reads 0 here (its buffer is dropped) and
+    /// re-allocates its previous size on the next append; the guard then
+    /// charges the forward's own need, which is at most that size and is
+    /// memory the budget had already seen this request hold.
+    pub(crate) fn allocated_positions(&self, key: &str) -> usize {
+        self.caches
+            .get(key)
+            .and_then(|entry| {
+                entry
+                    .layers
+                    .iter()
+                    .flatten()
+                    .find(|kv| kv.k_cache().all_data().is_some())
+                    .map(|kv| kv.k_cache().max_seq_len())
+            })
+            .unwrap_or(0)
     }
 
     /// Record that a prompt has been admitted for `bytes` it has not yet
@@ -939,6 +1042,7 @@ impl KvCacheStore {
         // owed. Every worker path that finishes or abandons a request already
         // comes through here.
         self.admitted_claims.remove(request_id);
+        self.reserved_positions.remove(request_id);
         let key = Self::cache_key(model_key, request_id);
         self.caches.remove(key.as_str());
         // Also clear TP-keyed cache entries for the same request
@@ -957,6 +1061,8 @@ impl KvCacheStore {
         // all, which nothing else would ever remove.
         self.admitted_claims
             .retain(|_, (_, at)| at.elapsed() <= ttl);
+        self.reserved_positions
+            .retain(|_, (_, at)| at.elapsed() <= ttl);
         let before = self.caches.len();
         self.caches
             .retain(|_, entry| entry.last_accessed.elapsed() <= ttl);
@@ -974,6 +1080,7 @@ impl KvCacheStore {
 
     /// Remove all cache entries for a given request_id (across all models).
     pub fn cleanup_request_id(&self, request_id: &str) {
+        self.reserved_positions.remove(request_id);
         let suffix = format!("\0{request_id}");
         self.caches.retain(|key, _| !key.ends_with(&suffix));
     }
@@ -1027,7 +1134,7 @@ mod tests {
         for req in ["req-a", "req-b"] {
             let mut entry = store.get_or_create("m", req, 1);
             let k = Tensor::zeros((1usize, 2, 8, 4), DType::F32, &Device::Cpu).unwrap();
-            let mut kv = new_kv_cache(64, true);
+            let mut kv = new_kv_cache(64, true, 0);
             kv.append(&k, &k.clone()).unwrap();
             entry.layers[0] = Some(kv);
         }
@@ -1061,11 +1168,129 @@ mod tests {
     use crate::inference::layers::{kv_cache_reservation, new_kv_cache, KV_CACHE_GROWTH_TOKENS};
     use candle_core::{DType, Device, Tensor};
 
+    /// A cache built for a known prompt length holds it in ONE allocation and
+    /// grows only past it; the same prompt appended to an unreserved cache
+    /// grows into place a quantum at a time. The buffer size is the evidence
+    /// (`KV_GROWTH_STEPS` is process-wide and tests run in parallel).
+    #[test]
+    fn a_reserved_cache_holds_its_prompt_without_growing() {
+        let dev = Device::Cpu;
+        let prompt = Tensor::zeros((1usize, 2, 2000, 4), DType::F32, &dev).unwrap();
+        let more = Tensor::zeros((1usize, 2, 100, 4), DType::F32, &dev).unwrap();
+
+        let mut reserved = new_kv_cache(4096, false, 2048);
+        reserved.append(&prompt, &prompt).unwrap();
+        assert_eq!(
+            reserved.k_cache().max_seq_len(),
+            2048,
+            "the prompt must fit the first allocation exactly as reserved"
+        );
+        reserved.append(&more, &more).unwrap();
+        assert_eq!(
+            reserved.k_cache().max_seq_len(),
+            2048 + KV_CACHE_GROWTH_TOKENS,
+            "past the reservation a cache grows by the ordinary quantum"
+        );
+
+        // The control: no reservation, the same prompt, grown into place.
+        let mut plain = new_kv_cache(4096, false, 0);
+        plain.append(&prompt, &prompt).unwrap();
+        assert_eq!(
+            plain.k_cache().max_seq_len(),
+            4 * KV_CACHE_GROWTH_TOKENS,
+            "512 -> 1024 -> 1536 -> 2048: three concatenations to hold 2000 positions"
+        );
+    }
+
+    /// The reservation is clamped to what the model can ever use, and a zero
+    /// reservation is the ordinary one-quantum start.
+    #[test]
+    fn a_reservation_is_clamped_to_the_context_window() {
+        assert_eq!(
+            new_kv_cache(4096, false, 10_000).k_cache().max_seq_len(),
+            4096
+        );
+        assert_eq!(
+            new_kv_cache(4096, false, 0).k_cache().max_seq_len(),
+            KV_CACHE_GROWTH_TOKENS
+        );
+        assert_eq!(
+            new_kv_cache(4096, false, 100).k_cache().max_seq_len(),
+            KV_CACHE_GROWTH_TOKENS
+        );
+        // A model whose whole window is under one quantum reserves the window.
+        assert_eq!(new_kv_cache(64, false, 0).k_cache().max_seq_len(), 64);
+    }
+
+    /// The reservation lives exactly as long as the request: recorded by the
+    /// worker, read by the executor, gone with `clear_request`.
+    #[test]
+    fn a_reservation_is_recorded_per_request_and_released_with_it() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        assert_eq!(
+            store.reserved_positions("r1"),
+            0,
+            "nothing recorded reads as zero"
+        );
+        store.set_reserved_positions("r1", 2560);
+        assert_eq!(store.reserved_positions("r1"), 2560);
+        assert_eq!(
+            store.reserved_positions("r2"),
+            0,
+            "another request's figure is its own"
+        );
+        store.set_reserved_positions("r1", 3072);
+        assert_eq!(
+            store.reserved_positions("r1"),
+            3072,
+            "a retry replaces, never stacks"
+        );
+        store.clear_request("m", "r1");
+        assert_eq!(
+            store.reserved_positions("r1"),
+            0,
+            "released with the request"
+        );
+        store.set_reserved_positions("r1", 512);
+        store.set_reserved_positions("r1", 0);
+        assert_eq!(store.reserved_positions("r1"), 0, "zero records nothing");
+    }
+
+    /// What the guard compares against is the ALLOCATED buffer, not the
+    /// positions written: before the first append nothing is allocated, after
+    /// it the whole reservation is, however few positions it holds.
+    #[test]
+    fn allocated_positions_is_the_buffer_not_the_tokens() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let key = KvCacheStore::cache_key("m", "r1");
+        assert_eq!(store.allocated_positions(&key), 0, "no entry");
+        {
+            let mut entry = store.get_or_create_keyed(&key, 2);
+            entry.layers[1] = Some(new_kv_cache(4096, false, 2048));
+        }
+        assert_eq!(
+            store.allocated_positions(&key),
+            0,
+            "built but nothing appended yet"
+        );
+        let k = Tensor::zeros((1usize, 2, 5, 4), DType::F32, &Device::Cpu).unwrap();
+        store.get_or_create_keyed(&key, 2).layers[1]
+            .as_mut()
+            .unwrap()
+            .append(&k, &k)
+            .unwrap();
+        assert_eq!(
+            store.allocated_positions(&key),
+            2048,
+            "five tokens, one reservation"
+        );
+    }
+
     /// Fill one layer of NAMED request's cache with `n` positions.
     fn append_for(store: &KvCacheStore, request_id: &str, n: usize, max_seq_len: usize) {
         let mut entry = store.get_or_create("m", request_id, 1);
         let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
-        let mut kv = new_kv_cache(max_seq_len, true);
+        let mut kv = new_kv_cache(max_seq_len, true, 0);
         kv.append(&k, &k.clone()).unwrap();
         entry.layers[0] = Some(kv);
     }
@@ -1154,7 +1379,7 @@ mod tests {
     fn append(store: &KvCacheStore, n: usize, max_seq_len: usize) {
         let mut entry = store.get_or_create("m", "r", 1);
         let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
-        let mut kv = new_kv_cache(max_seq_len, true);
+        let mut kv = new_kv_cache(max_seq_len, true, 0);
         kv.append(&k, &k.clone()).unwrap();
         entry.layers[0] = Some(kv);
     }
@@ -1334,7 +1559,7 @@ mod tests {
     #[test]
     fn mirror_tracks_the_f32_cache_across_appends() {
         let dev = candle_core::Device::Cpu;
-        let mut kv = LayerKv::new(64);
+        let mut kv = LayerKv::with_capacity(2, 64, 64);
         kv.force_shadow_for_test();
         for _ in 0..5 {
             let k = t(&dev, 1, 2, 3, 4);
@@ -1351,7 +1576,7 @@ mod tests {
     #[test]
     fn mirror_holds_the_same_numbers_as_the_f32_cache() {
         let dev = candle_core::Device::Cpu;
-        let mut kv = LayerKv::new(64);
+        let mut kv = LayerKv::with_capacity(2, 64, 64);
         kv.force_shadow_for_test();
         let k = t(&dev, 1, 2, 3, 4);
         kv.append(&k, &k).unwrap();
@@ -1382,7 +1607,7 @@ mod tests {
     #[test]
     fn reset_clears_both_representations() {
         let dev = candle_core::Device::Cpu;
-        let mut kv = LayerKv::new(64);
+        let mut kv = LayerKv::with_capacity(2, 64, 64);
         kv.force_shadow_for_test();
         let k = t(&dev, 1, 2, 3, 4);
         kv.append(&k, &k).unwrap();
@@ -1407,7 +1632,7 @@ mod tests {
         let store = KvCacheStore::new(std::time::Duration::from_secs(60));
         {
             let mut e = store.get_or_create("m", "r", 1);
-            let mut slot = LayerKv::new(64);
+            let mut slot = LayerKv::with_capacity(2, 64, 64);
             slot.force_shadow_for_test();
             let k = t(&dev, 1, 2, 8, 4);
             slot.append(&k, &k).unwrap();
@@ -1430,7 +1655,7 @@ mod tests {
     /// Distinct values per position, so a truncation that kept the wrong
     /// positions — or read back stale ones — is visible in the numbers.
     fn filled(dev: &candle_core::Device, positions: usize) -> LayerKv {
-        let mut kv = LayerKv::new(64);
+        let mut kv = LayerKv::with_capacity(2, 64, 64);
         kv.force_shadow_for_test();
         let k = t(dev, 1, 2, positions, 4);
         let v = (t(dev, 1, 2, positions, 4) + 1000.0).unwrap();
@@ -1594,7 +1819,7 @@ mod tests {
         // must fall back to converting the f32 cache, not hand the kernel a
         // history of the wrong length.
         let dev = candle_core::Device::Cpu;
-        let mut kv = LayerKv::new(64);
+        let mut kv = LayerKv::with_capacity(2, 64, 64);
         kv.force_shadow_for_test();
         let k = t(&dev, 1, 2, 3, 4);
         kv.append(&k, &k).unwrap();
@@ -1610,7 +1835,7 @@ mod tests {
     fn a_non_bhsd_cache_never_builds_a_mirror() {
         // Prefix-cache snapshots carry their own sequence dim; the mirror's
         // transpose only means anything for dim 2.
-        let mut kv = LayerKv::with_dim(1, 64);
+        let mut kv = LayerKv::with_capacity(1, 64, 64);
         kv.force_shadow_for_test();
         assert!(kv.flash_operands().is_none());
     }
@@ -1626,7 +1851,7 @@ mod tests {
         // while the same model starting fresh does not — the same model
         // behaving differently depending on how the conversation began.
         let dev = candle_core::Device::Cpu;
-        let mut kv = LayerKv::new(64);
+        let mut kv = LayerKv::with_capacity(2, 64, 64);
         kv.force_shadow_for_test();
         let k = t(&dev, 1, 2, 4, 4);
         kv.append(&k, &k).unwrap();
@@ -1648,7 +1873,7 @@ mod tests {
         // appends new ones. It would fail `flash_operands`' length check forever
         // while still costing memory and a conversion per token.
         let dev = candle_core::Device::Cpu;
-        let mut kv = LayerKv::new(64);
+        let mut kv = LayerKv::with_capacity(2, 64, 64);
         let k = t(&dev, 1, 2, 4, 4);
         kv.append(&k, &k).unwrap();
         kv.set_mirror_wanted(true);

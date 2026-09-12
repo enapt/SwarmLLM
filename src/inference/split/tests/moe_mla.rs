@@ -322,7 +322,7 @@ fn test_mla_q_decompress() {
     // Test that forward_mla runs without error and returns correct shape
     let x = Tensor::randn(0f32, 0.1, (1, 5, hidden), &device).unwrap();
     let mut kv_cache = None;
-    let out = mla.forward_mla(&x, None, 0, &mut kv_cache, 128).unwrap();
+    let out = mla.forward_mla(&x, None, 0, &mut kv_cache, 128, 0).unwrap();
     assert_eq!(out.dims(), &[1, 5, hidden], "MLA output shape mismatch");
 
     // KV cache should be populated
@@ -375,7 +375,7 @@ fn test_mla_kv_decompress() {
     // Prefill with seq_len=3
     let x = Tensor::randn(0f32, 0.1, (1, 3, hidden), &device).unwrap();
     let mut kv_cache = None;
-    mla.forward_mla(&x, None, 0, &mut kv_cache, 128).unwrap();
+    mla.forward_mla(&x, None, 0, &mut kv_cache, 128, 0).unwrap();
 
     // Check KV cache dimensions
     let cache = kv_cache.as_ref().unwrap();
@@ -433,14 +433,14 @@ fn test_mla_rope_split() {
     // Prefill + decode: verify output stays finite
     let x = Tensor::randn(0f32, 0.1, (1, 4, hidden), &device).unwrap();
     let mut kv_cache = None;
-    let out_prefill = mla.forward_mla(&x, None, 0, &mut kv_cache, 128).unwrap();
+    let out_prefill = mla.forward_mla(&x, None, 0, &mut kv_cache, 128, 0).unwrap();
     let flat: Vec<f32> = out_prefill.flatten_all().unwrap().to_vec1().unwrap();
     assert!(flat.iter().all(|v| v.is_finite()), "MLA prefill NaN/Inf");
 
     // Decode step
     let x_decode = Tensor::randn(0f32, 0.1, (1, 1, hidden), &device).unwrap();
     let out_decode = mla
-        .forward_mla(&x_decode, None, 4, &mut kv_cache, 128)
+        .forward_mla(&x_decode, None, 4, &mut kv_cache, 128, 0)
         .unwrap();
     assert_eq!(out_decode.dims(), &[1, 1, hidden]);
     let flat: Vec<f32> = out_decode.flatten_all().unwrap().to_vec1().unwrap();

@@ -486,13 +486,28 @@ impl SplitModel {
         // and THIS server cannot serve it right now. That is a 503, which is
         // what lets a coordinator route it to a peer that can — the reason a
         // swarm can refuse where vLLM has to preempt and recompute.
+        // Build the cache key once — reused for the guard, take and writeback
+        // (zero alloc on hot path).
+        let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
+        // What the first allocation of each layer's cache should cover: the
+        // admitted prompt plus its reply reserve, recorded by the worker in
+        // `ensure_room_for_prompt`; 0 — a cache built before the worker saw
+        // the prompt — means one quantum, grown from there as before.
+        let kv_reserve = kv_cache_store
+            .reserved_positions(request_id)
+            .min(self.max_seq_len);
         if let Some(load_time_budget) = self.kv_budget_bytes {
-            // Positions this forward newly reserves — zero for almost every
-            // decode step, and a whole prompt's worth on a prefill.
-            let claiming = super::kv_budget::positions_claimed(
-                index_pos,
+            // Positions this forward newly ALLOCATES — zero for almost every
+            // decode step, and a whole prompt's worth on a prefill. Read off
+            // the buffer the request already holds, not derived from
+            // `index_pos`: a reserved cache is larger than the rounded
+            // position from its first append, and the old arithmetic charged
+            // a reply at every quantum boundary inside memory it already had.
+            let claiming = super::kv_budget::positions_to_allocate(
+                kv_cache_store.allocated_positions(&cache_key),
+                kv_reserve,
                 total_seq,
-                crate::inference::layers::KV_CACHE_GROWTH_TOKENS,
+                crate::inference::layers::kv_growth_quantum(self.max_seq_len),
             );
             if claiming > 0 {
                 // The budget as the card can honour it at this moment — the
@@ -563,8 +578,11 @@ impl SplitModel {
         }
 
         let num_layers = self.layers.len();
-        // Build the cache key once — reused for both take and writeback (zero alloc on hot path).
-        let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
+        // How many times a cache grew by concatenation during THIS forward —
+        // the number a reserved prompt pass must leave at zero (FUTURE_WORK
+        // #32). Process-wide, so only meaningful on a worker serving one
+        // request, which is what a mechanism check runs.
+        let growth_before = super::kv_cache::kv_growth_steps();
 
         // Get or create the per-request cache entry, extract the layer caches,
         // then drop the DashMap guard before running the (potentially slow) forward pass.
@@ -689,6 +707,7 @@ impl SplitModel {
                             index_pos,
                             &mut layer_kv_caches[layer_idx],
                             max_seq_len,
+                            kv_reserve,
                             lora_param,
                         )
                         .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
@@ -746,6 +765,7 @@ impl SplitModel {
                             index_pos,
                             &mut layer_kv_caches[layer_idx],
                             max_seq_len,
+                            kv_reserve,
                         )
                         .map_err(|e| SwarmError::Internal(format!("mla: {e}")))?;
                     let x = (attn + &layer_in).map_err(SwarmError::internal)?;
@@ -781,6 +801,7 @@ impl SplitModel {
                             index_pos,
                             &mut layer_kv_caches[layer_idx],
                             max_seq_len,
+                            kv_reserve,
                         )
                         .map_err(|e| SwarmError::Internal(format!("q35_attn: {e}")))?;
                     let x = (attn + residual).map_err(SwarmError::internal)?;
@@ -866,6 +887,21 @@ impl SplitModel {
             entry.layers = layer_kv_caches;
             entry.ssm_states = layer_ssm_states;
             entry.last_accessed = std::time::Instant::now();
+        }
+        // A prompt chunk is where a reservation earns its keep — every chunk,
+        // not only the first: without a reservation the first chunk fits its
+        // quantum and the growth lands on the ones after it. A decode step
+        // grows at most once per quantum and is not worth a line.
+        if seq_len > 1 {
+            let grew = super::kv_cache::kv_growth_steps().saturating_sub(growth_before);
+            tracing::debug!(
+                request_id,
+                chunk_positions = seq_len,
+                index_pos,
+                reserved_positions = kv_reserve,
+                growth_steps = grew,
+                "DIAG: KV cache growth during a prompt chunk"
+            );
         }
 
         let result = if is_last {
@@ -1266,6 +1302,9 @@ impl SplitModel {
         }
 
         let seq_len = first_seq_len;
+        // See the same snapshot in `forward_inner_impl`: how many times a
+        // cache grew by concatenation during THIS batch forward.
+        let growth_before = super::kv_cache::kv_growth_steps();
 
         // Context window check: reject any item whose index_pos + seq_len
         // exceeds max_seq_len (same guard as forward_inner_impl, prevents RoPE
@@ -1299,6 +1338,17 @@ impl SplitModel {
         }
 
         let max_seq_len = self.max_seq_len;
+        // Each slot's first allocation covers its own admitted prompt — the
+        // batched path is where admission and prefill are furthest apart, and
+        // where a prompt grown into place a quantum at a time cost the most.
+        let kv_reserves: Vec<usize> = items
+            .iter()
+            .map(|i| {
+                kv_cache_store
+                    .reserved_positions(i.request_id)
+                    .min(max_seq_len)
+            })
+            .collect();
 
         // Build one causal mask for the whole batch when seq_len > 1. Every
         // slot shares (seq_len, index_pos) at this point — but a partial /
@@ -1427,6 +1477,7 @@ impl SplitModel {
                             &item_positions,
                             &mut layer_caches,
                             max_seq_len,
+                            &kv_reserves,
                             None,
                         )
                         .map_err(|e| SwarmError::Internal(format!("attn batched: {e}")))?;
@@ -1480,6 +1531,7 @@ impl SplitModel {
                                 item.index_pos,
                                 &mut all_kv_caches[req_idx][layer_idx],
                                 max_seq_len,
+                                kv_reserves[req_idx],
                             )
                             .map_err(|e| SwarmError::Internal(format!("mla_batch: {e}")))?;
                         attn_outputs.push(attn_out);
@@ -1528,6 +1580,7 @@ impl SplitModel {
                                 item.index_pos,
                                 &mut all_kv_caches[req_idx][layer_idx],
                                 max_seq_len,
+                                kv_reserves[req_idx],
                             )
                             .map_err(|e| SwarmError::Internal(format!("q35b_attn: {e}")))?;
                         attn_outputs.push(attn_out);
@@ -1603,6 +1656,18 @@ impl SplitModel {
             entry.layers = std::mem::take(&mut all_kv_caches[req_idx]);
             entry.ssm_states = std::mem::take(&mut all_ssm_states[req_idx]);
             entry.last_accessed = std::time::Instant::now();
+        }
+        // Same DIAG as the single-request path, for a fused prefill batch.
+        if seq_len > 1 {
+            let grew = super::kv_cache::kv_growth_steps().saturating_sub(growth_before);
+            tracing::debug!(
+                batch_size,
+                chunk_positions = seq_len,
+                index_pos = items.first().map(|i| i.index_pos).unwrap_or(0),
+                reserved_positions = ?kv_reserves,
+                growth_steps = grew,
+                "DIAG: KV cache growth during a prompt chunk"
+            );
         }
 
         // Split batch back into per-request outputs
@@ -1786,6 +1851,9 @@ impl SplitModel {
                         index_pos,
                         layer_slot,
                         self.max_seq_len,
+                        kv_cache_store
+                            .reserved_positions(request_id)
+                            .min(self.max_seq_len),
                         None,
                     )
                     .map_err(|e| SwarmError::Internal(format!("tp attn: {e}")))

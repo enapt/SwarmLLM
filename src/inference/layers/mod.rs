@@ -383,6 +383,7 @@ impl MlaWeights {
         index_pos: usize,
         kv_cache: &mut Option<LayerKv>,
         max_seq_len: usize,
+        kv_reserve: usize,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _hidden) = x.dims3()?;
         let nope_dim = self.key_length - self.rope_dim;
@@ -447,7 +448,7 @@ impl MlaWeights {
                 // MLA reconstructs K per head, so every head has its own key —
                 // MHA-shaped for routing purposes, and decode therefore reads
                 // the f32 cache. No mirror.
-                let mut cache = new_kv_cache(max_seq_len, false);
+                let mut cache = new_kv_cache(max_seq_len, false, kv_reserve);
                 let kv = cache.append(&k, &v)?;
                 *kv_cache = Some(cache);
                 kv
@@ -1101,7 +1102,10 @@ impl LayerWeights {
 /// **This is a growth quantum, not a limit.** candle's `Cache::append`
 /// allocates a buffer of `max_seq_len` positions on the FIRST append and, when
 /// that fills, grows by `grow_by` — and `Cache::new(dim, n)` sets *both* to
-/// `n`. Passing the model's whole context length therefore reserved the entire
+/// `n`. Since 2026-09-12 the first allocation is the request's RESERVATION
+/// (its admitted prompt plus reply reserve, `SeqCache::with_capacity`) and
+/// this quantum is only how a cache grows PAST it — see FUTURE_WORK #32 for
+/// what growing a whole prompt a quantum at a time cost. Passing the model's whole context length therefore reserved the entire
 /// context window from the very first token: measured on llama-3.2-3b Q4_K_M,
 /// one 904-token request held **940 MB allocated for 207 MB of real tokens,
 /// 22% utilisation**, and a twenty-token chat would have held the same 940 MB.
@@ -1164,15 +1168,35 @@ pub(crate) fn rope_over_heads(
     Tensor::cat(&[&x_rot, &x_pass], 3)?.contiguous()
 }
 
+/// The quantum a cache built for this context window actually grows by —
+/// [`KV_CACHE_GROWTH_TOKENS`], or the whole window when that is smaller. The
+/// head-room guard rounds its claims by this, so it charges what
+/// [`new_kv_cache`] will allocate rather than a constant the cache never used.
+pub(crate) fn kv_growth_quantum(max_seq_len: usize) -> usize {
+    KV_CACHE_GROWTH_TOKENS.min(max_seq_len.max(1))
+}
+
 /// Build the KV cache for one layer, reserving space incrementally.
 ///
 /// **Every KV cache must be created here.** Calling `KvCache::new` with a
 /// model's `max_seq_len` directly is the bug this exists to prevent, and it
 /// looks completely reasonable at the call site — the parameter is even named
 /// `max_seq_len`, so passing it reads as correct.
-pub(crate) fn new_kv_cache(max_seq_len: usize, mirror_for_flash: bool) -> LayerKv {
-    let growth = KV_CACHE_GROWTH_TOKENS.min(max_seq_len.max(1));
-    let mut kv = LayerKv::new(growth);
+///
+/// `reserve_positions` is what the first allocation covers — the admitted
+/// prompt plus its reply reserve, from `KvCacheStore::reserved_positions` —
+/// clamped to the context window; 0 means one quantum, the ordinary start.
+/// A prompt of known length is held in ONE allocation per layer instead of
+/// being grown into a quantum at a time (FUTURE_WORK #32; see [`SeqCache`]).
+pub(crate) fn new_kv_cache(
+    max_seq_len: usize,
+    mirror_for_flash: bool,
+    reserve_positions: usize,
+) -> LayerKv {
+    let window = max_seq_len.max(1);
+    let growth = kv_growth_quantum(window);
+    let initial = reserve_positions.clamp(growth, window);
+    let mut kv = LayerKv::with_capacity(2, initial, growth);
     kv.set_mirror_wanted(mirror_for_flash);
     kv
 }
@@ -2020,6 +2044,9 @@ impl LayerWeights {
         rope_over_heads(x, &cos, &sin, self.rope_dim, self.use_rope_contiguous)
     }
 
+    // Eight arguments, like `forward_attn_batched`: the cache's shape,
+    // reservation and window travel together with the tensors they size.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn forward_attn(
         &self,
         x: &Tensor,
@@ -2027,6 +2054,7 @@ impl LayerWeights {
         index_pos: usize,
         kv_cache: &mut Option<LayerKv>,
         max_seq_len: usize,
+        kv_reserve: usize,
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _n_embd) = x.dims3()?;
@@ -2111,6 +2139,7 @@ impl LayerWeights {
                 let mut cache = new_kv_cache(
                     max_seq_len,
                     model_wants_kv_mirror(self.n_head, self.n_kv_head),
+                    kv_reserve,
                 );
                 let kv = cache.append(&k, &v)?;
                 *kv_cache = Some(cache);
@@ -2215,6 +2244,7 @@ impl LayerWeights {
         index_positions: &[usize],
         caches: &mut [&mut Option<LayerKv>],
         max_seq_len: usize,
+        kv_reserves: &[usize],
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _n_embd) = x.dims3()?;
@@ -2318,6 +2348,7 @@ impl LayerWeights {
                     let mut cache = new_kv_cache(
                         max_seq_len,
                         model_wants_kv_mirror(self.n_head, self.n_kv_head),
+                        kv_reserves.get(i).copied().unwrap_or(0),
                     );
                     let kv = cache.append(&ki, &vi)?;
                     *cache_slot = Some(cache);
@@ -2485,17 +2516,17 @@ mod batched_attention_tests {
         // Prompt then decode, through the cache, on the single-request path.
         let mut cache: Option<LayerKv> = None;
         let x = Tensor::randn(0f32, 1., (1usize, 3usize, hidden), &dev).unwrap();
-        lw.forward_attn(&x, None, 0, &mut cache, 64, None)
+        lw.forward_attn(&x, None, 0, &mut cache, 64, 0, None)
             .expect("partial-RoPE prefill must reach the KV cache");
         let x1 = Tensor::randn(0f32, 1., (1usize, 1usize, hidden), &dev).unwrap();
-        lw.forward_attn(&x1, None, 3, &mut cache, 64, None)
+        lw.forward_attn(&x1, None, 3, &mut cache, 64, 0, None)
             .expect("partial-RoPE decode must reach the KV cache");
 
         // The batched path ropes per row when the rows disagree on position.
         let xb = Tensor::randn(0f32, 1., (2usize, 1usize, hidden), &dev).unwrap();
         let mut owned: Vec<Option<LayerKv>> = vec![None, None];
         let mut refs: Vec<&mut Option<LayerKv>> = owned.iter_mut().collect();
-        lw.forward_attn_batched(&xb, None, &[0, 5], &mut refs, 64, None)
+        lw.forward_attn_batched(&xb, None, &[0, 5], &mut refs, 64, &[], None)
             .expect("partial-RoPE batched decode at mixed positions");
     }
 
@@ -2523,6 +2554,7 @@ mod batched_attention_tests {
                     &vec![index_pos; batch],
                     &mut caches,
                     max_seq,
+                    &[],
                     None,
                 )
                 .expect("batched attention");
@@ -2533,7 +2565,7 @@ mod batched_attention_tests {
                 let xi = x.narrow(0, i, 1).unwrap().contiguous().unwrap();
                 let mut c: Option<LayerKv> = None;
                 rows.push(
-                    lw.forward_attn(&xi, None, index_pos, &mut c, max_seq, None)
+                    lw.forward_attn(&xi, None, index_pos, &mut c, max_seq, 0, None)
                         .expect("per-request attention"),
                 );
             }
@@ -2577,7 +2609,7 @@ mod batched_attention_tests {
         let mut owned: Vec<Option<LayerKv>> = (0..batch).map(|_| None).collect();
         let mut caches: Vec<&mut Option<LayerKv>> = owned.iter_mut().collect();
         let got = lw
-            .forward_attn_batched(&x, None, &positions, &mut caches, max_seq, None)
+            .forward_attn_batched(&x, None, &positions, &mut caches, max_seq, &[], None)
             .expect("mixed-position batched attention");
 
         let mut rows = Vec::with_capacity(batch);
@@ -2585,7 +2617,7 @@ mod batched_attention_tests {
             let xi = x.narrow(0, i, 1).unwrap().contiguous().unwrap();
             let mut c: Option<LayerKv> = None;
             rows.push(
-                lw.forward_attn(&xi, None, *pos, &mut c, max_seq, None)
+                lw.forward_attn(&xi, None, *pos, &mut c, max_seq, 0, None)
                     .expect("per-request attention"),
             );
         }
@@ -2638,9 +2670,9 @@ mod batched_attention_tests {
         for (i, &len) in histories.iter().enumerate() {
             for pos in 0..len {
                 let t = Tensor::randn(0f32, 1., (1usize, 1usize, hidden), &dev).unwrap();
-                lw.forward_attn(&t, None, pos, &mut batched_caches[i], max_seq, None)
+                lw.forward_attn(&t, None, pos, &mut batched_caches[i], max_seq, 0, None)
                     .expect("warm batched side");
-                lw.forward_attn(&t, None, pos, &mut solo_caches[i], max_seq, None)
+                lw.forward_attn(&t, None, pos, &mut solo_caches[i], max_seq, 0, None)
                     .expect("warm solo side");
             }
         }
@@ -2663,14 +2695,14 @@ mod batched_attention_tests {
 
         let mut refs: Vec<&mut Option<LayerKv>> = batched_caches.iter_mut().collect();
         let got = lw
-            .forward_attn_batched(&x, None, &positions, &mut refs, max_seq, None)
+            .forward_attn_batched(&x, None, &positions, &mut refs, max_seq, &[], None)
             .expect("batched decode over unequal histories");
 
         let mut rows = Vec::with_capacity(batch);
         for (i, pos) in positions.iter().enumerate() {
             let xi = x.narrow(0, i, 1).unwrap().contiguous().unwrap();
             rows.push(
-                lw.forward_attn(&xi, None, *pos, &mut solo_caches[i], max_seq, None)
+                lw.forward_attn(&xi, None, *pos, &mut solo_caches[i], max_seq, 0, None)
                     .expect("solo decode"),
             );
         }
@@ -2700,7 +2732,7 @@ mod batched_attention_tests {
         let mut owned: Vec<Option<LayerKv>> = vec![None, None, None];
         let mut caches: Vec<&mut Option<LayerKv>> = owned.iter_mut().collect();
         assert!(lw
-            .forward_attn_batched(&x, None, &[0, 1], &mut caches, 64, None)
+            .forward_attn_batched(&x, None, &[0, 1], &mut caches, 64, &[], None)
             .is_err());
     }
 
@@ -2715,7 +2747,7 @@ mod batched_attention_tests {
         let mut owned: Vec<Option<LayerKv>> = vec![None, None]; // 2 for 3 rows
         let mut caches: Vec<&mut Option<LayerKv>> = owned.iter_mut().collect();
         assert!(lw
-            .forward_attn_batched(&x, None, &[0, 0, 0], &mut caches, 64, None)
+            .forward_attn_batched(&x, None, &[0, 0, 0], &mut caches, 64, &[], None)
             .is_err());
     }
 }

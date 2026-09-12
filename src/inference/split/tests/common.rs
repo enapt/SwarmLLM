@@ -73,18 +73,36 @@ pub(super) fn make_test_split_model_on(
     hidden_dim: usize,
     device: candle_core::Device,
 ) -> SplitModel {
-    make_test_split_model_impl(num_layers, hidden_dim, device)
+    make_test_split_model_impl(num_layers, hidden_dim, device, 128)
 }
 
 /// Create a minimal SplitModel with real layers for testing forward/forward_batch.
 pub(super) fn make_test_split_model(num_layers: usize, hidden_dim: usize) -> SplitModel {
-    make_test_split_model_impl(num_layers, hidden_dim, candle_core::Device::Cpu)
+    make_test_split_model_impl(num_layers, hidden_dim, candle_core::Device::Cpu, 128)
+}
+
+/// The same model with a context window of the caller's choosing. The default
+/// 128 is smaller than one KV growth quantum, so a cache built against it can
+/// never outgrow its first allocation — a test that needs to see the cache
+/// GROW (the head-room guard at a quantum boundary) needs a wider window.
+pub(super) fn make_test_split_model_with_window(
+    num_layers: usize,
+    hidden_dim: usize,
+    max_seq_len: usize,
+) -> SplitModel {
+    make_test_split_model_impl(
+        num_layers,
+        hidden_dim,
+        candle_core::Device::Cpu,
+        max_seq_len,
+    )
 }
 
 fn make_test_split_model_impl(
     num_layers: usize,
     hidden_dim: usize,
     device: candle_core::Device,
+    max_seq_len: usize,
 ) -> SplitModel {
     // Build a minimal model with random weights for testing.
     // Identity-like weight matrices on the caller-chosen device.
@@ -92,7 +110,6 @@ fn make_test_split_model_impl(
     let n_head = hidden_dim / head_dim;
     let n_kv_head = n_head; // no GQA in test model
 
-    let max_seq_len = 128;
     let rope_dim = head_dim;
     let freq_base = 10000.0f32;
     let theta: Vec<f32> = (0..rope_dim / 2)

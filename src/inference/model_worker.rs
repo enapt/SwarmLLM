@@ -2477,6 +2477,19 @@ fn ensure_room_for_prompt(
     request_id: &str,
     prompt_tokens: usize,
 ) -> Result<(), SwarmError> {
+    // The prompt plus one growth quantum for the reply, so an admitted
+    // request can at least begin decoding without meeting the per-chunk
+    // guard at its first quantum boundary. A very long reply may still meet
+    // it later, which is the lazy charge that guard exists for.
+    let positions =
+        crate::inference::layers::kv_cache_reservation(prompt_tokens) + REPLY_RESERVE_POSITIONS;
+    // This is where the prompt's length is first known, so this is where its
+    // caches learn how big to be born: every layer's first allocation covers
+    // these positions, instead of being grown into a quantum at a time with
+    // a copy of everything so far at each step (FUTURE_WORK #32). Recorded
+    // before any budget question, because a node with no budget to check
+    // still pays for the growth.
+    kv_store.set_reserved_positions(request_id, positions.min(model.context_window()));
     if !prefix_cache_charged() {
         return Ok(());
     }
@@ -2516,12 +2529,6 @@ fn ensure_room_for_prompt(
         return Ok(());
     }
     let load_time_budget = model.kv_budget().0.unwrap_or(budget);
-    // The prompt plus one growth quantum for the reply, so an admitted
-    // request can at least begin decoding without meeting the per-chunk
-    // guard at its first quantum boundary. A very long reply may still meet
-    // it later, which is the lazy charge that guard exists for.
-    let positions =
-        crate::inference::layers::kv_cache_reservation(prompt_tokens) + REPLY_RESERVE_POSITIONS;
     let mb = |b: u64| b / (1024 * 1024);
     use crate::inference::split::kv_budget::{admit_prompt, PromptAdmission};
     let verdict = admit_prompt(budget, live, cached, per_token, positions);
@@ -4657,7 +4664,7 @@ mod prefix_reconcile_tests {
     fn hydrate(store: &Arc<KvCacheStore>, n: usize, layers: usize) {
         let mut entry = store.get_or_create(MODEL_KEY, REQ, layers);
         for slot in entry.layers.iter_mut() {
-            let mut kv = crate::inference::split::kv_cache::LayerKv::with_dim(2, 64);
+            let mut kv = crate::inference::split::kv_cache::LayerKv::with_capacity(2, 64, 64);
             // [batch, heads, seq, head_dim]
             let k =
                 Tensor::zeros((1usize, 2, n, 4), candle_core::DType::F32, &Device::Cpu).unwrap();

@@ -629,6 +629,89 @@ ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — eve
 and any GPU node whose free VRAM could not be read records `None`, and reading
 that as a zero budget refuses everything.
 
+## A prompt of known length is reserved, not grown into
+
+(2026-09-12, FUTURE_WORK #32.) `KvCacheStore::set_reserved_positions` is
+written by the worker at the top of `ensure_room_for_prompt` — the first
+point the prompt's length is known, before any budget question, since a node
+with no budget still pays for growth — with `kv_cache_reservation(prompt) +
+REPLY_RESERVE_POSITIONS`, the same figure admission charges. The executor
+reads it (`reserved_positions`, clamped to the context window) and hands it to
+`new_kv_cache` as the size of each layer's FIRST allocation; prefix-cache
+hydration builds its caches to the larger of the snapshot and the reservation,
+so the suffix appends into the same buffer. **`SeqCache::with_capacity(dim,
+initial, grow_by)`** separates the first allocation from the growth quantum;
+`new` remains the case where they agree, and the f16 mirror is born the same
+size as the f32 cache it shadows.
+
+**Why.** The cache grew by `Tensor::cat` in 512-position quanta, and a
+concatenation copies everything so far: a 20837-token prompt on a 3B was 41
+grows per layer, 2279 `cat` calls, **97 GB copied**, each step holding the old
+buffer, the new block and the result live at once — ~170 MB of transient per
+layer at that length — and every one of those was a fresh device allocation on
+a card admission had just judged full. None of it was charged: admission
+charges the FINAL size. That is the shape of the field OOM in FUTURE_WORK #32
+(v0.3.168, `xlam-2-3b`, prompt privacy on, 20837 tokens: `CUDA_ERROR_OUT_OF_MEMORY`
+during the forward, and a 16126-token retry that ran five minutes without a
+first token). vLLM allocates a request's KV blocks for the whole prompt before
+prefill runs (Kwon et al., *Efficient Memory Management for LLM Serving with
+PagedAttention*, 2023, §4.1) — a 32K request holds 32K of capacity from the
+start, never grown into — and the general rule in every production cache is
+the same: allocate once, write in place, never `cat`.
+
+**What a change here must keep.**
+
+- **The guard charges what will be ALLOCATED, read off the buffer.**
+  `kv_budget::positions_to_allocate(allocated, reserved, total_seq, quantum)`
+  replaced `positions_claimed(index_pos, total_seq, quantum)`. The old form
+  derived the buffer from `index_pos` rounded up, which is true only while a
+  cache grows from one quantum; a reserved cache is larger than that from its
+  first append, so the old arithmetic charged a reply for every quantum
+  boundary it crossed inside memory it already held, and could refuse it for
+  room it did not need. `allocated` comes from `KvCacheStore::allocated_positions`
+  — the buffer, not the tokens; 0 before the first append. The first
+  allocation's claim is `max(reserved, round_up(total_seq))`, which is what
+  `new_kv_cache` then allocates, so the claim and the allocation cannot drift.
+  Rounding is by `layers::kv_growth_quantum(max_seq_len)` — the quantum the
+  cache is actually built with (`KV_CACHE_GROWTH_TOKENS`, or the whole window
+  when that is smaller) — not the bare constant, which over-charged any model
+  whose window is under a quantum by up to 4x and was one more way for the
+  claim and the allocation to disagree.
+- **The test that guards the ratchet drives a real growth.**
+  `a_refused_request_gives_back_the_cache_it_had_taken` used to re-run
+  `index_pos = 0` on the same request, which never grows anything; it passed
+  only because the old guard derived its claim from the position. It now
+  sends a first chunk that fits and a second that outgrows the buffer, on a
+  model whose window is wider than a quantum (`make_test_split_model_with_window`)
+  — the default 128-position test model can never grow, which is why no test
+  had exercised a growth boundary against the guard until now.
+- **Absent means "grow as before".** A forward whose worker never recorded a
+  reservation — speculative verify rounds, tensor-parallel phases, the bench
+  harnesses, a request on a build that predates this — reads 0, `new_kv_cache`
+  clamps that to one quantum, and every number the budget sees is the number
+  it saw before. Nothing may treat 0 as "hold nothing".
+- **`SWARMLLM_KV_RESERVE=0`** records no reservation, so the two behaviours
+  compare inside ONE binary: the executor's `DIAG: KV cache growth during a prompt chunk` line reports `growth_steps` (from the process-wide
+  `KV_GROWTH_STEPS` counter, one per `cat`) — with the switch on it must read
+  0 for the prompt pass, with it off the old count. That line, not a faster
+  wall clock, is the mechanism check. Measured 2026-09-12 on an isolated
+  node, qwen2.5-0.5b (24 layers) on the processor, a 1901-token prompt:
+  `reserved_positions=2560 growth_steps=0` with the reservation;
+  `reserved_positions=0 growth_steps=144` without — three concatenations
+  (512→1024→1536→2048) × K and V × 24 layers, exactly the arithmetic.
+- **The reservation is per REQUEST and dies with it** — recorded beside
+  `admitted_claims`, released by `clear_request`, `cleanup_request_id` and the
+  TTL sweep. A retry replaces it, never stacks.
+- **A small chat now holds its reply reserve.** Admission has charged
+  `REPLY_RESERVE_POSITIONS` since gotcha #440; the memory is now actually held
+  from the first token rather than claimed at the first quantum boundary, so a
+  twenty-token prompt reserves two quanta where it held one. On a 3B that is
+  ~4 MB per request; it is memory the budget already counted.
+- **Not reproduced here.** The card is 8 GB with ~3.6 GB in use, so admission
+  refuses the prompt lengths that reach the failure; the mechanism is
+  established by reading, arithmetic and the growth counter, not by observing
+  the OOM stop. The reporter's machine is the place that can confirm it.
+
 ## `inference::process_pool::worker_socket_path`
 
 (2026-09-04, gotcha #449) —

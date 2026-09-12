@@ -653,9 +653,16 @@ impl PrefixCache {
             // a build that reserved a model's whole context window up front —
             // honouring it would re-inflate the reservation this node just
             // stopped making. See `KV_CACHE_GROWTH_TOKENS`.
-            let mut kv = LayerKv::with_dim(
+            //
+            // And at least what the worker reserved for the whole prompt this
+            // snapshot is a prefix of, so the suffix that follows is appended
+            // into the same allocation rather than grown into (FUTURE_WORK
+            // #32). Growth past that is by the ordinary quantum.
+            let mut kv = LayerKv::with_capacity(
                 snapshot.dim,
-                crate::inference::layers::kv_cache_reservation(snapshot.token_count),
+                crate::inference::layers::kv_cache_reservation(snapshot.token_count)
+                    .max(kv_store.reserved_positions(request_id)),
+                crate::inference::layers::KV_CACHE_GROWTH_TOKENS,
             );
             kv.append(k_src, v_src).map_err(|e| {
                 SwarmError::Internal(format!(
@@ -1147,7 +1154,7 @@ mod tests {
             let k = Tensor::zeros((1usize, 1, seq_len, 4), DType::F32, &device).unwrap();
             let v = Tensor::zeros((1usize, 1, seq_len, 4), DType::F32, &device).unwrap();
             // dim=2 is the sequence dim for this shape
-            let mut kv = LayerKv::with_dim(2, 4096);
+            let mut kv = LayerKv::with_capacity(2, 4096, 4096);
             kv.append(&k, &v).unwrap();
             *slot = Some(kv);
         }
@@ -1275,7 +1282,7 @@ mod tests {
             for slot in entry.layers.iter_mut() {
                 let k = Tensor::ones((1usize, 1, 8, 4), DType::F32, &device).unwrap();
                 let v = Tensor::ones((1usize, 1, 8, 4), DType::F32, &device).unwrap();
-                let mut kv = LayerKv::with_dim(2, 4096);
+                let mut kv = LayerKv::with_capacity(2, 4096, 4096);
                 kv.append(&k, &v).unwrap();
                 *slot = Some(kv);
             }

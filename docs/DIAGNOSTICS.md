@@ -706,6 +706,7 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 | WARN  | `DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device` — the 503 that re-routes; `short_by_mb` is against the reconciled budget | model_worker.rs |
 | DEBUG | `DIAG: KV budget reconciled with the device — less room than the load-time figure` — `load_time_budget_mb`, `budget_now_mb`, `live_mb`, `cached_mb`, `device`; fires whenever the device has less room than the loader predicted (another tenant, a snapshot, the llama.cpp context — or, on a processor, the rest of the machine filling up, or this worker's own weights growing when a failover hands it more layers). `device` is `card` or `processor`; the processor arm arrived with gotcha #462. `budget_mb` in the two lines above is this figure. | split/model.rs |
 | WARN  | `DIAG: refusing to grow the KV cache past this worker's budget` — the per-chunk guard, at a growth-quantum boundary, after evicting cached prompts | split/executor.rs |
+| DEBUG | `DIAG: KV cache growth during a prompt chunk` — `growth_steps` (concatenations this forward took, from the process-wide `KV_GROWTH_STEPS`), `chunk_positions`, `index_pos`, `reserved_positions`. **The mechanism check for a reserved prompt (FUTURE_WORK #32)**: with the reservation on it reads `growth_steps=0` on every chunk; with `SWARMLLM_KV_RESERVE=0` the old growth comes back (one `cat` per K and per V per layer per quantum crossed). Emitted on both forward paths; a fused prefill batch reports `reserved_positions` per slot. `scratchpad`-style harness: an isolated node, a ~1500-token prompt, grep this line — see `docs/invariants/memory.md` § "A prompt of known length is reserved" | split/executor.rs |
 
 ## Split Model Forward Pass Diagnostics
 
@@ -1411,7 +1412,9 @@ Two things that will otherwise be misread:
   lengths on a busy machine → the minimum is the LUCKIEST one.
 - **A/B inside ONE binary**, via an env switch — `SWARMLLM_DECODE_CALIBRATE=0`,
   `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`,
-  `SWARMLLM_DECODE_THREADS=0`, `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS`. Comparing two
+  `SWARMLLM_DECODE_THREADS=0`, `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS`,
+  `SWARMLLM_KV_RESERVE=0` (grow the KV cache into a prompt a quantum at a time,
+  as before 2026-09-12, instead of reserving its admitted length). Comparing two
   builds compares two builds.
 - **A one-shot benchmark cannot see a cost that only appears across turns.** The
   GPU swap floor was defended on the grounds that eviction discards a model's

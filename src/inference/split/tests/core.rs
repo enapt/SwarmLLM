@@ -207,7 +207,7 @@ fn kv_cache_store_isolates_requests() {
     // Create caches for both requests using KvCache
     {
         let mut entry_a = store.get_or_create(model_key, req_a, num_layers);
-        let mut cache = LayerKv::with_dim(2, 128);
+        let mut cache = LayerKv::with_capacity(2, 128, 128);
         let k = Tensor::from_vec(vec![1.0f32, 2.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
         let v = Tensor::from_vec(vec![3.0f32, 4.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
         cache.append(&k, &v).unwrap();
@@ -215,7 +215,7 @@ fn kv_cache_store_isolates_requests() {
     }
     {
         let mut entry_b = store.get_or_create(model_key, req_b, num_layers);
-        let mut cache = LayerKv::with_dim(2, 128);
+        let mut cache = LayerKv::with_capacity(2, 128, 128);
         let k = Tensor::from_vec(vec![10.0f32, 20.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
         let v = Tensor::from_vec(vec![30.0f32, 40.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
         cache.append(&k, &v).unwrap();
@@ -287,7 +287,7 @@ fn kv_truncate_to_preserves_prefix_and_drops_suffix() {
     let store = KvCacheStore::new(std::time::Duration::from_secs(600));
     {
         let mut entry = store.get_or_create("m", "r", 1);
-        let mut cache = LayerKv::with_dim(2, 128);
+        let mut cache = LayerKv::with_capacity(2, 128, 128);
         append_pos(&mut cache, 1.0, 10.0);
         append_pos(&mut cache, 2.0, 20.0);
         append_pos(&mut cache, 3.0, 30.0);
@@ -313,7 +313,7 @@ fn kv_truncate_to_target_geq_current_is_noop() {
     let store = KvCacheStore::new(std::time::Duration::from_secs(600));
     {
         let mut entry = store.get_or_create("m", "r", 1);
-        let mut cache = LayerKv::with_dim(2, 128);
+        let mut cache = LayerKv::with_capacity(2, 128, 128);
         append_pos(&mut cache, 1.0, 10.0);
         append_pos(&mut cache, 2.0, 20.0);
         entry.layers[0] = Some(cache);
@@ -332,7 +332,7 @@ fn kv_truncate_unallocated_layer_is_skipped() {
     {
         let mut entry = store.get_or_create("m", "r", 3);
         // Layer 0 has data; layers 1 and 2 are None — must be skipped, not panic.
-        let mut cache = LayerKv::with_dim(2, 128);
+        let mut cache = LayerKv::with_capacity(2, 128, 128);
         append_pos(&mut cache, 1.0, 10.0);
         append_pos(&mut cache, 2.0, 20.0);
         entry.layers[0] = Some(cache);
@@ -363,7 +363,7 @@ fn kv_truncate_all_layers_aligned() {
     {
         let mut entry = store.get_or_create("m", "r", 4);
         for layer_idx in 0..4 {
-            let mut cache = LayerKv::with_dim(2, 128);
+            let mut cache = LayerKv::with_capacity(2, 128, 128);
             append_pos(&mut cache, 1.0, 10.0);
             append_pos(&mut cache, 2.0, 20.0);
             append_pos(&mut cache, 3.0, 30.0);
@@ -1447,31 +1447,41 @@ fn no_recorded_budget_means_no_refusal() {
 /// refusals at 1152, then 2304, then 3456 MB against a 1166 MB budget, in exact
 /// one-quantum steps, until the card sat at 97% and decode had fallen from
 /// 29 tok/s to 1.0 (gotcha #387).
+///
+/// The sequence driven here is the one described: a first chunk that fits the
+/// budget, then a later chunk that OUTGROWS the buffer and is refused at the
+/// boundary. Until 2026-09-12 the second call re-ran `index_pos = 0` on the
+/// same request, which never grows anything; the guard fired only because it
+/// derived its claim from the position rather than reading the buffer
+/// (gotcha #572). The window is wider than a quantum so the cache can grow at
+/// all — the default 128-position test model never can.
 #[test]
 fn a_refused_request_gives_back_the_cache_it_had_taken() {
-    let mut model = super::common::make_test_split_model(2, 64);
+    let mut model = super::common::make_test_split_model_with_window(2, 64, 4096);
     let store = KvCacheStore::new(std::time::Duration::from_secs(600));
     let dev = candle_core::Device::Cpu;
 
     model.kv_bytes_per_token = 1024;
     // Room for one 512-position quantum and very little else, so the first
-    // forward is admitted and the next claim is not.
+    // chunk is admitted and the growth the second one needs is not.
     model.kv_budget_bytes = Some(1024 * 600);
 
-    let input = candle_core::Tensor::zeros((1, 8, 64), candle_core::DType::F32, &dev).unwrap();
+    let first = candle_core::Tensor::zeros((1, 8, 64), candle_core::DType::F32, &dev).unwrap();
     let req = "refused-request";
     model
-        .forward(&input, 0, &store, req)
-        .expect("the first forward fits the budget");
+        .forward(&first, 0, &store, req)
+        .expect("the first chunk fits the budget");
     assert_eq!(
         store.active_entries(),
         1,
-        "the first forward must have allocated a cache entry, or the test proves nothing"
+        "the first chunk must have allocated a cache entry, or the test proves nothing"
     );
 
-    // Claim another quantum with the budget already spent.
+    // The next chunk crosses the quantum the first one reserved, so the cache
+    // must grow — and the budget cannot cover a second quantum.
+    let second = candle_core::Tensor::zeros((1, 512, 64), candle_core::DType::F32, &dev).unwrap();
     let err = model
-        .forward(&input, 0, &store, req)
+        .forward(&second, 8, &store, req)
         .expect_err("a claim past the budget must be refused");
     assert!(
         matches!(err, crate::error::SwarmError::LocalMemoryUnavailable(_)),
