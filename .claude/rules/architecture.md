@@ -95,6 +95,18 @@ closes it immediately.
 
 → `docs/invariants/frontend.md`
 
+## Advice on an empty state must be advice the reader can take
+
+An instruction naming a control asserts three things that can each be false on
+their own: that the control exists, that it is called that, and that it is
+reachable in this state. Nothing compiles a string against the UI, so all three
+go stale silently. The chat empty state now picks its privacy line from
+`has_first_shard && has_last_shard`, and a key/legend lists EVERY value the
+thing it explains can paint (`buildShardLegend`, whose swatches are
+`.avail-seg` so they cannot drift from the strip).
+
+→ `docs/invariants/frontend.md`
+
 ## Every surface that shows a model's reply renders it the same way
 
 **`utils.renderReplyInto(el, text, opts)`** is the one place a reply becomes

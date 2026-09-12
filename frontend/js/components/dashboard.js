@@ -32,6 +32,7 @@
   var _buildShardMatrix    = DS.buildShardMatrix;
   var _buildShardDetailBody = DS.buildShardDetailBody;
   var _buildShardViewToggle = DS.buildShardViewToggle;
+  var _buildShardLegend = DS.buildShardLegend;
   var _buildCoverageRibbon = DS.buildCoverageRibbon;
 
   App.dashboard = {
@@ -1595,6 +1596,7 @@
               '</div>' +
               '<div class="mce-right" data-shard-detail="' + safeId + '">' +
                 '<div class="mce-right-head">' +
+                  _buildShardLegend() +
                   _buildShardViewToggle() +
                 '</div>' +
                 '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +

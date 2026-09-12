@@ -150,3 +150,60 @@ with default features and overwrite `target/debug/swarmllm` with an `embedded`
 build, so the dev node silently went back to serving a baked-in snapshot of the
 frontend (gotcha #573). Confirm with
 `curl -s :PORT/static/js/<file> | grep <your edit>` before doubting the browser.
+
+## Advice on an empty state must be advice the reader can take
+
+`utils.js`'s chat empty state chooses its privacy line from
+`modelData.has_first_shard && modelData.has_last_shard`, because the two
+audiences need opposite sentences and only one of them can act.
+
+**What it replaced.** It said, unconditionally: *Use the "Enable prompt privacy"
+button in the bar above to encrypt your prompts end-to-end.* On a new node's
+very first screen that was wrong three separate ways:
+
+1. **The bar is not there.** "The bar above" is the session header's encryption
+   banner, built by `chat.js::_renderSessionHeader` — which needs a SESSION. On
+   the empty state no chat has been started, so the element it names does not
+   exist yet.
+2. **The button is not called that.** The control in that banner is
+   `enc.enable_privacy` — "Turn on end-to-end encryption". Nothing in the
+   product has ever been labelled "Enable prompt privacy".
+3. **The reader usually cannot have it at all.** The enable button requires
+   this device to hold the model's FIRST and LAST pieces (the boomerang's two
+   ends). A new node holds nothing, so the action was unreachable — the first
+   screen a new user reads told them to do something impossible.
+
+The condition is the fix, not the wording: with both ends present the line
+points at the Models tab (a control that exists on every page); without them it
+states the requirement instead — *"this device needs the model's first and last
+pieces. It does not have them yet."* Both were driven and asserted to differ,
+which is the null control: a condition that changes nothing is the same bug in
+a new coat.
+
+**The general rule.** An instruction naming a control names three things that
+can each be false independently — that the control exists, that it is called
+that, and that it is reachable in this state. A string that hard-codes all
+three goes stale silently, because nothing compiles it against the UI. Prefer
+naming a PLACE that always exists over a button that sometimes does.
+
+## A key must cover every colour the thing it explains can paint
+
+`dashboard-shards.js::buildShardLegend` lists all six `data-loc` values the
+route strip can emit — `live`, `disk`, `swarm`, `thin`, `moving`, `absent` —
+and its swatches ARE `.avail-seg` elements, so they inherit the strip's own
+colour rules and cannot drift from it.
+
+The first cut left `moving` out as "transient". That is the original defect in
+miniature: a pulsing segment with no entry in the key leaves the reader exactly
+where the hover-only titles did, for that one state. If a colour can appear, it
+is in the key.
+
+Two things a change must keep: the swatch inherits `data-loc` rather than
+restating any colour (only geometry and the pulse are overridden), and
+`absent` — which has no background COLOUR at all, being a 45° hatch plus a
+border — keeps its legend-size override, or it renders as an invisible swatch
+next to the words "No computer has this".
+
+The key renders in the EXPANDED view only. Details on demand (Shneiderman
+1996): collapsed rows keep their density, and anyone who opens a model to look
+at its pieces gets the key beside them.

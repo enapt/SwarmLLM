@@ -6336,3 +6336,40 @@ textarea.pool-code-input { min-height: 4.5em; }
   color: var(--text-muted);
 }
 .panel-header .btn-shutdown:hover { color: var(--red, #ef4444); }
+
+/* Shard colour key — expanded model view only. Wraps ahead of the view toggle
+   rather than pushing it off the row, which is what `flex-wrap` on the head is
+   for; the toggle keeps its place at the right on a wide card and drops below
+   on a narrow one. */
+.model-card-expanded .mce-right-head { flex-wrap: wrap; }
+.shard-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: var(--fs-xs, 0.7rem);
+  color: var(--text-muted);
+  min-width: 0;
+}
+.shard-legend-title { font-weight: 600; }
+.shard-legend-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+/* The swatch IS an .avail-seg, so it inherits every data-loc colour rule and
+   cannot drift from the strip it explains. Only the geometry is overridden. */
+.shard-legend-swatch {
+  width: 10px; height: 10px;
+  flex: 0 0 auto;
+  border-radius: 2px;
+  display: inline-block;
+  /* `moving` pulses in the strip to say a copy is under way. In a key that is
+     just distracting, and the label already says it. */
+  animation: none;
+}
+/* `absent` carries no background COLOUR — it is a 45° hatch plus a border, so
+   at 10px the hatch barely lands. The key needs it to read as a swatch, so it
+   gets a denser hatch and a full-strength border. Any change to the strip's
+   own absent rule should keep these two looking like the same thing. */
+.shard-legend-swatch[data-loc="absent"] {
+  border-color: var(--absent);
+  background: repeating-linear-gradient(45deg,
+    color-mix(in srgb, var(--absent) 55%, transparent) 0 2px, transparent 2px 4px);
+}

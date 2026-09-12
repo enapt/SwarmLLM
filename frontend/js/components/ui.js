@@ -313,14 +313,14 @@
         if (capacity && stateKey !== 'connecting' && stateKey !== 'offline') {
           var modelsParts = [];
           var serveable = capacity.serveable_models || [];
-          var vramMb = capacity.total_vram_mb || 0;
-          // Below 1 GB reads as noise on a swarm-wide total, so it stays
-          // blank rather than rendering "< 1 MB" — the empty string is what
-          // the guard below tests. Formatting itself comes from formatSize.
-          var memText = vramMb >= 1024 ? U.formatSize(vramMb) : '';
-          if (memText && (peers > 0 || privateMode)) {
-            modelsParts.push('<strong>' + memText + '</strong> ' + U.escapeHtml(I18n.t('netstatus.memory_word')));
-          }
+          // Combined memory is NOT repeated here. It is the same
+          // `capacity.total_vram_mb` under the same "combined memory" label
+          // that the resources strip renders two lines below, so a reader met
+          // one number twice and had to work out they were the same fact —
+          // on a live node: "13.7 GB combined memory · Runs …" directly above
+          // "7 computers · 2 with GPUs · 13.7 GB combined memory · …".
+          // This line answers what the swarm can RUN; the strip answers what
+          // hardware it HAS, and memory is a hardware fact.
           if (serveable.length > 0) {
             var names = serveable.slice(0, 3).map(function(m) {
               var d = m.display_name || '';

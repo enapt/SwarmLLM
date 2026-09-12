@@ -327,9 +327,22 @@
           '<br><span class="field-hint text-muted">' + escapeHtml(I18n.t('chat.enc_e2e_latency')) + '</span></div>';
       }
     } else if (modelData && modelData.shard_count > 1 && modelData.hosted_shards < modelData.shard_count) {
+      // The follow-up line has to depend on whether the reader can ACT on it.
+      // It used to say, unconditionally, to use "the Enable prompt privacy
+      // button in the bar above" — and on this screen that was wrong three
+      // times over: the bar is the session header's encryption banner, which
+      // does not exist until a chat has been started; the button in it is
+      // labelled "Turn on end-to-end encryption", not that; and it is only
+      // offered when this device holds the model's FIRST and LAST pieces, so
+      // on a new node with no pieces at all the advice could never be
+      // followed. A new user's very first screen told them to do something
+      // impossible.
+      var canE2E = !!(modelData.has_first_shard && modelData.has_last_shard);
       encHint = '<div class="chat-empty-hint text-sm text-muted" style="margin:6px 0">' +
         '&#127760; ' + escapeHtml(I18n.t('chat.enc_distributed_hint')) +
-        '<br><span class="field-hint">' + escapeHtml(I18n.t('chat.enc_enable_hint')) + '</span></div>';
+        '<br><span class="field-hint">' +
+        escapeHtml(I18n.t(canE2E ? 'chat.enc_enable_hint' : 'chat.enc_needs_ends_hint')) +
+        '</span></div>';
     }
 
     div.innerHTML = '<div class="chat-empty-icon">' + icon + '</div>' +

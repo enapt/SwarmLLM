@@ -444,6 +444,48 @@
     return html;
   }
 
+  /**
+   * THE COLOUR KEY.
+   *
+   * Every colour in the route strip and the matrix meant something, and the
+   * only way to find out what was to hover a segment. NN/g's icon guidance is
+   * the same point the header pass acted on: don't rely on hover to carry a
+   * label — it costs an interaction and does not exist on touch at all. A
+   * peer-to-peer dashboard's one distinguishing fact is WHOSE machine each
+   * piece is on, and it was the fact least available to a reader.
+   *
+   * It renders in the expanded view only — details on demand (Shneiderman
+   * 1996), so the collapsed rows keep their density while anyone who opens a
+   * model to look at its pieces gets the key beside them.
+   *
+   * The labels are the SAME `shard.loc.*` strings the hover titles use, so the
+   * key cannot drift from what a segment says about itself. `swarm` is the one
+   * exception: its own string is counted ("On {n} other computers"), which a
+   * key cannot be.
+   *
+   * Every `data-loc` the strip can emit is listed, `moving` included. A colour
+   * that appears in the strip and not in the key leaves the reader exactly
+   * where the hover-only titles did, for that one state.
+   */
+  function buildShardLegend() {
+    var items = [
+      ['live', I18n.t('shard.loc.live')],
+      ['disk', I18n.t('shard.loc.disk')],
+      ['swarm', I18n.t('shard.legend.swarm')],
+      ['thin', I18n.t('shard.loc.thin')],
+      ['moving', I18n.t('shard.loc.moving')],
+      ['absent', I18n.t('shard.loc.absent')],
+    ];
+    var html = '<div class="shard-legend"><span class="shard-legend-title">' +
+      U.escapeHtml(I18n.t('shard.legend.title')) + '</span>';
+    items.forEach(function(it) {
+      html += '<span class="shard-legend-item">' +
+        '<span class="avail-seg shard-legend-swatch" data-loc="' + it[0] + '"></span>' +
+        U.escapeHtml(it[1]) + '</span>';
+    });
+    return html + '</div>';
+  }
+
   App.dashboardShards = {
     MMPROJ_SHARD_INDEX: MMPROJ_SHARD_INDEX,
     buildProgressBar: buildProgressBar,
@@ -458,6 +500,7 @@
     buildShardRow: buildShardRow,
     buildShardList: buildShardList,
     buildShardViewToggle: buildShardViewToggle,
+    buildShardLegend: buildShardLegend,
     buildShardMatrix: buildShardMatrix,
     buildShardDetailBody: buildShardDetailBody,
     buildCoverageRibbon: buildCoverageRibbon
