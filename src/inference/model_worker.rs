@@ -608,6 +608,10 @@ fn subsumed_segment_keys<'a>(
 async fn send_worker_error(writer: &mut IpcWriter, request_id: uuid::Uuid, err: SwarmError) {
     let message = err.to_string();
     let fatal = crate::inference::worker_ipc::worker_error_is_fatal(&message);
+    // Taken from the VARIANT, here, while it still exists. One line further on
+    // it is a string, and the string is deliberately indistinguishable from a
+    // peer's memory refusal.
+    let local_memory_refusal = matches!(err, SwarmError::LocalMemoryUnavailable(_));
     if fatal {
         // The daemon will kill us on receipt. Say so in our own log too — an
         // operator reading the worker log should not have to infer the
@@ -624,6 +628,7 @@ async fn send_worker_error(writer: &mut IpcWriter, request_id: uuid::Uuid, err: 
             request_id,
             message,
             fatal,
+            local_memory_refusal,
         },
         &[],
     )
@@ -2574,7 +2579,16 @@ fn ensure_room_for_prompt(
     // overhead are paid. A reader who has set `max_ram_mb = 4000` and is told
     // "budget 1822 MB" reasonably concludes their setting is being ignored.
     // Name which budget this is, and say the weights are already accounted for.
-    Err(SwarmError::ServiceUnavailable(format!(
+    // `LocalMemoryUnavailable`, not `ServiceUnavailable`, and the difference is
+    // not cosmetic: it is the one local failure the router re-plans, and a
+    // re-plan is what this refusal needs. Reported live with a five-segment
+    // route across peers already priced in the same scheduling pass, discarded
+    // on estimated compute cost, and never reconsidered when the plan it chose
+    // turned out not to fit (report #019). The wire wording is deliberately
+    // identical to the peer-side refusal — see the variant's own doc — so the
+    // class travels on `WorkerMsg::Error::local_memory_refusal` rather than in
+    // the text.
+    Err(SwarmError::LocalMemoryUnavailable(format!(
         "Not enough free memory on this node for a {prompt_tokens}-token prompt ({} MB of \
          conversation memory in use, {} MB available for conversations once this model's \
          weights are accounted for, short by {} MB). Shorter conversations still work; free \
@@ -4094,6 +4108,10 @@ async fn finalize_slot(
                 request_id,
                 message,
                 fatal,
+                // A slot that failed mid-batch carries its reason as a string
+                // and nothing else; a memory refusal is decided before
+                // admission, never here.
+                local_memory_refusal: false,
             },
             &[],
         )
@@ -4259,6 +4277,25 @@ async fn handle_daemon_msg(
             // (a direct-dispatch test harness). Record it anyway so the
             // semantics hold on either path.
             cancelled.insert(request_id, std::time::Instant::now());
+        }
+        DaemonMsg::ReleaseRequestKv { request_id } => {
+            // The request is over. Its KV can never be read again — the entry
+            // is keyed by request id, and the next turn of the same
+            // conversation arrives under a new one — so holding it only
+            // charges the shared budget against prompts that could otherwise
+            // be admitted. The `Generate` handlers clear their own; this is
+            // how a SEGMENT's entry gets released, which nothing did
+            // (report #019).
+            let before = kv_store.occupancy().allocated_bytes;
+            kv_store.cleanup_request_id(&request_id.to_string());
+            let after = kv_store.occupancy().allocated_bytes;
+            if after < before {
+                tracing::debug!(
+                    %request_id,
+                    freed_mb = (before - after) / (1024 * 1024),
+                    "model-worker: released a finished request's KV cache"
+                );
+            }
         }
         DaemonMsg::Unload {
             layer_start,

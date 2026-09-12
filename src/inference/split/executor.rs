@@ -543,7 +543,14 @@ impl SplitModel {
                     // returning an error, no later forward will reuse this
                     // cache, and a retry rebuilds it from the prompt.
                     kv_cache_store.clear_request(&self.kv_model_key, request_id);
-                    return Err(SwarmError::ServiceUnavailable(format!(
+                    // This node's own budget refused it, which is a different
+                    // fact from "this server cannot serve" — see
+                    // `SwarmError::LocalMemoryUnavailable`. The router re-plans
+                    // it, and the re-plan is barred from handing this node the
+                    // whole model again; a request that has already streamed is
+                    // excluded by `should_retry_after`, so a refusal mid-reply
+                    // still ends the reply rather than restarting it.
+                    return Err(SwarmError::LocalMemoryUnavailable(format!(
                         "Not enough free memory on this node to continue this conversation \
                          ({} MB of KV cache already in use, budget {} MB). Shorter \
                          conversations still work; free memory on this node (close other \

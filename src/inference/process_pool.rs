@@ -4541,10 +4541,16 @@ impl ModelProcessPool {
                             request_id: rid,
                             message,
                             fatal,
+                            local_memory_refusal,
                         } if rid == request_id => {
                             // Worker already reached a terminal state for this id.
                             guard.disarm();
-                            return Err(self.classify_worker_error(&model_id, message, fatal));
+                            return Err(self.classify_worker_error(
+                                &model_id,
+                                message,
+                                fatal,
+                                local_memory_refusal,
+                            ));
                         }
                         _ => continue,
                     },
@@ -4720,10 +4726,16 @@ impl ModelProcessPool {
                             request_id: err_rid,
                             message,
                             fatal,
+                            local_memory_refusal,
                         },
                         _,
                     )) if err_rid == rid => {
-                        return Err(self.classify_worker_error(&model_id, message, fatal));
+                        return Err(self.classify_worker_error(
+                            &model_id,
+                            message,
+                            fatal,
+                            local_memory_refusal,
+                        ));
                     }
                     Some(_) => continue,
                     None => {
@@ -4947,9 +4959,15 @@ impl ModelProcessPool {
                     request_id: rid,
                     message,
                     fatal,
+                    local_memory_refusal,
                 } if rid == request_id => {
                     guard.disarm();
-                    return Err(self.classify_worker_error(model_id, message, fatal));
+                    return Err(self.classify_worker_error(
+                        model_id,
+                        message,
+                        fatal,
+                        local_memory_refusal,
+                    ));
                 }
                 _ => continue,
             }
@@ -5022,6 +5040,7 @@ impl ModelProcessPool {
         model_id: &ModelId,
         message: String,
         fatal_flag: bool,
+        local_memory_refusal: bool,
     ) -> SwarmError {
         // Trust the worker's own verdict, but re-derive it from the message as
         // well: a worker binary older than the `fatal` field always sends
@@ -5125,6 +5144,16 @@ impl ModelProcessPool {
         // prompt on a 2048-context model, 2026-07-29.
         // One recovery, shared with the network boundary, which has the same
         // problem for the same reason (`crate::error::reclassify_flattened_error`).
+        // Our own worker's memory budget refused the work. Stated by the
+        // worker rather than read out of the wording, because the wording is
+        // deliberately the same as a PEER's memory refusal — see
+        // `WorkerMsg::Error::local_memory_refusal` and the variant's own doc.
+        // This is the one local failure the router re-plans, and a re-plan is
+        // exactly what the reported case needed: a five-segment route across
+        // peers had already been priced when the refusal killed the request.
+        if local_memory_refusal {
+            return SwarmError::LocalMemoryUnavailable(message);
+        }
         if let Some(recovered) = crate::error::reclassify_flattened_error(&message) {
             return recovered;
         }
@@ -5156,6 +5185,32 @@ impl ModelProcessPool {
         for worker in workers {
             let mut writer = worker.writer.lock().await;
             let _ = send_daemon(&mut *writer, &DaemonMsg::CancelRequest { request_id }, &[]).await;
+        }
+    }
+
+    /// Tell every live worker that `request_id` is finished with its KV cache.
+    ///
+    /// Same fan-out as `cancel_request` and for the same reason: the request id
+    /// is global, the workers are few, and an unknown id is a no-op on the
+    /// worker side. A request can touch more than one worker (a plan that gives
+    /// this node two ranges of one model does), so addressing the fan-out
+    /// precisely would mean tracking which workers a request reached for no
+    /// benefit over sending it to all of them.
+    pub async fn release_request_kv(&self, request_id: Uuid) {
+        let workers: Vec<Arc<WorkerHandle>> = self
+            .workers
+            .iter()
+            .filter(|e| !e.value().dead.load(Ordering::Acquire))
+            .map(|e| e.value().clone())
+            .collect();
+        for worker in workers {
+            let mut writer = worker.writer.lock().await;
+            let _ = send_daemon(
+                &mut *writer,
+                &DaemonMsg::ReleaseRequestKv { request_id },
+                &[],
+            )
+            .await;
         }
     }
 
@@ -6137,7 +6192,7 @@ mod tests {
         let m = ModelId("oomed".into());
         admit_and_insert_cpu_worker(&p, &m, 6000, false).await;
 
-        let err = p.classify_worker_error(&m, "CUDA_ERROR_OUT_OF_MEMORY".into(), true);
+        let err = p.classify_worker_error(&m, "CUDA_ERROR_OUT_OF_MEMORY".into(), true, false);
         assert!(matches!(err, SwarmError::ServiceUnavailable(_)));
 
         assert!(p.workers.get(&m).is_none(), "the worker is evicted");
@@ -6547,6 +6602,7 @@ mod tests {
              this conversation (168 MB of KV cache already in use, budget 323 MB)."
                 .into(),
             false,
+            false,
         );
         assert!(
             matches!(err, SwarmError::ServiceUnavailable(_)),
@@ -6562,6 +6618,7 @@ mod tests {
             &model,
             "Forward: Cuda(DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\"))".into(),
             true,
+            false,
         );
         assert!(matches!(err, SwarmError::ServiceUnavailable(_)));
         // OOM on a GPU-eligible model pins it to CPU for the next spawn.
@@ -6572,9 +6629,63 @@ mod tests {
     fn non_fatal_error_stays_inference_and_leaves_model_gpu_eligible() {
         let pool = test_pool();
         let model = ModelId("m".into());
-        let err = pool.classify_worker_error(&model, "Tokenize: bad prompt".into(), false);
+        let err = pool.classify_worker_error(&model, "Tokenize: bad prompt".into(), false, false);
         assert!(matches!(err, SwarmError::Inference(_)));
         assert!(!pool.is_cpu_pinned(&model));
+    }
+
+    /// **Report #019.** Our own worker's memory budget refusing a prompt is the
+    /// one local failure the router re-plans — and it could not, because the
+    /// refusal arrived as an ordinary `ServiceUnavailable`. The reported
+    /// request died with a five-segment route across peers already priced in
+    /// the same scheduling pass.
+    ///
+    /// The class cannot be read out of the message: `LocalMemoryUnavailable`
+    /// deliberately shares `ServiceUnavailable`'s wording, so that a PEER
+    /// refusing for memory keeps being treated as a peer refusing. It travels
+    /// as a flag from the worker that raised it, which is the only party that
+    /// knows the budget was ours.
+    #[test]
+    fn our_own_workers_memory_refusal_is_the_variant_the_router_re_plans() {
+        let pool = test_pool();
+        let model = ModelId("m".into());
+        let err = pool.classify_worker_error(
+            &model,
+            "Service unavailable: Not enough free memory on this node for a 1378-token \
+             prompt (2472 MB of conversation memory in use, 2551 MB available for \
+             conversations once this model's weights are accounted for, short by 689 MB)."
+                .into(),
+            false,
+            true,
+        );
+        assert!(
+            matches!(err, SwarmError::LocalMemoryUnavailable(_)),
+            "the router re-plans this variant and no other, got {err:?}"
+        );
+        assert!(
+            crate::inference::router::local_memory_refused_the_load(&err),
+            "and the router's own gate must agree"
+        );
+    }
+
+    /// The identical message from a PEER must NOT become the local variant.
+    /// The wording is shared on purpose; only the flag separates them, and a
+    /// peer's refusal has no flag to set.
+    #[test]
+    fn the_same_words_from_a_peer_stay_an_ordinary_refusal() {
+        let pool = test_pool();
+        let model = ModelId("m".into());
+        let err = pool.classify_worker_error(
+            &model,
+            "Service unavailable: Not enough free memory on this node for a 1378-token prompt."
+                .into(),
+            false,
+            false,
+        );
+        assert!(
+            !matches!(err, SwarmError::LocalMemoryUnavailable(_)),
+            "only our own worker can report a LOCAL memory refusal, got {err:?}"
+        );
     }
 
     #[test]
@@ -6587,6 +6698,7 @@ mod tests {
             &model,
             "cuda error: an illegal memory access was encountered".into(),
             true,
+            false,
         );
         assert!(matches!(err, SwarmError::ServiceUnavailable(_)));
         assert!(!pool.is_cpu_pinned(&model));

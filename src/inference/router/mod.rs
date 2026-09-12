@@ -155,7 +155,7 @@ fn segment_ran_out_of_machines(err: &SwarmError) -> bool {
 /// This is Kubernetes' queueing-hint rule in miniature: an unschedulable pod is
 /// requeued on an event that could change the answer, not on a timer. Ours is
 /// the event.
-fn local_memory_refused_the_load(err: &SwarmError) -> bool {
+pub(crate) fn local_memory_refused_the_load(err: &SwarmError) -> bool {
     matches!(err, SwarmError::LocalMemoryUnavailable(_))
 }
 

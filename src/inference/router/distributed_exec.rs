@@ -208,6 +208,26 @@ pub(super) async fn finalize_request(
         }
     }
 
+    // Release the KV this request holds in the WORKER, whose store is a
+    // different process's and which nothing above reaches.
+    //
+    // Unconditional, session or not: the worker keys its entries by REQUEST id
+    // — `session_id` rides along on the IPC message and nothing reads it — so
+    // the next turn of a conversation arrives under a new id and can never
+    // find this entry. What carries a conversation forward there is the prefix
+    // cache, whose snapshot is taken before the entry is cleared.
+    //
+    // The `Generate` handlers already clear their own on the way out; a
+    // SEGMENT's entry had nothing, and sat fully charged against the shared
+    // budget until the ten-minute idle sweep. On a small node a few finished
+    // turns then refuse the next prompt — reported live with `live_mb`
+    // identical across three refusals spanning two conversations, one of them
+    // already finished (report #019).
+    shared_state
+        .model_process_pool
+        .release_request_kv(request.id)
+        .await;
+
     // Clean up per-request KV-cache entries now that the request is done.
     // EXCEPT when the request has a session_id — those entries persist for
     // multi-turn reuse. They'll be cleaned up by the TTL-based expiry instead.

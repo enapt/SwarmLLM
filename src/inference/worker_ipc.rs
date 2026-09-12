@@ -81,6 +81,24 @@ pub enum DaemonMsg {
     /// request is dropped; a cancel that arrives before the request does is
     /// remembered briefly so the request is skipped on arrival.
     CancelRequest { request_id: Uuid },
+    /// Release the KV cache this request holds. The request is over.
+    ///
+    /// The worker's KV is keyed by REQUEST id — `session_id` rides along on
+    /// `IpcGenerate` but nothing reads it — so a finished request's entry can
+    /// never be read again by anything, whatever carried it. Multi-turn reuse
+    /// is the prefix cache's job, and that snapshot is taken before the entry
+    /// is cleared.
+    ///
+    /// The `Generate` handlers already clear their own on the way out. The
+    /// forward path had nothing: a segment's KV sat fully charged against the
+    /// shared budget until the ten-minute idle sweep, so a handful of finished
+    /// turns could refuse the next prompt on a small node — reported live with
+    /// `live_mb` identical across three refusals in two different conversations
+    /// (report #019).
+    ///
+    /// Best-effort and idempotent, like `CancelRequest`: an unknown id is a
+    /// no-op.
+    ReleaseRequestKv { request_id: Uuid },
     /// Graceful shutdown — worker exits cleanly.
     Shutdown,
 }
@@ -138,6 +156,23 @@ pub enum WorkerMsg {
         message: String,
         #[serde(default)]
         fatal: bool,
+        /// This node's own memory budget refused the work, rather than anything
+        /// going wrong.
+        ///
+        /// Carried as a flag because the TYPE does not survive this hop —
+        /// everything arrives as a string — and because the daemon must not
+        /// re-derive it from the wording: `LocalMemoryUnavailable` deliberately
+        /// shares `ServiceUnavailable`'s message shape, so that a peer refusing
+        /// for memory is still treated as a peer refusing. The distinction is
+        /// local, and this is the one place that can state it without guessing:
+        /// the worker that refused is ours.
+        ///
+        /// It is the one local failure the router re-plans, because it is the
+        /// one where the re-plan is handed a fact it did not have. Without it
+        /// the refusal read as an ordinary local failure and the request died
+        /// with a priced multi-peer alternative sitting unused (report #019).
+        #[serde(default)]
+        local_memory_refusal: bool,
     },
     /// Item 8 Phase 1: notify the daemon that the worker just inserted (or
     /// refreshed) prefix-cache entries for `model_id`. The daemon broadcasts
@@ -700,6 +735,7 @@ mod tests {
     #[test]
     fn error_fatal_field_round_trips() {
         let msg = WorkerMsg::Error {
+            local_memory_refusal: false,
             request_id: Uuid::nil(),
             message: "CUDA_ERROR_OUT_OF_MEMORY".into(),
             fatal: true,

@@ -1398,9 +1398,20 @@ fn a_forward_is_refused_when_the_kv_budget_is_exhausted() {
         .forward(&input, 0, &store, "over-budget")
         .expect_err("a zero budget must refuse the first quantum");
 
+    // `LocalMemoryUnavailable` rather than the `ServiceUnavailable` this
+    // asserted until report #019: THIS node's budget refused it, which is the
+    // one local failure the router re-plans. Both are 503 with the same
+    // `error_type`, deliberately — a peer receiving this over the wire still
+    // reads it as an ordinary refusal, because the class does not survive the
+    // hop and `reclassify_flattened_error` never produces the local variant.
     assert!(
-        matches!(err, crate::error::SwarmError::ServiceUnavailable(_)),
-        "must be 503 so a coordinator re-routes to a peer, got {err:?}"
+        matches!(err, crate::error::SwarmError::LocalMemoryUnavailable(_)),
+        "our own budget refusing is the variant the router re-plans, got {err:?}"
+    );
+    assert_eq!(
+        crate::error::classify_error(&err).0,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "and it must still be a 503 so a coordinator re-routes to a peer"
     );
     assert!(
         err.to_string().contains("KV cache"),
@@ -1463,8 +1474,13 @@ fn a_refused_request_gives_back_the_cache_it_had_taken() {
         .forward(&input, 0, &store, req)
         .expect_err("a claim past the budget must be refused");
     assert!(
-        matches!(err, crate::error::SwarmError::ServiceUnavailable(_)),
-        "a budget refusal is a 503 so a coordinator can re-route it: {err:?}"
+        matches!(err, crate::error::SwarmError::LocalMemoryUnavailable(_)),
+        "our own budget refusing is the variant the router re-plans: {err:?}"
+    );
+    assert_eq!(
+        crate::error::classify_error(&err).0,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "and it must still be a 503 so a coordinator can re-route it"
     );
     assert_eq!(
         store.active_entries(),
