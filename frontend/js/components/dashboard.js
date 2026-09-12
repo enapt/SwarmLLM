@@ -6,6 +6,11 @@
 // ============================================================================
 
 (function() {
+  // `credit::trust::DEFAULT_TRUST` as a whole percent: the score a peer we
+  // have never observed carries. Kept here, not inlined, so the reason the
+  // peer table hides this value is findable from the value itself.
+  var DEFAULT_TRUST_PCT = 50;
+
   var S = App.state;
   var U = App.utils;
 
@@ -2158,7 +2163,18 @@
         var dotClass = p.healthy ? 'online' : 'degraded';
         var latency = p.latency_ms ? p.latency_ms + 'ms' : '\u2014';
         var shards = p.hosted_shards || 0;
-        var trust = p.trust_score !== undefined ? (p.trust_score * 100).toFixed(0) + '%' : '\u2014';
+        // A peer that has never done work for us sits at the starting score,
+        // so every peer on a quiet node reads "50%" — which says we measured
+        // something when we measured nothing, and reads to anyone else as
+        // "half of these machines are dodgy". Same rule the rest of this
+        // codebase follows for an unknown quantity: unknown is not a number
+        // (`PeerResidency::WarmAmountUnknown`, `bandwidth.totals()` answering
+        // None). Shown only once it has moved off the default.
+        var trustPct = p.trust_score !== undefined ? Math.round(p.trust_score * 100) : null;
+        var trustObserved = trustPct !== null && trustPct !== DEFAULT_TRUST_PCT;
+        var trust = trustObserved
+          ? trustPct + '%'
+          : '<span title="' + U.escapeHtml(I18n.t('dashboard.peer_trust_unobserved')) + '">\u2014</span>';
         var status = p.healthy ? I18n.t('dashboard.health_healthy') : I18n.t('dashboard.peer_degraded');
         // Meta line under the peer name: version + GPU. Version is gossiped by
         // every node and makes it obvious at a glance when a peer is on an older

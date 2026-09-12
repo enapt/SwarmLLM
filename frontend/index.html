@@ -1266,11 +1266,19 @@
               </div>
             </div>
             <div class="panel">
-              <div class="panel-header" data-collapse="network-log-body">
+              <!-- Collapsed by default. This is a raw feed of lines like
+                   "4a3ac72e announced shards of thudm-glm-4-9b-0414-q4-k-m" —
+                   ninety of them on a quiet node — and being the only thing
+                   on the page that MOVES, it took the eye first. It is
+                   diagnostics, so it opens on demand: overview first, details
+                   when asked (Shneiderman 1996). The count in the header still
+                   shows without opening it. Activity, next to it, stays open —
+                   it is short and written for a person. -->
+              <div class="panel-header collapsed" data-collapse="network-log-body">
                 <h2 data-i18n="activity.label_network">Network</h2>
                 <span class="text-muted" style="font-size:0.75rem" id="network-log-count"></span>
               </div>
-              <div class="panel-body" id="network-log-body">
+              <div class="panel-body collapsed" id="network-log-body">
                 <div id="network-log" style="max-height:400px;overflow-y:auto">
                   <div class="text-muted" style="font-size:0.78rem;padding:12px 0;opacity:0.5" data-i18n="dashboard.no_network_events">No network events yet.</div>
                 </div>
