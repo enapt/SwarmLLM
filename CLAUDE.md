@@ -226,99 +226,66 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 All 20 build phases complete. All subsystems wired — no stubs. **2626 lib (dev,claude-subscription) — re-measured 2026-09-12, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 93 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
 **Released and deployed: v0.3.176-alpha (2026-09-12, tag on `f3daab6b`).** Gate
-clean job-by-job — CI **14/14** and Cache warm **3/3** ON THE TAGGED COMMIT,
-`check_ci_gate.sh` **14 required = 14 produced** against a COMPLETED run,
-release **10/10 first time**; on the DOWNLOADED artifact **smoke 9/9 + shapes
-7/7 + conformance 9/9 families (52 checks, 0 FAIL)**, matching a v0.3.175
-baseline taken FIRST that scored the same, plus **`constrained_node_test.sh`
-12/12** — the harness that matters most here, since #32 changes small-node
-memory behaviour. `/` verified redirecting to `/chat` on the released binary.
-Both nodes verified: local `225e6fe7f2b5cd74` and Proxmox `9684263580c6660f`,
-ids and `identity.key` unchanged, config untouched, 0 ERROR, paired at 168 ms.
-Rollback `~/.local/bin/swarmllm.0.3.175-alpha.bak`.
-
-⚠ **Cache warm BUILT the flash-attn kernels rather than restoring them** —
-`Cache not found for input keys` on both CUDA jobs, ~31 min, then saved. The
-cache had been evicted (the content-hash key was unchanged), so this is not a
-regression and the mechanism still works; but the gate line says to see them
-*restored AND skipped*, and this run showed the other half. Expect the next
-release to restore.
-
-⚠ **shapes failed on its FIRST run** with `node did not start` — the documented
-12 s `/health` timeout, hit right after a smoke run on the same 1 GB artifact.
-Port confirmed free and no process left over; the clean re-run scored 7/7.
-Probe before suspecting the build.
-
-**Previous: v0.3.175-alpha (tag `6bc9735d`)** — six field reports from a 16 GB
-processor-only Mac; gate clean, conformance 9/9. Rollback binaries live beside
-the installed one as `swarmllm.<version>.bak`.
+clean job-by-job — CI 14/14, Cache warm 3/3 and `check_ci_gate.sh` 14=14 all ON
+THE TAGGED COMMIT, release 10/10 first time; on the DOWNLOADED artifact **smoke
+9/9 + shapes 7/7 + conformance 9/9 families (52 checks, 0 FAIL)**, matching a
+v0.3.175 baseline taken FIRST that scored the same, plus
+**`constrained_node_test.sh` 12/12** — the harness that matters most here, since
+#32 changes small-node memory behaviour. `/` verified redirecting to `/chat` on
+the released binary. Both nodes verified: local `225e6fe7f2b5cd74` and Proxmox
+`9684263580c6660f`, ids and `identity.key` unchanged, config untouched, 0 ERROR,
+paired at 168 ms. Rollback `~/.local/bin/swarmllm.0.3.175-alpha.bak`. Two gate
+caveats worth reading before the next release are in `memory/open_cautions.md`
+(Cache warm BUILT the kernels rather than restoring them; shapes failed its
+first run on the 12 s start timeout). Full record:
+`memory/round_log_0912_new_user_sweep.md` § Release.
 
 **New users first (user direction, 2026-09-12).** Growth is the bottleneck, not
-the depth of the stack. Rank work by "would someone hit this in their first
-hour". Two fixes shipped from that sweep: opening this node's address landed on
-the OPERATOR CONSOLE (eleven panels, thirty-plus numbers, a live shard-announce
-feed) and now lands on chat; "Models" opened on the Wishlist — a list of models
-the swarm does not have, the first four rows reading "Too large for this
-swarm" — and now opens on "Running now". The header also carried seven tabs;
-it now carries three (Chat · Models · Dashboard) plus a "More" menu, grouped by
-how OFTEN a destination is wanted and deliberately NOT by skill — Home
-Assistant is removing the "Advanced mode" switch it has had since 0.96 for
-exactly that reason, and a menu is the replacement it recommends. The remaining
-queue (the seven header icons, two of which duplicate Settings), what is
-already good and must not be simplified away, and the jargon inventory are in
-`memory/round_log_0912_new_user_sweep.md`. ⚠ Mobile layout is UNVERIFIED.
+the depth of the stack — rank work by "would someone hit this in their first
+hour". **`memory/round_log_0912_new_user_sweep.md` is the queue**: what is
+already good and must not be simplified away, the jargon inventory, and the
+remaining items (the seven header icons, two of which duplicate Settings; the
+misleading "What we could run" label; dormant-credit strings). Read it before
+touching the frontend.
 
 **What v0.3.176 carries.** Under the hood: **#46** every tool schema reached
 every model ALPHABETISED (`preserve_order` on serde_json AND minijinja — two
-independent alphabetisers, so fixing either alone changed nothing; guard
-verified to fail both ways); **#32** the KV cache is RESERVED at the admitted
-prompt length instead of grown by `Tensor::cat` (mechanism check: 0 growth
-steps vs 144 on a 1901-token prompt — the field OOM itself is unreproduced
-here); **a silent peer is barred from the request's retry, which now happens by
-type**; and #569's traffic figure in `swarmllm status`. On the surface, the
-first-hour sweep: the front door opened on the OPERATOR CONSOLE and now opens
-on chat; the header carries three destinations plus "More" instead of seven;
-"Models" opened on models the swarm CANNOT have and now opens on what it can
-run; every peer showed a TRUST score of 50% that was simply the starting value
-and now shows nothing until measured; the shard-announce feed opens on demand.
+independent alphabetisers, so fixing either alone changed nothing); **#32** the
+KV cache is RESERVED at the admitted prompt length instead of grown by
+`Tensor::cat` (0 growth steps vs 144 on a 1901-token prompt — the field OOM
+itself is unreproduced here); **a silent peer is barred from the request's
+retry, which now happens by type**; and #569's traffic figure in `swarmllm
+status`. On the surface, the first-hour sweep: the front door opened on the
+OPERATOR CONSOLE and now opens on chat; the header carries three destinations
+plus "More" instead of seven; "Models" opened on models the swarm CANNOT have;
+every peer showed a TRUST score of 50% that was only the starting value; the
+shard-announce feed opens on demand. Round logs:
+`round_log_0912_{new_user_sweep,tool_schema_key_order,kv_reserve_and_silent_peer}.md`.
+
 ⚠ **Mobile (400px) is UNVERIFIED** — no tool here can give the page a narrow
-viewport (resize is a no-op, framing is refused, popups blocked), so the
-narrow-width CSS is written to need no verification and says so. Detail:
-`memory/round_log_0912_new_user_sweep.md`,
-`round_log_0912_tool_schema_key_order.md`,
-`round_log_0912_kv_reserve_and_silent_peer.md`.
+viewport (window resize is a no-op, the dashboard refuses to be framed, popups
+are blocked), so the narrow-width CSS is written to need no verification and
+says so at the rule. The nav change REDUCES narrow-width pressure (seven tabs
+to four), but that is reasoning, not observation.
 
-**Bumping the version LAST is now settled practice** — Cargo.toml changes in the
-bump commit, so Cache warm fires ON the tagged commit. That closes .174's open
-note.
-
-**What it carries** — six field reports from a 16 GB processor-only Mac, five
-fixed and one answered: a peer reconnecting mid-request became permanently
-undecryptable (#562/#563), the prefix cache never used on a plan routed back
-here (#564, now `pipeline::local_generate`), memory never released after a
-conversation, Stop in the wrong chat, the macOS RAM bar, live RX/TX from
-libp2p's counters (absent-never-zero, #565). ⚠ **Self-review found THREE
-regressions the batch introduced, none caught by a test** (#567-#569) — all
-found by asking **what does this new code do when the thing it assumes is not
-there?** ⚠ 11 Mbps NOT reproduced (0.94/1.74 Mbps live). ⚠ Two test nodes on
-this box are not isolated from the live node's mDNS (#566). Detail:
-`memory/round_log_0912_six_reports.md`.
+**Bumping the version LAST is settled practice** — Cargo.toml changes in the
+bump commit, so Cache warm fires ON the tagged commit. Confirmed again at .176.
 
 **Release-gate cautions** (detail in `memory/open_cautions.md`): conformance is
-NINE families, all passing, **~25 minutes on an idle box** (the "~2h" was load,
-not the harness) and part of the gate — run it on the DOWNLOADED artifact
-against a baseline of the PREVIOUS release taken FIRST; it has found eight real
-defects that all pass `release_shapes.sh`. A CPU build REFUSES `-m`, so
-establish which BUILD and PATH a report exercised before deciding code is
-innocent (#552/#555). Branch protection requires 14 contexts — verify with
-`examples/check_ci_gate.sh` against a COMPLETED run only (#530/#557).
+NINE families, ~25 minutes on an idle box, part of the gate — run it on the
+DOWNLOADED artifact against a baseline of the PREVIOUS release taken FIRST; it
+has found eight real defects that all pass `release_shapes.sh`. A CPU build
+REFUSES `-m`, so establish which BUILD and PATH a report exercised before
+deciding code is innocent (#552/#555). Branch protection requires 14 contexts —
+verify with `examples/check_ci_gate.sh` against a COMPLETED run only
+(#530/#557).
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
+- **.176** (09-12, tag `f3daab6b`, gate clean, conformance 9/9 matching a .175 baseline that scored the same, constrained-node 12/12): tool schemas were ALPHABETISED for every model; the KV cache is reserved at the admitted prompt length; a silent peer is barred from the retry; and the first-hour sweep — the front door opened on the operator console, the header carried seven tabs, Models opened on models the swarm cannot have, every peer showed a trust score of 50% nobody measured. `round_log_0912_new_user_sweep.md`.
 - **.175** (09-12, tag `6bc9735d`, gate clean, conformance 9/9 matching a .174 baseline): six field reports — an undecryptable peer after a reconnect, the prefix cache never used on a returned plan, memory never released, Stop in the wrong chat, macOS RAM, live RX/TX. ⚠ THREE self-inflicted regressions caught in review, none by a test (#567-#569). `round_log_0912_six_reports.md`.
 - **.174** (09-11, tag `f4feccd2`, gate clean, conformance 9/9 against a .173 baseline scoring 1 FAIL): nine fixes, five field-reported the same day — `tojson` was minijinja's (every tool schema mangled), a tool call in an invented tag is parsed structurally, auto-manage prune could delete the shard PRIVACY depends on, the cloud catalogue was ERASED not stale, a warm peer credited only for layers it holds. `round_log_0911_field_report_and_privacy.md`.
-- **.172-.173** (09-11): Phi models never stopped generating (one declared EOS, a DIFFERENT token ends each turn) + four tool-calling fixes; then streamed replies stopping dead at ~65 tokens (generation held the thread the runtime needed to SEND them, then a full 64-slot queue read as a departed client), and **partial RoPE meaning Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request**. Same day: the CI/cache round — `cache-gc.yml` was ref-blind and would have deleted main's LIVE cache, `actionlint` became a CI job, branch protection went to 14 contexts — and **`family_conformance.sh`**, which found two real bugs on its first run. `round_log_0911_*.md`.
-- **.166-.171** (09-09→09-10): five field-driven releases in two days. **Every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` and a context that will not fit is SHRUNK not refused (.170); **tools were NEVER passed to the template** — unreachable on every request ever served — plus an escrow that MINTED credits (.171). ⚠ Branch protection required two jobs that no longer existed; every PR was permanently BLOCKED (#530).
+- **.166-.173** (09-09→09-11): eight field-driven releases in three days. **Every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` (.170); **tools were NEVER passed to the template**, unreachable on every request ever served, plus an escrow that MINTED credits (.171); Phi models never stopped generating and **partial RoPE meant Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request** (.172-.173). Same period: `family_conformance.sh` was written and found two real bugs on its first run; branch protection went to 14 contexts after every PR was permanently BLOCKED (#530). `round_log_0911_*.md`.
 - **.160-.165** (09-06→09-08): #484 a FALSE PRIVACY ASSURANCE; #495 shipped INERT (a transport failure recorded as a perfect delivery); the prompt-trust bar; per-peer GOODPUT closing issue #21's open half. ⚠ Null controls caught THREE tests passing for the wrong reason.
 - **.132-.159** (08-29→09-06): the guards-were-the-defect audit (#413 — five tested by PLANTING the violation, four could not see what they guard); #449 ALL inference broken on every Mac; #472 a content hash recomputed mid-fix.
 - **.15-.131** (07-23→08-28): the era that produced most of the rules. A corrupt shard PROVED to spread and the repair QUARANTINED THE GOOD COPY (#382/#384) — **a repair mechanism is a destruction mechanism**; 25.7x from a budget read off the BOOT SNAPSHOT (#281 → `SharedState::cfg()`); credits switched OFF; AVX2 compiled OUT of releases (3.09x). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement.**
