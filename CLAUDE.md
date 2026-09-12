@@ -225,78 +225,66 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2617 lib (dev,claude-subscription) — re-measured 2026-09-12, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 93 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**UNRELEASED on `main` (2026-09-12): six field reports, five fixed and one
-answered.** All from one tester on a 16 GB processor-only Mac plus a bandwidth
-suggestion from another. 2617 lib, 93 repo-consistency, clippy clean.
+**Released and deployed: v0.3.175-alpha (2026-09-12, tag on `6bc9735d`).** Gate
+clean job-by-job — CI 14/14 and Cache warm 3/3 ON THE TAGGED COMMIT (kernels
+shown *restored* AND *skipped*), `check_ci_gate.sh` 14=14 against a COMPLETED
+run, release 10/10 first time; **smoke 9/9 + shapes 6+1-flaky + conformance 9/9
+families on the DOWNLOADED artifact**, matching a .174 baseline taken FIRST, plus
+`constrained_node_test.sh` 12/12 — the harness that matters most here, since two
+fixes change small-node memory behaviour. Both nodes verified, ids and
+`identity.key` unchanged, 0 ERROR, paired at 189 ms. Rollback
+`~/.local/bin/swarmllm.0.3.174-alpha.bak`. Detail:
+`memory/round_log_0912_six_reports.md` § Release.
 
-- **A peer that reconnected mid-request became permanently undecryptable** —
-  29 forwards, 29 failures, 0 successes. `handle_connection_closed` exempted a
-  peer in `active_pipelines` from `remove_session`, but that map is the
-  COORDINATOR's: the serving side retires its key either way and returns on a
-  fresh one, while the coordinator keeps an ephemeral key nothing can open.
-  **The comment justifying the exemption had been false since
-  `establish_session` became idempotent** (gotchas #562, #563 — this is the
-  mirror image of report #028's `retired` map). Exemption gone; a failed `open`
-  now asks for one rate-limited re-key, so any other divergence self-heals.
+**Bumping the version LAST is now settled practice** — Cargo.toml changes in the
+bump commit, so Cache warm fires ON the tagged commit. That closes .174's open
+note.
+
+**What it carries** — six field reports, five fixed and one answered, from a
+16 GB processor-only Mac, plus a bandwidth suggestion:
+
+- **A peer that reconnected mid-request became permanently undecryptable** (29
+  forwards, 29 failures, 0 successes). `handle_connection_closed` exempted a peer
+  in `active_pipelines` from `remove_session` — the COORDINATOR's map, so the
+  serving side retires either way and returns on a fresh key. **The comment
+  justifying the exemption had been false since `establish_session` became
+  idempotent** (#562, #563 — the mirror image of report #028's `retired` map).
+  A failed decrypt now asks for one rate-limited re-key, so any divergence heals.
 - **A request routed back to this node never used the prefix cache** —
-  `prefix-cache HIT` zero times in a week of field logs on a node holding a
-  complete 14B. `local_fast_path_for` stands aside so the scheduler can consider
-  peers (right), and the plan came back naming this node, which the pipeline then
-  carried out as a `LayerForward` per token to our own worker (the one path with
-  no prefix cache, batching or speculation). Now
-  `pipeline::local_generate::try_local_generate_fastpath` (#564).
-- **A finished conversation never gave its memory back, and running out ended
-  the request.** The forward path freed nothing — the daemon's
-  `cleanup_request_id` is a DIFFERENT PROCESS's store — so three refusals
-  seconds apart read the identical `live_mb`. And the refusal was a plain
-  `ServiceUnavailable`, so the router treated it as final while a five-segment
-  peer route sat priced one line earlier. Now `DaemonMsg::ReleaseRequestKv` +
-  `LocalMemoryUnavailable` carried over IPC as a typed flag.
-- **Stop belonged to the page, not to the chat you were looking at** — it
-  cancelled the OTHER chat's reply. Per-session now, and a reply survives you
-  switching away and back.
-- **macOS: the RAM bar read 13 MB for a worker holding 13 GB.** Two accountings;
-  the larger is reported. ⚠ The reporter's stated mechanism is probably
-  backwards, so the fix does not depend on it. Not testable from Linux.
-- **`max_bandwidth_mbps` is real but narrow** (shard serving only) and nothing
-  could say what a node was actually sending — the reporter had to stop the
-  daemon and diff `/sys/class/net`. The setting now says what it covers, and
-  `swarmllm status` / the dashboard / `/metrics` carry live RX/TX from libp2p's
-  transport counters. **Absent, never zero, when nothing is counting** (#565).
-  ⚠ The reported 11 Mbps is NOT reproduced: a fresh node with 5 peers measures a
-  few kbps here, a 12-hour-old one under 1 Mbps.
-- **Answered, not a defect: disk speed does not bias routing** (report #020).
-  Nothing the scheduler reads comes from a disk measurement; the one real cost is
-  the cold load, which is unpriced and one-off. `docs/FUTURE_WORK.md` § Not bugs.
+  `prefix-cache HIT` zero times in a week of field logs. `local_fast_path_for`
+  stands aside correctly; the plan then came back and was carried out as a
+  `LayerForward` per token to our own worker, the one path with no prefix cache,
+  batching or speculation. Now `pipeline::local_generate` (#564).
+- **A finished conversation never released its memory, and the refusal ended the
+  request** — the forward path freed nothing (the daemon's `cleanup_request_id`
+  is a DIFFERENT PROCESS's store), and the refusal was typed as final while a
+  five-segment peer route sat priced one line earlier.
+- **Stop belonged to the page**, not the chat on screen — it cancelled the other
+  chat's reply. Plus the macOS RAM bar (13 MB for 13 GB; two accountings, larger
+  wins) and **live RX/TX from libp2p's transport counters**, absent-never-zero
+  (#565), with `max_bandwidth_mbps` documented as shard-serving-only.
+- **Answered, not a defect: disk speed does not bias routing** (`FUTURE_WORK`
+  § Not bugs).
 
-⚠ **Two test nodes on this box are not isolated** even with mDNS off and no
-bootstrap: the live node's mDNS dials THEM (gotcha #566). Check the peer count.
+⚠ **Self-review found THREE regressions this batch introduced, none caught by
+any test** — an unwatched cancel on the new local path (#567), a frontend scope
+error that would have killed the hardware panel (#568), and the traffic figure
+missing from `/v1/status`, the payload `swarmllm status` reads (#569, fixed on
+`main` AFTER the tag). **The question that found all three: what does this new
+code do when the thing it assumes is not there?**
 
-**Released and deployed: v0.3.174-alpha (2026-09-11, tag on `f4feccd2`).** Gate
-clean job-by-job — CI 14/14, Cache warm with both kernel caches *restored* AND
-*skipped*, `check_ci_gate.sh` 14=14 against a COMPLETED run, release 10/10 first
-time; **smoke 9/9 + shapes 7/7 + conformance 9/9 families on the DOWNLOADED
-artifact**, against a .173 baseline taken FIRST that scored **1 FAIL** (GLM-4's
-own template — the `tojson` defect reproducing on the old binary, which is what
-makes the comparison mean anything). Both nodes verified, ids and `identity.key`
-unchanged, 0 ERROR, paired at 153 ms. Rollback
-`~/.local/bin/swarmllm.0.3.173-alpha.bak`. Full detail:
-`memory/round_log_0911_field_report_and_privacy.md` § Release.
+⚠ **11 Mbps is NOT reproduced** — the live node measures 0.94/1.74 Mbps with 4
+peers. ⚠ **Two test nodes on this box are not isolated**: the live node's mDNS
+dials them (#566). ⚠ The Proxmox node IS report #016's peer (`9684263580c6660f`).
 
-**What it carried** — nine fixes, five field-reported the same day: `tojson` was
-minijinja's not `transformers`' (every tool schema mangled); a tool call in a tag
-the model invented is parsed structurally; auto-manage prune could delete the
-shard prompt privacy depends on; the cloud routing catalogue was ERASED not
-stale; a warm peer is credited only for layers it holds
-(`NodeCapability::resident_layers`). Detail:
-`memory/round_log_0911_field_report_and_privacy.md`.
-
-**Conformance is nine families** — GLM-4 (the partial-RoPE family nothing here
-could exercise) and Mistral-7B-v0.3 (system-role refusal + `[TOOL_CALLS]`) were
-added and all nine pass. ⚠ A full run is now **~2h** on this box; budget for it.
+**Conformance is nine families** — GLM-4 (partial RoPE) and Mistral-7B-v0.3
+(system-role refusal + `[TOOL_CALLS]`) included; all nine pass. ⚠ The "~2h" this
+said is about LOAD, not the harness: **on an idle box with no background pollers
+it is ~25 minutes** (measured twice on 2026-09-12). The .174 run that took hours
+was competing with a dozen pollers under a 16 GB cap.
 
 ⚠ **`examples/family_conformance.sh` is part of the release gate** and has found
-six real defects in three runs, every one of which PASSES `release_shapes.sh`.
+eight real defects in six runs, every one of which PASSES `release_shapes.sh`.
 Run it on the DOWNLOADED artifact **against a baseline of the previous release
 taken FIRST** — that is what tells a fix that shipped from a check that was
 always green.
@@ -314,7 +302,7 @@ script fed an unfinished run advises causing exactly that (#557).
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
-- **.174** (09-11): nine fixes, five field-reported the same day — `tojson` was minijinja's (every tool schema mangled), a tool call in an invented tag is parsed structurally, auto-manage prune could delete the shard PRIVACY depends on, the cloud catalogue was ERASED not stale, a warm peer credited only for layers it holds. `round_log_0911_field_report_and_privacy.md`.
+- **.174** (09-11, tag `f4feccd2`, gate clean, conformance 9/9 against a .173 baseline scoring 1 FAIL): nine fixes, five field-reported the same day — `tojson` was minijinja's (every tool schema mangled), a tool call in an invented tag is parsed structurally, auto-manage prune could delete the shard PRIVACY depends on, the cloud catalogue was ERASED not stale, a warm peer credited only for layers it holds. `round_log_0911_field_report_and_privacy.md`.
 - **.172-.173** (09-11): Phi models never stopped generating (one declared EOS, a DIFFERENT token ends each turn) + four tool-calling fixes; then streamed replies stopping dead at ~65 tokens (generation held the thread the runtime needed to SEND them, then a full 64-slot queue read as a departed client), and **partial RoPE meaning Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request**. Same day: the CI/cache round — `cache-gc.yml` was ref-blind and would have deleted main's LIVE cache, `actionlint` became a CI job, branch protection went to 14 contexts — and **`family_conformance.sh`**, which found two real bugs on its first run. `round_log_0911_*.md`.
 - **.166-.171** (09-09→09-10): five field-driven releases in two days. **Every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` and a context that will not fit is SHRUNK not refused (.170); **tools were NEVER passed to the template** — unreachable on every request ever served — plus an escrow that MINTED credits (.171). ⚠ Branch protection required two jobs that no longer existed; every PR was permanently BLOCKED (#530).
 - **.160-.165** (09-06→09-08): #484 a FALSE PRIVACY ASSURANCE; #495 shipped INERT (a transport failure recorded as a perfect delivery); the prompt-trust bar; per-peer GOODPUT closing issue #21's open half. ⚠ Null controls caught THREE tests passing for the wrong reason.
