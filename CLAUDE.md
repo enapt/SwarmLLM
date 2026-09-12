@@ -225,9 +225,16 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2602 lib (dev,claude-subscription) — re-measured 2026-09-11, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 88 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released: v0.3.174-alpha (2026-09-11).** Gate as documented below; full
-detail in `memory/round_log_0911_field_report_and_privacy.md` § Release.
-Previous: v0.3.173-alpha (tag `bcf5420e`).
+**Released and deployed: v0.3.174-alpha (2026-09-11, tag on `f4feccd2`).** Gate
+clean job-by-job — CI 14/14, Cache warm with both kernel caches *restored* AND
+*skipped*, `check_ci_gate.sh` 14=14 against a COMPLETED run, release 10/10 first
+time; **smoke 9/9 + shapes 7/7 + conformance 9/9 families on the DOWNLOADED
+artifact**, against a .173 baseline taken FIRST that scored **1 FAIL** (GLM-4's
+own template — the `tojson` defect reproducing on the old binary, which is what
+makes the comparison mean anything). Both nodes verified, ids and `identity.key`
+unchanged, 0 ERROR, paired at 153 ms. Rollback
+`~/.local/bin/swarmllm.0.3.173-alpha.bak`. Full detail:
+`memory/round_log_0911_field_report_and_privacy.md` § Release.
 
 **What it carries** — nine fixes, five of them field-reported the same day:
 
