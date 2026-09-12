@@ -116,6 +116,7 @@
         App.chat.renderSessionList();
         App.chat.renderMessages();
         App.chat.updateChatHeader();
+        App.chat._refreshStreamingUI();
         return;
       }
       var emptied = [];
@@ -132,6 +133,7 @@
       App.chat.renderSessionList();
       App.chat.renderMessages();
       App.chat.updateChatHeader();
+      App.chat._refreshStreamingUI();
       if (emptied.length > 0) {
         App.notifications.showToast(I18n.t('chat.cleaned_sessions', { count: emptied.length }), 'info', 3000);
       }
@@ -170,6 +172,8 @@
       App.chat.renderSessionList();
       App.chat.renderMessages();
       App.chat.updateChatHeader();
+      // Send/Stop belong to the session on screen (report #015).
+      App.chat._refreshStreamingUI();
       if (window.innerWidth < 768) App.ui.closeSidebar();
     },
 
@@ -182,6 +186,14 @@
           method: 'DELETE',
         }).catch(function() {});
       }
+      // A deleted chat's reply has nowhere to land, and on a processor-only
+      // node it would keep a core busy for minutes. Aborting the fetch is what
+      // tells the daemon to stop (see `stopGeneration`).
+      var liveHere = S.streaming[id];
+      if (liveHere) {
+        if (liveHere.abort) { try { liveHere.abort.abort(); } catch (e) {} }
+        delete S.streaming[id];
+      }
       delete S.sessions[id];
       if (S.currentSessionId === id) {
         var keys = Object.keys(S.sessions);
@@ -190,6 +202,7 @@
       App.chat.saveSessions();
       App.chat.renderSessionList();
       App.chat.renderMessages();
+      App.chat._refreshStreamingUI();
     },
 
     renderSessionList: function() {
@@ -479,11 +492,14 @@
           target.appendChild(timerEl);
         }
       });
+      App.chat._reattachLiveReply();
       App.chat.scrollToBottom(true);
     },
 
     send: async function() {
-      if (S.isStreaming) return;
+      // Per SESSION, not per page: another chat generating must not block this
+      // one, and the guard has to agree with the button the user is looking at.
+      if (App.chat._isStreaming(S.currentSessionId)) return;
       if (!S.currentModel) {
         App.ui.showBanner('warning', I18n.t('chat.no_model_warning'));
         return;
@@ -541,7 +557,15 @@
       contentEl.innerHTML = '<span class="typing-indicator">' + U.escapeHtml(I18n.t('chat.thinking')) + '</span>';
       if (assistantAvatarEl) assistantAvatarEl.classList.add('avatar-thinking');
 
-      App.chat._setStreamingUI(true);
+      // Everything this reply writes into goes through `live`, so switching
+      // away and back can hand it the freshly-rendered nodes to carry on in.
+      var live = App.chat._beginStreaming(session.id, {
+        assistantEl: assistantEl,
+        contentEl: contentEl,
+        avatarEl: assistantAvatarEl,
+        encrypted: msgEncrypted,
+        model: model,
+      });
       // Sending re-attaches the view to the end: the reader has just acted.
       App.chat.scrollToBottom(true);
       var startTime = performance.now();
@@ -602,7 +626,7 @@
           if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
         }
         if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); if (!assistantAvatarEl.classList.contains('avatar-error')) assistantAvatarEl.classList.add('avatar-done'); }
-        App.chat._setStreamingUI(false);
+        App.chat._endStreaming(session.id);
         return;
       }
 
@@ -635,7 +659,7 @@
       // a processor legitimately takes minutes, and a client-invented deadline
       // would throw away a reply the node had finished computing (report #009).
       var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-      App.chat._abort = controller;
+      live.abort = controller;
       var aborted = function() { return !!(controller && controller.signal.aborted); };
 
       try {
@@ -661,46 +685,47 @@
               if (errJson.error.hint) hintHtml = '<div class="chat-error-hint">' + U.escapeHtml(errJson.error.hint) + '</div>';
             }
           } catch (e) {}
-          contentEl.innerHTML = U.escapeHtml(friendlyMsg) + hintHtml + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">' + U.escapeHtml(I18n.t('actions.retry')) + '</button></div>';
-          contentEl.classList.add('chat-error');
-          if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
-          App.chat._setStreamingUI(false);
-          App.chat._abort = null;
+          live.contentEl.innerHTML = U.escapeHtml(friendlyMsg) + hintHtml + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">' + U.escapeHtml(I18n.t('actions.retry')) + '</button></div>';
+          live.contentEl.classList.add('chat-error');
+          App.chat._markAvatar(live, 'avatar-error');
+          App.chat._endStreaming(session.id);
           return;
         }
 
-        var cleared = false;
-        var thinkingEl = null;
 
         var onChunk = function(chunk) {
           if (chunk.usage) streamUsage = chunk.usage;
           if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
             var delta = chunk.choices[0].delta;
             if (delta.reasoning_content) {
-              if (!cleared) { contentEl.textContent = ''; cleared = true; if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking'); assistantAvatarEl.classList.add('avatar-streaming'); } }
+              App.chat._clearPlaceholder(live);
+              var thinkingEl = live.contentEl.querySelector('.reasoning-block');
               if (!thinkingEl) {
                 thinkingEl = document.createElement('details');
                 thinkingEl.className = 'reasoning-block';
                 thinkingEl.innerHTML = '<summary>' + U.escapeHtml(I18n.t('chat.reasoning_label')) + '</summary><pre class="reasoning-content"></pre>';
                 thinkingEl.open = true;
-                contentEl.appendChild(thinkingEl);
+                live.contentEl.appendChild(thinkingEl);
               }
               reasoningContent += delta.reasoning_content;
+              live.reasoning = reasoningContent;
               thinkingEl.querySelector('.reasoning-content').textContent = reasoningContent;
               App.chat.scrollToBottom();
             }
             if (delta.content) {
-              if (!cleared) { contentEl.textContent = ''; cleared = true; if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking'); assistantAvatarEl.classList.add('avatar-streaming'); } }
-              if (thinkingEl && thinkingEl.open) {
-                thinkingEl.open = false;
-                thinkingEl.querySelector('summary').textContent = I18n.t('chat.reasoning_summary', { chars: reasoningContent.length });
+              App.chat._clearPlaceholder(live);
+              var openThinking = live.contentEl.querySelector('.reasoning-block');
+              if (openThinking && openThinking.open) {
+                openThinking.open = false;
+                openThinking.querySelector('summary').textContent = I18n.t('chat.reasoning_summary', { chars: reasoningContent.length });
               }
               fullContent += delta.content;
-              var textNode = contentEl.querySelector('.response-text');
+              live.text = fullContent;
+              var textNode = live.contentEl.querySelector('.response-text');
               if (!textNode) {
                 textNode = document.createElement('div');
                 textNode.className = 'response-text';
-                contentEl.appendChild(textNode);
+                live.contentEl.appendChild(textNode);
               }
               App.chat._renderReply(textNode, fullContent);
               App.chat.scrollToBottom();
@@ -723,7 +748,7 @@
         // token satisfies every other term here, so without it pressing Stop
         // silently sent the whole request again — the one outcome a Stop
         // button must never have.
-        if (!aborted() && !cleared && !fullContent && !reasoningContent) {
+        if (!aborted() && !live.cleared && !fullContent && !reasoningContent) {
           try {
             var retryResp = await App.authFetch('/v1/chat/completions', {
               method: 'POST',
@@ -742,10 +767,10 @@
           }
         }
 
-        if (!aborted() && !cleared && !fullContent && !reasoningContent) {
-          contentEl.textContent = I18n.t('chat.no_response');
-          contentEl.classList.add('chat-error');
-          if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
+        if (!aborted() && !live.cleared && !fullContent && !reasoningContent) {
+          live.contentEl.textContent = I18n.t('chat.no_response');
+          live.contentEl.classList.add('chat-error');
+          App.chat._markAvatar(live, 'avatar-error');
         }
       } catch (e) {
         // A cancel arrives here as an AbortError. It is not a failure and must
@@ -755,9 +780,9 @@
         if (wasAborted) {
           stoppedByUser = true;
         } else if (!fullContent) {
-          contentEl.textContent = I18n.t('chat.connection_failed');
-          contentEl.classList.add('chat-error');
-          if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
+          live.contentEl.textContent = I18n.t('chat.connection_failed');
+          live.contentEl.classList.add('chat-error');
+          App.chat._markAvatar(live, 'avatar-error');
         }
       }
       if (aborted()) stoppedByUser = true;
@@ -765,7 +790,7 @@
       // The queued frame would land eventually, but the message is saved and
       // may be re-rendered from history before it does. Settle it here.
       if (fullContent) {
-        var finalTextNode = contentEl.querySelector('.response-text');
+        var finalTextNode = live.contentEl.querySelector('.response-text');
         // `flush` is this settle-now step, expressed through the shared
         // renderer rather than open-coded beside it.
         if (finalTextNode) U.renderReplyInto(finalTextNode, fullContent, { flush: true });
@@ -774,13 +799,13 @@
       // Stopped before a single token arrived: the bubble is still showing the
       // typing indicator, so say what happened rather than leaving it spinning
       // for ever.
-      if (stoppedByUser && !cleared && !fullContent && !reasoningContent) {
-        contentEl.textContent = I18n.t('chat.stopped_no_output');
-        contentEl.classList.add('chat-stopped');
+      if (stoppedByUser && !live.cleared && !fullContent && !reasoningContent) {
+        live.contentEl.textContent = I18n.t('chat.stopped_no_output');
+        live.contentEl.classList.add('chat-stopped');
       }
 
       // Clear avatar animation on completion — pop if successful
-      if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); if (!assistantAvatarEl.classList.contains('avatar-error')) assistantAvatarEl.classList.add('avatar-done'); }
+      App.chat._markAvatar(live, 'avatar-done');
       var elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
       var timerEl = document.createElement('div');
       timerEl.className = 'msg-timer';
@@ -814,7 +839,7 @@
           );
         }
       }
-      var timerTarget = assistantEl.querySelector('.msg-bubble') || assistantEl;
+      var timerTarget = live.assistantEl.querySelector('.msg-bubble') || live.assistantEl;
       timerTarget.appendChild(timerEl);
 
       if (fullContent) {
@@ -830,8 +855,7 @@
         App.chat.flashSession(session.id);
       }
 
-      App.chat._setStreamingUI(false);
-      App.chat._abort = null;
+      App.chat._endStreaming(session.id);
     },
 
     updateSessionTokens: function(session) {
@@ -846,20 +870,126 @@
       el.title = I18n.t('chat.session_tokens', { input: U.formatCompact(session.token_usage.input), output: U.formatCompact(session.token_usage.output) });
     },
 
-    // The AbortController for the reply currently streaming, or null.
-    _abort: null,
-
     // ONE owner of "a reply is in flight", because the flag and the two
     // buttons have to move together and there are four places that end a
     // reply — the Claude Code branch, the HTTP-error branch, the normal
     // completion, and a cancel. Each used to set `S.isStreaming` and re-enable
     // the send button by hand, which is three chances to leave the UI stuck.
-    _setStreamingUI: function(on) {
-      S.isStreaming = !!on;
+    //
+    // **Per SESSION, not per page** (report #015). It was one flag and one
+    // AbortController for the whole tab, while `send-btn` / `stop-btn` exist
+    // once in the document and every session shares them — so opening a second
+    // chat while the first was answering showed Stop over an empty compose box
+    // in a chat that had sent nothing, and pressing it cancelled the OTHER
+    // chat's reply. Sending was blocked there too, by the same flag.
+    //
+    // The record also carries the nodes the reply is being written into, so
+    // `renderMessages` can hand a re-rendered session its live bubble back
+    // instead of leaving the answer to land on detached DOM.
+
+    /// Begin a reply in `sessionId`. Returns the record everything writes through.
+    _beginStreaming: function(sessionId, parts) {
+      var live = {
+        sessionId: sessionId,
+        abort: null,
+        assistantEl: parts.assistantEl,
+        contentEl: parts.contentEl,
+        avatarEl: parts.avatarEl,
+        encrypted: !!parts.encrypted,
+        model: parts.model || '',
+        // Accumulated so far, so a session re-rendered mid-reply shows what has
+        // arrived rather than an empty bubble.
+        text: '',
+        reasoning: '',
+        // Has the "thinking" placeholder been replaced by real output yet?
+        cleared: false,
+      };
+      S.streaming[sessionId] = live;
+      App.chat._refreshStreamingUI();
+      return live;
+    },
+
+    /// The reply in `sessionId` is over, however it ended.
+    _endStreaming: function(sessionId) {
+      delete S.streaming[sessionId];
+      App.chat._refreshStreamingUI();
+    },
+
+    _isStreaming: function(sessionId) {
+      return !!(sessionId && S.streaming[sessionId]);
+    },
+
+    /// Send/Stop reflect the session ON SCREEN, and nothing else.
+    _refreshStreamingUI: function() {
+      var on = App.chat._isStreaming(S.currentSessionId);
+      // Kept in step for anything still reading the old flag; it now means
+      // "the session being looked at is generating".
+      S.isStreaming = on;
       var send = document.getElementById('send-btn');
       var stop = document.getElementById('stop-btn');
-      if (send) { send.disabled = !!on; send.hidden = !!on; }
+      if (send) { send.disabled = on; send.hidden = on; }
       if (stop) stop.hidden = !on;
+    },
+
+    /// Replace the typing indicator with real output, once.
+    _clearPlaceholder: function(live) {
+      if (live.cleared) return;
+      live.contentEl.textContent = '';
+      live.cleared = true;
+      if (live.avatarEl) {
+        live.avatarEl.classList.remove('avatar-thinking');
+        live.avatarEl.classList.add('avatar-streaming');
+      }
+    },
+
+    /// End the avatar's animation, in the one state the caller asks for.
+    _markAvatar: function(live, cls) {
+      var el = live.avatarEl;
+      if (!el) return;
+      el.classList.remove('avatar-thinking', 'avatar-streaming');
+      if (cls === 'avatar-done' && el.classList.contains('avatar-error')) return;
+      el.classList.add(cls);
+    },
+
+    /// Re-create the bubble a reply is streaming into, after its session was
+    /// re-rendered, and point the record at the new nodes.
+    ///
+    /// Without this, switching away and back left the reply writing into
+    /// detached DOM: the answer never appeared, and the bubble stayed empty
+    /// until something else re-rendered the session.
+    _reattachLiveReply: function() {
+      var live = S.streaming[S.currentSessionId];
+      if (!live) return;
+      var el = U.appendMessageToDOM('assistant', '', false, {
+        encrypted: live.encrypted,
+        model: live.model,
+      });
+      if (!el) return;
+      live.assistantEl = el;
+      live.avatarEl = el.querySelector('.msg-avatar');
+      live.contentEl = el.querySelector('.msg-content');
+      if (!live.cleared) {
+        live.contentEl.innerHTML = '<span class="typing-indicator">' +
+          U.escapeHtml(I18n.t('chat.thinking')) + '</span>';
+        if (live.avatarEl) live.avatarEl.classList.add('avatar-thinking');
+        return;
+      }
+      if (live.avatarEl) live.avatarEl.classList.add('avatar-streaming');
+      if (live.reasoning) {
+        var thinkingEl = document.createElement('details');
+        thinkingEl.className = 'reasoning-block';
+        thinkingEl.innerHTML = '<summary>' +
+          U.escapeHtml(I18n.t('chat.reasoning_summary', { chars: live.reasoning.length })) +
+          '</summary><pre class="reasoning-content"></pre>';
+        thinkingEl.querySelector('.reasoning-content').textContent = live.reasoning;
+        live.contentEl.appendChild(thinkingEl);
+      }
+      if (live.text) {
+        var textNode = document.createElement('div');
+        textNode.className = 'response-text';
+        live.contentEl.appendChild(textNode);
+        U.renderReplyInto(textNode, live.text, { flush: true });
+      }
     },
 
     // Stop the reply that is streaming now.
@@ -874,8 +1004,9 @@
     // Whatever has already been streamed is kept: the user read it, and it is
     // genuine model output.
     stopGeneration: function() {
-      if (!App.chat._abort) return;
-      try { App.chat._abort.abort(); } catch (e) {}
+      var live = S.streaming[S.currentSessionId];
+      if (!live || !live.abort) return;
+      try { live.abort.abort(); } catch (e) {}
     },
 
     // Render a reply as markdown into `el`, at most once per animation frame.

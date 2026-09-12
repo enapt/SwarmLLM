@@ -5735,3 +5735,57 @@ fn the_active_pipeline_session_guard_catches_the_shape_it_replaced() {
          if !in_active_pipeline {\n    self.peer_to_node.remove(&peer_id);\n}\n"
     ));
 }
+
+/// **Send/Stop belong to the chat on screen, and so does the cancel behind
+/// them** (report #015).
+///
+/// `send-btn` and `stop-btn` exist once in the document and every session
+/// shares them, so a page-level "a reply is in flight" flag showed Stop in a
+/// chat that had sent nothing — and the single page-level `AbortController`
+/// meant pressing it cancelled a DIFFERENT chat's reply. Sending was blocked
+/// there too, by the same flag.
+///
+/// Both now hang off `S.streaming[sessionId]`. The three things that change
+/// which session is on screen must move the buttons with it, and nothing may
+/// keep a controller of its own again.
+#[test]
+fn the_chat_send_and_stop_buttons_follow_the_session_on_screen() {
+    let src = std::fs::read_to_string(repo_root().join("frontend/js/components/chat.js")).unwrap();
+
+    // One writer of the flag, inside the refresher that reads the current
+    // session. Anything else setting it is the page-level state coming back.
+    let writes: Vec<&str> = src
+        .lines()
+        .filter(|l| l.contains("S.isStreaming =") || l.contains("S.isStreaming="))
+        .collect();
+    assert_eq!(
+        writes.len(),
+        1,
+        "exactly one place may set the on-screen streaming flag, found: {writes:?}"
+    );
+
+    // A cancel must reach the session being looked at, never "the" reply.
+    let stop = fn_body(&src, "stopGeneration: function()")
+        .expect("stopGeneration must exist — rename it and update this guard");
+    assert!(
+        stop.contains("S.streaming[S.currentSessionId]"),
+        "Stop must abort the reply in the session on screen, not a page-level one"
+    );
+    assert!(
+        !src.contains("App.chat._abort"),
+        "the page-level AbortController is what cancelled the wrong chat's reply"
+    );
+
+    // Everything that changes the session on screen refreshes the buttons.
+    for f in [
+        "switchSession: function(id)",
+        "newSession: function()",
+        "deleteSession: function(id, e)",
+    ] {
+        let body = fn_body(&src, f).unwrap_or_else(|| panic!("{f} must exist"));
+        assert!(
+            body.contains("_refreshStreamingUI"),
+            "{f} changes which session is on screen and must move Send/Stop with it"
+        );
+    }
+}

@@ -18,6 +18,10 @@ window.App = {
     _swarmModelSort: 'problems', // initialized below after App is defined, using App.MODEL_SORT_KEY
     _shardView: 'list', // initialized below after App is defined, using App.SHARD_VIEW_KEY
     isStreaming: false,
+    // Replies in flight, keyed by session id — see `chat._beginStreaming`.
+    // The Send/Stop buttons and the AbortController used to be page-level
+    // while the chats sharing them are not (report #015).
+    streaming: {},
     // Whether the chat view should follow new tokens. Flipped by the reader's
     // own scrolling — see App.chat._bindScrollTracking.
     chatStickToBottom: true,
