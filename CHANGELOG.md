@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.3.175-alpha] — 2026-09-12
+
+Six problems reported from one machine, plus a suggestion about bandwidth.
+
+### Fixed
+
+- **A computer that briefly lost its connection could no longer be worked with
+  again.** When two machines are sharing a piece of work and one of them drops
+  off for a moment, both are supposed to agree on a new secret before carrying
+  on. One side was keeping the old one. Everything it sent from then on was
+  unreadable by the only machine it was addressed to, and there was nothing to
+  notice it: sending appeared to work, and the failure happened at the far end.
+  Reported from a real node, where every single request sent to one particular
+  peer failed for the rest of the session — 29 of them, with no successes.
+  Both machines now start afresh after a reconnection, and if two ever do end up
+  disagreeing for any other reason, they now notice and fix it in one exchange
+  rather than being stuck until one of them gives up ten minutes later.
+- **Conversations on a computer without a graphics card were re-read from the
+  beginning on every message.** A machine that holds a whole model but would run
+  it slowly asks the network first, in case someone faster can help — that part
+  is deliberate. When nobody faster is found, the work comes back, and it was
+  then being done in the slowest way available, which also happens to be the one
+  way that cannot reuse anything already worked out earlier in the conversation.
+  On the machine that reported it, a week of use recorded not one reuse. Such
+  work is now done the same way it is done when there is nobody to ask.
+- **A finished conversation kept holding memory, and running out ended the
+  request instead of asking elsewhere.** Ending a conversation freed nothing, so
+  after a few of them a new message could be refused for lack of memory — and so
+  could carrying on the very conversation that filled it. Worse, that refusal
+  ended the request, even when the network had already worked out a way to
+  spread the work across other machines moments earlier. Memory is now given
+  back when a request finishes, and a machine that runs out asks the others
+  rather than giving up.
+- **Stop now belongs to the conversation you are looking at.** Opening a second
+  chat while the first was still answering showed a Stop button over an empty
+  message box, and pressing it cancelled the first chat's reply. Sending in the
+  second chat was blocked too. Each chat now shows what it is actually doing,
+  and you can write in one while another is answering. A reply also survives
+  being left and come back to, instead of appearing to stop.
+- **On a Mac, the memory bar showed a few megabytes for a model using
+  gigabytes.** macOS measures a program's memory two different ways and we were
+  reading the one that disagreed with the rest of the system. Both are now read
+  and the larger is shown: a bar reading almost nothing on a nearly-full machine
+  is worse than no bar at all.
+
+### Changed
+
+- **You can now see how much network traffic your node is using.** `swarmllm
+  status` and the dashboard show what is going out and coming in right now, plus
+  the total since the node started. Until now there was no way to ask — someone
+  worried about their home connection had to stop the program and watch the
+  difference. The figure covers everything the node sends, and is left blank
+  rather than shown as zero when it is not being measured.
+- **The bandwidth setting says what it actually limits.** "Max Bandwidth" only
+  ever limited how fast this node sends pieces of model files to others — not
+  the work of answering, and not the background traffic that keeps a node
+  connected. It is now named and described for what it does, so nobody sets it
+  expecting more.
+
 ## [0.3.174-alpha] — 2026-09-11
 
 ### Fixed
