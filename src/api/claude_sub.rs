@@ -202,13 +202,22 @@ fn put_session(key: String, session_id: String) {
 /// Only produces a key for multi-turn conversations (2+ messages).
 /// Single-turn requests return None — no session reuse.
 /// Uses BLAKE3 (cryptographic) to prevent collision-based session confusion.
+///
+/// Each message is hashed with its keys SORTED. `serde_json` is built with
+/// `preserve_order` (so a tool schema reaches a model as its author wrote it),
+/// which means `to_string` would otherwise follow whatever order the client
+/// sent — and the same conversation would miss its session if the client
+/// reordered keys between turns. Sorting keeps the key what it was before that
+/// switch, so a session cached by the previous build is still found.
 fn session_key(model: &str, messages: &[serde_json::Value]) -> Option<String> {
     if messages.len() < 2 {
         return None;
     }
     let mut hasher = blake3::Hasher::new();
     for msg in &messages[..messages.len() - 1] {
-        hasher.update(msg.to_string().as_bytes());
+        let mut canonical = msg.clone();
+        canonical.sort_all_objects();
+        hasher.update(canonical.to_string().as_bytes());
     }
     hasher.update(model.as_bytes());
     Some(format!(

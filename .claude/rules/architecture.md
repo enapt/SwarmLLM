@@ -135,6 +135,13 @@ defaults) and does not escape HTML. minijinja's builtin does both wrong for this
 use: it rewrites `<`, `>`, `&` and `'` for a web page, and it rejects every
 keyword but `indent` — which fails the whole render.
 
+**And a schema's keys reach the model in the order its author wrote them.**
+`serde_json` and `minijinja` are both built with `preserve_order`; drop either
+and every tool schema is alphabetised on its way through `tojson`, which is
+what happened on every tool-carrying request until 2026-09-12. Every other
+serving stack delivers the author's order, and formatting is not cosmetic to
+a small model.
+
 → `docs/invariants/api-surfaces.md`
 
 ## A template that refuses a system role is still told what the system turn said

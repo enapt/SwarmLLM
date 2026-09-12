@@ -1989,6 +1989,7 @@ fn a_hostile_chat_template_cannot_amplify_without_bound() {
 // ---------------------------------------------------------------------------
 
 const QWEN3_OFFICIAL: &str = include_str!("fixtures/qwen3_official.jinja");
+const QWEN3_GGUF_SHIPPED: &str = include_str!("fixtures/qwen3_gguf_shipped.jinja");
 const LLAMA3_OFFICIAL: &str = include_str!("fixtures/llama3_official.jinja");
 
 fn weather_tool() -> serde_json::Value {
@@ -2265,37 +2266,37 @@ fn tojson_takes_the_arguments_transformers_defines() {
     // `","` and `":"` — and a bare `| tojson` is how Qwen and Llama-3.1 render
     // every tool schema, so this is the common case, not a corner.
     //
-    // Keys come out sorted whatever is asked for: a map reaching this filter is
-    // either a minijinja literal or a `serde_json::Value`, and `serde_json` is
-    // built here without `preserve_order`, so its map is a `BTreeMap`.
-    // `sort_keys` therefore changes nothing today — it is honoured rather than
-    // rejected, which is the whole point.
+    // Keys come out in the order they were WRITTEN — `b` before `a` here — as
+    // Python's `json.dumps` emits a dict. `sort_keys=True` is the one call that
+    // reorders, and it is the only expectation below with `a` first; before
+    // 2026-09-12 every map was a `BTreeMap` and all six read the same.
     assert_eq!(
         render("{{ x | tojson }}").as_deref(),
-        Some(r#"{"a": "café", "b": 1}"#),
-        "the default must match python's separators"
+        Some(r#"{"b": 1, "a": "café"}"#),
+        "the default must match python's separators, in the author's order"
     );
     assert_eq!(
         render("{{ x | tojson(separators=(',', ':')) }}").as_deref(),
-        Some(r#"{"a":"café","b":1}"#)
+        Some(r#"{"b":1,"a":"café"}"#)
     );
     assert_eq!(
         render("{{ x | tojson(sort_keys=True) }}").as_deref(),
-        Some(r#"{"a": "café", "b": 1}"#)
+        Some(r#"{"a": "café", "b": 1}"#),
+        "sort_keys=True is the one call that alphabetises"
     );
     assert_eq!(
         render("{{ x | tojson(ensure_ascii=True) }}").as_deref(),
-        Some(r#"{"a": "caf\u00e9", "b": 1}"#)
+        Some(r#"{"b": 1, "a": "caf\u00e9"}"#)
     );
     assert_eq!(
         render("{{ x | tojson(indent=4, ensure_ascii=False) }}").as_deref(),
-        Some("{\n    \"a\": \"café\",\n    \"b\": 1\n}"),
+        Some("{\n    \"b\": 1,\n    \"a\": \"café\"\n}"),
         "GLM-4's exact call"
     );
     // The positional slot stays `indent`, as in Jinja2's builtin and minja.
     assert_eq!(
         render("{{ x | tojson(2) }}").as_deref(),
-        Some("{\n  \"a\": \"café\",\n  \"b\": 1\n}")
+        Some("{\n  \"b\": 1,\n  \"a\": \"café\"\n}")
     );
 }
 
@@ -2303,13 +2304,12 @@ fn tojson_takes_the_arguments_transformers_defines() {
 /// `ImmutableSandboxedEnvironment(trim_blocks, lstrip_blocks)`, its own
 /// `tojson`, its own `raise_exception`.
 ///
-/// One deliberate difference, and it is the only one: keys arrive
-/// ALPHABETICALLY rather than in the order the caller wrote them, because a
-/// tool definition is a `serde_json::Value` by the time it reaches here and
-/// `serde_json` is built without `preserve_order`, so its map is a `BTreeMap`.
-/// The reference below was generated with `sort_keys=True` for that reason.
-/// See `docs/FUTURE_WORK.md` — "A tool schema reaches the model with its keys
-/// alphabetised".
+/// Byte-for-byte INCLUDING key order, since 2026-09-12: the schema reads
+/// `name, description, parameters` because that is how `weather_tool` writes
+/// it. Until then the reference had to be generated with `sort_keys=True`,
+/// because every map reaching the renderer was a `BTreeMap` and arrived
+/// alphabetised — `docs/FUTURE_WORK.md` item 46, closed by building
+/// `serde_json` and `minijinja` with `preserve_order`.
 #[test]
 fn the_glm4_template_renders_exactly_as_transformers_does() {
     let msgs = vec![ChatMessage {
@@ -2322,7 +2322,51 @@ fn the_glm4_template_renders_exactly_as_transformers_does() {
         apply_chat_template(GLM4_GGUF_SHIPPED, &msgs, "", "<|user|>", true, Some(&tools))
             .expect("GLM-4's template must render");
 
-    assert_eq!(rendered, "[gMASK]<sop><|system|>\n# 可用工具\n\n## get_weather\n\n{\n    \"description\": \"Get the weather\",\n    \"name\": \"get_weather\",\n    \"parameters\": {\n        \"properties\": {\n            \"city\": {\n                \"type\": \"string\"\n            }\n        },\n        \"type\": \"object\"\n    }\n}\n在调用上述函数时，请使用 Json 格式表示调用的参数。<|user|>\nwhat is the weather in Paris?<|assistant|>");
+    assert_eq!(rendered, "[gMASK]<sop><|system|>\n# 可用工具\n\n## get_weather\n\n{\n    \"name\": \"get_weather\",\n    \"description\": \"Get the weather\",\n    \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"city\": {\n                \"type\": \"string\"\n            }\n        }\n    }\n}\n在调用上述函数时，请使用 Json 格式表示调用的参数。<|user|>\nwhat is the weather in Paris?<|assistant|>");
+}
+
+/// A tool schema reaches the model in the order its author wrote it.
+///
+/// The tool here is parsed from TEXT, the shape it has when a request body
+/// arrives, and written deliberately in the order every API caller writes it:
+/// `type` before `function`, `name` before `description` before `parameters`,
+/// `type` before `properties`. The expected line is what `transformers`' jinja2
+/// renders from the same input (`json.dumps` with no `sort_keys`), and llama.cpp
+/// renders the same because minja's json is `nlohmann::ordered_json`.
+///
+/// This fails if `preserve_order` is dropped from EITHER `serde_json` (the value
+/// is alphabetised on parse) or `minijinja` (alphabetised on its way into the
+/// template) — verified both ways on 2026-09-12. Until that day every schema
+/// arrived as `{"function": {"description", "name", "parameters"}, "type"}`,
+/// and schema formatting is not cosmetic to a small model: changing only the
+/// separators moved Qwen2.5-Coder-7B's call from `<tools>` to `<xml>` at
+/// temperature 0 (`docs/FUTURE_WORK.md` item 46).
+#[test]
+fn a_tool_schema_reaches_the_model_in_the_order_its_author_wrote_it() {
+    let tool: serde_json::Value = serde_json::from_str(
+        r#"{"type": "function", "function": {"name": "get_weather", "description": "Get the weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}"#,
+    )
+    .expect("a valid tool definition");
+    let msgs = vec![ChatMessage {
+        role: Role::User,
+        content: "what is the weather in Paris?".into(),
+        images: vec![],
+    }];
+    let rendered = apply_chat_template(
+        QWEN3_GGUF_SHIPPED,
+        &msgs,
+        "",
+        "<|im_end|>",
+        true,
+        Some(std::slice::from_ref(&tool)),
+    )
+    .expect("Qwen3's template must render");
+
+    let expected = "<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}}}}\n</tools>";
+    assert!(
+        rendered.contains(expected),
+        "the schema must reach the model in the author's order, not alphabetised:\n{rendered}"
+    );
 }
 
 /// An astral character escapes as a surrogate pair, which is what Python does.

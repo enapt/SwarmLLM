@@ -80,7 +80,18 @@ tower-http = { version = "0.6", features = ["cors", "timeout"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order`: a JSON object keeps the order its author wrote it in. Without
+# it every map is a `BTreeMap` and comes out ALPHABETISED — which reached the
+# model: a tool schema written `{"type", "function": {"name", "description",
+# "parameters"}}` was rendered `{"function": {"description", "name",
+# "parameters"}, "type"}`, on every tool-carrying request to every model.
+# `transformers`, vLLM (Python dicts) and llama.cpp (minja's
+# `nlohmann::ordered_json`) all hand the model the author's order, and the model
+# was trained and validated against it. Schema formatting is not cosmetic to a
+# small model — changing only the SEPARATORS moved Qwen2.5-Coder-7B's tool call
+# from `<tools>` to `<xml>` at temperature 0 (docs/FUTURE_WORK.md item 46). The
+# same feature on `minijinja` below keeps the order through the render.
+serde_json = { version = "1", features = ["preserve_order"] }
 # Chat-template rendering. A model's template is a Jinja program, and this is
 # the same engine HuggingFace's own Rust inference server (TGI) and SGLang use
 # for the job, with the `pycompat` shim that gives templates the Python string
@@ -96,7 +107,10 @@ serde_json = "1"
 # all do — and without the feature the filter is unknown, which fails the WHOLE
 # render rather than that one expression, so the model silently gets a fallback
 # template instead.
-minijinja = { version = "2.24", default-features = false, features = ["builtins", "serde", "loop_controls", "fuel", "json"] }
+# `preserve_order` for the same reason as `serde_json`'s above: without it the
+# template engine's own map is a `BTreeMap`, so a schema that arrived in the
+# author's order would be alphabetised again on its way through `tojson`.
+minijinja = { version = "2.24", default-features = false, features = ["builtins", "serde", "loop_controls", "fuel", "json", "preserve_order"] }
 minijinja-contrib = { version = "2.24", default-features = false, features = ["pycompat"] }
 toml = "1"
 safetensors = "0.7"

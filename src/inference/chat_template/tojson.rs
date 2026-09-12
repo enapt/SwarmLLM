@@ -29,6 +29,15 @@
 //! is what Qwen and Llama-3.1 use for tool schemas, and it now produces the same
 //! bytes `transformers` produces.
 //!
+//! **Key order is the author's, not alphabetical.** A schema written
+//! `{"type", "function": {"name", "description", "parameters"}}` reaches the
+//! model in that order, as it does through `transformers`, vLLM and llama.cpp
+//! (whose minja renders with `nlohmann::ordered_json`). That takes
+//! `preserve_order` on BOTH `serde_json` (the value the API hands us) and
+//! `minijinja` (the value the template sees) — drop either and every schema
+//! is alphabetised again on its way through this filter. Pinned by
+//! `a_tool_schema_reaches_the_model_in_the_order_its_author_wrote_it`.
+//!
 //! The single positional argument stays `indent`, as in Jinja2's builtin,
 //! minijinja and minja. `transformers` reads that slot as `ensure_ascii`
 //! instead, but no chat template passes it positionally — every one seen here
@@ -109,17 +118,18 @@ pub fn tojson(value: Value, indent: Option<Value>, kwargs: Kwargs) -> Result<Val
         ensure_ascii,
     };
 
-    // `sort_keys` is served by round-tripping through `serde_json::Value`,
-    // whose map is a `BTreeMap` here and so is sorted by construction.
+    // Keys come out in the order the caller wrote them, because both
+    // `serde_json` and `minijinja` are built with `preserve_order` — a tool
+    // schema reaches the model as its author laid it out, which is what
+    // `transformers`, vLLM and llama.cpp's minja all deliver. Until 2026-09-12
+    // every map here was a `BTreeMap` and every schema arrived ALPHABETISED
+    // (`docs/FUTURE_WORK.md` item 46).
     //
-    // It changes nothing at present, and that is worth stating plainly: every
-    // map that reaches this filter is ALREADY key-sorted, because a tool
-    // definition arrives as a `serde_json::Value` and `serde_json` is built
-    // without `preserve_order`. The flag is honoured rather than rejected —
-    // rejecting it is the defect this module exists to fix — and it will still
-    // mean what it says if that ever changes.
+    // `sort_keys=True` is therefore a real request now: it round-trips through
+    // `serde_json::Value` and sorts every nested object, as Python does.
     let rendered = if sort_keys {
-        let sorted: serde_json::Value = serde_json::to_value(&value).map_err(json_error)?;
+        let mut sorted: serde_json::Value = serde_json::to_value(&value).map_err(json_error)?;
+        sorted.sort_all_objects();
         write_json(&sorted, formatter)?
     } else {
         write_json(&value, formatter)?

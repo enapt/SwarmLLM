@@ -140,12 +140,28 @@ the worse failure.
 What a change here must keep:
 
 - `the_glm4_template_renders_exactly_as_transformers_does` compares byte-for-byte
-  against `jinja2` driven the way `transformers` drives it. The ONE deliberate
-  difference is key ORDER: a tool definition is a `serde_json::Value` by the time
-  it reaches the renderer and `serde_json` is built without `preserve_order`, so
-  keys arrive alphabetically. That is `docs/FUTURE_WORK.md` item 46, and the
-  reference string in the test is generated with `sort_keys=True` to say so out
-  loud rather than hide it.
+  against `jinja2` driven the way `transformers` drives it — key ORDER included,
+  since 2026-09-12. Until then the one deliberate difference was that keys
+  arrived alphabetised: a tool definition is a `serde_json::Value` by the time
+  it reaches the renderer, and `serde_json` was built without `preserve_order`,
+  so its map was a `BTreeMap`; minijinja's map was one too. Both crates now
+  carry `preserve_order` (`Cargo.toml` says why at each), so a schema written
+  `{"type", "function": {"name", "description", "parameters"}}` reaches the
+  model in that order — what `transformers`, vLLM (Python dicts) and llama.cpp
+  (minja's `nlohmann::ordered_json`) all deliver, and what the model was
+  validated against. `a_tool_schema_reaches_the_model_in_the_order_its_author_wrote_it`
+  parses a tool from text, the shape a request body has, and pins the Qwen3
+  `<tools>` line jinja2 produces; it fails with the feature dropped from EITHER
+  crate (verified both ways). `sort_keys=True` is now a real sort
+  (`Value::sort_all_objects`), not a no-op that happened to be true.
+  The blast radius was checked before switching: no signature or hash is
+  computed over a serialised `Value` map (every `identity.sign` site hashes
+  explicit fields), `TransactionReason` carries no `Value`, redb values are
+  re-parsed, and `Value` equality is order-insensitive under `IndexMap`. Two
+  things did change shape and are accepted: `json!` literals in API responses
+  now serialise in literal order rather than alphabetical, and
+  `claude_sub::session_key` hashes a message's text so is now sensitive to a
+  client reordering keys between turns (a cache miss, nothing worse).
 - `a_tool_schema_reaches_the_model_unescaped` is the regression guard for the
   escaping half; it fails on an apostrophe alone.
 - All four tests were verified to fail with the filter registration removed.
