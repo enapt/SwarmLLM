@@ -241,30 +241,18 @@ bump commit, so Cache warm fires ON the tagged commit. That closes .174's open
 note.
 
 **What it carries** — six field reports, five fixed and one answered, from a
-16 GB processor-only Mac, plus a bandwidth suggestion:
-
-- **A peer that reconnected mid-request became permanently undecryptable** (29
-  forwards, 29 failures, 0 successes). `handle_connection_closed` exempted a peer
-  in `active_pipelines` from `remove_session` — the COORDINATOR's map, so the
-  serving side retires either way and returns on a fresh key. **The comment
-  justifying the exemption had been false since `establish_session` became
-  idempotent** (#562, #563 — the mirror image of report #028's `retired` map).
-  A failed decrypt now asks for one rate-limited re-key, so any divergence heals.
-- **A request routed back to this node never used the prefix cache** —
-  `prefix-cache HIT` zero times in a week of field logs. `local_fast_path_for`
-  stands aside correctly; the plan then came back and was carried out as a
-  `LayerForward` per token to our own worker, the one path with no prefix cache,
-  batching or speculation. Now `pipeline::local_generate` (#564).
-- **A finished conversation never released its memory, and the refusal ended the
-  request** — the forward path freed nothing (the daemon's `cleanup_request_id`
-  is a DIFFERENT PROCESS's store), and the refusal was typed as final while a
-  five-segment peer route sat priced one line earlier.
-- **Stop belonged to the page**, not the chat on screen — it cancelled the other
-  chat's reply. Plus the macOS RAM bar (13 MB for 13 GB; two accountings, larger
-  wins) and **live RX/TX from libp2p's transport counters**, absent-never-zero
-  (#565), with `max_bandwidth_mbps` documented as shard-serving-only.
-- **Answered, not a defect: disk speed does not bias routing** (`FUTURE_WORK`
-  § Not bugs).
+16 GB processor-only Mac, plus a bandwidth suggestion: a peer that reconnected
+mid-request became permanently undecryptable (29/29 — the `active_pipelines`
+exemption on `remove_session`, whose justifying comment had been false since
+`establish_session` became idempotent, #562/#563); a request routed back to this
+node never used the prefix cache (`prefix-cache HIT` zero times in a week — now
+`pipeline::local_generate`, #564); a finished conversation never released its
+memory and the refusal was typed as final while a peer route sat priced; Stop
+belonged to the page rather than the chat on screen; the macOS RAM bar read
+13 MB for 13 GB; and live RX/TX from libp2p's transport counters,
+absent-never-zero (#565), with `max_bandwidth_mbps` documented as
+shard-serving-only. Answered, not a defect: disk speed does not bias routing.
+Full detail: `memory/round_log_0912_six_reports.md`.
 
 ⚠ **Self-review found THREE regressions this batch introduced, none caught by
 any test** — an unwatched cancel on the new local path (#567), a frontend scope
@@ -302,6 +290,7 @@ script fed an unfinished run advises causing exactly that (#557).
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
+- **.175** (09-12, tag `6bc9735d`, gate clean, conformance 9/9 matching a .174 baseline): six field reports — an undecryptable peer after a reconnect, the prefix cache never used on a returned plan, memory never released, Stop in the wrong chat, macOS RAM, live RX/TX. ⚠ THREE self-inflicted regressions caught in review, none by a test (#567-#569). `round_log_0912_six_reports.md`.
 - **.174** (09-11, tag `f4feccd2`, gate clean, conformance 9/9 against a .173 baseline scoring 1 FAIL): nine fixes, five field-reported the same day — `tojson` was minijinja's (every tool schema mangled), a tool call in an invented tag is parsed structurally, auto-manage prune could delete the shard PRIVACY depends on, the cloud catalogue was ERASED not stale, a warm peer credited only for layers it holds. `round_log_0911_field_report_and_privacy.md`.
 - **.172-.173** (09-11): Phi models never stopped generating (one declared EOS, a DIFFERENT token ends each turn) + four tool-calling fixes; then streamed replies stopping dead at ~65 tokens (generation held the thread the runtime needed to SEND them, then a full 64-slot queue read as a departed client), and **partial RoPE meaning Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request**. Same day: the CI/cache round — `cache-gc.yml` was ref-blind and would have deleted main's LIVE cache, `actionlint` became a CI job, branch protection went to 14 contexts — and **`family_conformance.sh`**, which found two real bugs on its first run. `round_log_0911_*.md`.
 - **.166-.171** (09-09→09-10): five field-driven releases in two days. **Every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` and a context that will not fit is SHRUNK not refused (.170); **tools were NEVER passed to the template** — unreachable on every request ever served — plus an escrow that MINTED credits (.171). ⚠ Branch protection required two jobs that no longer existed; every PR was permanently BLOCKED (#530).
