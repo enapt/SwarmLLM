@@ -958,6 +958,14 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
         // with the requests it has in flight. A worker still busy for a client
         // that has gone used to be visible only in `ps` (gotcha #445).
         "workers": state.shared_state.model_process_pool.worker_summaries(),
+        // What it is putting on the wire. THIS is the payload `swarmllm status`
+        // reads — a third stats surface beside `/api/admin/stats` and the
+        // WebSocket tick, and the one a user is told to run when they are
+        // asking whether SwarmLLM is what is saturating their connection.
+        // Added here after the figure reached the other two and the CLI printed
+        // nothing, because `describe_traffic` was tested against a hand-made
+        // object and the wiring never was.
+        "network_traffic": crate::api::metrics::network_traffic_json(&state.shared_state),
     }))
 }
 

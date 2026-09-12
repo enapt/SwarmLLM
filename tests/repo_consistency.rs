@@ -5851,3 +5851,40 @@ fn the_chat_send_and_stop_buttons_follow_the_session_on_screen() {
         );
     }
 }
+
+/// **Every stats surface that promises the traffic figure carries it.**
+///
+/// There are THREE, and they are separate payloads built in separate files:
+/// `/api/admin/stats` (the dashboard's initial load), the WebSocket
+/// `stats_update` tick, and `/v1/status` — which is what `swarmllm status`
+/// reads, and the one a user is told to run when they are working out whether
+/// this program is saturating their connection.
+///
+/// The figure reached the first two and not the third, and nothing noticed:
+/// `describe_traffic` was tested against a hand-made JSON object, so the
+/// CLI printed no Traffic line at all while the API served the numbers
+/// (2026-09-12). One builder is not one surface — `network_traffic_json`
+/// existed and was simply not called from the third place.
+#[test]
+fn every_stats_surface_carries_the_traffic_figure() {
+    let root = repo_root();
+    for (file, what) in [
+        ("src/api/admin.rs", "GET /api/admin/stats"),
+        ("src/api/websocket.rs", "the WebSocket stats_update tick"),
+        (
+            "src/api/openai/mod.rs",
+            "GET /v1/status, which `swarmllm status` reads",
+        ),
+    ] {
+        let src = std::fs::read_to_string(root.join(file)).unwrap();
+        let joined: Vec<String> = statements(&src).into_iter().map(|(_, s)| s).collect();
+        assert!(
+            joined
+                .iter()
+                .any(|s| s.contains("\"network_traffic\"") && s.contains("network_traffic_json")),
+            "{what} ({file}) must carry \"network_traffic\" from \
+             `api::metrics::network_traffic_json` — a stats surface that omits it \
+             reports no traffic at all, which reads as a silent node"
+        );
+    }
+}
