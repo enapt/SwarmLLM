@@ -83,3 +83,70 @@ Four things a change here must keep.
   `input_tokens` rather than sending a confident zero; the card omits the chip
   for the same reason, and `null` survives into the stored history entry so a
   restored card says what the live one said.
+
+## A control in persistent chrome earns its seat, and says its own name
+
+The header carried seven icon-only buttons — share peer address, auto-manage
+status, private mode, Settings, language, theme, node id, stop — on every page,
+chat included. Each explained itself only through `title=`.
+
+**The research is the reason this is a rule and not a preference.** NN/g's icon
+guidance is explicit: *"Don't rely on hover to reveal text labels: not only does
+it increase the interaction cost, but it also fails to translate well on touch
+devices."* It also puts the set of near-universally recognised icons at roughly
+home, print and the magnifying glass — none of the seven. Microsoft's
+icon-only Outlook toolbar is the worked example of what that costs: users could
+not tell what the icons did until labels were added. Separately, the guidance on
+destructive controls is that they get separation and friction rather than
+sharing a row of same-weight buttons with everything else — the stop control sat
+flush against the node id in a row of identical ghost buttons.
+
+**What changed, and the rule each move follows.**
+
+- **Group by where a thing belongs, never by how expert you must be to want
+  it** — the same principle as the nav change, and the reason there is still no
+  "Advanced mode" (Home Assistant is removing theirs; see the nav entry).
+  Node operation went to the Dashboard, which is the page that answers "how is
+  my node doing": node id and **Stop** into the Node panel header, auto-manage
+  status beside the models it manages, "Connect a node" into the Network panel.
+- **A duplicated control has one home.** Language was already in Settings and is
+  now only there. Theme was NOT — it existed solely as a header toggle cycling
+  dark → light → system, so the glyph was the only reading of which of three
+  states was in force. It is a named select in Settings → Preferences now, which
+  also makes `welcome.card4_body` true: the tour had been promising "the gear
+  icon opens Settings — language, theme, contribution caps" for months.
+- **A state indicator renders when the state is on, not always.** Private mode
+  was a padlock that was always present and so said nothing about whether
+  anything was locked. It is a labelled chip shown only while private mode is
+  on, and clicking it navigates to My Devices rather than toggling — a one-click
+  disable of a privacy guarantee from permanent chrome is exactly the accidental
+  destructive click. Same reasoning as the trust column's em dash: a default
+  rendered as a measurement is worse than nothing.
+
+**Three things a change here must keep**, each of which broke during the move
+and was caught only by driving the page:
+
+1. **`#auto-manage-dot`'s base styling lives on the ID selector.**
+   `auto-manage-status.js::render` does `dot.className = state`, which REPLACES
+   the class list — any base styling carried by a class is wiped on the first
+   render. Its geometry used to be inline because the dot was absolutely
+   positioned over an icon; it is inline-before-a-label now.
+2. **A control inside a `data-collapse` panel header must not collapse it.**
+   The Network header now carries the connect popover, so typing an address
+   would have folded the panel away mid-edit. The handler ignores clicks that
+   land on anything interactive — and a click on the header's own empty area
+   must still collapse, which is the null control for that guard.
+3. **Opening a popover from a delegated click handler happens on the next
+   tick.** The `data-goto-network-code` CTA and the "close the share popover
+   when the click landed outside `.share-btn-wrap`" listener are both document
+   click handlers on the SAME event, and the CTA is always outside that
+   wrapper — so opening it inline opened and immediately closed it. The visible
+   symptom was simply that nothing happened.
+
+**Method note.** Every one of those three was invisible in the diff and green in
+`node -c`; all three were found by driving the real page. And the first attempt
+to verify the third read a STALE frontend: `cargo test` and `cargo clippy` run
+with default features and overwrite `target/debug/swarmllm` with an `embedded`
+build, so the dev node silently went back to serving a baked-in snapshot of the
+frontend (gotcha #573). Confirm with
+`curl -s :PORT/static/js/<file> | grep <your edit>` before doubting the browser.

@@ -77,6 +77,24 @@ loading, a model being picked, and entering the Chat tab.
 
 → `docs/invariants/frontend.md`
 
+## A control in persistent chrome earns its seat, and says its own name
+
+Anything that sits in the header is on EVERY page. Node operation (node id,
+Stop, connect-a-node, auto-manage status) lives on the Dashboard; a preference
+set once (language, appearance) lives in Settings, once; a state indicator
+renders only while its state is on (the private-mode chip). An icon whose only
+explanation is `title=` is not labelled — NN/g rules out hover for this, and
+only home/print/search are near-universal.
+
+Three things that broke during the move and must be kept: `#auto-manage-dot`'s
+base styling is on the ID selector because `render()` replaces `className`; a
+control inside a `data-collapse` header must not collapse it (and the header's
+own empty area must still collapse); and a popover opened from a delegated click
+handler opens on the NEXT TICK, or the same event's outside-click listener
+closes it immediately.
+
+→ `docs/invariants/frontend.md`
+
 ## Every surface that shows a model's reply renders it the same way
 
 **`utils.renderReplyInto(el, text, opts)`** is the one place a reply becomes

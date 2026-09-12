@@ -274,7 +274,7 @@
   vertical-align: middle; display: inline-block;
   box-shadow: 0 0 0 1px rgba(128,128,128,0.2);
 }
-#btn-lang-picker .lang-flag-img { width: 22px; height: 16px; }
+#setup-lang-btn .lang-flag-img { width: 22px; height: 16px; }
 .lang-dropdown .lang-flag-img { margin-right: 6px; }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -478,16 +478,13 @@ a:hover { color: var(--accent-hover); }
   font-family: var(--font-mono);
 }
 
-.node-info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--fs-sm);
-  color: var(--text-secondary);
-}
-
-.btn-shutdown { color: var(--text-muted) !important; font-size: var(--fs-xl) !important; }
-.btn-shutdown:hover { color: var(--red-text) !important; }
+/* Stop carries a text label now, so the oversized-glyph sizing that fitted a
+   bare power symbol in the header no longer applies. The !important on colour
+   is dropped with it: it beat every later rule, including the separation
+   styling the button gets in a panel header. */
+.btn-shutdown { color: var(--text-muted); }
+.btn-shutdown:hover { color: var(--red-text); }
+.btn-shutdown [aria-hidden="true"] { font-size: var(--fs-lg); vertical-align: middle; }
 
 /* ---- App Layout ---- */
 .app-layout {
@@ -1752,7 +1749,6 @@ a:hover { color: var(--accent-hover); }
 
   /* Hide non-essential header items */
   .model-selector { display: none; }
-  .node-info { display: none; }
 
   .hamburger-btn { display: inline-flex; }
 
@@ -1900,7 +1896,20 @@ a:hover { color: var(--accent-hover); }
   animation: pulse 2s infinite;
 }
 
-/* Auto-manage status indicator */
+/* Auto-manage status indicator.
+   The base rule is on the ID, deliberately: auto-manage-status.js sets
+   `dot.className = state`, which REPLACES the class list, so any base styling
+   carried by a class would be wiped on the first render. The dot used to be
+   absolutely positioned over an icon button in the header with its geometry
+   inline; now it sits inline before a text label in the Models panel. */
+#auto-manage-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted, #888);
+  margin-right: 6px;
+  vertical-align: middle;
+}
 #auto-manage-dot.idle-ok { background: var(--green); }
 #auto-manage-dot.idle-disabled { background: var(--text-muted, #888); }
 #auto-manage-dot.active-download { background: #3b82f6; animation: pulse-am 1.2s infinite; }
@@ -6289,3 +6298,41 @@ textarea.pool-code-input { min-height: 4.5em; }
   .lb-place-3 { order: 3; }
   .lb-count { margin-left: 0; width: 100%; }
 }
+
+/* Private-mode chip — the header's only state indicator, and it renders only
+   while the state is actually on (see index.html). Given real colour rather
+   than ghost styling so an active restriction on where inference may run is
+   visible at a glance from any page. */
+.private-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg-tertiary, rgba(255,255,255,0.06));
+  border: 1px solid var(--green);
+  color: var(--green);
+  white-space: nowrap;
+}
+.private-mode-chip:hover { filter: brightness(1.15); }
+
+/* Node identity in the Node panel header. Click-to-copy, as it was in the
+   header chrome — only now next to the version and uptime it belongs with. */
+.node-id-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.node-id-chip .pulse-dot { margin-right: 4px; }
+
+/* Stop is the one destructive control on this page. It gets separation from
+   the non-destructive controls beside it rather than sharing their weight —
+   accidental clicks on a persistent toolbar are the documented failure mode,
+   and the confirm() behind it is the second line of defence, not the first. */
+.panel-header .btn-shutdown {
+  margin-left: 10px;
+  border-left: 1px solid var(--border);
+  padding-left: 12px;
+  border-radius: 0;
+  color: var(--text-muted);
+}
+.panel-header .btn-shutdown:hover { color: var(--red, #ef4444); }

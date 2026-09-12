@@ -218,6 +218,19 @@
         });
       }
 
+      // Appearance. Applied immediately on change like the header toggle it
+      // replaced — there is no Save step for a preference you can see land.
+      var themeSelect = document.getElementById('settings-theme');
+      if (themeSelect) {
+        var cur = 'dark';
+        try { cur = localStorage.getItem(App.THEME_KEY) || 'dark'; } catch (e) {}
+        themeSelect.value = cur;
+        themeSelect.addEventListener('change', function() {
+          try { localStorage.setItem(App.THEME_KEY, this.value); } catch (e) {}
+          App.applyTheme(this.value);
+        });
+      }
+
       // Claude subscription toggle
       var csToggle = document.getElementById('claude-subscription-toggle');
       if (csToggle) {

@@ -102,9 +102,11 @@ App.applyTheme = function(theme) {
     resolved = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   }
   document.documentElement.setAttribute('data-theme', resolved);
-  var btn = document.getElementById('btn-theme-toggle');
-  var icons = { dark: '\u263E', light: '\u2600', system: '\u25D1' };
-  if (btn) btn.textContent = icons[theme] || '\u263E';
+  // Keep the Settings control in step. Appearance used to be a crescent-moon
+  // button in the header that cycled through three states, so the glyph was
+  // the only reading of which one you were on; it is a named select now.
+  var sel = document.getElementById('settings-theme');
+  if (sel && sel.value !== theme) sel.value = theme;
 };
 
 // Listen for system theme changes when in 'system' mode

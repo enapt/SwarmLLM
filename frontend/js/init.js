@@ -99,62 +99,13 @@
     on('btn-save-settings', 'click', function() { App.settings.save(); });
     on('btn-open-settings', 'click', function() { App.ui.openSettings(); });
 
-    // Theme toggle
-    on('btn-theme-toggle', 'click', function() {
-      var themes = ['dark', 'light', 'system'];
-      var icons = { dark: '\u263E', light: '\u2600', system: '\u25D1' };
-      var cur = localStorage.getItem(App.THEME_KEY) || 'dark';
-      var next = themes[(themes.indexOf(cur) + 1) % themes.length];
-      localStorage.setItem(App.THEME_KEY, next);
-      App.applyTheme(next);
-      var btn = document.getElementById('btn-theme-toggle');
-      if (btn) btn.textContent = icons[next] || '\u263E';
-    });
-
-    // Language picker dropdown
-    (function() {
-      // Country flag as inline SVG img
-      function countryFlag(cc) {
-        return '<img src="/static/flags/' + cc.toLowerCase() + '.svg" alt="' + cc + '" class="lang-flag-img">';
-      }
-      var dropdown = document.getElementById('lang-dropdown');
-      var btn = document.getElementById('btn-lang-picker');
-      if (!dropdown || !btn) return;
-      LANGS.forEach(function(pair) {
-        var b = document.createElement('button');
-        b.type = 'button';
-        b.innerHTML = countryFlag(pair[2]) + ' ' + App.utils.escapeHtml(pair[1]);
-        b.title = pair[1];
-        b.dataset.lang = pair[0];
-        b.addEventListener('click', function() {
-          if (typeof I18n !== 'undefined') I18n.setLang(pair[0]);
-          var settingsLang = document.getElementById('settings-language');
-          if (settingsLang) settingsLang.value = pair[0];
-          dropdown.style.display = 'none';
-          updateLangDropdownActive();
-        });
-        dropdown.appendChild(b);
-      });
-      btn.addEventListener('click', function(e) {
-        e.stopPropagation();
-        var open = dropdown.style.display !== 'none';
-        dropdown.style.display = open ? 'none' : '';
-        if (!open) updateLangDropdownActive();
-      });
-      document.addEventListener('click', function() { dropdown.style.display = 'none'; });
-      dropdown.addEventListener('click', function(e) { e.stopPropagation(); });
-
-      function updateLangDropdownActive() {
-        var cur = (typeof I18n !== 'undefined') ? I18n.getLang() : 'en';
-        dropdown.querySelectorAll('button').forEach(function(b) {
-          b.classList.toggle('active', b.dataset.lang === cur);
-        });
-        // Update header button to show current flag
-        var curLang = LANGS.find(function(l) { return l[0] === cur; });
-        if (curLang && btn) btn.innerHTML = countryFlag(curLang[2]);
-      }
-      updateLangDropdownActive();
-    })();
+    // Appearance and language are Settings controls, not header chrome.
+    // Both were icon-only buttons whose meaning was available on hover alone —
+    // the one thing NN/g's icon guidance rules out, because it costs an
+    // interaction and does not exist on touch. Language was already duplicated
+    // in Settings; appearance was not, and is now (settings.js). The setup
+    // wizard keeps its OWN language picker below: someone on first run has not
+    // got a Settings dialog yet, and it is labelled in place.
 
     // Setup wizard language picker (button-style dropdown — matches the header lang picker UX)
     (function() {
@@ -359,7 +310,31 @@
       if (el.getAttribute('data-goto-browse')) { App.ui.openModelBrowser(); }
       if (el.getAttribute('data-goto-settings')) { App.ui.openSettings(true); }
       if (el.getAttribute('data-goto-hf')) { App.ui.openModelBrowser(); }
-      if (el.getAttribute('data-goto-network-code')) { var btn = document.getElementById('btn-share-network'); if (btn) btn.click(); }
+      if (el.getAttribute('data-goto-network-code')) {
+        // Connecting to a node now lives in the Dashboard's Network panel, so
+        // this CTA takes you there rather than opening a popover attached to
+        // chrome that is no longer on the page you are standing on.
+        App.ui.switchTab('dashboard');
+        var body = document.getElementById('network-body');
+        if (body) {
+          body.classList.remove('collapsed');
+          var hdr = document.querySelector('.panel-header[data-collapse="network-body"]');
+          if (hdr) hdr.classList.remove('collapsed');
+        }
+        var btn = document.getElementById('btn-share-network');
+        if (btn) {
+          // Opened on the next tick, NOT inline: this same click event still
+          // has to reach the delegated "close the share popover when the click
+          // landed outside .share-btn-wrap" listener registered below, which
+          // would otherwise shut the popover we just opened. The CTA is always
+          // outside that wrapper, so it matched every time.
+          setTimeout(function() {
+            if (btn.scrollIntoView) btn.scrollIntoView({ block: 'center' });
+            var pop = document.getElementById('share-popover');
+            if (pop) pop.classList.add('show');
+          }, 0);
+        }
+      }
     });
 
     // Network discovery — share popover
@@ -775,7 +750,12 @@
   // ========================================================================
   function initCollapsiblePanels() {
     document.querySelectorAll('.panel-header[data-collapse]').forEach(function(header) {
-      header.addEventListener('click', function() {
+      header.addEventListener('click', function(e) {
+        // A control living in a collapsing header must not collapse it. The
+        // Network header now carries "Connect a node" and its popover, so
+        // typing an address or hitting Copy would otherwise fold the panel
+        // away mid-edit. Anything interactive is the control's business.
+        if (e.target.closest('button, a, input, select, textarea, label, .share-popover')) return;
         var targetId = header.getAttribute('data-collapse');
         var body = document.getElementById(targetId);
         if (!body) return;

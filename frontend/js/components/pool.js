@@ -514,11 +514,14 @@
           });
         });
       }
-      // Header shield button
-      var headerBtn = document.getElementById('btn-private-mode-toggle');
-      if (headerBtn) {
-        headerBtn.addEventListener('click', function () {
-          self.confirmPrivateMode(!self._privateMode);
+      // Header chip. It reports the state and takes you to the switch that
+      // sets it; it does not toggle. A one-click disable of a privacy
+      // restriction sitting in permanent chrome is the accidental-click case,
+      // and the labelled switch here already carries the coverage confirm.
+      var headerChip = document.getElementById('btn-private-mode-chip');
+      if (headerChip) {
+        headerChip.addEventListener('click', function () {
+          App.ui.switchTab('devices');
         });
       }
     },
@@ -592,16 +595,14 @@
         label.textContent = enabled ? I18n.t('pool.private_mode_on') : I18n.t('pool.private_mode_off');
         label.style.color = enabled ? 'var(--green)' : '';
       }
-      // Header shield
-      var icon = document.getElementById('private-mode-icon');
-      if (icon) {
-        icon.style.color = enabled ? 'var(--green)' : '';
-        icon.style.fill = enabled ? 'var(--green)' : 'none';
-      }
-      var badge = document.getElementById('private-mode-badge');
-      if (badge) {
-        if (enabled) badge.classList.remove('hidden');
-        else badge.classList.add('hidden');
+      // Header chip — present only while the state it reports is on. A
+      // padlock that is always there says nothing about whether anything is
+      // locked, which is the same reason an unmeasured trust score shows an
+      // em dash rather than its default.
+      var chip = document.getElementById('btn-private-mode-chip');
+      if (chip) {
+        if (enabled) chip.classList.remove('hidden');
+        else chip.classList.add('hidden');
       }
       // Coverage panel
       var coveragePanel = document.getElementById('pool-coverage-panel');

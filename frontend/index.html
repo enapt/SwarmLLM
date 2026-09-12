@@ -358,6 +358,21 @@
         </select>
         <span class="text-muted field-hint" data-i18n="settings.language_hint">Dashboard language. Community translations welcome!</span>
       </div>
+      <!-- Appearance lives here and only here. It used to be a crescent-moon
+           button in the header that cycled dark -> light -> system, so the only
+           way to learn which of the three you were on was to read the glyph —
+           and the welcome tour had been telling people for months that the gear
+           opened "language, theme, contribution caps", which was not true of
+           theme. A select shows all three states and names the one in force. -->
+      <div class="form-group">
+        <label for="settings-theme" data-i18n="settings.theme_label">Appearance</label>
+        <select id="settings-theme">
+          <option value="system" data-i18n="settings.theme_system">Match my device</option>
+          <option value="light" data-i18n="settings.theme_light">Light</option>
+          <option value="dark" data-i18n="settings.theme_dark">Dark</option>
+        </select>
+        <span class="text-muted field-hint" data-i18n="settings.theme_hint">Changes apply straight away.</span>
+      </div>
       </section>
 
       <section class="settings-section">
@@ -845,49 +860,22 @@
         <input type="hidden" id="model-select" value="" />
         <button class="btn btn-sm" id="btn-open-model-browser" data-i18n="nav.find_models_btn" data-i18n-title="nav.find_models_tip" title="Find models on HuggingFace to download and host." data-i18n-aria-label="nav.find_models_aria" aria-label="Find models">+ Find model</button>
       </div>
-      <div class="share-btn-wrap" style="position:relative">
-        <button class="btn btn-ghost btn-sm" id="btn-share-network" data-i18n-title="nav.share_peer" title="Share your swarm peer address" data-i18n-aria-label="nav.share_peer" aria-label="Share peer address"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></button>
-        <div class="share-popover" id="share-popover">
-          <label class="font-semibold mb-1" data-i18n="network.your_peer_address">Your Swarm Peer Address</label>
-          <div class="text-muted field-hint mb-1" data-i18n="network.share_desc">Share with other SwarmLLM users so your nodes can discover each other on the network</div>
-          <div class="flex gap-1 mb-2">
-            <input type="text" id="my-network-code" readonly class="form-control mono text-2xs flex-1" data-i18n-aria-label="network.my_address_aria" aria-label="Your peer address">
-            <button class="btn btn-sm" id="btn-copy-network-code" data-i18n-title="nav.copy_clipboard" title="Copy to clipboard" data-i18n="actions.copy">Copy</button>
-          </div>
-          <label class="font-semibold mb-0" data-i18n="network.other_peer_address">Another User's Peer Address</label>
-          <div class="text-muted field-hint mb-0" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
-          <div class="flex gap-1">
-            <input type="text" id="join-code-input" class="form-control mono text-2xs flex-1" placeholder="swarm://..." data-i18n-aria-label="network.peer_address_aria" aria-label="Peer address">
-            <button class="btn btn-sm btn-primary" id="btn-join-network" data-i18n="setup.connect_btn">Connect</button>
-          </div>
-          <div class="text-muted mt-0" id="join-status"></div>
-          <div class="text-muted text-2xs divider" data-i18n="network.not_devices">This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.</div>
-        </div>
-      </div>
-      <button class="btn btn-ghost btn-sm" id="btn-auto-manage-status" data-i18n-title="nav.auto_manage_idle_ok" title="Auto-manage: idle" aria-label="Auto-manage status" style="position:relative">
-        <svg id="auto-manage-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><path d="M21 12a9 9 0 1 1-3.5-7.1"/><polyline points="21 3 21 9 15 9"/></svg>
-        <span id="auto-manage-dot" style="position:absolute;top:2px;right:2px;width:8px;height:8px;background:var(--green);border-radius:50%;border:2px solid var(--bg-secondary)"></span>
-        <span id="auto-manage-label" class="hidden" style="margin-left:4px;font-size:0.75em"></span>
-      </button>
-      <button class="btn btn-ghost btn-sm" id="btn-private-mode-toggle" data-i18n-title="pool.private_mode_tooltip" title="Private Mode — restrict inference to your devices" aria-label="Toggle private mode" style="position:relative">
-        <svg id="private-mode-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-        <span id="private-mode-badge" class="hidden" style="position:absolute;top:0;right:0;width:8px;height:8px;background:var(--green);border-radius:50%;border:2px solid var(--bg-secondary)"></span>
+      <!-- Shown ONLY while private mode is on. A padlock that is always
+           present says nothing about the state it is meant to report, and an
+           always-live one-click toggle over a privacy guarantee is the
+           accidental-destructive-click case. Off: nothing here. On: a named
+           chip that takes you to My Devices, where the labelled switch and its
+           confirmation live. -->
+      <button class="btn btn-sm private-mode-chip hidden" id="btn-private-mode-chip" type="button"
+              data-i18n-title="pool.private_mode_tooltip" title="Private Mode - restrict inference to your devices">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+        <span data-i18n="nav.private_mode_on">Private mode</span>
       </button>
       <button class="btn btn-ghost btn-sm" id="btn-open-settings" data-i18n-title="settings.title" title="Settings" data-i18n-aria-label="settings.title" aria-label="Settings">&#9881;</button>
       <div class="setup-finish-chip hidden" id="setup-finish-chip" role="status" aria-live="polite">
         <button type="button" class="setup-finish-chip-main" id="setup-finish-chip-main" data-i18n="setup.complete_chip" data-i18n-title="setup.complete_chip_title" title="Finish your setup">Finish setup</button>
         <button type="button" class="setup-finish-chip-dismiss" id="setup-finish-chip-dismiss" data-i18n-aria-label="setup.complete_chip_dismiss" aria-label="Dismiss">&times;</button>
       </div>
-      <div class="header-lang-picker" style="position:relative">
-        <button class="btn btn-ghost btn-sm" id="btn-lang-picker" data-i18n-title="settings.language_label" title="Language" data-i18n-aria-label="settings.language_label" aria-label="Language"><img src="/static/flags/gb.svg" alt="EN" class="lang-flag-img"></button>
-        <div class="lang-dropdown" id="lang-dropdown" style="display:none"></div>
-      </div>
-      <button class="btn btn-ghost btn-sm" id="btn-theme-toggle" data-i18n-title="nav.toggle_theme" title="Toggle light/dark theme" data-i18n-aria-label="nav.toggle_theme" aria-label="Toggle theme">&#9790;</button>
-      <div class="node-info">
-        <span class="pulse-dot"></span>
-        <span class="mono" id="node-id" data-i18n-title="nav.node_id_title" title="Node ID">...</span>
-      </div>
-      <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" data-i18n-title="nav.shutdown" title="Stop SwarmLLM" data-i18n-aria-label="nav.shutdown" aria-label="Stop SwarmLLM">&#9211;</button>
     </div>
   </header>
 
@@ -1088,6 +1076,17 @@
                     <div class="hw-mode-popover hw-mode-note" id="hw-mode-note" hidden></div>
                   </span>
                   <span class="mono text-muted field-hint"><span id="version">v...</span> &middot; Up <span id="uptime">...</span></span>
+                  <!-- Node identity and the stop control used to sit in the
+                       header of every page, chat included. They are node
+                       operation: wanted deliberately, by someone already asking
+                       "how is my node doing". Stop keeps its confirm() and is
+                       given its own separation from everything non-destructive
+                       rather than sharing a row of same-weight ghost buttons. -->
+                  <span class="node-id-chip" id="node-id-chip">
+                    <span class="pulse-dot"></span>
+                    <span class="mono" id="node-id" data-i18n-title="nav.node_id_title" title="Node ID">...</span>
+                  </span>
+                  <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" data-i18n-title="nav.shutdown" title="Stop SwarmLLM" data-i18n-aria-label="nav.shutdown" aria-label="Stop SwarmLLM"><span aria-hidden="true">&#9211;</span> <span data-i18n="nav.shutdown_label">Stop</span></button>
                 </span>
               </div>
               <!-- Grouped by the device that does the work, not by the kind of
@@ -1180,7 +1179,23 @@
           <div class="panel mt-2">
             <div class="panel-header">
               <h2 data-i18n="dashboard.models_title">Models</h2>
-              <button class="btn btn-sm" id="btn-browse-hf" data-i18n="nav.find_models_aria">Find Models</button>
+              <span class="flex-center gap-1">
+                <!-- Auto-manage reports a STATE and its click only opens
+                     Settings, so it belongs beside the models it manages rather
+                     than in the chrome of every page. The dot alone said
+                     nothing without a hover, which is the one thing NN/g tells
+                     you not to do with an icon. -->
+                <button class="btn btn-ghost btn-sm" id="btn-auto-manage-status" data-i18n-title="nav.auto_manage_idle_ok" title="Auto-manage: idle" aria-label="Auto-manage status">
+                  <!-- No class here on purpose: render() assigns
+                       `dot.className = state`, which replaces the list. The
+                       dot's base styling is on the ID selector for that
+                       reason. -->
+                  <span id="auto-manage-dot"></span>
+                  <span data-i18n="nav.auto_manage_label">Auto-manage</span>
+                  <span id="auto-manage-label" class="hidden" style="margin-left:4px;font-size:0.75em"></span>
+                </button>
+                <button class="btn btn-sm" id="btn-browse-hf" data-i18n="nav.find_models_aria">Find Models</button>
+              </span>
             </div>
             <div id="models-stats-bar" class="models-stats-bar" style="display:none">
               <span class="models-stat-group">
@@ -1226,7 +1241,33 @@
           <div class="panel mt-2">
             <div class="panel-header" data-collapse="network-body">
               <h2 data-i18n="dashboard.network_title">Network</h2>
-              <span class="text-muted" style="font-size:0.75rem" id="peers-summary"></span>
+              <span class="flex-center gap-1">
+                <span class="text-muted" style="font-size:0.75rem" id="peers-summary"></span>
+                <!-- Connecting to another node is a network act and now sits in
+                     the Network panel. In the header it was an unlabelled
+                     three-circle glyph on every page; here it says what it
+                     does. data-collapse is on the header, so this button stops
+                     its own click from collapsing the panel underneath it. -->
+                <span class="share-btn-wrap" style="position:relative">
+                  <button class="btn btn-sm" id="btn-share-network" data-i18n-title="nav.share_peer" title="Share your swarm peer address" data-i18n="nav.connect_node">Connect a node</button>
+                  <div class="share-popover" id="share-popover">
+                    <label class="font-semibold mb-1" data-i18n="network.your_peer_address">Your Swarm Peer Address</label>
+                    <div class="text-muted field-hint mb-1" data-i18n="network.share_desc">Share with other SwarmLLM users so your nodes can discover each other on the network</div>
+                    <div class="flex gap-1 mb-2">
+                      <input type="text" id="my-network-code" readonly class="form-control mono text-2xs flex-1" data-i18n-aria-label="network.my_address_aria" aria-label="Your peer address">
+                      <button class="btn btn-sm" id="btn-copy-network-code" data-i18n-title="nav.copy_clipboard" title="Copy to clipboard" data-i18n="actions.copy">Copy</button>
+                    </div>
+                    <label class="font-semibold mb-0" data-i18n="network.other_peer_address">Another User's Peer Address</label>
+                    <div class="text-muted field-hint mb-0" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
+                    <div class="flex gap-1">
+                      <input type="text" id="join-code-input" class="form-control mono text-2xs flex-1" placeholder="swarm://..." data-i18n-aria-label="network.peer_address_aria" aria-label="Peer address">
+                      <button class="btn btn-sm btn-primary" id="btn-join-network" data-i18n="setup.connect_btn">Connect</button>
+                    </div>
+                    <div class="text-muted mt-0" id="join-status"></div>
+                    <div class="text-muted text-2xs divider" data-i18n="network.not_devices">This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.</div>
+                  </div>
+                </span>
+              </span>
             </div>
             <div class="panel-body" id="network-body">
               <div id="peers-list">
@@ -1469,7 +1510,7 @@
                 <button class="swarm-subtab active" data-swarm-subtab="running" data-i18n="swarm.tab_running">Running now</button>
                 <button class="swarm-subtab" data-swarm-subtab="wishlist" data-i18n="swarm.tab_wishlist">Wishlist</button>
                 <button class="swarm-subtab" data-swarm-subtab="search" data-i18n="swarm.tab_search">Search HuggingFace</button>
-                <button class="swarm-subtab" data-swarm-subtab="capacity" data-i18n="swarm.tab_capacity">Capacity plan</button>
+                <button class="swarm-subtab" data-swarm-subtab="capacity" data-i18n="swarm.tab_capacity">If more people join</button>
                 <button class="swarm-subtab" data-swarm-subtab="performance" data-i18n="swarm.tab_performance">Performance</button>
               </div>
             </div>
