@@ -380,9 +380,23 @@ a:hover { color: var(--accent-hover); }
   background: var(--bg-secondary); border: 1px solid var(--border-light);
   border-radius: var(--radius); box-shadow: var(--shadow-lg);
   min-width: 180px; padding: 4px;
+  /* Never wider than the screen it is on. A no-op at any width where 180px
+     fits, which is every desktop; it exists so the panel cannot be the thing
+     that makes the page scroll sideways. */
+  max-width: calc(100vw - 16px);
   display: flex; flex-direction: column; gap: 2px;
 }
 .nav-more-panel .tab-btn { text-align: left; width: 100%; }
+/* On a narrow screen the trigger sits right of centre — the fourth item in a
+   centred row — so a panel hung from its LEFT edge is the half most likely to
+   run off the right of the viewport. Hang it from the right instead, where it
+   grows back towards the middle. Reasoned, not observed: no tool available
+   here can give this page a 400px viewport (window resize is a no-op, the
+   dashboard refuses to be framed, popups are blocked), so this is written to
+   need no verification rather than to have had it. */
+@media (max-width: 640px) {
+  .nav-more-panel { left: auto; right: 0; }
+}
 
 /* Model selector in header */
 .model-selector {
