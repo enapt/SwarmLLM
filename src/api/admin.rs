@@ -1790,10 +1790,15 @@ pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serd
     let total_ram_mb = sys.total_memory() / (1024 * 1024);
     let used_ram_mb = sys.used_memory() / (1024 * 1024);
 
+    // Through `process_memory`, because `sysinfo`'s single reading is not the
+    // whole answer on every platform: on macOS it reported 13 MB for a worker
+    // holding a 14B model, while the machine was visibly full and the
+    // system-wide figure below was correct (report #017). That helper takes the
+    // largest accounting the platform offers, so this can under-report only
+    // where every accounting does.
     let rss_mb_of = |p: sysinfo::Pid| -> u64 {
-        sys.process(p)
-            .map(|pr| pr.memory() / (1024 * 1024))
-            .unwrap_or(0)
+        let from_sysinfo = sys.process(p).map(|pr| pr.memory()).unwrap_or(0);
+        crate::api::process_memory::resident_bytes(p.as_u32(), from_sysinfo) / (1024 * 1024)
     };
 
     // A worker that exited between listing the pids and reading them simply
