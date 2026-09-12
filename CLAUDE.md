@@ -242,8 +242,13 @@ hour". Two fixes shipped from that sweep: opening this node's address landed on
 the OPERATOR CONSOLE (eleven panels, thirty-plus numbers, a live shard-announce
 feed) and now lands on chat; "Models" opened on the Wishlist — a list of models
 the swarm does not have, the first four rows reading "Too large for this
-swarm" — and now opens on "Running now". The remaining queue, what is already
-good and must not be simplified away, and the jargon inventory are in
+swarm" — and now opens on "Running now". The header also carried seven tabs;
+it now carries three (Chat · Models · Dashboard) plus a "More" menu, grouped by
+how OFTEN a destination is wanted and deliberately NOT by skill — Home
+Assistant is removing the "Advanced mode" switch it has had since 0.96 for
+exactly that reason, and a menu is the replacement it recommends. The remaining
+queue (the seven header icons, two of which duplicate Settings), what is
+already good and must not be simplified away, and the jargon inventory are in
 `memory/round_log_0912_new_user_sweep.md`. ⚠ Mobile layout is UNVERIFIED.
 
 **Unreleased on `main` after the .175 tag (2026-09-12):** #569 (`swarmllm status`
