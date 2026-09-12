@@ -65,12 +65,22 @@ impl PipelineExecutor {
             "DIAG: single-segment plan names this node — running it as a local generate"
         );
 
+        // **Watched, not merely awaited.** This is a wait that runs for as long
+        // as the whole reply takes — minutes on a processor — and
+        // `generate_attempt` loops on the worker's messages until the worker
+        // stops. It does not read the cancel flag and a closed token channel
+        // does not end it (`let _ = tx.send(..)`), so nothing here would notice
+        // a client that left: the API fast path drops the same future through a
+        // `select!` on its disconnect watch, and this path had no equivalent.
+        //
+        // Dropping it is the mechanism, and it works because the pool's
+        // `ResponseGuard` sends `CancelRequest` to the worker on drop.
+        //
         // `session_id` is carried through so a multi-turn conversation keeps
         // its KV entry, exactly as it does on the API fast path.
-        let out = self
-            .shared_state
-            .model_process_pool
-            .generate(
+        let pool = &self.shared_state.model_process_pool;
+        let out = crate::inference::cancel::unless_cancelled(
+            pool.generate(
                 &model_id,
                 layer_range,
                 prompt,
@@ -78,8 +88,10 @@ impl PipelineExecutor {
                 request_id,
                 self.request.session_id.clone(),
                 token_tx,
-            )
-            .await?;
+            ),
+            self.request.cancel.as_ref(),
+        )
+        .await?;
         Ok(Some(out))
     }
 

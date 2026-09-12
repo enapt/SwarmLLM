@@ -1467,7 +1467,10 @@ fn every_long_pipeline_wait_watches_the_cancel_flag() {
             };
             // Test code sets its own deadlines and has no client to abandon it.
             let src = &text[..text.find("#[cfg(test)]").unwrap_or(text.len())];
-            for line_no in unwatched_pipeline_waits(src) {
+            for line_no in unwatched_pipeline_waits(src)
+                .into_iter()
+                .chain(unwatched_pool_generations(src))
+            {
                 offenders.push(format!(
                     "{}:{}",
                     p.strip_prefix(&root).unwrap_or(&p).display(),
@@ -1485,6 +1488,28 @@ fn every_long_pipeline_wait_watches_the_cancel_flag() {
          (gotcha #468).",
         offenders.join("\n  ")
     );
+}
+
+/// The generation half must see the shape it forbids, in the form rustfmt
+/// actually produces — the call it was written for is eight lines long.
+#[test]
+fn the_cancel_watch_guard_catches_an_unwatched_generation() {
+    // One line.
+    assert_eq!(
+        unwatched_pool_generations("let out = pool.generate(&m, r, p, s, id, None, tx).await?;\n"),
+        vec![1]
+    );
+    // Wrapped, which is how it is really written.
+    let wrapped = "let out = self\n    .shared_state\n    .model_process_pool\n    .generate(\n                           &model_id,\n        layer_range,\n        prompt,\n    )\n    .await?;\n";
+    assert_eq!(unwatched_pool_generations(wrapped), vec![1]);
+    // Watched: the fix, and it must not be reported.
+    let watched = "let out = crate::inference::cancel::unless_cancelled(\n                           pool.generate(&model_id, layer_range, prompt),\n                           self.request.cancel.as_ref(),\n    )\n    .await?;\n";
+    assert!(unwatched_pool_generations(watched).is_empty());
+    // The in-process executor blocks rather than awaits.
+    assert!(unwatched_pool_generations(
+        "let (c, g) = without_starving_the_runtime(|| executor.generate(&p, &s))?;\n"
+    )
+    .is_empty());
 }
 
 /// The guard is only worth having if it can see the shape it forbids.
@@ -1512,6 +1537,35 @@ fn the_cancel_watch_guard_catches_an_unwatched_wait() {
 
 /// Lines awaiting a channel under `tokio::time::timeout` without
 /// `unless_cancelled` on the same line.
+/// A whole-reply generation awaited in the pipeline without watching the flag.
+///
+/// `unwatched_pipeline_waits` above matches `tokio::time::timeout(` — a wait
+/// with a deadline on it. This one has none and is the LONGEST wait in a
+/// request's life: `ModelProcessPool::generate` returns when the worker has
+/// finished the whole reply, which on a processor is minutes. It does not read
+/// the cancel flag itself, and a closed token channel does not end it
+/// (`let _ = tx.send(..)`), so an unwatched `.await` on it keeps a worker
+/// generating for a client that has gone — the exact failure gotchas #441/#445
+/// were about.
+///
+/// Added 2026-09-12, when `pipeline::local_generate` introduced the first such
+/// call and the timeout-shaped guard could not see it. Statement-joined,
+/// because rustfmt splits a seven-argument call across eight lines.
+fn unwatched_pool_generations(src: &str) -> Vec<usize> {
+    statements(src)
+        .into_iter()
+        .filter(|(_, stmt)| {
+            stmt.contains(".generate(")
+                && stmt.contains(".await")
+                && !stmt.contains("unless_cancelled")
+                // The in-process executor's synchronous generate, which blocks
+                // rather than awaits and carries its own cancellation.
+                && !stmt.contains("without_starving_the_runtime")
+        })
+        .map(|(line, _)| line)
+        .collect()
+}
+
 fn unwatched_pipeline_waits(src: &str) -> Vec<usize> {
     src.lines()
         .enumerate()
