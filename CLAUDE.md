@@ -236,57 +236,52 @@ fixes change small-node memory behaviour. Both nodes verified, ids and
 `~/.local/bin/swarmllm.0.3.174-alpha.bak`. Detail:
 `memory/round_log_0912_six_reports.md` § Release.
 
+**New users first (user direction, 2026-09-12).** Growth is the bottleneck, not
+the depth of the stack. Rank work by "would someone hit this in their first
+hour". Two fixes shipped from that sweep: opening this node's address landed on
+the OPERATOR CONSOLE (eleven panels, thirty-plus numbers, a live shard-announce
+feed) and now lands on chat; "Models" opened on the Wishlist — a list of models
+the swarm does not have, the first four rows reading "Too large for this
+swarm" — and now opens on "Running now". The remaining queue, what is already
+good and must not be simplified away, and the jargon inventory are in
+`memory/round_log_0912_new_user_sweep.md`. ⚠ Mobile layout is UNVERIFIED.
+
+**Unreleased on `main` after the .175 tag (2026-09-12):** #569 (`swarmllm status`
+traffic figure), **#46** every tool schema reached every model ALPHABETISED
+(`preserve_order` on serde_json + minijinja, guard verified to fail both ways),
+**#32** the KV cache is RESERVED at the admitted prompt length instead of grown
+by `Tensor::cat` (mechanism check: 0 growth steps vs 144 on a 1901-token prompt;
+the field OOM itself is unreproduced here), and **a silent peer is barred from
+the request's retry, which now happens by type**. Three 2026-08 routing entries
+closed against current code. `memory/round_log_0912_tool_schema_key_order.md`,
+`memory/round_log_0912_kv_reserve_and_silent_peer.md`. **User direction the same
+day: NEW USERS FIRST** — bugs a first-hour user hits, and a dashboard sweep (a
+non-technical user found it overwhelming); four Opus audit agents were run.
+
 **Bumping the version LAST is now settled practice** — Cargo.toml changes in the
 bump commit, so Cache warm fires ON the tagged commit. That closes .174's open
 note.
 
-**What it carries** — six field reports, five fixed and one answered, from a
-16 GB processor-only Mac, plus a bandwidth suggestion: a peer that reconnected
-mid-request became permanently undecryptable (29/29 — the `active_pipelines`
-exemption on `remove_session`, whose justifying comment had been false since
-`establish_session` became idempotent, #562/#563); a request routed back to this
-node never used the prefix cache (`prefix-cache HIT` zero times in a week — now
-`pipeline::local_generate`, #564); a finished conversation never released its
-memory and the refusal was typed as final while a peer route sat priced; Stop
-belonged to the page rather than the chat on screen; the macOS RAM bar read
-13 MB for 13 GB; and live RX/TX from libp2p's transport counters,
-absent-never-zero (#565), with `max_bandwidth_mbps` documented as
-shard-serving-only. Answered, not a defect: disk speed does not bias routing.
-Full detail: `memory/round_log_0912_six_reports.md`.
+**What it carries** — six field reports from a 16 GB processor-only Mac, five
+fixed and one answered: a peer reconnecting mid-request became permanently
+undecryptable (#562/#563), the prefix cache never used on a plan routed back
+here (#564, now `pipeline::local_generate`), memory never released after a
+conversation, Stop in the wrong chat, the macOS RAM bar, live RX/TX from
+libp2p's counters (absent-never-zero, #565). ⚠ **Self-review found THREE
+regressions the batch introduced, none caught by a test** (#567-#569) — all
+found by asking **what does this new code do when the thing it assumes is not
+there?** ⚠ 11 Mbps NOT reproduced (0.94/1.74 Mbps live). ⚠ Two test nodes on
+this box are not isolated from the live node's mDNS (#566). Detail:
+`memory/round_log_0912_six_reports.md`.
 
-⚠ **Self-review found THREE regressions this batch introduced, none caught by
-any test** — an unwatched cancel on the new local path (#567), a frontend scope
-error that would have killed the hardware panel (#568), and the traffic figure
-missing from `/v1/status`, the payload `swarmllm status` reads (#569, fixed on
-`main` AFTER the tag). **The question that found all three: what does this new
-code do when the thing it assumes is not there?**
-
-⚠ **11 Mbps is NOT reproduced** — the live node measures 0.94/1.74 Mbps with 4
-peers. ⚠ **Two test nodes on this box are not isolated**: the live node's mDNS
-dials them (#566). ⚠ The Proxmox node IS report #016's peer (`9684263580c6660f`).
-
-**Conformance is nine families** — GLM-4 (partial RoPE) and Mistral-7B-v0.3
-(system-role refusal + `[TOOL_CALLS]`) included; all nine pass. ⚠ The "~2h" this
-said is about LOAD, not the harness: **on an idle box with no background pollers
-it is ~25 minutes** (measured twice on 2026-09-12). The .174 run that took hours
-was competing with a dozen pollers under a 16 GB cap.
-
-⚠ **`examples/family_conformance.sh` is part of the release gate** and has found
-eight real defects in six runs, every one of which PASSES `release_shapes.sh`.
-Run it on the DOWNLOADED artifact **against a baseline of the previous release
-taken FIRST** — that is what tells a fix that shipped from a check that was
-always green.
-
-⚠ **A CPU build REFUSES `-m` outright** (it needs `llama`, which only `cuda` and
-`windows-gpu` pull in), so nothing on one can reproduce a report naming it.
-**Establish which BUILD and which PATH a report exercised before deciding any
-code is innocent** (#552, #555).
-
-⚠ **Branch protection requires 14 contexts.** Verify with
-`examples/check_ci_gate.sh`, **against a COMPLETED run** — reading protection
-needs admin the `GITHUB_TOKEN` lacks, so it is a script, not a job. A required
-check naming a job that no longer exists blocks EVERY PR for ever (#530); the
-script fed an unfinished run advises causing exactly that (#557).
+**Release-gate cautions** (detail in `memory/open_cautions.md`): conformance is
+NINE families, all passing, **~25 minutes on an idle box** (the "~2h" was load,
+not the harness) and part of the gate — run it on the DOWNLOADED artifact
+against a baseline of the PREVIOUS release taken FIRST; it has found eight real
+defects that all pass `release_shapes.sh`. A CPU build REFUSES `-m`, so
+establish which BUILD and PATH a report exercised before deciding code is
+innocent (#552/#555). Branch protection requires 14 contexts — verify with
+`examples/check_ci_gate.sh` against a COMPLETED run only (#530/#557).
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
