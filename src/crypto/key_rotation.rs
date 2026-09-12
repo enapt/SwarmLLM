@@ -86,39 +86,16 @@ pub async fn run_key_rotation(
                 let mut rekey_initiated = 0usize;
                 let mut skipped_unreachable = 0usize;
                 for peer in &peers {
-                    // A session outlives the connection that created it — it is
-                    // evicted by age (MAX_SESSION_AGE), not on disconnect — and
-                    // EphemeralKeyExchange is not relay-eligible. Re-keying a
-                    // departed peer therefore buys nothing but an undeliverable
-                    // send plus an orphaned pending-ephemeral entry that lingers
-                    // until PENDING_EPHEMERAL_TTL. Resolve through the liveness
-                    // oracle BEFORE mutating session state.
-                    let Some(target) = shared_state.resolve_connected_peer_id_bytes(peer) else {
+                    if initiate_exchange(
+                        &session_manager,
+                        &network_tx,
+                        &local_node_id,
+                        &shared_state,
+                        peer,
+                    ) {
+                        rekey_initiated += 1;
+                    } else {
                         skipped_unreachable += 1;
-                        continue;
-                    };
-                    let ephemeral_pub = session_manager.initiate_ephemeral_exchange(peer);
-                    rekey_initiated += 1;
-                    let msg = SwarmMessage::EphemeralKeyExchange(EphemeralKeyExchange {
-                        session_id: uuid::Uuid::new_v4(),
-                        node_id: local_node_id.clone(),
-                        ephemeral_pubkey: ephemeral_pub,
-                        is_initiator: true,
-                    });
-                    // Send directly to the target peer via request_response (not gossip).
-                    // Gossip broadcast silently dropped EphemeralKeyExchange (no topic match).
-                    // Direct send also ensures the recipient can authenticate the sender
-                    // via the request_response protocol's peer identity.
-                    if let Err(e) = network_tx.try_send(NetworkCommand::SendDirectMessage {
-                        target_peer_bytes: target,
-                        message: msg,
-                        delivery_request_id: None,
-                    }) {
-                        tracing::debug!(
-                            peer = %peer,
-                            error = %e,
-                            "Failed to send ephemeral key exchange (channel full)"
-                        );
                     }
                 }
                 tracing::info!(
@@ -128,6 +105,79 @@ pub async fn run_key_rotation(
                     "DIAG: key rotation tick (re-keying)"
                 );
             }
+            // A session the peer cannot open, repaired in the round trip it
+            // takes rather than at the next ten-minute tick.
+            //
+            // The two ends of a link can end up holding different keys — a
+            // reconnect where only one side retired its session, an exchange
+            // whose reply was lost, two rotations crossing. Every one of those
+            // looks the same from here: `open` has tried every key this node
+            // holds for the peer and none of them fit, and neither end will
+            // notice on its own, because sealing still succeeds and
+            // `establish_session` leaves an existing session alone. One
+            // exchange fixes it whichever end is stale, because both install
+            // the result. Measured before this: 29 forwards to one peer, 29
+            // failures, zero successes (report #016).
+            _ = session_manager.rekey_requested() => {
+                for peer in session_manager.take_rekey_requests() {
+                    let sent = initiate_exchange(
+                        &session_manager,
+                        &network_tx,
+                        &local_node_id,
+                        &shared_state,
+                        &peer,
+                    );
+                    tracing::info!(
+                        %peer,
+                        sent,
+                        "DIAG: repairing an unopenable session with a fresh key exchange"
+                    );
+                }
+            }
         }
     }
+}
+
+/// Offer `peer` a fresh ephemeral key. Returns whether it was sent.
+///
+/// A session outlives the connection that created it — it is evicted by age
+/// (`MAX_SESSION_AGE`), not on disconnect — and `EphemeralKeyExchange` is not
+/// relay-eligible. Re-keying a departed peer therefore buys nothing but an
+/// undeliverable send plus an orphaned pending-ephemeral entry that lingers
+/// until `PENDING_EPHEMERAL_TTL`. Resolve through the liveness oracle BEFORE
+/// mutating session state.
+fn initiate_exchange(
+    session_manager: &Arc<SessionManager>,
+    network_tx: &mpsc::Sender<NetworkCommand>,
+    local_node_id: &NodeId,
+    shared_state: &Arc<crate::daemon::SharedState>,
+    peer: &NodeId,
+) -> bool {
+    let Some(target) = shared_state.resolve_connected_peer_id_bytes(peer) else {
+        return false;
+    };
+    let ephemeral_pub = session_manager.initiate_ephemeral_exchange(peer);
+    let msg = SwarmMessage::EphemeralKeyExchange(EphemeralKeyExchange {
+        session_id: uuid::Uuid::new_v4(),
+        node_id: local_node_id.clone(),
+        ephemeral_pubkey: ephemeral_pub,
+        is_initiator: true,
+    });
+    // Send directly to the target peer via request_response (not gossip).
+    // Gossip broadcast silently dropped EphemeralKeyExchange (no topic match).
+    // Direct send also ensures the recipient can authenticate the sender
+    // via the request_response protocol's peer identity.
+    if let Err(e) = network_tx.try_send(NetworkCommand::SendDirectMessage {
+        target_peer_bytes: target,
+        message: msg,
+        delivery_request_id: None,
+    }) {
+        tracing::debug!(
+            peer = %peer,
+            error = %e,
+            "Failed to send ephemeral key exchange (channel full)"
+        );
+        return false;
+    }
+    true
 }

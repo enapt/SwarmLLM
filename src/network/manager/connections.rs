@@ -471,14 +471,38 @@ impl NetworkManager {
                         .iter()
                         .any(|seg| seg.node_id == node_id)
                 });
-                // Clear encryption session on full disconnect to
-                // prevent epoch desync after reconnection.
-                // Only remove if no new connection has been established
-                // (prevents race where reconnect arrives before close is processed).
-                // Keep the session alive if the peer is in an active pipeline —
-                // reconnection will refresh it, and removing it mid-pipeline
-                // causes "seal() failed" on pending TP forwards.
-                if !self.swarm.is_connected(&peer_id) && !in_active_pipeline {
+                // Retire the encryption session on a full disconnect, so the
+                // reconnect performs a fresh handshake and both ends derive the
+                // same key. Skipped only when a new connection has already been
+                // established (the reconnect beat the close event to us).
+                //
+                // **An active pipeline is no longer an exemption**, and the
+                // exemption is what report #016 measured: 29 forwards to one
+                // peer, 29 `Could not decrypt forward`, zero successes, every
+                // request routed through it dead. The SERVING node retires its
+                // session on the same disconnect — `active_pipelines` is the
+                // COORDINATOR's map and holds nothing for work a node is doing
+                // for someone else (gotcha #194) — and comes back with a fresh
+                // static key, while the coordinator kept whatever it had. If
+                // that was an ephemeral key from a rotation, nothing can open
+                // what the coordinator seals, for as long as it holds it.
+                //
+                // The exemption was written in April, when this call was the
+                // only thing that could cost us a key and `establish_session`
+                // reinstalled on every Identify — so "reconnection will refresh
+                // it" was then true. It has not been true since that became
+                // idempotent, and the comment asserting it is how the
+                // contradiction survived: a reconnect now leaves the stale key
+                // exactly where it is.
+                //
+                // What it was protecting against is gone too. It bought a
+                // sealable key across the gap, but a peer we are not connected
+                // to cannot be sent to, and after the reconnect that peer has
+                // no session to open it with — so the seal it saved produced a
+                // forward nobody could read. In-flight results sealed under the
+                // old key still open here: `remove_session` RETIRES rather than
+                // destroys (report #028).
+                if !self.swarm.is_connected(&peer_id) {
                     self.shared_state.session_manager.remove_session(&node_id);
                 }
 

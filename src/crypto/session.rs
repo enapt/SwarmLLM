@@ -273,6 +273,42 @@ pub struct SessionManager {
     /// idempotence guard. WireGuard keeps a previous keypair for the same
     /// reason and with the same per-keypair counter.
     retired: DashMap<NodeId, PreviousKey>,
+    /// Peers this node has asked for a repair handshake, and when.
+    ///
+    /// A session the other end cannot open is not a session, and nothing else
+    /// in this file can notice that: `seal` succeeds, the failure happens on
+    /// the peer, and [`establish_session`](Self::establish_session) is
+    /// idempotent, so the Identify that follows a reconnect leaves the broken
+    /// key exactly where it is. Report #016 measured the consequence — 29
+    /// forwards to one peer, 29 failures, zero successes, every request routed
+    /// through it dead for the rest of the log.
+    ///
+    /// So a failed [`open`](Self::open) arms a repair here and
+    /// `crate::crypto::key_rotation` performs it: one ephemeral exchange, which
+    /// both ends install, whichever of them was holding the stale key. The
+    /// timestamp is a rate limit — a broken session fails every forward of
+    /// every request, and one exchange repairs all of them.
+    rekey_requests: DashMap<NodeId, RekeyRequest>,
+    /// Wakes the rotation task when a repair is armed, so it happens in the
+    /// round trip it takes rather than at the next ten-minute tick.
+    rekey_notify: tokio::sync::Notify,
+}
+
+/// Least time between two repair handshakes with the same peer.
+///
+/// One exchange fixes every request the broken session was failing, and the
+/// failures arrive in bursts, so this is a ceiling on handshakes per peer
+/// rather than a delay anyone waits for: the FIRST failure arms the repair
+/// immediately and the rest of the burst is absorbed.
+const REKEY_REQUEST_MIN_INTERVAL: Duration = Duration::from_secs(15);
+
+/// One peer's armed repair handshake.
+struct RekeyRequest {
+    /// When the repair was armed, which is what rate-limits the next one.
+    armed_at: Instant,
+    /// Still waiting to be performed. Cleared when the rotation task takes it;
+    /// `armed_at` stays, so the burst that follows is still absorbed.
+    pending: bool,
 }
 
 impl SessionManager {
@@ -287,6 +323,8 @@ impl SessionManager {
             sessions: DashMap::new(),
             pending_ephemeral: DashMap::new(),
             pending_ephemeral_pub: DashMap::new(),
+            rekey_requests: DashMap::new(),
+            rekey_notify: tokio::sync::Notify::new(),
         }
     }
 
@@ -638,7 +676,75 @@ impl SessionManager {
             "DIAG: open() decryption FAILED under the current, superseded and retired keys \
              — likely AAD mismatch or an unrelated key"
         );
+        // Ask for a repair handshake. Here rather than at the two call sites,
+        // so a third one inherits it: this is the ONE place that knows every
+        // key we hold for this peer has been tried and none of them fit.
+        //
+        // A replayed or forged frame lands here too and also arms a repair.
+        // That is deliberate and costs nothing: the exchange is rate-limited,
+        // and re-keying with a peer is what this node does every ten minutes
+        // anyway. Only that peer can trigger it — a connection is authenticated
+        // by PeerId at the Noise layer — and a peer can always negotiate a
+        // fresh key by asking.
+        self.request_rekey(peer);
         Err(SwarmError::DecryptionFailed)
+    }
+
+    /// Arm a repair handshake with `peer`, unless one was armed recently.
+    ///
+    /// Returns whether this call armed it. Rate-limited by
+    /// [`REKEY_REQUEST_MIN_INTERVAL`]: a broken session fails every forward of
+    /// every request routed through the peer, and one exchange repairs all of
+    /// them, so the burst must not become a burst of handshakes.
+    pub fn request_rekey(&self, peer: &NodeId) -> bool {
+        use dashmap::mapref::entry::Entry;
+        let armed = match self.rekey_requests.entry(peer.clone()) {
+            Entry::Occupied(mut occupied) => {
+                let req = occupied.get_mut();
+                if req.armed_at.elapsed() < REKEY_REQUEST_MIN_INTERVAL {
+                    false
+                } else {
+                    req.armed_at = Instant::now();
+                    req.pending = true;
+                    true
+                }
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(RekeyRequest {
+                    armed_at: Instant::now(),
+                    pending: true,
+                });
+                true
+            }
+        };
+        if armed {
+            tracing::warn!(
+                peer = %peer,
+                "Session with this peer cannot be opened — asking it to re-key"
+            );
+            self.rekey_notify.notify_one();
+        }
+        armed
+    }
+
+    /// Peers with a repair handshake armed since this was last called.
+    ///
+    /// Drains, so a peer is handed out once per armed request; the timestamp
+    /// that rate-limits the next one stays in place.
+    pub fn take_rekey_requests(&self) -> Vec<NodeId> {
+        let mut due = Vec::new();
+        for mut entry in self.rekey_requests.iter_mut() {
+            if entry.value().pending {
+                entry.value_mut().pending = false;
+                due.push(entry.key().clone());
+            }
+        }
+        due
+    }
+
+    /// Wait until a repair handshake is armed.
+    pub async fn rekey_requested(&self) {
+        self.rekey_notify.notified().await;
     }
 
     /// Try a key retired by a disconnect. Decrypt-only, within the grace
@@ -1440,5 +1546,79 @@ mod disconnect_retirement_tests {
         let forged = c.seal(&nb2, b"nope", b"header").unwrap();
         b.remove_session(&na);
         assert!(b.open(&na, &forged, b"header").is_err());
+    }
+
+    /// **The defect report #016 exposed**, which is report #028's from the
+    /// other side: there, a key one end had thrown away; here, a key the other
+    /// end never had.
+    ///
+    /// One node keeps its session across a disconnect (it was coordinating, so
+    /// the exemption in `handle_connection_closed` applied to it) while its
+    /// peer — serving, and holding nothing in `active_pipelines` — retires its
+    /// own and comes back on a fresh static key. Nothing then notices: sealing
+    /// still succeeds, `establish_session` leaves the stale session alone, and
+    /// every forward fails at the peer. Measured live: 29 attempts, 29
+    /// failures, zero successes.
+    ///
+    /// The ephemeral upgrade is what makes this a real test rather than a
+    /// tautology, for the same reason it is in
+    /// `a_forward_in_flight_survives_the_peer_reconnecting`: two static
+    /// sessions re-derive the IDENTICAL key, so a reconnect neither end
+    /// notices is harmless.
+    #[test]
+    fn a_session_the_peer_no_longer_holds_asks_to_be_repaired() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub);
+        assert!(a.complete_ephemeral_session(&nb, &b_pub));
+
+        // B's link drops and comes back; B retires and re-handshakes, A does
+        // not. Past the grace window, so the retired key cannot mask it.
+        b.remove_session(&na);
+        b.retired.clear();
+        assert!(b.establish_session(&na, a.local_public));
+
+        // A still holds the ephemeral key. It seals happily.
+        let sealed = a.seal(&nb, b"activations", aad).unwrap();
+        assert!(
+            b.open(&na, &sealed, aad).is_err(),
+            "the desync itself must reproduce, or this test proves nothing"
+        );
+
+        // The failure arms a repair — and names the peer that must perform it.
+        assert_eq!(b.take_rekey_requests(), vec![na.clone()]);
+
+        // Which repairs it: one exchange, and what A seals opens again.
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub);
+        assert!(a.complete_ephemeral_session(&nb, &b_pub));
+        let sealed = a.seal(&nb, b"activations", aad).unwrap();
+        assert_eq!(b.open(&na, &sealed, aad).unwrap(), b"activations");
+    }
+
+    /// A broken session fails every forward of every request routed through the
+    /// peer — 29 of them in the reported case — and one exchange repairs all of
+    /// them. The burst must not become a burst of handshakes.
+    #[test]
+    fn a_burst_of_failures_asks_for_one_repair() {
+        let (a, b, na, nb) = pair();
+        let c = SessionManager::from_ed25519_key(&[11u8; 32]);
+        let nc = NodeId([4u8; 32]);
+        assert!(c.establish_session(&nc, b.local_public));
+        let unopenable = c.seal(&nc, b"nope", b"header").unwrap();
+        let _ = (a, nb);
+
+        for _ in 0..29 {
+            assert!(b.open(&na, &unopenable, b"header").is_err());
+        }
+        assert_eq!(
+            b.take_rekey_requests(),
+            vec![na.clone()],
+            "a peer is asked to re-key once per burst, not once per failure"
+        );
+        // And taking them empties the queue: the rotation task must not
+        // re-handshake with the same peer on every wake-up.
+        assert!(b.take_rekey_requests().is_empty());
     }
 }

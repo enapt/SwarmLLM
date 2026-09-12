@@ -5649,3 +5649,89 @@ fn the_privacy_map_guard_catches_the_form_the_defect_took() {
         .iter()
         .any(|(_, t)| t.contains("encrypted_pipeline_models")));
 }
+
+/// Is this `remove_session` call gated on the peer serving an active pipeline?
+///
+/// The whole guard, kept as its own function so its reach can be tested by
+/// planting the violation rather than assumed — a scan that finds nothing and a
+/// scan that *cannot* find anything read identically (gotcha #413).
+fn session_removal_is_gated_on_an_active_pipeline(body: &str) -> bool {
+    let mut saw_gate = false;
+    for (_, stmt) in statements(body) {
+        if stmt.contains("in_active_pipeline") && stmt.contains("remove_session") {
+            return true;
+        }
+        // The gate and the call on separate statements: `if … in_active_pipeline
+        // {` opening a block that contains the call.
+        if stmt.starts_with("if ") && stmt.contains("in_active_pipeline") {
+            saw_gate = true;
+            continue;
+        }
+        if saw_gate && stmt.contains("session_manager.remove_session") {
+            return true;
+        }
+        if stmt == "}" {
+            saw_gate = false;
+        }
+    }
+    false
+}
+
+/// **A disconnect retires the session, whether or not this node was
+/// coordinating a request through the peer.**
+///
+/// It did not, and the exemption cost 29 consecutive undecryptable forwards to
+/// one peer with zero successes (report #016). The peer SERVING the request
+/// retires its own session on the same disconnect — `active_pipelines` is the
+/// coordinator's map and holds nothing for work a node does for someone else
+/// (gotcha #194) — and returns on a fresh static key, so a coordinator that
+/// kept an ephemeral key seals what nothing can open, for as long as it holds
+/// it. `establish_session` is idempotent, so the reconnect does not repair it.
+///
+/// The comment that stood here asserted the opposite ("reconnection will
+/// refresh it"), which was true in April 2026 and stopped being true when
+/// `establish_session` became idempotent. That is why this is a test and not a
+/// comment: a claim about another function's behaviour goes stale silently.
+#[test]
+fn a_disconnect_retires_the_session_even_mid_pipeline() {
+    let src = std::fs::read_to_string("src/network/manager/connections.rs").unwrap();
+    let body = fn_body(&src, "fn handle_connection_closed")
+        .expect("handle_connection_closed must exist — rename it and update this guard");
+    assert!(
+        body.contains("session_manager.remove_session"),
+        "the disconnect must still retire the session"
+    );
+    assert!(
+        !session_removal_is_gated_on_an_active_pipeline(body),
+        "an active pipeline must not exempt a peer from the session being \
+         retired — the peer retires its own either way (report #016)"
+    );
+}
+
+/// The guard above must see the defect in the shape it actually had.
+#[test]
+fn the_active_pipeline_session_guard_catches_the_shape_it_replaced() {
+    // The exact line this replaced.
+    assert!(session_removal_is_gated_on_an_active_pipeline(
+        "if !self.swarm.is_connected(&peer_id) && !in_active_pipeline {\n\
+         self.shared_state.session_manager.remove_session(&node_id);\n}\n"
+    ));
+    // The gate as a separate enclosing block.
+    assert!(session_removal_is_gated_on_an_active_pipeline(
+        "if !in_active_pipeline {\n\
+         self.shared_state.session_manager.remove_session(&node_id);\n\
+         }\n"
+    ));
+    // Wrapped by rustfmt, which is the form that has blinded six guards.
+    assert!(session_removal_is_gated_on_an_active_pipeline(
+        "if !self.swarm.is_connected(&peer_id)\n    && !in_active_pipeline\n{\n\
+         self.shared_state\n    .session_manager\n    .remove_session(&node_id);\n}\n"
+    ));
+    // The shape that is correct now must not trip it.
+    assert!(!session_removal_is_gated_on_an_active_pipeline(
+        "if !self.swarm.is_connected(&peer_id) {\n\
+         self.shared_state.session_manager.remove_session(&node_id);\n\
+         }\n\
+         if !in_active_pipeline {\n    self.peer_to_node.remove(&peer_id);\n}\n"
+    ));
+}
