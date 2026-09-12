@@ -582,7 +582,7 @@
     // live inside `updateFull`, which only runs on an explicit REST fetch,
     // so every other figure on the dashboard updated live and this panel
     // sat still until something happened to refetch (report #016).
-    _renderHardware: function(hw) {
+    _renderHardware: function(hw, traffic) {
       if (!hw) return;
         S._gpuInference = !!hw.gpu_inference;
         if (App.settings && App.settings.renderHwModeNote) {
@@ -759,7 +759,6 @@
         // that would be read as "SwarmLLM is not the thing using my
         // connection" when the truth is that nothing has been measured.
         var netCell = document.getElementById('hw-device-network');
-        var traffic = data.network_traffic;
         if (netCell) {
           if (traffic) {
             netCell.hidden = false;
@@ -828,7 +827,7 @@
 
       App.dashboard.updateStats(data);
 
-      App.dashboard._renderHardware(data.hardware);
+      App.dashboard._renderHardware(data.hardware, data.network_traffic);
 
       if (data.hosted_shards !== undefined) document.getElementById('hosted-shards').textContent = data.hosted_shards;
     },
@@ -840,7 +839,7 @@
       // on the dashboard moved. The backend kept it off the tick because
       // measuring it cost 182 ms — that was fixed on 2026-09-06 and is now
       // 0.43 ms, so the reason no longer applies.
-      if (data && data.hardware) App.dashboard._renderHardware(data.hardware);
+      if (data && data.hardware) App.dashboard._renderHardware(data.hardware, data.network_traffic);
       // Node version in the header, next to the logo. Guarded so the every-2s
       // WS tick doesn't rewrite the DOM when the (static) version is unchanged.
       if (data.version) {

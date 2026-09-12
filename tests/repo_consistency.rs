@@ -4679,6 +4679,14 @@ fn the_shard_announce_guard_catches_a_planted_literal() {
 /// version of this guard was written that way and went GREEN against the
 /// broken file. Only running it finds it.
 ///
+/// **2026-09-12 — it now also CALLS a render function, because loading a module
+/// cannot see a name that is only missing inside a function body.**
+/// `dashboard.js::_renderHardware` read `data.network_traffic` while its
+/// parameter was named `hw`: the file loads perfectly and throws
+/// `ReferenceError: data is not defined` the first time the dashboard renders,
+/// which is every two seconds on every node. Same failure as above, one level
+/// deeper — and `node -c` passes on it too.
+///
 /// Skips (loudly) when `node` is absent so an infrastructure change cannot turn
 /// a missing interpreter into a red build; GitHub runners ship one.
 #[test]

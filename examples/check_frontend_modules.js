@@ -30,6 +30,45 @@ const MODULES = [
   ['frontend/js/core/utils.js', 'utils'],
   ['frontend/js/core/data.js', 'data'],
   ['frontend/js/core/tooltip.js', null],
+  // Components load-check too: one that throws while building its exports
+  // takes its whole namespace with it, exactly as `utils` did.
+  //
+  // Order matters and mirrors `index.html`: `dashboard.js` aliases
+  // `App.dashboardShards.*` into locals at load time, so its dependency comes
+  // first — the same reason the page loads them in that order.
+  ['frontend/js/components/dashboard-shards.js', 'dashboardShards'],
+  ['frontend/js/components/dashboard.js', 'dashboard'],
+  ['frontend/js/components/chat.js', 'chat'],
+];
+
+// Render functions CALLED with stubs, because loading a module cannot see a
+// name that is only missing inside a function body.
+//
+// `_renderHardware` read `data.network_traffic` while its parameter was `hw`
+// (2026-09-12). Syntactically perfect, loads perfectly, and throws
+// `ReferenceError: data is not defined` the first time the dashboard renders —
+// which is every two seconds, on every node. That is the same failure as the
+// one this file was written for (gotcha #488), one level deeper: there the
+// name was missing when the module was built, here when the function ran.
+//
+// Only functions that are pure render-from-arguments belong here. Anything
+// that starts a timer, fetches, or loops over live state does not: the point
+// is to evaluate the BODY, not to simulate the app.
+const SMOKE_CALLS = [
+  ['App.dashboard._renderHardware(hw, traffic)', () => App.dashboard._renderHardware(
+    {
+      cpu_name: 'Test CPU', cpu_cores: 8,
+      total_ram_mb: 16000, used_ram_mb: 8000, process_rss_mb: 4000,
+      daemon_rss_mb: 300, worker_rss_mb: 3700, worker_count: 1,
+      total_disk_mb: 500000, used_disk_mb: 100000,
+      gpu_name: null, gpu_vram_mb: 0, gpu_vram_used_mb: 0, gpu_inference: false,
+    },
+    { in_bytes: 1024, out_bytes: 2048, in_bytes_per_sec: 12.5, out_bytes_per_sec: 30.0 },
+  )],
+  ['App.dashboard._renderHardware(hw, null)', () => App.dashboard._renderHardware(
+    { cpu_name: 'Test CPU', cpu_cores: 8, total_ram_mb: 16000, total_disk_mb: 500000 },
+    null,
+  )],
 ];
 
 // A permissive stand-in for anything a browser provides. Returns itself for
@@ -83,6 +122,16 @@ for (const [rel, exportName] of MODULES) {
     failed++;
     continue;
   }
+  // `state.js` creates the namespace with `window.App = { … }`, which REPLACES
+  // the object every other module reaches through the bare global `App`. Left
+  // alone, the sandbox ends up with two namespaces and components load against
+  // an empty one — so the constants state.js defines read as `undefined` and
+  // the check fails for a reason that has nothing to do with the code. Fold
+  // them into one identity after each module.
+  if (sandbox.window.App && sandbox.window.App !== App) {
+    Object.assign(App, sandbox.window.App);
+    sandbox.window.App = App;
+  }
   if (exportName && (!App[exportName] || typeof App[exportName] !== 'object')) {
     console.error(`NO EXPORT ${rel}: App.${exportName} was never assigned`);
     failed++;
@@ -90,5 +139,17 @@ for (const [rel, exportName] of MODULES) {
   }
   const n = exportName ? Object.keys(App[exportName]).length : 0;
   console.log(`ok       ${rel}${exportName ? ` (App.${exportName}, ${n} exports)` : ''}`);
+}
+
+// The DOM these need is the permissive stub, so what survives this is the
+// SCOPE of every name the body touches — which is the whole point.
+for (const [label, call] of SMOKE_CALLS) {
+  try {
+    vm.runInContext('(' + call.toString() + ')()', sandbox, { filename: label });
+    console.log(`ok       ${label}`);
+  } catch (e) {
+    console.error(`THREW    ${label}: ${e.constructor.name}: ${e.message}`);
+    failed++;
+  }
 }
 process.exit(failed ? 1 : 0);
