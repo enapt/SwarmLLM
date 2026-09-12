@@ -1433,8 +1433,13 @@
             <div class="panel-header">
               <h2 data-i18n="swarm.title">Models</h2>
               <div class="swarm-subtab-nav">
-                <button class="swarm-subtab active" data-swarm-subtab="wishlist" data-i18n="swarm.tab_wishlist">Wishlist</button>
-                <button class="swarm-subtab" data-swarm-subtab="running" data-i18n="swarm.tab_running">Running now</button>
+                <!-- "Running now" leads, and is the tab that opens. Someone who
+                     clicks Models wants a model they can use; the wishlist is a
+                     ranked list of models the swarm does NOT have, most of them
+                     too big for it, so it opened on a page of things the reader
+                     cannot have and read as "this cannot run anything". -->
+                <button class="swarm-subtab active" data-swarm-subtab="running" data-i18n="swarm.tab_running">Running now</button>
+                <button class="swarm-subtab" data-swarm-subtab="wishlist" data-i18n="swarm.tab_wishlist">Wishlist</button>
                 <button class="swarm-subtab" data-swarm-subtab="search" data-i18n="swarm.tab_search">Search HuggingFace</button>
                 <button class="swarm-subtab" data-swarm-subtab="capacity" data-i18n="swarm.tab_capacity">Capacity plan</button>
                 <button class="swarm-subtab" data-swarm-subtab="performance" data-i18n="swarm.tab_performance">Performance</button>
@@ -1442,14 +1447,14 @@
             </div>
 
             <!-- Wishlist subtab -->
-            <div class="swarm-subview" id="swarm-subview-wishlist">
+            <div class="swarm-subview" id="swarm-subview-wishlist" style="display:none">
               <div class="text-muted text-sm mb-2" data-i18n="swarm.wishlist_intro">A live, ranked list of models the swarm wants. Auto-manage works through this list within your contribution budget — no waiting required.</div>
               <div class="wishlist-list" id="wishlist-list"></div>
               <div class="text-muted text-2xs mt-2" id="wishlist-meta"></div>
             </div>
 
             <!-- Running-now subtab — reuses swarm_capacity.serveable_models -->
-            <div class="swarm-subview" id="swarm-subview-running" style="display:none">
+            <div class="swarm-subview" id="swarm-subview-running">
               <div class="text-muted text-sm mb-2" data-i18n="swarm.running_intro">Models the swarm can serve right now. The ones you help host are highlighted.</div>
               <!-- R134: quant tips — surface upgrade/downsize hints for the
                    models the swarm is already running. Only renders when

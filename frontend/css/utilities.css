@@ -47,3 +47,9 @@
 .badge-purple { color: var(--purple-text); background: var(--purple-dim);      border-color: rgba(167,139,250,0.3); }
 .badge-claude { color: var(--claude-text); background: var(--claude-dim);      border-color: rgba(217,119,87,0.3); }
 .badge-muted  { color: var(--text-secondary); background: rgba(255,255,255,0.04); border-color: var(--border); }
+
+/* A message standing in for a grid's contents — "nothing here yet", an error —
+   spans the whole grid instead of being dealt one column. Without it the
+   Models tab greeted a node with no models by wrapping one sentence into a
+   220px column four lines deep, which is what an empty grid cell is. */
+.grid-empty { grid-column: 1 / -1; }

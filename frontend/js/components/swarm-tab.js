@@ -290,7 +290,9 @@
     var serveable = (capacity && capacity.serveable_models) || [];
     if (serveable.length === 0) {
       var empty = document.createElement('div');
-      empty.className = 'text-muted';
+      // `grid-empty`: this grid deals 220px columns, so without it the
+      // sentence is laid out inside one of them.
+      empty.className = 'text-muted grid-empty';
       empty.textContent = I18n.t('swarm.running_empty');
       grid.appendChild(empty);
       return;
