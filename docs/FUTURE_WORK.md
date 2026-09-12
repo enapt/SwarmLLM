@@ -95,16 +95,26 @@ ranking them means re-reading each against the code and that has not been done.
 
 - `Routing never learns a peer is slow on the speculative path` — the single-token
   half is FIXED (2026-08-30); the batch/HIT half is explicitly still open
-- `Speculative distributed decode has no failover` (2026-08-25) — title says NOT fixed
-- `Shard removal can strand prompt privacy` (2026-08-09) — surfaced, not fixed
+- `Speculative distributed decode has no failover` (2026-08-25) — still no mid-request failover; **its "Related" half shipped 2026-09-12** (a silent verify peer is barred from the request and the request is re-planned once)
+- `Shard removal can strand prompt privacy` (2026-08-09) — **FIXED 2026-09-11** (auto-manage prune keeps the shard privacy depends on; its own heading says so, this list did not)
 - `Every pipeline hop round-trips through the coordinator, and that is what makes
   big models slow` (2026-08-20) — its own text calls this "the single
   highest-leverage change available for distributed inference", and it is untagged
 - `A node cannot test its own inbound reachability` (2026-08-18) — partial fix shipped
-- Three untagged 2026-08-03/04 routing entries (`Parallax routing fails transiently
-  after a restart`, `The LAN peer is not a routing candidate although it holds the
-  shards`, `An unmeasured peer gets a 296-second budget while a standby sits unused`)
-  — status UNVERIFIED against current code
+- Three untagged 2026-08-03/04 routing entries — **verified against current code
+  2026-09-12, all three CLOSED**: `Parallax routing fails transiently after a
+  restart` (its own text: the claim was CORRECTED, the real part — both router
+  branches logging at `debug` — was DONE 2026-08-03, and the genuine finding
+  moved to the next entry); `The LAN peer is not a routing candidate although
+  it holds the shards` (its own text: RESOLVED — the announce was ingested and
+  the peer was a candidate; a transient registry state, nothing to fix, a
+  cost-model preference left); `An unmeasured peer gets a 296-second budget
+  while a standby sits unused` (the acceptance signal it asked for shipped
+  2026-08-21 as `SwarmResponse::Ack` on receipt plus the RTT-scaled
+  `forward_ack_deadline_secs` sweep, 10-90 s — `.claude/rules/architecture.md`
+  § "A tensor forward is acknowledged on receipt"; a peer that never took the
+  work now fails over in seconds, and a slow one keeps its full budget). Each
+  heading carries a banner now.
 
 ### Closed in this pass (were listed open, verified fixed in code 2026-09-08)
 
@@ -9873,7 +9883,7 @@ while an actual figure below it proves nothing on its own. Anyone asked to send
 both numbers should be told this, or they will report a large overestimate that
 is not one.
 
-## Parallax routing fails transiently after a restart, and the fallback is silent (2026-08-03)
+## Parallax routing fails transiently after a restart, and the fallback is silent (2026-08-03; CLOSED 2026-09-12 — see the status line below)
 
 **Status: CORRECTED. The original claim here — that parallax NEVER runs — was
 wrong, and is left below only because the correction matters more than the
@@ -9953,7 +9963,7 @@ holding shards 1..8, `pipeline-plan` for the 8B model returned **0 segments** �
 assembly failing outright, not merely choosing badly. Worth reproducing before
 concluding anything about the sink condition.
 
-## The LAN peer is not a routing candidate although it holds the shards (2026-08-03)
+## The LAN peer is not a routing candidate although it holds the shards (2026-08-03; CLOSED 2026-09-12 — resolved as stated below, a cost-model preference remains)
 
 **Status: RESOLVED as stated, and REFRAMED. The announce path is fine.** The
 measurement named at the bottom of the original entry was taken and answered it.
@@ -10028,7 +10038,20 @@ Do not build on it.
 splits the search cleanly in two — ingest, or candidate gathering. Everything
 above is elimination; this is the measurement.
 
-## An unmeasured peer gets a 296-second budget while a standby sits unused (2026-08-04)
+## An unmeasured peer gets a 296-second budget while a standby sits unused (2026-08-04; SUPERSEDED 2026-08-21, banner added 2026-09-12)
+
+**Superseded — read this first.** The acceptance notification this entry
+designs shipped on 2026-08-21: a serving node answers an inbound `LayerForward`
+with `SwarmResponse::Ack` the moment it decodes, advertises
+`features::FORWARD_ACK`, and the coordinator's stale sweep fails an
+unacknowledged forward at `forward_ack_deadline_secs` (RTT-scaled, 10-90 s) so
+the pipeline fails over in seconds — while a peer that DID acknowledge keeps
+the full sized compute budget, which is the distinction below. See
+`.claude/rules/architecture.md` § "A tensor forward is acknowledged on receipt;
+a result is always its own request". The reasoning below is kept for the
+design; its "CHECKED 2026-08-05" conclusion describes the code before that
+change.
+
 
 **Observed live**, reproducing the stale-split-model 404 fix on a fresh node:
 
