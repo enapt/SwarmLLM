@@ -1592,3 +1592,59 @@ The bar this trust feeds is `DELEGATE_MIN_TRUST`, which equals `DEFAULT_TRUST` �
 the score an unknown peer starts on. See `docs/FUTURE_WORK.md` § "The
 plaintext-prompt trust bar sits exactly at the score an unknown peer starts on".
 
+
+## A peer that went silent is barred from the retry, and the retry happens
+
+(2026-09-12.) Three producers of `SwarmError::PeerUnresponsive`: the ACK
+sweep ("never acknowledged"), the first-token wait ("remote-generate timed
+out"), and the per-segment result deadline (`pipeline/local.rs::segment_timeout_error`,
+"Timed out waiting for segment result"). The router's retry classifier
+`is_transient_remote_failure` matched on the first two by their WORDING —
+the #295 trap — so the third reached the router as a 503 and was never
+retried. On the ordinary distributed path that did not matter, because
+`forward_through_segments` hands a deadline expiry to `failover_segment`,
+which bars the failed node at every exit and returns
+`SegmentFailoverExhausted` (retryable). On the speculative verify rounds
+(`forward_verify_through_segments`, used by `ngram_only_spec` and the
+speculative pipelines) there is no failover: the `?` propagates the raw
+variant straight to the router, and the request ended there.
+
+And neither fast-path arm barred the silent peer before returning, so the
+retry those two already had could re-plan onto the peer that had just gone
+quiet and wait the same silence out again — "the retry re-assembles a fresh
+pipeline that can pick the same holder; with a single holder it simply waits
+the same deadline twice" (FUTURE_WORK, "Speculative distributed decode has no
+failover", § Related). The pairing that makes a retry work here is stated at
+`remote_peer_could_not_serve`: the blacklist is what stops the re-plan
+re-learning the same holder from the DHT.
+
+**What changed.** `blacklist_holder_for_request(request_id, node)` is called
+at all three producers before the error is returned — in the deadline arm
+only when `is_remote`, since the local candidate must never be barred from
+its own request — and `router::peer_went_silent` (the TYPE) joins
+`should_retry_after` under `used_remote_segment`, beside
+`remote_peer_could_not_serve` and `segment_ran_out_of_machines`. The prose
+list is untouched, so nothing that retried before stops retrying.
+
+**Research (rule 0).** Envoy's `previous_hosts` retry-host predicate: "choose
+a different host than the host where the previous request has failed, because
+typically failures on that same host are likely to continue for some time and
+immediate retry would have less chance of success" — the same rule, and the
+same shape (per-attempt exclusion, not a global mark against the host).
+
+**What a change here must keep.**
+
+- `a_deadline_that_expires_bars_the_peer_from_this_request` — the bar is
+  scoped to the request id; another request may still use the peer.
+- `a_dropped_response_channel_does_not_bar_the_peer` — the control: our own
+  dropped sender says nothing about the peer and bars nobody, the same
+  attribution rule `segment_delivery_verdict` follows.
+- `a_segment_deadline_is_retried_only_with_a_remote_segment_involved` — the
+  variant is retried by type, never without a remote segment, and never once
+  text has streamed.
+- A NEW producer of `PeerUnresponsive` must bar the peer before returning.
+  The retry assumes it; without it the retry waits the deadline twice.
+- What is NOT changed: the speculative decode path still has no
+  mid-request failover of its own (the KV-state question in that entry
+  stands). What it gains is that a non-streaming request whose peer goes
+  quiet is re-planned once on a different holder instead of ending.

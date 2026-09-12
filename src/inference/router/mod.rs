@@ -111,6 +111,25 @@ fn is_transient_remote_failure(err: &SwarmError) -> bool {
         || crate::inference::pipeline::remote_error_means_missing_shard(&msg)
 }
 
+/// Did a peer take the work and then say nothing inside a deadline sized for
+/// it? The TYPE, not the wording — [`SwarmError::PeerUnresponsive`] is raised
+/// by the ACK sweep, the first-token wait and the per-segment result deadline
+/// (`pipeline/local.rs::segment_timeout_error`), and only the first two
+/// happened to use words [`is_transient_remote_failure`] matches. The third
+/// reached the router as a 503 with no retry — on the speculative verify
+/// rounds, which propagate it straight here with no failover of their own.
+///
+/// Safe to retry only because every producer of the variant now bars the
+/// silent peer from this request first (`blacklist_holder_for_request`), so
+/// the re-plan cannot pick it again and wait the same deadline twice — the
+/// pairing `is_transient_remote_failure`'s doc calls "what makes the retry
+/// actually work". Paired by the caller with evidence that a remote segment
+/// was involved, like [`remote_peer_could_not_serve`], since the variant can
+/// come back reclassified off the wire.
+fn peer_went_silent(err: &SwarmError) -> bool {
+    matches!(err, SwarmError::PeerUnresponsive(_))
+}
+
 /// Did a segment run out of machines to try?
 ///
 /// [`SwarmError::SegmentFailoverExhausted`] is what a pipeline returns when a
@@ -187,7 +206,9 @@ fn should_retry_after(
     is_transient_remote_failure(err)
         || local_memory_refused_the_load(err)
         || (used_remote_segment
-            && (remote_peer_could_not_serve(err) || segment_ran_out_of_machines(err)))
+            && (remote_peer_could_not_serve(err)
+                || segment_ran_out_of_machines(err)
+                || peer_went_silent(err)))
 }
 
 /// Hand back the work a definitively-failed request had already done.

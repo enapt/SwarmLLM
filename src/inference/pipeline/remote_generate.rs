@@ -635,6 +635,12 @@ impl PipelineExecutor {
                         // exempt as a local scheduling problem).
                         self.shared_state
                             .record_peer_delivery(&segment.node_id, false);
+                        // The retry this invites re-plans; without this it
+                        // can re-pick the peer that just went quiet and wait
+                        // the same silence out again (Envoy's `previous_hosts`
+                        // rule). Scoped to this request only.
+                        self.shared_state
+                            .blacklist_holder_for_request(request_id, &segment.node_id);
                         return Err(SwarmError::PeerUnresponsive(format!(
                             "remote-generate: peer never acknowledged request_id={request_id} (silent drop or disconnect)"
                         )));
@@ -677,7 +683,10 @@ impl PipelineExecutor {
                     self.shared_state
                         .record_peer_delivery(&segment.node_id, false);
                     // Same reclassification as the never-acknowledged arm
-                    // above: the peer went quiet past its deadline.
+                    // above: the peer went quiet past its deadline — and the
+                    // same bar from this request's retry.
+                    self.shared_state
+                        .blacklist_holder_for_request(request_id, &segment.node_id);
                     return Err(SwarmError::PeerUnresponsive(format!(
                         "remote-generate timed out waiting for token (first={first})"
                     )));

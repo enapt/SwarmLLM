@@ -579,6 +579,19 @@ impl PipelineExecutor {
                     SegmentOutcome::TimedOut,
                     budget.is_prefill(),
                 );
+                // And bar it from THIS request's retry. A re-plan that can
+                // re-pick the peer that just sat on a forward for the whole
+                // deadline waits that deadline again — Envoy's `previous_hosts`
+                // retry predicate exists for exactly this: a host that just
+                // failed is likely to keep failing for a while, so the retry
+                // goes elsewhere or nowhere. `failover_segment` bars the failed
+                // node at each of its exits already; this covers the paths
+                // that never reach it — the speculative verify rounds, which
+                // propagate this error straight to the router. Scoped to the
+                // request, released with its state, never about ourselves.
+                if is_remote {
+                    state.blacklist_holder_for_request(request_id, node_id);
+                }
                 Err(segment_timeout_error(timeout.as_secs(), num_layers))
             }
         }
@@ -768,6 +781,18 @@ mod segment_budget_tests {
         budget: SegmentBudget,
         result: Option<LayerResult>,
     ) -> Result<LayerResult, SwarmError> {
+        wait_on_request(state, uuid::Uuid::new_v4(), node, budget, result).await
+    }
+
+    /// [`wait_on`] for a NAMED request, so what the wait left behind under
+    /// that id can be inspected.
+    async fn wait_on_request(
+        state: &Arc<SharedState>,
+        request_id: uuid::Uuid,
+        node: &NodeId,
+        budget: SegmentBudget,
+        result: Option<LayerResult>,
+    ) -> Result<LayerResult, SwarmError> {
         let (tx, rx) = tokio::sync::oneshot::channel::<LayerResult>();
         match result {
             Some(r) => tx.send(r).unwrap(),
@@ -776,18 +801,7 @@ mod segment_budget_tests {
             // the peer's fault.
             None => std::mem::forget(tx),
         }
-        PipelineExecutor::wait_for_result(
-            state,
-            rx,
-            uuid::Uuid::new_v4(),
-            0,
-            node,
-            1,
-            8,
-            budget,
-            None,
-        )
-        .await
+        PipelineExecutor::wait_for_result(state, rx, request_id, 0, node, 1, 8, budget, None).await
     }
 
     /// The defect this pins: `record_peer_delivery` was called ONLY from
@@ -943,6 +957,55 @@ mod segment_budget_tests {
         );
         assert_eq!(state.peer_delivery_samples(&node), 1);
         assert!(state.peer_expected_attempts(&node) > 1.0);
+    }
+
+    /// The peer that sat on the forward for the whole deadline is barred from
+    /// this request's retry — otherwise the re-plan can pick it again and the
+    /// request waits the same deadline twice. Scoped to the request: another
+    /// request id is free to use it.
+    #[tokio::test]
+    async fn a_deadline_that_expires_bars_the_peer_from_this_request() {
+        let state = test_state();
+        let node = NodeId([13u8; 32]);
+        let request_id = uuid::Uuid::new_v4();
+        let budget = SegmentBudget::with_deadline_for_test(Duration::from_millis(20), true);
+
+        let err = wait_on_request(&state, request_id, &node, budget, None)
+            .await
+            .expect_err("nothing was ever sent");
+        assert!(matches!(err, SwarmError::PeerUnresponsive(_)));
+        assert!(
+            state.holder_blacklisted_for_request(request_id, &node),
+            "the silent peer must not be re-picked by this request's retry"
+        );
+        assert!(
+            !state.holder_blacklisted_for_request(uuid::Uuid::new_v4(), &node),
+            "barred for this request only — it may be healthy for everyone else"
+        );
+    }
+
+    /// The control: our own dropped sender says nothing about the peer, so it
+    /// is not barred either — a failover resolving elsewhere or a cancelled
+    /// request must not cost a healthy holder the retry.
+    #[tokio::test]
+    async fn a_dropped_response_channel_does_not_bar_the_peer() {
+        let state = test_state();
+        let node = NodeId([14u8; 32]);
+        let model = ModelId("m".into());
+        let request_id = uuid::Uuid::new_v4();
+        let budget = budget(&state, &node, &model, WorkKind::Prefill);
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<LayerResult>();
+        drop(tx);
+        let err =
+            PipelineExecutor::wait_for_result(&state, rx, request_id, 0, &node, 1, 8, budget, None)
+                .await
+                .expect_err("the sender was dropped");
+        assert!(!matches!(err, SwarmError::PeerUnresponsive(_)));
+        assert!(
+            !state.holder_blacklisted_for_request(request_id, &node),
+            "a dropped sender is our bookkeeping, not the peer's silence"
+        );
     }
 
     /// Every verdict in one place, so the timeout arm is pinned without a test

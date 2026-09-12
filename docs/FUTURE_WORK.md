@@ -14259,17 +14259,22 @@ being fixed. Any implementation must carry a `truncate_kv_to` for the positions
 in doubt, and should be tested against a peer that fails *after* applying them as
 well as one that fails before.
 
-**Related, deliberately also unfixed:** `is_transient_remote_failure` in
-`inference/router/mod.rs` matches on message PROSE (`"never acknowledged"`,
+**Related — DONE 2026-09-12, both halves together:** `is_transient_remote_failure`
+in `inference/router/mod.rs` matched on message PROSE (`"never acknowledged"`,
 `"silent drop"`, `"remote-generate timed out"`) rather than on the error type, so
-a `PeerUnresponsive` whose wording differs gets no router-level retry either.
-Matching the type is the obvious fix and was not taken, because the retry
-re-assembles a fresh pipeline that can pick the same holder — with a single
-holder it simply waits the same deadline twice. It wants
-`blacklist_holder_for_request` applied on a segment timeout first; that helper
-exists and is currently applied only for missing-shard errors
-(`distributed.rs:1254`, `remote_generate.rs:494,507`). Do those two together or
-neither.
+a `PeerUnresponsive` whose wording differed — the per-segment deadline's — got
+no router-level retry. Matching the type alone would have made the retry
+re-assemble a pipeline that can pick the same holder and wait the same deadline
+twice, so the two halves shipped as one: every producer of the variant now
+calls `blacklist_holder_for_request` on the silent peer before returning (the
+deadline arm in `pipeline/local.rs`, both fast-path arms in
+`remote_generate.rs`), and `router::peer_went_silent` retries the TYPE, gated on
+a remote segment having been involved. Rule and evidence:
+`docs/invariants/scheduling.md` § "A peer that went silent is barred from the
+retry". **What this does NOT give the speculative path is mid-request
+failover**: the KV-state question above stands. What it gives is that a
+non-streaming request whose verify peer goes quiet is re-planned once onto a
+different holder instead of ending with the 503.
 
 ## A contradicted shard hash cannot name the peer that claimed it (found 2026-08-26, RESOLVED 2026-08-26)
 

@@ -415,6 +415,28 @@ fn the_retry_gate_weighs_every_term() {
     }
 }
 
+/// A peer that sat on a segment for its whole deadline is retried on a fresh
+/// plan — by TYPE, since the deadline's wording matches none of the prose the
+/// transient classifier knows — and only when a remote segment was involved,
+/// because the variant can come back reclassified off the wire.
+#[test]
+fn a_segment_deadline_is_retried_only_with_a_remote_segment_involved() {
+    use crate::error::SwarmError;
+    let silent = SwarmError::PeerUnresponsive(
+        "Timed out waiting for segment result (296s, 28 layers)".into(),
+    );
+    // The wording alone never qualified it — that is the gap this closes.
+    assert!(!super::is_transient_remote_failure(&silent));
+    assert!(super::should_retry_after(&silent, true, false, false));
+    assert!(
+        !super::should_retry_after(&silent, false, false, false),
+        "with no remote segment there is nothing different to route to"
+    );
+    // The streamed and cancelled guards bind it like every other class.
+    assert!(!super::should_retry_after(&silent, true, false, true));
+    assert!(!super::should_retry_after(&silent, true, true, false));
+}
+
 /// This node's own memory refusal is re-planned with no remote segment
 /// involved — the one local failure that is.
 ///
