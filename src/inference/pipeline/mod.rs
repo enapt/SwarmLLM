@@ -9,6 +9,7 @@ pub(crate) mod distributed;
 mod dsd;
 mod hedge_dispatch;
 mod local;
+mod local_generate;
 mod ngram_only_spec;
 mod prompt;
 pub(crate) mod remote_generate;

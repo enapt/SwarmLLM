@@ -76,6 +76,16 @@ impl PipelineExecutor {
             return Ok(out);
         }
 
+        // The plan named this node for all of it. Run it as the local
+        // generation it is, rather than sending ourselves a LayerForward per
+        // token — which is the ONLY path that consults the prefix cache, so
+        // without this a node that stands its API fast path aside to let the
+        // scheduler consider the swarm re-prefills every prompt for ever
+        // (report #018).
+        if let Some(out) = self.try_local_generate_fastpath(token_tx.clone()).await? {
+            return Ok(out);
+        }
+
         // Remote-generate fast path for single-segment distributed: bypass
         // the per-token coordinator/remote round trip entirely. Remote
         // worker runs the full decode loop and streams tokens back. Falls
