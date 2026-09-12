@@ -8,6 +8,47 @@ names** — the rule statement in `architecture.md` is the summary, this is the
 reasoning, and several of these describe a fix that looked obviously correct
 and was not.
 
+## A plan that names this node for the whole model is a local generation
+
+**`inference::pipeline::local_generate::try_local_generate_fastpath`** runs a
+single-segment plan assigned to this node the way the same request runs when
+there is nobody to ask — through `ModelProcessPool::generate` — instead of
+sending our own worker a `LayerForward` per token.
+
+**Why.** `SharedState::local_fast_path_for` stands the API fast path aside
+whenever this node would run the model on its PROCESSOR and has peers, so the
+scheduler gets to consider delegating. That is right, and its doc says the cost
+when nobody better is found is "only a scheduling pass". It was not. The plan
+came back naming this node and the pipeline carried it out on the forward path —
+**the one execution path never wired to the prefix cache**. Continuous batching,
+slot admission and n-gram speculation live on the `Generate` path and were lost
+with it.
+
+Measured (report #018, 2026-09-11): `prefix-cache HIT` appears **zero times in a
+week of logs**, across several models, on a processor-only node holding a
+complete 14B with six peers. Every turn of every conversation re-read the whole
+prompt, on exactly the machines least able to afford it.
+
+`remote_generate::eligible` has asserted this arrangement since it was written —
+it excludes the local node with "local inference is handled by `execute_local`,
+which has its own faster path". True only of requests that never reached the
+router.
+
+Three things a change here must keep.
+
+- **The span is checked, not assumed from the segment count.**
+  `local_whole_model_segment` requires the segment to equal the complete local
+  split model's range. A segment short of either end produces hidden states, not
+  tokens, and handing it to `generate` would answer with the output of a
+  fraction of the model.
+- **Prompt privacy is NOT a disqualifier here.** What it guarantees is that the
+  prompt and the sampled tokens stay on this machine; a plan running every layer
+  here satisfies it completely, with no boomerang to build. The remote sibling
+  declines on it because that path puts the raw prompt on the wire.
+- **It changes how the answer is carried out, never what was decided.** The
+  scheduler still runs, still prices the swarm, and still delegates whenever a
+  peer is worth it.
+
 ## The component that will refuse must be asked while the plan can still change
 
 Two halves of one rule, both learned from a 16 GB processor-only Mac mini that

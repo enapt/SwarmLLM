@@ -221,6 +221,17 @@ the identical plan (gotcha #452).
 
 → `docs/invariants/scheduling.md`
 
+## A plan that names this node for the whole model is a local generation
+
+**`pipeline::local_generate::try_local_generate_fastpath`** runs a single-segment
+plan assigned to this node through `ModelProcessPool::generate`, not as a
+`LayerForward` per token to our own worker — which is the one path the prefix
+cache, continuous batching and n-gram speculation are absent from. The span is
+checked against the complete local split model, never assumed from the segment
+count.
+
+→ `docs/invariants/scheduling.md`
+
 ## The hand-off gate proposes; the priced search decides
 
 `assemble_pipeline_for` no longer RETURNS the whole-model hand-off. When the
@@ -393,12 +404,23 @@ itself and the books come out even.
 
 → `docs/invariants/state-and-config.md`
 
-## A disconnect retires a session key; it must not destroy it
+## A disconnect retires a session key; it must not destroy it — and must not keep it
 
 `SessionManager::remove_session` moves the live key into `retired` — openable,
 never sealable, for `PREVIOUS_KEY_GRACE`, carrying its own replay window — and
 `open` falls back to it after the current and superseded keys, including when
 there is no session at all.
+
+**It runs on every full disconnect, with no exemption.** An active pipeline is
+not a reason to keep a session: `active_pipelines` is the COORDINATOR's map, so
+the serving peer retires its own either way and comes back on a different key,
+and `establish_session` is idempotent — nothing repairs the mismatch.
+`a_disconnect_retires_the_session_even_mid_pipeline` in
+`tests/repo_consistency.rs` fails the build on a gated call.
+
+**A session the peer cannot open repairs itself.** A failed `open` calls
+`request_rekey` (inside `open`, so every decrypt site inherits it) and
+`key_rotation` performs one rate-limited ephemeral exchange.
 
 → `docs/invariants/network.md`
 
@@ -1390,6 +1412,9 @@ them is this codebase's most-repeated defect — see “One invariant, N paths�
 - **`inference::split::GgufTensorMeta::tied_output_location`** — the single definition of "is this model weight-tied", i.e. does it reuse `token_embd.weight` as the LM head instead of shipping an `output.weight`. Both sidecar writers and the reader go through it.
 
 ### Worker memory: graphics, RAM and the KV cache → `docs/invariants/memory.md`
+
+- **`DaemonMsg::ReleaseRequestKv` — a finished request releases its conversation cache, wherever it is held.** Sent by `ModelProcessPool::release_request_kv` at the one place a request finishes. The `Generate` handlers clear their own; the FORWARD path had nothing, and the daemon's own `cleanup_request_id` is a DIFFERENT PROCESS's store. Unconditional: the worker keys by REQUEST id, so no later turn can find the entry. A KV-admission refusal is `LocalMemoryUnavailable`, carried over IPC as `WorkerMsg::Error::local_memory_refusal` because the wording is deliberately identical to a peer's refusal.
+- **`api::process_memory::resident_bytes` — a process's memory is the LARGEST accounting the platform offers.** macOS keeps two that differ by orders of magnitude; under-reporting is the failure that matters.
 
 - **`inference::worker_ipc::worker_error_is_fatal`** — the single source of truth for "did this worker error destroy the worker's device state, or just this request?".
 - **`daemon::shard_loader::force_cpu_for`** — the single mapping from `inference.gpu_layers` (`-1` auto / `0` CPU only / `>0` GPU) to the loader's `force_cpu` flag.

@@ -8,6 +8,70 @@ names** — the rule statement in `architecture.md` is the summary, this is the
 reasoning, and several of these describe a fix that looked obviously correct
 and was not.
 
+## A process's memory is the largest accounting the platform offers
+
+**`api::process_memory::resident_bytes(pid, sysinfo_bytes)`** is the single
+answer to "how much memory is one of our processes holding", and it takes the
+maximum of every reading the platform has rather than choosing one.
+
+macOS keeps two and they are not interchangeable: `sysinfo` reports
+`pti_resident_size` from `proc_pidinfo`, Activity Monitor reports the memory
+footprint (`ri_phys_footprint` from `proc_pid_rusage`), and the two can differ by
+orders of magnitude depending on how the pages were obtained. Reported (report
+#017, 2026-09-11): a worker holding a 14B showed **13 MB** in the dashboard's
+tooltip while Activity Monitor showed ~13 GB and the machine was at 13-15 of
+16 GB. The system-wide figure the same endpoint reads was correct throughout —
+only the per-process half collapsed.
+
+**The direction is not symmetric and that is why the maximum is right.**
+Under-reporting is the observed failure and the one that matters: a bar near zero
+on a nearly-full machine tells a user their node is idle when it is the thing
+filling their memory. Over-reporting is bounded by the machine's own total, which
+the bar is drawn against.
+
+⚠ **The report's stated mechanism is probably backwards** — footprint is the
+accounting that EXCLUDES clean file-backed pages, and footprint is what showed
+13 GB, so "mmap'd pages invisible to the process figure" predicts the opposite of
+what was seen. The fix deliberately does not depend on which is right. Not
+testable from Linux; CI's macos-15 job compiles and runs it, and
+`this_process_reports_a_footprint_on_macos` fails there if the syscall stops
+answering — without it a permanently-failing call would leave the figure silently
+equal to the one it exists to correct.
+
+## A finished request releases its conversation cache, wherever it is held
+
+**`DaemonMsg::ReleaseRequestKv`**, sent by
+`ModelProcessPool::release_request_kv` at the one place a request finishes, is
+how a segment's KV entry is freed. The `Generate` handlers clear their own on
+the way out; the FORWARD path had nothing, so what it held stayed charged
+against the shared budget until the ten-minute idle sweep.
+
+The daemon's own `kv_cache_store.cleanup_request_id` looks like it covers this
+and does not: **the worker's store is a different process's.** That is the whole
+defect in one line.
+
+**Unconditional, session or not.** The worker keys entries by REQUEST id —
+`session_id` rides along on `IpcGenerate` and nothing in the worker reads it —
+so the next turn of a conversation arrives under a new id and could never find
+the old entry. What carries a conversation forward is the prefix cache, and its
+snapshot is taken before the entry is cleared. The daemon-side skip for
+session-keyed requests is about a different store and is left alone.
+
+Measured (report #019, 2026-09-11) on a 16 GB processor-only machine: three
+refusals seconds apart, across two different conversations one of which the user
+had finished, all reporting the identical `live_mb=2472` — a figure that cannot
+move because nothing ever gave anything back.
+
+**A KV-admission refusal is `LocalMemoryUnavailable`, and the class travels as a
+flag.** `WorkerMsg::Error::local_memory_refusal` carries it across the IPC
+boundary because the wire WORDING is deliberately identical to a peer's memory
+refusal (see `SwarmError::LocalMemoryUnavailable`), so
+`classify_worker_error` cannot and must not re-derive it from the text —
+`reclassify_flattened_error` deliberately never produces this variant. It is the
+one local failure the router re-plans, and in the reported case a five-segment
+route across peers had been priced one line earlier in the same scheduling pass
+and was discarded when the refusal read as final.
+
 ## `inference::worker_ipc::worker_error_is_fatal`
 
 (R146) — the single

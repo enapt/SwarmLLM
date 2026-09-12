@@ -57,6 +57,47 @@ static-key test passes with the fix reverted — which is how the first version 
 control caught it. Forward secrecy means the real link is ephemeral and a
 reconnect genuinely changes the key.
 
+### The mirror image: a key that must not be KEPT (2026-09-12, report #016)
+
+Everything above is about a key destroyed too eagerly. The same asymmetry has a
+second failure, in the other direction, and the paragraph above describes the
+mechanism without drawing the conclusion: **the `in_active_pipeline` exemption
+was also wrong for the side that KEPT its session.**
+
+The coordinator kept an ephemeral key across a reconnect. The serving node — not
+in `active_pipelines`, because that map is the coordinator's — retired its own
+and came back on a fresh static one. Nothing then noticed: `seal` succeeds
+whatever the peer holds, the failure happens on the far side, and
+`establish_session` is idempotent, so the Identify that follows the reconnect
+left the stale key exactly where it was. 29 forwards to that peer, 29 `Could not
+decrypt forward`, zero successes, every request routed through it dead until one
+end aged the session out ten minutes later.
+
+The exemption dated from April 2026, when `establish_session` reinstalled on
+every Identify and its comment — "reconnection will refresh it" — was true. It
+stopped being true when that became idempotent, and **the comment is how the
+contradiction survived**: a claim about another function's behaviour goes stale
+silently, which is why `a_disconnect_retires_the_session_even_mid_pipeline` in
+`tests/repo_consistency.rs` is a test and not a comment.
+
+What it was protecting is gone too. It bought a sealable key across the gap, but
+a peer we are not connected to cannot be sent to, and after the reconnect that
+peer has no session to open with — so the seal it saved produced a forward
+nobody could read.
+
+**And a session the other end cannot open now repairs itself.** A failed `open`
+arms a repair (`SessionManager::request_rekey`, at that single choke point so a
+third decrypt site inherits it) and `crypto::key_rotation` performs one ephemeral
+exchange, which both ends install. That covers every other way the two can
+diverge — a lost exchange reply, two rotations crossing — none of which either
+end can detect locally. Rate-limited per peer, because a broken session fails
+every forward of every request and one exchange repairs all of them: without the
+limit, 29 failures would have meant 29 handshakes.
+
+A forged or replayed frame also arms a repair. That is deliberate and costs
+nothing — connections are authenticated by PeerId at the Noise layer, so only
+that peer can trigger it, and it can always ask for a fresh key anyway.
+
 ## A holder record names a BUILD, not just a shard
 
 **`ModelRegistry::shard_holders` filters out holders that positively claim a

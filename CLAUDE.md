@@ -57,14 +57,14 @@ swarmllm/
 │   ├── config/    (mod, providers, credit, network, ops, node, inference)
 │   ├── daemon/    (mod, manifest, shard_loader, gpu_support (CUDA compute-capability floor + pre-Ampere CPU fallback), dispatch/, startup, background, helpers, supervisor)
 │   │   └── state/        (mod, activity, capacity, capacity_plan, credits, events, hf, metrics, models, peer_speed, perf_history, relay, removed_shards, repair, retained_activations (what was sent to each segment, so a stand-in can be replayed it and take over mid-reply), retained_replies (fast-path replies kept for ResendTokens, #438), tp_allreduce)
-│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer,relay}, behaviour, discovery, protocol, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), helpers, pipeline_stream)
+│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer,relay}, behaviour, discovery, protocol, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), bandwidth (what this node actually puts on the wire — libp2p's transport counters, read back), helpers, pipeline_stream)
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, reference (R150 get-model), huggingface/, auto_manage/, lora)
 │   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist, quant (R133 recommender))
 │   │   └── huggingface/  (mod, download, private_types, probe, search, shards, watcher, tests)
 │   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, attn_softmax (fused scale+softcap+mask+softmax CPU kernel), decode_attn (single-position CPU attention straight over the KV cache — +24% decode), fast_math (AVX2 expf + fused SiLU×up), cpu_pools (per-phase rayon pools: prefill wide, decode narrow), local_embedder, mem_bandwidth (measured memory bandwidth — what a CPU node advertises as its speed, replacing a hardcoded 50 GB/s assumption), model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), hedging (R136 L2), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler), cancel (the one cancellation signal), prefill_pacer, thermal)
 │   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
 │   │   ├── scheduler/    (mod, parallax, parallax_allocator, tests)
-│   │   ├── pipeline/     (mod, distributed, dsd, local, prompt, remote_generate, speculative, tensor_parallel, vision, hedge_dispatch (R136 L2), ngram_only_spec (R136 L1))
+│   │   ├── pipeline/     (mod, distributed, dsd, local, local_generate (a plan that names this node is run as the local generation it is), prompt, remote_generate, speculative, tensor_parallel, vision, hedge_dispatch (R136 L2), ngram_only_spec (R136 L1))
 │   │   ├── split/        (mod, model, loader, executor, kv_cache, kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, tests/)
 │   │   │   └── tests/    (mod, common, core, gqa, gemma2, moe_mla, llama4_glm4)
 │   │   ├── chat_template/ (mod, fallbacks, tojson (the `transformers` signature, not minijinja's), tests, fixtures/{llama3_official,qwen3_official,qwen3_gguf_shipped,glm4_gguf_shipped}.jinja — rendering is `minijinja` + `minijinja-contrib` pycompat, the engine HF's TGI and SGLang use; the hand-rolled parser/eval subset was retired 2026-09-10)
@@ -73,7 +73,7 @@ swarmllm/
 │   ├── identity/  (keypair, nickname)
 │   ├── crypto/    (session, pipeline_seal, gossip_seal, relay_seal, key_rotation, provider_keys)
 │   ├── pool/      (types, crypto, manager/, forward, scope, invite (the `swarmpool://` v2 codec))
-│   ├── api/       (server, sse, tool_parse (local-model tool-call parser), admin, admin_providers, websocket, middleware, dashboard_trust (may this request be handed the API key?), tailscale, identity, pool, metrics, providers, claude_sub*, mod, openai/, anthropic/, mcp/, admin_hf/, admin_models/, claude_session/)
+│   ├── api/       (server, sse, tool_parse (local-model tool-call parser), admin, admin_providers, websocket, middleware, dashboard_trust (may this request be handed the API key?), process_memory (the largest memory accounting the platform offers — macOS keeps two), tailscale, identity, pool, metrics, providers, claude_sub*, mod, openai/, anthropic/, mcp/, admin_hf/, admin_models/, claude_session/)
 │   ├── storage/   (db)
 │   └── health/    (monitor, rebalancer)
 ├── frontend/      (ONE index.html carrying 11 `<template>` elements, css/, js/{core/4,components/19,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/, fonts/ (IBM Plex woff2, SIL OFL — see LICENSE-THIRD-PARTY.md))
@@ -225,6 +225,53 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2617 lib (dev,claude-subscription) — re-measured 2026-09-12, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 91 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
+**UNRELEASED on `main` (2026-09-12): six field reports, five fixed and one
+answered.** All from one tester on a 16 GB processor-only Mac plus a bandwidth
+suggestion from another. 2617 lib, 91 repo-consistency, clippy clean.
+
+- **A peer that reconnected mid-request became permanently undecryptable** —
+  29 forwards, 29 failures, 0 successes. `handle_connection_closed` exempted a
+  peer in `active_pipelines` from `remove_session`, but that map is the
+  COORDINATOR's: the serving side retires its key either way and returns on a
+  fresh one, while the coordinator keeps an ephemeral key nothing can open.
+  **The comment justifying the exemption had been false since
+  `establish_session` became idempotent** (gotchas #562, #563 — this is the
+  mirror image of report #028's `retired` map). Exemption gone; a failed `open`
+  now asks for one rate-limited re-key, so any other divergence self-heals.
+- **A request routed back to this node never used the prefix cache** —
+  `prefix-cache HIT` zero times in a week of field logs on a node holding a
+  complete 14B. `local_fast_path_for` stands aside so the scheduler can consider
+  peers (right), and the plan came back naming this node, which the pipeline then
+  carried out as a `LayerForward` per token to our own worker (the one path with
+  no prefix cache, batching or speculation). Now
+  `pipeline::local_generate::try_local_generate_fastpath` (#564).
+- **A finished conversation never gave its memory back, and running out ended
+  the request.** The forward path freed nothing — the daemon's
+  `cleanup_request_id` is a DIFFERENT PROCESS's store — so three refusals
+  seconds apart read the identical `live_mb`. And the refusal was a plain
+  `ServiceUnavailable`, so the router treated it as final while a five-segment
+  peer route sat priced one line earlier. Now `DaemonMsg::ReleaseRequestKv` +
+  `LocalMemoryUnavailable` carried over IPC as a typed flag.
+- **Stop belonged to the page, not to the chat you were looking at** — it
+  cancelled the OTHER chat's reply. Per-session now, and a reply survives you
+  switching away and back.
+- **macOS: the RAM bar read 13 MB for a worker holding 13 GB.** Two accountings;
+  the larger is reported. ⚠ The reporter's stated mechanism is probably
+  backwards, so the fix does not depend on it. Not testable from Linux.
+- **`max_bandwidth_mbps` is real but narrow** (shard serving only) and nothing
+  could say what a node was actually sending — the reporter had to stop the
+  daemon and diff `/sys/class/net`. The setting now says what it covers, and
+  `swarmllm status` / the dashboard / `/metrics` carry live RX/TX from libp2p's
+  transport counters. **Absent, never zero, when nothing is counting** (#565).
+  ⚠ The reported 11 Mbps is NOT reproduced: a fresh node with 5 peers measures a
+  few kbps here, a 12-hour-old one under 1 Mbps.
+- **Answered, not a defect: disk speed does not bias routing** (report #020).
+  Nothing the scheduler reads comes from a disk measurement; the one real cost is
+  the cold load, which is unpriced and one-off. `docs/FUTURE_WORK.md` § Not bugs.
+
+⚠ **Two test nodes on this box are not isolated** even with mDNS off and no
+bootstrap: the live node's mDNS dials THEM (gotcha #566). Check the peer count.
+
 **Released and deployed: v0.3.174-alpha (2026-09-11, tag on `f4feccd2`).** Gate
 clean job-by-job — CI 14/14, Cache warm with both kernel caches *restored* AND
 *skipped*, `check_ci_gate.sh` 14=14 against a COMPLETED run, release 10/10 first
@@ -236,24 +283,13 @@ unchanged, 0 ERROR, paired at 153 ms. Rollback
 `~/.local/bin/swarmllm.0.3.173-alpha.bak`. Full detail:
 `memory/round_log_0911_field_report_and_privacy.md` § Release.
 
-**What it carries** — nine fixes, five of them field-reported the same day:
-
-- **`tojson` was minijinja's, not `transformers`'.** It escaped `<`, `>`, `&`
-  and `'` into `\u003c`-style codes, so every tool schema reached every model
-  with its apostrophes mangled — on every tool-carrying request to every model
-  whose template renders tools. It also rejected `ensure_ascii`, and a filter
-  error fails the WHOLE render, so GLM-4 with tools was answered by a fallback.
-  Ours now matches `transformers` byte-for-byte, pinned against `jinja2`.
-- **A tool call wrapped in a tag the model invented is parsed** — structurally,
-  because the tag MOVES with the prompt (`<tools>` → `<xml>` at temperature 0).
-- **Auto-manage prune could delete the shard prompt privacy depends on**: it read
-  the EXPLICIT per-model map, missing the models privacy switched itself on for,
-  which is how it is normally on. Two more sites derived it the same partial way.
-- **The cloud routing catalogue was erased, not stale**, and only a human opening
-  the admin page rebuilt it. Per-provider merge + a 15-minute refresh.
-- **A warm peer is credited only for layers it actually holds** —
-  `NodeCapability::resident_layers` + three-state `PeerResidency`. Plus a
-  duplicate shard download and a cancel that reached only the newest.
+**What it carried** — nine fixes, five field-reported the same day: `tojson` was
+minijinja's not `transformers`' (every tool schema mangled); a tool call in a tag
+the model invented is parsed structurally; auto-manage prune could delete the
+shard prompt privacy depends on; the cloud routing catalogue was ERASED not
+stale; a warm peer is credited only for layers it holds
+(`NodeCapability::resident_layers`). Detail:
+`memory/round_log_0911_field_report_and_privacy.md`.
 
 **Conformance is nine families** — GLM-4 (the partial-RoPE family nothing here
 could exercise) and Mistral-7B-v0.3 (system-role refusal + `[TOOL_CALLS]`) were
@@ -278,6 +314,7 @@ script fed an unfinished run advises causing exactly that (#557).
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
+- **.174** (09-11): nine fixes, five field-reported the same day — `tojson` was minijinja's (every tool schema mangled), a tool call in an invented tag is parsed structurally, auto-manage prune could delete the shard PRIVACY depends on, the cloud catalogue was ERASED not stale, a warm peer credited only for layers it holds. `round_log_0911_field_report_and_privacy.md`.
 - **.172-.173** (09-11): Phi models never stopped generating (one declared EOS, a DIFFERENT token ends each turn) + four tool-calling fixes; then streamed replies stopping dead at ~65 tokens (generation held the thread the runtime needed to SEND them, then a full 64-slot queue read as a departed client), and **partial RoPE meaning Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request**. Same day: the CI/cache round — `cache-gc.yml` was ref-blind and would have deleted main's LIVE cache, `actionlint` became a CI job, branch protection went to 14 contexts — and **`family_conformance.sh`**, which found two real bugs on its first run. `round_log_0911_*.md`.
 - **.166-.171** (09-09→09-10): five field-driven releases in two days. **Every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` and a context that will not fit is SHRUNK not refused (.170); **tools were NEVER passed to the template** — unreachable on every request ever served — plus an escrow that MINTED credits (.171). ⚠ Branch protection required two jobs that no longer existed; every PR was permanently BLOCKED (#530).
 - **.160-.165** (09-06→09-08): #484 a FALSE PRIVACY ASSURANCE; #495 shipped INERT (a transport failure recorded as a perfect delivery); the prompt-trust bar; per-peer GOODPUT closing issue #21's open half. ⚠ Null controls caught THREE tests passing for the wrong reason.
