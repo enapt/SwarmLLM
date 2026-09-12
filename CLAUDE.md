@@ -225,10 +225,29 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2626 lib (dev,claude-subscription) — re-measured 2026-09-12, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 93 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Releasing: v0.3.176-alpha (2026-09-12).** Baseline taken FIRST —
-v0.3.175-alpha conformance **9/9 families, 52 checks, 0 FAIL** (2 `n/a`, the
-known GLM-4 one). Gate results recorded in
-`memory/round_log_0912_new_user_sweep.md` § Release as each step lands.
+**Released and deployed: v0.3.176-alpha (2026-09-12, tag on `f3daab6b`).** Gate
+clean job-by-job — CI **14/14** and Cache warm **3/3** ON THE TAGGED COMMIT,
+`check_ci_gate.sh` **14 required = 14 produced** against a COMPLETED run,
+release **10/10 first time**; on the DOWNLOADED artifact **smoke 9/9 + shapes
+7/7 + conformance 9/9 families (52 checks, 0 FAIL)**, matching a v0.3.175
+baseline taken FIRST that scored the same, plus **`constrained_node_test.sh`
+12/12** — the harness that matters most here, since #32 changes small-node
+memory behaviour. `/` verified redirecting to `/chat` on the released binary.
+Both nodes verified: local `225e6fe7f2b5cd74` and Proxmox `9684263580c6660f`,
+ids and `identity.key` unchanged, config untouched, 0 ERROR, paired at 168 ms.
+Rollback `~/.local/bin/swarmllm.0.3.175-alpha.bak`.
+
+⚠ **Cache warm BUILT the flash-attn kernels rather than restoring them** —
+`Cache not found for input keys` on both CUDA jobs, ~31 min, then saved. The
+cache had been evicted (the content-hash key was unchanged), so this is not a
+regression and the mechanism still works; but the gate line says to see them
+*restored AND skipped*, and this run showed the other half. Expect the next
+release to restore.
+
+⚠ **shapes failed on its FIRST run** with `node did not start` — the documented
+12 s `/health` timeout, hit right after a smoke run on the same 1 GB artifact.
+Port confirmed free and no process left over; the clean re-run scored 7/7.
+Probe before suspecting the build.
 
 **Previous: v0.3.175-alpha (tag `6bc9735d`)** — six field reports from a 16 GB
 processor-only Mac; gate clean, conformance 9/9. Rollback binaries live beside
