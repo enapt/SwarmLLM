@@ -20,7 +20,11 @@ contribution = "minimal"       # "minimal", "moderate", "maximum" — change in 
 max_gpu_vram_mb = 0            # 0 = auto (80% of detected GPU used for inference; rest stays on disk for P2P)
 max_ram_mb = 0                 # 0 = auto (50% of system RAM with a GPU, 80% on a CPU-only node)
 max_disk_mb = 50000            # 50GB for model storage
-max_bandwidth_mbps = 0         # 0 = auto from [node] contribution (10/50/unlimited Mbps)
+max_bandwidth_mbps = 0         # UPLOAD cap for SERVING MODEL PIECES to other nodes, and
+                               # nothing else: inference traffic and the gossip that keeps
+                               # this node connected are not throttled by it. 0 = auto from
+                               # [node] contribution (10/50/unlimited Mbps). `swarmllm status`
+                               # reports what this node is actually sending and receiving.
 max_cpu_threads = 0            # 0 = auto from [node] contribution (half / three-quarters / all
                                # PHYSICAL cores). More threads than physical cores makes
                                # inference slower, not faster — it is memory-bound.

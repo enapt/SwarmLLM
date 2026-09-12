@@ -379,6 +379,13 @@ impl HealthMonitor {
                             "Evicted stale hedge-tracker entries"
                         );
                     }
+                    // Take a traffic reading. Here rather than at the stats
+                    // build, because a RATE needs two readings taken at a
+                    // known cadence and this loop has one — a reader that
+                    // sampled whenever someone opened the dashboard would
+                    // divide by whatever interval that happened to be.
+                    self.shared_state.metrics.bandwidth.refresh();
+
                     // Peer speed estimates go stale the same way, with an extra
                     // twist: the estimate is only refreshed when we route to a
                     // peer, and we stop routing to peers that look slow — so a

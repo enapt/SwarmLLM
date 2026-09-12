@@ -754,6 +754,32 @@
           document.getElementById('ram-bar').className = U.resourceBarClass(ramPct, 'green');
           App.dashboard._setGauge('ram-gauge', ramPct);
         }
+        // What this node is sending and receiving. Absent until the daemon has
+        // taken two readings — the tile stays hidden rather than showing a zero
+        // that would be read as "SwarmLLM is not the thing using my
+        // connection" when the truth is that nothing has been measured.
+        var netCell = document.getElementById('hw-device-network');
+        var traffic = data.network_traffic;
+        if (netCell) {
+          if (traffic) {
+            netCell.hidden = false;
+            var rateEl = document.getElementById('net-rate');
+            var totalEl = document.getElementById('net-total');
+            if (rateEl) {
+              rateEl.textContent = (traffic.out_bytes_per_sec === null || traffic.out_bytes_per_sec === undefined)
+                ? I18n.t('hw.network_measuring')
+                : '\u2191' + U.formatBitrate(traffic.out_bytes_per_sec) + '  \u2193' + U.formatBitrate(traffic.in_bytes_per_sec);
+            }
+            if (totalEl) {
+              totalEl.textContent = '\u2191' + U.formatBytes(traffic.out_bytes || 0) +
+                '  \u2193' + U.formatBytes(traffic.in_bytes || 0);
+            }
+            netCell.setAttribute('data-tooltip', I18n.t('hw.network_tip'));
+          } else {
+            netCell.hidden = true;
+          }
+        }
+
         if (hw.total_disk_mb) {
           document.getElementById('disk-total').textContent = '/ ' + U.formatMB(hw.total_disk_mb);
           var diskUsed = hw.used_disk_mb || 0;

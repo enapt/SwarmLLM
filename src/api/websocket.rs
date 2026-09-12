@@ -638,6 +638,9 @@ async fn build_stats_message(state: &SharedState) -> String {
     let mut data = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "hardware": hardware,
+        // Rides `stats_update` like `hardware` above it — there are
+        // deliberately only five WS message types.
+        "network_traffic": crate::api::metrics::network_traffic_json(state),
         "peers": peers_connected,
         "lan_peers": lan_peers,
         "pool_peers": pool_peers,

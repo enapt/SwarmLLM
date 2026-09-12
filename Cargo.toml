@@ -45,6 +45,11 @@ tokio = { version = "1", features = ["full"] }
 # P2P Networking
 libp2p = { version = "0.56", features = [
     "tokio",
+    # `metrics` is what counts the bytes on the wire. Without it nothing in
+    # this process can say how much traffic it is generating — the only way to
+    # find out was to stop the daemon and diff the interface counters, which is
+    # what a user reported having to do (2026-09-11 suggestion).
+    "metrics",
     "quic",
     "kad",
     "gossipsub",
@@ -63,6 +68,10 @@ libp2p = { version = "0.56", features = [
     "mdns",
 ] }
 libp2p-stream = "0.4.0-alpha"
+# The registry libp2p's bandwidth counters are registered into. Pinned to the
+# version libp2p itself depends on — two copies would give us a registry libp2p
+# cannot write to, and the failure would be a silent zero.
+prometheus-client = "0.23"
 
 # HTTP server
 socket2 = "0.5"

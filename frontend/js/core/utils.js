@@ -70,6 +70,17 @@
     return Math.round(bytes / 1024) + ' KB';
   }
 
+  // A transfer rate in the unit an internet plan is sold in — megaBITS per
+  // second. Bytes per second is the number the daemon counts and the number
+  // nobody compares their connection against, and showing it unconverted makes
+  // the figure read as eight times smaller than it is.
+  function formatBitrate(bytesPerSec) {
+    if (bytesPerSec === null || bytesPerSec === undefined) return '\u2014';
+    var mbps = bytesPerSec * 8 / 1000000;
+    if (mbps < 0.1) return Math.round(bytesPerSec * 8 / 1000) + ' kbps';
+    return mbps.toFixed(2) + ' Mbps';
+  }
+
   function formatDlProgress(dlBytes, totalBytes, pct) {
     return formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)';
   }
@@ -1170,6 +1181,7 @@
     formatMB: formatMB,
     formatSize: formatSize,
     formatBytes: formatBytes,
+    formatBitrate: formatBitrate,
     formatCompact: formatCompact,
     formatDlProgress: formatDlProgress,
     resourceBarClass: resourceBarClass,

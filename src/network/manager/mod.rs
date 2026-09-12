@@ -671,62 +671,78 @@ impl NetworkManager {
             );
         }
         let known_peers = cached_peers + config.network.bootstrap_peers.len();
-        let swarm = SwarmBuilder::with_existing_identity(keypair)
-            .with_tokio()
-            .with_tcp(
-                libp2p::tcp::Config::default().nodelay(true),
-                libp2p::noise::Config::new,
-                // Use yamux 0.13 defaults (auto-tuned windows, 1 GiB max connection window).
-                // NOTE: Do NOT call set_receive_window_size or set_max_buffer_size — those
-                // are deprecated and silently downgrade to yamux 0.12 which has severe
-                // substream opening delays (~30s between successful outbound requests).
-                libp2p::yamux::Config::default,
-            )
-            .map_err(|e| SwarmError::Network(format!("TCP transport error: {e}")))?
-            .with_quic()
-            // Wrap the transports with DNS resolution so `/dns4` / `/dns6` /
-            // `/dnsaddr` multiaddrs are dialable — without this, dialing a
-            // DNS-named peer (e.g. the default `swarmllm.duckdns.org` bootstrap
-            // anchor, or any `network.external_addresses` DNS entry) fails with
-            // "Multiaddr is not supported". Uses the system resolver.
-            .with_dns()
-            .map_err(|e| SwarmError::Network(format!("DNS transport error: {e}")))?
-            .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
-            .map_err(|e| SwarmError::Network(format!("Relay client error: {e}")))?
-            .with_behaviour(|_key, relay_behaviour| {
-                behaviour::build_behaviour(
-                    &keypair_for_behaviour,
-                    relay_behaviour,
-                    relay_cfg.as_ref(),
-                    enable_mdns,
-                    enable_autonat,
-                    enable_dcutr,
-                    enable_upnp,
-                    known_peers,
-                    Some(&config.network),
-                    config
-                        .network
-                        .effective_max_connections(config.node.contribution.clone()),
+        // The whole builder runs inside `arm` because `with_bandwidth_metrics`
+        // borrows the registry for the call that consumes the builder, and the
+        // registry lives behind a lock this node keeps so the totals can be
+        // read later. See `network::bandwidth`.
+        let swarm = shared_state.metrics.bandwidth.clone().arm(|bw_registry| {
+            let swarm = SwarmBuilder::with_existing_identity(keypair)
+                .with_tokio()
+                .with_tcp(
+                    libp2p::tcp::Config::default().nodelay(true),
+                    libp2p::noise::Config::new,
+                    // Use yamux 0.13 defaults (auto-tuned windows, 1 GiB max connection window).
+                    // NOTE: Do NOT call set_receive_window_size or set_max_buffer_size — those
+                    // are deprecated and silently downgrade to yamux 0.12 which has severe
+                    // substream opening delays (~30s between successful outbound requests).
+                    libp2p::yamux::Config::default,
                 )
-                .map_err(|e| {
-                    Box::new(std::io::Error::other(e.to_string()))
-                        as Box<dyn std::error::Error + Send + Sync>
+                .map_err(|e| SwarmError::Network(format!("TCP transport error: {e}")))?
+                .with_quic()
+                // Wrap the transports with DNS resolution so `/dns4` / `/dns6` /
+                // `/dnsaddr` multiaddrs are dialable — without this, dialing a
+                // DNS-named peer (e.g. the default `swarmllm.duckdns.org` bootstrap
+                // anchor, or any `network.external_addresses` DNS entry) fails with
+                // "Multiaddr is not supported". Uses the system resolver.
+                .with_dns()
+                .map_err(|e| SwarmError::Network(format!("DNS transport error: {e}")))?
+                .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
+                .map_err(|e| SwarmError::Network(format!("Relay client error: {e}")))?
+                // Count the bytes. This is the only phase of the builder where a
+                // transport can be wrapped, and it is after every other layer, so
+                // what it counts is what actually goes over the link — relay
+                // circuits, DNS-resolved dials, QUIC and TCP alike. Read back by
+                // `BandwidthMeter::totals`; see that module for why the counting is
+                // upstream's and the reading is ours.
+                .with_bandwidth_metrics(bw_registry)
+                .with_behaviour(|_key, relay_behaviour| {
+                    behaviour::build_behaviour(
+                        &keypair_for_behaviour,
+                        relay_behaviour,
+                        relay_cfg.as_ref(),
+                        enable_mdns,
+                        enable_autonat,
+                        enable_dcutr,
+                        enable_upnp,
+                        known_peers,
+                        Some(&config.network),
+                        config
+                            .network
+                            .effective_max_connections(config.node.contribution.clone()),
+                    )
+                    .map_err(|e| {
+                        Box::new(std::io::Error::other(e.to_string()))
+                            as Box<dyn std::error::Error + Send + Sync>
+                    })
                 })
-            })
-            .map_err(|e| SwarmError::Network(format!("Behaviour error: {e}")))?
-            .with_swarm_config(|c| {
-                c.with_idle_connection_timeout(std::time::Duration::from_secs(
-                    IDLE_CONNECTION_TIMEOUT_SECS,
-                ))
-                .with_notify_handler_buffer_size(std::num::NonZeroUsize::new(256).expect("256 > 0"))
-                // Increase connection→swarm event buffer from default 7 to 64.
-                // With many sub-behaviours (identify, kademlia, gossipsub, mdns),
-                // the default 7-slot buffer fills during post-connect bursts,
-                // blocking the connection task at events.send().await and preventing
-                // it from processing inbound NotifyHandler commands (tensor forwards).
-                .with_per_connection_event_buffer_size(64)
-            })
-            .build();
+                .map_err(|e| SwarmError::Network(format!("Behaviour error: {e}")))?
+                .with_swarm_config(|c| {
+                    c.with_idle_connection_timeout(std::time::Duration::from_secs(
+                        IDLE_CONNECTION_TIMEOUT_SECS,
+                    ))
+                    .with_notify_handler_buffer_size(
+                        std::num::NonZeroUsize::new(256).expect("256 > 0"),
+                    )
+                    // Increase connection→swarm event buffer from default 7 to 64.
+                    // With many sub-behaviours (identify, kademlia, gossipsub, mdns),
+                    // the default 7-slot buffer fills during post-connect bursts,
+                    // blocking the connection task at events.send().await and preventing
+                    // it from processing inbound NotifyHandler commands (tensor forwards).
+                    .with_per_connection_event_buffer_size(64)
+                })
+                .build();
+            Ok::<_, SwarmError>(swarm)
+        })?;
 
         let shard_store = ShardStore::new(&config.node.data_dir);
         let (internal_cmd_tx, internal_cmd_rx) = mpsc::channel::<NetworkCommand>(256);

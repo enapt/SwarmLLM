@@ -16,6 +16,27 @@ use crate::api::server::AppState;
 /// is an additional freshness bound on top.
 pub(crate) const LATENCY_SAMPLE_MAX_AGE: Duration = Duration::from_secs(600);
 
+/// What this node is sending and receiving, as the dashboard and
+/// `swarmllm status` show it — or `null` when nothing is counting.
+///
+/// One builder for both stats payloads (the admin endpoint and the WebSocket
+/// tick), because those two have diverged before and a traffic figure that
+/// differs between the page and the API is worse than none.
+pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::Value {
+    let Some(bw) = shared.metrics.bandwidth.current() else {
+        // Absent, not zero: a node that is not counting and a node that is
+        // silent must not look the same. This figure exists because a user
+        // could not tell those apart from outside.
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "in_bytes": bw.inbound_bytes,
+        "out_bytes": bw.outbound_bytes,
+        "in_bytes_per_sec": bw.inbound_bytes_per_sec,
+        "out_bytes_per_sec": bw.outbound_bytes_per_sec,
+    })
+}
+
 /// GET /metrics — Prometheus/OpenMetrics text-format endpoint.
 ///
 /// Exposes key node metrics for Prometheus scraping. No auth required
@@ -107,6 +128,31 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         "Credits returned by reverting a reservation — usually a failed request",
         refunded as f64,
     );
+
+    // swarmllm_network_bytes_total (counter, per direction)
+    //
+    // Counted at the transport, so this is every protocol — gossip, DHT
+    // maintenance, shard transfers, inference — not merely what this code
+    // writes itself. Omitted entirely rather than reported as zero when nothing
+    // is counting: a flat line at 0 that means "no counters" would be read as
+    // "no traffic", which is the reading this metric exists to correct.
+    if let Some(bw) = shared.metrics.bandwidth.totals() {
+        let _ = writeln!(
+            buf,
+            "# HELP swarmllm_network_bytes_total Bytes sent and received over the peer network"
+        );
+        let _ = writeln!(buf, "# TYPE swarmllm_network_bytes_total counter");
+        let _ = writeln!(
+            buf,
+            "swarmllm_network_bytes_total{{direction=\"in\"}} {}",
+            bw.inbound_bytes
+        );
+        let _ = writeln!(
+            buf,
+            "swarmllm_network_bytes_total{{direction=\"out\"}} {}",
+            bw.outbound_bytes
+        );
+    }
 
     // swarmllm_shards_hosted (gauge)
     let local_shards = count_local_shards(shared);

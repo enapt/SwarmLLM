@@ -4853,6 +4853,7 @@ dependencies = [
  "minijinja-contrib",
  "num_cpus",
  "parking_lot",
+ "prometheus-client",
  "rand 0.8.8",
  "rayon",
  "redb",

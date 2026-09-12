@@ -713,6 +713,11 @@
               <output class="slider-output" id="settings-bandwidth-out">Unlimited</output>
             </label>
             <input type="range" id="settings-bandwidth" class="slider" value="0" min="0" max="1000" step="10" data-slider-format="mbps">
+            <!-- What it actually caps. Labelled "Max Bandwidth" it read as a
+                 limit on everything this node sends, which it is not: a user
+                 set it to 1 Mbps, measured 11 Mbps, and reasonably concluded
+                 the setting did nothing (2026-09-11 suggestion). -->
+            <span class="text-muted field-hint" data-i18n="settings.max_bandwidth_help">Caps how fast this node sends model pieces to others. It does not limit inference or the background traffic that keeps this node connected — the Network figure on the dashboard shows the total.</span>
           </div>
           <div class="form-group">
             <label for="settings-disk">
@@ -1095,6 +1100,26 @@
                     <div class="hw-cell-body">
                       <span class="node-hw-label"><span id="vram-label">VRAM</span></span>
                       <span class="mono node-hw-value" id="node-vram">...</span>
+                    </div>
+                  </div>
+                </div>
+                <!-- What this node is putting on the wire. Someone asking
+                     whether SwarmLLM is what is saturating their connection
+                     had no way to find out from here, and was reduced to
+                     stopping the daemon and diffing the interface counters
+                     (2026-09-11 suggestion). Counted at the transport, so it
+                     covers every protocol and not only inference. Hidden
+                     until a figure exists: a confident 0 that means "not
+                     measured" is exactly the reading this replaces. -->
+                <div class="node-hw-cell hw-cell-device hw-device-network" id="hw-device-network" hidden>
+                  <div class="hw-device-head">
+                    <span class="node-hw-label"><span class="node-hw-icon">⇅</span><span data-i18n="hw.network_label">Network</span></span>
+                    <span class="mono node-hw-value hw-device-name" id="net-rate">...</span>
+                  </div>
+                  <div class="hw-device-mem">
+                    <div class="hw-cell-body">
+                      <span class="node-hw-label"><span data-i18n="hw.network_total">Since start</span></span>
+                      <span class="mono node-hw-value" id="net-total">...</span>
                     </div>
                   </div>
                 </div>

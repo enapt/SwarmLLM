@@ -130,6 +130,10 @@ fn print_summary(json: &serde_json::Value) {
         None => println!("Peers:     unknown"),
     }
 
+    if let Some(line) = describe_traffic(json.get("network_traffic")) {
+        println!("Traffic:   {line}");
+    }
+
     let downloading = list("models_downloading");
     if !downloading.is_empty() {
         println!("Fetching:  {}", downloading.join(", "));
@@ -146,6 +150,65 @@ fn print_summary(json: &serde_json::Value) {
     }
 
     println!("\n(run with --json for the raw response)");
+}
+
+/// What this node is sending and receiving, in one line, or `None` when there
+/// is nothing to say.
+///
+/// A person asking "is it me?" about their connection wants the CURRENT rate
+/// first and the total second — the total alone cannot distinguish a node that
+/// is busy now from one that was busy an hour ago. Absent rather than zero
+/// while the figure is still being established, for the same reason the API
+/// omits it: a confident 0 that means "not measured" is the answer this exists
+/// to stop anyone getting.
+///
+/// A function rather than inline formatting so the wording can be pinned by a
+/// test, like `describe_worker` below it.
+fn describe_traffic(traffic: Option<&serde_json::Value>) -> Option<String> {
+    let t = traffic?.as_object()?;
+    let num = |k: &str| t.get(k).and_then(|v| v.as_f64());
+    let total = |k: &str| t.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    let totals = format!(
+        "{} sent, {} received since this node started",
+        human_bytes(total("out_bytes")),
+        human_bytes(total("in_bytes")),
+    );
+    match (num("out_bytes_per_sec"), num("in_bytes_per_sec")) {
+        (Some(out), Some(inb)) => Some(format!(
+            "{} up, {} down right now — {totals}",
+            human_rate(out),
+            human_rate(inb),
+        )),
+        // Two readings are needed for a rate and only one has been taken.
+        _ => Some(format!("{totals} (rate not measured yet)")),
+    }
+}
+
+/// Bytes, in the unit a person would use.
+fn human_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} B")
+    } else if b < KB * KB {
+        format!("{:.0} KB", b / KB)
+    } else if b < KB * KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else {
+        format!("{:.2} GB", b / (KB * KB * KB))
+    }
+}
+
+/// A rate in the unit people actually compare their connection against, which
+/// is megaBITS per second — the number an internet plan is sold in. Reporting
+/// bytes here is how a figure gets read as eight times smaller than it is.
+fn human_rate(bytes_per_sec: f64) -> String {
+    let mbps = bytes_per_sec * 8.0 / 1_000_000.0;
+    if mbps < 0.1 {
+        format!("{:.0} kbps", bytes_per_sec * 8.0 / 1000.0)
+    } else {
+        format!("{mbps:.2} Mbps")
+    }
 }
 
 /// One worker, one line: what it runs, where, how busy, how long.
@@ -217,6 +280,49 @@ fn human_secs(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The line someone reads when they are trying to work out whether
+    /// SwarmLLM is what is saturating their connection. The rate comes first,
+    /// in the unit their internet plan is sold in.
+    #[test]
+    fn traffic_is_reported_as_a_rate_a_person_can_compare() {
+        let line = describe_traffic(Some(&serde_json::json!({
+            "in_bytes": 130_000_000u64,
+            "out_bytes": 112_000_000u64,
+            "in_bytes_per_sec": 152_000.0,
+            "out_bytes_per_sec": 163_000.0,
+        })))
+        .expect("a counted node reports its traffic");
+        // Megabits, not megabytes: reporting bytes is how a figure gets read
+        // as eight times smaller than it is.
+        assert!(
+            line.starts_with("1.30 Mbps up, 1.22 Mbps down right now"),
+            "{line}"
+        );
+        assert!(line.contains("106.8 MB sent, 124.0 MB received"), "{line}");
+    }
+
+    /// One reading is not a rate. Saying so beats publishing a zero that reads
+    /// as "this node is sending nothing".
+    #[test]
+    fn a_single_reading_says_the_rate_is_not_known_yet() {
+        let line = describe_traffic(Some(&serde_json::json!({
+            "in_bytes": 2048u64,
+            "out_bytes": 1024u64,
+            "in_bytes_per_sec": serde_json::Value::Null,
+            "out_bytes_per_sec": serde_json::Value::Null,
+        })))
+        .expect("totals alone are still worth reporting");
+        assert!(line.contains("rate not measured yet"), "{line}");
+        assert!(line.starts_with("1 KB sent, 2 KB received"), "{line}");
+    }
+
+    /// Nothing counting means nothing printed — never a zero.
+    #[test]
+    fn a_node_with_no_counters_prints_no_traffic_line() {
+        assert_eq!(describe_traffic(None), None);
+        assert_eq!(describe_traffic(Some(&serde_json::Value::Null)), None);
+    }
 
     /// The line a person reads for a worker stuck on a request nobody is
     /// waiting for: the model, the process, where it runs and why, how busy.

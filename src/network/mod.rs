@@ -1,3 +1,4 @@
+pub mod bandwidth;
 pub mod behaviour;
 pub mod discovery;
 pub mod helpers;

@@ -51,6 +51,16 @@ pub struct ResourceConfig {
     pub max_ram_mb: u64,
     #[serde(default = "default_max_disk")]
     pub max_disk_mb: u64,
+    /// Upload cap for SERVING MODEL PIECES, and nothing else.
+    ///
+    /// Named as though it bounded everything this node sends, and it does not:
+    /// [`ResourceConfig::shard_upload_mbps`] is its only consumer, applied at
+    /// the shard-transfer path in `network::manager::requests`. Inference
+    /// traffic, gossip, DHT maintenance and manifest announcements are all
+    /// outside it. A user capped it at 1 Mbps, measured 11 Mbps of traffic and
+    /// reasonably concluded the setting did nothing (2026-09-11 suggestion);
+    /// the settings panel and the config file now say which traffic it covers,
+    /// and `network::bandwidth` is how anyone can see the rest.
     #[serde(default)]
     pub max_bandwidth_mbps: u64,
     /// Cap on CPU threads used for inference. `0` (default) resolves from

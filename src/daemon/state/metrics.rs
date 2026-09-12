@@ -167,6 +167,18 @@ pub struct MetricsProviders {
     /// whether L1 is actually firing on their workload mix. R137.
     pub ngram_hits: AtomicU64,
     pub ngram_misses: AtomicU64,
+    /// Bytes this node has put on, and taken off, the wire.
+    ///
+    /// Counted at the transport, so it covers every protocol — gossip, DHT
+    /// maintenance, shard transfers, inference — and not merely the traffic
+    /// this code writes itself. Read through `BandwidthMeter::totals`, which
+    /// answers `None` when nothing is counting rather than a zero that cannot
+    /// be told apart from a silent node.
+    ///
+    /// It exists because a user chasing a hammered home connection had no way
+    /// to ask their node what it was sending, and had to stop the daemon and
+    /// diff the interface counters to find out (2026-09-11 suggestion).
+    pub bandwidth: Arc<crate::network::bandwidth::BandwidthMeter>,
 }
 
 /// Atomic counters for a single mpsc channel.

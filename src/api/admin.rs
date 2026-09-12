@@ -1081,6 +1081,8 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "hosted_shards": hosted_shards,
         "credits": credit_json,
         "hardware": hardware,
+        // Every protocol, counted at the transport — see `network::bandwidth`.
+        "network_traffic": crate::api::metrics::network_traffic_json(&state.shared_state),
         "inference": inference_perf,
         "swarm_spec": swarm_spec_metrics,
     }))
