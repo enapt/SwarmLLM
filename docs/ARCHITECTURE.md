@@ -367,6 +367,35 @@ without ever being able to read them.
   `state.relay_routes` (`daemon/state/relay.rs`, 5-min TTL, swept on the
   HealthMonitor tick); selection + forwarding live in `network/manager/relay.rs`.
 
+### Traffic accounting (`src/network/bandwidth.rs`, 2026-09-12)
+
+Every byte this node puts on the wire is counted at the TRANSPORT, so the figure
+covers gossip, DHT maintenance, shard transfers and inference alike — not merely
+what this code writes itself. libp2p does the counting
+(`SwarmBuilder::with_bandwidth_metrics`, which wraps the muxer); the wrapper is
+applied in **the only builder phase where a transport can be wrapped**, after
+relay and DNS, so it sees relay circuits and DNS-resolved dials too.
+
+Reading it back is ours: the counters are registered into a
+`prometheus_client::Registry`, which exposes no iteration, so the registry is
+encoded and the two totals parsed out (`the_totals_are_read_out_of_the_shape_libp2p_writes`
+pins that contract against upstream's format). A hand-rolled wrapper was
+rejected — it could only sit before the relay and DNS layers, and would count a
+different set of bytes depending on where it landed.
+
+- **`refresh()` is called from the HealthMonitor tick and nowhere else.** A RATE
+  needs two readings taken at a known cadence; a reader that sampled whenever
+  someone opened the dashboard would divide by whatever interval that happened
+  to be. Everything else reads `current()`.
+- **`None`, never `0`, when nothing is counting.** A figure that reads 0.0 Mbps
+  whether the node is silent or the counters were never wired is exactly the
+  reading this replaces — a user chasing a saturated home connection had to stop
+  the daemon and diff `/sys/class/net` to find out (gotcha #565).
+- **`resources.max_bandwidth_mbps` is not this.** It caps shard SERVING only
+  (`shard_upload_mbps`, applied in `network/manager/requests.rs`) and nothing
+  else. Its name promised more, which is how a user set it to 1 Mbps, measured
+  11, and concluded it did nothing.
+
 ## Inference Pipeline
 
 ### Split Inference Engine
@@ -933,9 +962,27 @@ ModelProcessPool.forward()   ──socket──▶   runs forward passes / decod
 - `DaemonMsg::Forward(IpcForward)` — single-step LayerForward for distributed inference
 - `DaemonMsg::Generate(IpcGenerate)` — full prompt→tokens decode loop for API inference
 - `DaemonMsg::Unload` — drop a layer range within the worker (partial memory reclaim)
+- `DaemonMsg::CancelRequest` — abandon a request the daemon no longer wants a reply for
+- `DaemonMsg::ReleaseRequestKv` — the request is over; free the KV cache it holds
+  (2026-09-12, report #019). The `Generate` handlers clear their own on the way
+  out; the FORWARD path had nothing, so a finished segment's cache stayed charged
+  against the shared budget until the ten-minute idle sweep, and a few finished
+  turns could refuse the next prompt on a small node. Sent unconditionally at the
+  one place a request finishes: the worker keys its entries by REQUEST id
+  (`IpcGenerate.session_id` rides along and nothing reads it), so no later turn
+  could ever find the entry — multi-turn reuse is the prefix cache's job, and its
+  snapshot is taken first. **The daemon's own `kv_cache_store.cleanup_request_id`
+  looks like it covers this and does not: the worker's store is a different
+  process's.**
 - `DaemonMsg::Shutdown` — graceful exit
 - `WorkerMsg::Token` — streaming token during Generate
 - `WorkerMsg::LayerResult` — activation result for distributed pipeline forwarding
+- `WorkerMsg::Error { message, fatal, local_memory_refusal }` — a request failed.
+  `local_memory_refusal` carries the CLASS across a boundary that flattens types:
+  the wire wording of a local memory refusal is deliberately identical to a
+  peer's, so `classify_worker_error` must not re-derive it from the text. It is
+  what makes the refusal `SwarmError::LocalMemoryUnavailable`, the one local
+  failure the router re-plans.
 
 **`ModelProcessPool`** (`src/inference/process_pool.rs`):
 - `DashMap<ModelId, Arc<WorkerHandle>>` — one worker per active model
@@ -1854,7 +1901,11 @@ the sidecar holds.
   from one value. Omitted when the model's declared context is unreadable, since
   a wrong figure is worse than an absent one.
 - `GET    /v1/providers` — List configured cloud providers and their available models
-- `GET    /v1/status` — SwarmLLM node status. `workers` (2026-09-03): every resident model-worker subprocess — `model`, `pid`, `device` (`graphics card`/`processor`), `cpu_reason`, `in_flight` (requests it is computing now, from the pool's own response map), `idle_secs`, `age_secs`, `dead`, `gpu_estimate_mb`. The answer to "what is my machine computing right now", and how a worker still busy for a client that has gone is found without `ps` (gotcha #445); retire one with `POST /api/admin/models/{id}/unload`. `swarmllm status` renders it.
+- `GET    /v1/status` — SwarmLLM node status. `workers` (2026-09-03): every resident model-worker subprocess — `model`, `pid`, `device` (`graphics card`/`processor`), `cpu_reason`, `in_flight` (requests it is computing now, from the pool's own response map), `idle_secs`, `age_secs`, `dead`, `gpu_estimate_mb`. The answer to "what is my machine computing right now", and how a worker still busy for a client that has gone is found without `ps` (gotcha #445); retire one with `POST /api/admin/models/{id}/unload`. `swarmllm status` renders it. `network_traffic` (2026-09-12): bytes in and out since
+  startup plus the current rate, from libp2p's transport counters — every protocol, not
+  just what this code writes. **`null`, never zero, when nothing is counting**; the
+  status renderer then prints no Traffic line at all. One of THREE payloads carrying
+  it (see `api::metrics::network_traffic_json`), and the one that was missed.
 
 ### OpenAI Responses API (`/v1/responses`)
 OpenAI-compatible Responses endpoint — the 2026 default API for o-series / gpt-5 / reasoning-era callers:
@@ -1977,7 +2028,12 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   weights and KV cache live in the worker subprocesses, so a daemon-only
   reading is blind to nearly all of it), broken out as `daemon_rss_mb` /
   `worker_rss_mb` / `worker_count`. The process refresh names an explicit pid
-  list and must never become a whole-machine scan (gotcha #417).
+  list and must never become a whole-machine scan (gotcha #417). On macOS the
+  per-process figure is the LARGEST accounting the platform offers — `sysinfo`'s
+  `pti_resident_size` and `proc_pid_rusage`'s `ri_phys_footprint` differed by
+  three orders of magnitude on a worker holding a 14B (report #017), so
+  `api::process_memory::resident_bytes` takes the maximum and can only raise it.
+  Also carries `network_traffic` (see `GET /v1/status`).
 - `GET     /api/admin/swarm/capacity` — R110: collective capacity snapshot (online_nodes, total_vram_mb, serveable/aspirational/hosted_locally model lists, redundancy)
 - `GET     /api/admin/swarm/capacity-plan` — R113: what-if scenarios + headline_target with concrete `contributors_needed` count
 - `GET     /api/admin/storage/breakdown` — R110: stacked-bar data (total_mb, used_mb, auto_target_mb, free_mb)
@@ -2095,8 +2151,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 ### Frontend Architecture
 - **No build step**: Vanilla HTML/CSS/JS — no framework, no bundler, no Node.js
 - **Component architecture**: `App` global namespace with component sub-objects (`App.chat`, `App.dashboard`, etc.)
-  - `frontend/js/core/state.js` — App namespace, shared mutable state, theme, storage keys
-  - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `formatDlProgress`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`), `extractErrorMessage`, `getApiErrorMessage`, `renderMarkdown`/`inlineMarkdown` (the ONE markdown renderer; every fragment passes through `escapeHtml`, so its output is safe for innerHTML) plus `renderReplyInto` (the ONE way a model's reply is rendered — chat and compare both go through it; it coalesces re-renders on rAF while streaming, takes `{flush:true}` for a final render because a backgrounded tab suspends rAF, and keeps the markdown source on `_rawText` so Copy returns what the model wrote), and `initTopBannerOffset`, which keeps `--top-banner-height` in step with the DOM so a fixed top banner pushes the header down instead of covering it
+  - `frontend/js/core/state.js` — App namespace, shared mutable state, theme, storage keys, and `streaming` — replies in flight keyed by SESSION id (the Send/Stop buttons and the AbortController were page-level while the chats sharing them are not, report #015)
+  - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `formatDlProgress`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`), `extractErrorMessage`, `getApiErrorMessage`, `renderMarkdown`/`inlineMarkdown` (the ONE markdown renderer; every fragment passes through `escapeHtml`, so its output is safe for innerHTML) plus `renderReplyInto` (the ONE way a model's reply is rendered — chat and compare both go through it; it coalesces re-renders on rAF while streaming, takes `{flush:true}` for a final render because a backgrounded tab suspends rAF, and keeps the markdown source on `_rawText` so Copy returns what the model wrote), `formatBitrate` (a transfer rate in the unit an internet plan is sold in — megaBITS per second, because showing bytes makes a figure read eight times smaller than it is), and `initTopBannerOffset`, which keeps `--top-banner-height` in step with the DOM so a fixed top banner pushes the header down instead of covering it
   - `frontend/js/core/data.js` — data store with in-flight deduplication, `authFetch` wrapper
   - `frontend/js/core/tooltip.js` — unified popover replacing native `title=` attributes
   - `frontend/js/components/ui.js` — tab switching, banners, mode indicator, sidebar

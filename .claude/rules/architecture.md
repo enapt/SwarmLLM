@@ -47,6 +47,7 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
   `privacy_explicitly_enabled_for` only where a DELIBERATE user choice is the
   question. `prompt_privacy_is_never_re_derived_from_the_per_model_map` in
   `tests/repo_consistency.rs` fails the build on a direct read.
+- `state.metrics.bandwidth` — 2026-09-12. `Arc<BandwidthMeter>`; libp2p's transport counters, armed once when the swarm is built (`with_bandwidth_metrics`, the ONLY builder phase where a transport can be wrapped) and read back by encoding the registry. **`totals()` answers `None`, never `0`, when nothing is counting** — a figure that reads zero whether the node is silent or the counters were never wired is the reading this replaces. `refresh()` is called from the health-monitor tick and NOWHERE else, because a rate needs two readings at a known cadence; everything else reads `current()`.
 - `state.metrics.node_stats` — NOT `state.node_stats`
 - `state.metrics.providers_config` — NOT `state.providers_config`
 - `state.metrics.swarm_capacity` — R110. ArcSwap<SwarmCapacity>; refresh via `crate::daemon::state::refresh_swarm_capacity(state)`. Eagerly refreshed on peer connect (`network/manager/identify.rs`) and disconnect (`network/manager/connections.rs`) so the dashboard banner stays consistent with the peer-list panel under churn — the WS stats-cache 1.5s coalesce alone is too lazy.
@@ -1384,6 +1385,8 @@ them is this codebase's most-repeated defect — see “One invariant, N paths�
 **Read the topic file before changing one.**
 
 ### API surfaces, errors and streaming → `docs/invariants/api-surfaces.md`
+
+- **`api::metrics::network_traffic_json` — every status payload reports traffic the same way, and there are THREE.** `/api/admin/stats`, the WebSocket `stats_update` tick, and `/v1/status` (which `swarmllm status` reads). One builder is not one surface: the figure reached two of them and the CLI printed nothing, while its formatter passed against a hand-made object (gotcha #569). `every_stats_surface_carries_the_traffic_figure` in `tests/repo_consistency.rs` names all three.
 
 - **`api::mcp::dispatch::spawn_model_call_task`** — the single place that decides whether a fan-out model call actually **answered**, as opposed to merely not erroring.
 - **`crate::error::reclassify_flattened_error`** — recovers an error's CLASS from a message that crossed a boundary carrying no types.

@@ -8,6 +8,38 @@ names** — the rule statement in `architecture.md` is the summary, this is the
 reasoning, and several of these describe a fix that looked obviously correct
 and was not.
 
+## Every status payload reports traffic the same way, and there are THREE
+
+**`api::metrics::network_traffic_json`** builds the figure; three surfaces serve
+it, and all three must call it:
+
+| surface | file | who reads it |
+|---|---|---|
+| `GET /api/admin/stats` | `api/admin.rs` | the dashboard's initial load |
+| the WebSocket `stats_update` tick | `api/websocket.rs` | the dashboard, every 2 s |
+| `GET /v1/status` | `api/openai/mod.rs` | **`swarmllm status`** |
+
+**One builder is not one surface.** The figure was written as a single builder
+and called from the first two; the third is the one a person is told to run when
+they are working out whether this program is saturating their connection, and it
+printed no Traffic line at all while the API served the numbers (2026-09-12).
+`describe_traffic` in `cli/status.rs` was unit-tested against a hand-made JSON
+object, so it passed while nothing supplied it.
+
+That is the third instance in one day of the same shape — the unit passed, the
+connection was missing — and the one that reached a released artifact, because
+it was found by DEPLOYING and running the command a user would run. See gotchas
+#567 (an unwatched cancel), #568 (a frontend scope error), #569 (this).
+
+`every_stats_surface_carries_the_traffic_figure` fails by name when a surface
+drops it.
+
+**Absent, never zero.** `network_traffic_json` returns `Value::Null` when
+`BandwidthMeter::current()` has nothing, every surface omits the figure rather
+than printing 0, and `/metrics` emits no counter at all. A confident `0.0 Mbps`
+cannot be told apart from a silent node, which is the reading the whole feature
+exists to correct (gotcha #565).
+
 ## A model is told about its tools the way it was trained to be
 
 (2026-09-10). **`chat_template::build_prompt` is the ONE place that decides how
