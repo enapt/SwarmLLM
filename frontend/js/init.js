@@ -792,6 +792,11 @@
       S.inputEl.addEventListener('input', U.updateTokenCounter);
     }
 
+    // Project links in the header — fetched once, not on the stats tick:
+    // none of it moves, and there are two stats builders that would each have
+    // had to carry it.
+    if (App.dashboard && App.dashboard.loadCommunityLinks) App.dashboard.loadCommunityLinks();
+
     App.setup.init();
     App.settings.init();
     if (App.welcome) {

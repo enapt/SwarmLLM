@@ -70,6 +70,16 @@
     return Math.round(bytes / 1024) + ' KB';
   }
 
+  // A plain count, shortened past a thousand. Used for the star count in the
+  // header, where "2.5k" reads at a glance and "2483" invites you to read it
+  // digit by digit.
+  function formatCount(n) {
+    if (n === null || n === undefined) return '';
+    if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+    return String(n);
+  }
+
   // A transfer rate in the unit an internet plan is sold in — megaBITS per
   // second. Bytes per second is the number the daemon counts and the number
   // nobody compares their connection against, and showing it unconverted makes
@@ -1194,6 +1204,7 @@
     formatMB: formatMB,
     formatSize: formatSize,
     formatBytes: formatBytes,
+    formatCount: formatCount,
     formatBitrate: formatBitrate,
     formatCompact: formatCompact,
     formatDlProgress: formatDlProgress,

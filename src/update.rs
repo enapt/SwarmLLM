@@ -134,6 +134,17 @@ pub struct UpdateState {
     /// compared them. This is that comparison, so the question stops needing
     /// forensics.
     pub restart_required: Option<RestartRequired>,
+    /// GitHub star count, refreshed on the same pass as the release check.
+    ///
+    /// It rides along with the update check deliberately: same host, same
+    /// HTTP client, same cadence, and the same gate — a node with updates
+    /// switched Off makes no GitHub request at all, so this adds no outbound
+    /// counterparty a user had not already accepted. `None` until a check has
+    /// succeeded, and a failed refresh LEAVES THE PREVIOUS VALUE rather than
+    /// clearing it: a number that blinks out on one rate-limited request
+    /// reads as "the project lost its stars".
+    #[serde(default)]
+    pub github_stars: Option<u64>,
 }
 
 /// A newer version is installed on disk than the one running.
@@ -144,6 +155,14 @@ pub struct RestartRequired {
     /// Version the updater last reported installing successfully.
     pub installed: String,
 }
+
+/// Where to find the project's community chat.
+///
+/// Kept beside the update checker because both are "how this node reaches the
+/// project": the repository URL comes from the manifest, and this is the one
+/// piece that has nowhere else to live. Changing it changes the dashboard, and
+/// the README link is maintained separately — check both.
+pub const DISCORD_INVITE_URL: &str = "https://discord.gg/nq9be3u828";
 
 /// Performs update checks against the GitHub releases API.
 pub struct UpdateChecker {
@@ -452,6 +471,36 @@ impl UpdateChecker {
             Some(shared) => shared.cfg().updates.clone(),
             None => self.config.clone(),
         }
+    }
+
+    /// How many people have starred the repository. Surfaced in the dashboard
+    /// header beside the version, because the one thing a stranger evaluating
+    /// a peer-to-peer network wants to know is whether anyone else is on it.
+    ///
+    /// Best-effort by design: the caller keeps the last good value on `Err`,
+    /// and an unauthenticated GitHub request is rate-limited per IP, so a busy
+    /// address will sometimes get nothing back. That is not worth a log line
+    /// at anything above debug.
+    pub async fn fetch_star_count(&self) -> Result<u64, SwarmError> {
+        let url = format!("https://api.github.com/repos/{}", self.repo);
+        let resp = UPDATE_CHECK_CLIENT
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| SwarmError::Network(format!("GitHub API request failed: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(SwarmError::Network(format!(
+                "GitHub API returned {}",
+                resp.status()
+            )));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| SwarmError::Network(format!("GitHub API response unreadable: {e}")))?;
+        body.get("stargazers_count")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| SwarmError::Network("no stargazers_count in response".into()))
     }
 
     /// Check GitHub for a newer release. Returns `Some(UpdateInfo)` if an update is available.
@@ -1215,6 +1264,13 @@ impl UpdateChecker {
                         continue;
                     }
                 }
+            }
+
+            // Same pass, same gate: anything past `Off` already talks to this
+            // host. A failure leaves whatever we had.
+            match self.fetch_star_count().await {
+                Ok(stars) => self.state.write().await.github_stars = Some(stars),
+                Err(e) => tracing::debug!("star count refresh failed: {e}"),
             }
 
             match self.check_for_update().await {

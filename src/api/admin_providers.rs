@@ -996,6 +996,12 @@ pub async fn version_info(State(state): State<AppState>) -> Json<serde_json::Val
         // i.e. the restart into it did not happen. `null` when they agree.
         "restart_required": update_state.restart_required,
         "changelog": changelog,
+        // Where the project lives, so the dashboard header does not hardcode
+        // URLs the manifest already owns, and a fork's dashboard points at the
+        // fork. `github_stars` is null until an update check has succeeded.
+        "repo_url": env!("CARGO_PKG_REPOSITORY"),
+        "discord_url": crate::update::DISCORD_INVITE_URL,
+        "github_stars": update_state.github_stars,
     }))
 }
 

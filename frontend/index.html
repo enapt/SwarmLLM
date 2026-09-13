@@ -814,7 +814,22 @@
   <header class="app-header">
     <div class="header-left">
       <button class="hamburger-btn" id="hamburger-btn" data-i18n-aria-label="nav.toggle_sidebar" aria-label="Toggle sidebar" aria-expanded="false">&#9776;</button>
-      <div class="logo" id="logo" style="cursor:pointer"><img src="/static/icons/swarm.svg" width="20" height="20" alt="" aria-hidden="true" class="logo-icon">SwarmLLM<span class="app-version" id="app-version" hidden></span></div>
+      <div class="logo" id="logo" style="cursor:pointer"><img src="/static/icons/swarm.svg" width="20" height="20" alt="" aria-hidden="true" class="logo-icon">SwarmLLM</div>
+      <!-- Project identity clusters on the LEFT: what you are running, and
+           where the people running it are. The node's own controls stay on the
+           right. The version links to its release notes — a tester asked what
+           had changed and had no way to get there from the thing telling them
+           the number. -->
+      <a class="app-version" id="app-version" href="#" target="_blank" rel="noopener noreferrer"
+         data-i18n-title="community.version_tip" title="Release notes on GitHub" hidden></a>
+      <a class="header-link header-link-stars" id="header-github" href="#" target="_blank" rel="noopener noreferrer"
+         data-i18n-title="community.github_tip" title="Star SwarmLLM on GitHub" hidden>
+        <span aria-hidden="true">&#9733;</span><span id="header-stars"></span>
+      </a>
+      <a class="header-link header-link-discord" id="header-discord" href="#" target="_blank" rel="noopener noreferrer"
+         data-i18n-title="community.discord_tip" title="Join the SwarmLLM Discord" hidden>
+        <span data-i18n="community.discord">Discord</span>
+      </a>
     </div>
     <div class="header-center">
       <!-- Three destinations, because there are three things a person does

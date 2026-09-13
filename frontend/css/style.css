@@ -344,14 +344,50 @@ a:hover { color: var(--accent-hover); }
   gap: 7px;
 }
 .app-header .logo .logo-icon { flex-shrink: 0; display: block; }
-.app-header .logo .app-version {
+/* The project cluster: version, stars, chat. It sits beside the logo rather
+   than in `header-right`, which carries the NODE's controls — "what am I
+   running and who else is running it" is a different question from "what is
+   my node doing", and the right side was already full. */
+.app-header .app-version {
   font-size: var(--fs-2xs);
   font-weight: 500;
   color: var(--text-muted);
   letter-spacing: 0;
-  margin-left: 1px;
-  align-self: flex-start;
-  margin-top: 1px;
+  text-decoration: none;
+}
+.app-header .app-version:hover { color: var(--text-secondary); text-decoration: underline; }
+.header-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill, 9999px);
+  border: 1px solid var(--border);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: var(--transition);
+}
+.header-link:hover { border-color: var(--border-light); color: var(--text-primary); }
+.header-link-stars span:first-child { color: var(--yellow, #ca8a04); }
+/* Discord's own colour, because that is what makes the word read as the
+   place rather than as another control. */
+.header-link-discord {
+  border-color: rgba(88,101,242,0.45);
+  background: rgba(88,101,242,0.12);
+  color: #a5b0f5;
+}
+.header-link-discord:hover {
+  border-color: rgba(88,101,242,0.8);
+  background: rgba(88,101,242,0.22);
+  color: #cdd3fb;
+}
+/* Narrow: the project cluster is the first thing to go — the node's own
+   controls and the nav matter more on a phone. */
+@media (max-width: 899px) {
+  .app-header .app-version, .header-link { display: none; }
 }
 
 /* Tab buttons */

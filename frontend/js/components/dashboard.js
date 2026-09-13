@@ -733,14 +733,50 @@
           App.dashboard._setGauge('disk-gauge', diskPct);
         }
     },
-    updateFull: function(data) {
-      if (data.version) {
-        var vEl = document.getElementById('app-version');
-        if (vEl) {
-          vEl.textContent = 'v' + data.version;
-          vEl.removeAttribute('hidden');
+    // THE HEADER'S PROJECT CLUSTER — version, stars, Discord.
+    //
+    // `_communityLinks` is fetched once (the version endpoint), because none
+    // of it moves on the 2-second tick and there are TWO stats builders that
+    // would each have had to carry it. The version itself DOES arrive on the
+    // tick, so the two setters that used to write it are one function now —
+    // they had already drifted, one of them re-writing the DOM every 2s.
+    _setHeaderVersion: function(version) {
+      var el = document.getElementById('app-version');
+      if (!el || el.getAttribute('data-v') === version) return;
+      el.textContent = 'v' + version;
+      el.setAttribute('data-v', version);
+      el.removeAttribute('hidden');
+      var repo = App.state._communityLinks && App.state._communityLinks.repo_url;
+      if (repo) el.href = repo.replace(/\/$/, '') + '/releases/tag/v' + version;
+    },
+
+    loadCommunityLinks: async function() {
+      try {
+        var resp = await App.authFetch('/api/admin/version');
+        if (!resp.ok) return;
+        var d = await resp.json();
+        App.state._communityLinks = d;
+
+        var gh = document.getElementById('header-github');
+        if (gh && d.repo_url) {
+          gh.href = d.repo_url;
+          // No count until an update check has succeeded — show the link
+          // anyway rather than hiding the project behind a missing number.
+          var stars = document.getElementById('header-stars');
+          if (stars) stars.textContent = d.github_stars ? U.formatCount(d.github_stars) : '';
+          gh.removeAttribute('hidden');
         }
-      }
+        var dc = document.getElementById('header-discord');
+        if (dc && d.discord_url) {
+          dc.href = d.discord_url;
+          dc.removeAttribute('hidden');
+        }
+        if (d.current_version) App.dashboard._setHeaderVersion(d.current_version);
+      } catch (e) { /* links are decoration; a failure must not break the header */ }
+    },
+
+    updateFull: function(data) {
+      if (data.version) App.dashboard._setHeaderVersion(data.version);
       if (data.node_id) {
         var el = document.getElementById('node-id');
         var short = data.node_id.substring(0, 8);
@@ -785,14 +821,7 @@
       if (data && data.hardware) App.dashboard._renderHardware(data.hardware, data.network_traffic);
       // Node version in the header, next to the logo. Guarded so the every-2s
       // WS tick doesn't rewrite the DOM when the (static) version is unchanged.
-      if (data.version) {
-        var vEl = document.getElementById('app-version');
-        if (vEl && vEl.getAttribute('data-v') !== data.version) {
-          vEl.textContent = 'v' + data.version;
-          vEl.setAttribute('data-v', data.version);
-          vEl.removeAttribute('hidden');
-        }
-      }
+      if (data.version) App.dashboard._setHeaderVersion(data.version);
       if (data.uptime_seconds !== undefined) {
         document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
       }
