@@ -1953,6 +1953,11 @@ pub async fn rescan_shards(State(state): State<AppState>) -> Json<serde_json::Va
 
 /// GET /api/admin/network-map — Aggregated region data for the world heatmap.
 ///
+/// How many recent routes the map draws. The ring behind it holds more; past
+/// a couple of dozen arcs a world map stops reading as traffic and starts
+/// reading as a scribble.
+const MAX_MAP_ROUTES: usize = 24;
+
 /// Returns `{ regions: { "US": { total: N, models: { "model-id": count } }, ... } }`
 /// based on self-reported region in peer capabilities.
 pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -2100,7 +2105,60 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
         })
         .collect();
 
-    Json(serde_json::json!({ "regions": region_json }))
+    // WORK ACTUALLY MOVING ACROSS THE MAP.
+    //
+    // A regional heat map answers "who is out there" and stops there: two
+    // nodes lit in Thailand and Italy look the same whether they have ever
+    // exchanged a token or not. `recent_traces` already records which nodes
+    // served each request, and `SegmentTrace` already carries the region it
+    // learned them in, so the route a request actually took is a projection of
+    // data the node keeps anyway — no new bookkeeping on the inference path.
+    //
+    // A LOCAL segment records no region (it is this node), so it resolves to
+    // ours. Consecutive segments in the same region collapse: a hop that never
+    // left a country is not a line on a world map. What is left is the ordered
+    // list of regions a request passed through, newest first, and only where
+    // there is more than one — a request served entirely here is a dot, and
+    // drawing it as an arc to itself would be a lie about the network.
+    let recent_routes: Vec<serde_json::Value> = {
+        let mut out = Vec::new();
+        for t in state
+            .shared_state
+            .recent_traces_snapshot()
+            .into_iter()
+            .rev()
+        {
+            // The route STARTS here. Without this a request this node sent to
+            // one peer abroad has a single segment, collapses to one region and
+            // draws nothing — which is the most common shape there is, and it
+            // is precisely the case worth drawing: work leaving this machine.
+            let mut regions_hopped: Vec<String> = vec![self_region.clone()];
+            for seg in &t.segments {
+                let code = seg
+                    .region
+                    .clone()
+                    .unwrap_or_else(|| self_region.clone())
+                    .to_uppercase();
+                if regions_hopped.last() != Some(&code) {
+                    regions_hopped.push(code);
+                }
+            }
+            if regions_hopped.len() < 2 {
+                continue;
+            }
+            out.push(serde_json::json!({
+                "model": t.model,
+                "regions": regions_hopped,
+                "ok": matches!(t.outcome, crate::inference::trace::Outcome::Ok),
+            }));
+            if out.len() >= MAX_MAP_ROUTES {
+                break;
+            }
+        }
+        out
+    };
+
+    Json(serde_json::json!({ "regions": region_json, "recent_routes": recent_routes }))
 }
 
 /// GET /api/admin/network-code — Return this node's network invite code.

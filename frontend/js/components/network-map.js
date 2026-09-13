@@ -173,6 +173,7 @@
         App.networkMap.data = data;
         App.networkMap.render(data);
         App.networkMap.populateModelFilter(data);
+        App.networkMap.renderRecentRoutes(data.recent_routes);
         App.networkMap.renderPipelinePath();
       } catch (e) {}
     },
@@ -289,6 +290,71 @@
       App.networkMap.renderPipelinePath();
     },
 
+    // WHERE A REGION SITS ON THE MAP, and the arc between two of them.
+    //
+    // Both the scheduler's PLANNED route and the routes that actually ran are
+    // drawn from these, so a predicted hop and a real one land on the same
+    // pixels — otherwise the map would show the plan bending one way and
+    // history bending another between the same two countries.
+    regionCenter: function(code) {
+      if (!code) return null;
+      var el = document.getElementById('region-' + code);
+      if (!el) return null;
+      var bb = el.getBBox();
+      return [bb.x + bb.width / 2, bb.y + bb.height / 2];
+    },
+
+    arcPath: function(a, b) {
+      var mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+      var dx = b[0] - a[0], dy = b[1] - a[1];
+      var lift = Math.min(60, Math.sqrt(dx * dx + dy * dy) * 0.25);
+      return 'M' + a[0] + ',' + a[1] + ' Q' + mx + ',' + (my - lift) + ' ' + b[0] + ',' + b[1];
+    },
+
+    // WORK THAT ACTUALLY CROSSED THE MAP.
+    //
+    // The planned path below answers "where would the next request go"; this
+    // answers "where have requests been", which is what makes the map look
+    // like a network rather than a list of pins. Newest first from the API, so
+    // the index is the recency — the freshest arc is brightest and the oldest
+    // is nearly gone.
+    //
+    // It draws nothing on a node that has served nothing across regions, and
+    // that is the honest result: a new node's map is quiet because its swarm
+    // has not asked it for anything yet.
+    renderRecentRoutes: function(routes) {
+      var svg = document.querySelector('.world-svg');
+      if (!svg) return;
+      svg.querySelectorAll('.map-route-history').forEach(function(el) { el.remove(); });
+      if (!routes || routes.length === 0) return;
+
+      var ns = 'http://www.w3.org/2000/svg';
+      var group = document.createElementNS(ns, 'g');
+      group.setAttribute('class', 'map-route-history');
+
+      routes.forEach(function(route, idx) {
+        var pts = [];
+        (route.regions || []).forEach(function(code) {
+          var c = App.networkMap.regionCenter(code);
+          if (c) pts.push(c);
+        });
+        if (pts.length < 2) return;
+        // Freshest at full strength, fading to a trace by the end of the ring.
+        var strength = Math.max(0.12, 1 - (idx / Math.max(routes.length, 1)) * 0.85);
+        for (var i = 0; i < pts.length - 1; i++) {
+          var path = document.createElementNS(ns, 'path');
+          path.setAttribute('d', App.networkMap.arcPath(pts[i], pts[i + 1]));
+          path.setAttribute('class', 'map-route-arc' + (route.ok ? '' : ' failed'));
+          path.setAttribute('style', 'opacity:' + strength.toFixed(2));
+          var t = document.createElementNS(ns, 'title');
+          t.textContent = (route.model || '') + ' — ' + (route.regions || []).join(' \u2192 ');
+          path.appendChild(t);
+          group.appendChild(path);
+        }
+      });
+      svg.appendChild(group);
+    },
+
     // Fetch the scheduler's plan for the currently-filtered model and draw
     // arcs between each chosen peer's region on the world map — the literal
     // inference path for the next request to that model.
@@ -303,13 +369,7 @@
       App.data.loadPipelinePlan(filter)
         .then(function(plan) {
           if (!plan || !plan.segments || plan.segments.length === 0) return;
-          function regionCenter(code) {
-            if (!code) return null;
-            var el = document.getElementById('region-' + code);
-            if (!el) return null;
-            var bb = el.getBBox();
-            return [bb.x + bb.width / 2, bb.y + bb.height / 2];
-          }
+          var regionCenter = App.networkMap.regionCenter;
           var local = regionCenter(plan.local_region);
           var pts = [];
           if (local) pts.push({ c: local, label: I18n.t('map.pipeline_you'), local: true });
@@ -331,15 +391,8 @@
           group.setAttribute('class', 'map-pipeline-path');
 
           for (var i = 0; i < pts.length - 1; i++) {
-            var a = pts[i].c, b = pts[i + 1].c;
-            var mx = (a[0] + b[0]) / 2;
-            var my = (a[1] + b[1]) / 2;
-            var dx = b[0] - a[0], dy = b[1] - a[1];
-            var dist = Math.sqrt(dx * dx + dy * dy);
-            var lift = Math.min(60, dist * 0.25);
-            var cx = mx, cy = my - lift;
             var path = document.createElementNS(ns, 'path');
-            path.setAttribute('d', 'M' + a[0] + ',' + a[1] + ' Q' + cx + ',' + cy + ' ' + b[0] + ',' + b[1]);
+            path.setAttribute('d', App.networkMap.arcPath(pts[i].c, pts[i + 1].c));
             path.setAttribute('class', 'map-pipeline-arc');
             group.appendChild(path);
           }

@@ -31,7 +31,11 @@ window.App = {
     activeTab: (function() {
       var p = window.location.pathname;
       if (p === '/chat' || p.startsWith('/chat/')) return 'chat';
-      if (p === '/admin/leaderboard') return 'leaderboard';
+      // The leaderboard is a panel of the Network view now, not a destination.
+      // Its old URL still resolves — it is in people's history and bookmarks,
+      // and landing on the dashboard instead would look like the page was
+      // removed.
+      if (p === '/admin/leaderboard') return 'network-map';
       if (p === '/admin/network') return 'network-map';
       if (p === '/admin/compare') return 'compare';
       if (p === '/admin/responses') return 'responses';

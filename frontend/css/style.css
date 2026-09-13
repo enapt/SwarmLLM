@@ -6041,6 +6041,23 @@ textarea.pool-code-input { min-height: 4.5em; }
 }
 
 /* Network-map inference-path overlay — arcs connect chosen peers' regions. */
+/* Routes that have ALREADY run. Deliberately quieter than the planned path
+   below: history is context, the plan is the thing being pointed at. Solid
+   rather than marching dashes, because a request that finished is not still
+   in motion — animating it would say the opposite. Per-arc opacity carries
+   recency and is set inline. */
+.map-route-arc {
+  fill: none;
+  stroke: var(--green, #22c55e);
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  pointer-events: stroke;
+}
+.map-route-arc.failed {
+  stroke: var(--red, #ef4444);
+  stroke-dasharray: 3 3;
+}
+
 .map-pipeline-arc {
   fill: none;
   stroke: var(--accent, #22d3ee);

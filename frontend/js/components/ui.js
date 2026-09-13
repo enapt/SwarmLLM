@@ -14,7 +14,6 @@
       S.activeTab = tab;
       if (!skipHistory) {
         var path = tab === 'chat' ? '/chat'
-          : tab === 'leaderboard' ? '/admin/leaderboard'
           : tab === 'network-map' ? '/admin/network'
           : tab === 'compare' ? '/admin/compare'
           : tab === 'responses' ? '/admin/responses'
@@ -47,8 +46,6 @@
       }
       document.getElementById('view-chat').style.display = tab === 'chat' ? '' : 'none';
       document.getElementById('view-dashboard').style.display = tab === 'dashboard' ? '' : 'none';
-      var lbView = document.getElementById('view-leaderboard');
-      if (lbView) lbView.style.display = tab === 'leaderboard' ? '' : 'none';
       var mapView = document.getElementById('view-network-map');
       if (mapView) mapView.style.display = tab === 'network-map' ? '' : 'none';
       var compareView = document.getElementById('view-compare');
@@ -91,11 +88,11 @@
           App.dashboard.loadInitial();
         }
       }
-      if (tab === 'leaderboard') {
-        App.identity.loadLeaderboard();
-      }
+      // One destination, two panels: the map and the leaderboard are the
+      // same question asked twice, so entering refreshes both.
       if (tab === 'network-map') {
         App.networkMap.refresh();
+        if (App.identity && App.identity.loadLeaderboard) App.identity.loadLeaderboard();
       }
       if (tab === 'compare' && App.compare) {
         App.compare.loadModels();

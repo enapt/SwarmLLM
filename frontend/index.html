@@ -848,13 +848,16 @@
       <button class="tab-btn tab-btn-chat" data-tab="chat" data-i18n="nav.chat">Chat</button>
       <button class="tab-btn" data-tab="swarm" data-i18n="nav.swarm">Models</button>
       <button class="tab-btn active" data-tab="dashboard" data-i18n="nav.dashboard">Dashboard</button>
+      <!-- "Who is on this network" is the one question a peer-to-peer product
+           exists to answer, and the nav pass put it behind a menu. A tester
+           called the map and the leaderboard the two links they used most;
+           they are one destination now, and it is primary. -->
+      <button class="tab-btn" data-tab="network-map" data-i18n="nav.network">Network</button>
       <div class="nav-more" id="nav-more">
         <button class="tab-btn nav-more-trigger" id="nav-more-trigger" type="button"
                 aria-haspopup="true" aria-expanded="false" aria-controls="nav-more-panel"
                 data-i18n="nav.more">More</button>
         <div class="nav-more-panel" id="nav-more-panel" role="menu" style="display:none">
-          <button class="tab-btn" role="menuitem" data-tab="network-map" data-i18n="nav.network_map">Network Map</button>
-          <button class="tab-btn" role="menuitem" data-tab="leaderboard" data-i18n="nav.leaderboard">Leaderboard</button>
           <button class="tab-btn" role="menuitem" data-tab="compare" data-i18n="nav.compare">Compare</button>
           <button class="tab-btn" role="menuitem" data-tab="devices" data-i18n="pool.title">My Devices</button>
         </div>
@@ -1191,6 +1194,102 @@
             </div>
 
           <!-- Models -->
+          <!-- Order, after a tester: "i would probably put models section in
+               the bottom to have activity more close to the top". What a node
+               operator opens this page to see is what their node is DOING; the
+               model inventory is what it is HOLDING, and inventory does not
+               change minute to minute. Activity sits directly under Node, the
+               Models panel moved below the peer table and the download queue. -->
+          <div class="grid grid-2 mt-2">
+            <div class="panel">
+              <div class="panel-header" data-collapse="activity-body">
+                <h2 data-i18n="activity.label_activity">Activity</h2>
+                <span class="text-muted" style="font-size:0.75rem" id="activity-count"></span>
+              </div>
+              <div class="panel-body" id="activity-body">
+                <div id="activity-log" style="max-height:400px;overflow-y:auto">
+                  <div class="text-muted" style="font-size:0.78rem;padding:12px 0;opacity:0.5" data-i18n="dashboard.no_activity">No activity yet.</div>
+                </div>
+              </div>
+            </div>
+            <div class="panel">
+              <!-- Collapsed by default. This is a raw feed of lines like
+                   "4a3ac72e announced shards of thudm-glm-4-9b-0414-q4-k-m" —
+                   ninety of them on a quiet node — and being the only thing
+                   on the page that MOVES, it took the eye first. It is
+                   diagnostics, so it opens on demand: overview first, details
+                   when asked (Shneiderman 1996). The count in the header still
+                   shows without opening it. Activity, next to it, stays open —
+                   it is short and written for a person. -->
+              <div class="panel-header collapsed" data-collapse="network-log-body">
+                <h2 data-i18n="activity.label_network">Network</h2>
+                <span class="text-muted" style="font-size:0.75rem" id="network-log-count"></span>
+              </div>
+              <div class="panel-body collapsed" id="network-log-body">
+                <div id="network-log" style="max-height:400px;overflow-y:auto">
+                  <div class="text-muted" style="font-size:0.78rem;padding:12px 0;opacity:0.5" data-i18n="dashboard.no_network_events">No network events yet.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Shard Pruning & Schedule -->
+          <div class="panel mt-2">
+            <div class="panel-header" data-collapse="network-body">
+              <h2 data-i18n="dashboard.network_title">Network</h2>
+              <span class="flex-center gap-1">
+                <span class="text-muted" style="font-size:0.75rem" id="peers-summary"></span>
+                <!-- Connecting to another node is a network act and now sits in
+                     the Network panel. In the header it was an unlabelled
+                     three-circle glyph on every page; here it says what it
+                     does. data-collapse is on the header, so this button stops
+                     its own click from collapsing the panel underneath it. -->
+                <span class="share-btn-wrap" style="position:relative">
+                  <button class="btn btn-sm" id="btn-share-network" data-i18n-title="nav.share_peer" title="Share your swarm peer address" data-i18n="nav.connect_node">Connect a node</button>
+                  <div class="share-popover" id="share-popover">
+                    <label class="font-semibold mb-1" data-i18n="network.your_peer_address">Your Swarm Peer Address</label>
+                    <div class="text-muted field-hint mb-1" data-i18n="network.share_desc">Share with other SwarmLLM users so your nodes can discover each other on the network</div>
+                    <div class="flex gap-1 mb-2">
+                      <input type="text" id="my-network-code" readonly class="form-control mono text-2xs flex-1" data-i18n-aria-label="network.my_address_aria" aria-label="Your peer address">
+                      <button class="btn btn-sm" id="btn-copy-network-code" data-i18n-title="nav.copy_clipboard" title="Copy to clipboard" data-i18n="actions.copy">Copy</button>
+                    </div>
+                    <label class="font-semibold mb-0" data-i18n="network.other_peer_address">Another User's Peer Address</label>
+                    <div class="text-muted field-hint mb-0" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
+                    <div class="flex gap-1">
+                      <input type="text" id="join-code-input" class="form-control mono text-2xs flex-1" placeholder="swarm://..." data-i18n-aria-label="network.peer_address_aria" aria-label="Peer address">
+                      <button class="btn btn-sm btn-primary" id="btn-join-network" data-i18n="setup.connect_btn">Connect</button>
+                    </div>
+                    <div class="text-muted mt-0" id="join-status"></div>
+                    <div class="text-muted text-2xs divider" data-i18n="network.not_devices">This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.</div>
+                  </div>
+                </span>
+              </span>
+            </div>
+            <div class="panel-body" id="network-body">
+              <div id="peers-list">
+                <div id="peers-loading">
+                  <div class="skeleton-peer"><div class="skeleton-dot"></div><div class="skeleton-line" style="height:10px;width:60%"></div></div>
+                </div>
+              </div>
+              <div id="peers-overflow" style="display:none">
+                <button class="btn btn-sm btn-outline" id="btn-show-all-peers" style="width:100%;margin-top:6px;font-size:0.75rem"></button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Downloads queue (hidden when no active downloads) -->
+          <div class="panel mt-2 hidden" id="download-queue-panel">
+            <div class="panel-header" data-collapse="download-queue-body">
+              <h2 data-i18n="dashboard.downloads_title">Downloads</h2>
+              <span class="text-muted" style="font-size:0.75rem" id="download-queue-count"></span>
+            </div>
+            <div class="panel-body" id="download-queue-body">
+              <div id="download-queue-list"></div>
+              <div id="download-queue-empty" class="text-muted hidden" style="font-size:0.78rem;padding:8px 0;opacity:0.6" data-i18n="dashboard.downloads_empty">No active downloads.</div>
+            </div>
+          </div>
+
+          <!-- Activity + Network Logs side by side -->
           <div class="panel mt-2">
             <div class="panel-header">
               <h2 data-i18n="dashboard.models_title">Models</h2>
@@ -1253,96 +1352,6 @@
 
 
           <!-- Network -->
-          <div class="panel mt-2">
-            <div class="panel-header" data-collapse="network-body">
-              <h2 data-i18n="dashboard.network_title">Network</h2>
-              <span class="flex-center gap-1">
-                <span class="text-muted" style="font-size:0.75rem" id="peers-summary"></span>
-                <!-- Connecting to another node is a network act and now sits in
-                     the Network panel. In the header it was an unlabelled
-                     three-circle glyph on every page; here it says what it
-                     does. data-collapse is on the header, so this button stops
-                     its own click from collapsing the panel underneath it. -->
-                <span class="share-btn-wrap" style="position:relative">
-                  <button class="btn btn-sm" id="btn-share-network" data-i18n-title="nav.share_peer" title="Share your swarm peer address" data-i18n="nav.connect_node">Connect a node</button>
-                  <div class="share-popover" id="share-popover">
-                    <label class="font-semibold mb-1" data-i18n="network.your_peer_address">Your Swarm Peer Address</label>
-                    <div class="text-muted field-hint mb-1" data-i18n="network.share_desc">Share with other SwarmLLM users so your nodes can discover each other on the network</div>
-                    <div class="flex gap-1 mb-2">
-                      <input type="text" id="my-network-code" readonly class="form-control mono text-2xs flex-1" data-i18n-aria-label="network.my_address_aria" aria-label="Your peer address">
-                      <button class="btn btn-sm" id="btn-copy-network-code" data-i18n-title="nav.copy_clipboard" title="Copy to clipboard" data-i18n="actions.copy">Copy</button>
-                    </div>
-                    <label class="font-semibold mb-0" data-i18n="network.other_peer_address">Another User's Peer Address</label>
-                    <div class="text-muted field-hint mb-0" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
-                    <div class="flex gap-1">
-                      <input type="text" id="join-code-input" class="form-control mono text-2xs flex-1" placeholder="swarm://..." data-i18n-aria-label="network.peer_address_aria" aria-label="Peer address">
-                      <button class="btn btn-sm btn-primary" id="btn-join-network" data-i18n="setup.connect_btn">Connect</button>
-                    </div>
-                    <div class="text-muted mt-0" id="join-status"></div>
-                    <div class="text-muted text-2xs divider" data-i18n="network.not_devices">This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.</div>
-                  </div>
-                </span>
-              </span>
-            </div>
-            <div class="panel-body" id="network-body">
-              <div id="peers-list">
-                <div id="peers-loading">
-                  <div class="skeleton-peer"><div class="skeleton-dot"></div><div class="skeleton-line" style="height:10px;width:60%"></div></div>
-                </div>
-              </div>
-              <div id="peers-overflow" style="display:none">
-                <button class="btn btn-sm btn-outline" id="btn-show-all-peers" style="width:100%;margin-top:6px;font-size:0.75rem"></button>
-              </div>
-            </div>
-          </div>
-
-          <!-- Downloads queue (hidden when no active downloads) -->
-          <div class="panel mt-2 hidden" id="download-queue-panel">
-            <div class="panel-header" data-collapse="download-queue-body">
-              <h2 data-i18n="dashboard.downloads_title">Downloads</h2>
-              <span class="text-muted" style="font-size:0.75rem" id="download-queue-count"></span>
-            </div>
-            <div class="panel-body" id="download-queue-body">
-              <div id="download-queue-list"></div>
-              <div id="download-queue-empty" class="text-muted hidden" style="font-size:0.78rem;padding:8px 0;opacity:0.6" data-i18n="dashboard.downloads_empty">No active downloads.</div>
-            </div>
-          </div>
-
-          <!-- Activity + Network Logs side by side -->
-          <div class="grid grid-2 mt-2">
-            <div class="panel">
-              <div class="panel-header" data-collapse="activity-body">
-                <h2 data-i18n="activity.label_activity">Activity</h2>
-                <span class="text-muted" style="font-size:0.75rem" id="activity-count"></span>
-              </div>
-              <div class="panel-body" id="activity-body">
-                <div id="activity-log" style="max-height:400px;overflow-y:auto">
-                  <div class="text-muted" style="font-size:0.78rem;padding:12px 0;opacity:0.5" data-i18n="dashboard.no_activity">No activity yet.</div>
-                </div>
-              </div>
-            </div>
-            <div class="panel">
-              <!-- Collapsed by default. This is a raw feed of lines like
-                   "4a3ac72e announced shards of thudm-glm-4-9b-0414-q4-k-m" —
-                   ninety of them on a quiet node — and being the only thing
-                   on the page that MOVES, it took the eye first. It is
-                   diagnostics, so it opens on demand: overview first, details
-                   when asked (Shneiderman 1996). The count in the header still
-                   shows without opening it. Activity, next to it, stays open —
-                   it is short and written for a person. -->
-              <div class="panel-header collapsed" data-collapse="network-log-body">
-                <h2 data-i18n="activity.label_network">Network</h2>
-                <span class="text-muted" style="font-size:0.75rem" id="network-log-count"></span>
-              </div>
-              <div class="panel-body collapsed" id="network-log-body">
-                <div id="network-log" style="max-height:400px;overflow-y:auto">
-                  <div class="text-muted" style="font-size:0.78rem;padding:12px 0;opacity:0.5" data-i18n="dashboard.no_network_events">No network events yet.</div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Shard Pruning & Schedule -->
           <div class="grid grid-2 mt-2">
             <div class="panel">
               <div class="panel-header collapsed" data-collapse="prune-body">
@@ -1404,11 +1413,66 @@
               <div id="map-swarm-models" class="text-xs text-muted" style="display:none"></div>
             </div>
           </div>
+          <!-- The leaderboard lives with the map, not as its own
+               destination. Between them they answer one question — who is on
+               this network and what are they contributing — and a tester
+               reported the two were "the 2 links i use the most" and that the
+               nav pass had buried both in the overflow menu. -->
+<div class="panel">
+            <div class="panel-header">
+              <h2 data-i18n="leaderboard.title">Network Leaderboard</h2>
+              <button class="btn btn-sm" id="btn-refresh-leaderboard" data-i18n="dashboard.refresh">Refresh</button>
+            </div>
+            <!-- Top three. Rendered only when at least three nodes qualify;
+                 a podium with gaps reads as missing data rather than a small
+                 network. -->
+            <div class="lb-podium" id="leaderboard-podium" hidden></div>
+
+            <div class="lb-filters" id="leaderboard-filters">
+              <label class="lb-filter">
+                <span data-i18n="leaderboard.filter_accelerator">Hardware</span>
+                <select id="lb-filter-accel">
+                  <option value="" data-i18n="leaderboard.filter_all">All</option>
+                  <option value="gpu" data-i18n="leaderboard.gpu">GPU</option>
+                  <option value="cpu" data-i18n="leaderboard.cpu">CPU</option>
+                </select>
+              </label>
+              <label class="lb-filter">
+                <span data-i18n="leaderboard.filter_os">System</span>
+                <select id="lb-filter-os">
+                  <option value="" data-i18n="leaderboard.filter_all">All</option>
+                </select>
+              </label>
+              <label class="lb-filter">
+                <span data-i18n="leaderboard.filter_region">Region</span>
+                <select id="lb-filter-region">
+                  <option value="" data-i18n="leaderboard.filter_all">All</option>
+                </select>
+              </label>
+              <span class="lb-count text-muted" id="lb-count"></span>
+            </div>
+
+            <table class="data-table" id="leaderboard-table">
+              <thead>
+                <tr>
+                  <th scope="col" style="width:60px" data-i18n="leaderboard.rank">#</th>
+                  <th scope="col" data-i18n="leaderboard.node">Node</th>
+                  <th scope="col" data-i18n="leaderboard.rig">Machine</th>
+                  <th scope="col" data-i18n="leaderboard.region">Region</th>
+                  <th scope="col" data-i18n="leaderboard.speed">Speed</th>
+                  <th scope="col" data-i18n="leaderboard.shards">Shards</th>
+                </tr>
+              </thead>
+              <tbody id="leaderboard-body">
+                <tr class="skeleton-row"><td colspan="6"><div class="skeleton-line" style="width:100%;height:12px"></div></td></tr>
+                <tr class="skeleton-row"><td colspan="6"><div class="skeleton-line" style="width:90%;height:12px"></div></td></tr>
+                <tr class="skeleton-row"><td colspan="6"><div class="skeleton-line" style="width:95%;height:12px"></div></td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
-
-      <!-- Compare view -->
-      <div class="view" id="view-compare" style="display:none">
+<div class="view" id="view-compare" style="display:none">
         <div class="container">
           <div class="panel">
             <div class="panel-header flex-wrap" style="gap:4px 12px">
@@ -1664,64 +1728,6 @@
       </div>
 
       <!-- Leaderboard view -->
-      <div class="view" id="view-leaderboard" style="display:none">
-        <div class="container">
-          <div class="panel">
-            <div class="panel-header">
-              <h2 data-i18n="leaderboard.title">Network Leaderboard</h2>
-              <button class="btn btn-sm" id="btn-refresh-leaderboard" data-i18n="dashboard.refresh">Refresh</button>
-            </div>
-            <!-- Top three. Rendered only when at least three nodes qualify;
-                 a podium with gaps reads as missing data rather than a small
-                 network. -->
-            <div class="lb-podium" id="leaderboard-podium" hidden></div>
-
-            <div class="lb-filters" id="leaderboard-filters">
-              <label class="lb-filter">
-                <span data-i18n="leaderboard.filter_accelerator">Hardware</span>
-                <select id="lb-filter-accel">
-                  <option value="" data-i18n="leaderboard.filter_all">All</option>
-                  <option value="gpu" data-i18n="leaderboard.gpu">GPU</option>
-                  <option value="cpu" data-i18n="leaderboard.cpu">CPU</option>
-                </select>
-              </label>
-              <label class="lb-filter">
-                <span data-i18n="leaderboard.filter_os">System</span>
-                <select id="lb-filter-os">
-                  <option value="" data-i18n="leaderboard.filter_all">All</option>
-                </select>
-              </label>
-              <label class="lb-filter">
-                <span data-i18n="leaderboard.filter_region">Region</span>
-                <select id="lb-filter-region">
-                  <option value="" data-i18n="leaderboard.filter_all">All</option>
-                </select>
-              </label>
-              <span class="lb-count text-muted" id="lb-count"></span>
-            </div>
-
-            <table class="data-table" id="leaderboard-table">
-              <thead>
-                <tr>
-                  <th scope="col" style="width:60px" data-i18n="leaderboard.rank">#</th>
-                  <th scope="col" data-i18n="leaderboard.node">Node</th>
-                  <th scope="col" data-i18n="leaderboard.rig">Machine</th>
-                  <th scope="col" data-i18n="leaderboard.region">Region</th>
-                  <th scope="col" data-i18n="leaderboard.speed">Speed</th>
-                  <th scope="col" data-i18n="leaderboard.shards">Shards</th>
-                </tr>
-              </thead>
-              <tbody id="leaderboard-body">
-                <tr class="skeleton-row"><td colspan="6"><div class="skeleton-line" style="width:100%;height:12px"></div></td></tr>
-                <tr class="skeleton-row"><td colspan="6"><div class="skeleton-line" style="width:90%;height:12px"></div></td></tr>
-                <tr class="skeleton-row"><td colspan="6"><div class="skeleton-line" style="width:95%;height:12px"></div></td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <!-- ═══ Devices (Pool) ═══ -->
       <div class="view" id="view-devices" style="display:none">
         <div class="container">
 
