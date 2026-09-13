@@ -136,6 +136,16 @@ in `finalize_reply_text` (the non-streaming choke point), and
 `tool_parse::StreamingToolText` withholds the same block while streaming — the
 buffer both encoders already share, so all four API paths inherit it.
 
+**Two implementations of one rule, so the property asserted is that they
+AGREE** (`streamed_and_unstreamed_replies_strip_the_same_scratchpad`). While
+each was tested only against itself they diverged on the input neither used: a
+first chunk that is pure whitespace. In the streaming decision an empty
+remainder is the WEAKEST evidence about a `<think>` block, not the strongest —
+nothing decisive has been seen yet — and treating it as decisive latched
+"no scratchpad here" on zero characters and streamed the whole thing to the
+user (report #031). A lone leading space as its own chunk is ordinary: a BPE
+tokenizer decodes its word-boundary marker to one.
+
 → `docs/invariants/api-surfaces.md`
 
 ## A rendered prompt that lost the question is a FAILED render

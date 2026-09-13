@@ -1407,6 +1407,15 @@
                 <span class="text-muted" style="font-size:0.7rem" id="map-legend-max">0</span>
               </div>
             </div>
+            <!-- The lines the map draws had no key at all — two colours, one
+                 meaning "a request ran this way" and one "and it failed",
+                 explained nowhere. Written by `renderRecentRoutes`, which is
+                 also the only thing that draws them, so the key cannot drift
+                 from what is on the map. On a node that has run nothing across
+                 regions it says so instead, which is the whole of the map's
+                 first-run story: the arcs are real routes, and a new user has
+                 none yet. -->
+            <div id="map-route-legend" class="map-legend"></div>
             <div id="map-stats" class="map-stats">
               <span class="text-muted" style="font-size:0.8rem" id="map-stats-text" data-i18n="network.map_loading">Discovering network...</span>
               <div id="map-swarm-summary" class="text-xs text-muted mt-1" style="display:none"></div>

@@ -168,6 +168,37 @@ What a change here must keep:
 
 ## A reasoning model's scratchpad is not the reply
 
+**Report #031 (2026-09-13): one whitespace-only first chunk disabled the
+streaming filter for the entire reply.** `withholding_reasoning`'s
+"can this still become `<think>`?" test read
+`THINK_OPEN.starts_with(rest) && !rest.is_empty()`. When every token so far
+trims away to nothing, `rest` is `""` — which means *no character has yet said
+anything either way*, the weakest possible evidence — and the `!is_empty()`
+clause carved exactly that case out of "undecidable". `Reasoning::Absent`
+latched, and since it short-circuits the whole match and never re-reads the
+text, the model's complete scratchpad streamed to the user as the answer.
+Confirmed in the field on qwen3-1.7b through the dashboard chat.
+
+Three things a change here must keep:
+
+- **An empty remainder waits.** Withholding for ever is not the risk it looks
+  like: `pending_all` releases everything at the end of the stream, and both
+  streaming surfaces already call it — the same way a reply that opens with a
+  bare `<` and stops has always been released.
+- **A leading whitespace chunk is ordinary input, not an edge case.** A BPE
+  tokenizer decodes its word-boundary marker to a literal space, so a great
+  many replies begin with one as a standalone chunk. Every one of the seven
+  tests that existed here started its stream with the literal `"<think>"` —
+  which is precisely the case that worked.
+- **Assert that the two paths AGREE, not that each is right.** The
+  non-streaming sibling was correct throughout, because it runs once over the
+  complete text and so never has to decide what "nothing but whitespace so far"
+  means. Two implementations tested only against themselves diverge on the
+  input neither author thought of;
+  `streamed_and_unstreamed_replies_strip_the_same_scratchpad` feeds one reply
+  through both and requires the same answer, so a new shape of input covers
+  both at once.
+
 `inference::take_leading_reasoning_block` removes a leading `<think>…</think>`
 in `finalize_reply_text` (the non-streaming choke point), and
 `tool_parse::StreamingToolText` withholds the same block while streaming — the

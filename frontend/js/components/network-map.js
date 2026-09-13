@@ -326,6 +326,9 @@
       var svg = document.querySelector('.world-svg');
       if (!svg) return;
       svg.querySelectorAll('.map-route-history').forEach(function(el) { el.remove(); });
+      // Written on EVERY call, including the empty one — the key is part of
+      // drawing the arcs, so it cannot fall out of step with them.
+      App.networkMap.renderRouteKey(routes);
       if (!routes || routes.length === 0) return;
 
       var ns = 'http://www.w3.org/2000/svg';
@@ -353,6 +356,47 @@
         }
       });
       svg.appendChild(group);
+    },
+
+    // WHAT THE LINES MEAN, and what it means when there are none.
+    //
+    // The arcs are painted in two colours — a request that ran, and one that
+    // failed — and were explained nowhere. A key must list every value the
+    // thing it explains can paint (`docs/invariants/frontend.md`), and this one
+    // listed only node density, which is the map's other visual channel.
+    //
+    // The empty case is the one that mattered enough to open FUTURE_WORK #62.
+    // These are THIS node's own routes, so a node that has served nothing
+    // across regions draws nothing — which is every new node, and a new user
+    // opening the Network tab reads pins-and-no-traffic as "nothing is
+    // happening here" rather than "nothing has happened *to you* yet". Saying
+    // so is the honest half of that entry; seeding the map from the swarm's
+    // traffic is the other half and is still open, because it needs a new
+    // gossip message and a privacy decision. **Do not fake it with sample
+    // data** — the arcs are worth something precisely because they are the
+    // routes that actually ran.
+    renderRouteKey: function(routes) {
+      var el = document.getElementById('map-route-legend');
+      if (!el) return;
+      if (!routes || routes.length === 0) {
+        el.innerHTML = '<span class="text-muted" style="font-size:0.75rem">'
+          + U.escapeHtml(I18n.t('network.no_routes_yet')) + '</span>';
+        return;
+      }
+      // Only offer the "failed" key when a failed arc is actually on the map:
+      // a key that lists a colour nothing is painted in reads as a warning
+      // about something that has not happened.
+      var anyFailed = routes.some(function(r) { return !r.ok; });
+      var items = [['', 'network.route_key_ran'], ['newest', 'network.route_key_newest']];
+      if (anyFailed) items.push(['failed', 'network.route_key_failed']);
+      el.innerHTML = items.map(function(it) {
+        return '<span class="map-route-key-item">'
+          + '<svg class="map-route-key-swatch" viewBox="0 0 22 8" aria-hidden="true">'
+          + '<path d="M1,6 Q11,0 21,6" class="map-route-arc' + (it[0] === 'failed' ? ' failed' : '') + '"'
+          + (it[0] === 'newest' ? '' : ' style="opacity:0.35"') + '/></svg>'
+          + '<span class="text-muted" style="font-size:0.75rem">' + U.escapeHtml(I18n.t(it[1])) + '</span>'
+          + '</span>';
+      }).join('');
     },
 
     // Fetch the scheduler's plan for the currently-filtered model and draw

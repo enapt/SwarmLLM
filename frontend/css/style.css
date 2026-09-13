@@ -6066,6 +6066,21 @@ textarea.pool-code-input { min-height: 4.5em; }
   stroke: var(--red, #ef4444);
   stroke-dasharray: 3 3;
 }
+/* The key for those arcs. The swatch reuses `.map-route-arc` itself rather
+   than restating its colours, so the key cannot drift from the map — the same
+   reason the shard legend's swatches are `.avail-seg`. */
+.map-route-key-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 14px;
+}
+.map-route-key-swatch {
+  width: 22px;
+  height: 8px;
+  flex-shrink: 0;
+  overflow: visible;
+}
 
 .map-pipeline-arc {
   fill: none;

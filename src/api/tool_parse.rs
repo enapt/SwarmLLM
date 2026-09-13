@@ -428,7 +428,28 @@ impl StreamingToolText {
                 }
                 // Still a possible prefix of `<think>`? Then wait. Otherwise the
                 // reply plainly does not open with one and never will.
-                let undecidable = THINK_OPEN.starts_with(rest) && !rest.is_empty();
+                //
+                // **An empty `rest` is the weakest evidence there is, not the
+                // strongest.** It means every token so far trimmed away to
+                // nothing, i.e. we have seen zero characters that could decide
+                // anything — so it must WAIT. This read `&& !rest.is_empty()`,
+                // which carved that exact case out of "undecidable" and latched
+                // `Absent` on it; since `Absent` short-circuits the whole match
+                // and never re-examines the text, one whitespace-only first
+                // chunk disabled the filter for the rest of the reply and the
+                // model's entire scratchpad streamed to the user as the answer.
+                //
+                // A lone leading space as its own chunk is ordinary rather than
+                // exotic: a BPE tokenizer decodes its word-boundary marker to a
+                // literal space, so that is how a great many replies begin.
+                // Reported from the field on qwen3-1.7b (report #031).
+                //
+                // Waiting for ever is not the risk it looks like. A reply that
+                // is nothing but whitespace is released by `pending_all`, which
+                // both streaming surfaces already call when the stream ends —
+                // the same way a reply that opens with a bare `<` and stops has
+                // always been released.
+                let undecidable = THINK_OPEN.starts_with(rest);
                 if undecidable {
                     true
                 } else {
@@ -2051,6 +2072,93 @@ mod streaming_reasoning_tests {
             }
         }
         (out, b)
+    }
+
+    /// **Report #031: one whitespace-only first chunk disabled the filter for
+    /// the whole reply.**
+    ///
+    /// `undecidable` required `!rest.is_empty()`, so a first token that trims
+    /// to nothing was read as the strongest possible evidence AGAINST a
+    /// `<think>` block, when it is the weakest — nothing decisive has been seen
+    /// yet. `Reasoning::Absent` latched on zero non-whitespace characters and
+    /// short-circuits every later call, so the entire scratchpad streamed to
+    /// the user as the answer.
+    ///
+    /// A leading space as a standalone chunk is ordinary, not exotic: BPE
+    /// tokenizers decode a word-boundary marker to a literal space, so it is
+    /// how a great many replies begin. Confirmed in the field on qwen3-1.7b
+    /// through the dashboard chat.
+    ///
+    /// Every existing test in this module starts its stream with the literal
+    /// `"<think>"`, which is exactly the case that works.
+    #[test]
+    fn a_leading_whitespace_token_does_not_disable_the_reasoning_filter() {
+        for lead in [" ", "\n", "\n\n", "  ", "\t"] {
+            let (out, mut b) = stream(&[
+                lead,
+                "<think>",
+                "\nOkay, the user said ciao.\n",
+                "</think>",
+                "\n\n",
+                "Ciao! Come stai?",
+            ]);
+            let all = out + &b.pending_all().unwrap_or_default();
+            assert!(
+                !all.contains("<think>") && !all.contains("Okay, the user said"),
+                "lead {lead:?}: the scratchpad reached the user — {all:?}"
+            );
+            assert!(
+                all.contains("Ciao! Come stai?"),
+                "lead {lead:?}: the answer must still arrive — {all:?}"
+            );
+        }
+    }
+
+    /// **The property both paths exist to provide: the same reply gives the
+    /// same content whether or not the client asked to stream it.**
+    ///
+    /// Stated in the doc comment of `a_reasoning_preamble_is_not_streamed` and
+    /// asserted nowhere, so the two implementations were free to diverge — and
+    /// did, on the one input neither test used. Asserting the equivalence
+    /// rather than each side separately is what makes a new shape of input
+    /// cover both at once.
+    #[test]
+    fn streamed_and_unstreamed_replies_strip_the_same_scratchpad() {
+        let replies: &[&[&str]] = &[
+            &[" ", "<think>", "\nthinking\n", "</think>", "\n\n", "Ciao!"],
+            &["<think>", "\nthinking\n", "</think>", "\n\n", "Ciao!"],
+            &["\n\n", "<think>a</think>", "\n", "Answer"],
+            &[" ", "Just an answer"],
+            &["<thi", "nking about it"],
+            &["<think>", "never closed"],
+        ];
+        for chunks in replies {
+            let (out, mut b) = stream(chunks);
+            let streamed = out + &b.pending_all().unwrap_or_default();
+
+            let mut whole: String = chunks.concat();
+            crate::inference::take_leading_reasoning_block(&mut whole);
+
+            assert_eq!(
+                streamed, whole,
+                "streaming and non-streaming disagree on {chunks:?}"
+            );
+        }
+    }
+
+    /// The control: whitespace that is NOT followed by a preamble must still
+    /// reach the user, and must not be withheld for ever. Without this the fix
+    /// above passes on code that simply never decides.
+    #[test]
+    fn a_leading_whitespace_token_before_ordinary_text_still_streams() {
+        let (out, mut b) = stream(&[" ", "Ciao", "!"]);
+        let all = out + &b.pending_all().unwrap_or_default();
+        assert_eq!(all, " Ciao!");
+
+        // And a reply that is nothing BUT whitespace is released by the flush
+        // every streaming surface already runs at the end.
+        let (out, mut b) = stream(&[" ", "\n"]);
+        assert_eq!(out + &b.pending_all().unwrap_or_default(), " \n");
     }
 
     /// A reasoning model's scratchpad must not stream to the user as the reply.
