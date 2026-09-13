@@ -808,12 +808,10 @@ pub async fn diagnostics(
     // not. See `docs/FUTURE_WORK.md` § "A disputed shard is kept but the
     // disagreement is never settled".
     {
-        let disputed: Vec<crate::types::ShardId> = ss
-            .models
-            .disputed_shards
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
+        // Through the accessor, which drops entries whose file has since been
+        // deleted or pruned — a report listing a dispute about a shard that is
+        // no longer here is worse than one listing none.
+        let disputed = ss.disputed_shards_now();
         let _ = writeln!(
             out,
             "\n-- shards kept despite disagreeing ({}) --",

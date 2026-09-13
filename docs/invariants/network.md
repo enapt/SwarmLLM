@@ -128,6 +128,17 @@ v0.3.177 was therefore field-unverifiable by construction.
 - **The diagnostics section prints at zero.** A pasted report saying `0` is a
   measurement; one that says nothing is not, and the whole point is to find out
   whether this ever happens.
+- **The read self-evicts.** `SharedState::disputed_shards_now` drops any entry
+  whose file has since gone, and both the count and the report go through it. A
+  dispute ends three ways — a later check passes, the bytes are quarantined, or
+  the file stops being here (the user deletes the part, `delete_model` takes the
+  lot, auto-manage prunes it). The first two clear where they happen; the third
+  is three call sites today and every future one would have to remember. A
+  stale entry is not harmless, because this set exists to MEASURE how often
+  disputes occur: a phantom inflates the figure the settlement decision turns
+  on, and the report prints it as real. Same shape as `shard_in_backoff`, which
+  self-evicts on read so the map stays bounded with no dedicated sweep and no
+  obligation on code that has not been written yet.
 - **The two outcomes are two events.** `verification_failure_event` and
   `verification_summary` are pure so their truth tables are pinned, because in
   both cases the branch existed in the code and was not carried through to the

@@ -213,13 +213,47 @@ impl SharedState {
         self.models.disputed_shards.contains(shard_id)
     }
 
+    /// The shards currently in dispute, dropping any whose file has since gone.
+    ///
+    /// **Self-evicting on read, deliberately, rather than cleared by every path
+    /// that can delete a shard.** A dispute ends in one of three ways: a later
+    /// check passes, the bytes are quarantined, or the file simply stops being
+    /// here — the user deletes the part, `delete_model` takes the lot, or
+    /// auto-manage prunes it. The first two clear the entry where they happen;
+    /// the third is three call sites today and every future one would have to
+    /// remember. A stale entry is not harmless either: this set exists to
+    /// MEASURE how often disputes occur, and one naming a shard that no longer
+    /// exists corrupts the figure the decision in `docs/FUTURE_WORK.md` turns
+    /// on, while the diagnostics report prints it as a real one.
+    ///
+    /// Same shape as `shard_in_backoff`, which self-evicts on read for the same
+    /// reason: the map stays bounded with no dedicated sweep and no obligation
+    /// on code that has not been written yet.
+    pub fn disputed_shards_now(&self) -> Vec<ShardId> {
+        let store = self.shard_store();
+        let mut gone: Vec<ShardId> = Vec::new();
+        let mut live: Vec<ShardId> = Vec::new();
+        for entry in self.models.disputed_shards.iter() {
+            let sid = entry.key();
+            if store.shard_path(&sid.model_id, sid.index).exists() {
+                live.push(sid.clone());
+            } else {
+                gone.push(sid.clone());
+            }
+        }
+        for sid in gone {
+            self.models.disputed_shards.remove(&sid);
+        }
+        live
+    }
+
     /// How many shards this node holds and disagrees with the swarm about.
     ///
     /// The figure the diagnostics report prints, and the one that decides
     /// whether the settlement designs in `docs/FUTURE_WORK.md` are worth
     /// building. Zero is a real answer and worth reporting as one.
     pub fn disputed_shard_count(&self) -> usize {
-        self.models.disputed_shards.len()
+        self.disputed_shards_now().len()
     }
 }
 
@@ -307,8 +341,11 @@ mod tests {
         let s = sid();
 
         state.note_shard_disputed(&s);
+        // Membership, not the reported count: `disputed_shards_now` drops a
+        // shard whose file is gone, and this test writes no file. The two are
+        // different questions — see
+        // `a_dispute_about_a_shard_that_is_gone_evicts_itself`.
         assert!(state.shard_is_disputed(&s));
-        assert_eq!(state.disputed_shard_count(), 1);
         assert!(
             !state.models.shards_needing_repair.contains(&s),
             "the repair set is drained by a loop that clears any mark whose file \
@@ -320,13 +357,13 @@ mod tests {
         // the count is what decides whether the settlement designs in
         // FUTURE_WORK are worth building.
         state.note_shard_disputed(&s);
-        assert_eq!(state.disputed_shard_count(), 1);
+        assert_eq!(state.models.disputed_shards.len(), 1);
 
         // A later check that passes is what ends it: the hash was corrected,
         // or the origin's copy arrived.
         state.clear_shard_dispute(&s);
         assert!(!state.shard_is_disputed(&s));
-        assert_eq!(state.disputed_shard_count(), 0);
+        assert!(state.models.disputed_shards.is_empty());
     }
 
     /// Zero is a measurement. The whole reason this state exists is that the
@@ -335,6 +372,35 @@ mod tests {
     #[test]
     fn a_node_with_no_disputes_can_say_so() {
         assert_eq!(test_state().disputed_shard_count(), 0);
+    }
+
+    /// **A dispute about a shard that is no longer here is not a dispute.**
+    ///
+    /// Three paths delete a shard this node holds — the user deleting a part,
+    /// `delete_model` taking the lot, auto-manage pruning — and none of them
+    /// knows about this set. Rather than oblige each of them (and every future
+    /// one) to remember, the read drops what is gone. It matters because the
+    /// whole point of the set is to MEASURE how often this happens: a phantom
+    /// inflates the figure the settlement decision turns on, and the
+    /// diagnostics report prints it as real.
+    #[test]
+    fn a_dispute_about_a_shard_that_is_gone_evicts_itself() {
+        let state = test_state();
+        let s = sid();
+        state.note_shard_disputed(&s);
+        assert!(state.models.disputed_shards.contains(&s));
+
+        // No file was ever written for it, which is the same thing the reader
+        // sees after a delete or a prune.
+        assert_eq!(
+            state.disputed_shard_count(),
+            0,
+            "a shard with no file on disk is not in dispute"
+        );
+        assert!(
+            !state.models.disputed_shards.contains(&s),
+            "and the entry is dropped, so the set stays bounded without a sweep"
+        );
     }
 
     /// "Will the fetch actually happen", not "does an origin exist" — the
