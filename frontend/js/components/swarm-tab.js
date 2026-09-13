@@ -1010,19 +1010,26 @@
     },
   };
 
-  function _restFetch(url, renderFn) {
+  // `onFail` is optional and exists for the one view whose container is not
+  // empty before the fetch lands. Silently doing nothing is right when the
+  // panel would just stay blank; it is wrong when the panel is holding a
+  // placeholder, because the placeholder then becomes the permanent answer.
+  function _restFetch(url, renderFn, onFail) {
     App.authFetch(url).then(function (r) {
       return r.ok ? r.json() : null;
     }).then(function (data) {
       if (data) renderFn(data);
-    }).catch(function () { /* non-fatal */ });
+      else if (onFail) onFail();
+    }).catch(function () { if (onFail) onFail(); });
   }
 
   function _refreshFromRest() {
     if (!App.authFetch) return;
     _restFetch('/api/admin/wishlist', _renderWishlist);
     _restFetch('/api/admin/swarm/capacity', _renderRunning);
-    _restFetch('/api/admin/swarm/capacity-plan', _renderCapacityPlan);
+    // The one view that starts with words in it, so the one that needs to be
+    // told when the fetch did not arrive — see `_capacityPlanUnavailable`.
+    _restFetch('/api/admin/swarm/capacity-plan', _renderCapacityPlan, _capacityPlanUnavailable);
     _restFetch('/api/admin/quant-recommendations', _renderQuantTips);
     _restFetch('/api/admin/foreign-pool-catalog', function (data) {
       // REST returns the same shape WS does, so reuse the renderer.
@@ -1035,6 +1042,19 @@
   // "if N more contributors joined with X GB each, you'd unlock Y" —
   // makes the contribution → capability link tangible for non-technical
   // users.
+  // **The placeholder this replaces said the feature was "being prepared in a
+  // follow-up update".** It shipped in R113 and the string stayed, sitting in
+  // the container as the initial content — so any request that failed, or a
+  // page opened before the node answered, told the user a built feature did
+  // not exist yet. `_restFetch` swallowed both the non-OK response and the
+  // thrown error, so nothing ever replaced it.
+  function _capacityPlanUnavailable() {
+    var container = document.getElementById('capacity-plan-content');
+    if (!container) return;
+    container.innerHTML = '<div class="text-muted text-sm">'
+      + U.escapeHtml(I18n.t('swarm.capacity_failed')) + '</div>';
+  }
+
   function _renderCapacityPlan(plan) {
     var container = document.getElementById('capacity-plan-content');
     if (!container) return;

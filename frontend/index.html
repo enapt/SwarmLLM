@@ -1717,8 +1717,13 @@
             <!-- Capacity-plan subtab — what-if calculator (filled in R113) -->
             <div class="swarm-subview" id="swarm-subview-capacity" style="display:none">
               <div class="text-muted text-sm mb-2" data-i18n="swarm.capacity_intro">See what the swarm could run if more contributors joined.</div>
+              <!-- Says "loading", not "coming soon". This held a
+                   "being prepared in a follow-up update" line for releases
+                   after the view shipped, and since `_restFetch` swallowed
+                   both a failed request and a non-OK response, that line was
+                   what a user saw whenever the figures did not arrive. -->
               <div id="capacity-plan-content">
-                <div class="text-muted" data-i18n="swarm.capacity_pending">Capacity-plan view is being prepared in a follow-up update.</div>
+                <div class="text-muted" data-i18n="perf.loading">Loading…</div>
               </div>
             </div>
 
