@@ -510,10 +510,14 @@
       }
     },
 
-    toggleMetadata: async function(modelId) {
+    // Fill the technical-details panel for a model. It used to be behind a
+    // "Technical Details" link inside the expanded card; the card now shows it
+    // outright beside the parts, so this is called when a card is expanded
+    // rather than when a link is clicked. Idempotent: a panel that already has
+    // content returns immediately, and the fetch is cached per model.
+    loadMetadata: async function(modelId) {
       var panel = document.querySelector('[data-meta-panel="' + U.cssSafeAttr(modelId) + '"]');
       if (!panel) return;
-      if (!panel.classList.contains('hidden')) { panel.classList.add('hidden'); return; }
       panel.classList.remove('hidden');
       if (panel.innerHTML) return;
 

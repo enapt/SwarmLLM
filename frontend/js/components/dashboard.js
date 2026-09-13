@@ -1202,16 +1202,9 @@
         }
 
         // Gear stays on the row — it is this model's own settings. The raw
-        // GGUF metadata dump does not: it is the most specialist thing the
-        // card can show, it was a bare ⓘ glyph explained only by hovering
-        // (which NN/g rules out and touch does not have at all), and it was on
-        // all fifteen collapsed rows. It moves into the expanded card beside
-        // the other details, with a name on it.
+        // GGUF metadata is no longer a button at all: the expanded card shows
+        // it beside the parts.
         var gearHtml = '<button class="model-gear-btn" data-am-gear="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.gear_title')) + '">&#9881;</button>';
-        var metaBtnHtml = m.has_header
-          ? '<button class="btn-action" data-meta-toggle="' + U.escapeHtml(m.id) + '">' +
-              U.escapeHtml(I18n.t('models.metadata_header')) + '</button>'
-          : '';
 
         // Swarm health summary badge — shown in the left column of the expanded card.
         // Derived from per-shard holder counts across the network.
@@ -1422,10 +1415,6 @@
 
         // --- Parse architecture + quantization from model ID ---
         var modelId = m.id || '';
-        var archKey = modelIconKey(modelId);
-        var archTag = archKey ? '<span class="model-tag tag-arch">' + U.escapeHtml(archKey) + '</span>' : '';
-        var quantMatch = modelId.match(/[._-](q[0-9]+[_-]?k?[_-]?[a-z]*)/i);
-        var quantTag = quantMatch ? '<span class="model-tag tag-quant">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span>' : '';
 
         // --- Spec line (label/value pairs, rendered inline) ---
         //
@@ -1435,8 +1424,11 @@
         // cannot say — what kind of model it is, how it was compressed, and
         // where on this machine it runs.
         var configRows = [];
-        if (archKey)    configRows.push(['dashboard.info_arch',  '<span class="mce-info-pill">' + U.escapeHtml(archKey) + '</span>']);
-        if (quantMatch) configRows.push(['dashboard.info_quant', '<span class="mce-info-pill">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span>']);
+        // Architecture and quantization are NOT here: the Technical Details
+        // column beside the parts reads them from the GGUF itself, while these
+        // were guessed from the model's id — two sources for one fact, shown a
+        // few centimetres apart. What stays is what that column cannot say,
+        // because it is about THIS machine rather than the model.
         // Mode (CPU/GPU) — single word
         configRows.push(['dashboard.info_mode', S._gpuInference ? I18n.t('dashboard.gpu_label') : I18n.t('dashboard.cpu_label')]);
         // VRAM fit — only when GPU mode; in CPU mode the Mode row already conveys this.
@@ -1609,32 +1601,41 @@
                 (fileIndicators ? '<div class="mce-file-warn">' + fileIndicators + '</div>' : '') +
                 '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
                 '<div class="mce-spec">' + trustHeaderHtml + configGridHtml + '</div>' +
-                '<div class="mce-more">' +
-                  (shards.length > 0
-                    ? '<button class="mce-disclose" data-parts-toggle="' + safeId + '" aria-expanded="false">' +
-                        '<span class="mce-disclose-caret">▸</span>' +
-                        U.escapeHtml(I18n.t('dashboard.show_the_parts', { count: shards.length })) +
-                      '</button>'
-                    : '') +
-                  metaBtnHtml +
-                '</div>' +
               '</div>' +
-              '<div class="mce-parts" data-shard-detail="' + safeId + '" data-parts-open="0">' +
-                '<div class="mce-right-head">' +
-                  _buildShardViewToggle() +
+              // The reference half, both columns always shown. They were two
+              // disclosure links; a link that only reveals what the card was
+              // going to show anyway is a step the reader has to take for no
+              // decision, and reads as a seam in the middle of the card.
+              '<div class="mce-detail' + (m.has_header ? '' : ' mce-detail-noinfo') + '">' +
+                (m.has_header
+                  ? '<div class="mce-detail-info">' +
+                      '<div class="gguf-metadata-panel" data-meta-panel="' + U.escapeHtml(m.id) + '"></div>' +
+                    '</div>'
+                  : '') +
+                '<div class="mce-parts" data-shard-detail="' + safeId + '">' +
+                  '<div class="mce-right-head">' +
+                    _buildShardViewToggle() +
+                  '</div>' +
+                  '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +
+                  '<div class="model-ticker model-ticker-embedded" data-model-ticker="' + safeId + '" style="display:none"></div>' +
                 '</div>' +
-                '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +
-                '<div class="model-ticker model-ticker-embedded" data-model-ticker="' + safeId + '" style="display:none"></div>' +
               '</div>' +
             '</div>' +
           '</div>' +
-          '<div class="gguf-metadata-panel hidden" data-meta-panel="' + U.escapeHtml(m.id) + '"></div>';
+          '';
 
         if (swarmBody) swarmBody.appendChild(card);
 
         // Restore per-model activity ticker from stored events (DOM only, don't re-log)
         if (_modelEvents[m.id] && _modelEvents[m.id].length > 0) {
           App.dashboard._renderModelTicker(m.id);
+        }
+
+        // A card that renders already-expanded (a re-render while the user has
+        // it open) needs its technical details filled too — the click handler
+        // that fills them on expand never runs in that case.
+        if (!isCompact && m.has_header && App.models && App.models.loadMetadata) {
+          App.models.loadMetadata(m.id);
         }
 
         // The pipeline-encrypted connector line is gone with the two-column

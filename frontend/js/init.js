@@ -472,28 +472,6 @@
         return;
       }
 
-      // "Show the N parts" — the per-part table is a disclosure inside the
-      // expanded card, not the card's main content. Handled here rather than
-      // with a <details> element so the caret, the label and aria-expanded
-      // stay in step with one toggle.
-      var partsToggle = target.getAttribute('data-parts-toggle');
-      if (partsToggle) {
-        var partsPanel = document.querySelector('[data-shard-detail="' + partsToggle + '"]');
-        if (partsPanel) {
-          var nowOpen = partsPanel.getAttribute('data-parts-open') !== '1';
-          partsPanel.setAttribute('data-parts-open', nowOpen ? '1' : '0');
-          target.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
-          var caret = target.querySelector('.mce-disclose-caret');
-          if (caret) caret.textContent = nowOpen ? '▾' : '▸';
-        }
-        e.stopPropagation();
-        return;
-      }
-
-      // GGUF metadata toggle
-      var metaToggle = target.getAttribute('data-meta-toggle');
-      if (metaToggle) { App.models.toggleMetadata(metaToggle); return; }
-
       // Download queue cancel
       var dlCancel = target.getAttribute('data-dl-cancel');
       if (dlCancel) { App.downloads.cancelDownload(dlCancel); return; }
@@ -596,7 +574,7 @@
       // Model card expand/collapse toggle — chevron or title row click
       var expandBtn = target.closest('[data-expand-model]');
       var titleRow = !expandBtn && target.closest('.model-card-title');
-      if (expandBtn || (titleRow && !target.closest('button, select, input, .badge-encrypted, [data-am-gear], [data-meta-toggle]'))) {
+      if (expandBtn || (titleRow && !target.closest('button, select, input, .badge-encrypted, [data-am-gear]'))) {
         var expandCard = (expandBtn || titleRow).closest('.model-card');
         if (expandCard && expandCard.getAttribute('data-model-id')) {
           var expandModelId = expandCard.getAttribute('data-model-id');
@@ -604,6 +582,9 @@
           if (wasCompact) {
             expandCard.classList.remove('compact');
             App.state._expandedModels[expandModelId] = true;
+            // The card shows its technical details outright, so fill them
+            // the moment it opens rather than on a click that no longer exists.
+            if (App.models && App.models.loadMetadata) App.models.loadMetadata(expandModelId);
           } else {
             expandCard.classList.add('compact');
             delete App.state._expandedModels[expandModelId];

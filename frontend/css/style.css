@@ -5121,7 +5121,33 @@ textarea.pool-code-input { min-height: 4.5em; }
   padding: 10px 14px 12px;
 }
 .model-card-expanded .mce-summary,
-.model-card-expanded .mce-parts { grid-column: 1 / -1; }
+.model-card-expanded .mce-detail { grid-column: 1 / -1; }
+
+/* The reference half: what the model IS on the left, where its parts are on
+   the right. Both always shown — they were behind two disclosure links, and a
+   link that only reveals what the card was going to show anyway is a step with
+   no decision in it. Falls to one column where there is no room for two. */
+.model-card-expanded .mce-detail {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.model-card-expanded .mce-detail-noinfo { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 899px) {
+  .model-card-expanded .mce-detail { grid-template-columns: minmax(0, 1fr); }
+}
+.model-card-expanded .mce-detail-info { min-width: 0; }
+.model-card-expanded .mce-parts { min-width: 0; }
+/* In the card it is a column, not a panel that dropped in: no top margin, no
+   entrance animation, and it carries the card's own surface. */
+.model-card-expanded .mce-detail-info .gguf-metadata-panel {
+  margin-top: 0;
+  animation: none;
+  background: transparent;
+}
 
 
 /* The health sentence: what the state means for the reader. */
@@ -5154,25 +5180,6 @@ textarea.pool-code-input { min-height: 4.5em; }
 .mce-summary .mce-line.mce-section-toggleable:hover { border-color: var(--accent); }
 
 /* The parts table, hidden until asked for. */
-.mce-parts[data-parts-open="0"] { display: none; }
-.mce-more { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.mce-disclose {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: none; border: none; padding: 0;
-  color: var(--accent); font-size: var(--fs-sm); font-family: inherit;
-  cursor: pointer;
-}
-.mce-disclose:hover { text-decoration: underline; }
-.mce-disclose-caret { font-size: var(--fs-2xs); }
-/* "Technical details" is a peer of "Show the N parts", not a button: both
-   reveal detail, so they read the same. */
-.mce-more .btn-action {
-  background: none; border: none; padding: 0;
-  color: var(--accent); font-size: var(--fs-sm); font-family: inherit;
-  cursor: pointer;
-}
-.mce-more .btn-action:hover { text-decoration: underline; }
-
 .model-card-expanded .mce-summary {
   display: flex;
   flex-direction: column;
