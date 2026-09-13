@@ -273,6 +273,61 @@ what it is doing; the user-facing `model_gpu_restored` event is emitted only onc
 the worker is on the card, because admission prices the model again and has the
 last word — the same correction `admit_to_gpu`'s refusal log already carries.
 
+## A worker's growth is weighed by the budget its spawn charged
+
+(2026-09-13, report #030, gotcha #586.)
+**`WorkerHandle::holds_gpu_memory` is the single answer to "does this worker's
+memory come out of the graphics budget or the system-RAM one?"**, and it reads
+`charged_against_ram` — what `charges_ram` decided at spawn — never
+`placed_on_cpu_because`.
+
+**Why the two are not interchangeable.** `placed_on_cpu_because` records why a
+model was *demoted*, for the user and the dashboard. On a machine with no
+graphics card nothing was demoted — there is nowhere to demote to — so it reads
+`None`, exactly as it does for a worker holding a card. `charges_ram` is the
+other question, "who pays", and it knows the two cases `cpu_reason` cannot see:
+*no card detected* and *this build has no CUDA*.
+
+**What it replaced.** `charge_additional_segment` re-derived `on_gpu =
+handle.placed_on_cpu_because.is_none()`, so on every GPU-less node each later
+layer-range growth of a live worker was weighed by `admit_to_gpu` — which
+returns `true` unconditionally when `vram_budget_mb` is 0, as it is on a
+machine with no card. The delta was also priced with the VRAM estimator and
+subsumed ranges released from the VRAM map. Only a worker's FIRST admission
+ever met the real anti-swap check.
+
+**Measured.** A 16 GB CPU-only Mac mini on v0.3.177: the 14B's spawn was weighed
+honestly (`estimated_mb=470 cap_mb=13107 available_mb=12092
+live_headroom_mb=8400`), then four growths — `delta_mb=6090`, `2730`, `2520`,
+`210`, ≈ 11.5 GB — were each logged `on_gpu=true` and admitted without a check.
+`grep -c "admitting model to system RAM"` over the whole run returned 3, one per
+model spawned. No refusal line anywhere; the machine swapped.
+
+**What a change must keep.**
+
+- **Growth is the common case, not the rare one.** A swarm node's coverage is
+  reassigned by scheduling, failover and re-plans. A gate that only runs on the
+  create path is a gate that mostly does not run — the same lesson the KV grant
+  learned as gotcha #440, recorded in this very function's own comment ("the
+  bound lives with the worker … reconciles at every decision that takes
+  memory") while the weights beside it still decided once.
+- **One accountant per worker, chosen once.** `charged_against_ram` is set at
+  spawn and every later charge, release and price must follow it. A worker
+  charged against RAM must hold no VRAM reservation: the spawn's own
+  `admit_to_gpu` charge is released the moment `charges_ram` says RAM, which
+  the RAM-refusal arm below it had always done and the success arm had not.
+- **`placed_on_cpu_because` answers only "why was this demoted".** Three other
+  readers were asking it the accountant's question. `would_fit_on_gpu` and
+  `gpu_estimate_and_fit` answered `Some(true)` — "it fits on your GPU" — for
+  every resident model on every Mac; the honest answer with no card and no
+  budget is `None`, which is what the API documents that field to mean.
+  `DepartedWorker::freed_gpu_memory` logged `device="gpu"` for workers that had
+  never touched one.
+- **The guard.** `a_live_workers_growth_is_weighed_by_the_budget_its_spawn_charged`
+  in `tests/repo_consistency.rs` fails the build if `charge_additional_segment`
+  mentions `placed_on_cpu_because`, scanning statements so a chain rustfmt has
+  wrapped is still seen, and with its own planted-violation self-test.
+
 ## Graphics memory has ONE owner: `ModelProcessPool`
 
 (2026-08-27). It admits

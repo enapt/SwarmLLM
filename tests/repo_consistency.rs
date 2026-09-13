@@ -5888,3 +5888,107 @@ fn every_stats_surface_carries_the_traffic_figure() {
         );
     }
 }
+
+/// A method's body, brace-balanced from its signature.
+///
+/// [`fn_body`] stops at the first closing brace in column zero, which for a
+/// method inside an `impl` is the impl's own — so it returns every method
+/// below the one asked for. That is safe for a presence check and wrong for an
+/// absence one, and the guard below is an absence check.
+fn method_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
+    let start = src.find(signature)?;
+    let rest = &src[start..];
+    let open = rest.find('{')?;
+    let mut depth = 0usize;
+    for (i, ch) in rest.char_indices().skip(open) {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&rest[..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// **Which budget a live worker's growth is weighed against is the budget its
+/// spawn charged — never a fact re-derived from placement.**
+///
+/// `WorkerHandle::placed_on_cpu_because` records why a model was DEMOTED. On a
+/// machine with no graphics card nothing was demoted, so it reads `None`
+/// exactly as it does for a worker holding a card, while `charges_ram` — which
+/// knows "no card detected" and "this build has no CUDA" — put that worker on
+/// the RAM budget. `charge_additional_segment` read placement, so every later
+/// layer-range growth of a live worker on a GPU-less node was weighed by
+/// `admit_to_gpu`, which returns `true` unconditionally when `vram_budget_mb`
+/// is 0. Reported live 2026-09-13 (report #030) from a 16 GB Mac mini: 470 MB
+/// through the real RAM gate at spawn, then ~11.5 GB waved through the
+/// graphics gate across four growths of the same worker, and the machine
+/// swapped. The anti-swap check was working and was simply never asked again.
+///
+/// Growth is the COMMON case on a swarm node — coverage is reassigned by
+/// scheduling, failover and re-plans — so this is not a rare path.
+#[test]
+fn a_live_workers_growth_is_weighed_by_the_budget_its_spawn_charged() {
+    let src =
+        std::fs::read_to_string("src/inference/process_pool.rs").expect("read process_pool.rs");
+    let body = method_body(&src, "    async fn charge_additional_segment(")
+        .expect("charge_additional_segment was renamed — re-point this guard");
+
+    assert!(
+        body.contains("handle.holds_gpu_memory()"),
+        "charge_additional_segment must ask `WorkerHandle::holds_gpu_memory`, \
+         which reads `charged_against_ram` — the budget the spawn actually \
+         charged"
+    );
+    for (line, stmt) in statements(body) {
+        assert!(
+            !stmt.contains("placed_on_cpu_because"),
+            "line {line}: charge_additional_segment must not re-derive placement \
+             — `placed_on_cpu_because` is `None` on a node with NO card, so this \
+             sends every growth to the graphics gate, which has no ceiling to \
+             check there. Ask `handle.holds_gpu_memory()`.\n  {stmt}"
+        );
+    }
+}
+
+/// The guard above must actually be able to fire, on the shape rustfmt
+/// produces. Planted violation, per `.claude/rules/architecture.md` §
+/// "A source-scanning guard is only as good as the spellings it knows".
+#[test]
+fn the_growth_accountant_guard_catches_a_re_derived_placement() {
+    let planted = "impl ModelProcessPool {\n\
+        \x20   async fn charge_additional_segment(\n\
+        \x20       &self,\n\
+        \x20   ) -> Result<(), SwarmError> {\n\
+        \x20       let on_gpu = handle\n\
+        \x20           .placed_on_cpu_because\n\
+        \x20           .is_none();\n\
+        \x20       if on_gpu {\n\
+        \x20           self.admit_to_gpu(model_id, delta_mb);\n\
+        \x20       }\n\
+        \x20   }\n\
+        \x20   fn something_else(&self) {\n\
+        \x20       let _ = self.holds_gpu_memory();\n\
+        \x20   }\n\
+        }\n";
+    let body = method_body(planted, "    async fn charge_additional_segment(")
+        .expect("the extractor must find the method");
+
+    assert!(
+        !body.contains("holds_gpu_memory"),
+        "the extractor must stop at the method's OWN closing brace — reaching \
+         the next method makes the presence half of the guard pass on any file"
+    );
+    assert!(
+        statements(body)
+            .iter()
+            .any(|(_, s)| s.contains(".placed_on_cpu_because.is_none()")),
+        "the scanner must see the chain rustfmt has wrapped across three lines, \
+         which is the shape the real code was written in"
+    );
+}

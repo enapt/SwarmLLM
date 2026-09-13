@@ -927,6 +927,37 @@ fn response_slot_superseded(map: &ResponseMap, request_id: Uuid, token: u64) -> 
 }
 
 impl WorkerHandle {
+    /// Is this worker's memory held on a graphics card — i.e. does what it
+    /// takes come out of the VRAM budget rather than the system-RAM one?
+    ///
+    /// **The single answer, and deliberately NOT
+    /// `placed_on_cpu_because.is_none()`.** That field records why a model was
+    /// DEMOTED, and on a machine with no graphics card at all nothing was
+    /// demoted — so it reads `None` there exactly as it does for a worker
+    /// genuinely holding a card. `charged_against_ram` is the fact instead: it
+    /// is what [`charges_ram`] decided at spawn, and `charges_ram` knows the
+    /// two cases `cpu_reason` cannot see, "no card detected" and "this build
+    /// has no CUDA".
+    ///
+    /// Re-deriving it from placement is what made this node's anti-swap
+    /// admission control inert. `charge_additional_segment` asked
+    /// `placed_on_cpu_because`, so every growth of a live worker on a
+    /// GPU-less node was weighed by `admit_to_gpu` — which returns `true`
+    /// unconditionally when `vram_budget_mb` is 0, as it is on a machine with
+    /// no card. Reported live 2026-09-13 (report #030) from a 16 GB Mac mini:
+    /// the 14B's spawn was correctly weighed against RAM (470 MB, headroom
+    /// 8400 MB) and its next four layer-range growths — 6090 + 2730 + 2520 +
+    /// 210 ≈ 11.5 GB — were each waved through by the graphics gate, all
+    /// logged `on_gpu=true` on a machine with no GPU. The node went into swap
+    /// with the RAM gate working perfectly and simply never asked again.
+    ///
+    /// A swarm node's coverage is reassigned by scheduling, failover and
+    /// re-plans, so growth is the common case, not the rare one — the gate
+    /// opened once per model and then stopped checking. See gotcha #586.
+    fn holds_gpu_memory(&self) -> bool {
+        !self.charged_against_ram
+    }
+
     /// Has this worker already been charged for `segment`?
     fn segment_is_charged(&self, segment: (u32, u32)) -> bool {
         self.charged_segments
@@ -1292,7 +1323,12 @@ impl From<&WorkerHandle> for DepartedWorker {
             // while the processor worker it produced is still running — so a
             // model on its way back to the card answered "GPU" and lifted every
             // other model's pin on the strength of memory it never held.
-            freed_gpu_memory: h.placed_on_cpu_because.is_none(),
+            //
+            // Through `holds_gpu_memory`, so the `device` this line reports and
+            // the budget the release below subtracts from cannot disagree:
+            // reading `placed_on_cpu_because` directly logged `device="gpu"`
+            // for every worker on a machine with no graphics card.
+            freed_gpu_memory: h.holds_gpu_memory(),
             charged_mb: h.charged_mb.load(Ordering::Acquire),
             charged_against_ram: h.charged_against_ram,
         }
@@ -2327,10 +2363,7 @@ impl ModelProcessPool {
     /// Single-answer callers keep the single-answer methods; nothing is made
     /// slower to make this faster.
     pub fn gpu_estimate_and_fit(&self, model_id: &ModelId) -> (Option<u64>, Option<bool>) {
-        let resident_on_gpu = self
-            .workers
-            .get(model_id)
-            .map(|h| h.placed_on_cpu_because.is_none());
+        let resident_on_gpu = self.workers.get(model_id).map(|h| h.holds_gpu_memory());
         let budget = self
             .vram_budget_mb
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -2382,10 +2415,15 @@ impl ModelProcessPool {
         // proxy a model waiting to move back to the card would report "already
         // charged" while holding no graphics memory at all, which is the exact
         // contradiction described above.
-        let resident_on_gpu = self
-            .workers
-            .get(model_id)
-            .map(|h| h.placed_on_cpu_because.is_none());
+        //
+        // And it is asked through `holds_gpu_memory`, which is the same
+        // question one step further: `placed_on_cpu_because` reads `None` on a
+        // machine with NO card, so a worker on a GPU-less node reported
+        // "already charged to the graphics budget" and this answered
+        // `Some(true)` — "it fits on your GPU" — for every resident model on
+        // every Mac. The honest answer there is `None`, unknowable, which is
+        // what falling through to a zero budget now gives.
+        let resident_on_gpu = self.workers.get(model_id).map(|h| h.holds_gpu_memory());
         if resident_on_gpu == Some(true) {
             return Some(true);
         }
@@ -3063,7 +3101,10 @@ impl ModelProcessPool {
         if handle.segment_is_charged(segment) {
             return Ok(());
         }
-        let on_gpu = handle.placed_on_cpu_because.is_none();
+        // Which budget this worker is charged against was decided ONCE, at
+        // spawn, by `charges_ram`, and every later charge must reach the same
+        // accountant — `WorkerHandle::holds_gpu_memory` is that answer.
+        let on_gpu = handle.holds_gpu_memory();
         let layers = u64::from(segment.1.saturating_sub(segment.0)).max(1);
         let Some((_fixed_mb, per_layer_mb)) = self.segment_cost_curve(model_id, on_gpu) else {
             // Unreadable geometry: nothing to weigh, and refusing on a file we
@@ -3075,10 +3116,8 @@ impl ModelProcessPool {
         let delta_mb = per_layer_mb.saturating_mul(layers);
         let admitted = if on_gpu {
             self.admit_to_gpu(model_id, delta_mb)
-        } else if handle.charged_against_ram {
-            self.admit_to_cpu(model_id, delta_mb)
         } else {
-            true
+            self.admit_to_cpu(model_id, delta_mb)
         };
         if !admitted {
             return Err(SwarmError::ServiceUnavailable(format!(
@@ -3104,7 +3143,7 @@ impl ModelProcessPool {
         if released_mb > 0 {
             if on_gpu {
                 self.release_vram_charge(model_id, released_mb);
-            } else if handle.charged_against_ram {
+            } else {
                 self.release_ram_charge(model_id, released_mb);
             }
         }
@@ -3738,6 +3777,19 @@ impl ModelProcessPool {
                 model = %model_id,
                 "No usable GPU on this node — charging the model against the RAM budget"
             );
+            // ...and give back the graphics charge this spawn just took. The
+            // block above ran because `going_to_cpu` is false, so `admit_to_gpu`
+            // was asked and — with no card, hence no budget — waved the model
+            // through and reserved for it. That reservation is against memory
+            // this machine does not have: the worker is charged against RAM
+            // below, `charged_against_ram` records it, and the release path
+            // subtracts from that budget alone, so nothing would ever have
+            // taken this one back. The refusal arm below already released it
+            // for exactly this reason; the success arm did not, so a GPU-less
+            // node accumulated a phantom VRAM charge per spawn for the life of
+            // the process.
+            self.release_vram_charge(model_id, charged_vram_mb);
+            charged_vram_mb = 0;
         }
         if charge_ram {
             let estimated = self.estimate_cpu_footprint_mb(model_id, Some(segment));
@@ -5844,7 +5896,7 @@ mod tests {
     /// retirement path can be exercised without spawning a subprocess.
     /// `child: None` — `Drop` skips the kill and marks `exited` directly.
     async fn fake_worker_handle(dead_now: bool) -> Arc<WorkerHandle> {
-        fake_worker_handle_on(dead_now, Some(CpuReason::Configured)).await
+        fake_worker_handle_on(dead_now, Some(CpuReason::Configured), true).await
     }
 
     /// Admit `mb` against the RAM budget and insert a worker that records
@@ -5986,10 +6038,17 @@ mod tests {
         );
     }
 
-    /// `placed_on_cpu_because: None` means the worker was holding the card.
+    /// The two placement facts are passed SEPARATELY and deliberately.
+    ///
+    /// `placed_on_cpu_because` says why a model was demoted; `charged_against_ram`
+    /// says which budget pays for it. They agree on every node that has a
+    /// graphics card and disagree on every node that does not — deriving one
+    /// from the other here would make the shape report #030 is about
+    /// unrepresentable in a test.
     async fn fake_worker_handle_on(
         dead_now: bool,
         placed_on_cpu_because: Option<CpuReason>,
+        charged_against_ram: bool,
     ) -> Arc<WorkerHandle> {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
         let name = format!(
@@ -6033,9 +6092,7 @@ mod tests {
             charged_mb: AtomicU64::new(0),
             charged_segments: std::sync::Mutex::new(Vec::new()),
             placed_on_cpu_because,
-            // As production decides it: a worker holding the card is charged
-            // against the graphics budget, one on the processor against RAM.
-            charged_against_ram: placed_on_cpu_because.is_some(),
+            charged_against_ram,
             gpu_estimate_mb: 0,
             gpu_layers_on_card: None,
         })
@@ -6126,6 +6183,74 @@ mod tests {
         );
     }
 
+    /// **Report #030: on a machine with no graphics card, only a worker's
+    /// FIRST admission was weighed against the real RAM budget.**
+    ///
+    /// The two placement facts disagree on exactly one shape of node, and this
+    /// pins that disagreement so nothing collapses them back together.
+    #[tokio::test]
+    async fn a_worker_on_a_node_with_no_card_holds_no_graphics_memory() {
+        // The shape a spawn produces on a GPU-less node. `cpu_reason` returns
+        // None — nothing demoted this model, there was nowhere to demote it to
+        // — while `charges_ram` sees "no card detected" and puts the worker on
+        // the RAM budget.
+        assert!(
+            charges_ram(false, false, true),
+            "no card detected means the model can only land in RAM"
+        );
+        let h = fake_worker_handle_on(false, None, true).await;
+
+        assert!(
+            h.placed_on_cpu_because.is_none(),
+            "nothing demoted it, so placement reads exactly as it does for a \
+             worker holding a card — which is why placement cannot answer this"
+        );
+        assert!(
+            !h.holds_gpu_memory(),
+            "but it holds no graphics memory. Asking `placed_on_cpu_because` \
+             here is what sent every later layer-range growth to `admit_to_gpu`, \
+             which has no ceiling to check when `vram_budget_mb` is 0 — a 16 GB \
+             Mac mini charged 470 MB through the real RAM gate at spawn and then \
+             ~11.5 GB through the graphics gate, and swapped"
+        );
+    }
+
+    /// The control: on a node that HAS a card, the two facts agree and the
+    /// answer is unchanged. Without this the test above would pass on code
+    /// that simply always answered "in RAM", which would send a GPU worker's
+    /// growth to the wrong accountant in the other direction.
+    #[tokio::test]
+    async fn a_worker_holding_a_card_still_says_so() {
+        let on_card = fake_worker_handle_on(false, None, false).await;
+        assert!(on_card.holds_gpu_memory());
+
+        let demoted = fake_worker_handle_on(false, Some(CpuReason::NotEnoughVram), true).await;
+        assert!(
+            !demoted.holds_gpu_memory(),
+            "a model the card refused runs in RAM and is charged there"
+        );
+    }
+
+    /// The same one-field confusion, on the surface a user reads: a resident
+    /// worker on a card-less machine reported `fits_on_gpu: true` for every
+    /// model it held. `null` — unknowable — is the honest answer, and is what
+    /// the API documents that field to mean.
+    #[tokio::test]
+    async fn a_card_less_node_does_not_claim_its_models_fit_on_a_gpu() {
+        let p = test_pool();
+        p.set_gpu_detected(false);
+        let m = ModelId("resident-on-a-mac".into());
+        p.workers
+            .insert(m.clone(), fake_worker_handle_on(false, None, true).await);
+
+        assert_eq!(
+            p.would_fit_on_gpu(&m),
+            None,
+            "there is no card and no budget, so there is nothing to fit into. \
+             Before this the resident check read placement and answered Some(true)"
+        );
+    }
+
     /// A worker charged against the card must not have its release taken off
     /// the RAM budget, or the two drift apart on every eviction.
     #[tokio::test]
@@ -6136,7 +6261,7 @@ mod tests {
         let m = ModelId("on-the-card".into());
 
         assert!(p.admit_to_gpu(&m, 4000));
-        let h = fake_worker_handle_on(true, None).await;
+        let h = fake_worker_handle_on(true, None, false).await;
         h.charged_mb.store(4000, Ordering::Release);
         // A worker on the card is not charged against RAM.
         assert!(!h.charged_against_ram);
@@ -6242,8 +6367,10 @@ mod tests {
         p.cpu_pinned_models.insert(pinned.clone());
 
         let on_card = ModelId("held-the-card".into());
-        p.workers
-            .insert(on_card.clone(), fake_worker_handle_on(true, None).await);
+        p.workers.insert(
+            on_card.clone(),
+            fake_worker_handle_on(true, None, false).await,
+        );
         assert!(p.retire_dead_worker(&on_card).await);
 
         assert!(

@@ -857,15 +857,31 @@
       // second his machine was managing: the number was not on his screen, and
       // ms-per-layer cannot be used to work it out (a whole prompt and a single
       // token each count as one segment).
-      html += '<div class="text-sm mb-1">' + I18n.t('perf.served_plain', {
-        tokens: (served.tokens || 0).toLocaleString(),
-        minutes: ((served.compute_secs || 0) / 60).toFixed(1),
-      }) + '</div>';
+      //
+      // The figures are TOKENS, not words, and the unit is the one the Recent
+      // table three sections below already prints. This block used to say
+      // "words" and "words per second" — plain language bought at the price of
+      // being wrong (a token is about three-quarters of a word), and it left
+      // one panel quoting two different units for the same quantity. A user
+      // asked for tok/s; the gloss under the strip is where the plain-language
+      // explanation belongs, so the number itself can stay comparable with
+      // every other tokens-per-second figure they will see.
+      var cards = [
+        ['green', '&#9650;', (served.tokens || 0).toLocaleString(), I18n.t('perf.served_tokens_label')],
+      ];
       if (served.tokens_per_sec) {
-        html += '<div class="text-sm mb-1">' + I18n.t('perf.served_rate', {
-          rate: served.tokens_per_sec.toFixed(1),
-        }) + '</div>';
+        cards.push(['purple', '&#9889;', served.tokens_per_sec.toFixed(1), I18n.t('compare.tok_per_sec')]);
       }
+      cards.push(['orange', '&#9203;', ((served.compute_secs || 0) / 60).toFixed(1), I18n.t('perf.served_minutes_label')]);
+      html += '<div class="stat-strip mb-2">' + cards.map(function (c) {
+        return '<div class="stat-card">'
+          + '<div class="stat-icon ' + c[0] + '">' + c[1] + '</div>'
+          + '<div class="stat-body">'
+          + '<div><span class="stat-value">' + U.escapeHtml(c[2]) + '</span></div>'
+          + '<div class="stat-label">' + U.escapeHtml(c[3]) + '</div>'
+          + '</div></div>';
+      }).join('') + '</div>';
+      html += '<div class="text-muted text-sm mb-1">' + I18n.t('perf.served_gloss') + '</div>';
       html += '<div class="text-muted text-sm mb-3">' + I18n.t('perf.served_detail', {
         segments: served.segments,
         layers: served.layers,
