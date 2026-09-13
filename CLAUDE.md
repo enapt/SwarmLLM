@@ -225,20 +225,40 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2632 lib (dev,claude-subscription) — re-measured 2026-09-13, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 93 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.176-alpha (2026-09-12, tag on `f3daab6b`).** Gate
-clean job-by-job — CI 14/14, Cache warm 3/3 and `check_ci_gate.sh` 14=14 all ON
-THE TAGGED COMMIT, release 10/10 first time; on the DOWNLOADED artifact **smoke
-9/9 + shapes 7/7 + conformance 9/9 families (52 checks, 0 FAIL)**, matching a
-v0.3.175 baseline taken FIRST that scored the same, plus
-**`constrained_node_test.sh` 12/12** — the harness that matters most here, since
-#32 changes small-node memory behaviour. `/` verified redirecting to `/chat` on
-the released binary. Both nodes verified: local `225e6fe7f2b5cd74` and Proxmox
-`9684263580c6660f`, ids and `identity.key` unchanged, config untouched, 0 ERROR,
-paired at 168 ms. Rollback `~/.local/bin/swarmllm.0.3.175-alpha.bak`. Two gate
-caveats worth reading before the next release are in `memory/open_cautions.md`
-(Cache warm BUILT the kernels rather than restoring them; shapes failed its
-first run on the 12 s start timeout). Full record:
-`memory/round_log_0912_new_user_sweep.md` § Release.
+**Released and deployed: v0.3.177-alpha (2026-09-13, tag on `2a11564e`).**
+Gate clean job-by-job — CI 14/14, Cache warm 3/3 with the kernels shown
+**restored AND skipped** (better than .176, which rebuilt them),
+`check_ci_gate.sh` 14=14, all ON THE TAGGED COMMIT; release 10/10 first time.
+On the DOWNLOADED artifact **smoke 9/9 + shapes 7/7 + conformance 9 families,
+0 FAIL**, matching a .176 baseline taken FIRST that scored identically
+(including the same two `n/a`, Phi-4-mini and GLM-4). Both nodes deployed and
+verified: local `225e6fe7f2b5cd74` and Proxmox `9684263580c6660f`, ids and
+`identity.key` unchanged, config untouched, 0 ERROR, paired at 81 ms. Rollback
+`~/.local/bin/swarmllm.0.3.176-alpha.bak`.
+
+**What .177 carries.** The one that matters: **a peer's gossip could make a node
+DELETE a shard it held correctly** (#581) — found live on this node's own
+restart, 507 MB quarantined, model unservable 11 minutes, replacement
+byte-identical to what was deleted. Six such quarantines across three models in
+55 hours of one log, all six condemned by a hash with no origin backing.
+`ModelRegistry::mismatch_policy` now gates destruction on origin-backed
+evidence, and `OnMismatch` is a REQUIRED parameter of `verify_shard`, which
+flushed out seven call sites including two that deleted files as a side effect
+of asking a question. Plus #582 (every node start warned the traffic metric
+"may have been renamed" — false, and one-shot so never retracted) and the
+first-hour UI pass (seven header icons → three destinations and a menu; the
+chat screen no longer points at a button that does not exist; a visible key for
+the shard bar).
+
+⚠ **The field A/B did NOT exercise the shard fix.** .177 logged
+`verified=65 quarantined=0` where .176 logged `quarantined=1` — but this
+morning's forced origin re-download recorded provenance for exactly the
+vulnerable shards, so the OLDER `register_manifest` guard now refuses those
+claims and the new `KeepBytes` path never ran (21 contradictions arrived, all
+refused by the old guard). Mechanism is proven by unit tests + null controls
+only. **`disputed` in the background-verification line is the instrument** that
+would show it firing. Open follow-up: item #61, the dispute is kept but never
+settled.
 
 **New users first (user direction, 2026-09-12).** Growth is the bottleneck, not
 the depth of the stack — rank work by "would someone hit this in their first
