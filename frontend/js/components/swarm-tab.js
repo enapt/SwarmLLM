@@ -492,15 +492,25 @@
 
   function _browseEnsureTrending() {
     if (_browseState.trendingLoaded) return;
+    // Claimed up front so two rapid opens do not both fetch, and given back on
+    // EITHER kind of failure so a later open tries again.
+    //
+    // Only the thrown-error path used to give it back. A non-OK response —
+    // which is what a node still starting up, or one whose hourly trending
+    // poll has not run yet, answers with — became `null`, skipped the render
+    // and left the flag set, so the strip stayed empty until the page was
+    // reloaded. The same two-failure-modes-one-handled shape as the capacity
+    // panel above (gotcha #589) and as `try_send` reporting Full and Closed
+    // alike (#588).
     _browseState.trendingLoaded = true;
     if (!App.authFetch) return;
+    var giveBack = function () { _browseState.trendingLoaded = false; };
     App.authFetch('/api/admin/hf/trending').then(function (r) {
       return r.ok ? r.json() : null;
     }).then(function (snap) {
       if (snap) _renderBrowseTrending(snap);
-    }).catch(function () {
-      _browseState.trendingLoaded = false;
-    });
+      else giveBack();
+    }).catch(giveBack);
   }
 
   function _renderBrowseTrending(snap) {
