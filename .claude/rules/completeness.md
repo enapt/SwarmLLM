@@ -16,7 +16,16 @@ grep -rn "\.events\.events\.\|\.models\.models\.\|\.credits\.credits\.\|\.metric
 grep -rn "shared_state\.activity_tx\b" src/ | grep -v state.rs                                       # direct field bypass
 grep -rn "console\.\(log\|error\|warn\)" frontend/js/                                                # console debug left behind
 for f in frontend/js/**/*.js; do node -c "$f"; done                                                  # JS syntax
+node examples/frontend_load_check.js                                                                 # JS actually LOADS
 ```
+
+`node -c` is a syntax check and **nothing more** (gotcha #568): a reference to
+a name that is out of scope inside a function body passes it, and so does a
+component whose IIFE throws the moment it runs. `frontend_load_check.js` loads
+every module in `index.html`'s order and reports what throws — run it after
+deleting or renaming anything a component exports. It is not a substitute for
+looking at the page: what it catches and what it deliberately does not are
+listed at the top of the file.
 
 Run `/cleanup` after committing changes to: SharedState fields, API endpoints, JS file structure, broadcast channels, WebSocket message formats, error type → HTTP status mappings.
 
