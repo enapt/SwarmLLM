@@ -3001,63 +3001,26 @@ kbd {
 .model-card-meta { display: flex; gap: 12px; font-size: var(--fs-sm); color: var(--text-secondary); flex-wrap: wrap; }
 .model-card-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
-/* Per-model activity ticker */
-.model-ticker {
-  padding: 4px 14px; font-size: var(--fs-sm);
-  border-top: 1px solid var(--border);
-  background: rgba(0,0,0,0.04); position: relative;
-  cursor: pointer; user-select: none; transition: background 0.15s;
-}
-.model-ticker:hover { background: rgba(255,255,255,0.03); }
-.model-ticker::after {
-  content: '\25BE';
-  position: absolute; right: 12px; top: 6px;
-  font-size: var(--fs-2xs); color: var(--text-muted);
-  transition: transform 0.2s;
-}
-.model-ticker.expanded::after { transform: rotate(180deg); }
-.model-ticker-latest {
-  display: flex; align-items: center; gap: 5px;
-}
-.model-ticker-icon { flex-shrink: 0; }
-.model-ticker-text { flex: 1; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.model-ticker-time { flex-shrink: 0; font-size: var(--fs-2xs); color: var(--text-muted); font-family: var(--font-mono); }
-.model-ticker-history {
-  max-height: 0; overflow: hidden; transition: max-height 0.25s ease-out;
-  border-top: 1px solid var(--border); margin-top: 0;
-}
-.model-ticker.expanded .model-ticker-history {
-  max-height: 300px; margin-top: 4px; overflow-y: auto;
-}
-.model-ticker-fullwidth {
-  margin-top: 8px;
-  padding: 6px 12px;
+/* "See this model's activity" — the link that replaced the per-model ticker.
+   The feed itself lives in the Activity panel, which the model card now points
+   at instead of carrying its own copy of. */
+.mce-model-activity-link {
+  margin-top: auto;
   border-top: 1px dashed var(--border);
-  cursor: pointer;
-  user-select: none;
-  transition: background 0.15s;
+  padding: 8px 4px 4px;
+  font-size: var(--fs-xs);
 }
-.model-ticker-fullwidth:hover { background: rgba(255,255,255,0.03); }
-.model-ticker-fullwidth::after {
-  content: '\25BE';
-  position: absolute;
-  right: 12px;
-  top: 8px;
-  font-size: var(--fs-2xs);
-  color: var(--text-muted);
-  transition: transform 0.2s;
+
+/* The chip that says which model the Activity / Network panels are narrowed
+   to. Rendered as the first row INSIDE the log, so it appears and disappears
+   with the thing it describes and needs no slot of its own. */
+.activity-filter-chip {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 4px 8px; margin-bottom: 6px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--accent-glow);
+  font-size: var(--fs-xs); color: var(--text-secondary);
 }
-.model-ticker-fullwidth.expanded::after { transform: rotate(180deg); }
-.model-ticker-row {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 2px 0; font-size: var(--fs-xs); color: var(--text-muted);
-  border-bottom: 1px solid rgba(128,128,128,0.1);
-}
-.model-ticker-row:last-child { border-bottom: none; }
-.model-ticker-split { display: flex; gap: 1px; }
-.model-ticker-col { flex: 1; min-width: 0; overflow: hidden; }
-.model-ticker-col-label { font-size: var(--fs-2xs); font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
-.model-ticker-col + .model-ticker-col { border-left: 1px solid var(--border); padding-left: 8px; }
 
 /* Shard row transition flash (reused across both list rows and matrix cells) */
 @keyframes shard-flash {
@@ -4758,7 +4721,6 @@ textarea.pool-code-input { min-height: 4.5em; }
 
 /* ---- Compact Model Cards (collapsed default, expand on click) ---- */
 .model-card.compact .model-card-shards,
-.model-card.compact .model-ticker,
 .model-card.compact .model-card-detail-badges {
   display: none;
 }
@@ -5345,21 +5307,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   font-size: var(--fs-xs);
   color: var(--orange-text);
   padding-top: 2px;
-}
-
-/* Embedded ticker inside right column — fills the dead space under the matrix */
-.model-card-expanded .mce-right .model-ticker-embedded {
-  margin-top: auto;
-  border-top: 1px dashed var(--border);
-  padding: 8px 4px 4px;
-  font-size: var(--fs-xs);
-  position: relative;
-  cursor: pointer;
-  user-select: none;
-  transition: background 0.15s;
-}
-.model-card-expanded .mce-right .model-ticker-embedded:hover {
-  background: rgba(255,255,255,0.02);
 }
 
 /* Health chip shown in STATUS section body — matches composite-badge /

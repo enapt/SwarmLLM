@@ -184,11 +184,6 @@
       });
     }
 
-    // Route to per-model ticker if model_id is present (skipGlobal=true to avoid double-logging)
-    if (modelId && App.dashboard && App.dashboard._logModelEvent) {
-      App.dashboard._logModelEvent(modelId, icon, data.message || data.kind, true, data.kind);
-    }
-
     // Forward auto-manage events to the header status indicator
     if (App.autoManageStatus && App.autoManageStatus.onEvent) {
       App.autoManageStatus.onEvent(data);
@@ -204,18 +199,43 @@
   // changed since the last render of this log, skip the full innerHTML
   // rebuild entirely (the visible state is already correct).
   var _renderSig = {};
+  // Which model the two event logs are narrowed to, or '' for everything.
+  //
+  // This is what replaced the per-model ticker inside each model card: a log
+  // inside a card, duplicating a panel the page already has. The events always
+  // reached both — `_pushEntry` runs before the ticker was fed — so the ticker
+  // was a second rendering of the same data with its own store, its own
+  // signature cache and its own "ago" refresh loop.
+  var _modelFilter = '';
+
   function _renderEventLog(entries, logId, countId, emptyText) {
     var log = document.getElementById(logId);
     if (!log) return;
+    // Filter FIRST, then count. A filtered log whose header still counts every
+    // entry says "42" over four visible rows.
+    if (_modelFilter) {
+      entries = entries.filter(function(e) { return e.modelId === _modelFilter; });
+    }
     var countEl = document.getElementById(countId);
     if (countEl) countEl.textContent = I18n.t('activity.count', { count: entries.length });
 
+    // The filter is part of what is being rendered, so it is part of the
+    // signature — otherwise setting or clearing it changes nothing on screen
+    // until the next event happens to arrive.
     var topTs = entries.length > 0 ? entries[0].ts : 0;
-    var sig = topTs + ':' + entries.length;
+    var sig = topTs + ':' + entries.length + '|' + _modelFilter;
     if (_renderSig[logId] === sig) return;
     _renderSig[logId] = sig;
 
     var html = '';
+    if (_modelFilter) {
+      html += '<div class="activity-filter-chip">'
+        + '<span>' + U.escapeHtml(I18n.t('activity.filtered_to', {
+            model: U.formatModelDisplayName(_modelFilter),
+          })) + '</span>'
+        + '<button type="button" class="btn-link" data-activity-filter-clear>'
+        + U.escapeHtml(I18n.t('activity.show_all')) + '</button></div>';
+    }
     var show = entries.slice(0, MAX_DISPLAY);
     for (var i = 0; i < show.length; i++) {
       var e = show[i];
@@ -234,7 +254,33 @@
       html += '<div class="activity-overflow text-muted" style="font-size:0.7rem;padding:4px 0;text-align:center">' +
         U.escapeHtml(I18n.t('activity.overflow', { count: entries.length - MAX_DISPLAY })) + '</div>';
     }
-    log.innerHTML = html || '<div class="text-muted text-sm" style="padding:8px 0">' + U.escapeHtml(emptyText) + '</div>';
+    if (show.length === 0) {
+      // A filtered log with no matches is a different statement from an empty
+      // one, and saying "no activity yet" over a model that simply has none
+      // reads as though the whole node is idle.
+      html += '<div class="text-muted text-sm" style="padding:8px 0">'
+        + U.escapeHtml(_modelFilter ? I18n.t('activity.none_for_model') : emptyText) + '</div>';
+    }
+    log.innerHTML = html;
+  }
+
+  /// Narrow both event logs to one model, or pass '' to show everything.
+  function filterByModel(modelId) {
+    _modelFilter = modelId || '';
+    _renderSig = {};
+    _renderActivityLog();
+    _renderNetworkLog();
+    var panel = document.getElementById('activity-log');
+    if (panel && _modelFilter) {
+      // Open the panel if the user had collapsed it — scrolling to a closed
+      // panel lands them on a header with nothing under it.
+      var body = document.getElementById('activity-body');
+      if (body) {
+        var header = document.querySelector('[data-collapse="activity-body"]');
+        if (header && header.classList.contains('collapsed')) header.click();
+      }
+      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
   }
 
   function _renderActivityLog() { _renderEventLog(_activityEntries, 'activity-log', 'activity-count', I18n.t('activity.none')); }
@@ -828,11 +874,6 @@
     _renderSig = {};
     _renderActivityLog();
     _renderNetworkLog();
-    // Also refresh per-model tickers
-    document.querySelectorAll('.model-ticker-time').forEach(function(el) {
-      var ts = parseInt(el.getAttribute('data-ts'), 10);
-      if (ts) el.textContent = U.timeAgo(ts);
-    });
   }, 30000);
 
   App.notifications = {
@@ -841,5 +882,6 @@
     connectWebSocket: connectWebSocket,
     startPolling: startPolling,
     logActivity: logActivity,
+    filterByModel: filterByModel,
   };
 })();

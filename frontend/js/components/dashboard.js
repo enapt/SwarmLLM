@@ -14,13 +14,6 @@
   var S = App.state;
   var U = App.utils;
 
-  // Per-model event logs — populated from backend activity_history replay on WS connect
-  var _modelEvents = {};
-  var _modelNetEvents = {};
-
-  // Kinds that go to the network ticker on model cards
-  var MODEL_NET_KINDS = { 'shard_announced': 1, 'peer_connected': 1, 'peer_disconnected': 1, 'rebalance_peer_left': 1 };
-
   // Shard rendering helpers live in App.dashboardShards (dashboard-shards.js).
   // Alias to local names for tight call-site rewrites.
   var DS = App.dashboardShards;
@@ -250,24 +243,6 @@
       if (body) body.innerHTML = _buildShardMatrix(model, model.shards || [], safeId, true);
     },
 
-    _logModelEvent: function(modelId, icon, text, skipGlobal, kind) {
-      var isNet = kind && MODEL_NET_KINDS[kind];
-      var store = isNet ? _modelNetEvents : _modelEvents;
-      if (!store[modelId]) store[modelId] = [];
-      var events = store[modelId];
-      var ts = Date.now();
-      events.unshift({ icon: icon, text: text, ts: ts });
-      if (events.length > 15) events.pop();
-
-      App.dashboard._renderModelTicker(modelId);
-
-      // Also log to global panel (unless the caller already did via activity_event)
-      if (!skipGlobal) {
-        App.notifications.logActivity(icon, U.formatModelDisplayName(modelId) + ': ' + text, isNet ? 'network' : 'model', modelId);
-      }
-    },
-
-    // Render the per-model ticker DOM — split into activity + network columns
     _setGauge: function(id, pct) {
       var el = document.getElementById(id);
       if (!el) return;
@@ -434,54 +409,6 @@
             }
           });
     },
-    _tickerSig: {},
-    _renderModelTicker: function(modelId) {
-      var actEvents = _modelEvents[modelId] || [];
-      var netEvents = _modelNetEvents[modelId] || [];
-      if (actEvents.length === 0 && netEvents.length === 0) return;
-
-      var safeId = U.safeId(modelId);
-      var ticker = document.querySelector('[data-model-ticker="' + safeId + '"]');
-      if (!ticker) return;
-
-      // Skip the innerHTML rebuild when nothing has changed. Each ticker is
-      // re-rendered on every activity event for that model; during download
-      // bursts that's many events per second per model. The signature
-      // collapses to top event ts + length on each side.
-      var actTop = actEvents.length ? actEvents[0].ts : 0;
-      var netTop = netEvents.length ? netEvents[0].ts : 0;
-      var sig = actTop + ':' + actEvents.length + '|' + netTop + ':' + netEvents.length;
-      if (App.dashboard._tickerSig[modelId] === sig) return;
-      App.dashboard._tickerSig[modelId] = sig;
-
-      function _tickerTime(ts) {
-        var d = new Date(ts);
-        return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
-      }
-      function _renderColumn(events, emptyText) {
-        if (events.length === 0) return '<div class="text-muted text-2xs py-1">' + U.escapeHtml(emptyText) + '</div>';
-        var latest = events[0];
-        var html = '<div class="model-ticker-latest"><span class="model-ticker-icon">' + U.escapeHtml(latest.icon) + '</span>' +
-          '<span class="model-ticker-text">' + U.escapeHtml(latest.text) + '</span>' +
-          '<span class="model-ticker-time" data-ts="' + latest.ts + '">' + U.timeAgo(latest.ts) + '</span></div>';
-        if (events.length > 1) {
-          html += '<div class="model-ticker-history">';
-          events.slice(1, 6).forEach(function(e) {
-            html += '<div class="model-ticker-row"><span>' + U.escapeHtml(e.icon) + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + _tickerTime(e.ts) + ' ' + U.timeAgo(e.ts) + '</span></div>';
-          });
-          html += '</div>';
-        }
-        return html;
-      }
-
-      ticker.innerHTML =
-        '<div class="model-ticker-split">' +
-          '<div class="model-ticker-col"><div class="model-ticker-col-label">' + U.escapeHtml(I18n.t('activity.label_activity')) + '</div>' + _renderColumn(actEvents, I18n.t('activity.none')) + '</div>' +
-          '<div class="model-ticker-col"><div class="model-ticker-col-label">' + U.escapeHtml(I18n.t('activity.label_network')) + '</div>' + _renderColumn(netEvents, I18n.t('activity.none_network')) + '</div>' +
-        '</div>';
-      ticker.style.display = '';
-    },
-
     loadInitial: async function() {
       // Debounce: skip if already loading or loaded within 5s
       if (App.dashboard._loading) return;
@@ -1646,7 +1573,15 @@
                     _buildShardViewToggle() +
                   '</div>' +
                   '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +
-                  '<div class="model-ticker model-ticker-embedded" data-model-ticker="' + safeId + '" style="display:none"></div>' +
+                  // Was a live event log inside the card — a second rendering
+                  // of what the Activity panel already holds, with its own
+                  // store, signature cache and "ago" refresh loop. The panel
+                  // takes a model filter now, so this points at it instead of
+                  // duplicating it.
+                  '<div class="mce-model-activity-link">' +
+                    '<button type="button" class="btn-link" data-model-activity="' + U.escapeHtml(m.id) + '">' +
+                    U.escapeHtml(I18n.t('activity.see_for_model')) + '</button>' +
+                  '</div>' +
                 '</div>' +
               '</div>' +
             '</div>' +
@@ -1654,11 +1589,6 @@
           '';
 
         if (swarmBody) swarmBody.appendChild(card);
-
-        // Restore per-model activity ticker from stored events (DOM only, don't re-log)
-        if (_modelEvents[m.id] && _modelEvents[m.id].length > 0) {
-          App.dashboard._renderModelTicker(m.id);
-        }
 
         // A card that renders already-expanded (a re-render while the user has
         // it open) needs its technical details filled too — the click handler

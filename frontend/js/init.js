@@ -433,10 +433,17 @@
       var unloadId = target.getAttribute('data-unload-model');
       if (unloadId) { App.models.unload(unloadId); return; }
 
-      // Per-model activity ticker: click to expand history
-      var tickerEl = target.closest('.model-ticker');
-      if (tickerEl && !target.closest('button, a')) {
-        tickerEl.classList.toggle('expanded');
+      // "See this model's activity" — narrows the Activity and Network panels
+      // to one model and scrolls to them, instead of the model card carrying
+      // its own copy of the feed.
+      var actModel = target.getAttribute('data-model-activity');
+      if (actModel) {
+        App.notifications.filterByModel(actModel);
+        e.stopPropagation();
+        return;
+      }
+      if (target.hasAttribute('data-activity-filter-clear')) {
+        App.notifications.filterByModel('');
         e.stopPropagation();
         return;
       }
